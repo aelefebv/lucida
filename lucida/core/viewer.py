@@ -1,9 +1,9 @@
 from __future__ import annotations
 import numpy as np
-from vispy.scene.canvas import SceneCanvas
 from vispy import app
-from vispy.scene import ViewBox
 from vispy import scene
+from vispy.scene import ViewBox
+from vispy.scene.canvas import SceneCanvas
 from vispy.scene.visuals import Volume, Image
 
 from lucida.core.events import SignalBus
