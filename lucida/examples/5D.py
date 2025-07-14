@@ -66,17 +66,6 @@ def on_timer(event):
 
 timer = Timer(interval=0.3, connect=on_timer, start=False)
 
-# ------ INFO ------
-print("""
-🧠 Controls:
-  → or D: next time point
-  ← or A: previous time point
-  ↑ or W: next channel
-  ↓ or S: previous channel
-  Space: toggle autoplay
-  R: reset view
-""")
-
 # ------ RUN ------
 if __name__ == '__main__':
     app.run()
