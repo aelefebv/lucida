@@ -7,9 +7,11 @@ from lucida.core.events import Event, SignalBus
 
 Slice = dict[str, int]  # e.g. {"T": 3, "C": 1}
 
+@dataclass(slots=True, frozen=True)
 class LayerUpdateEvent(Event):
     layer: Layer
     changed: str  # e.g. "indices", "data", "colormap"
+    _ignore_attrs = {"layer"}  # avoid logging full layer data
     __log__ = True
     
 
@@ -53,8 +55,10 @@ class Layer:
         if dim not in self.order or dim in "ZYX":
             raise ValueError(f"Cannot index dim {dim!r}")
         self.indices[dim] = idx
-        
+        self.bus.emit(LayerUpdateEvent(layer=self, changed="indices"))
 
     def set_colormap(self, cm: str) -> None:
         self.colormap = cm
         
+class LabelsLayer(Layer):  # segmentation masks
+    opacity: float = 0.5

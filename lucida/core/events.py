@@ -1,11 +1,12 @@
 from collections import defaultdict
 from typing import Any, ClassVar, TypeVar, Callable
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass, field, is_dataclass
 from lucida.core import logging as log
 
 @dataclass(slots=True, frozen=True)
 class Event: 
-    __log__: ClassVar[bool] = False
+    __log__: ClassVar[bool] = True
+    _ignore_attrs: ClassVar[set[str]] = set()
 E = TypeVar("E", bound=Event)
 Handler = Callable[[E], None]
 
@@ -36,6 +37,12 @@ class SignalBus:
             )
                 
 def _event_payload(e: Event) -> dict[str, Any]:
+    ignore = getattr(e.__class__, '_ignore_attrs', set())
     if is_dataclass(e) and not isinstance(e, tuple):   # small guard vs namedtuple
-        return {f.name: getattr(e, f.name) for f in e.__dataclass_fields__.values() if not f.name.startswith("_")}
-    return {k: v for k, v in e.__dict__.items() if not k.startswith("_")}
+        return {
+            f.name: getattr(e, f.name) 
+            for f in e.__dataclass_fields__.values() 
+            if not f.name.startswith("_") and f.name not in ignore
+        }
+    return {k: v for k, v in vars(e).items()
+            if not k.startswith("_") and k not in ignore}

@@ -8,6 +8,7 @@ from vispy.scene.visuals import Volume, Image
 
 from lucida.core.events import SignalBus
 from lucida.core.layer import Layer, LayerUpdateEvent
+from lucida.core.logging import init_logging
 from lucida.core.utils import get_current_ipython
     
 class Viewer:
@@ -19,6 +20,7 @@ class Viewer:
         self.view: ViewBox = self.scene_canvas.central_widget.add_view()
         self.view.camera = scene.cameras.TurntableCamera(fov=60)
         
+        self._log_level = "INFO"
         self.bus.subscribe(LayerUpdateEvent, self._on_layer_update)
     
     ## ----- Public API
@@ -30,6 +32,7 @@ class Viewer:
                   order: str = "TCZYX",
                   cmap: str = "gray",
                   interp: str = "nearest",) -> Layer:
+        
         layer = Layer(data=data, order=order, bus=self.bus, colormap=cmap, interpolation=interp)
         arr = layer.as_render_array()
         visual_cls = Volume if arr.ndim == 3 else Image
@@ -38,6 +41,10 @@ class Viewer:
         layer.visual = visual
         self.view.add(visual)  # type: ignore
         return layer
+        
+    def set_logging(self, stdout: bool = True, level: str = "INFO") -> None:
+        init_logging(std_out=stdout, level=level)
+        self.log_level = level
         
     ## ----- Internals
     def _update_canvas(self) -> None:
