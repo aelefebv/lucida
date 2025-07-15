@@ -1,8 +1,8 @@
-from examples import minimal
+from examples import hello
 
 
 def main():
-    minimal.main()
+    hello.main()
 
 
 if __name__ == "__main__":
