@@ -31,8 +31,8 @@ class Viewer:
         app.run()
         
     def add_image(self, data: np.ndarray, 
-                  order: str = "TCZYX",
-                  cmap: str = "gray",
+                  order: str,
+                  cmap: str = "grays",
                   interp: str = "nearest",) -> Layer:
         
         layer = Layer(data=data, order=order, bus=self._bus, colormap=cmap, interpolation=interp)

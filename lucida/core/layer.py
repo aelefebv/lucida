@@ -21,7 +21,7 @@ class Layer:
     order: str  # axis-label string, e.g."TCZYX"
     bus: SignalBus 
     name: str = "layer"
-    colormap: str = "gray"
+    colormap: str = "grays"
     interpolation: str = "nearest"
     visual: Volume | Image | None = None  # optional, if you want to force a specific visual class (Volume/Image)
 
