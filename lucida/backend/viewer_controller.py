@@ -5,72 +5,38 @@ from PySide6 import QtWidgets
 class ViewerController:
     """Create, collect, and configure VisPy views on demand."""
     def __init__(self, parent: QtWidgets.QWidget | None = None):
-        self._parent = parent           # keeps Qt ownership tidy
         self._views = []                # [(canvas, view, camera), ...]
+        self.canvas = scene.SceneCanvas(
+            keys="interactive",
+            bgcolor="black",
+        )
+        self.canvas.create_native()
+        self.canvas.native.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        self.grid = self.canvas.central_widget.add_grid()
+        self.grid.padding = 6
 
     # ------------------------------------------------------------------
     # PUBLIC API
     # ------------------------------------------------------------------
     def add_view(
-        self,
-        camera_type: str = "Turntable",
-        canvas_kwargs: dict | None = None,
-        camera_kwargs: dict | None = None,
-    ) -> scene.SceneCanvas:
-        """
-        Create a SceneCanvas + ViewBox + Camera and return a QWidget you can
-        embed anywhere (e.g. a splitter, grid, dock).
+        self, camera_type: str = "Turntable",  # or "PanZoom"
+    ) -> scene.widgets.ViewBox:
 
-        Parameters
-        ----------
-        camera_type : {'turntable', 'panzoom', 'fly', ...}
-            Any camera available in ``vispy.scene.cameras``.
-        canvas_kwargs, camera_kwargs : dict | None
-            Extra keyword args forwarded to SceneCanvas / Camera ctors.
-
-        Returns
-        -------
-        widget : QtWidgets.QWidget
-            ``canvas.native`` – the Qt wrapper around the GL canvas.
-        """
-        canvas_kwargs = canvas_kwargs or {}
-        camera_kwargs = camera_kwargs or {}
-
-        # 1. Build a SceneCanvas that lives inside Qt
-        canvas = scene.SceneCanvas(
-            parent=self._parent,
-            keys="interactive",
-            bgcolor="black",
-            **canvas_kwargs,
-        )
-        canvas.create_native()          # make the .native QWidget
-        canvas.native.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-
-        # 2. Attach a ViewBox in the usual grid-layout style
-        view = canvas.central_widget.add_view()
-
-        # 3. Choose and configure a camera
-        CameraCls = getattr(scene.cameras, f"{camera_type}Camera")
-        cam = CameraCls(**camera_kwargs)
-        view.camera = cam
-
-        # 4. Track everything in case you want cross-view logic later
-        self._views.append((canvas, view, cam))
-        return canvas            # <-- drop this into your GUI
+        view = scene.widgets.ViewBox(border_color='white')
+        camera_cls = getattr(scene.cameras, camera_type + "Camera")
+        view.camera = camera_cls()
+        self._views.append(view)
+        self.grid.add_widget(view, len(self._views)-1, len(self._views)-1)
+        return view            # <-- drop this into your GUI
 
     # Convenience accessor if you need all active views
     @property
     def views(self):
-        return [v for _c, v, _cam in self._views]
+        return [v for v in self._views]
 
-    # Example: synchronize all cameras (optional)
-    def link_cameras(self, source_view):
-        for _canvas, view, _cam in self._views:
-            if view is not source_view:
-                view.camera.link(source_view.camera)
 
 
 # ----------------------------------------------------------------------
