@@ -8,6 +8,7 @@ from vispy.scene.canvas import SceneCanvas
 
 class LucidaCanvas(SceneCanvas):
     def __init__(self, bus: SignalBus) -> None:
+        app.use_app('pyqt6')
         self._bus = bus
         super().__init__(
             keys='interactive', 

@@ -4,8 +4,9 @@ from typing import Mapping
 import numpy as np
 from vispy.scene.visuals import Volume, Image
 
-from lucida.core.events import Event
+from lucida.core.events import DimIndexChanged, Event
 from lucida.core.signal_bus import SignalBus
+
 
 Slice = dict[str, int]  # e.g. {"T": 3, "C": 1}
 
@@ -17,19 +18,20 @@ class LayerUpdateEvent(Event):
     __log__ = True
     
 
-@dataclass(slots=True)
 class Layer:
-    data: np.ndarray  # the full  N-D array
-    order: str  # axis-label string, e.g."TCZYX"
-    bus: SignalBus 
-    name: str = "layer"
-    colormap: str = "grays"
-    interpolation: str = "nearest"
-    visual: Volume | Image | None = None  # optional, if you want to force a specific visual class (Volume/Image)
-
-    # public state for "extra" dims
-    indices: Slice = field(default_factory=dict)   # which slice on each non-render dim
-                                                   # e.g. {"T":0,"C":1}
+    def __init__(self, *, data: np.ndarray, order: str, bus: SignalBus, name: str = "layer", colormap: str = "grays", interpolation: str = "nearest", visual: Volume | Image | None = None) -> None:
+        self.data = data
+        self.order = order
+        self.bus = bus
+        self.name = name
+        self.colormap = colormap
+        self.interpolation = interpolation
+        self.visual = visual
+        self.indices: Slice = {}
+        self.bus.subscribe(DimIndexChanged, self._on_dim_index_changed)
+        
+    def _on_dim_index_changed(self, ev: DimIndexChanged) -> None:
+        self.set_index(ev.dim, ev.value)
 
     # Public API
     def as_render_array(self) -> np.ndarray:
@@ -45,7 +47,9 @@ class Layer:
             if dim in need_axes:
                 slicer.append(slice(None))
             else:
-                slicer.append(self.indices.get(dim, 0))
+                idx = self.indices.get(dim, 0)
+                max_idx = self.data.shape[self.order.index(dim)] - 1
+                slicer.append(min(idx, max_idx))
         view = self.data[tuple(slicer)]  # no copy
 
         # move axes so they end in YX or ZYX
@@ -54,8 +58,9 @@ class Layer:
         return np.transpose(view, axis_order)
 
     def set_index(self, dim: str, idx: int) -> None:
-        if dim not in self.order or dim in "ZYX":
-            raise ValueError(f"Cannot index dim {dim!r}")
+        print(f"Layer {self.name!r} set_index({dim!r}, {idx})")
+        if (dim not in self.order) or (dim in "ZYX"):
+            return
         self.indices[dim] = idx
         self.bus.emit(LayerUpdateEvent(layer=self, changed="indices"))
 
