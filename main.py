@@ -1,5 +1,8 @@
+from examples import minimal
+
+
 def main():
-    print("Hello from lucida!")
+    minimal.main()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
+from typing import Mapping
 import numpy as np
 from vispy.scene.visuals import Volume, Image
 
-from lucida.core.events import Event, SignalBus
+from lucida.core.events import Event
+from lucida.core.signal_bus import SignalBus
 
 Slice = dict[str, int]  # e.g. {"T": 3, "C": 1}
 
@@ -59,6 +61,27 @@ class Layer:
 
     def set_colormap(self, cm: str) -> None:
         self.colormap = cm
+        
+    @property
+    def shape_by_dim(self) -> Mapping[str, int]:
+        """
+        Mapping of dimension letter → axis length, based on this layer’s
+        declared order string.
+
+        Example
+        -------
+        >>> layer.order        # "TCYX"
+        >>> layer.data.shape   # (23, 10, 512, 512)
+        >>> layer.shape_by_dim
+        {'T': 23, 'C': 10, 'Y': 512, 'X': 512}
+        """
+        return {d: self.data.shape[i] for i, d in enumerate(self.order)}
+    
+    # ----- Internals
+    def __eq__(self, other: object) -> bool: 
+        return self is other
+
+    __hash__ = object.__hash__
         
 class LabelsLayer(Layer):  # segmentation masks
     opacity: float = 0.5

@@ -6,10 +6,12 @@ from vispy.scene import ViewBox
 from vispy.scene.visuals import Volume, Image
 
 from lucida.core.canvas import LucidaCanvas
-from lucida.core.events import SignalBus
+from lucida.core.signal_bus import SignalBus
 from lucida.core.layer import Layer, LayerUpdateEvent
 from lucida.core.logging import init_logging
 from lucida.core.utils import get_current_ipython
+from lucida.gui.control_panel import ControlPanel
+from lucida.gui.controller import DimController
     
     
 class Viewer:
@@ -22,7 +24,10 @@ class Viewer:
         self._view: ViewBox = self.canvas.central_widget.add_view()
         self._view.camera = scene.cameras.TurntableCamera(fov=60)
         self._log_level = "INFO"
-    
+        
+        self._controller = DimController(self._bus)
+        self._control_panel: ControlPanel | None = None
+
         self._bus.subscribe(LayerUpdateEvent, self._on_layer_update)
         
     ## ----- Public API
@@ -35,7 +40,17 @@ class Viewer:
                   cmap: str = "grays",
                   interp: str = "nearest",) -> Layer:
         
-        layer = Layer(data=data, order=order, bus=self._bus, colormap=cmap, interpolation=interp)
+        # Create the layer and register it
+        layer = Layer(data=data, order=order, bus=self._bus, 
+                      colormap=cmap, interpolation=interp)
+        self._controller.register(layer)
+        
+        # Create control panel if needed
+        if self._control_panel is None:
+            self._control_panel = ControlPanel(self._bus, layer)
+            self._control_panel.show()
+        
+        # Show the layer
         arr = layer.as_render_array()
         visual_cls = Volume if arr.ndim == 3 else Image
         visual = visual_cls(arr, cmap=layer.colormap,

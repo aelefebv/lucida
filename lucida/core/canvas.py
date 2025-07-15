@@ -1,4 +1,4 @@
-from lucida.core.events import SignalBus
+from lucida.core.signal_bus import SignalBus
 from lucida.core.inputs import KeyPressed
 
 
@@ -9,7 +9,10 @@ from vispy.scene.canvas import SceneCanvas
 class LucidaCanvas(SceneCanvas):
     def __init__(self, bus: SignalBus) -> None:
         self._bus = bus
-        super().__init__(keys='interactive', show=False)
+        super().__init__(
+            keys='interactive', 
+            show=False, 
+            title="Lucida")
 
     def on_key_press(self, event: app.KeyEvent) -> None:
         if event.handled:          # camera already used it
