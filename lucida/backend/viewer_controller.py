@@ -1,4 +1,4 @@
-from vispy import scene, app
+from vispy import scene
 from PySide6 import QtWidgets
 
 
@@ -6,26 +6,19 @@ class ViewerController:
     """Create, collect, and configure VisPy views on demand."""
     def __init__(self):
         self._views = {}
-        self.canvas = scene.SceneCanvas(
-            keys="interactive",
-            bgcolor="black",
-        )
-        self.canvas.create_native()
-        self.canvas.native.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        self.grid = self.canvas.central_widget.add_grid()
-        self.grid.padding = 6
+        self.canvas: scene.SceneCanvas = self._setup_canvas() 
+        self.qt_widget: QtWidgets.QWidget = self._setup_qt_widget()
+        self.central_widget: scene.widgets.Widget = self.canvas.central_widget
+        self.grid: scene.Grid = self._setup_grid()
 
     # ------------------------------------------------------------------
     # PUBLIC API
     # ------------------------------------------------------------------
     def add_view(
         self, grid_x: int, grid_y: int, camera_type: str = "Turntable",  # or "PanZoom"
-    ) -> scene.widgets.ViewBox:
+    ) -> scene.ViewBox:
 
-        view = scene.widgets.ViewBox(border_color='white')
+        view = scene.ViewBox(border_color='white')
         camera_cls = getattr(scene.cameras, camera_type + "Camera")
         view.camera = camera_cls()
         self._views[grid_x, grid_y] = view
@@ -37,23 +30,29 @@ class ViewerController:
     def views(self):
         return [v for v in self._views.values()]
 
+    # ----------------------------------------------------------------------
+    # PRIVATE API
+    def _setup_canvas(self) -> scene.SceneCanvas:
+        """Create a VisPy canvas with a central widget."""
+        canvas = scene.SceneCanvas(
+            keys="interactive",
+            bgcolor="black",
+        )
+        canvas.create_native()
+        return canvas
 
+    def _setup_qt_widget(self) -> QtWidgets.QWidget:
+        """Return the Qt widget for the canvas."""
+        qt_widget: QtWidgets.QWidget = self.canvas.native
+        qt_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        return qt_widget
 
-# ----------------------------------------------------------------------
-# Quick demo usage
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    app.use_app("pyside6")  # ensure VisPy knows to use Qt6
-    qt_app = QtWidgets.QApplication([])
-
-    main = QtWidgets.QMainWindow()
-    splitter = QtWidgets.QSplitter()
-    main.setCentralWidget(splitter)
-
-    vc = ViewerController(parent=splitter)
-    splitter.addWidget(vc.add_view())                       # view 1
-    splitter.addWidget(vc.add_view(camera_type="PanZoom"))  # view 2
-
-    main.resize(1200, 600)
-    main.show()
-    qt_app.exec()
+    def _setup_grid(self) -> scene.Grid:
+        """Create a grid layout for the central widget."""
+        grid = scene.Grid()
+        grid.padding = 6
+        self.central_widget.add_widget(grid)
+        return grid

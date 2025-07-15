@@ -6,7 +6,7 @@ class Viewer:
         self.app = MainApplication()
         self.window = MainWindow()
         self.vc = ViewerController()        
-        self.window.set_central_widget(self.vc.canvas.native)   
+        self.window.set_central_widget(self.vc.qt_widget)   
         
     # def 
         
