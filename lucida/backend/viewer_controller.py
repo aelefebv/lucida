@@ -4,8 +4,8 @@ from PySide6 import QtWidgets
 
 class ViewerController:
     """Create, collect, and configure VisPy views on demand."""
-    def __init__(self, parent: QtWidgets.QWidget | None = None):
-        self._views = []                # [(canvas, view, camera), ...]
+    def __init__(self):
+        self._views = {}
         self.canvas = scene.SceneCanvas(
             keys="interactive",
             bgcolor="black",
@@ -22,20 +22,20 @@ class ViewerController:
     # PUBLIC API
     # ------------------------------------------------------------------
     def add_view(
-        self, camera_type: str = "Turntable",  # or "PanZoom"
+        self, grid_x: int, grid_y: int, camera_type: str = "Turntable",  # or "PanZoom"
     ) -> scene.widgets.ViewBox:
 
         view = scene.widgets.ViewBox(border_color='white')
         camera_cls = getattr(scene.cameras, camera_type + "Camera")
         view.camera = camera_cls()
-        self._views.append(view)
-        self.grid.add_widget(view, len(self._views)-1, len(self._views)-1)
+        self._views[grid_x, grid_y] = view
+        self.grid.add_widget(view, grid_x, grid_y)
         return view            # <-- drop this into your GUI
 
     # Convenience accessor if you need all active views
     @property
     def views(self):
-        return [v for v in self._views]
+        return [v for v in self._views.values()]
 
 
 
