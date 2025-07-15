@@ -1,6 +1,6 @@
 from collections import defaultdict
 from typing import Any, ClassVar, TypeVar, Callable
-from dataclasses import dataclass, field, is_dataclass
+from dataclasses import dataclass, is_dataclass
 from lucida.core import logging as log
 
 @dataclass(slots=True, frozen=True)
