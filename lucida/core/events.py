@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Any
 
 
 @dataclass(slots=True, frozen=True)
@@ -14,3 +14,12 @@ class DimIndexChanged(Event):
     dim: str      # e.g. 'T', 'C', 'Z'
     value: int    # new integer index
     
+@dataclass(slots=True, frozen=True)
+class ViewerInitialized(Event):
+    """Emitted when the viewer is fully initialized."""
+    
+@dataclass(slots=True, frozen=True)
+class KeyPressed(Event):
+    """Emitted when a key is pressed."""
+    key: str
+    modifiers: tuple[str, ...]

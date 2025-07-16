@@ -1,14 +1,11 @@
-from lucida.core.signal_bus import SignalBus
-from lucida.core.inputs import KeyPressed
-
-
-from vispy import app
 from vispy.scene.canvas import SceneCanvas
+from vispy import app
 
+from lucida.core.events import KeyPressed
+from lucida.core.signal_bus import SignalBus
 
 class LucidaCanvas(SceneCanvas):
     def __init__(self, bus: SignalBus) -> None:
-        app.use_app('pyqt6')
         self._bus = bus
         super().__init__(
             keys='interactive', 

@@ -1,8 +1,11 @@
 from __future__ import annotations
-try:
-    from IPython.core.interactiveshell import InteractiveShell
-except ImportError:
-    pass
+import typing
+
+if typing.TYPE_CHECKING:
+    try:
+        from IPython.core.interactiveshell import InteractiveShell
+    except ImportError:
+        pass
 
 def get_current_ipython() -> InteractiveShell | None:
     """Get the current IPython instance, or None if not in IPython."""
