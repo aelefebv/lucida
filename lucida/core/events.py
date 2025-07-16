@@ -18,3 +18,8 @@ class DimIndexChanged(Event):
 class ViewerInitialized(Event):
     """Emitted when the viewer is fully initialized."""
     
+@dataclass(slots=True, frozen=True)
+class KeyPressed(Event):
+    """Emitted when a key is pressed."""
+    key: str
+    modifiers: tuple[str, ...]

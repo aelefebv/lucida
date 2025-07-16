@@ -1,6 +1,7 @@
 from vispy import scene, app
 from PySide6 import QtWidgets
 
+from lucida.backend.canvas import LucidaCanvas
 from lucida.backend.layer_manager import Layer, LayerManager
 from lucida.core.signal_bus import SignalBus
 from lucida.frontend.dim_slider import DimSlider
@@ -55,7 +56,7 @@ class ViewManager:
     """Create, collect, and configure VisPy views on demand."""
     def __init__(self, bus: SignalBus):
         self._bus = bus
-        self.canvas:        scene.SceneCanvas       = self._setup_canvas() 
+        self.canvas:        LucidaCanvas            = self._setup_canvas() 
         self.qt_widget:     QtWidgets.QWidget       = self._setup_qt_widget()
         self.canvas_widget: scene.widgets.Widget    = self._setup_central_widget()
         self.grid:          scene.Grid              = self._setup_grid()
@@ -95,9 +96,9 @@ class ViewManager:
         return self._views.get(name, None)
 
     # ----- PRIVATE API
-    def _setup_canvas(self) -> scene.SceneCanvas:
+    def _setup_canvas(self) -> LucidaCanvas:
         """Create a VisPy canvas with a central widget."""
-        return scene.SceneCanvas()
+        return LucidaCanvas(self._bus)
 
     def _setup_qt_widget(self) -> QtWidgets.QWidget:
         """Return the Qt widget for the canvas."""
