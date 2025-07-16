@@ -14,6 +14,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 class MainApplication(QApplication):
+    """Main application class for Lucida."""
     def __init__(self):
         super().__init__()
         self.setApplicationName("Lucida")
@@ -22,6 +23,7 @@ class MainApplication(QApplication):
         self.setOrganizationDomain("https://github.com/aelefebv")
 
 class MainWindow(QMainWindow):
+    """Main window for the Lucida application."""
     def __init__(self):
         super().__init__()
         self._setup_window()

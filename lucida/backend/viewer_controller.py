@@ -1,44 +1,48 @@
 from vispy import scene
 from PySide6 import QtWidgets
 
-
 class ViewerController:
     """Create, collect, and configure VisPy views on demand."""
     def __init__(self):
-        self._views = {}
         self.canvas:        scene.SceneCanvas       = self._setup_canvas() 
         self.qt_widget:     QtWidgets.QWidget       = self._setup_qt_widget()
         self.canvas_widget: scene.widgets.Widget    = self._setup_central_widget()
         self.grid:          scene.Grid              = self._setup_grid()
+        
+        self._views: dict[str, scene.ViewBox] = {}
 
-    # ------------------------------------------------------------------
-    # PUBLIC API
-    # ------------------------------------------------------------------
-    def add_view(
-        self, grid_x: int, grid_y: int, camera_type: str = "Turntable",  # or "PanZoom"
-    ) -> scene.ViewBox:
+    # ----- PUBLIC API
+    def add_view(self, name: str = "default",
+                 grid_xy: tuple[int, int] = (0, 0),
+                 span_xy: tuple[int, int] = (1, 1), 
+                 *,
+                 camera_type: str = "Turntable",  # or "PanZoom"
+                 border_color: str = 'white') -> scene.ViewBox:
+        """Add a new view to the grid layout and returns it. Removes any existing view with the same name."""
 
-        view = scene.ViewBox(border_color='white')
         camera_cls = getattr(scene.cameras, camera_type + "Camera")
-        view.camera = camera_cls()
-        self._views[grid_x, grid_y] = view
-        self.grid.add_widget(view, grid_x, grid_y)
-        return view            # <-- drop this into your GUI
+        view = scene.ViewBox(camera=camera_cls(), border_color=border_color)
+        
+        if name in self._views:
+            self.grid.remove_widget(self._views[name])
+        self._views[name] = view
+        self.grid.add_widget(view, row=grid_xy[0], col=grid_xy[1], 
+                             row_span=span_xy[0], col_span=span_xy[1])
+        return view  
 
-    # Convenience accessor if you need all active views
     @property
-    def views(self):
+    def views(self) -> list[scene.ViewBox]:
+        """Return a list of all views."""
         return [v for v in self._views.values()]
+    
+    def get_view(self, name: str) -> scene.ViewBox | None:
+        """Get a view by name, or None if it doesn't exist."""
+        return self._views.get(name, None)
 
-    # ----------------------------------------------------------------------
-    # PRIVATE API
+    # ----- PRIVATE API
     def _setup_canvas(self) -> scene.SceneCanvas:
         """Create a VisPy canvas with a central widget."""
-        canvas = scene.SceneCanvas(
-            keys="interactive",
-            bgcolor="black",
-        )
-        return canvas
+        return scene.SceneCanvas()
 
     def _setup_qt_widget(self) -> QtWidgets.QWidget:
         """Return the Qt widget for the canvas."""

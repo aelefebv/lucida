@@ -2,6 +2,7 @@ from lucida.backend.viewer_controller import ViewerController
 from lucida.frontend.main_window import MainApplication, MainWindow
 
 class Viewer:
+    """Main entry point for the Lucida viewer application."""
     def __init__(self):
         self.app =      MainApplication()
         self.window =   MainWindow()

@@ -9,8 +9,9 @@ from lucida import lucida
 
 def main():
     viewer = lucida.Viewer()
-    viewer.vc.add_view(0, 0, "Arcball")
-    viewer.vc.add_view(0, 1)
+    viewer.vc.add_view("left", grid_xy=(0, 0), span_xy=(1, 4))
+    viewer.vc.add_view("main", grid_xy=(1, 0), span_xy=(4, 4))
+    viewer.vc.add_view("minimap", grid_xy=(0, 4), span_xy=(1, 1))
     
     data = np.random.rand(30, 40, 50).astype(np.float32)  # 3D volume
     vols = []
@@ -24,9 +25,8 @@ def main():
     clipping_plane = np.array([[volume_center, clipping_plane_normal]])
     vols[0].clipping_planes = clipping_plane
     
-    # Add a third view from the clipping plane's perspective
-    viewer.vc.add_view(1, 0)
     clipping_view = viewer.vc.views[-1]  # Get the newly added view
+    # Add a third view from the clipping plane's perspective
 
     # Create volume for the clipping plane view
     clipping_vol = Volume(data, interpolation='nearest', cmap='viridis')
@@ -47,7 +47,7 @@ def main():
     clipping_view.camera.elevation = elevation
     print(clipping_view.camera.get_state())
     
-    new_view = viewer.vc.add_view(1, 1)
+    new_view = viewer.vc.add_view("right", grid_xy=(1, 4), span_xy=(4, 1))
     new_view.add(Volume(
         data,
         raycasting_mode='plane',
