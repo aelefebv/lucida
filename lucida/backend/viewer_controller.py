@@ -6,10 +6,10 @@ class ViewerController:
     """Create, collect, and configure VisPy views on demand."""
     def __init__(self):
         self._views = {}
-        self.canvas: scene.SceneCanvas = self._setup_canvas() 
-        self.qt_widget: QtWidgets.QWidget = self._setup_qt_widget()
-        self.central_widget: scene.widgets.Widget = self.canvas.central_widget
-        self.grid: scene.Grid = self._setup_grid()
+        self.canvas:        scene.SceneCanvas       = self._setup_canvas() 
+        self.qt_widget:     QtWidgets.QWidget       = self._setup_qt_widget()
+        self.canvas_widget: scene.widgets.Widget    = self._setup_central_widget()
+        self.grid:          scene.Grid              = self._setup_grid()
 
     # ------------------------------------------------------------------
     # PUBLIC API
@@ -38,7 +38,6 @@ class ViewerController:
             keys="interactive",
             bgcolor="black",
         )
-        canvas.create_native()
         return canvas
 
     def _setup_qt_widget(self) -> QtWidgets.QWidget:
@@ -49,10 +48,14 @@ class ViewerController:
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         return qt_widget
+    
+    def _setup_central_widget(self) -> scene.widgets.Widget:
+        """Create a central widget for the canvas."""
+        return self.canvas.central_widget
 
     def _setup_grid(self) -> scene.Grid:
         """Create a grid layout for the central widget."""
         grid = scene.Grid()
         grid.padding = 6
-        self.central_widget.add_widget(grid)
+        self.canvas_widget.add_widget(grid)
         return grid
