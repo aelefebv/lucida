@@ -13,12 +13,33 @@ class View(scene.ViewBox):
         self.dim_sliders: dict[str, DimSlider] = {}
         super().__init__(**kwargs)
         
-    def add_layer(self, layer: Layer) -> Layer:
+    def add_layer(self, layer: Layer):
         for dim in layer.order:
             if dim not in "ZYX":
                 self._add_dim_slider(dim, layer.data.shape[layer.order.index(dim)])
         visual = self.layer_manager.add_layer(layer)
         self.add(visual)  # type: ignore
+        render_shape = layer.render_shape
+        if render_shape:
+            self._center_camera(render_shape, layer.order)
+            
+    def _center_camera(self, render_shape: tuple[int, ...], order: str):
+        if 'Z' in order:
+            # Use last 3 dimensions (ZYX)
+            layer_center = (render_shape[-3] // 2,
+                            render_shape[-2] // 2,
+                            render_shape[-1] // 2)
+            z_range = (0, render_shape[-3])
+        else:
+            # Use last 2 dimensions (YX)
+            layer_center = (render_shape[-2] // 2,
+                            render_shape[-1] // 2)
+            z_range = (0, 1)
+        x_range = (0, render_shape[-1])
+        y_range = (0, render_shape[-2])
+        self.camera.center = layer_center
+        self.camera.set_range(x=x_range, y=y_range, z=z_range)
+
                 
     def _add_dim_slider(self, dim: str, size: int) -> DimSlider:
         """Add a dimension slider for the given dimension."""

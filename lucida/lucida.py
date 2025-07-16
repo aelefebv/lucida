@@ -35,6 +35,5 @@ class Viewer:
         view.add_layer(layer)
         # Clear existing dim sliders and add new ones from the view
         self.wnd.clear_dim_sliders()
-        for dim, slider in view.dim_sliders.items():
-            print(f"Adding slider for {dim} with size {slider.size}")
+        for slider in view.dim_sliders.values():
             self.wnd.add_dim_slider(slider)

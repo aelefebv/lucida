@@ -10,12 +10,15 @@ from lucida import lucida
 def main():
     viewer = lucida.Viewer()
     viewer.vwm.add_view("left", grid_xy=(0, 0), span_xy=(1, 4))
-    viewer.vwm.add_view("main", grid_xy=(1, 0), span_xy=(4, 4))
+    viewer.vwm.add_view("default", grid_xy=(1, 0), span_xy=(4, 4))
     viewer.vwm.add_view("minimap", grid_xy=(0, 4), span_xy=(1, 1))
     
     data = np.random.rand(20, 20, 30, 40, 50).astype(np.float32)  # 3D volume
-    viewer.add_image(data, order="TCZYX", layer_name="Random Volume", view_name="main",
+    viewer.add_image(data, order="TCZYX",
                      colormap="viridis", interpolation="nearest")
+    
+    data = np.random.rand(30, 20, 100, 100).astype(np.float32)  # 2D volume
+    viewer.add_image(data, order="TCYX")
     # vols = []
     # for view in viewer.vwm.views:
     #     vol = Volume(data, interpolation='nearest', cmap='viridis')

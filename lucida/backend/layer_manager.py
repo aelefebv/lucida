@@ -25,6 +25,7 @@ class Layer:
         
         self.indices: Slice = {}
         self._subscribe_to_events()
+        self.render_shape: tuple | None = None
         
     # ----- PUBLIC API
     def as_render_array(self) -> np.ndarray:
@@ -49,7 +50,9 @@ class Layer:
         view = self.data[tuple(slicer)]
         present = [d for d, s in zip(self.order, slicer) if isinstance(s, slice)]
         axis_order = [present.index(d) for d in need_axes]
-        return np.transpose(view, axis_order)
+        out_view = np.transpose(view, axes=axis_order)
+        self.render_shape = out_view.shape
+        return out_view
     
     # ----- PRIVATE API
     def _subscribe_to_events(self):
