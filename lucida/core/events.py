@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Any
 
 
 @dataclass(slots=True, frozen=True)
@@ -13,4 +13,8 @@ class DimIndexChanged(Event):
     """Emitted by GUI controls when a dimension index is moved."""
     dim: str      # e.g. 'T', 'C', 'Z'
     value: int    # new integer index
+    
+@dataclass(slots=True, frozen=True)
+class ViewerInitialized(Event):
+    """Emitted when the viewer is fully initialized."""
     

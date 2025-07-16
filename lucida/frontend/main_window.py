@@ -7,15 +7,20 @@ from PySide6.QtWidgets import (
     QToolBar,
     QStatusBar,
     QMessageBox,
+    QDockWidget,
 )
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import QSize, Qt
 import sys
 from PySide6.QtWidgets import QApplication
 
+from lucida.core.signal_bus import SignalBus
+from lucida.frontend.dim_slider import DimSlider
+
 class MainApplication(QApplication):
     """Main application class for Lucida."""
-    def __init__(self):
+    def __init__(self, bus: SignalBus):
+        self._bus = bus
         super().__init__()
         self.setApplicationName("Lucida")
         self.setApplicationVersion("0.0.1")
@@ -24,17 +29,31 @@ class MainApplication(QApplication):
 
 class MainWindow(QMainWindow):
     """Main window for the Lucida application."""
-    def __init__(self):
+    def __init__(self, bus: SignalBus):
+        self._bus = bus
         super().__init__()
         self._setup_window()
 
         # --- Central widget ---
         central = QWidget()
         layout = QVBoxLayout(central)
+        
         label = QLabel("Hello, PySide6!")
         label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(label)
         self.setCentralWidget(central)
+        
+        # --- Bottom Slider VBox ---
+        
+        dock = QDockWidget("Dimension Sliders", self)
+        self._dim_slider_widget = QWidget()
+        # TODO(austin): Should put an HBox so I can put the label too
+        self.dim_slider_vbox = QVBoxLayout(self._dim_slider_widget)
+        self._dim_slider_widget.setLayout(self.dim_slider_vbox)
+        dock.setWidget(self._dim_slider_widget)
+        dock.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        
 
         # --- Toolbar ---
         toolbar = QToolBar("Main toolbar", movable=False)
@@ -49,6 +68,19 @@ class MainWindow(QMainWindow):
 
         # --- Status bar ---
         self.setStatusBar(QStatusBar())
+        
+    def clear_dim_sliders(self):
+        """Clear all dimension sliders from the main window."""
+        for slider in self.dim_slider_vbox.children():
+            if isinstance(slider, DimSlider):
+                self.dim_slider_vbox.removeWidget(slider)
+                slider.deleteLater()
+        self.dim_slider_vbox.update()
+        
+    def add_dim_slider(self, slider: DimSlider):
+        """Add a dimension slider to the main window."""
+        self.dim_slider_vbox.addWidget(slider)
+        self.dim_slider_vbox.update()
     
     def _setup_window(self):
         self.set_title("Lucida")
@@ -74,16 +106,3 @@ class MainWindow(QMainWindow):
     # Slot (any callable can be a slot in PyQt 6)
     def say_hello(self):
         QMessageBox.information(self, "Hi there!", "Thanks for clicking me 😊")
-
-
-def main():
-    app = QApplication(sys.argv)
-
-    # create, show, and execute main event loop
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
-
-
-if __name__ == "__main__":
-    main()
