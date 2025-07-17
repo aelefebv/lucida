@@ -10,9 +10,6 @@ from lucida.core.utils import get_current_ipython
 from lucida.frontend.main_window import MainApplication, MainWindow
 from vispy import app
     
-def run():
-    app.run()
-    
 class Viewer:
     """Main entry point for the Lucida viewer application."""
     def __init__(self, *, log_level: str = "INFO", stdout_log: bool = True):
@@ -27,6 +24,10 @@ class Viewer:
         self._bus.emit(ViewerInitialized())
         self.wnd.show()
         
+    def run(self):
+        if not self.ipython:
+            app.run()
+        
     def add_image(self, data: np.ndarray, order: str, *,
                   layer_name: str = "layer",
                   colormap: str = "grays",
@@ -38,10 +39,11 @@ class Viewer:
         layer = Layer(bus=self._bus, data=data, order=order,
                       name=layer_name, colormap=colormap, interpolation=interpolation)
         view.add_layer(layer)
+        
         # Clear existing dim sliders and add new ones from the view
         self.wnd.clear_dim_sliders()
         for slider in view.dim_sliders.values():
             self.wnd.add_dim_slider(slider)
+            
         # Center the camera on the new layer
-        WHY DOES IT UPDATE THE CAMERA AFTER THIS???
-        view._center_camera(layer.render_shape, layer.order)
+        view.center_camera()

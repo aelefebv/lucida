@@ -8,6 +8,7 @@ from lucida.core.signal_bus import SignalBus
 from lucida.frontend.dim_slider import DimSlider
 from lucida.backend.camera import LucidaFlyCamera
 from vispy.visuals import VolumeVisual
+from vispy.util.quaternion import Quaternion
 
 available_cameras = {
     "Fly": LucidaFlyCamera,
@@ -47,23 +48,24 @@ class View(scene.ViewBox):
             
         self.add(visual)  # type: ignore            
             
-    def _center_camera(self, render_shape: tuple[int, ...], order: str):
-        if 'Z' in order:
-            # Use last 3 dimensions (ZYX)
-            layer_center = (render_shape[-3] // 2,
-                            render_shape[-2] // 2,
-                            render_shape[-1] // 2)
-            z_range = (0, render_shape[-3])
-        else:
-            # Use last 2 dimensions (YX)
-            layer_center = (render_shape[-2] // 2,
-                            render_shape[-1] // 2)
-            z_range = (0, 1)
-        x_range = (0, render_shape[-1])
-        y_range = (0, render_shape[-2])
+    def center_camera(self):
+        self.camera.set_range()
+        
+        layer_center = (self.largest_zyx["X"] // 2,
+                        self.largest_zyx["Y"] // 2,
+                        self.largest_zyx["Z"] * 8)
         self.camera.center = np.array(layer_center)
-        self.camera.set_range(x=x_range, y=y_range, z=z_range)
 
+        # set the rotation to look down the -Z axis
+        angles = (np.pi, np.pi, 0)
+        q1 = Quaternion.create_from_axis_angle(angles[0], -1, 0, 0)
+        q2 = Quaternion.create_from_axis_angle(angles[1], 0, 1, 0)
+        q3 = Quaternion.create_from_axis_angle(angles[2], 0, 0, -1)
+        q = q1 * q2 * q3
+        self.camera._rotation1 = q.normalize()
+        self.camera.set_default_state()
+        
+        
                 
     def _add_dim_slider(self, dim: str, size: int) -> DimSlider:
         """Add a dimension slider for the given dimension."""
@@ -109,9 +111,9 @@ class ViewManager:
         return view  
 
     @property
-    def views(self) -> list[View]:
-        """Return a list of all views."""
-        return [v for v in self._views.values()]
+    def views(self) -> dict[str, View]:
+        """Return all views."""
+        return self._views
     
     def get_view(self, name: str | None) -> View | None:
         """Get a view by name, or None if it doesn't exist."""
