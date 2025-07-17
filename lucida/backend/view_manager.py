@@ -48,7 +48,7 @@ class View(scene.ViewBox):
             
         self.add(visual)  # type: ignore            
             
-    def center_camera(self):
+    def set_default_camera_state(self):
         self.camera.set_range()
         
         layer_center = (self.largest_zyx["X"] // 2,
@@ -63,9 +63,7 @@ class View(scene.ViewBox):
         q3 = Quaternion.create_from_axis_angle(angles[2], 0, 0, -1)
         q = q1 * q2 * q3
         self.camera._rotation1 = q.normalize()
-        self.camera.set_default_state()
-        
-        
+        self.camera.set_default_state()   
                 
     def _add_dim_slider(self, dim: str, size: int) -> DimSlider:
         """Add a dimension slider for the given dimension."""
