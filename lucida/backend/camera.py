@@ -102,7 +102,10 @@ class LucidaFlyCamera(FlyCamera):
     def _handle_mouse_press_event(self, event: SceneMouseEvent, mouse_evt: MouseEvent):
         event.handled = True
         
+        right_click = 2 in event.buttons
         middle_click = 3 in event.buttons
+        if right_click:
+            self._clipper_rotation = self.rotation
         if middle_click:
             self._reset_clipper()
         
