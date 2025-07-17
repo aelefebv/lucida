@@ -45,5 +45,6 @@ class Viewer:
         for slider in view.dim_sliders.values():
             self.wnd.add_dim_slider(slider)
             
-        # Center the camera on the new layer
+        # Center the camera on the new layer and set it as default
         view.set_default_camera_state()
+        
