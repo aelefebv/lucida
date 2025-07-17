@@ -7,6 +7,7 @@ from lucida.backend.layer_manager import Layer, LayerManager
 from lucida.core.signal_bus import SignalBus
 from lucida.frontend.dim_slider import DimSlider
 from lucida.backend.camera import LucidaFlyCamera
+from vispy.visuals import VolumeVisual
 
 available_cameras = {
     "Fly": LucidaFlyCamera,
@@ -31,8 +32,11 @@ class View(scene.ViewBox):
         if render_shape:
             self._center_camera(render_shape, layer.order)
         if use_clipper and isinstance(self.camera, LucidaFlyCamera):
-            # Attach clipping planes if using LucidaFlyCamera
-            visual.attach(self.camera.plane_clipper)
+            if isinstance(visual, VolumeVisual):
+                self.camera.register_volume(visual)
+            # else:
+            #     visual.attach(self.camera._clipper)
+            
         self.add(visual)  # type: ignore
             
             

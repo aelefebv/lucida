@@ -1,22 +1,32 @@
 import numpy as np
+from vispy import app
 from vispy.scene.cameras import FlyCamera
 from vispy.visuals.filters.clipping_planes import PlanesClipper
-from vispy.scene.visuals import Plane
-from vispy.visuals.transforms import MatrixTransform
+from vispy.scene.visuals import Volume
 
 class LucidaFlyCamera(FlyCamera):
-    def __init__(self, *, debug_plane=True, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
-        self.plane_clipper = PlanesClipper()
+        self._clipper = PlanesClipper(coord_system='visual')
+        self._plane = np.empty((1, 2, 3), dtype=np.float32)
+        self.transform.changed.connect(self._update_clipping)
         
-        self.transform.changed.connect(self._update_plane)
-
-    def _update_plane(self, event=None):
-        clip_distance = 0.5 * self.scale_factor
-        n = np.array(self.rotation.inverse().rotate_point((0, 0, -1)), dtype=np.float32)
-        n /= np.linalg.norm(n)           # normal
-        p = np.array(self.center, dtype=np.float32) + n * clip_distance
-
-        self.plane_clipper.clipping_planes = np.array([[p, n]], dtype=np.float32)
+        self._volumes: list[Volume] = []
+        # self.timertimer = app.Timer(interval = 0.5, connect=self._update_clipping, start=True)
         
+    def register_volume(self, volume):
+        """Register a volume to be clipped by this camera."""
+        self._volumes.append(volume)
+
+    def _update_clipping(self, event=None):
+        n = self.rotation.inverse().rotate_point((0, 0, -1))
+        n /= np.linalg.norm(n) 
+        
+        p = self.center + n * self.scale_factor
+        self._plane[0, 0] = p
+        self._plane[0, 1] = n
+        
+        self._clipper.clipping_planes = self._plane
+        for volume in self._volumes:
+            volume.clipping_planes = self._plane
