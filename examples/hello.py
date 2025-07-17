@@ -18,8 +18,9 @@ def main():
     viewer.add_image(data, order="TCYX")
 
     # im_path = r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif"
-    im_path = "/Users/austin/test_files/nellie_all_tests/yeast_3d_mitochondria.ome.tif"
+    im_path = "/Users/austin/test_files/nellie_all_tests/yeast_3d_mitochondria.ome.tif"; order = "TZYX"
+    # im_path = "/Users/austin/test_files/nellie_all_tests/test.tif"; order = "ZYX"
     im_data = tifffile.imread(im_path)
-    viewer.add_image(im_data, order="TZYX", layer_name="Yeast Mitochondria",
+    viewer.add_image(im_data, order=order, layer_name="Yeast Mitochondria",
                      colormap="viridis", interpolation="nearest")
     viewer.run()

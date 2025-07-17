@@ -36,7 +36,7 @@ class LucidaFlyCamera(FlyCamera):
         n = self.rotation.inverse().rotate_point((0, 0, -1))
         n /= np.linalg.norm(n) 
         
-        p = self.center + n * (self.scale_factor * 0.5)
+        p = self.center + n * (self.scale_factor * 0.1)
         self._plane[0, 0] = p
         self._plane[0, 1] = n
         
