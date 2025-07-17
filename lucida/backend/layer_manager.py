@@ -94,9 +94,14 @@ class LayerManager:
             layer.name += "+"
         
         arr = layer.as_render_array()
-        visual_cls = Volume if arr.ndim == 3 else Image
-        visual = visual_cls(arr, cmap=layer.colormap,
-                            interpolation=layer.interpolation)
+        if arr.ndim not in (2, 3):
+            raise ValueError("Layer data must be 2-D or 3-D after slicing.")
+        if arr.ndim == 2:
+            visual = Image(arr, cmap=layer.colormap, interpolation=layer.interpolation)
+        else:
+            visual = Volume(arr, cmap=layer.colormap, threshold=0.0,
+                            method='iso', interpolation=layer.interpolation,
+                            relative_step_size=0.1)
         layer.visual = visual
         self.layers[layer.name] = layer
         return layer.visual

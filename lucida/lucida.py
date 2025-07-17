@@ -38,7 +38,7 @@ class Viewer:
         
         layer = Layer(bus=self._bus, data=data, order=order,
                       name=layer_name, colormap=colormap, interpolation=interpolation)
-        view.add_layer(layer)
+        view.add_layer(layer, use_clipper=True)
         
         # Clear existing dim sliders and add new ones from the view
         self.wnd.clear_dim_sliders()
