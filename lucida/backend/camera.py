@@ -9,6 +9,7 @@ class LucidaFlyCamera(FlyCamera):
         super().__init__(**kwargs)
         
         self._clipper = PlanesClipper(coord_system='visual')
+        self.auto_roll = False
         self._plane = np.empty((1, 2, 3), dtype=np.float32)
         self.transform.changed.connect(self._update_clipping)
         
@@ -20,6 +21,7 @@ class LucidaFlyCamera(FlyCamera):
         self._volumes.append(volume)
 
     def _update_clipping(self, event=None):
+        print(self.center)
         n = self.rotation.inverse().rotate_point((0, 0, -1))
         n /= np.linalg.norm(n) 
         

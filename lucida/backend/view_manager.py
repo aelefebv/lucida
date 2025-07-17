@@ -21,6 +21,7 @@ class View(scene.ViewBox):
         self._bus = bus
         self.layer_manager = LayerManager(bus=self._bus, view=self)
         self.dim_sliders: dict[str, DimSlider] = {}
+        self.largest_zyx = {"Z": 1, "Y": 1, "X": 1}  # Default to 1 for all dimensions
         super().__init__(**kwargs)
         
     def add_layer(self, layer: Layer, use_clipper: bool = True):
@@ -28,17 +29,23 @@ class View(scene.ViewBox):
             if dim not in "ZYX":
                 self._add_dim_slider(dim, layer.data.shape[layer.order.index(dim)])
         visual = self.layer_manager.add_layer(layer)
+        
         render_shape = layer.render_shape
         if render_shape:
-            self._center_camera(render_shape, layer.order)
+            if 'Z' in layer.order and render_shape[-3] > self.largest_zyx["Z"]:
+                self.largest_zyx["Z"] = render_shape[-3]
+            if 'Y' in layer.order and render_shape[-2] > self.largest_zyx["Y"]:
+                self.largest_zyx["Y"] = render_shape[-2]
+            if 'X' in layer.order and render_shape[-1] > self.largest_zyx["X"]:
+                self.largest_zyx["X"] = render_shape[-1]
+                
         if use_clipper and isinstance(self.camera, LucidaFlyCamera):
             if isinstance(visual, VolumeVisual):
                 self.camera.register_volume(visual)
-            # else:
-            #     visual.attach(self.camera._clipper)
+            else:
+                visual.attach(self.camera._clipper)
             
-        self.add(visual)  # type: ignore
-            
+        self.add(visual)  # type: ignore            
             
     def _center_camera(self, render_shape: tuple[int, ...], order: str):
         if 'Z' in order:
@@ -54,7 +61,7 @@ class View(scene.ViewBox):
             z_range = (0, 1)
         x_range = (0, render_shape[-1])
         y_range = (0, render_shape[-2])
-        self.camera.center = layer_center
+        self.camera.center = np.array(layer_center)
         self.camera.set_range(x=x_range, y=y_range, z=z_range)
 
                 
@@ -79,7 +86,7 @@ class ViewManager:
         
         self._views: dict[str, View] = {}
         self._default_view_name = "default"
-        self._timer = app.Timer(interval=0.5, connect=self._update_canvas, start=True)
+        self._timer = app.Timer(interval=0.1, connect=self._update_canvas, start=True)
 
 
     # ----- PUBLIC API

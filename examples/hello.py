@@ -4,11 +4,11 @@ import tifffile
 
 def main():
     
-    viewer = lucida.Viewer()
+    viewer = lucida.Viewer()    
     viewer.vwm.add_view("default", grid_xy=(1, 0), span_xy=(4, 4), camera_type="Fly")
     
-    # viewer.vwm.add_view("left", grid_xy=(0, 0), span_xy=(1, 4))
-    # viewer.vwm.add_view("minimap", grid_xy=(0, 4), span_xy=(1, 1))
+    viewer.vwm.add_view("left", grid_xy=(0, 0), span_xy=(1, 4))
+    viewer.vwm.add_view("minimap", grid_xy=(0, 4), span_xy=(1, 1))
     
     data = np.random.rand(20, 20, 30, 40, 50).astype(np.float32)  # 3D volume
     viewer.add_image(data, order="TCZYX",
@@ -21,6 +21,4 @@ def main():
     im_data = tifffile.imread(im_path)
     viewer.add_image(im_data, order="TZYX", layer_name="Yeast Mitochondria",
                      colormap="viridis", interpolation="nearest")
-
-    viewer.wnd.show()
-    viewer.app.exec()
+    lucida.run()

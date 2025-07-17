@@ -8,6 +8,10 @@ from lucida.core.logging import init_logging
 from lucida.core.signal_bus import SignalBus
 from lucida.core.utils import get_current_ipython
 from lucida.frontend.main_window import MainApplication, MainWindow
+from vispy import app
+    
+def run():
+    app.run()
     
 class Viewer:
     """Main entry point for the Lucida viewer application."""
@@ -21,6 +25,7 @@ class Viewer:
         self.ipython = get_current_ipython() 
         init_logging(std_out=stdout_log, level=log_level)
         self._bus.emit(ViewerInitialized())
+        self.wnd.show()
         
     def add_image(self, data: np.ndarray, order: str, *,
                   layer_name: str = "layer",
@@ -37,3 +42,6 @@ class Viewer:
         self.wnd.clear_dim_sliders()
         for slider in view.dim_sliders.values():
             self.wnd.add_dim_slider(slider)
+        # Center the camera on the new layer
+        WHY DOES IT UPDATE THE CAMERA AFTER THIS???
+        view._center_camera(layer.render_shape, layer.order)
