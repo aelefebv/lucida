@@ -100,7 +100,8 @@ class LayerManager:
             visual = Image(arr, cmap=layer.colormap, interpolation=layer.interpolation)
         else:
             visual = Volume(arr, cmap=layer.colormap, threshold=0.0,
-                            method='iso', interpolation=layer.interpolation,
+                            method='iso',  # type: ignore  # vispy stub issue
+                            interpolation=layer.interpolation,
                             relative_step_size=0.1)
         layer.visual = visual
         self.layers[layer.name] = layer
