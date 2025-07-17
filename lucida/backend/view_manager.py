@@ -1,3 +1,4 @@
+import numpy as np
 from vispy import scene, app
 from PySide6 import QtWidgets
 
@@ -5,6 +6,13 @@ from lucida.backend.canvas import LucidaCanvas
 from lucida.backend.layer_manager import Layer, LayerManager
 from lucida.core.signal_bus import SignalBus
 from lucida.frontend.dim_slider import DimSlider
+from lucida.backend.camera import LucidaFlyCamera
+
+available_cameras = {
+    "Fly": LucidaFlyCamera,
+    "Turntable": scene.cameras.TurntableCamera,
+    "PanZoom": scene.cameras.PanZoomCamera,
+}
 
 class View(scene.ViewBox):
     """A custom ViewBox that can be used in the ViewManager."""
@@ -14,15 +22,19 @@ class View(scene.ViewBox):
         self.dim_sliders: dict[str, DimSlider] = {}
         super().__init__(**kwargs)
         
-    def add_layer(self, layer: Layer):
+    def add_layer(self, layer: Layer, use_clipper: bool = True):
         for dim in layer.order:
             if dim not in "ZYX":
                 self._add_dim_slider(dim, layer.data.shape[layer.order.index(dim)])
         visual = self.layer_manager.add_layer(layer)
-        self.add(visual)  # type: ignore
         render_shape = layer.render_shape
         if render_shape:
             self._center_camera(render_shape, layer.order)
+        if use_clipper and isinstance(self.camera, LucidaFlyCamera):
+            # Attach clipping planes if using LucidaFlyCamera
+            visual.attach(self.camera.plane_clipper)
+        self.add(visual)  # type: ignore
+            
             
     def _center_camera(self, render_shape: tuple[int, ...], order: str):
         if 'Z' in order:
@@ -74,7 +86,7 @@ class ViewManager:
                  camera_type: str = "Turntable",  # or "PanZoom"
                  border_color: str = 'white') -> View:
         """Add a new view to the grid layout and returns it. Removes any existing view with the same name."""
-        camera_cls = getattr(scene.cameras, camera_type + "Camera")
+        camera_cls = available_cameras.get(camera_type, LucidaFlyCamera)
         view = View(bus=self._bus, camera=camera_cls(), border_color=border_color)
 
         name = name or self._default_view_name
@@ -122,6 +134,7 @@ class ViewManager:
     
     def _update_canvas(self, event):
         """Update the canvas periodically."""
+        # Let's print the camera state for debugging
         self.canvas.update()
-        for view in self._views.values():
+        for name, view in self._views.items():
             view.update()
