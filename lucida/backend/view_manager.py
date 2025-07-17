@@ -1,3 +1,4 @@
+import numpy as np
 from vispy import scene, app
 from PySide6 import QtWidgets
 
@@ -5,6 +6,15 @@ from lucida.backend.canvas import LucidaCanvas
 from lucida.backend.layer_manager import Layer, LayerManager
 from lucida.core.signal_bus import SignalBus
 from lucida.frontend.dim_slider import DimSlider
+from lucida.backend.camera import LucidaFlyCamera
+from vispy.visuals import VolumeVisual
+from vispy.util.quaternion import Quaternion
+
+available_cameras = {
+    "Fly": LucidaFlyCamera,
+    "Turntable": scene.cameras.TurntableCamera,
+    "PanZoom": scene.cameras.PanZoomCamera,
+}
 
 class View(scene.ViewBox):
     """A custom ViewBox that can be used in the ViewManager."""
@@ -12,35 +22,48 @@ class View(scene.ViewBox):
         self._bus = bus
         self.layer_manager = LayerManager(bus=self._bus, view=self)
         self.dim_sliders: dict[str, DimSlider] = {}
+        self.largest_zyx = {"Z": 1, "Y": 1, "X": 1}  # Default to 1 for all dimensions
         super().__init__(**kwargs)
         
-    def add_layer(self, layer: Layer):
+    def add_layer(self, layer: Layer, use_clipper: bool = True):
         for dim in layer.order:
             if dim not in "ZYX":
                 self._add_dim_slider(dim, layer.data.shape[layer.order.index(dim)])
         visual = self.layer_manager.add_layer(layer)
-        self.add(visual)  # type: ignore
+        
         render_shape = layer.render_shape
         if render_shape:
-            self._center_camera(render_shape, layer.order)
+            if 'Z' in layer.order and render_shape[-3] > self.largest_zyx["Z"]:
+                self.largest_zyx["Z"] = render_shape[-3]
+            if 'Y' in layer.order and render_shape[-2] > self.largest_zyx["Y"]:
+                self.largest_zyx["Y"] = render_shape[-2]
+            if 'X' in layer.order and render_shape[-1] > self.largest_zyx["X"]:
+                self.largest_zyx["X"] = render_shape[-1]
+                
+        if use_clipper and isinstance(self.camera, LucidaFlyCamera):
+            if isinstance(visual, VolumeVisual):
+                self.camera.register_volume(visual)
+            else:
+                visual.attach(self.camera._clipper)
             
-    def _center_camera(self, render_shape: tuple[int, ...], order: str):
-        if 'Z' in order:
-            # Use last 3 dimensions (ZYX)
-            layer_center = (render_shape[-3] // 2,
-                            render_shape[-2] // 2,
-                            render_shape[-1] // 2)
-            z_range = (0, render_shape[-3])
-        else:
-            # Use last 2 dimensions (YX)
-            layer_center = (render_shape[-2] // 2,
-                            render_shape[-1] // 2)
-            z_range = (0, 1)
-        x_range = (0, render_shape[-1])
-        y_range = (0, render_shape[-2])
-        self.camera.center = layer_center
-        self.camera.set_range(x=x_range, y=y_range, z=z_range)
+        self.add(visual)  # type: ignore            
+            
+    def set_default_camera_state(self):
+        self.camera.set_range()
+        
+        layer_center = (self.largest_zyx["X"] // 2,
+                        self.largest_zyx["Y"] // 2,
+                        self.largest_zyx["Z"] * 8)
+        self.camera.center = np.array(layer_center)
 
+        # set the rotation to look down the -Z axis
+        angles = (np.pi, np.pi, 0)
+        q1 = Quaternion.create_from_axis_angle(angles[0], -1, 0, 0)
+        q2 = Quaternion.create_from_axis_angle(angles[1], 0, 1, 0)
+        q3 = Quaternion.create_from_axis_angle(angles[2], 0, 0, -1)
+        q = q1 * q2 * q3
+        self.camera._rotation1 = q.normalize()
+        self.camera.set_default_state()   
                 
     def _add_dim_slider(self, dim: str, size: int) -> DimSlider:
         """Add a dimension slider for the given dimension."""
@@ -63,7 +86,7 @@ class ViewManager:
         
         self._views: dict[str, View] = {}
         self._default_view_name = "default"
-        self._timer = app.Timer(interval=0.5, connect=self._update_canvas, start=True)
+        self._timer = app.Timer(interval=0.1, connect=self._update_canvas, start=True)
 
 
     # ----- PUBLIC API
@@ -74,7 +97,7 @@ class ViewManager:
                  camera_type: str = "Turntable",  # or "PanZoom"
                  border_color: str = 'white') -> View:
         """Add a new view to the grid layout and returns it. Removes any existing view with the same name."""
-        camera_cls = getattr(scene.cameras, camera_type + "Camera")
+        camera_cls = available_cameras.get(camera_type, LucidaFlyCamera)
         view = View(bus=self._bus, camera=camera_cls(), border_color=border_color)
 
         name = name or self._default_view_name
@@ -86,9 +109,9 @@ class ViewManager:
         return view  
 
     @property
-    def views(self) -> list[View]:
-        """Return a list of all views."""
-        return [v for v in self._views.values()]
+    def views(self) -> dict[str, View]:
+        """Return all views."""
+        return self._views
     
     def get_view(self, name: str | None) -> View | None:
         """Get a view by name, or None if it doesn't exist."""
@@ -122,6 +145,7 @@ class ViewManager:
     
     def _update_canvas(self, event):
         """Update the canvas periodically."""
+        # Let's print the camera state for debugging
         self.canvas.update()
-        for view in self._views.values():
+        for name, view in self._views.items():
             view.update()

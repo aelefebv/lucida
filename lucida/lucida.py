@@ -8,6 +8,7 @@ from lucida.core.logging import init_logging
 from lucida.core.signal_bus import SignalBus
 from lucida.core.utils import get_current_ipython
 from lucida.frontend.main_window import MainApplication, MainWindow
+from vispy import app
     
 class Viewer:
     """Main entry point for the Lucida viewer application."""
@@ -21,6 +22,11 @@ class Viewer:
         self.ipython = get_current_ipython() 
         init_logging(std_out=stdout_log, level=log_level)
         self._bus.emit(ViewerInitialized())
+        self.wnd.show()
+        
+    def run(self):
+        if not self.ipython:
+            app.run()
         
     def add_image(self, data: np.ndarray, order: str, *,
                   layer_name: str = "layer",
@@ -33,7 +39,12 @@ class Viewer:
         layer = Layer(bus=self._bus, data=data, order=order,
                       name=layer_name, colormap=colormap, interpolation=interpolation)
         view.add_layer(layer)
+        
         # Clear existing dim sliders and add new ones from the view
         self.wnd.clear_dim_sliders()
         for slider in view.dim_sliders.values():
             self.wnd.add_dim_slider(slider)
+            
+        # Center the camera on the new layer and set it as default
+        view.set_default_camera_state()
+        
