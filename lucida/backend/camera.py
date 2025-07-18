@@ -14,17 +14,6 @@ class LucidaFlyCamera(FlyCamera):
         super().__init__(**kwargs)
         self.auto_roll = False
         
-        self._clipper = PlanesClipper(coord_system='scene')
-        self._plane = np.empty((1, 2, 3), dtype=np.float32)
-        self.transform.changed.connect(self._on_transform_changed)
-        
-        self._volumes: list[Volume] = []
-        self._clipper_distance = 100  # Distance from the camera to the clipping plane'
-        self._clipper_center = self.center
-        self._clipper_rotation = self.rotation
-        self._clipper_on_camera = True
-        self._moving_clipper = False
-        
         self._keymap = {
             'W': (+1, 1), 'S': (-1, 1),  # forward/backward
             'D': (+1, 2), 'A': (-1, 2),  # strafe right/left
@@ -37,9 +26,20 @@ class LucidaFlyCamera(FlyCamera):
             keys.SPACE: (0, 1, 2, 3),  # 0 means brake, apply to translation
         }
         
-    def register_volume(self, volume):
+        self._volumes_to_clip: list[Volume] = []
+        self._clipper = PlanesClipper(coord_system='scene')
+        self._clipper_plane = np.empty((1, 2, 3), dtype=np.float32)
+        self._clipper_distance = 100  # Distance from the camera to the clipping plane'
+        self._clipper_center = self.center
+        self._clipper_rotation = self.rotation
+        self._clipper_on_camera = True
+        self._clipper_rotating = False
+        
+        self.transform.changed.connect(self._on_transform_changed)
+        
+    def register_volume_to_clip(self, volume):
         """Register a volume to be clipped by this camera."""
-        self._volumes.append(volume)
+        self._volumes_to_clip.append(volume)
         
     def viewbox_mouse_event(self, event):
         """
@@ -74,7 +74,7 @@ class LucidaFlyCamera(FlyCamera):
         self._update_from_mouse = True
         
     def _on_transform_changed(self, event=None):
-        if not self._moving_clipper and self._clipper_on_camera:
+        if not self._clipper_rotating and self._clipper_on_camera:
             self._clipper_rotation = self.rotation
         self._update_clipping(event)
 
@@ -86,12 +86,12 @@ class LucidaFlyCamera(FlyCamera):
         if self._clipper_on_camera:
             self._clipper_center = self.center
             
-        self._plane[0, 0] = self._clipper_center + n * self._clipper_distance
-        self._plane[0, 1] = n
+        self._clipper_plane[0, 0] = self._clipper_center + n * self._clipper_distance
+        self._clipper_plane[0, 1] = n
         
-        self._clipper.clipping_planes = self._plane
-        for volume in self._volumes:
-            volume.clipping_planes = self._plane
+        self._clipper.clipping_planes = self._clipper_plane
+        for volume in self._volumes_to_clip:
+            volume.clipping_planes = self._clipper_plane
             
     def _handle_scroll_event(self, event: SceneMouseEvent, mouse_evt: MouseEvent):
         dist_mult = 0.25
@@ -117,8 +117,8 @@ class LucidaFlyCamera(FlyCamera):
         self._rotation2 = Quaternion()
         event.handled = True
         
-        if self._moving_clipper:
-            self._moving_clipper = False
+        if self._clipper_rotating:
+            self._clipper_rotating = False
             self._clipper_on_camera = False
             
         
@@ -159,7 +159,7 @@ class LucidaFlyCamera(FlyCamera):
             elif right_click:
                 # Rotate the clipping plane and unstick it from the camera
                 self._clipper_rotation = rotation
-                self._moving_clipper = True
+                self._clipper_rotating = True
                 self._update_clipping(event)
                 
     def _reset_clipper(self):
@@ -167,7 +167,7 @@ class LucidaFlyCamera(FlyCamera):
         self._clipper_distance = 100
         self._clipper_rotation = self.rotation
         self._clipper_on_camera = True
-        self._moving_clipper = False
+        self._clipper_rotating = False
         self._update_clipping()
         
     def reset(self):
