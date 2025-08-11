@@ -32,15 +32,15 @@ prog = ctx.program(
 )
 
 vertices = np.array([
-    0.0, 0.5,
-    -0.5, -0.5,
-    0.5, -0.5
+    0.0,    0.5,    0.0,
+    -0.5,   -0.5,   0.0,
+    0.5,    -0.5,   0.0
 ], dtype=np.float32)
 vbo = ctx.buffer(vertices.tobytes())
 
 vao = ctx.vertex_array(
     prog,
-    [(vbo, '2f', 'in_pos'),]
+    [(vbo, '3f', 'in_pos'),]
 )
 
 # Let's register a callback to resize the viewport when the window is resized
