@@ -56,11 +56,11 @@ def link_program(vs, fs):
     return shader_program
 
 shader_dir = Path(r"C:\Users\austin\GitHub\lucida\opengl_run\shaders")
-vert_shader_path = shader_dir / 'vert.glsl'
+vert_shader_path = shader_dir / 'vert_minimal.glsl'
 vert_shader_file = open(vert_shader_path, 'r').read()
 vert_shader = compile_shader(vert_shader_file, gl.GL_VERTEX_SHADER)
 
-frag_shader_path = shader_dir / 'frag.glsl'
+frag_shader_path = shader_dir / 'frag_minimal.glsl'
 frag_shader_file = open(frag_shader_path, 'r').read()
 frag_shader = compile_shader(frag_shader_file, gl.GL_FRAGMENT_SHADER)
 

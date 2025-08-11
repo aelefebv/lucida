@@ -2,7 +2,7 @@
 
 
 def main():
-    from moderngl_run import hello
+    from opengl_run.examples import hello
     # hello.main()
 
 
