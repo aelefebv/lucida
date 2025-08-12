@@ -1,8 +1,9 @@
-from examples import hello
+# from examples import hello
 
 
 def main():
-    hello.main()
+    from opengl_run.examples import lucida_tif_texture
+    # hello.main()
 
 
 if __name__ == "__main__":
