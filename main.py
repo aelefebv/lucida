@@ -2,7 +2,7 @@
 
 
 def main():
-    from opengl_run.examples import lucida_numpy_texture
+    from opengl_run.examples import lucida_tif_texture
     # hello.main()
 
 
