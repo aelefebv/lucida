@@ -8,15 +8,17 @@ from pathlib import Path
 import ctypes
 import tifffile
 
-window = LucidaWindow(800, 800, "Hello OpenGL")
+window = LucidaWindow(1200, 1200, "Hello OpenGL")
 window.renderers.append(Clearer())
 
-shader_dir = Path(r"C:\Users\austin\GitHub\lucida\opengl_run\shaders")
+tif_path = Path("/Users/austin/test_files/nellie_all_tests/yeast_3d_mitochondria.ome.tif")
+shader_dir = Path("/Users/austin/GitHub/lucida/opengl_run/shaders")
+# shader_dir = Path(r"C:\Users\austin\GitHub\lucida\opengl_run\shaders")
 vs_path = shader_dir / 'lucida_tif_texture.vs'
 fs_path = shader_dir / 'lucida_tif_texture.fs'
 shader = Shader(vs_path, fs_path)
 
-tif_path = Path(r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif")
+# tif_path = Path(r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif")
 test_np = tifffile.imread(tif_path)
 mip = np.max(test_np[0], axis=0)  # Create a maximum intensity projection
 test_np = np.flipud(mip)
@@ -28,6 +30,10 @@ h, w = im.shape[-2:]
 pixel_format = gl.GL_RED
 gl_type = gl.GL_UNSIGNED_SHORT
 internal_format = gl.GL_R16
+
+window.adjust_aspect_ratio(w, h)
+window.toggle_aspect_ratio_lock(force=True)
+# window.change_window_size(w, h)
 
 tex = gl.glGenTextures(1)
 gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
