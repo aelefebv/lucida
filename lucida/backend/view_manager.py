@@ -42,7 +42,7 @@ class View(scene.ViewBox):
                 
         if use_clipper and isinstance(self.camera, LucidaFlyCamera):
             if isinstance(visual, VolumeVisual):
-                self.camera.register_volume(visual)
+                self.camera.register_volume_to_clip(visual)
             else:
                 visual.attach(self.camera._clipper)
             

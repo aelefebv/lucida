@@ -17,10 +17,12 @@ def main():
     data = np.random.rand(30, 20, 100, 100).astype(np.float32)  # 2D volume
     viewer.add_image(data, order="TCYX")
 
-    # im_path = r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif"
-    im_path = "/Users/austin/test_files/nellie_all_tests/yeast_3d_mitochondria.ome.tif"; order = "TZYX"
+    im_path = r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif"; order = "TZYX"
+    # im_path = "/Users/austin/test_files/nellie_all_tests/yeast_3d_mitochondria.ome.tif"; order = "TZYX"
     # im_path = "/Users/austin/test_files/nellie_all_tests/test.tif"; order = "ZYX"
+    # im_path = r"D:\test_files\nellie_all_tests\test.tif"; order = "ZYX"
+    # im_path = r"D:\test_files\all_flt1_kidneys\0248-1_Flt1-Treated-Kd\output\skel.tif"; order = "ZYX"
     im_data = tifffile.imread(im_path)
-    viewer.add_image(im_data, order=order, layer_name="Yeast Mitochondria",
+    viewer.add_image(im_data, order=order, layer_name="Test",
                      colormap="viridis", interpolation="nearest")
     viewer.run()
