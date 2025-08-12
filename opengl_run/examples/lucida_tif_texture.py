@@ -103,15 +103,15 @@ gl.glEnableVertexAttribArray(2)
 class ColorChanger(Renderer):
     def update(self, dt: float):
         time = glfw.get_time() * 5
-        green_value = (np.sin(time * 1.5) + 1.0) / 2.0
-        red_value = (np.sin(time * 2.3) + 1.0) / 2.0
-        blue_value = (np.sin(time * 1.8) + 1.0) / 2.0
+        # green_value = (np.sin(time * 1.5) + 1.0) / 2.0
+        # red_value = (np.sin(time * 2.3) + 1.0) / 2.0
+        # blue_value = (np.sin(time * 1.8) + 1.0) / 2.0
         # blue_value = 1
         gl.glUseProgram(shader.program)
         gl.glActiveTexture(gl.GL_TEXTURE0)  # Activate texture unit 0
         gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
         # shader.set_uniform("custom_color", (1.0, 1.0, 0.0, 0.0))
-        shader.set_uniform("custom_color", (red_value, green_value, blue_value, 1.0))
+        # shader.set_uniform("custom_color", (red_value, green_value, blue_value, 1.0))
         # shader.set_uniform("custom_texture", (red_value, green_value, blue_value, 1.0))
         gl.glBindVertexArray(vao)
         gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
