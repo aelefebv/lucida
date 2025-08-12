@@ -7,14 +7,15 @@ import glfw
 from pathlib import Path
 import ctypes
 import tifffile
+from pyglm import glm
 
 window = LucidaWindow(1200, 1200, "Hello OpenGL")
 window.renderers.append(Clearer())
 
 # tif_path = Path("/Users/austin/test_files/nellie_all_tests/yeast_3d_mitochondria.ome.tif"); shader_dir = Path("/Users/austin/GitHub/lucida/opengl_run/shaders")
 tif_path = Path(r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif"); shader_dir = Path(r"C:\Users\austin\GitHub\lucida\opengl_run\shaders")
-vs_path = shader_dir / 'lucida_tif_texture.vs'
-fs_path = shader_dir / 'lucida_tif_texture.fs'
+vs_path = shader_dir / 'glm_funcs.vs'
+fs_path = shader_dir / 'glm_funcs.fs'
 shader = Shader(vs_path, fs_path)
 
 test_np = tifffile.imread(tif_path)
@@ -32,6 +33,16 @@ internal_format = gl.GL_R16
 window.adjust_aspect_ratio(w, h)
 window.toggle_aspect_ratio_lock(force=True)
 # window.change_window_size(w, h)
+
+vec = glm.vec4(1.0, 0.0, 0.0, 1.0)
+trans_test = glm.mat4(1.0)
+
+trans_test = glm.translate(trans_test, glm.vec3(1.0, 1.0, 0.0))
+vec = trans_test * vec
+print(vec.x, vec.y, vec.z)
+# should print 2.0, 1.0, 0.0
+
+
 
 tex = gl.glGenTextures(1)
 gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
@@ -104,23 +115,32 @@ gl.glEnableVertexAttribArray(1)
 gl.glVertexAttribPointer(2, s[2], gl.GL_FLOAT, gl.GL_FALSE, bits_per_vertex, ctypes.c_void_p(int(offsets_cumul[1])))
 gl.glEnableVertexAttribArray(2)
 
-class ColorChanger(Renderer):
+gl.glUseProgram(shader.program)
+gl.glActiveTexture(gl.GL_TEXTURE0)  # Activate texture unit 0
+gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
+gl.glBindVertexArray(vao)
+
+class MainRenderer(Renderer):
     def update(self, dt: float):
-        time = glfw.get_time() * 5
+        time = glfw.get_time()
         # green_value = (np.sin(time * 1.5) + 1.0) / 2.0
         # red_value = (np.sin(time * 2.3) + 1.0) / 2.0
         # blue_value = (np.sin(time * 1.8) + 1.0) / 2.0
         # blue_value = 1
-        gl.glUseProgram(shader.program)
-        gl.glActiveTexture(gl.GL_TEXTURE0)  # Activate texture unit 0
-        gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
+        # trans = glm.mat4(1.0)
+        
+        trans = glm.mat4(1.0)
+        trans = glm.translate(trans, glm.vec3(0.5, -0.5, 0.0))
+        trans = glm.rotate(trans, time, glm.vec3(0.0, 1.0, 1.0))
+        shader.set_uniform("transform", trans)
+        
+        
         # shader.set_uniform("custom_color", (1.0, 1.0, 0.0, 0.0))
         # shader.set_uniform("custom_color", (red_value, green_value, blue_value, 1.0))
         # shader.set_uniform("custom_texture", (red_value, green_value, blue_value, 1.0))
-        gl.glBindVertexArray(vao)
         gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
         # gl.glDrawArrays(gl.GL_TRIANGLES, 0, vn)
 
-window.renderers.append(ColorChanger())
+window.renderers.append(MainRenderer())
 
 window.run()

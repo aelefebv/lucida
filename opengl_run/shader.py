@@ -1,4 +1,5 @@
 from OpenGL import GL as gl
+from pyglm import glm
 
 class Shader:
     def __init__(self, vertex_path, fragment_path):
@@ -16,6 +17,8 @@ class Shader:
         
     def set_uniform(self, name, value):
         location = gl.glGetUniformLocation(self.program, name)
+        
+        # python types
         if isinstance(value, float):
             gl.glUniform1f(location, value)
         elif isinstance(value, (list, tuple)) and len(value) == 2:
@@ -26,6 +29,29 @@ class Shader:
             gl.glUniform4f(location, *value)
         elif isinstance(value, int):
             gl.glUniform1i(location, value)
+            
+        # glm types
+        elif isinstance(value, glm.vec2):
+            gl.glUniform2f(location, value.x, value.y)
+        elif isinstance(value, glm.vec3):
+            gl.glUniform3f(location, value.x, value.y, value.z)
+        elif isinstance(value, glm.vec4):
+            gl.glUniform4f(location, value.x, value.y, value.z, value.w)
+        elif isinstance(value, glm.mat2):
+            gl.glUniformMatrix2fv(location, 1, gl.GL_FALSE, glm.value_ptr(value))
+        elif isinstance(value, glm.mat3):
+            gl.glUniformMatrix3fv(location, 1, gl.GL_FALSE, glm.value_ptr(value))
+        elif isinstance(value, glm.mat4):
+            gl.glUniformMatrix4fv(location, 1, gl.GL_FALSE, glm.value_ptr(value))
+        elif isinstance(value, glm.quat):
+            gl.glUniform4f(location, value.x, value.y, value.z, value.w)
+        elif isinstance(value, glm.mat2x2):
+            gl.glUniformMatrix2fv(location, 1, gl.GL_FALSE, glm.value_ptr(value))
+        elif isinstance(value, glm.mat3x3):
+            gl.glUniformMatrix3fv(location, 1, gl.GL_FALSE, glm.value_ptr(value))
+        elif isinstance(value, glm.mat4x4):
+            gl.glUniformMatrix4fv(location, 1, gl.GL_FALSE, glm.value_ptr(value))
+            
         else:
             raise ValueError(f"Unsupported uniform type: {type(value)} for {name}")
 

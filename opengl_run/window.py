@@ -35,8 +35,8 @@ class LucidaWindow:
             for renderer in self.renderers:
                 renderer.update(dt)
                 
-            glfw.wait_events()
-            # glfw.poll_events()  # I don't think we need constant polling?
+            # glfw.wait_events()
+            glfw.poll_events()
             glfw.swap_buffers(self.window)
 
         glfw.terminate()
