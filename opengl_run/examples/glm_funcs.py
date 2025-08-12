@@ -122,14 +122,20 @@ gl.glBindVertexArray(vao)
 
 class MainRenderer(Renderer):
     def update(self, dt: float):
-        time = glfw.get_time()
+        time = glfw.get_time() * 5
         
         trans = glm.mat4(1.0)
         trans = glm.translate(trans, glm.vec3(0.5, -0.5, 0.0))
-        trans = glm.rotate(trans, time, glm.vec3(0.0, 1.0, 1.0))
+        trans = glm.rotate(trans, time, glm.vec3(0.0, 0.0, 1.0))
         shader.set_uniform("transform", trans)
-        
         gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
+        
+        trans = glm.mat4(1.0)
+        trans = glm.translate(trans, glm.vec3(-0.5, 0.5, 0.0))
+        trans = glm.scale(trans,glm.vec3(glm.sin(time), glm.sin(time), 1.0))
+        shader.set_uniform("transform", trans)
+        gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
+        
 
 window.renderers.append(MainRenderer())
 
