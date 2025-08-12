@@ -2,7 +2,7 @@
 
 
 def main():
-    from opengl_run.examples import hello
+    from opengl_run.examples import lucida_more_colors
     # hello.main()
 
 
