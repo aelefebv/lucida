@@ -16,7 +16,8 @@ class LucidaWindow:
         self._is_aspect_ratio_locked = False
         
         # Callbacks
-        glfw.set_framebuffer_size_callback(self.window, self._framebuffer_size_callback)
+        glfw.set_framebuffer_size_callback(self.window, self._on_framebuffer_resize)
+        glfw.set_key_callback(self.window, self._on_key_press)
         
     ####################
     # Run ##############
@@ -25,8 +26,6 @@ class LucidaWindow:
     def run(self):
         last_time = glfw.get_time()
         while not glfw.window_should_close(self.window):
-            self._process_inputs()
-            
             time = glfw.get_time()
             dt = time - last_time
             if dt < self.min_dt:
@@ -36,7 +35,8 @@ class LucidaWindow:
             for renderer in self.renderers:
                 renderer.update(dt)
                 
-            glfw.poll_events()
+            glfw.wait_events()
+            # glfw.poll_events()  # I don't think we need constant polling?
             glfw.swap_buffers(self.window)
 
         glfw.terminate()
@@ -112,18 +112,18 @@ class LucidaWindow:
         glfw.make_context_current(window)
         return window
     
-    def _process_inputs(self):
-        if glfw.get_key(self.window, glfw.KEY_ESCAPE) == glfw.PRESS:
-            glfw.set_window_should_close(self.window, True)
-    
     ######################
     # Callbacks ##########
     ######################
     
-    def _framebuffer_size_callback(self, _, width, height):
+    def _on_framebuffer_resize(self, _, width, height):
         self.width = width
         self.height = height
         gl.glViewport(0, 0, width, height)
+        
+    def _on_key_press(self, window, key: int, scancode: int, action: int, mods: int):
+        if (key == glfw.KEY_ESCAPE and action == glfw.PRESS):
+            glfw.set_window_should_close(window, True)
     
     
 if __name__ == "__main__":
