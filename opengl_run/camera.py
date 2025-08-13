@@ -2,14 +2,10 @@ from pyglm import glm
 import glfw
 
 class Camera:
-    def __init__(self, 
-                 position = glm.vec3(),   # a bit back
-                 fov = 45.0,
-                 aspect_ratio = 1.0,
-                 speed = 2.5,
-                ):
+    def __init__(self, position = glm.vec3(), fov=45.0, aspect_ratio=1.0, speed=2.5, sensitivity=1):
         self.position = position
         self.speed = speed
+        self.sensitivity = sensitivity
         self.fov = fov
         self.aspect_ratio = aspect_ratio
         
@@ -40,9 +36,9 @@ class Camera:
         self.forward = glm.normalize(self.orientation * glm.vec3(0, 0, -1))  # type: ignore
         
     def rotate(self, yaw_d: float, pitch_d: float, roll_d: float):
-        yaw_q   = glm.angleAxis(glm.radians(yaw_d), self.up)
-        pitch_q = glm.angleAxis(glm.radians(pitch_d), self.right)
-        roll_q  = glm.angleAxis(glm.radians(roll_d), self.forward)
+        yaw_q   = glm.angleAxis(glm.radians(yaw_d   * self.sensitivity), self.up)
+        pitch_q = glm.angleAxis(glm.radians(pitch_d * self.sensitivity), self.right)
+        roll_q  = glm.angleAxis(glm.radians(roll_d  * self.sensitivity), self.forward)
         
         dq = roll_q * pitch_q * yaw_q
         self.orientation = glm.normalize(dq * self.orientation)
