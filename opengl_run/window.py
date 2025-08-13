@@ -1,5 +1,6 @@
 import glfw
 import OpenGL.GL as gl
+from opengl_run.camera import Camera
 from opengl_run.render import Renderer
 
 class LucidaWindow:
@@ -7,6 +8,7 @@ class LucidaWindow:
         self.width = width
         self.height = height
         self.title = title
+        self.camera = Camera()
         self.window = self._initialize_window()
         self._initialize_gl()
         
@@ -126,8 +128,24 @@ class LucidaWindow:
         gl.glViewport(0, 0, width, height)
         
     def _on_key_press(self, window, key: int, scancode: int, action: int, mods: int):
-        if (key == glfw.KEY_ESCAPE and action == glfw.PRESS):
+        if not action == glfw.PRESS: return
+        
+        cam = self.camera
+        
+        if key == glfw.KEY_ESCAPE:
             glfw.set_window_should_close(window, True)
+        if key == glfw.KEY_W:
+            cam.apply_force(cam.forward)
+        if key == glfw.KEY_A:
+            cam.apply_force(-cam.right)
+        if key == glfw.KEY_S:
+            cam.apply_force(-cam.forward)
+        if key == glfw.KEY_D:
+            cam.apply_force(cam.right)
+        if key == glfw.KEY_Q:
+            cam.apply_force(-cam.up)
+        if key == glfw.KEY_E:
+            cam.apply_force(cam.up)
     
     
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 
 def main():
-    from opengl_run.examples import glm_projections
+    from opengl_run.examples import glm_camera
     # hello.main()
 
 

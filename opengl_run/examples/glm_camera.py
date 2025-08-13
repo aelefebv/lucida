@@ -39,7 +39,6 @@ trans_test = glm.mat4(1.0)
 
 trans_test = glm.translate(trans_test, glm.vec3(1.0, 1.0, 0.0))
 vec = trans_test * vec
-print(vec.x, vec.y, vec.z)
 # should print 2.0, 1.0, 0.0
 
 # Change the near value to clip anything close to the camera.
@@ -163,11 +162,9 @@ gl.glActiveTexture(gl.GL_TEXTURE0)  # Activate texture unit 0
 gl.glBindTexture(gl.GL_TEXTURE_2D, tex)
 gl.glBindVertexArray(vao)
 
-view = glm.mat4(1.0)
-view = glm.translate(view, glm.vec3(0, 0, -3))
+# view = glm.mat4(1.0)
+# view = glm.translate(view, glm.vec3(0, 0, -3))
 
-ortho_proj = glm.ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0)
-print(ortho_proj, '\n')
 
 # print(window.width, window.height)
 # # persp_proj = glm.perspective(glm.radians(45.0), window.width/window.height, 0.1, 100.0)
@@ -190,16 +187,35 @@ cube_positions = [
     glm.vec3(-1.5, 2.0, -1.5)
 ]
 
+camera_pos = glm.vec3(0.0, 0.0, 3.0)
+camera_front = glm.vec3(0.0, 0.0, -1.0)
+camera_up = glm.vec3(0.0, 1.0, 0.0)
+
 class MainRenderer(Renderer):
     def __init__(self):
         super().__init__()
-        self.starting_fov = 20
-        self.starting_ar = 0.5
+        self.starting_fov = 45
+        self.starting_ar = 1
         
     def update(self, dt: float):
-        self.starting_ar += dt
+        time = glfw.get_time()
+        # self.starting_ar += dt
+        # ortho_proj = glm.ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0)
+        # shader.set_uniform("projection", ortho_proj)
+        
         # persp_proj = glm.perspective(glm.radians(self.starting_fov), 1, 0.1, 100.0)
         persp_proj = glm.perspective(glm.radians(45), self.starting_ar, 0.1, 100.0)
+        shader.set_uniform("projection", persp_proj)
+        
+        # radius = 10.0
+        # cam_x = glm.sin(time) * radius
+        # cam_z = glm.cos(time) * radius
+        view = glm.lookAt(
+            camera_pos,  # camera position,
+            camera_pos + camera_front,  # target position
+            camera_up)  # up vector
+        shader.set_uniform("view", view)
+        
         
         for i in range(10):
             model = glm.mat4(1.0)
@@ -207,8 +223,6 @@ class MainRenderer(Renderer):
             angle = 20 * i
             model = glm.rotate(model, glm.radians(angle), glm.vec3(1, -0.7, 0.5))
             shader.set_uniform("model", model)
-            shader.set_uniform("view", view)
-            shader.set_uniform("projection", persp_proj)
             gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
         
         # model = glm.mat4(1.0)
