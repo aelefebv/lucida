@@ -18,6 +18,9 @@ class LucidaWindow:
         
         self._is_aspect_ratio_locked = False
         
+        self.pressed_keys = set()  # Track pressed keys
+        self.pressed_mods = set()  # Track pressed modifiers
+        
         # Callbacks
         glfw.set_framebuffer_size_callback(self.window, self._on_framebuffer_resize)
         glfw.set_key_callback(self.window, self._on_key_press)
@@ -34,6 +37,9 @@ class LucidaWindow:
             if dt < self.min_dt:
                 continue
             last_time = time
+            
+            self._process_pressed_keys()
+            self.camera.update(self.pressed_keys, dt)
             
             for renderer in self.renderers:
                 renderer.update(dt)
@@ -117,6 +123,10 @@ class LucidaWindow:
     
     def _initialize_gl(self):
         gl.glEnable(gl.GL_DEPTH_TEST)
+        
+    def _process_pressed_keys(self):
+        if glfw.KEY_ESCAPE in self.pressed_keys:
+            glfw.set_window_should_close(self.window, True)
     
     ######################
     # Callbacks ##########
@@ -128,25 +138,10 @@ class LucidaWindow:
         gl.glViewport(0, 0, width, height)
         
     def _on_key_press(self, window, key: int, scancode: int, action: int, mods: int):
-        if not action == glfw.PRESS: return
-        
-        cam = self.camera
-        
-        if key == glfw.KEY_ESCAPE:
-            glfw.set_window_should_close(window, True)
-        if key == glfw.KEY_W:
-            cam.apply_force(cam.forward)
-        if key == glfw.KEY_A:
-            cam.apply_force(-cam.right)
-        if key == glfw.KEY_S:
-            cam.apply_force(-cam.forward)
-        if key == glfw.KEY_D:
-            cam.apply_force(cam.right)
-        if key == glfw.KEY_Q:
-            cam.apply_force(-cam.up)
-        if key == glfw.KEY_E:
-            cam.apply_force(cam.up)
-    
+        if action == glfw.PRESS:
+            self.pressed_keys.add(key)
+        elif action == glfw.RELEASE:
+            self.pressed_keys.discard(key)
     
 if __name__ == "__main__":
     lucida_window = LucidaWindow()
