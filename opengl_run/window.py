@@ -2,6 +2,7 @@ import glfw
 import OpenGL.GL as gl
 from opengl_run.camera import Camera
 from opengl_run.render import Renderer
+from pyglm import glm
 
 class LucidaWindow:
     def __init__(self, width=800, height=600, title="Lucida", *, min_dt=0.00833):
@@ -38,8 +39,8 @@ class LucidaWindow:
                 continue
             last_time = time
             
-            self._process_pressed_keys()
-            self.camera.update(self.pressed_keys, dt)
+            self._process_pressed_keys(dt)
+            self.camera.update(dt)
             
             for renderer in self.renderers:
                 renderer.update(dt)
@@ -124,9 +125,17 @@ class LucidaWindow:
     def _initialize_gl(self):
         gl.glEnable(gl.GL_DEPTH_TEST)
         
-    def _process_pressed_keys(self):
+    def _process_pressed_keys(self, dt: float):
         if glfw.KEY_ESCAPE in self.pressed_keys:
             glfw.set_window_should_close(self.window, True)
+            
+        cam = self.camera
+        if glfw.KEY_W in self.pressed_keys: cam.apply_force(-cam.forward)
+        if glfw.KEY_S in self.pressed_keys: cam.apply_force( cam.forward)
+        if glfw.KEY_A in self.pressed_keys: cam.apply_force(-cam.right)
+        if glfw.KEY_D in self.pressed_keys: cam.apply_force( cam.right)
+        if glfw.KEY_Q in self.pressed_keys: cam.apply_force(-cam.up)
+        if glfw.KEY_E in self.pressed_keys: cam.apply_force( cam.up)
     
     ######################
     # Callbacks ##########
