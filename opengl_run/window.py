@@ -2,7 +2,6 @@ import glfw
 import OpenGL.GL as gl
 from opengl_run.camera import Camera
 from opengl_run.render import Renderer
-from pyglm import glm
 
 class LucidaWindow:
     def __init__(self, width=800, height=600, title="Lucida", *, min_dt=0.00833):
