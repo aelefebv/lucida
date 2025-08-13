@@ -130,12 +130,25 @@ class LucidaWindow:
             glfw.set_window_should_close(self.window, True)
             
         cam = self.camera
-        if glfw.KEY_W in self.pressed_keys: cam.apply_force(-cam.forward)
-        if glfw.KEY_S in self.pressed_keys: cam.apply_force( cam.forward)
-        if glfw.KEY_A in self.pressed_keys: cam.apply_force(-cam.right)
+        if glfw.KEY_W in self.pressed_keys: cam.apply_force(cam.forward)
+        if glfw.KEY_S in self.pressed_keys: cam.apply_force(-cam.forward)
         if glfw.KEY_D in self.pressed_keys: cam.apply_force( cam.right)
-        if glfw.KEY_Q in self.pressed_keys: cam.apply_force(-cam.up)
+        if glfw.KEY_A in self.pressed_keys: cam.apply_force(-cam.right)
         if glfw.KEY_E in self.pressed_keys: cam.apply_force( cam.up)
+        if glfw.KEY_Q in self.pressed_keys: cam.apply_force(-cam.up)
+        
+        if glfw.KEY_J in self.pressed_keys:
+            cam.rotate(yaw_d=1, pitch_d=0, roll_d=0)
+        if glfw.KEY_L in self.pressed_keys:
+            cam.rotate(yaw_d=-1, pitch_d=0, roll_d=0)
+        if glfw.KEY_I in self.pressed_keys:
+            cam.rotate(yaw_d=0, pitch_d=1, roll_d=0)
+        if glfw.KEY_K in self.pressed_keys:
+            cam.rotate(yaw_d=0, pitch_d=-1, roll_d=0)
+        if glfw.KEY_U in self.pressed_keys:
+            cam.rotate(yaw_d=0, pitch_d=0, roll_d=1)
+        if glfw.KEY_O in self.pressed_keys:
+            cam.rotate(yaw_d=0, pitch_d=0, roll_d=-1)
     
     ######################
     # Callbacks ##########

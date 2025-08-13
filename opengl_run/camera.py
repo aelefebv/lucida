@@ -35,9 +35,9 @@ class Camera:
         return glm.normalize(glm.cross(self.forward, self.up))
     
     def _update_basis(self):
-        self.right   = glm.normalize(self.orientation * glm.vec3(1, 0, 0))
-        self.up      = glm.normalize(self.orientation * glm.vec3(0, 1, 0))
-        self.forward = glm.normalize(self.orientation * glm.vec3(0, 0, -1))
+        self.right   = glm.normalize(self.orientation * glm.vec3(1, 0, 0))  # type: ignore
+        self.up      = glm.normalize(self.orientation * glm.vec3(0, 1, 0))  # type: ignore
+        self.forward = glm.normalize(self.orientation * glm.vec3(0, 0, -1))  # type: ignore
         
     def rotate(self, yaw_d: float, pitch_d: float, roll_d: float):
         yaw_q   = glm.angleAxis(glm.radians(yaw_d), self.up)
@@ -48,17 +48,8 @@ class Camera:
         self.orientation = glm.normalize(dq * self.orientation)
         self._update_basis()
         
-    def move(self, direction: glm.vec3, dt: float):
-        world_move = (self.right * direction.x +
-                       self.up * direction.y +
-                       self.forward * direction.z)
-    
     def update(self, dt: float):
         """Update the camera position based on pressed keys."""
-        # Update the camera position
-        world_move = (self.right * self.applied_forces.x +
-                       self.up * self.applied_forces.y +
-                       self.forward * self.applied_forces.z)
-        self.position += world_move * self.speed * dt
+        self.position += self.applied_forces * self.speed * dt
         self.applied_forces = glm.vec3()  # reset forces
             
