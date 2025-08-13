@@ -8,6 +8,7 @@ class LucidaWindow:
         self.height = height
         self.title = title
         self.window = self._initialize_window()
+        self._initialize_gl()
         
         self.min_dt = min_dt
         
@@ -111,6 +112,9 @@ class LucidaWindow:
 
         glfw.make_context_current(window)
         return window
+    
+    def _initialize_gl(self):
+        gl.glEnable(gl.GL_DEPTH_TEST)
     
     ######################
     # Callbacks ##########
