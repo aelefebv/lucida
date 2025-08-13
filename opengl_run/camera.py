@@ -1,5 +1,4 @@
 from pyglm import glm
-import glfw
 
 class Camera:
     def __init__(self, position = glm.vec3(), fov=45.0, aspect_ratio=1.0, speed=2.5, sensitivity=1):
