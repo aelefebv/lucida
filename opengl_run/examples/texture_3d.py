@@ -26,12 +26,23 @@ test_np = (test_np - np.min(test_np)) / (np.max(test_np) - np.min(test_np)) * 65
 test_np = test_np.astype(np.uint16)
 im = np.ascontiguousarray(test_np, dtype=np.uint16)  # ensure packed rows
 d, h, w = im.shape
+
+voxel_sizes = (0.2, 0.2, 0.5)
+phys_size = glm.vec3(float(w), float(h), float(d)) * voxel_sizes
+
+# normalize so longest side is 1.0 in world units
+L = max(phys_size.x, phys_size.y, phys_size.z)
+model_scale = phys_size / L
+
+# base step in world units (the smallest voxel edge, normalized)
+world_step = min(voxel_sizes) / L
+
 pixel_format = gl.GL_RED
 gl_type = gl.GL_UNSIGNED_SHORT
 internal_format = gl.GL_R16
 
-window.adjust_aspect_ratio(w, h)
-window.toggle_aspect_ratio_lock(force=True)
+# window.adjust_aspect_ratio(w, h)
+# window.toggle_aspect_ratio_lock(force=True)
 # window.change_size(w, h)
 
 vec = glm.vec4(1.0, 0.0, 0.0, 1.0)
@@ -191,7 +202,7 @@ class MainRenderer(Renderer):
         self.starting_fov = 45
         self.starting_ar = 1
         
-        self.step = 1.0 / float(max(d, h, w)) * 1.2
+        self.world_step = float(world_step) * 1.2
         self.density = 6.0
         self.brightness = 1.2
         
@@ -203,34 +214,51 @@ class MainRenderer(Renderer):
         gl.glEnable(gl.GL_DEPTH_TEST)
         gl.glEnable(gl.GL_BLEND)
         gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
-        # gl.glEnable(gl.GL_CULL_FACE)
-        # gl.glCullFace(gl.GL_BACK)
         
         shader.set_uniform("projection", window.camera.proj)
         shader.set_uniform("view", window.camera.view)
+        
         
         gl.glActiveTexture(gl.GL_TEXTURE0)  # Activate texture unit 0
         gl.glBindTexture(gl.GL_TEXTURE_3D, tex)
         shader.set_uniform("ourTexture", 0)
         
         # common ray-march params
-        shader.set_uniform("stepSize", float(self.step))
         shader.set_uniform("density", float(self.density))
         shader.set_uniform("brightness", float(self.brightness))
         
-        cam_world = glm.inverse(window.camera.view) * glm.vec4(0, 0, 0, 1)
+        # cam_world = glm.inverse(window.camera.view) * glm.vec4(0, 0, 0, 1)
         
         gl.glBindVertexArray(vao)
         # for i in range(10):
         model = glm.mat4(1.0)
+        model = glm.scale(model, model_scale)
+        print(model_scale)
+        shader.set_uniform("model", model)
+        shader.set_uniform("worldStep", float(self.world_step))
         # model = glm.translate(model, cube_positions[i % len(cube_positions)])
         # angle = 20 * i
         # model = glm.rotate(model, glm.radians(angle), glm.vec3(1, -0.7, 0.5))
-        shader.set_uniform("model", model)
         
-        # camera in OBJECT space for this cube (model^-1 * cam_world)
-        cam_obj = glm.inverse(model) * cam_world
+        cam_world_pos = window.camera.position
+        cam_world_dir = window.camera.forward  # already normalized in your Camera
+        # camera position in object space (you already had this):
+        cam_world = glm.vec4(cam_world_pos, 1.0)
+        inv_model = glm.inverse(model)
+        cam_obj   = inv_model * cam_world
         shader.set_uniform("camPosObj", glm.vec3(cam_obj))
+        
+        # camera forward in object space (treat as direction: w=0)
+        # use inverse(model) for world->object; for non-uniform scale, prefer mat3(transpose(inverse(model)))
+        cam_dir_obj = glm.normalize((inv_model * glm.vec4(cam_world_dir, 0.0)).xyz)
+        shader.set_uniform("camDirObj", cam_dir_obj)
+        
+        # near distance (the same value your projection uses)
+        shader.set_uniform("camNear", float(window.camera.near))
+        shader.set_uniform("camFar", float(window.camera.far))
+        # camera in OBJECT space for this cube (model^-1 * cam_world)
+        # cam_obj = glm.inverse(model) * cam_world
+        # shader.set_uniform("camPosObj", glm.vec3(cam_obj))
         
         gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
         
