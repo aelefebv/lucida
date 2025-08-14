@@ -26,15 +26,19 @@ class Camera:
         
         self.applied_forces = glm.vec3()  # forces applied to the camera position
         
-        self.proj = self._update_projection_matrix()
+    @property
+    def proj(self):
+        """Update the projection matrix based on the current FOV and aspect ratio."""
+        return glm.perspective(glm.radians(self.fov), self.aspect_ratio, self.near, self.far)
+
+    @property
+    def view(self):
+        """Return the view matrix based on the camera position and orientation."""
+        return glm.lookAt(self.position, self.position + self.forward, self.up)
         
     def apply_force(self, force: glm.vec3):
         """Apply a force to the camera position."""
         self.applied_forces += force
-        
-    def _get_right(self):
-        """Get the right vector of the camera."""
-        return glm.normalize(glm.cross(self.forward, self.up))
     
     def _update_basis(self):
         self.right   = glm.normalize(self.orientation * glm.vec3(1, 0, 0))  # type: ignore
@@ -52,23 +56,18 @@ class Camera:
         
     def update(self, dt: float):
         """Update the camera position based on pressed keys."""
+        if glm.length(self.applied_forces) == 0: return
         self.position += self.applied_forces * self.speed * dt
         self.applied_forces = glm.vec3()  # reset forces
         
     def set_fov(self, fov: float):
         """Set the field of view."""
         self.fov = max(1.0, min(fov, 179.0))
-        self._update_projection_matrix()
         print(f"FOV set to: {self.fov}")
         
     def set_near(self, near: float):
         """Set the near clipping plane."""
         self.near = max(0.01, near)
         self.near = min(self.near, self.far - 0.01)
-        self._update_projection_matrix()
-        
-    def _update_projection_matrix(self):
-        """Update the projection matrix based on the current FOV and aspect ratio."""
-        self.proj = glm.perspective(glm.radians(self.fov), self.aspect_ratio, self.near, self.far)
-        return self.proj
+
     

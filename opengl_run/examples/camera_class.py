@@ -199,19 +199,14 @@ class MainRenderer(Renderer):
         # ortho_proj = glm.ortho(-1.0, 1.0, -1.0, 1.0, 0.1, 100.0)
         # shader.set_uniform("projection", ortho_proj)
         
-        # persp_proj = glm.perspective(glm.radians(self.starting_fov), 1, 0.1, 100.0)
-        # persp_proj = glm.perspective(glm.radians(45), self.starting_ar, 2, 100.0)
         shader.set_uniform("projection", window.camera.proj)
         
         # radius = 10.0
         # cam_x = glm.sin(time) * radius
         # cam_z = glm.cos(time) * radius
-        view = glm.lookAt(
-            window.camera.position,  # camera position,
-            window.camera.position + window.camera.forward,  # target position
-            window.camera.up)  # up vector
-        shader.set_uniform("view", view)
-        
+
+        shader.set_uniform("view", window.camera.view)
+        # shader.set_uniform("view", view)
         
         for i in range(10):
             model = glm.mat4(1.0)
