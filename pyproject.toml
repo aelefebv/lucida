@@ -15,4 +15,5 @@ dependencies = [
     "pyside6>=6.9.1",
     "tifffile>=2025.6.11",
     "vispy>=0.15.2",
+    "zarr>=3.1.1",
 ]

@@ -2,7 +2,7 @@
 
 
 def main():
-    from opengl_run.examples import texture_3d
+    from opengl_run.examples import zarr_data
     # hello.main()
 
 

@@ -8,17 +8,21 @@ from pathlib import Path
 import ctypes
 import tifffile
 from pyglm import glm
+import zarr
 
 window = LucidaWindow(1200, 1200, "Hello OpenGL")
 window.renderers.append(Clearer())
 
 # tif_path = Path("/Users/austin/test_files/nellie_all_tests/yeast_3d_mitochondria.ome.tif"); shader_dir = Path("/Users/austin/GitHub/lucida/opengl_run/shaders")
-tif_path = Path(r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif"); shader_dir = Path(r"C:\Users\austin\GitHub\lucida\opengl_run\shaders")
+# tif_path = Path(r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif"); shader_dir = Path(r"C:\Users\austin\GitHub\lucida\opengl_run\shaders")
+zarr_path = Path(r"C:\test_files_C\test_zarr.zarr"); shader_dir = Path(r"C:\Users\austin\GitHub\lucida\opengl_run\shaders")
 vs_path = shader_dir / 'texture_3d.vs'
 fs_path = shader_dir / 'texture_3d_max_intensity.fs'
 shader = Shader(vs_path, fs_path)
 
-test_np = tifffile.imread(tif_path)
+zarr_store = zarr.open_group(zarr_path, mode='r')
+test_np = np.array(zarr_store['ds_0'])[0]
+# test_np = tifffile.imread(tif_path)
 # mip = np.max(test_np[0], axis=0)  # Create a maximum intensity projection
 test_np = np.flip(test_np[0], axis=1)
 # normalize to 0-65535 range
