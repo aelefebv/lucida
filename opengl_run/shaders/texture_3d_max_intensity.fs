@@ -47,22 +47,6 @@ void main() {
         tfar = min(tfar, t1);
         if (t > tfar) discard;
     }
-    // intersect ray with camera near plane in object space
-    // plane: dot(camDirObj, x - (ro + camDirObj * camNear)) = 0
-    // float denom = dot(camDirObj, rd);
-    // if (denom > 0.0) {
-    //     float tNearPlane = camNear / denom;   // because ro == camPosObj
-    //     t = max(t, tNearPlane);
-    // }
-
-    // // far plane at ro + camDirObj * camFar
-    // float denomF = dot(camDirObj, rd);
-    // if (denomF > 0.0) {
-    //     float tFarPlane = camFar / denomF;
-    //     tfar = min(tfar, tFarPlane);
-    // }
-
-    // if (t > tfar) discard;  // nothing to integrate
 
     vec3 pos = ro + rd * t;
 
@@ -100,8 +84,8 @@ void main() {
     float alphaOut = maxS;  // or 1.0
 
     // Optional depth cue (fade with distance to help perceive depth):
-    // float depthFade = exp(-0.02 * (tAtMax - tnear));
-    // maxCol *= depthFade;
+    float depthFade = exp(-0.02 * (tAtMax - tnear));
+    maxCol *= depthFade;
 
     FragColor = vec4(maxCol * brightness, alphaOut);
 }

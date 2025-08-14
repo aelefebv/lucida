@@ -231,45 +231,45 @@ class MainRenderer(Renderer):
         # cam_world = glm.inverse(window.camera.view) * glm.vec4(0, 0, 0, 1)
         
         gl.glBindVertexArray(vao)
-        # for i in range(10):
-        model = glm.mat4(1.0)
-        model = glm.scale(model, model_scale)
-        shader.set_uniform("model", model)
-        shader.set_uniform("worldStep", float(self.world_step))
-        # model = glm.translate(model, cube_positions[i % len(cube_positions)])
-        # angle = 20 * i
-        # model = glm.rotate(model, glm.radians(angle), glm.vec3(1, -0.7, 0.5))
-        
-        cam_world_pos = window.camera.position
-        cam_world_dir = window.camera.forward  # already normalized in your Camera
-        # camera position in object space (you already had this):
-        cam_world = glm.vec4(cam_world_pos, 1.0)
+        for i in range(10):
+            model = glm.mat4(1.0)
+            angle = 20 * i
+            model = glm.rotate(model, glm.radians(angle), glm.vec3(1, -0.7, 0.5))
+            model = glm.scale(model, model_scale)
+            model = glm.translate(model, cube_positions[i % len(cube_positions)])
+            shader.set_uniform("model", model)
+            shader.set_uniform("worldStep", float(self.world_step))
+            
+            cam_world_pos = window.camera.position
+            cam_world_dir = window.camera.forward  # already normalized in your Camera
+            # camera position in object space (you already had this):
+            cam_world = glm.vec4(cam_world_pos, 1.0)
 
-        near_pt_world = window.camera.position + window.camera.forward * window.camera.near
-        far_pt_world  = window.camera.position + window.camera.forward * window.camera.far
-        inv_model = glm.inverse(model)
-        
-        nearPointObj = glm.vec3(inv_model * glm.vec4(near_pt_world, 1.0))
-        farPointObj  = glm.vec3(inv_model * glm.vec4(far_pt_world,  1.0))
-        shader.set_uniform("nearPointObj", nearPointObj)
-        shader.set_uniform("farPointObj",  farPointObj)
-        
-        cam_obj   = inv_model * cam_world
-        shader.set_uniform("camPosObj", glm.vec3(cam_obj))
-        
-        # camera forward in object space (treat as direction: w=0)
-        # use inverse(model) for world->object; for non-uniform scale, prefer mat3(transpose(inverse(model)))
-        cam_plane_nrm_obj = glm.normalize(glm.mat3(glm.transpose(inv_model)) * cam_world_dir)
-        shader.set_uniform("camDirObj", cam_plane_nrm_obj)
-        
-        # near distance (the same value your projection uses)
-        shader.set_uniform("camNear", float(window.camera.near))
-        shader.set_uniform("camFar", float(window.camera.far))
-        # camera in OBJECT space for this cube (model^-1 * cam_world)
-        # cam_obj = glm.inverse(model) * cam_world
-        # shader.set_uniform("camPosObj", glm.vec3(cam_obj))
-        
-        gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
+            near_pt_world = window.camera.position + window.camera.forward * window.camera.near
+            far_pt_world  = window.camera.position + window.camera.forward * window.camera.far
+            inv_model = glm.inverse(model)
+            
+            nearPointObj = glm.vec3(inv_model * glm.vec4(near_pt_world, 1.0))
+            farPointObj  = glm.vec3(inv_model * glm.vec4(far_pt_world,  1.0))
+            shader.set_uniform("nearPointObj", nearPointObj)
+            shader.set_uniform("farPointObj",  farPointObj)
+            
+            cam_obj   = inv_model * cam_world
+            shader.set_uniform("camPosObj", glm.vec3(cam_obj))
+            
+            # camera forward in object space (treat as direction: w=0)
+            # use inverse(model) for world->object; for non-uniform scale, prefer mat3(transpose(inverse(model)))
+            cam_plane_nrm_obj = glm.normalize(glm.mat3(glm.transpose(model)) * cam_world_dir)
+            shader.set_uniform("camDirObj", cam_plane_nrm_obj)
+            
+            # near distance (the same value your projection uses)
+            shader.set_uniform("camNear", float(window.camera.near))
+            shader.set_uniform("camFar", float(window.camera.far))
+            # camera in OBJECT space for this cube (model^-1 * cam_world)
+            # cam_obj = glm.inverse(model) * cam_world
+            # shader.set_uniform("camPosObj", glm.vec3(cam_obj))
+            
+            gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
         
         gl.glBindVertexArray(0)
         gl.glBindTexture(gl.GL_TEXTURE_3D, 0)
