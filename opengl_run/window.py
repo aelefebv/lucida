@@ -168,6 +168,7 @@ class LucidaWindow:
             self.pressed_keys.discard(key)
             
     def _on_scroll(self, window, xoffset: float, yoffset: float):
+        # Adjust the near clipping plane based on scroll input
         new_near = self.camera.near - yoffset * 0.1
         self.camera.set_near(new_near)
     
