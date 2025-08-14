@@ -2,7 +2,7 @@
 
 
 def main():
-    from opengl_run.examples import camera_class
+    from opengl_run.examples import texture_3d
     # hello.main()
 
 

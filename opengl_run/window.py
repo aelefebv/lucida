@@ -125,7 +125,8 @@ class LucidaWindow:
         return window
     
     def _initialize_gl(self):
-        gl.glEnable(gl.GL_DEPTH_TEST)
+        pass
+        # gl.glEnable(gl.GL_DEPTH_TEST)
         
     def _process_pressed_keys(self, dt: float):
         if glfw.KEY_ESCAPE in self.pressed_keys:
