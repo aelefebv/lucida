@@ -12,6 +12,7 @@ class LucidaWindow:
         self.window = self._initialize_window()
         self._initialize_gl()
         
+        self.time_elapsed = 0.0
         self.min_dt = min_dt
         
         self.renderers: list[Renderer] = []
@@ -34,6 +35,7 @@ class LucidaWindow:
         while not glfw.window_should_close(self.window):
             time = glfw.get_time()
             dt = time - last_time
+            self.time_elapsed += dt
             if dt < self.min_dt:
                 continue
             last_time = time
