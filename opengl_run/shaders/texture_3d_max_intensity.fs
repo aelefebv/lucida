@@ -7,7 +7,7 @@ uniform sampler3D ourTexture;
 uniform vec3 camPosObj;  // camera origin in object space of this cube
 uniform float camNear;  // camera near plane distance
 uniform float camFar;  // camera far plane distance
-uniform vec3 camDirObj;  // camera direction in object space of this cube
+uniform vec3 camPlaneNrmObj;  // camera direction in object space of this cube
 uniform float density;  // absorption scale
 uniform float brightness;  // final scale
 
@@ -37,10 +37,10 @@ void main() {
     // start at the cube entry, or the near plane, whichever is farther
     float t = max(tnear, 0.0);
 
-    float denom = dot(camDirObj, rd);
+    float denom = dot(camPlaneNrmObj, rd);
     if (abs(denom) > 1e-6) {
-        float t0 = dot(camDirObj, nearPointObj - ro) / denom;
-        float t1 = dot(camDirObj,  farPointObj - ro) / denom;
+        float t0 = dot(camPlaneNrmObj, nearPointObj - ro) / denom;
+        float t1 = dot(camPlaneNrmObj,  farPointObj - ro) / denom;
         if (t0 > t1) { float tmp = t0; t0 = t1; t1 = tmp; }  // ensure order
 
         t    = max(t,    t0);

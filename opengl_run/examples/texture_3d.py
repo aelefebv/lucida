@@ -260,7 +260,7 @@ class MainRenderer(Renderer):
             # camera forward in object space (treat as direction: w=0)
             # use inverse(model) for world->object; for non-uniform scale, prefer mat3(transpose(inverse(model)))
             cam_plane_nrm_obj = glm.normalize(glm.mat3(glm.transpose(model)) * cam_world_dir)
-            shader.set_uniform("camDirObj", cam_plane_nrm_obj)
+            shader.set_uniform("camPlaneNrmObj", cam_plane_nrm_obj)
             
             # near distance (the same value your projection uses)
             shader.set_uniform("camNear", float(window.camera.near))

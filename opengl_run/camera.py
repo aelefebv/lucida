@@ -2,7 +2,7 @@ from pyglm import glm
 
 class Camera:
     def __init__(self, position = glm.vec3(), 
-                 fov=60.0, aspect_ratio=1.0, near=0.1, far=100.0,
+                 fov=60.0, aspect_ratio=1.0, near=0.5, far=100.0,
                  speed=1, sensitivity=1):
         self.position = position
         self.speed = speed
