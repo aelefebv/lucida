@@ -15,7 +15,7 @@ window.renderers.append(Clearer())
 # tif_path = Path("/Users/austin/test_files/nellie_all_tests/yeast_3d_mitochondria.ome.tif"); shader_dir = Path("/Users/austin/GitHub/lucida/opengl_run/shaders")
 tif_path = Path(r"D:\test_files\nellie_all_tests\yeast_3d_mitochondria.ome.tif"); shader_dir = Path(r"C:\Users\austin\GitHub\lucida\opengl_run\shaders")
 vs_path = shader_dir / 'texture_3d.vs'
-fs_path = shader_dir / 'texture_3d.fs'
+fs_path = shader_dir / 'texture_3d_max_intensity.fs'
 shader = Shader(vs_path, fs_path)
 
 test_np = tifffile.imread(tif_path)
@@ -27,11 +27,12 @@ test_np = test_np.astype(np.uint16)
 im = np.ascontiguousarray(test_np, dtype=np.uint16)  # ensure packed rows
 d, h, w = im.shape
 
-voxel_sizes = (0.2, 0.2, 0.5)
+voxel_sizes = (0.2, 0.2, 1)
 phys_size = glm.vec3(float(w), float(h), float(d)) * voxel_sizes
 
 # normalize so longest side is 1.0 in world units
-L = max(phys_size.x, phys_size.y, phys_size.z)
+scale = 1
+L = max(phys_size.x, phys_size.y, phys_size.z) / scale
 model_scale = phys_size / L
 
 # base step in world units (the smallest voxel edge, normalized)
@@ -59,9 +60,9 @@ gl.glBindTexture(gl.GL_TEXTURE_3D, tex)
 gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)  # ensure no padding, rows are tightly packed
 gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_NEAREST)
 gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_NEAREST)
-gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_R, gl.GL_CLAMP_TO_BORDER)
-gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_BORDER)
-gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_BORDER)
+gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_R, gl.GL_CLAMP_TO_EDGE)
+gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
 
 gl.glTexImage3D(
     gl.GL_TEXTURE_3D,  # target texture
@@ -202,7 +203,7 @@ class MainRenderer(Renderer):
         self.starting_fov = 45
         self.starting_ar = 1
         
-        self.world_step = float(world_step) * 1.2
+        self.world_step = float(world_step) * 0.5
         self.density = 6.0
         self.brightness = 1.2
         
@@ -212,8 +213,8 @@ class MainRenderer(Renderer):
         
         # basic GL state for volume compositing
         gl.glEnable(gl.GL_DEPTH_TEST)
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        # gl.glEnable(gl.GL_BLEND)
+        # gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
         
         shader.set_uniform("projection", window.camera.proj)
         shader.set_uniform("view", window.camera.view)
@@ -233,7 +234,6 @@ class MainRenderer(Renderer):
         # for i in range(10):
         model = glm.mat4(1.0)
         model = glm.scale(model, model_scale)
-        print(model_scale)
         shader.set_uniform("model", model)
         shader.set_uniform("worldStep", float(self.world_step))
         # model = glm.translate(model, cube_positions[i % len(cube_positions)])
@@ -244,14 +244,23 @@ class MainRenderer(Renderer):
         cam_world_dir = window.camera.forward  # already normalized in your Camera
         # camera position in object space (you already had this):
         cam_world = glm.vec4(cam_world_pos, 1.0)
+
+        near_pt_world = window.camera.position + window.camera.forward * window.camera.near
+        far_pt_world  = window.camera.position + window.camera.forward * window.camera.far
         inv_model = glm.inverse(model)
+        
+        nearPointObj = glm.vec3(inv_model * glm.vec4(near_pt_world, 1.0))
+        farPointObj  = glm.vec3(inv_model * glm.vec4(far_pt_world,  1.0))
+        shader.set_uniform("nearPointObj", nearPointObj)
+        shader.set_uniform("farPointObj",  farPointObj)
+        
         cam_obj   = inv_model * cam_world
         shader.set_uniform("camPosObj", glm.vec3(cam_obj))
         
         # camera forward in object space (treat as direction: w=0)
         # use inverse(model) for world->object; for non-uniform scale, prefer mat3(transpose(inverse(model)))
-        cam_dir_obj = glm.normalize((inv_model * glm.vec4(cam_world_dir, 0.0)).xyz)
-        shader.set_uniform("camDirObj", cam_dir_obj)
+        cam_plane_nrm_obj = glm.normalize(glm.mat3(glm.transpose(inv_model)) * cam_world_dir)
+        shader.set_uniform("camDirObj", cam_plane_nrm_obj)
         
         # near distance (the same value your projection uses)
         shader.set_uniform("camNear", float(window.camera.near))

@@ -40,6 +40,7 @@ class LucidaWindow:
             if dt < self.min_dt:
                 continue
             last_time = time
+            print(1/dt)
             
             self._process_pressed_keys(dt)
             self.camera.update(dt)
@@ -170,7 +171,7 @@ class LucidaWindow:
             
     def _on_scroll(self, window, xoffset: float, yoffset: float):
         # Adjust the near clipping plane based on scroll input
-        new_near = self.camera.near - yoffset * 0.1
+        new_near = self.camera.near - yoffset * 0.01
         self.camera.set_near(new_near)
     
 if __name__ == "__main__":

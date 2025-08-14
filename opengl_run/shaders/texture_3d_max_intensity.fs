@@ -13,6 +13,7 @@ uniform float brightness;  // final scale
 
 uniform float worldStep;  // base step in world units (normalized)
 uniform mat4 model;
+uniform vec3 nearPointObj, farPointObj;
 
 // Axis-aligned box [-0.5,0.5]^3 intersection
 bool intersectBox(vec3 ro, vec3 rd, out float tnear, out float tfar) {
@@ -36,6 +37,16 @@ void main() {
     // start at the cube entry, or the near plane, whichever is farther
     float t = max(tnear, 0.0);
 
+    float denom = dot(camDirObj, rd);
+    if (abs(denom) > 1e-6) {
+        float t0 = dot(camDirObj, nearPointObj - ro) / denom;
+        float t1 = dot(camDirObj,  farPointObj - ro) / denom;
+        if (t0 > t1) { float tmp = t0; t0 = t1; t1 = tmp; }  // ensure order
+
+        t    = max(t,    t0);
+        tfar = min(tfar, t1);
+        if (t > tfar) discard;
+    }
     // intersect ray with camera near plane in object space
     // plane: dot(camDirObj, x - (ro + camDirObj * camNear)) = 0
     // float denom = dot(camDirObj, rd);
@@ -58,29 +69,39 @@ void main() {
     float ds = worldStep / length(mat3(model) * rd);
 
     const int MAX_STEPS = 1024;
-    vec3 accum = vec3(0.0);
-    float alpha = 0.0;
 
+    float maxS = 0.0;          // highest scalar encountered
+    vec3  maxCol = vec3(0.0);  // color at that scalar (apply your TF here)
+    float tAtMax = tfar;       // optional: where the max occurred (for depth cueing)
+    
     for (int i = 0; i < MAX_STEPS; ++i) {
-        if (t > tfar || alpha > 0.995) break;
+        if (t > tfar) break;
 
         // map [-0.5,0.5] → [0,1] for texture coords
-        vec3 tc = pos + vec3(0.5);
-        float s = texture(ourTexture, tc).r;   // single-channel sample [0,1]
+        vec3 tc = clamp(pos + vec3(0.5), vec3(1e-3), vec3(1.0 - 1e-3));
+        float s = texture(ourTexture, tc).r; // [0,1]
 
-        // Beer-Lambert absorption for this step
-        float a = 1.0 - exp(-s * density * ds);
+        if (s > maxS) {
+            maxS   = s;
+            maxCol = vec3(s);  // or: maxCol = transferFunction(s);
+            tAtMax = t;
 
-        // simple grayscale (you can add a transfer function here)
-        vec3 col = vec3(s);
-
-        // front-to-back compositing
-        accum += (1.0 - alpha) * col * a;
-        alpha += (1.0 - alpha) * a;
+            // optional early exit if we've basically hit the top
+            if (maxS >= 0.999) break;
+        }
 
         t   += ds;
         pos += rd * ds;
     }
 
-    FragColor = vec4(accum * brightness, alpha);
+    // Alpha choice:
+    // - 1.0: fully opaque MIP
+    // - maxS: handy if you want intensity to influence blending
+    float alphaOut = maxS;  // or 1.0
+
+    // Optional depth cue (fade with distance to help perceive depth):
+    // float depthFade = exp(-0.02 * (tAtMax - tnear));
+    // maxCol *= depthFade;
+
+    FragColor = vec4(maxCol * brightness, alphaOut);
 }

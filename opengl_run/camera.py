@@ -2,8 +2,8 @@ from pyglm import glm
 
 class Camera:
     def __init__(self, position = glm.vec3(), 
-                 fov=45.0, aspect_ratio=1.0, near=0.1, far=100.0,
-                 speed=2.5, sensitivity=1):
+                 fov=60.0, aspect_ratio=1.0, near=0.1, far=100.0,
+                 speed=1, sensitivity=1):
         self.position = position
         self.speed = speed
         self.sensitivity = sensitivity
@@ -29,7 +29,7 @@ class Camera:
     @property
     def proj(self):
         """Update the projection matrix based on the current FOV and aspect ratio."""
-        return glm.perspective(glm.radians(self.fov), self.aspect_ratio, self.near, self.far)
+        return glm.perspective(glm.radians(self.fov), self.aspect_ratio, 0.1, 1000)
 
     @property
     def view(self):
