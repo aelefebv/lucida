@@ -200,8 +200,8 @@ class MainRenderer(Renderer):
         # shader.set_uniform("projection", ortho_proj)
         
         # persp_proj = glm.perspective(glm.radians(self.starting_fov), 1, 0.1, 100.0)
-        persp_proj = glm.perspective(glm.radians(45), self.starting_ar, 2, 100.0)
-        shader.set_uniform("projection", persp_proj)
+        # persp_proj = glm.perspective(glm.radians(45), self.starting_ar, 2, 100.0)
+        shader.set_uniform("projection", window.camera.proj)
         
         # radius = 10.0
         # cam_x = glm.sin(time) * radius

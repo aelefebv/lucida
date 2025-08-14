@@ -25,6 +25,7 @@ class LucidaWindow:
         # Callbacks
         glfw.set_framebuffer_size_callback(self.window, self._on_framebuffer_resize)
         glfw.set_key_callback(self.window, self._on_key_press)
+        glfw.set_scroll_callback(self.window, self._on_scroll)
         
     ####################
     # Run ##############
@@ -165,6 +166,10 @@ class LucidaWindow:
             self.pressed_keys.add(key)
         elif action == glfw.RELEASE:
             self.pressed_keys.discard(key)
+            
+    def _on_scroll(self, window, xoffset: float, yoffset: float):
+        new_near = self.camera.near - yoffset * 0.1
+        self.camera.set_near(new_near)
     
 if __name__ == "__main__":
     lucida_window = LucidaWindow()
