@@ -22,14 +22,42 @@ fs_path = shader_dir / 'texture_3d_max_intensity.fs'
 shader = Shader(vs_path, fs_path)
 
 zarr_store = zarr.open_group(zarr_path, mode='r')
-test_np = np.array(zarr_store['ds_1'])[0]
-# test_np = tifffile.imread(tif_path)
-# mip = np.max(test_np[0], axis=0)  # Create a maximum intensity projection
-test_np = np.flip(test_np[0], axis=1)
-# normalize to 0-65535 range
-test_np = (test_np - np.min(test_np)) / (np.max(test_np) - np.min(test_np)) * 65535
-test_np = test_np.astype(np.uint16)
-im = np.ascontiguousarray(test_np, dtype=np.uint16)  # ensure packed rows
+arr = zarr_store["ds_0"][0, 0]
+class Block:
+    def __init__(self, arr, slices):
+        self.arr = arr
+        self.slices = slices
+        
+    def get_block(self):
+        return self.arr[*self.slices]
+    
+    def get_contiguous_array(self):
+        im = self.get_block()
+        im = np.flip(im, axis=1)
+        # normalize to 0-65535 range
+        im = (im - np.min(im)) / (np.max(im) - np.min(im)) * 65535
+        im = im.astype(np.uint16)
+        im = np.ascontiguousarray(im, dtype=np.uint16)  # ensure packed rows
+        return im
+    
+# test_np = zarr_store['ds_0'][0, 0,]#:10, :10, :10]
+# test_block = Block(arr, (slice(0, 64), slice(0, 64), slice(0, 64)))
+test_block = Block(arr, (slice(0, -1), slice(0, -1), slice(0, -1)))
+im = test_block.get_contiguous_array()
+block_1 = arr[:64, :64, :64]
+block_2 = arr[:64, :64, 64:128]
+
+test_block_1 = Block(arr, (slice(0, 1), slice(0, -1), slice(0, -1)))
+im_1 = test_block_1.get_contiguous_array()
+test_block_2 = Block(arr, (slice(1, 2), slice(0, -1), slice(0, -1)))
+im_2 = test_block_2.get_contiguous_array()
+# # test_np = tifffile.imread(tif_path)
+# # mip = np.max(test_np[0], axis=0)  # Create a maximum intensity projection
+# test_np = np.flip(test_np, axis=1)
+# # normalize to 0-65535 range
+# test_np = (test_np - np.min(test_np)) / (np.max(test_np) - np.min(test_np)) * 65535
+# test_np = test_np.astype(np.uint16)
+# im = np.ascontiguousarray(test_np, dtype=np.uint16)  # ensure packed rows
 d, h, w = im.shape
 
 voxel_sizes = (0.2, 0.2, 1)
@@ -90,35 +118,35 @@ gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_SWIZZLE_A, gl.GL_ONE)
 gl.glBindTexture(gl.GL_TEXTURE_3D, 0)  # unbind texture
 
 vertices = np.array([
-    -0.5, -0.5, -0.5,  0.0, 0.0,
-     0.5, -0.5, -0.5,  1.0, 0.0,
-     0.5,  0.5, -0.5,  1.0, 1.0,
-    -0.5,  0.5, -0.5,  0.0, 1.0,
+    -1, -1, -1,  0.0, 0.0,
+     1, -1, -1,  1.0, 0.0,
+     1,  1, -1,  1.0, 1.0,
+    -1,  1, -1,  0.0, 1.0,
 
-    -0.5, -0.5,  0.5,  0.0, 0.0,
-     0.5, -0.5,  0.5,  1.0, 0.0,
-     0.5,  0.5,  0.5,  1.0, 1.0,
-    -0.5,  0.5,  0.5,  0.0, 1.0,
+    -1, -1,  1,  0.0, 0.0,
+     1, -1,  1,  1.0, 0.0,
+     1,  1,  1,  1.0, 1.0,
+    -1,  1,  1,  0.0, 1.0,
 
-    -0.5,  0.5,  0.5,  1.0, 0.0,
-    -0.5,  0.5, -0.5,  1.0, 1.0,
-    -0.5, -0.5, -0.5,  0.0, 1.0,
-    -0.5, -0.5,  0.5,  0.0, 0.0,
+    -1,  1,  1,  1.0, 0.0,
+    -1,  1, -1,  1.0, 1.0,
+    -1, -1, -1,  0.0, 1.0,
+    -1, -1,  1,  0.0, 0.0,
 
-     0.5,  0.5, -0.5,  1.0, 1.0,
-     0.5, -0.5, -0.5,  0.0, 1.0,
-     0.5, -0.5,  0.5,  0.0, 0.0,
-     0.5,  0.5,  0.5,  1.0, 0.0,
+     1,  1, -1,  1.0, 1.0,
+     1, -1, -1,  0.0, 1.0,
+     1, -1,  1,  0.0, 0.0,
+     1,  1,  1,  1.0, 0.0,
 
-     0.5, -0.5, -0.5,  1.0, 1.0,
-     0.5, -0.5,  0.5,  1.0, 0.0,
-    -0.5, -0.5,  0.5,  0.0, 0.0,
-    -0.5, -0.5, -0.5,  0.0, 1.0,
+     1, -1, -1,  1.0, 1.0,
+     1, -1,  1,  1.0, 0.0,
+    -1, -1,  1,  0.0, 0.0,
+    -1, -1, -1,  0.0, 1.0,
 
-     0.5,  0.5, -0.5,  1.0, 1.0,
-     0.5,  0.5,  0.5,  1.0, 0.0,
-    -0.5,  0.5,  0.5,  0.0, 0.0,
-    -0.5,  0.5, -0.5,  0.0, 1.0
+     1,  1, -1,  1.0, 1.0,
+     1,  1,  1,  1.0, 0.0,
+    -1,  1,  1,  0.0, 0.0,
+    -1,  1, -1,  0.0, 1.0
 ], dtype=np.float32)
 
 indices = np.array([
@@ -184,6 +212,7 @@ gl.glEnableVertexAttribArray(1)
 
 cube_positions = [
     glm.vec3(0.0, 0.0, 0.0),
+    glm.vec3(0.0, 0.0, 1.0),
     glm.vec3(2.0, 5.0, -15.0),
     glm.vec3(4, -2.2, -2.5),
     glm.vec3(-3.8, -2.0, -12.3),
@@ -210,15 +239,37 @@ class MainRenderer(Renderer):
         gl.glUseProgram(shader.program)
         
         # basic GL state for volume compositing
-        gl.glEnable(gl.GL_DEPTH_TEST)
-        # gl.glEnable(gl.GL_BLEND)
-        # gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        # gl.glEnable(gl.GL_DEPTH_TEST)
+        # gl.glDepthMask(gl.GL_TRUE)
+        gl.glEnable(gl.GL_BLEND)
+        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
         
         shader.set_uniform("projection", window.camera.proj)
         shader.set_uniform("view", window.camera.view)
         
         
         gl.glActiveTexture(gl.GL_TEXTURE0)  # Activate texture unit 0
+        
+        gl.glTexImage3D(
+            gl.GL_TEXTURE_3D,  # target texture
+            0,  # level of detail (0 is base level, others are mipmaps)
+            internal_format,  # dtype, 
+            w,  # width of the texture
+            h,  # height of the texture
+            d, 
+            0,  # border (must be 0..)
+            pixel_format,  # pixel data format (number of color components), RED is 1 component
+            gl_type,   # data type of the pixel data, UNSIGNED_SHORT is 2 bytes per pixel
+            im  # the image data in memory
+        )
+
+        gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_SWIZZLE_R, gl.GL_RED)
+        gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_SWIZZLE_G, gl.GL_RED)
+        gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_SWIZZLE_B, gl.GL_RED)
+        gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_SWIZZLE_A, gl.GL_ONE)
+
+        gl.glBindTexture(gl.GL_TEXTURE_3D, 0)  # unbind texture
+        
         gl.glBindTexture(gl.GL_TEXTURE_3D, tex)
         shader.set_uniform("ourTexture", 0)
         
@@ -231,8 +282,8 @@ class MainRenderer(Renderer):
         gl.glBindVertexArray(vao)
         for i in range(10):
             model = glm.mat4(1.0)
-            angle = 20 * i
-            model = glm.rotate(model, glm.radians(angle), glm.vec3(1, -0.7, 0.5))
+            # angle = 20 * i
+            # model = glm.rotate(model, glm.radians(angle), glm.vec3(1, -0.7, 0.5))
             model = glm.scale(model, model_scale)
             model = glm.translate(model, cube_positions[i % len(cube_positions)])
             shader.set_uniform("model", model)
