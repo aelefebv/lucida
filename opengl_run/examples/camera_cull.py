@@ -1,3 +1,4 @@
+from opengl_run.camera import Camera
 from opengl_run.window import LucidaWindow
 from opengl_run.shader import Shader
 from opengl_run.render import Renderer, Clearer
@@ -21,6 +22,7 @@ shader = Shader(vs_path, fs_path)
 
 zarr_store = zarr.open_group(zarr_path, mode='r')
 arr = zarr_store["ds_0"][0, 0]
+
 class Block:
     def __init__(self, arr, slices):
         self.arr = arr
@@ -38,24 +40,8 @@ class Block:
         im = np.ascontiguousarray(im, dtype=np.uint16)  # ensure packed rows
         return im
     
-# test_np = zarr_store['ds_0'][0, 0,]#:10, :10, :10]
-# test_block = Block(arr, (slice(0, 64), slice(0, 64), slice(0, 64)))
 test_block = Block(arr, (slice(0, -1), slice(0, -1), slice(0, -1)))
 im = test_block.get_contiguous_array()
-block_1 = arr[:64, :64, :64]
-block_2 = arr[:64, :64, 64:128]
-
-test_block_1 = Block(arr, (slice(0, 1), slice(0, -1), slice(0, -1)))
-im_1 = test_block_1.get_contiguous_array()
-test_block_2 = Block(arr, (slice(1, 2), slice(0, -1), slice(0, -1)))
-im_2 = test_block_2.get_contiguous_array()
-# # test_np = tifffile.imread(tif_path)
-# # mip = np.max(test_np[0], axis=0)  # Create a maximum intensity projection
-# test_np = np.flip(test_np, axis=1)
-# # normalize to 0-65535 range
-# test_np = (test_np - np.min(test_np)) / (np.max(test_np) - np.min(test_np)) * 65535
-# test_np = test_np.astype(np.uint16)
-# im = np.ascontiguousarray(test_np, dtype=np.uint16)  # ensure packed rows
 d, h, w = im.shape
 
 voxel_sizes = (0.2, 0.2, 1)
@@ -72,17 +58,6 @@ world_step = min(voxel_sizes) / L
 pixel_format = gl.GL_RED
 gl_type = gl.GL_UNSIGNED_SHORT
 internal_format = gl.GL_R16
-
-# window.adjust_aspect_ratio(w, h)
-# window.toggle_aspect_ratio_lock(force=True)
-# window.change_size(w, h)
-
-vec = glm.vec4(1.0, 0.0, 0.0, 1.0)
-trans_test = glm.mat4(1.0)
-
-trans_test = glm.translate(trans_test, glm.vec3(1.0, 1.0, 0.0))
-vec = trans_test * vec
-# should print 2.0, 1.0, 0.0
 
 # Change the near value to clip anything close to the camera.
 
@@ -196,31 +171,110 @@ gl.glVertexAttribPointer(1, s[1], gl.GL_FLOAT, gl.GL_FALSE, bits_per_vertex, cty
 gl.glEnableVertexAttribArray(1)
 
 
-# view = glm.mat4(1.0)
-# view = glm.translate(view, glm.vec3(0, 0, -3))
+def build_frustum_planes(camera: Camera, model: glm.mat4) -> list[glm.vec4]:
+    # plane order: left, right, bottom, top, near, far
+    
+    # Clip matrix that takes MODEL space → CLIP space
+    C = camera.proj * camera.view * model
+    R = glm.transpose(C)
 
+    planes = [
+        R[3] + R[0],  # Left
+        R[3] - R[0],  # Right
+        R[3] + R[1],  # Bottom
+        R[3] - R[1],  # Top
+        R[3] + R[2],  # Near
+        R[3] - R[2],  # Far
+    ]
+    
+    # Normalize (so ||n|| = 1)
+    out = []
+    for p in planes:
+        n = glm.vec3(p)
+        inv_len = 1.0 / glm.length(n)
+        out.append(glm.vec4(n * inv_len, p.w * inv_len))
+    return out  # list[vec4]: nx, ny, nz, d  with n·x + d ≥ 0 = inside
 
-# print(window.width, window.height)
-# # persp_proj = glm.perspective(glm.radians(45.0), window.width/window.height, 0.1, 100.0)
-# persp_proj = glm.perspective(glm.radians(45.0), 1, 0.1, 100.0)
-# print(persp_proj)
+def candidate_brick_bounds(camera: Camera, model, vol_min: glm.vec3, vol_max: glm.vec3, brick_size: glm.vec3, grid_dims: glm.ivec3):
+    planes = build_frustum_planes(camera, model)  # you already have this
+    if not aabb_frustum_intersect(planes, vol_min+2, vol_max-2):
+        return None, None
+    
+    fmn, fmx = camera.get_aabb_in_model(model)
+    # Initial quick check: if the frustum is completely outside the volume, return None
+    mn = glm.max(fmn, vol_min)
+    mx = glm.min(fmx, vol_max)
+    if (mn.x >= mx.x) or (mn.y >= mx.y) or (mn.z >= mx.z):
+        return None, None  # frustum doesn’t touch volume at all
 
-# proj = persp_proj
-# proj = ortho_proj
+    eps = 1e-6  # small epsilon to avoid numerical issues
+    sizef = glm.vec3(brick_size)
+    
+    # Convert coord to brick index (inclusive)
+    start = (mn - vol_min + eps) / sizef  # start in grid coords
+    stop  = (mx - vol_min - eps) / sizef  # stop in grid coords
+    
+    bmin = glm.ivec3(glm.floor(start))
+    bmax = glm.ivec3(glm.ivec3(glm.ceil(stop)) - glm.ivec3(1))  # inclusive end
+    
+    # Clamp to grid bounds
+    lo = glm.ivec3(0)
+    hi = grid_dims - glm.ivec3(1)  # inclusive end
+    bmin = glm.clamp(bmin, lo, hi)
+    bmax = glm.clamp(bmax, lo, hi)
+    
+    # empty?
+    if (bmin.x > bmax.x) or (bmin.y > bmax.y) or (bmin.z > bmax.z):
+        return None, None
+    return bmin, bmax
 
-cube_positions = [
-    glm.vec3(0.0, 0.0, 0.0),
-    glm.vec3(0.0, 0.0, 1.0),
-    glm.vec3(2.0, 5.0, -15.0),
-    glm.vec3(4, -2.2, -2.5),
-    glm.vec3(-3.8, -2.0, -12.3),
-    glm.vec3(2.4, -0.4, -3.5),
-    glm.vec3(-4, 2.0, -7.5),
-    glm.vec3(1.3, 1.0, -1.5),
-    glm.vec3(6, 3, -1.5),
-    glm.vec3(5, 0.2, -1.5),
-    glm.vec3(-1.5, 2.0, -1.5)
-]
+def aabb_frustum_intersect(planes, bmin, bmax):
+    for pl in planes:
+        n = glm.vec3(pl)
+        d = pl.w
+        # choose the corner most likely to be OUTSIDE (most negative side)
+        p = glm.vec3(
+            bmin.x if n.x >= 0 else bmax.x,
+            bmin.y if n.y >= 0 else bmax.y,
+            bmin.z if n.z >= 0 else bmax.z
+        )
+        if glm.dot(n, p) + d < 0.0:
+            return False  # culled by this plane
+    return True
+
+def cull_frustum_bricks(camera, model, model_scale, brick_size=64, dilation=1):
+    planes = build_frustum_planes(camera, model)
+    vol_min = -glm.vec3(model_scale)
+    vol_max = glm.vec3(model_scale)
+    vol_span = vol_max - vol_min
+    
+    brick_size_vec = glm.vec3(vol_span.x * brick_size / w, 
+                                vol_span.y * brick_size / h, 
+                                vol_span.z * brick_size / d)
+    
+    grid_dims = glm.ivec3(ceil_div(w, brick_size), ceil_div(h, brick_size), ceil_div(d, brick_size))
+    
+    bmin, bmax = candidate_brick_bounds(window.camera, model, 
+                                        vol_min, vol_max, 
+                                        brick_size_vec, grid_dims)
+    if bmin is None or bmax is None:
+        return []
+    
+    bmin -= glm.ivec3(dilation)
+    bmax += glm.ivec3(dilation)
+    
+    visible = []
+    for bz in range(bmin.z, bmax.z + 1):
+        for by in range(bmin.y, bmax.y + 1):
+            for bx in range(bmin.x, bmax.x + 1):
+                a0 = vol_min + glm.vec3(float(bx), float(by), float(bz)) * brick_size_vec
+                a1 = a0 + brick_size_vec
+                if aabb_frustum_intersect(planes, a0, a1):
+                    visible.append(glm.ivec3(bx, by, bz))
+    print(f"Visible bricks: {len(visible)}")
+    return visible
+
+def ceil_div(n, d): return (n + d - 1) // d
 
 class MainRenderer(Renderer):
     def __init__(self):
@@ -237,10 +291,10 @@ class MainRenderer(Renderer):
         gl.glUseProgram(shader.program)
         
         # basic GL state for volume compositing
-        # gl.glEnable(gl.GL_DEPTH_TEST)
+        gl.glEnable(gl.GL_DEPTH_TEST)
         # gl.glDepthMask(gl.GL_TRUE)
-        gl.glEnable(gl.GL_BLEND)
-        gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
+        # gl.glEnable(gl.GL_BLEND)
+        # gl.glBlendFunc(gl.GL_SRC_ALPHA, gl.GL_ONE_MINUS_SRC_ALPHA)
         
         shader.set_uniform("projection", window.camera.proj)
         shader.set_uniform("view", window.camera.view)
@@ -278,45 +332,47 @@ class MainRenderer(Renderer):
         # cam_world = glm.inverse(window.camera.view) * glm.vec4(0, 0, 0, 1)
         
         gl.glBindVertexArray(vao)
-        for i in range(10):
-            model = glm.mat4(1.0)
-            # angle = 20 * i
-            # model = glm.rotate(model, glm.radians(angle), glm.vec3(1, -0.7, 0.5))
-            # model = glm.scale(model, model_scale)
-            model = glm.translate(model, cube_positions[i % len(cube_positions)])
-            shader.set_uniform("model", model)
-            shader.set_uniform("worldStep", float(self.world_step))
-            
-            cam_world_pos = window.camera.position
-            cam_world_dir = window.camera.forward  # already normalized in your Camera
-            # camera position in object space (you already had this):
-            cam_world = glm.vec4(cam_world_pos, 1.0)
+        model = glm.mat4(1.0)
+        # angle = 20 * i
+        # model = glm.rotate(model, glm.radians(angle), glm.vec3(1, -0.7, 0.5))
+        model = glm.scale(model, model_scale)
+        
+        visible_bricks = cull_frustum_bricks(window.camera, model, model_scale,
+                                             brick_size=64, dilation=1)
+        
+        shader.set_uniform("model", model)
+        shader.set_uniform("worldStep", float(self.world_step))
+        
+        cam_world_pos = window.camera.position
+        cam_world_dir = window.camera.forward  # already normalized in your Camera
+        # camera position in object space (you already had this):
+        cam_world = glm.vec4(cam_world_pos, 1.0)
 
-            near_pt_world = window.camera.position + window.camera.forward * window.camera.near
-            far_pt_world  = window.camera.position + window.camera.forward * window.camera.far
-            inv_model = glm.inverse(model)
-            
-            nearPointObj = glm.vec3(inv_model * glm.vec4(near_pt_world, 1.0))
-            farPointObj  = glm.vec3(inv_model * glm.vec4(far_pt_world,  1.0))
-            shader.set_uniform("nearPointObj", nearPointObj)
-            shader.set_uniform("farPointObj",  farPointObj)
-            
-            cam_obj   = inv_model * cam_world
-            shader.set_uniform("camPosObj", glm.vec3(cam_obj))
-            
-            # camera forward in object space (treat as direction: w=0)
-            # use inverse(model) for world->object; for non-uniform scale, prefer mat3(transpose(inverse(model)))
-            cam_plane_nrm_obj = glm.normalize(glm.mat3(glm.transpose(model)) * cam_world_dir)
-            shader.set_uniform("camPlaneNrmObj", cam_plane_nrm_obj)
-            
-            # near distance (the same value your projection uses)
-            shader.set_uniform("camNear", float(window.camera.near))
-            shader.set_uniform("camFar", float(window.camera.far))
-            # camera in OBJECT space for this cube (model^-1 * cam_world)
-            # cam_obj = glm.inverse(model) * cam_world
-            # shader.set_uniform("camPosObj", glm.vec3(cam_obj))
-            
-            gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
+        near_pt_world = window.camera.position + window.camera.forward * window.camera.near
+        far_pt_world  = window.camera.position + window.camera.forward * window.camera.far
+        inv_model = glm.inverse(model)
+        
+        nearPointObj = glm.vec3(inv_model * glm.vec4(near_pt_world, 1.0))
+        farPointObj  = glm.vec3(inv_model * glm.vec4(far_pt_world,  1.0))
+        shader.set_uniform("nearPointObj", nearPointObj)
+        shader.set_uniform("farPointObj",  farPointObj)
+        
+        cam_obj   = inv_model * cam_world
+        shader.set_uniform("camPosObj", glm.vec3(cam_obj))
+        
+        # camera forward in object space (treat as direction: w=0)
+        # use inverse(model) for world->object; for non-uniform scale, prefer mat3(transpose(inverse(model)))
+        cam_plane_nrm_obj = glm.normalize(glm.mat3(glm.transpose(model)) * cam_world_dir)
+        shader.set_uniform("camPlaneNrmObj", cam_plane_nrm_obj)
+        
+        # near distance (the same value your projection uses)
+        shader.set_uniform("camNear", float(window.camera.near))
+        shader.set_uniform("camFar", float(window.camera.far))
+        # camera in OBJECT space for this cube (model^-1 * cam_world)
+        # cam_obj = glm.inverse(model) * cam_world
+        # shader.set_uniform("camPosObj", glm.vec3(cam_obj))
+        
+        gl.glDrawElements(gl.GL_TRIANGLES, len(indices), gl.GL_UNSIGNED_INT, None)
         
         gl.glBindVertexArray(0)
         gl.glBindTexture(gl.GL_TEXTURE_3D, 0)

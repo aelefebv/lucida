@@ -40,7 +40,7 @@ class LucidaWindow:
             if dt < self.min_dt:
                 continue
             last_time = time
-            print(1/dt)
+            # print(1/dt)
             
             self._process_pressed_keys(dt)
             self.camera.update(dt)
