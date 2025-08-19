@@ -171,35 +171,51 @@ gl.glVertexAttribPointer(1, s[1], gl.GL_FLOAT, gl.GL_FALSE, bits_per_vertex, cty
 gl.glEnableVertexAttribArray(1)
 
 
-def build_frustum_planes(camera: Camera, model: glm.mat4) -> list[glm.vec4]:
-    # plane order: left, right, bottom, top, near, far
+# def build_frustum_planes(camera: Camera, model: glm.mat4) -> list[glm.vec4]:
+#     # plane order: left, right, bottom, top, near, far
     
-    # Clip matrix that takes MODEL space → CLIP space
-    C = camera.proj * camera.view * model
-    R = glm.transpose(C)
+#     # Clip matrix that takes MODEL space → CLIP space
+#     C = camera.proj * camera.view * model
+#     R = glm.transpose(C)
 
-    planes = [
-        R[3] + R[0],  # Left
-        R[3] - R[0],  # Right
-        R[3] + R[1],  # Bottom
-        R[3] - R[1],  # Top
-        R[3] + R[2],  # Near
-        R[3] - R[2],  # Far
-    ]
-    
-    # Normalize (so ||n|| = 1)
-    out = []
-    for p in planes:
-        n = glm.vec3(p)
-        inv_len = 1.0 / glm.length(n)
-        out.append(glm.vec4(n * inv_len, p.w * inv_len))
-    return out  # list[vec4]: nx, ny, nz, d  with n·x + d ≥ 0 = inside
+#     planes = [
+#         R[3] + R[0],  # Left
+#         R[3] - R[0],  # Right
+#         R[3] + R[1],  # Bottom
+#         R[3] - R[1],  # Top
+#         R[3] + R[2],  # Near
+#         R[3] - R[2],  # Far
+#     ]
+#     # Normalize (so ||n|| = 1)
+#     out = []
+#     for p in planes:
+#         n = glm.vec3(p)
+#         inv_len = 1.0 / glm.length(n)
+#         out.append(glm.vec4(n * inv_len, p.w * inv_len))
+#     return out
+
+def aabb_corners_world(bmin: glm.vec3, bmax: glm.vec3, model: glm.mat4) -> list[glm.vec3]:
+    corners = []
+    for x in (bmin.x, bmax.x):
+        for y in (bmin.y, bmax.y):
+            for z in (bmin.z, bmax.z):
+                corners.append(glm.vec3(model * glm.vec4(x, y, z, 1.0)))
+    return corners
+
+def box_frustum_intersect_world_corners(planes: list[glm.vec4], corners_w: list[glm.vec3]) -> bool:
+    for pl_n, pl in enumerate(planes):
+        n = glm.vec3(pl.x, pl.y, pl.z)
+        d = pl.w
+        # if ALL corners are behind the plane, the box is outside
+        # if pl_n == 0:
+        #     print()
+        #     for c in corners_w:
+        #         print(glm.dot(n, c) + d)
+        if all(glm.dot(n, c) + d < 0.0 for c in corners_w):
+            return False
+    return True
 
 def candidate_brick_bounds(camera: Camera, model, vol_min: glm.vec3, vol_max: glm.vec3, brick_size: glm.vec3, grid_dims: glm.ivec3):
-    planes = build_frustum_planes(camera, model)  # you already have this
-    if not aabb_frustum_intersect(planes, vol_min+2, vol_max-2):
-        return None, None
-    
     fmn, fmx = camera.get_aabb_in_model(model)
     # Initial quick check: if the frustum is completely outside the volume, return None
     mn = glm.max(fmn, vol_min)
@@ -229,23 +245,30 @@ def candidate_brick_bounds(camera: Camera, model, vol_min: glm.vec3, vol_max: gl
     return bmin, bmax
 
 def aabb_frustum_intersect(planes, bmin, bmax):
+    # Center and half-extents
+    c = 0.5 * (bmin + bmax)
+    e = 0.5 * (bmax - bmin)
     for pl in planes:
         n = glm.vec3(pl)
         d = pl.w
-        # choose the corner most likely to be OUTSIDE (most negative side)
-        p = glm.vec3(
-            bmin.x if n.x >= 0 else bmax.x,
-            bmin.y if n.y >= 0 else bmax.y,
-            bmin.z if n.z >= 0 else bmax.z
-        )
-        if glm.dot(n, p) + d < 0.0:
-            return False  # culled by this plane
+        # distance from center to plane
+        s = glm.dot(n, c) + d
+        # projected radius of the box on the normal
+        r = abs(n.x) * e.x + abs(n.y) * e.y + abs(n.z) * e.z
+        if s + r < 0.0:
+            return False  # completely outside
     return True
 
-def cull_frustum_bricks(camera, model, model_scale, brick_size=64, dilation=1):
-    planes = build_frustum_planes(camera, model)
+def cull_frustum_bricks(camera: Camera, model, model_scale, brick_size=64, dilation=1):
+    planes = camera.frustum_clipping_planes
+    
+    # TODO: this should be based on all model transforms, not just scale
     vol_min = -glm.vec3(model_scale)
     vol_max = glm.vec3(model_scale)
+    # if not aabb_frustum_intersect(planes, vol_min, vol_max):
+    #     print("Frustum does not intersect the volume at all.")
+    #     return None, None
+    
     vol_span = vol_max - vol_min
     
     brick_size_vec = glm.vec3(vol_span.x * brick_size / w, 
@@ -269,7 +292,8 @@ def cull_frustum_bricks(camera, model, model_scale, brick_size=64, dilation=1):
             for bx in range(bmin.x, bmax.x + 1):
                 a0 = vol_min + glm.vec3(float(bx), float(by), float(bz)) * brick_size_vec
                 a1 = a0 + brick_size_vec
-                if aabb_frustum_intersect(planes, a0, a1):
+                corners_w = aabb_corners_world(a0, a1, model)
+                if box_frustum_intersect_world_corners(planes, corners_w):
                     visible.append(glm.ivec3(bx, by, bz))
     print(f"Visible bricks: {len(visible)}")
     return visible

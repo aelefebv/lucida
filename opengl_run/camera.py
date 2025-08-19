@@ -36,6 +36,29 @@ class Camera:
         """Return the view matrix based on the camera position and orientation."""
         return glm.lookAt(self.position, self.position + self.forward, self.up)
         
+    @property
+    def clip(self):
+        """Return the combined projection and view matrix."""
+        return self.proj * self.view
+        
+    @property
+    def frustum_clipping_planes(self):
+        R = glm.transpose(self.clip)
+        planes = [
+            R[3] + R[0],   # Left
+            R[3] - R[0],   # Right
+            R[3] + R[1],   # Bottom
+            R[3] - R[1],   # Top
+            R[3] + R[2],   # Near
+            R[3] - R[2],   # Far
+        ]
+        out = []
+        for p in planes:
+            n = glm.vec3(p.x, p.y, p.z)  # type: ignore
+            invlen = 1.0 / glm.length(n)
+            out.append(glm.vec4(n * invlen, p.w * invlen))  # type: ignore
+        return out
+        
     #### Public Methods ########## 
     def update(self, dt: float):
         """Update the camera position based on pressed keys."""
