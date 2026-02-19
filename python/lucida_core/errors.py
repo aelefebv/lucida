@@ -82,3 +82,32 @@ def internal(message: str, details: dict[str, Any] | None = None) -> LucidaError
         message=message,
         details=details or {},
     )
+
+
+def timeout(
+    message: str,
+    details: dict[str, Any] | None = None,
+    *,
+    retry_after_ms: int | None = None,
+) -> LucidaError:
+    return LucidaError(
+        code="LUCIDA_TIMEOUT",
+        message=message,
+        details=details or {},
+        retryable=True,
+        retry_after_ms=retry_after_ms,
+    )
+
+
+def io_failure(
+    message: str,
+    details: dict[str, Any] | None = None,
+    *,
+    retryable: bool = True,
+) -> LucidaError:
+    return LucidaError(
+        code="LUCIDA_IO_FAILURE",
+        message=message,
+        details=details or {},
+        retryable=retryable,
+    )

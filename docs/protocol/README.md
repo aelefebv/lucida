@@ -75,6 +75,10 @@ This document is the human-readable guide for the machine-readable contract in:
    - `selection.get`
    - `selection.set`
 5. Multi-dataset overlay and side-by-side workflows are modeled through multiple views and explicit layer bindings.
+6. `dataset.open.axis_map` is strict source-axis remapping:
+   - unknown source axes are rejected
+   - duplicate canonical targets are rejected
+   - invalid mappings fail with `LUCIDA_INVALID_PARAMS`
 
 ## 7. Async jobs
 
@@ -82,6 +86,7 @@ This document is the human-readable guide for the machine-readable contract in:
    - `job.job_id`
    - `job.accepted_at`
    - `job.state = "queued"`
+   - includes `dataset.open`, `dataset.export`, layer creation calls, and replay/import operations
 2. Job lifecycle states:
    - `queued`
    - `running`
@@ -139,14 +144,12 @@ Every error includes:
 
 ## 11. Versioning rules
 
-1. Patch:
-   - clarifications and additive non-breaking schema tightening.
-2. Minor:
-   - additive methods/fields only.
-3. Major:
-   - any breaking change in required fields, semantics, method signatures, or behavior.
+1. The in-repo contract currently uses protocol version `1.0.0` in pre-release mode.
+2. During pre-release, additive method/field changes may evolve in-place under `1.0.0`.
+3. Breaking changes still require a new major version line.
+4. OpenRPC/schema artifacts in this repo are always the authoritative live contract.
 
-## 12. Frozen v1 method list
+## 12. Current v1.0.0 method list (pre-release mutable)
 
 1. `system.hello`
 2. `system.capabilities.get`
@@ -156,28 +159,46 @@ Every error includes:
 6. `dataset.open`
 7. `dataset.close`
 8. `dataset.get`
-9. `layer.add_image`
-10. `layer.add_points`
-11. `layer.update`
-12. `layer.remove`
-13. `layer.get`
-14. `view.create`
-15. `view.close`
-16. `view.get`
-17. `view.bind_layer`
-18. `view.unbind_layer`
-19. `view.set_axis_index`
-20. `view.reorder_axes`
-21. `view.set_channel_order`
-22. `camera.set_mode`
-23. `camera.set_pose`
-24. `camera.get`
-25. `selection.get`
-26. `selection.set`
-27. `job.get`
-28. `job.cancel`
-29. `job.list`
-30. `events.subscribe`
-31. `command_log.export`
-32. `command_log.import`
-33. `command_log.replay`
+9. `dataset.export`
+10. `layer.add_image`
+11. `layer.add_points`
+12. `layer.update`
+13. `layer.remove`
+14. `layer.get`
+15. `view.create`
+16. `view.close`
+17. `view.get`
+18. `view.bind_layer`
+19. `view.unbind_layer`
+20. `view.set_axis_index`
+21. `view.reorder_axes`
+22. `view.set_channel_order`
+23. `camera.set_mode`
+24. `camera.set_pose`
+25. `camera.get`
+26. `selection.get`
+27. `selection.set`
+28. `job.get`
+29. `job.cancel`
+30. `job.list`
+31. `events.subscribe`
+32. `command_log.export`
+33. `command_log.import`
+34. `command_log.replay`
+
+## 13. Step 03 method contract details
+
+1. `dataset.open`:
+   - `axis_map` is strict `source_axis -> canonical_axis` remapping.
+   - unknown source labels, empty targets, and duplicate mapped labels fail with `LUCIDA_INVALID_PARAMS`.
+   - optional remote IO knobs: `timeout_ms` (positive int), `max_retries` (non-negative int).
+2. `dataset.get`:
+   - additive optional metadata fields in current `1.0.0` line:
+     - `backend` (`local|http|s3|gcs|synthetic`)
+     - `ngff` (`ngff_version`, `zarr_format`, `multiscales` summary)
+     - `cache` (`chunk_capacity_bytes`, `chunk_used_bytes`, `metadata_entries`, counter set)
+3. `dataset.export`:
+   - required request fields: `protocol_version`, `request_id`, `idempotency_key`, `session_id`, `dataset_id`, `destination_uri`.
+   - optional request fields: `overwrite`, `timeout_ms`, `max_retries`.
+   - response shape: `{ session_id, job }` using the standard async accepted envelope.
+   - completion event: `dataset.exported` with `dataset_id`, `destination_uri`, and `job_id`.

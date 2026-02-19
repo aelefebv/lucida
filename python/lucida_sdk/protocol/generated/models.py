@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-SCHEMA_DIGEST = "8f0dd73be1cd1a525e7e3b3a232174239658e9c94b3b97a1c431296c5ed66f00"
+SCHEMA_DIGEST = "820aaf9155d0ac617d0b6ef35240caa0ab59cd309eb8421e4a2221f608f6b1c4"
 
 class AsyncAccepted(TypedDict):
     accepted_at: Timestamp
@@ -170,6 +170,35 @@ class DatasetCloseResponse(TypedDict):
     closed_at: Timestamp
     dataset_id: UUIDv7
 
+class DatasetExportRequest(TypedDict):
+    dataset_id: UUIDv7
+    destination_uri: str
+    idempotency_key: str
+    max_retries: NotRequired[int]
+    overwrite: NotRequired[bool]
+    protocol_version: SemVer
+    request_id: UUIDv7
+    session_id: UUIDv7
+    timeout_ms: NotRequired[int]
+
+class DatasetExportResponse(TypedDict):
+    job: AsyncAccepted
+    session_id: UUIDv7
+
+class DatasetExportedEvent(TypedDict):
+    emitted_at: Timestamp
+    event_id: UUIDv7
+    event_type: Literal['dataset.exported']
+    payload: DatasetExportedPayload
+    protocol_version: SemVer
+    session_id: UUIDv7
+    session_seq: SessionSeq
+
+class DatasetExportedPayload(TypedDict):
+    dataset_id: UUIDv7
+    destination_uri: str
+    job_id: UUIDv7
+
 class DatasetGetRequest(TypedDict):
     dataset_id: UUIDv7
     protocol_version: SemVer
@@ -178,8 +207,11 @@ class DatasetGetRequest(TypedDict):
 
 class DatasetGetResponse(TypedDict):
     axis_labels: list[AxisLabel]
+    backend: NotRequired[Literal['local', 'http', 's3', 'gcs', 'synthetic']]
+    cache: NotRequired[dict[str, Any]]
     dataset_id: UUIDv7
     dtype: str
+    ngff: NotRequired[dict[str, Any]]
     session_id: UUIDv7
     shape: list[int]
     transform: Transform
@@ -188,10 +220,12 @@ class DatasetGetResponse(TypedDict):
 class DatasetOpenRequest(TypedDict):
     axis_map: NotRequired[dict[str, Any]]
     idempotency_key: str
+    max_retries: NotRequired[int]
     protocol_version: SemVer
     read_only: bool
     request_id: UUIDv7
     session_id: UUIDv7
+    timeout_ms: NotRequired[int]
     uri: str
 
 class DatasetOpenResponse(TypedDict):
@@ -208,6 +242,7 @@ class DatasetOpenedEvent(TypedDict):
     session_seq: SessionSeq
 
 class DatasetOpenedPayload(TypedDict):
+    backend: NotRequired[Literal['local', 'http', 's3', 'gcs', 'synthetic']]
     dataset_id: UUIDv7
     uri: str
 
@@ -617,7 +652,7 @@ class ViewUnbindLayerResponse(TypedDict):
     unbound_at: Timestamp
     view_id: UUIDv7
 
-AnyEvent = CommandLogReplayEvent | DatasetOpenedEvent | ErrorEvent | JobLifecycleEvent | JobProgressEvent | SelectionChangedEvent | StateChangedEvent
+AnyEvent = CommandLogReplayEvent | DatasetExportedEvent | DatasetOpenedEvent | ErrorEvent | JobLifecycleEvent | JobProgressEvent | SelectionChangedEvent | StateChangedEvent
 
 AxisLabel = str
 

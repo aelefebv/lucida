@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -38,6 +39,69 @@ class NDStateEngineTests(unittest.TestCase):
     def _dataset_ids(self, engine: NDStateEngine, session_id: str) -> list[str]:
         events = engine.events_for_session(session_id)
         return [event["payload"]["dataset_id"] for event in events if event["event_type"] == "dataset.opened"]
+
+    def _write_ome_zarr_fixture(
+        self,
+        root: Path,
+        *,
+        name: str = "sample.zarr",
+        version: str = "0.5",
+        shape: tuple[int, ...] = (1, 1, 4, 16, 16),
+        dtype: str = "uint16",
+    ) -> str:
+        import zarr
+
+        path = root / name
+        grp = zarr.open_group(str(path), mode="w")
+        create_array = getattr(grp, "create_array", None)
+        if callable(create_array):
+            try:
+                create_array(
+                    name="0",
+                    shape=shape,
+                    chunks=(1, 1, 2, 8, 8),
+                    dtype=dtype,
+                    fill_value=0,
+                )
+            except TypeError:
+                create_array(
+                    "0",
+                    shape=shape,
+                    chunks=(1, 1, 2, 8, 8),
+                    dtype=dtype,
+                    fill_value=0,
+                )
+        else:
+            grp.create_dataset(
+                "0",
+                shape=shape,
+                chunks=(1, 1, 2, 8, 8),
+                dtype=dtype,
+                fill_value=0,
+            )
+        grp.attrs["multiscales"] = [
+            {
+                "name": "main",
+                "version": version,
+                "axes": [
+                    {"name": "t", "type": "time"},
+                    {"name": "c", "type": "channel"},
+                    {"name": "z", "type": "space"},
+                    {"name": "y", "type": "space"},
+                    {"name": "x", "type": "space"},
+                ],
+                "datasets": [
+                    {
+                        "path": "0",
+                        "coordinateTransformations": [
+                            {"type": "scale", "scale": [1, 1, 2, 0.5, 0.5]},
+                            {"type": "translation", "translation": [0, 0, 0, 0, 0]},
+                        ],
+                    }
+                ],
+            }
+        ]
+        return f"file://{path}"
 
     def _run_deterministic_flow(self, engine: NDStateEngine) -> dict[str, object]:
         session_id = self._create_session(engine)
@@ -251,15 +315,205 @@ class NDStateEngineTests(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "LUCIDA_CONFLICT")
 
-    def test_non_synthetic_dataset_uri_is_unsupported(self) -> None:
+    def test_unsupported_dataset_scheme_is_rejected(self) -> None:
         engine = self._new_engine()
         session_id = self._create_session(engine)
         with self.assertRaises(LucidaError) as ctx:
             engine.dispatch(
                 "dataset.open",
-                _request(2, idempotency_key="idem-open-file", session_id=session_id, uri="file:///tmp/data.zarr", read_only=True),
+                _request(2, idempotency_key="idem-open-file", session_id=session_id, uri="ftp://example.com/data.zarr", read_only=True),
             )
         self.assertEqual(ctx.exception.code, "LUCIDA_UNSUPPORTED_CAPABILITY")
+
+    def test_local_dataset_uri_surfaces_step3_metadata(self) -> None:
+        engine = self._new_engine()
+        session_id = self._create_session(engine)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            uri = self._write_ome_zarr_fixture(Path(tmpdir))
+            engine.dispatch(
+                "dataset.open",
+                _request(2, idempotency_key="idem-open-local", session_id=session_id, uri=uri, read_only=True),
+            )
+            dataset_id = self._dataset_ids(engine, session_id)[0]
+            payload = engine.dispatch(
+                "dataset.get",
+                _request(3, session_id=session_id, dataset_id=dataset_id),
+            )
+            self.assertEqual(payload["backend"], "local")
+            self.assertEqual(payload["ngff"]["ngff_version"], "0.5")
+            self.assertEqual(payload["ngff"]["zarr_format"], 2)
+            self.assertIn("cache", payload)
+            self.assertIn("counters", payload["cache"])
+
+    def test_local_dataset_uri_supports_ngff_v04_metadata(self) -> None:
+        engine = self._new_engine()
+        session_id = self._create_session(engine)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            uri = self._write_ome_zarr_fixture(Path(tmpdir), version="0.4")
+            engine.dispatch(
+                "dataset.open",
+                _request(2, idempotency_key="idem-open-local-v04", session_id=session_id, uri=uri, read_only=True),
+            )
+            dataset_id = self._dataset_ids(engine, session_id)[0]
+            payload = engine.dispatch(
+                "dataset.get",
+                _request(3, session_id=session_id, dataset_id=dataset_id),
+            )
+            self.assertEqual(payload["ngff"]["ngff_version"], "0.4")
+
+    def test_dataset_get_cache_snapshot_reflects_live_counters(self) -> None:
+        engine = self._new_engine()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            uri = self._write_ome_zarr_fixture(Path(tmpdir))
+            first_session = self._create_session(engine, key="idem-session-cache-1")
+            second_session = self._create_session(engine, key="idem-session-cache-2")
+
+            engine.dispatch(
+                "dataset.open",
+                _request(2, idempotency_key="idem-open-cache-1", session_id=first_session, uri=uri, read_only=True),
+            )
+            engine.dispatch(
+                "dataset.open",
+                _request(3, idempotency_key="idem-open-cache-2", session_id=second_session, uri=uri, read_only=True),
+            )
+
+            dataset_id = self._dataset_ids(engine, second_session)[0]
+            payload = engine.dispatch("dataset.get", _request(4, session_id=second_session, dataset_id=dataset_id))
+            counters = payload["cache"]["counters"]
+            self.assertGreaterEqual(counters["metadata_hits"], 1)
+            self.assertGreaterEqual(counters["metadata_misses"], 1)
+
+    def test_axis_map_is_strictly_validated(self) -> None:
+        engine = self._new_engine()
+        session_id = self._create_session(engine)
+        with self.assertRaises(LucidaError) as missing_axis:
+            engine.dispatch(
+                "dataset.open",
+                _request(
+                    2,
+                    idempotency_key="idem-open-axis-a",
+                    session_id=session_id,
+                    uri="synthetic://image",
+                    read_only=True,
+                    axis_map={"foo": "t"},
+                ),
+            )
+        self.assertEqual(missing_axis.exception.code, "LUCIDA_INVALID_PARAMS")
+
+        with self.assertRaises(LucidaError) as duplicate_axis:
+            engine.dispatch(
+                "dataset.open",
+                _request(
+                    3,
+                    idempotency_key="idem-open-axis-b",
+                    session_id=session_id,
+                    uri="synthetic://image",
+                    read_only=True,
+                    axis_map={"t": "x", "x": "x"},
+                ),
+            )
+        self.assertEqual(duplicate_axis.exception.code, "LUCIDA_INVALID_PARAMS")
+
+    def test_dataset_export_is_async_and_creates_local_v05_dataset(self) -> None:
+        engine = self._new_engine()
+        session_id = self._create_session(engine)
+        engine.dispatch(
+            "dataset.open",
+            _request(2, idempotency_key="idem-open-export", session_id=session_id, uri="synthetic://image", read_only=True),
+        )
+        dataset_id = self._dataset_ids(engine, session_id)[0]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            destination = str(Path(tmpdir) / "exported.zarr")
+            export_result = engine.dispatch(
+                "dataset.export",
+                _request(
+                    3,
+                    idempotency_key="idem-export-1",
+                    session_id=session_id,
+                    dataset_id=dataset_id,
+                    destination_uri=destination,
+                ),
+            )
+            job_id = export_result["job"]["job_id"]
+            self.assertEqual(export_result["job"]["state"], "queued")
+
+            job = engine.dispatch("job.get", _request(4, session_id=session_id, job_id=job_id))
+            self.assertEqual(job["state"], "completed")
+
+            engine.dispatch(
+                "dataset.open",
+                _request(
+                    5,
+                    idempotency_key="idem-open-exported",
+                    session_id=session_id,
+                    uri=f"file://{destination}",
+                    read_only=True,
+                ),
+            )
+            exported_dataset = self._dataset_ids(engine, session_id)[1]
+            exported = engine.dispatch(
+                "dataset.get",
+                _request(6, session_id=session_id, dataset_id=exported_dataset),
+            )
+            self.assertEqual(exported["ngff"]["ngff_version"], "0.5")
+            exported_events = [e for e in engine.events_for_session(session_id) if e["event_type"] == "dataset.exported"]
+            self.assertEqual(len(exported_events), 1)
+            self.assertEqual(exported_events[0]["payload"]["dataset_id"], dataset_id)
+
+    def test_dataset_export_job_can_be_cancelled_before_execution(self) -> None:
+        engine = self._new_engine()
+        session_id = self._create_session(engine)
+        engine.dispatch(
+            "dataset.open",
+            _request(2, idempotency_key="idem-open-cancel", session_id=session_id, uri="synthetic://image", read_only=True),
+        )
+        dataset_id = self._dataset_ids(engine, session_id)[0]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            destination = str(Path(tmpdir) / "cancelled.zarr")
+            export_result = engine.dispatch(
+                "dataset.export",
+                _request(
+                    3,
+                    idempotency_key="idem-export-cancel",
+                    session_id=session_id,
+                    dataset_id=dataset_id,
+                    destination_uri=destination,
+                ),
+            )
+            job_id = export_result["job"]["job_id"]
+            cancelled = engine.dispatch(
+                "job.cancel",
+                _request(4, idempotency_key="idem-cancel-job", session_id=session_id, job_id=job_id),
+            )
+            self.assertEqual(cancelled["state"], "cancelled")
+            self.assertFalse(Path(destination).exists())
+
+    def test_dataset_open_timeout_maps_to_typed_timeout_error(self) -> None:
+        class AlwaysTimeoutScheduler:
+            def execute(self, *_args: object, **_kwargs: object) -> object:
+                from lucida_core.io import SchedulerTimeout
+
+                raise SchedulerTimeout("simulated timeout")
+
+        engine = NDStateEngine(
+            clock=SequenceClock(start=datetime(2026, 1, 1, tzinfo=UTC), tick_seconds=1),
+            uuid_factory=SequenceUUIDFactory(seed=1),
+            io_scheduler=AlwaysTimeoutScheduler(),
+        )
+        session_id = self._create_session(engine)
+        with self.assertRaises(LucidaError) as ctx:
+            engine.dispatch(
+                "dataset.open",
+                _request(
+                    2,
+                    idempotency_key="idem-open-timeout",
+                    session_id=session_id,
+                    uri="synthetic://image",
+                    read_only=True,
+                    timeout_ms=5,
+                ),
+            )
+        self.assertEqual(ctx.exception.code, "LUCIDA_TIMEOUT")
 
     def test_async_jobs_follow_queued_running_completed_lifecycle(self) -> None:
         engine = self._new_engine()

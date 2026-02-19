@@ -13,6 +13,7 @@ MUTATING_METHOD_REQUEST_DEFS = {
     "SessionCloseRequest",
     "DatasetOpenRequest",
     "DatasetCloseRequest",
+    "DatasetExportRequest",
     "LayerAddImageRequest",
     "LayerAddPointsRequest",
     "LayerUpdateRequest",

@@ -243,6 +243,34 @@
       ]
     },
     {
+      "name": "dataset.export",
+      "summary": "Protocol method dataset.export",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/DatasetExportRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/DatasetExportResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
       "name": "layer.add_image",
       "summary": "Protocol method layer.add_image",
       "params": [

@@ -16,6 +16,11 @@
    - `python/lucida_core/__init__.py`
    - `python/lucida_core/engine.py`
    - `python/lucida_core/errors.py`
+5. Step 03 IO subsystem:
+   - `python/lucida_core/io/backends.py`
+   - `python/lucida_core/io/cache.py`
+   - `python/lucida_core/io/metadata.py`
+   - `python/lucida_core/io/scheduler.py`
 
 ## Planned Runtime Components (Roadmap-Aligned)
 
