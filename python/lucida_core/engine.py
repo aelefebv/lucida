@@ -1,4 +1,4 @@
-"""Deterministic in-memory ND state engine with Step 3 IO extensions."""
+"""Deterministic in-memory ND state engine with Step 3/4 extensions."""
 
 from __future__ import annotations
 
@@ -33,6 +33,16 @@ from .io import (
 from .io.backends import _canonical_dataset_id
 from .io.metadata import AxisMapError
 from .io.scheduler import CancelToken, CancelledError
+from .render2d import (
+    FramePlan2D,
+    InvalidationKind,
+    Render2DInvalidationScheduler,
+    build_frame_plan_2d,
+    frame_plan_to_dict,
+    panzoom_state_from_pose,
+    panzoom_state_to_pose,
+)
+from .render2d.controls import PanZoomState
 
 
 ProtocolVersion = "1.0.0"
@@ -174,6 +184,7 @@ class SessionState:
     subscriptions: dict[str, SubscriptionState] = field(default_factory=dict)
     pending_job_ops: dict[str, Callable[[], dict[str, Any]]] = field(default_factory=dict)
     job_cancel_tokens: dict[str, CancelToken] = field(default_factory=dict)
+    frame_plans: dict[str, FramePlan2D] = field(default_factory=dict)
     outbox: list[dict[str, Any]] = field(default_factory=list)
     session_seq: int = 0
 
@@ -225,6 +236,7 @@ class NDStateEngine:
         self._state = RuntimeState()
         self._cache = cache_manager or CacheManager()
         self._scheduler = io_scheduler or IOScheduler()
+        self._render2d_scheduler = Render2DInvalidationScheduler()
         self._handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "system.hello": self._system_hello,
             "system.capabilities.get": self._system_capabilities_get,
@@ -362,6 +374,10 @@ class NDStateEngine:
                         }
                         for subscription_id, subscription in sorted(session.subscriptions.items())
                     },
+                    "frame_plans": {
+                        view_id: frame_plan_to_dict(plan)
+                        for view_id, plan in sorted(session.frame_plans.items())
+                    },
                     "outbox": deepcopy(session.outbox),
                 }
             )
@@ -370,6 +386,14 @@ class NDStateEngine:
     def events_for_session(self, session_id: str) -> list[dict[str, Any]]:
         session = self._require_session(session_id)
         return deepcopy(session.outbox)
+
+    def frame_plan_for_view(self, session_id: str, view_id: str) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        self._require_view(session, view_id)
+        plan = session.frame_plans.get(view_id)
+        if plan is None:
+            raise not_found("Frame plan does not exist for view", {"session_id": session_id, "view_id": view_id})
+        return frame_plan_to_dict(plan)
 
     def _validate_protocol(self, params: dict[str, Any]) -> None:
         version = params.get("protocol_version")
@@ -541,6 +565,64 @@ class NDStateEngine:
             and left.transform == right.transform
         )
 
+    def _canonical_panzoom_pose(self, pose: dict[str, Any], *, strict: bool) -> dict[str, Any]:
+        try:
+            panzoom = panzoom_state_from_pose(deepcopy(pose))
+        except ValueError as exc:
+            if strict:
+                raise invalid_params("pose is invalid for panzoom mode", {"error": str(exc)}) from exc
+            panzoom = PanZoomState(center_x=0.0, center_y=0.0, zoom=1.0)
+        return panzoom_state_to_pose(panzoom)
+
+    def _mark_view_invalidation(
+        self,
+        session: SessionState,
+        *,
+        view_id: str,
+        kind: InvalidationKind,
+        reason: str,
+    ) -> None:
+        if view_id not in session.views:
+            return
+        self._render2d_scheduler.mark(
+            session_id=session.session_id,
+            view_id=view_id,
+            kind=kind,
+            reason=reason,
+        )
+
+    def _mark_session_views_invalidation(self, session: SessionState, *, kind: InvalidationKind, reason: str) -> None:
+        for view_id in sorted(session.views):
+            self._mark_view_invalidation(session, view_id=view_id, kind=kind, reason=reason)
+
+    def _mark_layer_views_invalidation(
+        self,
+        session: SessionState,
+        *,
+        layer_id: str,
+        kind: InvalidationKind,
+        reason: str,
+    ) -> None:
+        for view_id in sorted(session.views):
+            view = session.views[view_id]
+            if layer_id in view.bound_layer_ids:
+                self._mark_view_invalidation(session, view_id=view_id, kind=kind, reason=reason)
+
+    def _plan_view_if_invalidated(self, session: SessionState, view_id: str) -> None:
+        view = session.views.get(view_id)
+        if view is None:
+            return
+        ticket = self._render2d_scheduler.consume(session_id=session.session_id, view_id=view_id)
+        if ticket is None:
+            return
+        previous = session.frame_plans.get(view_id)
+        plan = build_frame_plan_2d(session=session, view=view, ticket=ticket, previous_plan=previous)
+        session.frame_plans[view_id] = plan
+
+    def _plan_views(self, session: SessionState, view_ids: list[str]) -> None:
+        for view_id in sorted(set(view_ids)):
+            self._plan_view_if_invalidated(session, view_id)
+
     def _apply_job_lifecycle(self, session: SessionState, job_id: str) -> dict[str, Any]:
         accepted_at = self._clock()
         job = JobState(
@@ -686,6 +768,13 @@ class NDStateEngine:
         )
         default_view = self._default_view_state(self._uuid(), "default", ["t", "c", "z", "y", "x"])
         session.views[default_view.view_id] = default_view
+        self._mark_view_invalidation(
+            session,
+            view_id=default_view.view_id,
+            kind=InvalidationKind.FULL,
+            reason="session.create",
+        )
+        self._plan_view_if_invalidated(session, default_view.view_id)
         self._state.sessions[session_id] = session
         self._emit_event(
             session,
@@ -742,6 +831,7 @@ class NDStateEngine:
         if dataset.dataset_id in session.datasets:
             raise conflict("Dataset already open in session", {"dataset_id": dataset.dataset_id})
         session.datasets[dataset.dataset_id] = dataset
+        self._mark_session_views_invalidation(session, kind=InvalidationKind.FULL, reason="dataset.open")
         job_id = self._uuid()
         accepted = self._apply_job_lifecycle(session, job_id)
         self._emit_event(
@@ -762,6 +852,7 @@ class NDStateEngine:
                 "change_summary": "dataset opened",
             },
         )
+        self._plan_views(session, list(session.views))
         return {"session_id": session.session_id, "job": accepted}
 
     def _dataset_export(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -862,6 +953,7 @@ class NDStateEngine:
                 {"dataset_id": dataset.dataset_id, "layer_ids": layer_refs},
             )
         del session.datasets[dataset.dataset_id]
+        self._mark_session_views_invalidation(session, kind=InvalidationKind.FULL, reason="dataset.close")
         closed_at = self._clock()
         self._emit_event(
             session,
@@ -872,6 +964,7 @@ class NDStateEngine:
                 "change_summary": "dataset closed",
             },
         )
+        self._plan_views(session, list(session.views))
         return {"dataset_id": dataset.dataset_id, "closed_at": closed_at}
 
     def _dataset_get(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -910,6 +1003,7 @@ class NDStateEngine:
             transform=params.get("transform"),
         )
         session.layers[layer_id] = layer
+        self._mark_session_views_invalidation(session, kind=InvalidationKind.FULL, reason="layer.add_image")
         job_id = self._uuid()
         accepted = self._apply_job_lifecycle(session, job_id)
         self._emit_event(
@@ -921,6 +1015,7 @@ class NDStateEngine:
                 "change_summary": "image layer added",
             },
         )
+        self._plan_views(session, list(session.views))
         return {"session_id": session.session_id, "layer_id": layer_id, "job": accepted}
 
     def _layer_add_points(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -936,6 +1031,7 @@ class NDStateEngine:
             attributes=deepcopy(params.get("attributes", {})),
         )
         session.layers[layer_id] = layer
+        self._mark_session_views_invalidation(session, kind=InvalidationKind.FULL, reason="layer.add_points")
         job_id = self._uuid()
         accepted = self._apply_job_lifecycle(session, job_id)
         self._emit_event(
@@ -947,6 +1043,7 @@ class NDStateEngine:
                 "change_summary": "points layer added",
             },
         )
+        self._plan_views(session, list(session.views))
         return {"session_id": session.session_id, "layer_id": layer_id, "job": accepted}
 
     def _layer_update(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -955,15 +1052,18 @@ class NDStateEngine:
         patch = params["patch"]
         if not isinstance(patch, dict):
             raise invalid_params("patch must be an object", {"layer_id": layer.layer_id})
+        style_reasons: list[str] = []
         if "visible" in patch:
             if not isinstance(patch["visible"], bool):
                 raise invalid_params("patch.visible must be boolean", {})
             layer.visible = patch["visible"]
+            style_reasons.append("layer.update.visible")
         if "opacity" in patch:
             opacity = patch["opacity"]
             if not isinstance(opacity, (int, float)) or not (0 <= float(opacity) <= 1):
                 raise invalid_params("patch.opacity must be between 0 and 1", {})
             layer.opacity = float(opacity)
+            style_reasons.append("layer.update.opacity")
         if "name" in patch:
             if not isinstance(patch["name"], str):
                 raise invalid_params("patch.name must be string", {})
@@ -979,11 +1079,21 @@ class NDStateEngine:
                 "change_summary": "layer updated",
             },
         )
+        if style_reasons:
+            for reason in style_reasons:
+                self._mark_layer_views_invalidation(
+                    session,
+                    layer_id=layer.layer_id,
+                    kind=InvalidationKind.STYLE,
+                    reason=reason,
+                )
+            self._plan_views(session, list(session.views))
         return {"layer_id": layer.layer_id, "updated_at": updated_at}
 
     def _layer_remove(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
         layer = self._require_layer(session, params["layer_id"])
+        self._mark_session_views_invalidation(session, kind=InvalidationKind.FULL, reason="layer.remove")
         del session.layers[layer.layer_id]
         for view in session.views.values():
             if layer.layer_id in view.bound_layer_ids:
@@ -998,6 +1108,7 @@ class NDStateEngine:
                 "change_summary": "layer removed",
             },
         )
+        self._plan_views(session, list(session.views))
         return {"layer_id": layer.layer_id, "removed_at": removed_at}
 
     def _layer_get(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1022,6 +1133,12 @@ class NDStateEngine:
             axis_order = list(first_dataset.axis_labels)
         view = self._default_view_state(view_id, params.get("label"), axis_order)
         session.views[view_id] = view
+        self._mark_view_invalidation(
+            session,
+            view_id=view_id,
+            kind=InvalidationKind.FULL,
+            reason="view.create",
+        )
         created_at = self._clock()
         self._emit_event(
             session,
@@ -1032,12 +1149,14 @@ class NDStateEngine:
                 "change_summary": "view created",
             },
         )
+        self._plan_view_if_invalidated(session, view_id)
         return {"session_id": session.session_id, "view_id": view_id, "created_at": created_at}
 
     def _view_close(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
         view = self._require_view(session, params["view_id"])
         del session.views[view.view_id]
+        session.frame_plans.pop(view.view_id, None)
         closed_at = self._clock()
         self._emit_event(
             session,
@@ -1084,6 +1203,12 @@ class NDStateEngine:
                     )
         if layer.layer_id not in view.bound_layer_ids:
             view.bound_layer_ids.append(layer.layer_id)
+        self._mark_view_invalidation(
+            session,
+            view_id=view.view_id,
+            kind=InvalidationKind.FULL,
+            reason="view.bind_layer",
+        )
         bound_at = self._clock()
         self._emit_event(
             session,
@@ -1094,12 +1219,14 @@ class NDStateEngine:
                 "change_summary": "layer bound to view",
             },
         )
-        return {
+        out = {
             "session_id": session.session_id,
             "view_id": view.view_id,
             "layer_id": layer.layer_id,
             "bound_at": bound_at,
         }
+        self._plan_view_if_invalidated(session, view.view_id)
+        return out
 
     def _view_unbind_layer(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
@@ -1111,6 +1238,12 @@ class NDStateEngine:
                 {"view_id": view.view_id, "layer_id": params["layer_id"]},
             )
         view.bound_layer_ids = [layer_id for layer_id in view.bound_layer_ids if layer_id != params["layer_id"]]
+        self._mark_view_invalidation(
+            session,
+            view_id=view.view_id,
+            kind=InvalidationKind.FULL,
+            reason="view.unbind_layer",
+        )
         unbound_at = self._clock()
         self._emit_event(
             session,
@@ -1121,12 +1254,14 @@ class NDStateEngine:
                 "change_summary": "layer unbound from view",
             },
         )
-        return {
+        out = {
             "session_id": session.session_id,
             "view_id": view.view_id,
             "layer_id": params["layer_id"],
             "unbound_at": unbound_at,
         }
+        self._plan_view_if_invalidated(session, view.view_id)
+        return out
 
     def _view_set_axis_index(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
@@ -1154,6 +1289,12 @@ class NDStateEngine:
                     {"axis": axis, "index": index, "max_index": axis_size - 1},
                 )
         view.axis_indices[axis] = index
+        self._mark_view_invalidation(
+            session,
+            view_id=view.view_id,
+            kind=InvalidationKind.SLICE,
+            reason="view.set_axis_index",
+        )
         updated_at = self._clock()
         self._emit_event(
             session,
@@ -1164,7 +1305,14 @@ class NDStateEngine:
                 "change_summary": f"axis {axis} index set to {index}",
             },
         )
-        return {"session_id": session.session_id, "view_id": view.view_id, "axis_index": {"axis": axis, "index": index}, "updated_at": updated_at}
+        out = {
+            "session_id": session.session_id,
+            "view_id": view.view_id,
+            "axis_index": {"axis": axis, "index": index},
+            "updated_at": updated_at,
+        }
+        self._plan_view_if_invalidated(session, view.view_id)
+        return out
 
     def _view_reorder_axes(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
@@ -1175,6 +1323,12 @@ class NDStateEngine:
         if len(order) != len(view.axis_order) or sorted(order) != sorted(view.axis_order):
             raise invalid_params("order must be a permutation of current axes", {"current": view.axis_order, "requested": order})
         view.axis_order = list(order)
+        self._mark_view_invalidation(
+            session,
+            view_id=view.view_id,
+            kind=InvalidationKind.FULL,
+            reason="view.reorder_axes",
+        )
         self._emit_event(
             session,
             "state.changed",
@@ -1184,7 +1338,9 @@ class NDStateEngine:
                 "change_summary": "view axis order updated",
             },
         )
-        return {"session_id": session.session_id, "view_id": view.view_id, "order": list(view.axis_order)}
+        out = {"session_id": session.session_id, "view_id": view.view_id, "order": list(view.axis_order)}
+        self._plan_view_if_invalidated(session, view.view_id)
+        return out
 
     def _view_set_channel_order(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
@@ -1208,6 +1364,12 @@ class NDStateEngine:
         if max_channel is not None and any(idx >= max_channel for idx in channel_order):
             raise invalid_params("channel_order exceeds channel bounds", {"max_channels": max_channel})
         view.channel_order = list(channel_order)
+        self._mark_view_invalidation(
+            session,
+            view_id=view.view_id,
+            kind=InvalidationKind.SLICE,
+            reason="view.set_channel_order",
+        )
         self._emit_event(
             session,
             "state.changed",
@@ -1217,7 +1379,9 @@ class NDStateEngine:
                 "change_summary": "view channel order updated",
             },
         )
-        return {"session_id": session.session_id, "view_id": view.view_id, "channel_order": list(view.channel_order)}
+        out = {"session_id": session.session_id, "view_id": view.view_id, "channel_order": list(view.channel_order)}
+        self._plan_view_if_invalidated(session, view.view_id)
+        return out
 
     def _camera_set_mode(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
@@ -1226,6 +1390,14 @@ class NDStateEngine:
         if mode not in {"panzoom", "arcball", "freefly"}:
             raise invalid_params("mode must be one of panzoom, arcball, freefly", {"mode": mode})
         view.camera_mode = str(mode)
+        if view.camera_mode == "panzoom":
+            view.camera_pose = self._canonical_panzoom_pose(view.camera_pose, strict=False)
+        self._mark_view_invalidation(
+            session,
+            view_id=view.view_id,
+            kind=InvalidationKind.CAMERA,
+            reason="camera.set_mode",
+        )
         self._emit_event(
             session,
             "state.changed",
@@ -1235,7 +1407,9 @@ class NDStateEngine:
                 "change_summary": f"camera mode set to {mode}",
             },
         )
-        return {"session_id": session.session_id, "view_id": view.view_id, "mode": view.camera_mode}
+        out = {"session_id": session.session_id, "view_id": view.view_id, "mode": view.camera_mode}
+        self._plan_view_if_invalidated(session, view.view_id)
+        return out
 
     def _camera_set_pose(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
@@ -1243,7 +1417,16 @@ class NDStateEngine:
         pose = params.get("pose")
         if not isinstance(pose, dict):
             raise invalid_params("pose must be an object", {})
-        view.camera_pose = deepcopy(pose)
+        if view.camera_mode == "panzoom":
+            view.camera_pose = self._canonical_panzoom_pose(pose, strict=True)
+        else:
+            view.camera_pose = deepcopy(pose)
+        self._mark_view_invalidation(
+            session,
+            view_id=view.view_id,
+            kind=InvalidationKind.CAMERA,
+            reason="camera.set_pose",
+        )
         self._emit_event(
             session,
             "state.changed",
@@ -1253,11 +1436,15 @@ class NDStateEngine:
                 "change_summary": "camera pose updated",
             },
         )
-        return {"session_id": session.session_id, "view_id": view.view_id, "pose": deepcopy(view.camera_pose)}
+        out = {"session_id": session.session_id, "view_id": view.view_id, "pose": deepcopy(view.camera_pose)}
+        self._plan_view_if_invalidated(session, view.view_id)
+        return out
 
     def _camera_get(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
         view = self._require_view(session, params["view_id"])
+        if view.camera_mode == "panzoom":
+            view.camera_pose = self._canonical_panzoom_pose(view.camera_pose, strict=False)
         return {
             "session_id": session.session_id,
             "view_id": view.view_id,

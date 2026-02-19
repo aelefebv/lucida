@@ -278,8 +278,8 @@ v1 deliverables:
 1. Define baseline protocol interfaces (Step 1) and introduce explicit-view protocol v1 delta in Step 2.
 2. Implement ND state model and transform system with deterministic transitions and multi-view semantics.
 3. Implement OME-Zarr IO + cache scheduler, including `dataset.export`.
-4. Implement 2D renderer and controls.
-5. Implement 3D renderer + arcball/free-fly cameras.
+4. Implement Step 04 2D renderer/control semantics baseline in Python runtime.
+5. Kick off Rust renderer scaffold in Step 05, then implement 3D renderer + arcball/free-fly cameras.
 6. Implement points/graph layer with linked selection.
 7. Implement daemon session model + event stream.
 8. Implement Python SDK + notebook integration.
@@ -303,9 +303,9 @@ Operational note:
 3. [`specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md`](specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md)
    - OME-Zarr adapters, remote/local backend behavior, chunk scheduling, and cache policy.
 4. [`specs/roadmap/step-04-2d-renderer-and-controls.md`](specs/roadmap/step-04-2d-renderer-and-controls.md)
-   - 2D render pipeline contract, pan/zoom controls, and interaction latency targets.
+   - Deterministic 2D planning semantics, pan/zoom controls, and interaction/perf acceptance gates.
 5. [`specs/roadmap/step-05-3d-renderer-and-cameras.md`](specs/roadmap/step-05-3d-renderer-and-cameras.md)
-   - 3D render modes and camera semantics for arcball and free-fly workflows.
+   - Rust renderer scaffold kickoff plus 3D render modes and camera semantics for arcball/free-fly workflows.
 6. [`specs/roadmap/step-06-points-graph-layer-and-linked-selection.md`](specs/roadmap/step-06-points-graph-layer-and-linked-selection.md)
    - Million-point rendering, LOD behavior, selection contracts, and linked-view interactions.
 7. [`specs/roadmap/step-07-daemon-session-model-and-event-stream.md`](specs/roadmap/step-07-daemon-session-model-and-event-stream.md)
