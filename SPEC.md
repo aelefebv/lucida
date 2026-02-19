@@ -278,11 +278,38 @@ v1 deliverables:
 10. Implement installers + CI/release gates.
 11. Phase 2: remote web gateway.
 
-## 16. Step 1 Protocol Baseline (Frozen)
+## 16. Roadmap Sub-Spec Table of Contents
+
+Each roadmap step has a dedicated sub-spec in `specs/roadmap/`. These files are implementation-facing and should hold step-specific scope, interfaces, dependencies, acceptance criteria, and test gates.
+
+1. [`specs/roadmap/step-01-core-interfaces-and-command-protocol.md`](specs/roadmap/step-01-core-interfaces-and-command-protocol.md)
+   - Source of truth for command protocol contracts, versioning rules, and schema/OpenRPC artifacts.
+2. [`specs/roadmap/step-02-nd-state-model-and-transforms.md`](specs/roadmap/step-02-nd-state-model-and-transforms.md)
+   - ND state graph, axis semantics, anisotropic world transforms, and deterministic state transitions.
+3. [`specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md`](specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md)
+   - OME-Zarr adapters, remote/local backend behavior, chunk scheduling, and cache policy.
+4. [`specs/roadmap/step-04-2d-renderer-and-controls.md`](specs/roadmap/step-04-2d-renderer-and-controls.md)
+   - 2D render pipeline contract, pan/zoom controls, and interaction latency targets.
+5. [`specs/roadmap/step-05-3d-renderer-and-cameras.md`](specs/roadmap/step-05-3d-renderer-and-cameras.md)
+   - 3D render modes and camera semantics for arcball and free-fly workflows.
+6. [`specs/roadmap/step-06-points-graph-layer-and-linked-selection.md`](specs/roadmap/step-06-points-graph-layer-and-linked-selection.md)
+   - Million-point rendering, LOD behavior, selection contracts, and linked-view interactions.
+7. [`specs/roadmap/step-07-daemon-session-model-and-event-stream.md`](specs/roadmap/step-07-daemon-session-model-and-event-stream.md)
+   - Daemon lifecycle, multi-session behavior, and event delivery guarantees.
+8. [`specs/roadmap/step-08-python-sdk-and-notebook-integration.md`](specs/roadmap/step-08-python-sdk-and-notebook-integration.md)
+   - SDK surface, generated typing behavior, notebook control workflows, and client ergonomics.
+9. [`specs/roadmap/step-09-command-log-replay.md`](specs/roadmap/step-09-command-log-replay.md)
+   - Export/import/replay semantics, determinism constraints, and replay safety checks.
+10. [`specs/roadmap/step-10-installers-and-ci-release-gates.md`](specs/roadmap/step-10-installers-and-ci-release-gates.md)
+   - Packaging matrix, signing/distribution requirements, and CI release criteria.
+11. [`specs/roadmap/step-11-remote-web-gateway-phase-2.md`](specs/roadmap/step-11-remote-web-gateway-phase-2.md)
+   - Phase 2 browser gateway architecture, transport rules, and security posture.
+
+## 17. Step 1 Protocol Baseline (Frozen)
 
 Step 1 is complete when the protocol contract is implementation-ready without additional design decisions.
 
-### 16.1 Canonical artifacts
+### 17.1 Canonical artifacts
 
 1. OpenRPC registry:
    - `protocol/openrpc/lucida.v1.openrpc.json`
@@ -300,7 +327,7 @@ Step 1 is complete when the protocol contract is implementation-ready without ad
 7. Command log line schema:
    - `protocol/command-log/lucida.commandlog.v1.schema.json`
 
-### 16.2 Frozen method set
+### 17.2 Frozen method set
 
 1. `system.hello`
 2. `system.capabilities.get`
@@ -331,7 +358,7 @@ Step 1 is complete when the protocol contract is implementation-ready without ad
 27. `command_log.import`
 28. `command_log.replay`
 
-### 16.3 Protocol behavior guarantees
+### 17.3 Protocol behavior guarantees
 
 1. Handshake and compatibility:
    - `system.hello` is the first command on a connection.
@@ -352,14 +379,14 @@ Step 1 is complete when the protocol contract is implementation-ready without ad
    - JSONL, one schema-validated record per line.
    - replay requires version compatibility validation.
 
-### 16.4 Protocol freeze rules
+### 17.4 Protocol freeze rules
 
 1. Any change that affects required fields, method signatures, ordering semantics, or retry semantics is a breaking change.
 2. Breaking changes require a major protocol version bump and a new OpenRPC/schema set.
 3. Additive changes may only be introduced as minor versions and must preserve existing method behavior.
 4. Generated SDK protocol models must always be reproducible from schema artifacts.
 
-## 17. Explicit Assumptions and Defaults
+## 18. Explicit Assumptions and Defaults
 
 1. Rust core + Python SDK is the default architecture.
 2. WebGPU is primary rendering backend with constrained fallback path.
