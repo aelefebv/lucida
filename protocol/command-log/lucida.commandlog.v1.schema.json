@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lucida.dev/schemas/command-log/lucida.commandlog.v1.schema.json",
+  "title": "Lucida Command Log Record v1",
+  "description": "Schema for a single JSONL line in a Lucida command log.",
+  "type": "object",
+  "$defs": {
+    "CommandRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "command"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recorded_at": {
+          "$ref": "../schemas/common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "correlation_id": {
+          "$ref": "../schemas/common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "method": {
+          "type": "string",
+          "minLength": 1
+        },
+        "request": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "protocol_version": {
+              "$ref": "../schemas/common/primitives.schema.json#/$defs/SemVer"
+            },
+            "request_id": {
+              "$ref": "../schemas/common/primitives.schema.json#/$defs/UUIDv7"
+            },
+            "idempotency_key": {
+              "type": "string"
+            },
+            "params": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "required": [
+            "protocol_version",
+            "request_id",
+            "params"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "seq",
+        "recorded_at",
+        "correlation_id",
+        "method",
+        "request"
+      ]
+    },
+    "EventRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "event"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recorded_at": {
+          "$ref": "../schemas/common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "correlation_id": {
+          "$ref": "../schemas/common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event": {
+          "$ref": "../schemas/events/events.schema.json#/$defs/AnyEvent"
+        }
+      },
+      "required": [
+        "kind",
+        "seq",
+        "recorded_at",
+        "correlation_id",
+        "event"
+      ]
+    },
+    "LogRecord": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/CommandRecord"
+        },
+        {
+          "$ref": "#/$defs/EventRecord"
+        }
+      ]
+    }
+  },
+  "$ref": "#/$defs/LogRecord"
+}
