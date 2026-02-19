@@ -1,0 +1,813 @@
+{
+  "openrpc": "1.2.6",
+  "info": {
+    "title": "Lucida Protocol",
+    "version": "1.0.0",
+    "description": "Lucida v1 JSON-RPC API contract."
+  },
+  "servers": [
+    {
+      "name": "local-ipc",
+      "url": "ipc://lucida-daemon",
+      "description": "Default local IPC transport"
+    },
+    {
+      "name": "remote-ws",
+      "url": "ws://127.0.0.1:7411",
+      "description": "Optional remote WebSocket transport"
+    }
+  ],
+  "methods": [
+    {
+      "name": "system.hello",
+      "summary": "Protocol method system.hello",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/SystemHelloRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/SystemHelloResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "system.capabilities.get",
+      "summary": "Protocol method system.capabilities.get",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/SystemCapabilitiesGetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/SystemCapabilitiesGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "session.create",
+      "summary": "Protocol method session.create",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/SessionCreateRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/SessionCreateResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "session.close",
+      "summary": "Protocol method session.close",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/SessionCloseRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/SessionCloseResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "session.get",
+      "summary": "Protocol method session.get",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/SessionGetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/SessionGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dataset.open",
+      "summary": "Protocol method dataset.open",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/DatasetOpenRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/DatasetOpenResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dataset.close",
+      "summary": "Protocol method dataset.close",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/DatasetCloseRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/DatasetCloseResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "dataset.get",
+      "summary": "Protocol method dataset.get",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/DatasetGetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/DatasetGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "layer.add_image",
+      "summary": "Protocol method layer.add_image",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/LayerAddImageRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/LayerAddImageResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "layer.add_points",
+      "summary": "Protocol method layer.add_points",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/LayerAddPointsRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/LayerAddPointsResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "layer.update",
+      "summary": "Protocol method layer.update",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/LayerUpdateRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/LayerUpdateResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "layer.remove",
+      "summary": "Protocol method layer.remove",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/LayerRemoveRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/LayerRemoveResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "layer.get",
+      "summary": "Protocol method layer.get",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/LayerGetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/LayerGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.set_axis_index",
+      "summary": "Protocol method view.set_axis_index",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/ViewSetAxisIndexRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/ViewSetAxisIndexResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.reorder_axes",
+      "summary": "Protocol method view.reorder_axes",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/ViewReorderAxesRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/ViewReorderAxesResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.set_channel_order",
+      "summary": "Protocol method view.set_channel_order",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/ViewSetChannelOrderRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/ViewSetChannelOrderResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "camera.set_mode",
+      "summary": "Protocol method camera.set_mode",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/CameraSetModeRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/CameraSetModeResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "camera.set_pose",
+      "summary": "Protocol method camera.set_pose",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/CameraSetPoseRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/CameraSetPoseResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "camera.get",
+      "summary": "Protocol method camera.get",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/CameraGetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/CameraGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "selection.get",
+      "summary": "Protocol method selection.get",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/SelectionGetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/SelectionGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "selection.set",
+      "summary": "Protocol method selection.set",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/SelectionSetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/SelectionSetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "job.get",
+      "summary": "Protocol method job.get",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/JobGetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/JobGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "job.cancel",
+      "summary": "Protocol method job.cancel",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/JobCancelRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/JobCancelResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "job.list",
+      "summary": "Protocol method job.list",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/JobListRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/JobListResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "events.subscribe",
+      "summary": "Protocol method events.subscribe",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/EventsSubscribeRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/EventsSubscribeResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "command_log.export",
+      "summary": "Protocol method command_log.export",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/CommandLogExportRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/CommandLogExportResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "command_log.import",
+      "summary": "Protocol method command_log.import",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/CommandLogImportRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/CommandLogImportResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "command_log.replay",
+      "summary": "Protocol method command_log.replay",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/CommandLogReplayRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/CommandLogReplayResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    }
+  ],
+  "components": {
+    "schemas": {
+      "ErrorEnvelope": {
+        "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+      }
+    }
+  }
+}

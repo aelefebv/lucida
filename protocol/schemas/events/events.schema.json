@@ -1,0 +1,434 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lucida.dev/schemas/events/events.schema.json",
+  "title": "Lucida v1 Event Schemas",
+  "type": "object",
+  "$defs": {
+    "JobLifecyclePayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "state": {
+          "$ref": "../common/primitives.schema.json#/$defs/JobState"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "error": {
+          "$ref": "../errors/error.schema.json#/$defs/ErrorEnvelope"
+        }
+      },
+      "required": [
+        "job_id",
+        "state"
+      ]
+    },
+    "JobProgressPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "progress": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "progress"
+      ]
+    },
+    "StateChangedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "object_type": {
+          "type": "string",
+          "enum": [
+            "session",
+            "dataset",
+            "layer",
+            "view",
+            "camera",
+            "selection"
+          ]
+        },
+        "object_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "change_summary": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "object_type",
+        "object_id",
+        "change_summary"
+      ]
+    },
+    "DatasetOpenedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "dataset_id",
+        "uri"
+      ]
+    },
+    "SelectionChangedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "selection"
+      ]
+    },
+    "CommandLogReplayPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "replay_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "started",
+            "progress",
+            "completed",
+            "failed"
+          ]
+        },
+        "applied_commands": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "total_commands": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "replay_id",
+        "state",
+        "applied_commands",
+        "total_commands"
+      ]
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "$ref": "../errors/error.schema.json#/$defs/ErrorEnvelope"
+        }
+      },
+      "required": [
+        "error"
+      ]
+    },
+    "JobLifecycleEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "const": "job.lifecycle"
+        },
+        "session_seq": {
+          "$ref": "../common/primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "payload": {
+          "$ref": "#/$defs/JobLifecyclePayload"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at",
+        "payload"
+      ]
+    },
+    "JobProgressEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "const": "job.progress"
+        },
+        "session_seq": {
+          "$ref": "../common/primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "payload": {
+          "$ref": "#/$defs/JobProgressPayload"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at",
+        "payload"
+      ]
+    },
+    "StateChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "const": "state.changed"
+        },
+        "session_seq": {
+          "$ref": "../common/primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "payload": {
+          "$ref": "#/$defs/StateChangedPayload"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at",
+        "payload"
+      ]
+    },
+    "DatasetOpenedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "const": "dataset.opened"
+        },
+        "session_seq": {
+          "$ref": "../common/primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "payload": {
+          "$ref": "#/$defs/DatasetOpenedPayload"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at",
+        "payload"
+      ]
+    },
+    "SelectionChangedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "const": "selection.changed"
+        },
+        "session_seq": {
+          "$ref": "../common/primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "payload": {
+          "$ref": "#/$defs/SelectionChangedPayload"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at",
+        "payload"
+      ]
+    },
+    "CommandLogReplayEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "const": "command_log.replay"
+        },
+        "session_seq": {
+          "$ref": "../common/primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "payload": {
+          "$ref": "#/$defs/CommandLogReplayPayload"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at",
+        "payload"
+      ]
+    },
+    "ErrorEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "const": "error"
+        },
+        "session_seq": {
+          "$ref": "../common/primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "payload": {
+          "$ref": "#/$defs/ErrorPayload"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at",
+        "payload"
+      ]
+    },
+    "AnyEvent": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/JobLifecycleEvent"
+        },
+        {
+          "$ref": "#/$defs/JobProgressEvent"
+        },
+        {
+          "$ref": "#/$defs/StateChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/DatasetOpenedEvent"
+        },
+        {
+          "$ref": "#/$defs/SelectionChangedEvent"
+        },
+        {
+          "$ref": "#/$defs/CommandLogReplayEvent"
+        },
+        {
+          "$ref": "#/$defs/ErrorEvent"
+        }
+      ]
+    }
+  }
+}

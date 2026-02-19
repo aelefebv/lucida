@@ -1,0 +1,642 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lucida.dev/schemas/responses/methods.response.schema.json",
+  "title": "Lucida v1 Response Schemas",
+  "type": "object",
+  "$defs": {
+    "SystemHelloResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "selected_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "daemon_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "daemon_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "capabilities": {
+          "$ref": "../common/types.schema.json#/$defs/CapabilityFlags"
+        },
+        "event_stream": {
+          "type": "string",
+          "enum": [
+            "unix_socket",
+            "named_pipe",
+            "tcp",
+            "ws"
+          ]
+        },
+        "server_time": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "selected_version",
+        "daemon_name",
+        "daemon_version",
+        "capabilities",
+        "event_stream",
+        "server_time"
+      ]
+    },
+    "SystemCapabilitiesGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "selected_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "capabilities": {
+          "$ref": "../common/types.schema.json#/$defs/CapabilityFlags"
+        },
+        "inline_payload_limit_bytes": {
+          "$ref": "../common/primitives.schema.json#/$defs/InlinePayloadLimitBytes"
+        }
+      },
+      "required": [
+        "selected_version",
+        "capabilities",
+        "inline_payload_limit_bytes"
+      ]
+    },
+    "SessionCreateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "label": {
+          "type": "string"
+        },
+        "created_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "session_id",
+        "created_at"
+      ]
+    },
+    "SessionCloseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "closed_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "session_id",
+        "closed_at"
+      ]
+    },
+    "SessionGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "label": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "active",
+            "closing",
+            "closed"
+          ]
+        },
+        "created_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "session_id",
+        "state",
+        "created_at"
+      ]
+    },
+    "DatasetOpenResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "job": {
+          "$ref": "../common/types.schema.json#/$defs/AsyncAccepted"
+        }
+      },
+      "required": [
+        "session_id",
+        "job"
+      ]
+    },
+    "DatasetCloseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "closed_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "closed_at"
+      ]
+    },
+    "DatasetGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "dataset_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "uri": {
+          "type": "string"
+        },
+        "axis_labels": {
+          "type": "array",
+          "items": {
+            "$ref": "../common/primitives.schema.json#/$defs/AxisLabel"
+          },
+          "minItems": 1
+        },
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1
+        },
+        "dtype": {
+          "type": "string"
+        },
+        "transform": {
+          "$ref": "../common/types.schema.json#/$defs/Transform"
+        }
+      },
+      "required": [
+        "session_id",
+        "dataset_id",
+        "uri",
+        "axis_labels",
+        "shape",
+        "dtype",
+        "transform"
+      ]
+    },
+    "LayerAddImageResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "job": {
+          "$ref": "../common/types.schema.json#/$defs/AsyncAccepted"
+        }
+      },
+      "required": [
+        "session_id",
+        "layer_id",
+        "job"
+      ]
+    },
+    "LayerAddPointsResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "job": {
+          "$ref": "../common/types.schema.json#/$defs/AsyncAccepted"
+        }
+      },
+      "required": [
+        "session_id",
+        "layer_id",
+        "job"
+      ]
+    },
+    "LayerUpdateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "updated_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "layer_id",
+        "updated_at"
+      ]
+    },
+    "LayerRemoveResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "removed_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "layer_id",
+        "removed_at"
+      ]
+    },
+    "LayerGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "layer_type": {
+          "type": "string",
+          "enum": [
+            "image",
+            "points"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "opacity": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "layer_id",
+        "layer_type",
+        "visible",
+        "opacity"
+      ]
+    },
+    "ViewSetAxisIndexResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "axis_index": {
+          "$ref": "../common/types.schema.json#/$defs/AxisIndex"
+        },
+        "updated_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "session_id",
+        "axis_index",
+        "updated_at"
+      ]
+    },
+    "ViewReorderAxesResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "order": {
+          "type": "array",
+          "items": {
+            "$ref": "../common/primitives.schema.json#/$defs/AxisLabel"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "session_id",
+        "order"
+      ]
+    },
+    "ViewSetChannelOrderResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "channel_order": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "session_id",
+        "channel_order"
+      ]
+    },
+    "CameraSetModeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "mode": {
+          "$ref": "../common/primitives.schema.json#/$defs/CameraMode"
+        }
+      },
+      "required": [
+        "session_id",
+        "mode"
+      ]
+    },
+    "CameraSetPoseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "pose": {
+          "$ref": "../common/types.schema.json#/$defs/CameraPose"
+        }
+      },
+      "required": [
+        "session_id",
+        "pose"
+      ]
+    },
+    "CameraGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "mode": {
+          "$ref": "../common/primitives.schema.json#/$defs/CameraMode"
+        },
+        "pose": {
+          "$ref": "../common/types.schema.json#/$defs/CameraPose"
+        }
+      },
+      "required": [
+        "session_id",
+        "mode",
+        "pose"
+      ]
+    },
+    "SelectionGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "session_id",
+        "selection"
+      ]
+    },
+    "SelectionSetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "selection": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "session_id",
+        "selection"
+      ]
+    },
+    "JobGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "job_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "state": {
+          "$ref": "../common/primitives.schema.json#/$defs/JobState"
+        },
+        "submitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "started_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "completed_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "error": {
+          "$ref": "../errors/error.schema.json#/$defs/ErrorEnvelope"
+        }
+      },
+      "required": [
+        "session_id",
+        "job_id",
+        "state",
+        "submitted_at"
+      ]
+    },
+    "JobCancelResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "job_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "state": {
+          "type": "string",
+          "const": "cancelled"
+        }
+      },
+      "required": [
+        "session_id",
+        "job_id",
+        "state"
+      ]
+    },
+    "JobListResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "job_id": {
+                "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+              },
+              "state": {
+                "$ref": "../common/primitives.schema.json#/$defs/JobState"
+              },
+              "submitted_at": {
+                "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+              }
+            },
+            "required": [
+              "job_id",
+              "state",
+              "submitted_at"
+            ]
+          }
+        }
+      },
+      "required": [
+        "session_id",
+        "jobs"
+      ]
+    },
+    "EventsSubscribeResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "subscription_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "topics": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "transport_uri": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "session_id",
+        "subscription_id",
+        "topics",
+        "transport_uri"
+      ]
+    },
+    "CommandLogExportResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "destination_uri": {
+          "type": "string"
+        },
+        "record_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "session_id",
+        "destination_uri",
+        "record_count"
+      ]
+    },
+    "CommandLogImportResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "import_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "job": {
+          "$ref": "../common/types.schema.json#/$defs/AsyncAccepted"
+        }
+      },
+      "required": [
+        "session_id",
+        "import_id",
+        "job"
+      ]
+    },
+    "CommandLogReplayResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "replay_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "job": {
+          "$ref": "../common/types.schema.json#/$defs/AsyncAccepted"
+        }
+      },
+      "required": [
+        "session_id",
+        "replay_id",
+        "job"
+      ]
+    }
+  }
+}

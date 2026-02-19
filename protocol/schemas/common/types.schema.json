@@ -1,0 +1,393 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lucida.dev/schemas/common/types.schema.json",
+  "title": "Lucida Composite Types",
+  "type": "object",
+  "$defs": {
+    "CapabilityFlags": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "async_jobs": {
+          "type": "boolean"
+        },
+        "dedicated_event_stream": {
+          "type": "boolean"
+        },
+        "idempotency_keys": {
+          "type": "boolean"
+        },
+        "dataref_oob": {
+          "type": "boolean"
+        },
+        "total_ordered_events": {
+          "type": "boolean"
+        },
+        "command_log_replay": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "async_jobs",
+        "dedicated_event_stream",
+        "idempotency_keys",
+        "dataref_oob",
+        "total_ordered_events",
+        "command_log_replay"
+      ]
+    },
+    "RequestMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "primitives.schema.json#/$defs/SemVer"
+        },
+        "request_id": {
+          "$ref": "primitives.schema.json#/$defs/UUIDv7"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id"
+      ]
+    },
+    "MutatingRequestMeta": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RequestMeta"
+        },
+        {
+          "type": "object",
+          "required": [
+            "idempotency_key"
+          ]
+        }
+      ]
+    },
+    "EventEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.]{2,63}$"
+        },
+        "session_seq": {
+          "$ref": "primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at"
+      ]
+    },
+    "AsyncAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "$ref": "primitives.schema.json#/$defs/UUIDv7"
+        },
+        "accepted_at": {
+          "$ref": "primitives.schema.json#/$defs/Timestamp"
+        },
+        "state": {
+          "type": "string",
+          "const": "queued"
+        }
+      },
+      "required": [
+        "job_id",
+        "accepted_at",
+        "state"
+      ]
+    },
+    "Transform": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "scale": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "minItems": 1
+        },
+        "translate": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "scale",
+        "translate"
+      ]
+    },
+    "CameraPose": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "position": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "target": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "up": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "fov_degrees": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 179
+        }
+      },
+      "required": [
+        "position",
+        "target",
+        "up"
+      ]
+    },
+    "AxisIndex": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "axis": {
+          "$ref": "primitives.schema.json#/$defs/AxisLabel"
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "axis",
+        "index"
+      ]
+    },
+    "DataRefSharedMemory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "shared_memory"
+        },
+        "shm_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1
+        },
+        "strides": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1
+        },
+        "endianness": {
+          "$ref": "primitives.schema.json#/$defs/Endianness"
+        },
+        "compression": {
+          "$ref": "primitives.schema.json#/$defs/Compression"
+        },
+        "ttl_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "checksum_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "kind",
+        "shm_name",
+        "dtype",
+        "shape",
+        "endianness",
+        "compression",
+        "ttl_ms",
+        "checksum_sha256"
+      ]
+    },
+    "DataRefTempFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "temp_file"
+        },
+        "file_path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1
+        },
+        "strides": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1
+        },
+        "endianness": {
+          "$ref": "primitives.schema.json#/$defs/Endianness"
+        },
+        "compression": {
+          "$ref": "primitives.schema.json#/$defs/Compression"
+        },
+        "ttl_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "checksum_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "kind",
+        "file_path",
+        "dtype",
+        "shape",
+        "endianness",
+        "compression",
+        "ttl_ms",
+        "checksum_sha256"
+      ]
+    },
+    "DataRefUri": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "uri"
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dtype": {
+          "type": "string",
+          "minLength": 1
+        },
+        "shape": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1
+        },
+        "strides": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minItems": 1
+        },
+        "endianness": {
+          "$ref": "primitives.schema.json#/$defs/Endianness"
+        },
+        "compression": {
+          "$ref": "primitives.schema.json#/$defs/Compression"
+        },
+        "ttl_ms": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "checksum_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "kind",
+        "uri",
+        "dtype",
+        "shape",
+        "endianness",
+        "compression",
+        "ttl_ms",
+        "checksum_sha256"
+      ]
+    },
+    "DataRef": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/DataRefSharedMemory"
+        },
+        {
+          "$ref": "#/$defs/DataRefTempFile"
+        },
+        {
+          "$ref": "#/$defs/DataRefUri"
+        }
+      ]
+    }
+  }
+}

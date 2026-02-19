@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://lucida.dev/schemas/common/primitives.schema.json",
+  "title": "Lucida Primitive Types",
+  "type": "object",
+  "$defs": {
+    "SemVer": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-.]+)?(?:\\+[0-9A-Za-z-.]+)?$"
+    },
+    "UUIDv7": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "AxisLabel": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,31}$"
+    },
+    "CameraMode": {
+      "type": "string",
+      "enum": [
+        "panzoom",
+        "arcball",
+        "freefly"
+      ]
+    },
+    "JobState": {
+      "type": "string",
+      "enum": [
+        "queued",
+        "running",
+        "completed",
+        "failed",
+        "cancelled"
+      ]
+    },
+    "Endianness": {
+      "type": "string",
+      "enum": [
+        "little",
+        "big"
+      ]
+    },
+    "Compression": {
+      "type": "string",
+      "enum": [
+        "none",
+        "gzip",
+        "zstd",
+        "blosc"
+      ]
+    },
+    "ErrorCode": {
+      "type": "string",
+      "enum": [
+        "LUCIDA_INVALID_PARAMS",
+        "LUCIDA_NOT_FOUND",
+        "LUCIDA_CONFLICT",
+        "LUCIDA_VERSION_MISMATCH",
+        "LUCIDA_UNSUPPORTED_CAPABILITY",
+        "LUCIDA_BUSY",
+        "LUCIDA_TIMEOUT",
+        "LUCIDA_INTERNAL",
+        "LUCIDA_IO_FAILURE",
+        "LUCIDA_AUTH_REQUIRED",
+        "LUCIDA_AUTH_DENIED"
+      ]
+    },
+    "VersionRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "min_version": {
+          "$ref": "#/$defs/SemVer"
+        },
+        "max_version": {
+          "$ref": "#/$defs/SemVer"
+        }
+      },
+      "required": [
+        "min_version",
+        "max_version"
+      ]
+    },
+    "SessionSeq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "InlinePayloadLimitBytes": {
+      "type": "integer",
+      "const": 65536
+    }
+  }
+}
