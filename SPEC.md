@@ -355,3 +355,13 @@ Automation:
 1. `scripts/check_context.py` validates context contracts.
 2. `tests/context/test_context_contracts.py` verifies checker behavior and required templates/playbook content.
 3. `.github/workflows/context-check.yml` runs context checks on PRs and pushes.
+
+## 20. Step 05 Kickoff Decisions (2026-02-19)
+
+1. Step 05 remains behavior-only at the protocol boundary (no schema/OpenRPC changes).
+2. Step 05 execution is dual-track:
+   - Python reference runtime implements deterministic Step 05 3D semantics.
+   - Rust renderer scaffold/workspace bootstrap starts in Step 05 kickoff.
+3. Minimum 3D render-mode contract for image layers is `mip`, `alpha`, and `iso` via standardized `layer.update.patch` keys.
+4. Camera policy for Step 05 is full 6DOF in both `arcball` and `freefly` modes (no world-up lock).
+5. Step 04 remains the deterministic 2D semantics baseline, and Step 05 builds on that baseline while Rust runtime scaffolding begins.

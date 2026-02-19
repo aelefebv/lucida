@@ -1,0 +1,85 @@
+name: Step 5 Render3D
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - refactor
+      - "codex/**"
+  schedule:
+    - cron: "30 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  step5-smoke:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --python 3.12
+
+      - name: Run Step 5 deterministic tests
+        run: uv run --python 3.12 python -m unittest tests/core/test_step5_render3d.py -v
+
+      - name: Run Step 5 perf smoke
+        env:
+          LUCIDA_STEP5_PERF_SMOKE_P95_MS: "60"
+        run: uv run --python 3.12 python -m unittest tests/perf/test_step5_render3d_perf.py -v
+
+      - name: Run Rust workspace check
+        run: cargo check --manifest-path rust/Cargo.toml --workspace
+
+      - name: Run Rust workspace tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace
+
+  step5-nightly-perf:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --python 3.12
+
+      - name: Run Step 5 deterministic tests
+        run: uv run --python 3.12 python -m unittest tests/core/test_step5_render3d.py -v
+
+      - name: Run Step 5 full perf regression gate
+        env:
+          LUCIDA_STEP5_PERF_FULL: "1"
+          LUCIDA_STEP5_PERF_SMOKE_P95_MS: "60"
+          LUCIDA_STEP5_PERF_REGRESSION_FACTOR: "1.25"
+        run: uv run --python 3.12 python -m unittest tests/perf/test_step5_render3d_perf.py -v
+
+      - name: Run Rust workspace check
+        run: cargo check --manifest-path rust/Cargo.toml --workspace
+
+      - name: Run Rust workspace tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace

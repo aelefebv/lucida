@@ -21,6 +21,14 @@
    - `python/lucida_core/io/cache.py`
    - `python/lucida_core/io/metadata.py`
    - `python/lucida_core/io/scheduler.py`
+6. Step 04/05 deterministic planning runtime:
+   - `python/lucida_core/render2d/*`
+   - `python/lucida_core/render3d/*`
+   - `python/lucida_core/engine.py`
+7. Step 05 Rust renderer scaffold kickoff:
+   - `rust/Cargo.toml`
+   - `rust/crates/lucida-render-wgpu/*`
+   - `rust/crates/lucida-render-shell/*`
 
 ## Planned Runtime Components (Roadmap-Aligned)
 

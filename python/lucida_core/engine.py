@@ -1,4 +1,4 @@
-"""Deterministic in-memory ND state engine with Step 3/4 extensions."""
+"""Deterministic in-memory ND state engine with Step 3/4/5 extensions."""
 
 from __future__ import annotations
 
@@ -43,6 +43,13 @@ from .render2d import (
     panzoom_state_to_pose,
 )
 from .render2d.controls import PanZoomState
+from .render3d import (
+    FramePlan3D,
+    Render3DInvalidationScheduler,
+    build_frame_plan_3d,
+    canonicalize_camera_pose_3d,
+    frame_plan_3d_to_dict,
+)
 
 
 ProtocolVersion = "1.0.0"
@@ -185,6 +192,7 @@ class SessionState:
     pending_job_ops: dict[str, Callable[[], dict[str, Any]]] = field(default_factory=dict)
     job_cancel_tokens: dict[str, CancelToken] = field(default_factory=dict)
     frame_plans: dict[str, FramePlan2D] = field(default_factory=dict)
+    frame_plans_3d: dict[str, FramePlan3D] = field(default_factory=dict)
     outbox: list[dict[str, Any]] = field(default_factory=list)
     session_seq: int = 0
 
@@ -237,6 +245,7 @@ class NDStateEngine:
         self._cache = cache_manager or CacheManager()
         self._scheduler = io_scheduler or IOScheduler()
         self._render2d_scheduler = Render2DInvalidationScheduler()
+        self._render3d_scheduler = Render3DInvalidationScheduler()
         self._handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "system.hello": self._system_hello,
             "system.capabilities.get": self._system_capabilities_get,
@@ -378,6 +387,10 @@ class NDStateEngine:
                         view_id: frame_plan_to_dict(plan)
                         for view_id, plan in sorted(session.frame_plans.items())
                     },
+                    "frame_plans_3d": {
+                        view_id: frame_plan_3d_to_dict(plan)
+                        for view_id, plan in sorted(session.frame_plans_3d.items())
+                    },
                     "outbox": deepcopy(session.outbox),
                 }
             )
@@ -394,6 +407,14 @@ class NDStateEngine:
         if plan is None:
             raise not_found("Frame plan does not exist for view", {"session_id": session_id, "view_id": view_id})
         return frame_plan_to_dict(plan)
+
+    def frame_plan_3d_for_view(self, session_id: str, view_id: str) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        self._require_view(session, view_id)
+        plan = session.frame_plans_3d.get(view_id)
+        if plan is None:
+            raise not_found("3D frame plan does not exist for view", {"session_id": session_id, "view_id": view_id})
+        return frame_plan_3d_to_dict(plan)
 
     def _validate_protocol(self, params: dict[str, Any]) -> None:
         version = params.get("protocol_version")
@@ -574,6 +595,50 @@ class NDStateEngine:
             panzoom = PanZoomState(center_x=0.0, center_y=0.0, zoom=1.0)
         return panzoom_state_to_pose(panzoom)
 
+    def _canonical_3d_pose(self, pose: dict[str, Any], *, mode: str, strict: bool) -> dict[str, Any]:
+        try:
+            return canonicalize_camera_pose_3d(deepcopy(pose), mode=mode, strict=strict)
+        except ValueError as exc:
+            if strict:
+                raise invalid_params(f"pose is invalid for {mode} mode", {"error": str(exc)}) from exc
+            return canonicalize_camera_pose_3d({}, mode=mode, strict=False)
+
+    def _validate_step5_render_patch(self, layer: LayerState, patch: dict[str, Any]) -> list[str]:
+        style_reasons: list[str] = []
+        render_keys = {"render_mode", "iso_threshold", "density_scale", "sample_step"}
+        touched_render_keys = sorted(render_keys.intersection(patch.keys()))
+        if touched_render_keys and layer.layer_type != "image":
+            raise invalid_params(
+                "Step 05 render controls apply only to image layers",
+                {"layer_id": layer.layer_id, "layer_type": layer.layer_type, "keys": touched_render_keys},
+            )
+
+        if "render_mode" in patch:
+            render_mode = patch["render_mode"]
+            if not isinstance(render_mode, str) or render_mode not in {"mip", "alpha", "iso"}:
+                raise invalid_params("patch.render_mode must be one of mip, alpha, iso", {"value": render_mode})
+            style_reasons.append("layer.update.render_mode")
+
+        if "iso_threshold" in patch:
+            iso_threshold = patch["iso_threshold"]
+            if not isinstance(iso_threshold, (int, float)) or not (0 <= float(iso_threshold) <= 1):
+                raise invalid_params("patch.iso_threshold must be between 0 and 1", {"value": iso_threshold})
+            style_reasons.append("layer.update.iso_threshold")
+
+        if "density_scale" in patch:
+            density_scale = patch["density_scale"]
+            if not isinstance(density_scale, (int, float)) or not (float(density_scale) > 0):
+                raise invalid_params("patch.density_scale must be greater than 0", {"value": density_scale})
+            style_reasons.append("layer.update.density_scale")
+
+        if "sample_step" in patch:
+            sample_step = patch["sample_step"]
+            if not isinstance(sample_step, (int, float)) or not (float(sample_step) > 0):
+                raise invalid_params("patch.sample_step must be greater than 0", {"value": sample_step})
+            style_reasons.append("layer.update.sample_step")
+
+        return style_reasons
+
     def _mark_view_invalidation(
         self,
         session: SessionState,
@@ -585,6 +650,12 @@ class NDStateEngine:
         if view_id not in session.views:
             return
         self._render2d_scheduler.mark(
+            session_id=session.session_id,
+            view_id=view_id,
+            kind=kind,
+            reason=reason,
+        )
+        self._render3d_scheduler.mark(
             session_id=session.session_id,
             view_id=view_id,
             kind=kind,
@@ -612,12 +683,17 @@ class NDStateEngine:
         view = session.views.get(view_id)
         if view is None:
             return
-        ticket = self._render2d_scheduler.consume(session_id=session.session_id, view_id=view_id)
-        if ticket is None:
-            return
-        previous = session.frame_plans.get(view_id)
-        plan = build_frame_plan_2d(session=session, view=view, ticket=ticket, previous_plan=previous)
-        session.frame_plans[view_id] = plan
+        ticket_2d = self._render2d_scheduler.consume(session_id=session.session_id, view_id=view_id)
+        if ticket_2d is not None:
+            previous_2d = session.frame_plans.get(view_id)
+            plan_2d = build_frame_plan_2d(session=session, view=view, ticket=ticket_2d, previous_plan=previous_2d)
+            session.frame_plans[view_id] = plan_2d
+
+        ticket_3d = self._render3d_scheduler.consume(session_id=session.session_id, view_id=view_id)
+        if ticket_3d is not None:
+            previous_3d = session.frame_plans_3d.get(view_id)
+            plan_3d = build_frame_plan_3d(session=session, view=view, ticket=ticket_3d, previous_plan=previous_3d)
+            session.frame_plans_3d[view_id] = plan_3d
 
     def _plan_views(self, session: SessionState, view_ids: list[str]) -> None:
         for view_id in sorted(set(view_ids)):
@@ -1068,6 +1144,7 @@ class NDStateEngine:
             if not isinstance(patch["name"], str):
                 raise invalid_params("patch.name must be string", {})
             layer.name = patch["name"]
+        style_reasons.extend(self._validate_step5_render_patch(layer, patch))
         layer.patch.update(deepcopy(patch))
         updated_at = self._clock()
         self._emit_event(
@@ -1157,6 +1234,7 @@ class NDStateEngine:
         view = self._require_view(session, params["view_id"])
         del session.views[view.view_id]
         session.frame_plans.pop(view.view_id, None)
+        session.frame_plans_3d.pop(view.view_id, None)
         closed_at = self._clock()
         self._emit_event(
             session,
@@ -1392,6 +1470,8 @@ class NDStateEngine:
         view.camera_mode = str(mode)
         if view.camera_mode == "panzoom":
             view.camera_pose = self._canonical_panzoom_pose(view.camera_pose, strict=False)
+        else:
+            view.camera_pose = self._canonical_3d_pose(view.camera_pose, mode=view.camera_mode, strict=False)
         self._mark_view_invalidation(
             session,
             view_id=view.view_id,
@@ -1420,7 +1500,7 @@ class NDStateEngine:
         if view.camera_mode == "panzoom":
             view.camera_pose = self._canonical_panzoom_pose(pose, strict=True)
         else:
-            view.camera_pose = deepcopy(pose)
+            view.camera_pose = self._canonical_3d_pose(pose, mode=view.camera_mode, strict=True)
         self._mark_view_invalidation(
             session,
             view_id=view.view_id,
@@ -1445,6 +1525,8 @@ class NDStateEngine:
         view = self._require_view(session, params["view_id"])
         if view.camera_mode == "panzoom":
             view.camera_pose = self._canonical_panzoom_pose(view.camera_pose, strict=False)
+        else:
+            view.camera_pose = self._canonical_3d_pose(view.camera_pose, mode=view.camera_mode, strict=False)
         return {
             "session_id": session.session_id,
             "view_id": view.view_id,
