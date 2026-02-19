@@ -42,12 +42,12 @@ jobs:
           enable-cache: true
 
       - name: Sync dependencies (including backend extras)
-        run: uv sync --all-extras
+        run: uv sync --all-extras --python 3.12
 
       - name: Pin zarr lane
         run: |
-          uv run python -m pip install --upgrade "${{ matrix.zarr_spec }}"
-          uv run python - <<'PY'
+          uv pip install --python .venv/bin/python --upgrade "${{ matrix.zarr_spec }}"
+          uv run --python 3.12 python - <<'PY'
           import zarr
           print(zarr.__version__)
           PY
@@ -86,7 +86,7 @@ jobs:
 
       - name: Provision S3 and GCS OME-Zarr fixtures
         run: |
-          uv run python - <<'PY'
+          uv run --python 3.12 python - <<'PY'
           import os
 
           import gcsfs
@@ -171,7 +171,7 @@ jobs:
           PY
 
       - name: Run Step 3 backend integration tests
-        run: uv run python -m unittest tests/core/test_step3_backend_integrations.py -v
+        run: uv run --python 3.12 python -m unittest tests/core/test_step3_backend_integrations.py -v
 
       - name: Show emulator logs on failure
         if: failure()
