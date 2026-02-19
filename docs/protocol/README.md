@@ -202,3 +202,18 @@ Every error includes:
    - optional request fields: `overwrite`, `timeout_ms`, `max_retries`.
    - response shape: `{ session_id, job }` using the standard async accepted envelope.
    - completion event: `dataset.exported` with `dataset_id`, `destination_uri`, and `job_id`.
+
+## 14. Step 04 behavior notes (no schema changes)
+
+1. Step 04 does not add methods or fields; behavior is defined behind existing contracts.
+2. 2D display plane selection:
+   - renderer uses the last two labels in `view.axis_order` as displayed axes.
+   - non-displayed axes are resolved via `view.axis_indices`.
+   - user-facing X/Y selection is therefore controlled through `view.reorder_axes`.
+3. 2D channel traversal and compositing:
+   - `view.set_channel_order` controls channel traversal order for 2D planning.
+   - `layer.update` changes to `visible` and `opacity` participate in style invalidation and compositing output.
+4. Panzoom camera semantics:
+   - `camera.set_pose` in `panzoom` mode is canonicalized so `target[0:2]` is the pan center.
+   - effective zoom derives from `1 / max(position[2] - target[2], 1e-6)`.
+   - `camera.get` in `panzoom` mode returns canonical pose representation.

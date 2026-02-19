@@ -29,6 +29,14 @@ Out of scope:
 3. Camera state serialization tests.
 4. 3D performance tests.
 
+## Step 05 Kickoff Rust Scope
+Step 05 kickoff owns renderer bootstrap work that was intentionally excluded from Step 04:
+
+1. Create Rust renderer scaffold and workspace target(s) for Lucida render runtime components.
+2. Establish compile/test baseline for renderer crate(s) so subsequent 2D/3D work has stable CI entrypoints.
+3. Port and adhere to Step 04 2D behavior contract as the renderer foundation before expanding 3D camera/render semantics.
+4. Maintain behavioral conformance with Step 04 deterministic 2D planning rules during the migration from Python reference to Rust runtime.
+
 ## Test and Acceptance Gates
 1. 3D camera interaction reaches >=30 FPS on target hardware.
 2. Replayed camera commands reproduce equivalent view state.

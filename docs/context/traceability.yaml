@@ -119,11 +119,26 @@
     {
       "step_id": "step-04",
       "step_spec_path": "specs/roadmap/step-04-2d-renderer-and-controls.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
+      "status": "in_progress",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/protocol/README.md",
+        "specs/roadmap/step-04-2d-renderer-and-controls.md",
+        "python/lucida_core/__init__.py",
+        "python/lucida_core/engine.py",
+        "python/lucida_core/render2d/__init__.py",
+        "python/lucida_core/render2d/model.py",
+        "python/lucida_core/render2d/controls.py",
+        "python/lucida_core/render2d/planner.py",
+        "python/lucida_core/render2d/scheduler.py",
+        ".github/workflows/step4-render2d.yml"
+      ],
+      "test_paths": [
+        "tests/core/test_step4_render2d.py",
+        "tests/perf/test_step4_render2d_perf.py"
+      ],
       "protocol_artifacts": [],
-      "last_validated": ""
+      "last_validated": "2026-02-19"
     },
     {
       "step_id": "step-05",
