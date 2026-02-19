@@ -1,0 +1,85 @@
+name: Step 6 Points
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - refactor
+      - "codex/**"
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+
+jobs:
+  step6-smoke:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --python 3.12
+
+      - name: Run Step 6 deterministic tests
+        run: uv run --python 3.12 python -m unittest tests/core/test_step6_points_graph.py -v
+
+      - name: Run Step 6 perf smoke
+        env:
+          LUCIDA_STEP6_PERF_SMOKE_P95_MS: "80"
+        run: uv run --python 3.12 python -m unittest tests/perf/test_step6_points_perf.py -v
+
+      - name: Run Rust workspace check
+        run: cargo check --manifest-path rust/Cargo.toml --workspace
+
+      - name: Run Rust workspace tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace
+
+  step6-nightly-perf:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --python 3.12
+
+      - name: Run Step 6 deterministic tests
+        run: uv run --python 3.12 python -m unittest tests/core/test_step6_points_graph.py -v
+
+      - name: Run Step 6 full perf regression gate
+        env:
+          LUCIDA_STEP6_PERF_FULL: "1"
+          LUCIDA_STEP6_PERF_SMOKE_P95_MS: "80"
+          LUCIDA_STEP6_PERF_REGRESSION_FACTOR: "1.25"
+        run: uv run --python 3.12 python -m unittest tests/perf/test_step6_points_perf.py -v
+
+      - name: Run Rust workspace check
+        run: cargo check --manifest-path rust/Cargo.toml --workspace
+
+      - name: Run Rust workspace tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace

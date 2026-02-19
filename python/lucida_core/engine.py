@@ -1,4 +1,4 @@
-"""Deterministic in-memory ND state engine with Step 3/4/5 extensions."""
+"""Deterministic in-memory ND state engine with Step 3/4/5/6 extensions."""
 
 from __future__ import annotations
 
@@ -50,9 +50,18 @@ from .render3d import (
     canonicalize_camera_pose_3d,
     frame_plan_3d_to_dict,
 )
+from .render_points import (
+    FramePlanPoints,
+    RenderPointsInvalidationScheduler,
+    build_frame_plan_points,
+    frame_plan_points_to_dict,
+)
 
 
 ProtocolVersion = "1.0.0"
+POINT_SELECTION_INLINE_CAP = 4096
+_DATAREF_DEFAULT_TTL_MS = 60_000
+_DATAREF_CHECKSUM_PLACEHOLDER = "0" * 64
 
 
 MUTATING_METHODS = {
@@ -144,6 +153,11 @@ class LayerState:
     channel: int | None = None
     transform: dict[str, list[float]] | None = None
     data_ref: dict[str, Any] | None = None
+    point_id_ref: dict[str, Any] | None = None
+    edges_ref: dict[str, Any] | None = None
+    attribute_table_ref: dict[str, Any] | None = None
+    attribute_columns: list[str] = field(default_factory=list)
+    coordinate_axes: list[str] = field(default_factory=list)
     attributes: dict[str, Any] = field(default_factory=dict)
     patch: dict[str, Any] = field(default_factory=dict)
 
@@ -193,6 +207,7 @@ class SessionState:
     job_cancel_tokens: dict[str, CancelToken] = field(default_factory=dict)
     frame_plans: dict[str, FramePlan2D] = field(default_factory=dict)
     frame_plans_3d: dict[str, FramePlan3D] = field(default_factory=dict)
+    frame_plans_points: dict[str, FramePlanPoints] = field(default_factory=dict)
     outbox: list[dict[str, Any]] = field(default_factory=list)
     session_seq: int = 0
 
@@ -246,6 +261,7 @@ class NDStateEngine:
         self._scheduler = io_scheduler or IOScheduler()
         self._render2d_scheduler = Render2DInvalidationScheduler()
         self._render3d_scheduler = Render3DInvalidationScheduler()
+        self._render_points_scheduler = RenderPointsInvalidationScheduler()
         self._handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "system.hello": self._system_hello,
             "system.capabilities.get": self._system_capabilities_get,
@@ -353,6 +369,13 @@ class NDStateEngine:
                             "name": layer.name,
                             "visible": layer.visible,
                             "opacity": layer.opacity,
+                            "data_ref": deepcopy(layer.data_ref),
+                            "point_id_ref": deepcopy(layer.point_id_ref),
+                            "edges_ref": deepcopy(layer.edges_ref),
+                            "attribute_table_ref": deepcopy(layer.attribute_table_ref),
+                            "attribute_columns": list(layer.attribute_columns),
+                            "coordinate_axes": list(layer.coordinate_axes),
+                            "patch": deepcopy(layer.patch),
                         }
                         for layer_id, layer in sorted(session.layers.items())
                     },
@@ -391,6 +414,10 @@ class NDStateEngine:
                         view_id: frame_plan_3d_to_dict(plan)
                         for view_id, plan in sorted(session.frame_plans_3d.items())
                     },
+                    "frame_plans_points": {
+                        view_id: frame_plan_points_to_dict(plan)
+                        for view_id, plan in sorted(session.frame_plans_points.items())
+                    },
                     "outbox": deepcopy(session.outbox),
                 }
             )
@@ -415,6 +442,14 @@ class NDStateEngine:
         if plan is None:
             raise not_found("3D frame plan does not exist for view", {"session_id": session_id, "view_id": view_id})
         return frame_plan_3d_to_dict(plan)
+
+    def frame_plan_points_for_view(self, session_id: str, view_id: str) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        self._require_view(session, view_id)
+        plan = session.frame_plans_points.get(view_id)
+        if plan is None:
+            raise not_found("Points frame plan does not exist for view", {"session_id": session_id, "view_id": view_id})
+        return frame_plan_points_to_dict(plan)
 
     def _validate_protocol(self, params: dict[str, Any]) -> None:
         version = params.get("protocol_version")
@@ -565,8 +600,18 @@ class NDStateEngine:
                 "up": [0.0, 1.0, 0.0],
                 "fov_degrees": 45.0,
             },
-            selection={},
+            selection=self._new_empty_selection_state(),
         )
+
+    def _new_empty_selection_state(self) -> dict[str, Any]:
+        timestamp = self._clock()
+        return {
+            "selection_version": 1,
+            "query": {"mode": "ids", "combine": "replace", "ids": []},
+            "resolved": {"count": 0, "selected_point_ids": []},
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
 
     def _dataset_axis_size(self, dataset: DatasetState, axis: str) -> int | None:
         if axis not in dataset.axis_labels:
@@ -639,6 +684,360 @@ class NDStateEngine:
 
         return style_reasons
 
+    def _dtype_kind(self, dtype: str) -> str:
+        normalized = dtype.strip().lower()
+        if normalized and normalized[0] in {"<", ">", "|", "="}:
+            normalized = normalized[1:]
+
+        numeric_aliases = {
+            "f2": "float",
+            "f4": "float",
+            "f8": "float",
+            "f16": "float",
+            "f32": "float",
+            "f64": "float",
+            "i1": "int",
+            "i2": "int",
+            "i4": "int",
+            "i8": "int",
+            "u1": "int",
+            "u2": "int",
+            "u4": "int",
+            "u8": "int",
+        }
+        if normalized in numeric_aliases:
+            return numeric_aliases[normalized]
+        if normalized.startswith("float"):
+            return "float"
+        if normalized.startswith("int") or normalized.startswith("uint"):
+            return "int"
+        return "other"
+
+    def _validate_dataref(self, *, field: str, data_ref: Any, rank: int, dtype_kind: str | None = None) -> tuple[list[int], str]:
+        if not isinstance(data_ref, dict):
+            raise invalid_params(f"{field} must be an object", {})
+        shape_value = data_ref.get("shape")
+        if not isinstance(shape_value, list) or len(shape_value) != rank:
+            raise invalid_params(f"{field}.shape must contain exactly {rank} dimensions", {})
+        if not all(isinstance(item, int) and item > 0 for item in shape_value):
+            raise invalid_params(f"{field}.shape values must be positive integers", {})
+        shape = [int(item) for item in shape_value]
+
+        dtype = data_ref.get("dtype")
+        if not isinstance(dtype, str) or not dtype.strip():
+            raise invalid_params(f"{field}.dtype must be a non-empty string", {})
+        kind = self._dtype_kind(dtype)
+        if dtype_kind == "numeric" and kind not in {"int", "float"}:
+            raise invalid_params(f"{field}.dtype must be numeric", {"dtype": dtype})
+        if dtype_kind == "integer" and kind != "int":
+            raise invalid_params(f"{field}.dtype must be integer", {"dtype": dtype})
+        return (shape, dtype)
+
+    def _validate_points_filter_predicate(self, predicate: Any, *, path: str = "points_filter") -> None:
+        if not isinstance(predicate, dict):
+            raise invalid_params(f"{path} must be an object", {})
+        op = predicate.get("op")
+        if not isinstance(op, str):
+            raise invalid_params(f"{path}.op must be a string", {})
+
+        if op in {"and", "or"}:
+            predicates = predicate.get("predicates")
+            if not isinstance(predicates, list) or not predicates:
+                raise invalid_params(f"{path}.predicates must be a non-empty array", {})
+            for idx, child in enumerate(predicates):
+                self._validate_points_filter_predicate(child, path=f"{path}.predicates[{idx}]")
+            return
+
+        if op == "not":
+            self._validate_points_filter_predicate(predicate.get("predicate"), path=f"{path}.predicate")
+            return
+
+        if op == "range":
+            field = predicate.get("field")
+            minimum = predicate.get("min")
+            maximum = predicate.get("max")
+            if not isinstance(field, str) or not field:
+                raise invalid_params(f"{path}.field must be a non-empty string", {})
+            if minimum is None and maximum is None:
+                raise invalid_params(f"{path} requires at least one of min or max", {})
+            if minimum is not None and not isinstance(minimum, (int, float)):
+                raise invalid_params(f"{path}.min must be numeric", {})
+            if maximum is not None and not isinstance(maximum, (int, float)):
+                raise invalid_params(f"{path}.max must be numeric", {})
+            if isinstance(minimum, (int, float)) and isinstance(maximum, (int, float)) and float(minimum) > float(maximum):
+                raise invalid_params(f"{path}.min must be <= max", {})
+            return
+
+        if op == "in":
+            field = predicate.get("field")
+            values = predicate.get("values")
+            if not isinstance(field, str) or not field:
+                raise invalid_params(f"{path}.field must be a non-empty string", {})
+            if not isinstance(values, list) or not values:
+                raise invalid_params(f"{path}.values must be a non-empty array", {})
+            allowed_types = (str, int, float, bool)
+            if not all(isinstance(value, allowed_types) for value in values):
+                raise invalid_params(f"{path}.values must contain primitive values", {})
+            return
+
+        if op == "eq":
+            field = predicate.get("field")
+            if not isinstance(field, str) or not field:
+                raise invalid_params(f"{path}.field must be a non-empty string", {})
+            value = predicate.get("value")
+            if not isinstance(value, (str, int, float, bool)):
+                raise invalid_params(f"{path}.value must be a primitive value", {})
+            return
+
+        if op == "exists":
+            field = predicate.get("field")
+            if not isinstance(field, str) or not field:
+                raise invalid_params(f"{path}.field must be a non-empty string", {})
+            return
+
+        raise invalid_params(f"{path}.op is unsupported", {"op": op})
+
+    def _validate_step6_points_patch(self, layer: LayerState, patch: dict[str, Any]) -> list[str]:
+        style_reasons: list[str] = []
+        points_keys = {"points_filter", "color_by", "color_map", "lod_cell_px", "lod_max_points", "point_size"}
+        touched_points_keys = sorted(points_keys.intersection(patch.keys()))
+        if touched_points_keys and layer.layer_type != "points":
+            raise invalid_params(
+                "Step 06 points controls apply only to points layers",
+                {"layer_id": layer.layer_id, "layer_type": layer.layer_type, "keys": touched_points_keys},
+            )
+
+        if "points_filter" in patch:
+            points_filter = patch["points_filter"]
+            if points_filter is not None:
+                self._validate_points_filter_predicate(points_filter)
+            style_reasons.append("layer.update.points_filter")
+
+        if "color_by" in patch:
+            if not isinstance(patch["color_by"], str) or not patch["color_by"]:
+                raise invalid_params("patch.color_by must be a non-empty string", {})
+            style_reasons.append("layer.update.color_by")
+
+        if "color_map" in patch:
+            if not isinstance(patch["color_map"], str) or not patch["color_map"]:
+                raise invalid_params("patch.color_map must be a non-empty string", {})
+            style_reasons.append("layer.update.color_map")
+
+        if "lod_cell_px" in patch:
+            lod_cell_px = patch["lod_cell_px"]
+            if not isinstance(lod_cell_px, int) or lod_cell_px <= 0:
+                raise invalid_params("patch.lod_cell_px must be a positive integer", {})
+            style_reasons.append("layer.update.lod_cell_px")
+
+        if "lod_max_points" in patch:
+            lod_max_points = patch["lod_max_points"]
+            if not isinstance(lod_max_points, int) or lod_max_points <= 0:
+                raise invalid_params("patch.lod_max_points must be a positive integer", {})
+            style_reasons.append("layer.update.lod_max_points")
+
+        if "point_size" in patch:
+            point_size = patch["point_size"]
+            if not isinstance(point_size, (int, float)) or float(point_size) <= 0:
+                raise invalid_params("patch.point_size must be greater than 0", {})
+            style_reasons.append("layer.update.point_size")
+
+        return style_reasons
+
+    def _selection_ids_data_ref(self, *, session_id: str, view_id: str, count: int) -> dict[str, Any]:
+        return {
+            "kind": "uri",
+            "uri": f"memory://{session_id}/{view_id}/selection_ids",
+            "dtype": "uint64",
+            "shape": [max(count, 1)],
+            "endianness": "little",
+            "compression": "none",
+            "ttl_ms": _DATAREF_DEFAULT_TTL_MS,
+            "checksum_sha256": _DATAREF_CHECKSUM_PLACEHOLDER,
+        }
+
+    def _canonical_selection_state(
+        self,
+        *,
+        session: SessionState,
+        view: ViewState,
+        selection: dict[str, Any],
+    ) -> dict[str, Any]:
+        if "selection_version" in selection:
+            selection_version = selection.get("selection_version")
+            if not isinstance(selection_version, int) or selection_version <= 0:
+                raise invalid_params("selection.selection_version must be a positive integer", {})
+
+            query = selection.get("query")
+            if not isinstance(query, dict):
+                raise invalid_params("selection.query must be an object", {})
+            mode = query.get("mode")
+            if mode not in {"box", "lasso", "predicate", "ids"}:
+                raise invalid_params("selection.query.mode must be one of box, lasso, predicate, ids", {})
+            combine = query.get("combine")
+            if combine is None:
+                query["combine"] = "replace"
+            elif combine not in {"replace", "union", "intersect", "subtract"}:
+                raise invalid_params("selection.query.combine is invalid", {})
+            if "predicate" in query and query.get("predicate") is not None:
+                self._validate_points_filter_predicate(query.get("predicate"), path="selection.query.predicate")
+
+            resolved = selection.get("resolved")
+            if not isinstance(resolved, dict):
+                raise invalid_params("selection.resolved must be an object", {})
+            resolved_count = resolved.get("count")
+            if not isinstance(resolved_count, int) or resolved_count < 0:
+                raise invalid_params("selection.resolved.count must be a non-negative integer", {})
+
+            selected_ids = resolved.get("selected_point_ids")
+            selected_ids_ref = resolved.get("selected_point_ids_ref")
+            if selected_ids is not None and selected_ids_ref is not None:
+                raise invalid_params("selection.resolved cannot include both selected_point_ids and selected_point_ids_ref", {})
+
+            if selected_ids is not None:
+                if not isinstance(selected_ids, list) or not all(isinstance(item, int) and item >= 0 for item in selected_ids):
+                    raise invalid_params("selection.resolved.selected_point_ids must be an array of non-negative integers", {})
+                dedup_ids = sorted(set(int(item) for item in selected_ids))
+                if len(dedup_ids) > POINT_SELECTION_INLINE_CAP:
+                    raise invalid_params(
+                        f"selection.resolved.selected_point_ids exceeds inline cap {POINT_SELECTION_INLINE_CAP}",
+                        {},
+                    )
+                resolved = {
+                    "count": int(resolved_count),
+                    "selected_point_ids": dedup_ids,
+                }
+            elif selected_ids_ref is not None:
+                self._validate_dataref(field="selection.resolved.selected_point_ids_ref", data_ref=selected_ids_ref, rank=1, dtype_kind="integer")
+                resolved = {
+                    "count": int(resolved_count),
+                    "selected_point_ids_ref": deepcopy(selected_ids_ref),
+                }
+            else:
+                resolved = {"count": int(resolved_count)}
+
+            updated_at = selection.get("updated_at")
+            if updated_at is not None and not isinstance(updated_at, str):
+                raise invalid_params("selection.updated_at must be an RFC3339 timestamp string", {})
+            created_at = selection.get("created_at")
+            if created_at is not None and not isinstance(created_at, str):
+                raise invalid_params("selection.created_at must be an RFC3339 timestamp string", {})
+
+            canonical = {
+                "selection_version": int(selection_version),
+                "query": deepcopy(query),
+                "resolved": resolved,
+                "updated_at": str(updated_at or self._clock()),
+            }
+            if created_at is not None:
+                canonical["created_at"] = str(created_at)
+            return canonical
+
+        indices = selection.get("indices", selection.get("ids"))
+        dedup_ids: list[int] = []
+        if isinstance(indices, list):
+            dedup_ids = sorted({int(item) for item in indices if isinstance(item, int) and item >= 0})
+        resolved: dict[str, Any] = {"count": len(dedup_ids)}
+        if len(dedup_ids) <= POINT_SELECTION_INLINE_CAP:
+            resolved["selected_point_ids"] = list(dedup_ids)
+        else:
+            resolved["selected_point_ids_ref"] = self._selection_ids_data_ref(
+                session_id=session.session_id,
+                view_id=view.view_id,
+                count=len(dedup_ids),
+            )
+        timestamp = self._clock()
+        return {
+            "selection_version": 1,
+            "query": {"mode": "ids", "combine": "replace", "ids": list(dedup_ids)},
+            "resolved": resolved,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+
+    def _selection_linked_image_context(self, *, view: ViewState, selection_state: dict[str, Any]) -> dict[str, Any]:
+        query = selection_state.get("query")
+        resolved = selection_state.get("resolved")
+        bbox_min: list[float] = [0.0, 0.0, 0.0]
+        bbox_max: list[float] = [0.0, 0.0, 0.0]
+
+        if isinstance(query, dict):
+            box_world = query.get("box_world")
+            if isinstance(box_world, dict):
+                min_value = box_world.get("min")
+                max_value = box_world.get("max")
+                if (
+                    isinstance(min_value, list)
+                    and isinstance(max_value, list)
+                    and len(min_value) == len(max_value)
+                    and min_value
+                    and all(isinstance(v, (int, float)) for v in min_value)
+                    and all(isinstance(v, (int, float)) for v in max_value)
+                ):
+                    bbox_min = [float(v) for v in min_value]
+                    bbox_max = [float(v) for v in max_value]
+            elif isinstance(query.get("lasso_world"), list) and query.get("lasso_world"):
+                lasso = query.get("lasso_world")
+                assert isinstance(lasso, list)  # narrowed above
+                points = [point for point in lasso if isinstance(point, list) and all(isinstance(v, (int, float)) for v in point)]
+                if points:
+                    dims = len(points[0])
+                    dims = max(2, min(dims, 3))
+                    mins = [float("inf")] * dims
+                    maxs = [float("-inf")] * dims
+                    for point in points:
+                        for idx in range(dims):
+                            value = float(point[idx])
+                            mins[idx] = min(mins[idx], value)
+                            maxs[idx] = max(maxs[idx], value)
+                    bbox_min = mins
+                    bbox_max = maxs
+
+        if bbox_min == [0.0, 0.0, 0.0] and bbox_max == [0.0, 0.0, 0.0] and isinstance(resolved, dict):
+            selected_ids = resolved.get("selected_point_ids")
+            if isinstance(selected_ids, list) and selected_ids:
+                first = float(min(selected_ids))
+                last = float(max(selected_ids))
+                bbox_min = [first, 0.0, 0.0]
+                bbox_max = [last, 1.0, 1.0]
+
+        dims = min(len(bbox_min), len(bbox_max))
+        dims = max(2, min(dims, 3))
+        bbox_min = bbox_min[:dims]
+        bbox_max = bbox_max[:dims]
+        centroid = [(bbox_min[idx] + bbox_max[idx]) * 0.5 for idx in range(dims)]
+        return {
+            "centroid_world": centroid,
+            "bbox_world": {"min": bbox_min, "max": bbox_max},
+            "slice_hint": {axis: int(index) for axis, index in sorted(view.axis_indices.items())},
+        }
+
+    def _points_state_summary(self, layer: LayerState) -> dict[str, Any]:
+        point_count = 0
+        edge_count = 0
+        if isinstance(layer.data_ref, dict):
+            shape = layer.data_ref.get("shape")
+            if isinstance(shape, list) and shape and isinstance(shape[0], int):
+                point_count = int(shape[0])
+        if isinstance(layer.edges_ref, dict):
+            shape = layer.edges_ref.get("shape")
+            if isinstance(shape, list) and shape and isinstance(shape[0], int):
+                edge_count = int(shape[0])
+
+        patch = layer.patch if isinstance(layer.patch, dict) else {}
+        lod_cell_px = patch.get("lod_cell_px", 2)
+        lod_max_points = patch.get("lod_max_points", 250_000)
+        active_filter = patch.get("points_filter")
+        return {
+            "point_count": point_count,
+            "edge_count": edge_count,
+            "attribute_columns": list(layer.attribute_columns),
+            "active_lod": {
+                "lod_cell_px": int(lod_cell_px) if isinstance(lod_cell_px, int) else 2,
+                "lod_max_points": int(lod_max_points) if isinstance(lod_max_points, int) else 250_000,
+            },
+            "active_filter": deepcopy(active_filter) if isinstance(active_filter, dict) else None,
+        }
+
     def _mark_view_invalidation(
         self,
         session: SessionState,
@@ -656,6 +1055,12 @@ class NDStateEngine:
             reason=reason,
         )
         self._render3d_scheduler.mark(
+            session_id=session.session_id,
+            view_id=view_id,
+            kind=kind,
+            reason=reason,
+        )
+        self._render_points_scheduler.mark(
             session_id=session.session_id,
             view_id=view_id,
             kind=kind,
@@ -694,6 +1099,17 @@ class NDStateEngine:
             previous_3d = session.frame_plans_3d.get(view_id)
             plan_3d = build_frame_plan_3d(session=session, view=view, ticket=ticket_3d, previous_plan=previous_3d)
             session.frame_plans_3d[view_id] = plan_3d
+
+        ticket_points = self._render_points_scheduler.consume(session_id=session.session_id, view_id=view_id)
+        if ticket_points is not None:
+            previous_points = session.frame_plans_points.get(view_id)
+            plan_points = build_frame_plan_points(
+                session=session,
+                view=view,
+                ticket=ticket_points,
+                previous_plan=previous_points,
+            )
+            session.frame_plans_points[view_id] = plan_points
 
     def _plan_views(self, session: SessionState, view_ids: list[str]) -> None:
         for view_id in sorted(set(view_ids)):
@@ -1096,6 +1512,82 @@ class NDStateEngine:
 
     def _layer_add_points(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
+        data_ref = params.get("data_ref")
+        data_shape, _data_dtype = self._validate_dataref(field="data_ref", data_ref=data_ref, rank=2, dtype_kind="numeric")
+        point_count = int(data_shape[0])
+        coord_dim = int(data_shape[1])
+        if coord_dim < 2:
+            raise invalid_params("data_ref.shape[1] must be >= 2 for point coordinates", {})
+
+        point_id_ref = params.get("point_id_ref")
+        if point_id_ref is not None:
+            point_id_shape, _ = self._validate_dataref(
+                field="point_id_ref",
+                data_ref=point_id_ref,
+                rank=1,
+                dtype_kind="integer",
+            )
+            if point_id_shape[0] != point_count:
+                raise invalid_params(
+                    "point_id_ref length must match data_ref point count",
+                    {"point_count": point_count, "point_id_count": point_id_shape[0]},
+                )
+
+        edges_ref = params.get("edges_ref")
+        if edges_ref is not None:
+            edge_shape, _ = self._validate_dataref(
+                field="edges_ref",
+                data_ref=edges_ref,
+                rank=2,
+                dtype_kind="integer",
+            )
+            if edge_shape[1] != 2:
+                raise invalid_params("edges_ref.shape[1] must be 2", {})
+
+        attribute_table_ref = params.get("attribute_table_ref")
+        attribute_columns = params.get("attribute_columns", [])
+        if attribute_columns is None:
+            attribute_columns = []
+        if not isinstance(attribute_columns, list) or not all(isinstance(item, str) and item for item in attribute_columns):
+            raise invalid_params("attribute_columns must be an array of non-empty strings", {})
+        if len(set(attribute_columns)) != len(attribute_columns):
+            raise invalid_params("attribute_columns must be unique", {})
+
+        if attribute_table_ref is not None:
+            attr_shape, _ = self._validate_dataref(
+                field="attribute_table_ref",
+                data_ref=attribute_table_ref,
+                rank=2,
+            )
+            if attr_shape[0] != point_count:
+                raise invalid_params(
+                    "attribute_table_ref row count must match data_ref point count",
+                    {"point_count": point_count, "attribute_rows": attr_shape[0]},
+                )
+            if attribute_columns and attr_shape[1] != len(attribute_columns):
+                raise invalid_params(
+                    "attribute_columns length must match attribute_table_ref.shape[1]",
+                    {"columns": len(attribute_columns), "table_columns": attr_shape[1]},
+                )
+
+        coordinate_axes = params.get("coordinate_axes")
+        if coordinate_axes is None:
+            canonical_axes = ["x", "y", "z"]
+            coordinate_axes = [canonical_axes[idx] if idx < len(canonical_axes) else f"axis_{idx}" for idx in range(coord_dim)]
+        if not isinstance(coordinate_axes, list) or not all(isinstance(axis, str) and axis for axis in coordinate_axes):
+            raise invalid_params("coordinate_axes must be an array of non-empty strings", {})
+        if len(coordinate_axes) != coord_dim:
+            raise invalid_params(
+                "coordinate_axes length must match data_ref.shape[1]",
+                {"coordinate_axes": len(coordinate_axes), "dimensions": coord_dim},
+            )
+        if len(set(coordinate_axes)) != len(coordinate_axes):
+            raise invalid_params("coordinate_axes must be unique", {})
+
+        attributes = params.get("attributes", {})
+        if not isinstance(attributes, dict):
+            raise invalid_params("attributes must be an object", {})
+
         layer_id = self._uuid()
         layer = LayerState(
             layer_id=layer_id,
@@ -1103,8 +1595,13 @@ class NDStateEngine:
             name=params.get("name"),
             visible=True,
             opacity=1.0,
-            data_ref=params["data_ref"],
-            attributes=deepcopy(params.get("attributes", {})),
+            data_ref=deepcopy(data_ref),
+            point_id_ref=deepcopy(point_id_ref),
+            edges_ref=deepcopy(edges_ref),
+            attribute_table_ref=deepcopy(attribute_table_ref),
+            attribute_columns=list(attribute_columns),
+            coordinate_axes=list(coordinate_axes),
+            attributes=deepcopy(attributes),
         )
         session.layers[layer_id] = layer
         self._mark_session_views_invalidation(session, kind=InvalidationKind.FULL, reason="layer.add_points")
@@ -1145,6 +1642,7 @@ class NDStateEngine:
                 raise invalid_params("patch.name must be string", {})
             layer.name = patch["name"]
         style_reasons.extend(self._validate_step5_render_patch(layer, patch))
+        style_reasons.extend(self._validate_step6_points_patch(layer, patch))
         layer.patch.update(deepcopy(patch))
         updated_at = self._clock()
         self._emit_event(
@@ -1199,6 +1697,8 @@ class NDStateEngine:
         }
         if layer.name:
             out["name"] = layer.name
+        if layer.layer_type == "points":
+            out["points_state"] = self._points_state_summary(layer)
         return out
 
     def _view_create(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1235,6 +1735,7 @@ class NDStateEngine:
         del session.views[view.view_id]
         session.frame_plans.pop(view.view_id, None)
         session.frame_plans_3d.pop(view.view_id, None)
+        session.frame_plans_points.pop(view.view_id, None)
         closed_at = self._clock()
         self._emit_event(
             session,
@@ -1537,6 +2038,8 @@ class NDStateEngine:
     def _selection_get(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
         view = self._require_view(session, params["view_id"])
+        if not isinstance(view.selection, dict) or not view.selection:
+            view.selection = self._new_empty_selection_state()
         return {"session_id": session.session_id, "view_id": view.view_id, "selection": deepcopy(view.selection)}
 
     def _selection_set(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1545,20 +2048,62 @@ class NDStateEngine:
         selection = params.get("selection")
         if not isinstance(selection, dict):
             raise invalid_params("selection must be an object", {})
+
+        previous_selection = view.selection if isinstance(view.selection, dict) else {}
+        previous_version = previous_selection.get("selection_version")
+        if not isinstance(previous_version, int) or previous_version < 0:
+            previous_version = 0
+        created_at = previous_selection.get("created_at") if isinstance(previous_selection.get("created_at"), str) else None
+
+        canonical_selection = self._canonical_selection_state(
+            session=session,
+            view=view,
+            selection=selection,
+        )
+        if "selection_version" not in selection:
+            canonical_selection["selection_version"] = previous_version + 1
+        if created_at is not None:
+            canonical_selection["created_at"] = created_at
+
         layer_id = params.get("layer_id")
         if layer_id is not None:
             self._require_layer(session, layer_id)
-        view.selection = deepcopy(selection)
+        view.selection = deepcopy(canonical_selection)
+
+        resolved = canonical_selection.get("resolved", {})
+        resolved_count = resolved.get("count", 0) if isinstance(resolved, dict) else 0
+        payload: dict[str, Any] = {
+            "view_id": view.view_id,
+            "selection_version": int(canonical_selection["selection_version"]),
+            "query": deepcopy(canonical_selection.get("query", {})),
+            "resolved_count": int(resolved_count) if isinstance(resolved_count, int) and resolved_count >= 0 else 0,
+            "linked_image_context": self._selection_linked_image_context(
+                view=view,
+                selection_state=canonical_selection,
+            ),
+            "selection": deepcopy(canonical_selection),
+        }
+        selected_point_ids = resolved.get("selected_point_ids") if isinstance(resolved, dict) else None
+        selected_point_ids_ref = resolved.get("selected_point_ids_ref") if isinstance(resolved, dict) else None
+        if isinstance(selected_point_ids, list):
+            payload["selected_point_ids"] = list(selected_point_ids[:POINT_SELECTION_INLINE_CAP])
+        if isinstance(selected_point_ids_ref, dict):
+            payload["selected_point_ids_ref"] = deepcopy(selected_point_ids_ref)
+        if layer_id is not None:
+            payload["layer_id"] = layer_id
+
         self._emit_event(
             session,
             "selection.changed",
-            {
-                "layer_id": layer_id,
-                "selection": deepcopy(selection),
-            }
-            if layer_id is not None
-            else {"selection": deepcopy(selection)},
+            payload,
         )
+        self._mark_view_invalidation(
+            session,
+            view_id=view.view_id,
+            kind=InvalidationKind.STYLE,
+            reason="selection.set",
+        )
+        self._plan_view_if_invalidated(session, view.view_id)
         return {"session_id": session.session_id, "view_id": view.view_id, "selection": deepcopy(view.selection)}
 
     def _job_get(self, params: dict[str, Any]) -> dict[str, Any]:

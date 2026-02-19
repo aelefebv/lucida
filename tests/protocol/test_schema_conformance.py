@@ -157,6 +157,74 @@ class SchemaConformanceTests(unittest.TestCase):
         serialized = json.dumps(sample, sort_keys=True)
         self.assertTrue(serialized.startswith("{"))
 
+    def test_selection_set_request_accepts_typed_and_legacy_payloads(self) -> None:
+        request_schema = self.resolver.load(self.requests_file)["$defs"]["SelectionSetRequest"]
+
+        typed = {
+            "protocol_version": "1.0.0",
+            "request_id": "0194c8f0-c7fa-7a2d-8abc-1234567890ab",
+            "idempotency_key": "idem-step6-selection",
+            "session_id": "0194c8f0-c7fb-7a2d-8abc-1234567890ab",
+            "view_id": "0194c8f0-c7fc-7a2d-8abc-1234567890ab",
+            "selection": {
+                "selection_version": 1,
+                "query": {"mode": "ids", "combine": "replace", "ids": [1, 2]},
+                "resolved": {"count": 2, "selected_point_ids": [1, 2]},
+                "updated_at": "2026-01-01T00:00:00Z",
+            },
+        }
+        assert_valid(typed, request_schema, self.resolver, self.requests_file)
+
+        legacy = {
+            "protocol_version": "1.0.0",
+            "request_id": "0194c8f0-c7fa-7a2d-8abc-1234567890ac",
+            "idempotency_key": "idem-step6-selection-legacy",
+            "session_id": "0194c8f0-c7fb-7a2d-8abc-1234567890ab",
+            "view_id": "0194c8f0-c7fc-7a2d-8abc-1234567890ab",
+            "selection": {"indices": [3, 4, 5]},
+        }
+        assert_valid(legacy, request_schema, self.resolver, self.requests_file)
+
+    def test_selection_changed_payload_supports_inline_and_dataref(self) -> None:
+        payload_schema = self.resolver.load(self.events_file)["$defs"]["SelectionChangedPayload"]
+
+        inline_payload = {
+            "view_id": "0194c8f0-c7fd-7a2d-8abc-1234567890ab",
+            "selection_version": 2,
+            "query": {"mode": "ids", "combine": "replace", "ids": [1, 2, 3]},
+            "resolved_count": 3,
+            "selected_point_ids": [1, 2, 3],
+            "linked_image_context": {
+                "centroid_world": [1.0, 2.0, 0.0],
+                "bbox_world": {"min": [0.0, 1.0, 0.0], "max": [2.0, 3.0, 0.0]},
+                "slice_hint": {"z": 0},
+            },
+        }
+        assert_valid(inline_payload, payload_schema, self.resolver, self.events_file)
+
+        dataref_payload = {
+            "view_id": "0194c8f0-c7fd-7a2d-8abc-1234567890ab",
+            "selection_version": 3,
+            "query": {"mode": "predicate", "combine": "replace", "predicate": {"op": "exists", "field": "track_id"}},
+            "resolved_count": 10000,
+            "selected_point_ids_ref": {
+                "kind": "uri",
+                "uri": "memory://selection-ids",
+                "dtype": "uint64",
+                "shape": [10000],
+                "endianness": "little",
+                "compression": "none",
+                "ttl_ms": 60000,
+                "checksum_sha256": "a" * 64,
+            },
+            "linked_image_context": {
+                "centroid_world": [10.0, 20.0, 0.0],
+                "bbox_world": {"min": [5.0, 15.0, 0.0], "max": [15.0, 25.0, 0.0]},
+                "slice_hint": {"z": 2},
+            },
+        }
+        assert_valid(dataref_payload, payload_schema, self.resolver, self.events_file)
+
 
 if __name__ == "__main__":
     unittest.main()

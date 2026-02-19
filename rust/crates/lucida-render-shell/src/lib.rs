@@ -1,17 +1,21 @@
 //! Minimal Step 05 renderer shell helpers.
 
-use lucida_render_wgpu::{smoke_backend_mask, VolumeRenderSettings};
+use lucida_render_wgpu::{smoke_backend_mask, PointsLayerStyle, VolumeRenderSettings};
 
 /// Return a deterministic startup summary string for shell smoke tests.
 pub fn startup_summary() -> String {
     let defaults = VolumeRenderSettings::default();
+    let points = PointsLayerStyle::default();
     let backends = smoke_backend_mask();
     format!(
-        "mode={:?} iso={} density={} step={} backends={:?}",
+        "mode={:?} iso={} density={} step={} points_cell={} points_max={} points_size={} backends={:?}",
         defaults.render_mode,
         defaults.iso_threshold,
         defaults.density_scale,
         defaults.sample_step,
+        points.lod_cell_px,
+        points.lod_max_points,
+        points.point_size,
         backends
     )
 }

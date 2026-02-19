@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-SCHEMA_DIGEST = "820aaf9155d0ac617d0b6ef35240caa0ab59cd309eb8421e4a2221f608f6b1c4"
+SCHEMA_DIGEST = "11b1e192d14eb0fc2ea417f78acc1a88e653d3c09e2f32df9183beebd30e97a3"
 
 class AsyncAccepted(TypedDict):
     accepted_at: Timestamp
@@ -374,10 +374,15 @@ class LayerAddImageResponse(TypedDict):
     session_id: UUIDv7
 
 class LayerAddPointsRequest(TypedDict):
+    attribute_columns: NotRequired[list[str]]
+    attribute_table_ref: NotRequired[DataRef]
     attributes: NotRequired[dict[str, Any]]
+    coordinate_axes: NotRequired[list[AxisLabel]]
     data_ref: DataRef
+    edges_ref: NotRequired[DataRef]
     idempotency_key: str
     name: NotRequired[str]
+    point_id_ref: NotRequired[DataRef]
     protocol_version: SemVer
     request_id: UUIDv7
     session_id: UUIDv7
@@ -398,6 +403,7 @@ class LayerGetResponse(TypedDict):
     layer_type: Literal['image', 'points']
     name: NotRequired[str]
     opacity: float
+    points_state: NotRequired[PointsLayerStateSummary]
     visible: bool
 
 class LayerRemoveRequest(TypedDict):
@@ -423,6 +429,75 @@ class LayerUpdateResponse(TypedDict):
     layer_id: UUIDv7
     updated_at: Timestamp
 
+class LegacySelectionObject(TypedDict):
+    indices: list[int]
+
+class LinkedImageContext(TypedDict):
+    bbox_world: dict[str, Any]
+    centroid_world: list[float]
+    slice_hint: dict[str, Any]
+
+class PointsFilterAnd(TypedDict):
+    op: Literal['and']
+    predicates: list[PointsFilterPredicate]
+
+class PointsFilterEq(TypedDict):
+    field: str
+    op: Literal['eq']
+    value: Any
+
+class PointsFilterExists(TypedDict):
+    field: str
+    op: Literal['exists']
+
+class PointsFilterIn(TypedDict):
+    field: str
+    op: Literal['in']
+    values: list[Any]
+
+class PointsFilterNot(TypedDict):
+    op: Literal['not']
+    predicate: PointsFilterPredicate
+
+class PointsFilterOr(TypedDict):
+    op: Literal['or']
+    predicates: list[PointsFilterPredicate]
+
+class PointsFilterRange(TypedDict):
+    field: str
+    include_max: NotRequired[bool]
+    include_min: NotRequired[bool]
+    max: NotRequired[float]
+    min: NotRequired[float]
+    op: Literal['range']
+
+class PointsLayerStateSummary(TypedDict):
+    active_filter: NotRequired[PointsFilterPredicate]
+    active_lod: dict[str, Any]
+    attribute_columns: list[str]
+    edge_count: int
+    point_count: int
+
+class PointsSelectionQuery(TypedDict):
+    box_world: NotRequired[dict[str, Any]]
+    combine: Literal['replace', 'union', 'intersect', 'subtract']
+    ids: NotRequired[DataRef | list[int]]
+    lasso_world: NotRequired[list[list[float]]]
+    mode: Literal['box', 'lasso', 'predicate', 'ids']
+    predicate: NotRequired[PointsFilterPredicate]
+
+class PointsSelectionResolved(TypedDict):
+    count: int
+    selected_point_ids: NotRequired[list[int]]
+    selected_point_ids_ref: NotRequired[DataRef]
+
+class PointsSelectionState(TypedDict):
+    created_at: NotRequired[Timestamp]
+    query: PointsSelectionQuery
+    resolved: PointsSelectionResolved
+    selection_version: int
+    updated_at: Timestamp
+
 class RequestMeta(TypedDict):
     idempotency_key: NotRequired[str]
     protocol_version: SemVer
@@ -439,7 +514,14 @@ class SelectionChangedEvent(TypedDict):
 
 class SelectionChangedPayload(TypedDict):
     layer_id: NotRequired[UUIDv7]
-    selection: dict[str, Any]
+    linked_image_context: LinkedImageContext
+    query: PointsSelectionQuery
+    resolved_count: int
+    selected_point_ids: NotRequired[list[int]]
+    selected_point_ids_ref: NotRequired[DataRef]
+    selection: NotRequired[LegacySelectionObject | PointsSelectionState]
+    selection_version: int
+    view_id: UUIDv7
 
 class SelectionGetRequest(TypedDict):
     protocol_version: SemVer
@@ -448,7 +530,7 @@ class SelectionGetRequest(TypedDict):
     view_id: UUIDv7
 
 class SelectionGetResponse(TypedDict):
-    selection: dict[str, Any]
+    selection: LegacySelectionObject | PointsSelectionState
     session_id: UUIDv7
     view_id: UUIDv7
 
@@ -457,12 +539,12 @@ class SelectionSetRequest(TypedDict):
     layer_id: NotRequired[UUIDv7]
     protocol_version: SemVer
     request_id: UUIDv7
-    selection: dict[str, Any]
+    selection: LegacySelectionObject | PointsSelectionState
     session_id: UUIDv7
     view_id: UUIDv7
 
 class SelectionSetResponse(TypedDict):
-    selection: dict[str, Any]
+    selection: LegacySelectionObject | PointsSelectionState
     session_id: UUIDv7
     view_id: UUIDv7
 
@@ -673,6 +755,8 @@ JobState = Literal['queued', 'running', 'completed', 'failed', 'cancelled']
 LogRecord = CommandRecord | EventRecord
 
 MutatingRequestMeta = RequestMeta | dict[str, Any]
+
+PointsFilterPredicate = PointsFilterAnd | PointsFilterEq | PointsFilterExists | PointsFilterIn | PointsFilterNot | PointsFilterOr | PointsFilterRange
 
 SemVer = str
 

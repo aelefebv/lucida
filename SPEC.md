@@ -365,3 +365,25 @@ Automation:
 3. Minimum 3D render-mode contract for image layers is `mip`, `alpha`, and `iso` via standardized `layer.update.patch` keys.
 4. Camera policy for Step 05 is full 6DOF in both `arcball` and `freefly` modes (no world-up lock).
 5. Step 04 remains the deterministic 2D semantics baseline, and Step 05 builds on that baseline while Rust runtime scaffolding begins.
+
+## 21. Step 06 Decisions (2026-02-19)
+
+1. Step 06 keeps existing RPC methods and introduces additive typed points/selection payloads in protocol line `1.0.0`.
+2. Graph support in Step 06 is optional `edges_ref` on `layer.add_points`; no `layer.add_graph` method is introduced.
+3. Selection contract is canonical hybrid query+resolved state:
+   - selection query geometry/filter metadata is retained
+   - resolved selected IDs are retained inline up to `4096` IDs, otherwise via `DataRef`
+4. Linked selection in Step 06 is points-to-image hooks only:
+   - emit linked image context in events
+   - no automatic image camera/slice mutation by runtime
+   - bidirectional sync is deferred
+5. Step 06 default LOD policy is deterministic frustum/filter followed by screen-grid constrained sampling.
+6. Default Step 06 patch controls for points layers:
+   - `lod_cell_px = 2`
+   - `lod_max_points = 250000`
+7. Step 06 implementation track is dual:
+   - Python runtime owns deterministic semantics and acceptance tests
+   - Rust renderer scaffold adds points-pipeline primitives and compile-time tests
+8. Step 06 performance target baseline:
+   - planner/update smoke gate at `1M` points with p95 dispatch time under `80ms`
+   - nightly regression factor default remains `1.25`

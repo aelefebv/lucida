@@ -341,6 +341,31 @@
         "data_ref": {
           "$ref": "../common/types.schema.json#/$defs/DataRef"
         },
+        "point_id_ref": {
+          "$ref": "../common/types.schema.json#/$defs/DataRef"
+        },
+        "edges_ref": {
+          "$ref": "../common/types.schema.json#/$defs/DataRef"
+        },
+        "attribute_table_ref": {
+          "$ref": "../common/types.schema.json#/$defs/DataRef"
+        },
+        "attribute_columns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "coordinate_axes": {
+          "type": "array",
+          "items": {
+            "$ref": "../common/primitives.schema.json#/$defs/AxisLabel"
+          },
+          "minItems": 2,
+          "uniqueItems": true
+        },
         "name": {
           "type": "string"
         },
@@ -836,8 +861,14 @@
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         },
         "selection": {
-          "type": "object",
-          "additionalProperties": true
+          "oneOf": [
+            {
+              "$ref": "../common/types.schema.json#/$defs/PointsSelectionState"
+            },
+            {
+              "$ref": "../common/types.schema.json#/$defs/LegacySelectionObject"
+            }
+          ]
         },
         "view_id": {
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"

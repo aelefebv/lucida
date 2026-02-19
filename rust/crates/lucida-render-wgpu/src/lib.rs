@@ -30,6 +30,77 @@ impl Default for VolumeRenderSettings {
     }
 }
 
+/// Stable points layer style controls used in Step 06.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointsLayerStyle {
+    pub lod_cell_px: u32,
+    pub lod_max_points: u32,
+    pub point_size: f32,
+}
+
+impl Default for PointsLayerStyle {
+    fn default() -> Self {
+        Self {
+            lod_cell_px: 2,
+            lod_max_points: 250_000,
+            point_size: 1.0,
+        }
+    }
+}
+
+impl PointsLayerStyle {
+    /// Validate Step 06 points style contract.
+    pub fn validate(self) -> Result<Self, &'static str> {
+        if self.lod_cell_px == 0 {
+            return Err("lod_cell_px must be greater than 0");
+        }
+        if self.lod_max_points == 0 {
+            return Err("lod_max_points must be greater than 0");
+        }
+        if self.point_size <= 0.0 {
+            return Err("point_size must be greater than 0");
+        }
+        Ok(self)
+    }
+}
+
+/// Minimal Step 06 points layer descriptor carried in renderer scaffolding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointsLayerDescriptor {
+    pub point_count: u64,
+    pub edge_count: u64,
+}
+
+impl PointsLayerDescriptor {
+    pub fn has_edges(self) -> bool {
+        self.edge_count > 0
+    }
+}
+
+/// Selection payload mode used by Step 06 (`inline` or `DataRef`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointsSelectionEncoding {
+    Inline,
+    DataRef,
+}
+
+/// Deterministic selection summary primitive for points renderer handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointsSelectionSummary {
+    pub resolved_count: u64,
+    pub inline_cap: u32,
+}
+
+impl PointsSelectionSummary {
+    pub fn encoding(self) -> PointsSelectionEncoding {
+        if self.resolved_count > self.inline_cap as u64 {
+            PointsSelectionEncoding::DataRef
+        } else {
+            PointsSelectionEncoding::Inline
+        }
+    }
+}
+
 impl VolumeRenderSettings {
     /// Validate Step 05 settings contract.
     pub fn validate(self) -> Result<Self, &'static str> {
@@ -53,7 +124,10 @@ pub fn smoke_backend_mask() -> wgpu::Backends {
 
 #[cfg(test)]
 mod tests {
-    use super::{smoke_backend_mask, VolumeRenderMode, VolumeRenderSettings};
+    use super::{
+        smoke_backend_mask, PointsLayerDescriptor, PointsLayerStyle, PointsSelectionEncoding,
+        PointsSelectionSummary, VolumeRenderMode, VolumeRenderSettings,
+    };
 
     #[test]
     fn defaults_match_step5_contract() {
@@ -79,5 +153,52 @@ mod tests {
     fn wgpu_link_smoke() {
         let backends = smoke_backend_mask();
         assert!(!backends.is_empty());
+    }
+
+    #[test]
+    fn step6_points_defaults_match_contract() {
+        let defaults = PointsLayerStyle::default();
+        assert_eq!(defaults.lod_cell_px, 2);
+        assert_eq!(defaults.lod_max_points, 250_000);
+        assert_eq!(defaults.point_size, 1.0);
+        assert!(defaults.validate().is_ok());
+    }
+
+    #[test]
+    fn step6_points_validate_rejects_invalid_values() {
+        let invalid = PointsLayerStyle {
+            lod_cell_px: 0,
+            lod_max_points: 100,
+            point_size: 1.0,
+        };
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn points_descriptor_reports_edge_presence() {
+        let no_edges = PointsLayerDescriptor {
+            point_count: 10,
+            edge_count: 0,
+        };
+        let with_edges = PointsLayerDescriptor {
+            point_count: 10,
+            edge_count: 2,
+        };
+        assert!(!no_edges.has_edges());
+        assert!(with_edges.has_edges());
+    }
+
+    #[test]
+    fn selection_encoding_switches_to_dataref_above_cap() {
+        let inline = PointsSelectionSummary {
+            resolved_count: 128,
+            inline_cap: 4096,
+        };
+        let dataref = PointsSelectionSummary {
+            resolved_count: 5000,
+            inline_cap: 4096,
+        };
+        assert!(matches!(inline.encoding(), PointsSelectionEncoding::Inline));
+        assert!(matches!(dataref.encoding(), PointsSelectionEncoding::DataRef));
     }
 }

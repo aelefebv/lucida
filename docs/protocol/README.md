@@ -238,3 +238,38 @@ Every error includes:
    - kinds remain `full`, `slice`, `style`, `camera`
    - Step 05 render-control patch updates map to `style`
    - one coalesced plan update per view per dispatch cycle
+
+## 16. Step 06 behavior notes (additive schema typing in `1.0.0`)
+
+1. Step 06 keeps the existing method set and adds typed payload structure for points/selection contracts.
+2. `layer.add_points` additive request fields:
+   - `point_id_ref` (optional point-id vector)
+   - `edges_ref` (optional graph edge pairs)
+   - `attribute_table_ref` + `attribute_columns`
+   - `coordinate_axes`
+3. Points-layer data contract:
+   - `data_ref.shape` must be `[N, D]` with `D >= 2`
+   - points coordinates must use numeric dtype
+   - `edges_ref`, when present, must be integer dtype with shape `[E, 2]`
+4. Selection payload typing:
+   - typed canonical form is `PointsSelectionState`
+   - legacy payloads using `indices` remain accepted for compatibility
+5. `selection.changed` payload now carries:
+   - `view_id`, `selection_version`, `query`, `resolved_count`
+   - inline `selected_point_ids` for small selections
+   - `selected_point_ids_ref` when selected IDs exceed inline cap (`4096`)
+   - `linked_image_context` hook payload for points-to-image integration
+6. Linked selection semantics in Step 06:
+   - points selection emits linked image context hooks
+   - no automatic camera/slice mutation is performed by the runtime
+   - image-to-points bidirectional linking is out of scope
+7. Step 06 points-style controls through existing `layer.update.patch` keys:
+   - `points_filter` (structured predicate AST)
+   - `color_by`, `color_map`
+   - `lod_cell_px` (default `2`)
+   - `lod_max_points` (default `250000`)
+   - `point_size`
+8. Invalidation/coalescing policy remains unchanged:
+   - kinds remain `full`, `slice`, `style`, `camera`
+   - Step 06 points filter/style/LOD patch updates map to `style`
+   - one coalesced plan update per view per dispatch cycle

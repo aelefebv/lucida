@@ -388,6 +388,441 @@
           "$ref": "#/$defs/DataRefUri"
         }
       ]
+    },
+    "PointsFilterEq": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "eq"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "integer",
+            "boolean"
+          ]
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "value"
+      ]
+    },
+    "PointsFilterExists": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "exists"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "op",
+        "field"
+      ]
+    },
+    "PointsFilterRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "range"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "include_min": {
+          "type": "boolean"
+        },
+        "include_max": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "op",
+        "field"
+      ]
+    },
+    "PointsFilterIn": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "in"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "values": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "number",
+              "integer",
+              "boolean"
+            ]
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "op",
+        "field",
+        "values"
+      ]
+    },
+    "PointsFilterNot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "not"
+        },
+        "predicate": {
+          "$ref": "#/$defs/PointsFilterPredicate"
+        }
+      },
+      "required": [
+        "op",
+        "predicate"
+      ]
+    },
+    "PointsFilterAnd": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "and"
+        },
+        "predicates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PointsFilterPredicate"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "op",
+        "predicates"
+      ]
+    },
+    "PointsFilterOr": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "op": {
+          "const": "or"
+        },
+        "predicates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PointsFilterPredicate"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "op",
+        "predicates"
+      ]
+    },
+    "PointsFilterPredicate": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/PointsFilterEq"
+        },
+        {
+          "$ref": "#/$defs/PointsFilterExists"
+        },
+        {
+          "$ref": "#/$defs/PointsFilterRange"
+        },
+        {
+          "$ref": "#/$defs/PointsFilterIn"
+        },
+        {
+          "$ref": "#/$defs/PointsFilterNot"
+        },
+        {
+          "$ref": "#/$defs/PointsFilterAnd"
+        },
+        {
+          "$ref": "#/$defs/PointsFilterOr"
+        }
+      ]
+    },
+    "PointsSelectionQuery": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "box",
+            "lasso",
+            "predicate",
+            "ids"
+          ]
+        },
+        "combine": {
+          "type": "string",
+          "enum": [
+            "replace",
+            "union",
+            "intersect",
+            "subtract"
+          ]
+        },
+        "predicate": {
+          "$ref": "#/$defs/PointsFilterPredicate"
+        },
+        "box_world": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 3
+            },
+            "max": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 3
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ]
+        },
+        "lasso_world": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 2,
+            "maxItems": 3
+          },
+          "minItems": 3
+        },
+        "ids": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            {
+              "$ref": "#/$defs/DataRef"
+            }
+          ]
+        }
+      },
+      "required": [
+        "mode",
+        "combine"
+      ]
+    },
+    "PointsSelectionResolved": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "selected_point_ids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxItems": 4096
+        },
+        "selected_point_ids_ref": {
+          "$ref": "#/$defs/DataRef"
+        }
+      },
+      "required": [
+        "count"
+      ]
+    },
+    "LinkedImageContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "centroid_world": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 2,
+          "maxItems": 3
+        },
+        "bbox_world": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 3
+            },
+            "max": {
+              "type": "array",
+              "items": {
+                "type": "number"
+              },
+              "minItems": 2,
+              "maxItems": 3
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ]
+        },
+        "slice_hint": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "centroid_world",
+        "bbox_world",
+        "slice_hint"
+      ]
+    },
+    "PointsSelectionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "selection_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "query": {
+          "$ref": "#/$defs/PointsSelectionQuery"
+        },
+        "resolved": {
+          "$ref": "#/$defs/PointsSelectionResolved"
+        },
+        "created_at": {
+          "$ref": "primitives.schema.json#/$defs/Timestamp"
+        },
+        "updated_at": {
+          "$ref": "primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "selection_version",
+        "query",
+        "resolved",
+        "updated_at"
+      ]
+    },
+    "LegacySelectionObject": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "indices": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "required": [
+        "indices"
+      ]
+    },
+    "PointsLayerStateSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "point_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edge_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "attribute_columns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "active_lod": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "lod_cell_px": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "lod_max_points": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "required": [
+            "lod_cell_px",
+            "lod_max_points"
+          ]
+        },
+        "active_filter": {
+          "$ref": "#/$defs/PointsFilterPredicate"
+        }
+      },
+      "required": [
+        "point_count",
+        "edge_count",
+        "attribute_columns",
+        "active_lod"
+      ]
     }
   }
 }

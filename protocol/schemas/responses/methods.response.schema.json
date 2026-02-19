@@ -460,6 +460,9 @@
           "type": "number",
           "minimum": 0,
           "maximum": 1
+        },
+        "points_state": {
+          "$ref": "../common/types.schema.json#/$defs/PointsLayerStateSummary"
         }
       },
       "required": [
@@ -753,8 +756,14 @@
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         },
         "selection": {
-          "type": "object",
-          "additionalProperties": true
+          "oneOf": [
+            {
+              "$ref": "../common/types.schema.json#/$defs/PointsSelectionState"
+            },
+            {
+              "$ref": "../common/types.schema.json#/$defs/LegacySelectionObject"
+            }
+          ]
         },
         "view_id": {
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
@@ -774,8 +783,14 @@
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         },
         "selection": {
-          "type": "object",
-          "additionalProperties": true
+          "oneOf": [
+            {
+              "$ref": "../common/types.schema.json#/$defs/PointsSelectionState"
+            },
+            {
+              "$ref": "../common/types.schema.json#/$defs/LegacySelectionObject"
+            }
+          ]
         },
         "view_id": {
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
