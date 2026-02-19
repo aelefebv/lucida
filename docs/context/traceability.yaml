@@ -44,6 +44,7 @@
       "status": "done",
       "implementation_paths": [
         "SPEC.md",
+        "docs/architecture/component-map.md",
         "docs/protocol/README.md",
         "protocol/openrpc/lucida.v1.openrpc.json",
         "protocol/schemas/requests/methods.request.schema.json",
@@ -76,11 +77,44 @@
     {
       "step_id": "step-03",
       "step_spec_path": "specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
-      "protocol_artifacts": [],
-      "last_validated": ""
+      "status": "done",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/protocol/README.md",
+        "specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md",
+        ".github/workflows/step3-io-integration.yml",
+        "protocol/openrpc/lucida.v1.openrpc.json",
+        "protocol/schemas/requests/methods.request.schema.json",
+        "protocol/schemas/responses/methods.response.schema.json",
+        "protocol/schemas/events/events.schema.json",
+        "python/lucida_core/__init__.py",
+        "python/lucida_core/engine.py",
+        "python/lucida_core/errors.py",
+        "python/lucida_core/io/__init__.py",
+        "python/lucida_core/io/backends.py",
+        "python/lucida_core/io/cache.py",
+        "python/lucida_core/io/metadata.py",
+        "python/lucida_core/io/scheduler.py",
+        "python/lucida_sdk/protocol/generated/models.py",
+        "pyproject.toml",
+        "uv.lock"
+      ],
+      "test_paths": [
+        "tests/core/test_nd_state_engine.py",
+        "tests/core/test_step3_cache_scheduler.py",
+        "tests/core/test_step3_backend_integrations.py",
+        "tests/protocol/test_openrpc_integrity.py",
+        "tests/protocol/test_protocol_policies.py",
+        "tests/protocol/test_schema_conformance.py",
+        "tests/protocol/test_generated_models.py"
+      ],
+      "protocol_artifacts": [
+        "protocol/openrpc/lucida.v1.openrpc.json",
+        "protocol/schemas/requests/methods.request.schema.json",
+        "protocol/schemas/responses/methods.response.schema.json",
+        "protocol/schemas/events/events.schema.json"
+      ],
+      "last_validated": "2026-02-19"
     },
     {
       "step_id": "step-04",

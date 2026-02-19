@@ -1,11 +1,10 @@
-"""Deterministic in-memory ND state engine for Step 2."""
+"""Deterministic in-memory ND state engine with Step 3 IO extensions."""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-import hashlib
 import uuid
 from typing import Any, Callable
 
@@ -14,10 +13,26 @@ from .errors import (
     conflict,
     internal,
     invalid_params,
+    io_failure,
     not_found,
+    timeout,
     unsupported,
     version_mismatch,
 )
+from .io import (
+    CacheManager,
+    DatasetMetadata,
+    IOScheduler,
+    IOBackendError,
+    MissingDependencyError,
+    SchedulerTimeout,
+    detect_backend,
+    export_dataset_local_v05,
+    open_dataset_metadata,
+)
+from .io.backends import _canonical_dataset_id
+from .io.metadata import AxisMapError
+from .io.scheduler import CancelToken, CancelledError
 
 
 ProtocolVersion = "1.0.0"
@@ -28,6 +43,7 @@ MUTATING_METHODS = {
     "session.close",
     "dataset.open",
     "dataset.close",
+    "dataset.export",
     "layer.add_image",
     "layer.add_points",
     "layer.update",
@@ -68,6 +84,22 @@ def _is_version_compatible(min_version: str, max_version: str, target: str) -> b
     return low <= val <= high
 
 
+def _dataset_to_metadata(dataset: "DatasetState") -> DatasetMetadata:
+    return DatasetMetadata(
+        backend=dataset.backend if dataset.backend in {"local", "http", "s3", "gcs", "synthetic"} else "local",
+        uri=dataset.uri,
+        axis_labels=list(dataset.axis_labels),
+        shape=list(dataset.shape),
+        dtype=dataset.dtype,
+        transform={"scale": list(dataset.transform["scale"]), "translate": list(dataset.transform["translate"])},
+        read_only=dataset.read_only,
+        ngff_version=dataset.ngff_version,
+        zarr_format=dataset.zarr_format,
+        multiscales=deepcopy(dataset.multiscales),
+        cache_snapshot=deepcopy(dataset.cache_snapshot),
+    )
+
+
 @dataclass
 class DatasetState:
     dataset_id: str
@@ -77,6 +109,11 @@ class DatasetState:
     dtype: str
     transform: dict[str, list[float]]
     read_only: bool
+    backend: str = "synthetic"
+    ngff_version: str = "synthetic"
+    zarr_format: int = 2
+    multiscales: list[dict[str, Any]] = field(default_factory=list)
+    cache_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -135,6 +172,8 @@ class SessionState:
     views: dict[str, ViewState] = field(default_factory=dict)
     jobs: dict[str, JobState] = field(default_factory=dict)
     subscriptions: dict[str, SubscriptionState] = field(default_factory=dict)
+    pending_job_ops: dict[str, Callable[[], dict[str, Any]]] = field(default_factory=dict)
+    job_cancel_tokens: dict[str, CancelToken] = field(default_factory=dict)
     outbox: list[dict[str, Any]] = field(default_factory=list)
     session_seq: int = 0
 
@@ -178,10 +217,14 @@ class NDStateEngine:
         *,
         clock: Callable[[], str] | None = None,
         uuid_factory: Callable[[], str] | None = None,
+        cache_manager: CacheManager | None = None,
+        io_scheduler: IOScheduler | None = None,
     ) -> None:
         self._clock = clock or _utc_now_iso
         self._uuid = uuid_factory or _uuid_v7
         self._state = RuntimeState()
+        self._cache = cache_manager or CacheManager()
+        self._scheduler = io_scheduler or IOScheduler()
         self._handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
             "system.hello": self._system_hello,
             "system.capabilities.get": self._system_capabilities_get,
@@ -190,6 +233,7 @@ class NDStateEngine:
             "session.get": self._session_get,
             "dataset.open": self._dataset_open,
             "dataset.close": self._dataset_close,
+            "dataset.export": self._dataset_export,
             "dataset.get": self._dataset_get,
             "layer.add_image": self._layer_add_image,
             "layer.add_points": self._layer_add_points,
@@ -271,10 +315,13 @@ class NDStateEngine:
                     "datasets": {
                         dataset_id: {
                             "uri": dataset.uri,
+                            "backend": dataset.backend,
                             "axis_labels": dataset.axis_labels,
                             "shape": dataset.shape,
                             "dtype": dataset.dtype,
                             "transform": dataset.transform,
+                            "ngff_version": dataset.ngff_version,
+                            "zarr_format": dataset.zarr_format,
                         }
                         for dataset_id, dataset in sorted(session.datasets.items())
                     },
@@ -390,36 +437,71 @@ class NDStateEngine:
             return
         self._emit_event(session, "error", {"error": exc.envelope()})
 
-    def _synthetic_dataset(self, uri: str, read_only: bool) -> DatasetState:
-        if not (uri.startswith("synthetic://") or uri.startswith("mem://")):
-            raise unsupported(
-                "Only synthetic dataset URIs are supported in Step 2",
-                {"uri": uri},
+    def _parse_timeout_ms(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        if not isinstance(value, int) or value <= 0:
+            raise invalid_params("timeout_ms must be a positive integer", {"timeout_ms": value})
+        return value
+
+    def _parse_max_retries(self, value: Any) -> int | None:
+        if value is None:
+            return None
+        if not isinstance(value, int) or value < 0:
+            raise invalid_params("max_retries must be a non-negative integer", {"max_retries": value})
+        return value
+
+    def _dataset_from_uri(
+        self,
+        *,
+        uri: str,
+        read_only: bool,
+        axis_map: dict[str, str] | None,
+        timeout_ms: int | None,
+        max_retries: int | None,
+    ) -> DatasetState:
+        try:
+            metadata = self._scheduler.execute(
+                lambda: open_dataset_metadata(
+                    uri=uri,
+                    read_only=read_only,
+                    axis_map=axis_map,
+                    cache=self._cache,
+                ),
+                timeout_ms=timeout_ms,
+                max_retries=max_retries,
             )
+        except AxisMapError as exc:
+            raise invalid_params("axis_map is invalid", {"uri": uri, "error": str(exc)}) from exc
+        except MissingDependencyError as exc:
+            backend = detect_backend(uri)
+            raise unsupported(
+                "Optional backend dependency is not installed",
+                {"uri": uri, "backend": backend, "dependency_error": str(exc)},
+            ) from exc
+        except SchedulerTimeout as exc:
+            raise timeout("dataset.open timed out", {"uri": uri, "error": str(exc)}) from exc
+        except IOBackendError as exc:
+            message = str(exc)
+            if "unsupported dataset URI scheme" in message:
+                raise unsupported("Dataset backend is unsupported", {"uri": uri, "error": message}) from exc
+            raise io_failure("dataset.open backend IO failed", {"uri": uri, "error": message}) from exc
+        except Exception as exc:
+            raise io_failure("dataset.open backend IO failed", {"uri": uri, "error": str(exc)}) from exc
 
-        axis_labels = ["t", "c", "z", "y", "x"]
-        shape = [1, 1, 16, 128, 128]
-        dtype = "uint16"
-        scale = [1.0, 1.0, 1.0, 1.0, 1.0]
-        translate = [0.0, 0.0, 0.0, 0.0, 0.0]
-
-        if "mask" in uri:
-            dtype = "uint8"
-        if "large" in uri:
-            shape = [1, 1, 32, 256, 256]
-        if "anisotropic" in uri:
-            scale = [1.0, 1.0, 2.0, 0.5, 0.5]
-
-        digest = hashlib.sha256(uri.encode("utf-8")).hexdigest()
-        dataset_id = f"{digest[0:8]}-{digest[8:12]}-7{digest[13:16]}-8{digest[17:20]}-{digest[20:32]}"
         return DatasetState(
-            dataset_id=dataset_id,
+            dataset_id=_canonical_dataset_id(uri),
             uri=uri,
-            axis_labels=axis_labels,
-            shape=shape,
-            dtype=dtype,
-            transform={"scale": scale, "translate": translate},
+            axis_labels=list(metadata.axis_labels),
+            shape=list(metadata.shape),
+            dtype=metadata.dtype,
+            transform={"scale": list(metadata.transform["scale"]), "translate": list(metadata.transform["translate"])},
             read_only=read_only,
+            backend=metadata.backend,
+            ngff_version=metadata.ngff_version,
+            zarr_format=metadata.zarr_format,
+            multiscales=deepcopy(metadata.multiscales),
+            cache_snapshot=deepcopy(metadata.cache_snapshot),
         )
 
     def _default_view_state(self, view_id: str, label: str | None, axis_order: list[str]) -> ViewState:
@@ -481,6 +563,90 @@ class NDStateEngine:
 
         return {"job_id": job_id, "accepted_at": accepted_at, "state": "queued"}
 
+    def _job_accept(self, session: SessionState, job_id: str) -> dict[str, Any]:
+        accepted_at = self._clock()
+        session.jobs[job_id] = JobState(
+            job_id=job_id,
+            state="queued",
+            submitted_at=accepted_at,
+        )
+        self._emit_event(session, "job.lifecycle", {"job_id": job_id, "state": "queued"})
+        return {"job_id": job_id, "accepted_at": accepted_at, "state": "queued"}
+
+    def _job_start(self, session: SessionState, job_id: str) -> JobState:
+        job = session.jobs[job_id]
+        if job.state != "queued":
+            return job
+        job.state = "running"
+        job.started_at = self._clock()
+        self._emit_event(session, "job.lifecycle", {"job_id": job_id, "state": "running"})
+        return job
+
+    def _job_complete(self, session: SessionState, job_id: str, message: str = "done") -> None:
+        job = session.jobs[job_id]
+        if job.state in {"completed", "failed", "cancelled"}:
+            return
+        self._emit_event(session, "job.progress", {"job_id": job_id, "progress": 1.0, "message": message})
+        job.state = "completed"
+        job.completed_at = self._clock()
+        self._emit_event(session, "job.lifecycle", {"job_id": job_id, "state": "completed"})
+        session.pending_job_ops.pop(job_id, None)
+        session.job_cancel_tokens.pop(job_id, None)
+
+    def _job_fail(self, session: SessionState, job_id: str, exc: LucidaError) -> None:
+        job = session.jobs[job_id]
+        if job.state in {"completed", "failed", "cancelled"}:
+            return
+        job.state = "failed"
+        job.completed_at = self._clock()
+        job.error = exc.envelope()
+        self._emit_event(
+            session,
+            "job.lifecycle",
+            {"job_id": job_id, "state": "failed", "error": exc.envelope()},
+        )
+        session.pending_job_ops.pop(job_id, None)
+        session.job_cancel_tokens.pop(job_id, None)
+
+    def _run_pending_job(self, session: SessionState, job_id: str) -> None:
+        op = session.pending_job_ops.get(job_id)
+        if op is None:
+            return
+        job = session.jobs.get(job_id)
+        if job is None or job.state in {"cancelled", "completed", "failed"}:
+            session.pending_job_ops.pop(job_id, None)
+            session.job_cancel_tokens.pop(job_id, None)
+            return
+        self._job_start(session, job_id)
+        self._emit_event(session, "job.progress", {"job_id": job_id, "progress": 0.5, "message": "running"})
+        try:
+            op()
+        except CancelledError:
+            token = session.job_cancel_tokens.get(job_id)
+            if token is not None:
+                token.cancel()
+            job.state = "cancelled"
+            if job.completed_at is None:
+                job.completed_at = self._clock()
+            self._emit_event(session, "job.lifecycle", {"job_id": job_id, "state": "cancelled"})
+            session.pending_job_ops.pop(job_id, None)
+            session.job_cancel_tokens.pop(job_id, None)
+            return
+        except LucidaError as exc:
+            self._job_fail(session, job_id, exc)
+            return
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            self._job_fail(
+                session,
+                job_id,
+                io_failure(
+                    "Job operation failed",
+                    {"job_id": job_id, "error": str(exc)},
+                ),
+            )
+            return
+        self._job_complete(session, job_id)
+
     def _system_hello(self, params: dict[str, Any]) -> dict[str, Any]:
         supported = params.get("supported_versions")
         if not isinstance(supported, dict):
@@ -496,7 +662,7 @@ class NDStateEngine:
             )
         return {
             "selected_version": ProtocolVersion,
-            "daemon_name": "lucida-step2",
+            "daemon_name": "lucida-step3",
             "daemon_version": ProtocolVersion,
             "capabilities": self._capabilities(),
             "event_stream": "ws",
@@ -560,7 +726,19 @@ class NDStateEngine:
 
     def _dataset_open(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
-        dataset = self._synthetic_dataset(params["uri"], bool(params["read_only"]))
+        uri = params["uri"]
+        axis_map = params.get("axis_map")
+        if axis_map is not None and not isinstance(axis_map, dict):
+            raise invalid_params("axis_map must be an object", {"axis_map": axis_map})
+        timeout_ms = self._parse_timeout_ms(params.get("timeout_ms"))
+        max_retries = self._parse_max_retries(params.get("max_retries"))
+        dataset = self._dataset_from_uri(
+            uri=uri,
+            read_only=bool(params["read_only"]),
+            axis_map=axis_map,
+            timeout_ms=timeout_ms,
+            max_retries=max_retries,
+        )
         if dataset.dataset_id in session.datasets:
             raise conflict("Dataset already open in session", {"dataset_id": dataset.dataset_id})
         session.datasets[dataset.dataset_id] = dataset
@@ -569,7 +747,11 @@ class NDStateEngine:
         self._emit_event(
             session,
             "dataset.opened",
-            {"dataset_id": dataset.dataset_id, "uri": dataset.uri},
+            {
+                "dataset_id": dataset.dataset_id,
+                "uri": dataset.uri,
+                "backend": dataset.backend,
+            },
         )
         self._emit_event(
             session,
@@ -580,6 +762,94 @@ class NDStateEngine:
                 "change_summary": "dataset opened",
             },
         )
+        return {"session_id": session.session_id, "job": accepted}
+
+    def _dataset_export(self, params: dict[str, Any]) -> dict[str, Any]:
+        session = self._require_session(params["session_id"])
+        dataset = self._require_dataset(session, params["dataset_id"])
+        destination_uri = params["destination_uri"]
+        if not isinstance(destination_uri, str) or not destination_uri:
+            raise invalid_params("destination_uri must be a non-empty string", {"destination_uri": destination_uri})
+
+        overwrite = bool(params.get("overwrite", False))
+        timeout_ms = self._parse_timeout_ms(params.get("timeout_ms"))
+        max_retries = self._parse_max_retries(params.get("max_retries"))
+        job_id = self._uuid()
+        accepted = self._job_accept(session, job_id)
+        cancel_token = CancelToken()
+        session.job_cancel_tokens[job_id] = cancel_token
+
+        def operation() -> dict[str, Any]:
+            if cancel_token.cancelled:
+                raise CancelledError("dataset export cancelled")
+            try:
+                self._scheduler.execute(
+                    lambda: export_dataset_local_v05(
+                        _dataset_to_metadata(dataset),
+                        destination_uri=destination_uri,
+                        overwrite=overwrite,
+                    ),
+                    timeout_ms=timeout_ms,
+                    max_retries=max_retries,
+                    cancel_token=cancel_token,
+                )
+            except CancelledError:
+                raise
+            except SchedulerTimeout as exc:
+                raise timeout(
+                    "dataset.export timed out",
+                    {"dataset_id": dataset.dataset_id, "destination_uri": destination_uri, "error": str(exc)},
+                ) from exc
+            except MissingDependencyError as exc:
+                raise unsupported(
+                    "Export backend dependency is not installed",
+                    {"dataset_id": dataset.dataset_id, "destination_uri": destination_uri, "error": str(exc)},
+                ) from exc
+            except FileExistsError as exc:
+                raise conflict(
+                    "Export destination already exists",
+                    {"dataset_id": dataset.dataset_id, "destination_uri": destination_uri, "error": str(exc)},
+                ) from exc
+            except IOBackendError as exc:
+                message = str(exc)
+                if "supports local filesystem" in message:
+                    raise unsupported(
+                        "dataset.export destination backend is unsupported",
+                        {"dataset_id": dataset.dataset_id, "destination_uri": destination_uri, "error": message},
+                    ) from exc
+                raise io_failure(
+                    "dataset.export failed",
+                    {"dataset_id": dataset.dataset_id, "destination_uri": destination_uri, "error": message},
+                ) from exc
+            except LucidaError:
+                raise
+            except Exception as exc:
+                raise io_failure(
+                    "dataset.export failed",
+                    {"dataset_id": dataset.dataset_id, "destination_uri": destination_uri, "error": str(exc)},
+                ) from exc
+
+            self._emit_event(
+                session,
+                "dataset.exported",
+                {
+                    "dataset_id": dataset.dataset_id,
+                    "destination_uri": destination_uri,
+                    "job_id": job_id,
+                },
+            )
+            self._emit_event(
+                session,
+                "state.changed",
+                {
+                    "object_type": "dataset",
+                    "object_id": dataset.dataset_id,
+                    "change_summary": "dataset exported",
+                },
+            )
+            return {"session_id": session.session_id, "job_id": job_id}
+
+        session.pending_job_ops[job_id] = operation
         return {"session_id": session.session_id, "job": accepted}
 
     def _dataset_close(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -607,6 +877,7 @@ class NDStateEngine:
     def _dataset_get(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
         dataset = self._require_dataset(session, params["dataset_id"])
+        dataset.cache_snapshot = self._cache.snapshot()
         return {
             "session_id": session.session_id,
             "dataset_id": dataset.dataset_id,
@@ -615,6 +886,13 @@ class NDStateEngine:
             "shape": dataset.shape,
             "dtype": dataset.dtype,
             "transform": dataset.transform,
+            "backend": dataset.backend,
+            "ngff": {
+                "ngff_version": dataset.ngff_version,
+                "zarr_format": dataset.zarr_format,
+                "multiscales": deepcopy(dataset.multiscales),
+            },
+            "cache": deepcopy(dataset.cache_snapshot),
         }
 
     def _layer_add_image(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1019,6 +1297,9 @@ class NDStateEngine:
         job = session.jobs.get(params["job_id"])
         if job is None:
             raise not_found("Job does not exist", {"session_id": session.session_id, "job_id": params["job_id"]})
+        if job.state in {"queued", "running"} and params["job_id"] in session.pending_job_ops:
+            self._run_pending_job(session, params["job_id"])
+            job = session.jobs[params["job_id"]]
         out: dict[str, Any] = {
             "session_id": session.session_id,
             "job_id": job.job_id,
@@ -1038,8 +1319,13 @@ class NDStateEngine:
         job = session.jobs.get(params["job_id"])
         if job is None:
             raise not_found("Job does not exist", {"session_id": session.session_id, "job_id": params["job_id"]})
-        if job.state in {"completed", "failed"}:
+        if job.state in {"completed", "failed", "cancelled"}:
             raise conflict("Completed jobs cannot be cancelled", {"job_id": job.job_id, "state": job.state})
+        token = session.job_cancel_tokens.get(job.job_id)
+        if token is not None:
+            token.cancel()
+        session.pending_job_ops.pop(job.job_id, None)
+        session.job_cancel_tokens.pop(job.job_id, None)
         job.state = "cancelled"
         if job.completed_at is None:
             job.completed_at = self._clock()
@@ -1049,6 +1335,10 @@ class NDStateEngine:
     def _job_list(self, params: dict[str, Any]) -> dict[str, Any]:
         session = self._require_session(params["session_id"])
         state_filter = params.get("state")
+        for job_id in sorted(session.pending_job_ops):
+            job_state = session.jobs.get(job_id)
+            if job_state is not None and job_state.state in {"queued", "running"}:
+                self._run_pending_job(session, job_id)
         jobs = []
         for job_id in sorted(session.jobs):
             job = session.jobs[job_id]

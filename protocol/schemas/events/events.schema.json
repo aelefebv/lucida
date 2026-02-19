@@ -86,11 +86,42 @@
         "uri": {
           "type": "string",
           "minLength": 1
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "local",
+            "http",
+            "s3",
+            "gcs",
+            "synthetic"
+          ]
         }
       },
       "required": [
         "dataset_id",
         "uri"
+      ]
+    },
+    "DatasetExportedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "destination_uri": {
+          "type": "string",
+          "minLength": 1
+        },
+        "job_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        }
+      },
+      "required": [
+        "dataset_id",
+        "destination_uri",
+        "job_id"
       ]
     },
     "SelectionChangedPayload": {
@@ -297,6 +328,42 @@
         "payload"
       ]
     },
+    "DatasetExportedEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "event_type": {
+          "const": "dataset.exported"
+        },
+        "session_seq": {
+          "$ref": "../common/primitives.schema.json#/$defs/SessionSeq"
+        },
+        "emitted_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "payload": {
+          "$ref": "#/$defs/DatasetExportedPayload"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "session_id",
+        "event_id",
+        "event_type",
+        "session_seq",
+        "emitted_at",
+        "payload"
+      ]
+    },
     "SelectionChangedEvent": {
       "type": "object",
       "additionalProperties": false,
@@ -418,6 +485,9 @@
         },
         {
           "$ref": "#/$defs/DatasetOpenedEvent"
+        },
+        {
+          "$ref": "#/$defs/DatasetExportedEvent"
         },
         {
           "$ref": "#/$defs/SelectionChangedEvent"

@@ -7,6 +7,7 @@
   "dataset.open",
   "dataset.close",
   "dataset.get",
+  "dataset.export",
   "layer.add_image",
   "layer.add_points",
   "layer.update",

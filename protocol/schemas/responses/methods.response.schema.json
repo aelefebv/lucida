@@ -191,6 +191,151 @@
         },
         "transform": {
           "$ref": "../common/types.schema.json#/$defs/Transform"
+        },
+        "backend": {
+          "type": "string",
+          "enum": [
+            "local",
+            "http",
+            "s3",
+            "gcs",
+            "synthetic"
+          ]
+        },
+        "ngff": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ngff_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "zarr_format": {
+              "type": "integer",
+              "minimum": 2
+            },
+            "multiscales": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "axes": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "../common/primitives.schema.json#/$defs/AxisLabel"
+                    },
+                    "minItems": 1
+                  },
+                  "levels": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "properties": {
+                        "path": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "shape": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "minItems": 1
+                        },
+                        "chunk_shape": {
+                          "type": "array",
+                          "items": {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "minItems": 1
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "shape",
+                        "chunk_shape"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "name",
+                  "axes",
+                  "levels"
+                ]
+              }
+            }
+          },
+          "required": [
+            "ngff_version",
+            "zarr_format",
+            "multiscales"
+          ]
+        },
+        "cache": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "chunk_capacity_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "chunk_used_bytes": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "metadata_entries": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "counters": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "chunk_hits": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "chunk_misses": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "metadata_hits": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "metadata_misses": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "evictions": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "chunk_hits",
+                "chunk_misses",
+                "metadata_hits",
+                "metadata_misses",
+                "evictions"
+              ]
+            }
+          },
+          "required": [
+            "chunk_capacity_bytes",
+            "chunk_used_bytes",
+            "metadata_entries",
+            "counters"
+          ]
         }
       },
       "required": [
@@ -201,6 +346,22 @@
         "shape",
         "dtype",
         "transform"
+      ]
+    },
+    "DatasetExportResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "job": {
+          "$ref": "../common/types.schema.json#/$defs/AsyncAccepted"
+        }
+      },
+      "required": [
+        "session_id",
+        "job"
       ]
     },
     "LayerAddImageResponse": {

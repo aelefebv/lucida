@@ -55,6 +55,7 @@ Primary dataset format:
    - local filesystem
    - HTTP(S)
    - S3-compatible object stores
+   - GCS object stores
 6. Long-lived daemon process + session model.
 7. Typed Python SDK for scripting and Jupyter workflows.
 8. Command log capture and deterministic replay.
@@ -144,6 +145,7 @@ Primary dataset format:
 - `connect(...)`
 - `create_session(...)`
 - `open_dataset(...)`
+- `export_dataset(...)`
 - `add_image_layer(...)`
 - `add_points_layer(...)`
 - `create_view(...)`
@@ -248,6 +250,7 @@ No mock-heavy middle-layer tests. Prioritize unit and e2e/integration on real pa
   - local filesystem
   - HTTP(S)
   - S3-compatible storage
+  - GCS-compatible storage
 
 ### 13.3 End-to-End Tests
 
@@ -274,7 +277,7 @@ v1 deliverables:
 
 1. Define baseline protocol interfaces (Step 1) and introduce explicit-view protocol v1 delta in Step 2.
 2. Implement ND state model and transform system with deterministic transitions and multi-view semantics.
-3. Implement OME-Zarr IO + cache scheduler.
+3. Implement OME-Zarr IO + cache scheduler, including `dataset.export`.
 4. Implement 2D renderer and controls.
 5. Implement 3D renderer + arcball/free-fly cameras.
 6. Implement points/graph layer with linked selection.
@@ -329,10 +332,11 @@ This top-level spec intentionally avoids duplicating Step 1 protocol details so 
 1. Rust core + Python SDK is the default architecture.
 2. WebGPU is primary rendering backend with constrained fallback path.
 3. Protocol v1 is the active control contract line and includes explicit view resources.
-4. v1 supports local/HTTP/S3 OME-Zarr access.
+4. v1 supports local/HTTP/S3/GCS OME-Zarr access.
 5. Browser support is phase 2 (remote gateway), not day-one parity.
 6. Extensibility in v1 is lightweight hooks, not full plugin framework.
 7. Observability includes local logs and optional crash/usage telemetry.
+8. During pre-release, protocol `1.0.0` may evolve in-place with additive updates, and in-repo OpenRPC/schema artifacts are the source of truth.
 
 ## 19. Context System and Governance
 
