@@ -217,3 +217,24 @@ Every error includes:
    - `camera.set_pose` in `panzoom` mode is canonicalized so `target[0:2]` is the pan center.
    - effective zoom derives from `1 / max(position[2] - target[2], 1e-6)`.
    - `camera.get` in `panzoom` mode returns canonical pose representation.
+
+## 15. Step 05 behavior notes (no schema changes)
+
+1. Step 05 does not add methods or fields; behavior is defined behind existing contracts.
+2. 3D volume-axis selection:
+   - planner uses the last three labels in `view.axis_order` as volume axes.
+   - non-volume axes are resolved via `view.axis_indices`.
+   - source normalization remains `dataset.open.axis_map`.
+3. 3D camera semantics:
+   - `camera.set_mode` and `camera.set_pose` in `arcball` and `freefly` modes canonicalize finite pose vectors.
+   - `camera.get` returns canonicalized `position`, `target`, normalized `up`, and optional `fov_degrees`.
+   - Step 05 camera policy is full 6DOF for both `arcball` and `freefly`.
+4. 3D render controls through existing `layer.update.patch` keys:
+   - `render_mode`: `mip|alpha|iso` (default `mip`)
+   - `iso_threshold`: `[0,1]` (default `0.5`)
+   - `density_scale`: `>0` (default `1.0`)
+   - `sample_step`: `>0` (default `1.0`)
+5. Invalidation/coalescing policy is unchanged from Step 04:
+   - kinds remain `full`, `slice`, `style`, `camera`
+   - Step 05 render-control patch updates map to `style`
+   - one coalesced plan update per view per dispatch cycle

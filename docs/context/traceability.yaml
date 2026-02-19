@@ -143,11 +143,33 @@
     {
       "step_id": "step-05",
       "step_spec_path": "specs/roadmap/step-05-3d-renderer-and-cameras.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
+      "status": "in_progress",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/architecture/component-map.md",
+        "docs/protocol/README.md",
+        "specs/roadmap/step-05-3d-renderer-and-cameras.md",
+        "python/lucida_core/engine.py",
+        "python/lucida_core/render3d/__init__.py",
+        "python/lucida_core/render3d/model.py",
+        "python/lucida_core/render3d/controls.py",
+        "python/lucida_core/render3d/planner.py",
+        "python/lucida_core/render3d/scheduler.py",
+        "rust/Cargo.toml",
+        "rust/crates/lucida-render-wgpu/Cargo.toml",
+        "rust/crates/lucida-render-wgpu/src/lib.rs",
+        "rust/crates/lucida-render-shell/Cargo.toml",
+        "rust/crates/lucida-render-shell/src/lib.rs",
+        "rust/crates/lucida-render-shell/src/main.rs",
+        ".github/workflows/step5-render3d.yml"
+      ],
+      "test_paths": [
+        "tests/core/test_step5_render3d.py",
+        "tests/perf/test_step5_render3d_perf.py",
+        "tests/perf/baselines/step5_render3d_perf.json"
+      ],
       "protocol_artifacts": [],
-      "last_validated": ""
+      "last_validated": "2026-02-19"
     },
     {
       "step_id": "step-06",
