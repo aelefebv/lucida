@@ -55,7 +55,28 @@ This document is the human-readable guide for the machine-readable contract in:
 2. Non-mutating methods must not require `idempotency_key`.
 3. Retry-safe behavior is keyed by `(session_id, method, idempotency_key)`.
 
-## 6. Async jobs
+## 6. Explicit view model
+
+1. Views are explicit resources in v1.
+2. New view lifecycle methods:
+   - `view.create`
+   - `view.close`
+   - `view.get`
+3. View-to-layer binding methods:
+   - `view.bind_layer`
+   - `view.unbind_layer`
+4. View-scoped controls require `view_id`:
+   - `view.set_axis_index`
+   - `view.reorder_axes`
+   - `view.set_channel_order`
+   - `camera.set_mode`
+   - `camera.set_pose`
+   - `camera.get`
+   - `selection.get`
+   - `selection.set`
+5. Multi-dataset overlay and side-by-side workflows are modeled through multiple views and explicit layer bindings.
+
+## 7. Async jobs
 
 1. Long-running operations return immediately with:
    - `job.job_id`
@@ -70,7 +91,7 @@ This document is the human-readable guide for the machine-readable contract in:
 3. Progress and lifecycle updates are delivered via dedicated event stream.
 4. Job state recovery is done through `job.get` and `job.list`.
 
-## 7. Large payload policy
+## 8. Large payload policy
 
 1. Bulk numeric payloads must be out-of-band via `DataRef`.
 2. `DataRef.kind`:
@@ -80,7 +101,7 @@ This document is the human-readable guide for the machine-readable contract in:
 3. `DataRef` includes shape/dtype/endianness/compression/ttl/checksum metadata.
 4. Inline JSON payload budget is capped at `65536` bytes for control-sized payloads.
 
-## 8. Typed error contract
+## 9. Typed error contract
 
 Error envelope schema lives at `protocol/schemas/errors/error.schema.json`.
 
@@ -106,7 +127,7 @@ Every error includes:
 4. `retryable`
 5. optional `retry_after_ms`
 
-## 9. Command log format
+## 10. Command log format
 
 1. Command logs are JSONL.
 2. One line equals one record validated by:
@@ -116,7 +137,7 @@ Every error includes:
    - `kind = "event"`
 4. Replay must validate protocol compatibility before applying records.
 
-## 10. Versioning rules
+## 11. Versioning rules
 
 1. Patch:
    - clarifications and additive non-breaking schema tightening.
@@ -125,7 +146,7 @@ Every error includes:
 3. Major:
    - any breaking change in required fields, semantics, method signatures, or behavior.
 
-## 11. Frozen v1 method list
+## 12. Frozen v1 method list
 
 1. `system.hello`
 2. `system.capabilities.get`
@@ -140,18 +161,23 @@ Every error includes:
 11. `layer.update`
 12. `layer.remove`
 13. `layer.get`
-14. `view.set_axis_index`
-15. `view.reorder_axes`
-16. `view.set_channel_order`
-17. `camera.set_mode`
-18. `camera.set_pose`
-19. `camera.get`
-20. `selection.get`
-21. `selection.set`
-22. `job.get`
-23. `job.cancel`
-24. `job.list`
-25. `events.subscribe`
-26. `command_log.export`
-27. `command_log.import`
-28. `command_log.replay`
+14. `view.create`
+15. `view.close`
+16. `view.get`
+17. `view.bind_layer`
+18. `view.unbind_layer`
+19. `view.set_axis_index`
+20. `view.reorder_axes`
+21. `view.set_channel_order`
+22. `camera.set_mode`
+23. `camera.set_pose`
+24. `camera.get`
+25. `selection.get`
+26. `selection.set`
+27. `job.get`
+28. `job.cancel`
+29. `job.list`
+30. `events.subscribe`
+31. `command_log.export`
+32. `command_log.import`
+33. `command_log.replay`

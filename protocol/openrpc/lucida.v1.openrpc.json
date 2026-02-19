@@ -383,6 +383,146 @@
       ]
     },
     {
+      "name": "view.create",
+      "summary": "Protocol method view.create",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/ViewCreateRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/ViewCreateResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.close",
+      "summary": "Protocol method view.close",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/ViewCloseRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/ViewCloseResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.get",
+      "summary": "Protocol method view.get",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/ViewGetRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/ViewGetResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.bind_layer",
+      "summary": "Protocol method view.bind_layer",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/ViewBindLayerRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/ViewBindLayerResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.unbind_layer",
+      "summary": "Protocol method view.unbind_layer",
+      "params": [
+        {
+          "name": "params",
+          "required": true,
+          "schema": {
+            "$ref": "../schemas/requests/methods.request.schema.json#/$defs/ViewUnbindLayerRequest"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "../schemas/responses/methods.response.schema.json#/$defs/ViewUnbindLayerResponse"
+        }
+      },
+      "errors": [
+        {
+          "code": -32000,
+          "message": "Lucida typed error",
+          "data": {
+            "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
+          }
+        }
+      ]
+    },
+    {
       "name": "view.set_axis_index",
       "summary": "Protocol method view.set_axis_index",
       "params": [
@@ -802,12 +942,5 @@
         }
       ]
     }
-  ],
-  "components": {
-    "schemas": {
-      "ErrorEnvelope": {
-        "$ref": "../schemas/errors/error.schema.json#/$defs/ErrorEnvelope"
-      }
-    }
-  }
+  ]
 }

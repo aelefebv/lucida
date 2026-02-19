@@ -41,11 +41,37 @@
     {
       "step_id": "step-02",
       "step_spec_path": "specs/roadmap/step-02-nd-state-model-and-transforms.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
-      "protocol_artifacts": [],
-      "last_validated": ""
+      "status": "done",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/protocol/README.md",
+        "protocol/openrpc/lucida.v1.openrpc.json",
+        "protocol/schemas/requests/methods.request.schema.json",
+        "protocol/schemas/responses/methods.response.schema.json",
+        "protocol/schemas/events/events.schema.json",
+        "protocol/command-log/lucida.commandlog.v1.schema.json",
+        "python/lucida_core/__init__.py",
+        "python/lucida_core/engine.py",
+        "python/lucida_core/errors.py",
+        "python/lucida_sdk/protocol/generate_models.py",
+        "python/lucida_sdk/protocol/generated/models.py"
+      ],
+      "test_paths": [
+        "tests/core/test_nd_state_engine.py",
+        "tests/protocol/test_openrpc_integrity.py",
+        "tests/protocol/test_protocol_policies.py",
+        "tests/protocol/test_schema_conformance.py",
+        "tests/protocol/test_command_log_roundtrip.py",
+        "tests/protocol/test_generated_models.py"
+      ],
+      "protocol_artifacts": [
+        "protocol/openrpc/lucida.v1.openrpc.json",
+        "protocol/schemas/requests/methods.request.schema.json",
+        "protocol/schemas/responses/methods.response.schema.json",
+        "protocol/schemas/events/events.schema.json",
+        "protocol/command-log/lucida.commandlog.v1.schema.json"
+      ],
+      "last_validated": "2026-02-19"
     },
     {
       "step_id": "step-03",

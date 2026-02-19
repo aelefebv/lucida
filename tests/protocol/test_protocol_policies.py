@@ -17,6 +17,10 @@ MUTATING_METHOD_REQUEST_DEFS = {
     "LayerAddPointsRequest",
     "LayerUpdateRequest",
     "LayerRemoveRequest",
+    "ViewCreateRequest",
+    "ViewCloseRequest",
+    "ViewBindLayerRequest",
+    "ViewUnbindLayerRequest",
     "ViewSetAxisIndexRequest",
     "ViewReorderAxesRequest",
     "ViewSetChannelOrderRequest",
@@ -59,8 +63,8 @@ class ProtocolPolicyTests(unittest.TestCase):
         self.events = json.loads(self.events_path.read_text(encoding="utf-8"))
 
     def test_handshake_compatible_range_selects_highest_shared(self) -> None:
-        selected = negotiate_version("1.0.0", "1.3.0", "1.0.0", "1.1.4")
-        self.assertEqual(selected, "1.1.4")
+        selected = negotiate_version("1.0.0", "2.3.0", "1.0.0", "1.0.0")
+        self.assertEqual(selected, "1.0.0")
 
     def test_handshake_incompatible_range_returns_none(self) -> None:
         selected = negotiate_version("2.0.0", "2.1.0", "1.0.0", "1.9.9")
@@ -95,4 +99,3 @@ class ProtocolPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

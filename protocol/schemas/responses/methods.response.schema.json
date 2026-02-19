@@ -308,6 +308,144 @@
         "opacity"
       ]
     },
+    "ViewCreateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "created_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "session_id",
+        "view_id",
+        "created_at"
+      ]
+    },
+    "ViewCloseResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "closed_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "session_id",
+        "view_id",
+        "closed_at"
+      ]
+    },
+    "ViewGetResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "axis_order": {
+          "type": "array",
+          "items": {
+            "$ref": "../common/primitives.schema.json#/$defs/AxisLabel"
+          },
+          "minItems": 1
+        },
+        "axis_indices": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "channel_order": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "bound_layer_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "session_id",
+        "view_id",
+        "axis_order",
+        "axis_indices",
+        "channel_order",
+        "bound_layer_ids"
+      ]
+    },
+    "ViewBindLayerResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "bound_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "session_id",
+        "view_id",
+        "layer_id",
+        "bound_at"
+      ]
+    },
+    "ViewUnbindLayerResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "unbound_at": {
+          "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        }
+      },
+      "required": [
+        "session_id",
+        "view_id",
+        "layer_id",
+        "unbound_at"
+      ]
+    },
     "ViewSetAxisIndexResponse": {
       "type": "object",
       "additionalProperties": false,
@@ -320,10 +458,14 @@
         },
         "updated_at": {
           "$ref": "../common/primitives.schema.json#/$defs/Timestamp"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "session_id",
+        "view_id",
         "axis_index",
         "updated_at"
       ]
@@ -341,10 +483,14 @@
             "$ref": "../common/primitives.schema.json#/$defs/AxisLabel"
           },
           "minItems": 1
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "session_id",
+        "view_id",
         "order"
       ]
     },
@@ -363,10 +509,14 @@
           },
           "minItems": 1,
           "uniqueItems": true
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "session_id",
+        "view_id",
         "channel_order"
       ]
     },
@@ -379,10 +529,14 @@
         },
         "mode": {
           "$ref": "../common/primitives.schema.json#/$defs/CameraMode"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "session_id",
+        "view_id",
         "mode"
       ]
     },
@@ -395,10 +549,14 @@
         },
         "pose": {
           "$ref": "../common/types.schema.json#/$defs/CameraPose"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "session_id",
+        "view_id",
         "pose"
       ]
     },
@@ -414,10 +572,14 @@
         },
         "pose": {
           "$ref": "../common/types.schema.json#/$defs/CameraPose"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "session_id",
+        "view_id",
         "mode",
         "pose"
       ]
@@ -432,10 +594,14 @@
         "selection": {
           "type": "object",
           "additionalProperties": true
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "session_id",
+        "view_id",
         "selection"
       ]
     },
@@ -449,10 +615,14 @@
         "selection": {
           "type": "object",
           "additionalProperties": true
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "session_id",
+        "view_id",
         "selection"
       ]
     },

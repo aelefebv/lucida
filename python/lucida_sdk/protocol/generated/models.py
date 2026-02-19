@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
-SCHEMA_DIGEST = "f8d2485c97d0c8a401ca1a30edfee6c4ba1a2bd8304a389f3052adffe0b630ed"
+SCHEMA_DIGEST = "8f0dd73be1cd1a525e7e3b3a232174239658e9c94b3b97a1c431296c5ed66f00"
 
 class AsyncAccepted(TypedDict):
     accepted_at: Timestamp
@@ -19,11 +19,13 @@ class CameraGetRequest(TypedDict):
     protocol_version: SemVer
     request_id: UUIDv7
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class CameraGetResponse(TypedDict):
     mode: CameraMode
     pose: CameraPose
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class CameraPose(TypedDict):
     fov_degrees: NotRequired[float]
@@ -37,10 +39,12 @@ class CameraSetModeRequest(TypedDict):
     protocol_version: SemVer
     request_id: UUIDv7
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class CameraSetModeResponse(TypedDict):
     mode: CameraMode
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class CameraSetPoseRequest(TypedDict):
     idempotency_key: str
@@ -48,10 +52,12 @@ class CameraSetPoseRequest(TypedDict):
     protocol_version: SemVer
     request_id: UUIDv7
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class CameraSetPoseResponse(TypedDict):
     pose: CameraPose
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class CapabilityFlags(TypedDict):
     async_jobs: bool
@@ -404,10 +410,12 @@ class SelectionGetRequest(TypedDict):
     protocol_version: SemVer
     request_id: UUIDv7
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class SelectionGetResponse(TypedDict):
     selection: dict[str, Any]
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class SelectionSetRequest(TypedDict):
     idempotency_key: str
@@ -416,10 +424,12 @@ class SelectionSetRequest(TypedDict):
     request_id: UUIDv7
     selection: dict[str, Any]
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class SelectionSetResponse(TypedDict):
     selection: dict[str, Any]
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class SessionCloseRequest(TypedDict):
     idempotency_key: str
@@ -501,16 +511,70 @@ class VersionRange(TypedDict):
     max_version: SemVer
     min_version: SemVer
 
+class ViewBindLayerRequest(TypedDict):
+    idempotency_key: str
+    layer_id: UUIDv7
+    protocol_version: SemVer
+    request_id: UUIDv7
+    session_id: UUIDv7
+    view_id: UUIDv7
+
+class ViewBindLayerResponse(TypedDict):
+    bound_at: Timestamp
+    layer_id: UUIDv7
+    session_id: UUIDv7
+    view_id: UUIDv7
+
+class ViewCloseRequest(TypedDict):
+    idempotency_key: str
+    protocol_version: SemVer
+    request_id: UUIDv7
+    session_id: UUIDv7
+    view_id: UUIDv7
+
+class ViewCloseResponse(TypedDict):
+    closed_at: Timestamp
+    session_id: UUIDv7
+    view_id: UUIDv7
+
+class ViewCreateRequest(TypedDict):
+    idempotency_key: str
+    label: NotRequired[str]
+    protocol_version: SemVer
+    request_id: UUIDv7
+    session_id: UUIDv7
+
+class ViewCreateResponse(TypedDict):
+    created_at: Timestamp
+    session_id: UUIDv7
+    view_id: UUIDv7
+
+class ViewGetRequest(TypedDict):
+    protocol_version: SemVer
+    request_id: UUIDv7
+    session_id: UUIDv7
+    view_id: UUIDv7
+
+class ViewGetResponse(TypedDict):
+    axis_indices: dict[str, Any]
+    axis_order: list[AxisLabel]
+    bound_layer_ids: list[UUIDv7]
+    channel_order: list[int]
+    session_id: UUIDv7
+    view_id: UUIDv7
+
 class ViewReorderAxesRequest(TypedDict):
     idempotency_key: str
     order: list[AxisLabel]
     protocol_version: SemVer
     request_id: UUIDv7
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class ViewReorderAxesResponse(TypedDict):
     order: list[AxisLabel]
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class ViewSetAxisIndexRequest(TypedDict):
     axis_index: AxisIndex
@@ -518,11 +582,13 @@ class ViewSetAxisIndexRequest(TypedDict):
     protocol_version: SemVer
     request_id: UUIDv7
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class ViewSetAxisIndexResponse(TypedDict):
     axis_index: AxisIndex
     session_id: UUIDv7
     updated_at: Timestamp
+    view_id: UUIDv7
 
 class ViewSetChannelOrderRequest(TypedDict):
     channel_order: list[int]
@@ -530,10 +596,26 @@ class ViewSetChannelOrderRequest(TypedDict):
     protocol_version: SemVer
     request_id: UUIDv7
     session_id: UUIDv7
+    view_id: UUIDv7
 
 class ViewSetChannelOrderResponse(TypedDict):
     channel_order: list[int]
     session_id: UUIDv7
+    view_id: UUIDv7
+
+class ViewUnbindLayerRequest(TypedDict):
+    idempotency_key: str
+    layer_id: UUIDv7
+    protocol_version: SemVer
+    request_id: UUIDv7
+    session_id: UUIDv7
+    view_id: UUIDv7
+
+class ViewUnbindLayerResponse(TypedDict):
+    layer_id: UUIDv7
+    session_id: UUIDv7
+    unbound_at: Timestamp
+    view_id: UUIDv7
 
 AnyEvent = CommandLogReplayEvent | DatasetOpenedEvent | ErrorEvent | JobLifecycleEvent | JobProgressEvent | SelectionChangedEvent | StateChangedEvent
 

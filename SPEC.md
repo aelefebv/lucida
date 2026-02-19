@@ -131,6 +131,7 @@ Primary dataset format:
 ### 7.1 Control Protocol
 
 - JSON-RPC 2.0.
+- Active protocol line: Lucida protocol v1 (`1.0.0`) with explicit view resources.
 - Default local transport:
   - Unix sockets (macOS/Linux)
   - named pipes (Windows)
@@ -145,6 +146,10 @@ Primary dataset format:
 - `open_dataset(...)`
 - `add_image_layer(...)`
 - `add_points_layer(...)`
+- `create_view(...)`
+- `close_view(...)`
+- `bind_layer_to_view(...)`
+- `unbind_layer_from_view(...)`
 - `set_axis_index(...)`
 - `reorder_axes(...)`
 - `set_channel_order(...)`
@@ -180,6 +185,7 @@ All user-visible actions must map to command API operations.
 - Channel/time stepping.
 - Axis slider and reorder controls.
 - Visibility toggles and render property changes per channel/layer.
+- Multiple explicit views per session for side-by-side workflows.
 
 ## 9. ND Graph/Points Visualization
 
@@ -266,8 +272,8 @@ v1 deliverables:
 
 ## 15. Roadmap (high-level)
 
-1. Define core interfaces and command protocol.
-2. Implement ND state model and transform system.
+1. Define baseline protocol interfaces (Step 1) and introduce explicit-view protocol v1 delta in Step 2.
+2. Implement ND state model and transform system with deterministic transitions and multi-view semantics.
 3. Implement OME-Zarr IO + cache scheduler.
 4. Implement 2D renderer and controls.
 5. Implement 3D renderer + arcball/free-fly cameras.
@@ -322,7 +328,7 @@ This top-level spec intentionally avoids duplicating Step 1 protocol details so 
 
 1. Rust core + Python SDK is the default architecture.
 2. WebGPU is primary rendering backend with constrained fallback path.
-3. v1 includes 2D + 3D + graph support.
+3. Protocol v1 is the active control contract line and includes explicit view resources.
 4. v1 supports local/HTTP/S3 OME-Zarr access.
 5. Browser support is phase 2 (remote gateway), not day-one parity.
 6. Extensibility in v1 is lightweight hooks, not full plugin framework.

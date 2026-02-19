@@ -1,7 +1,7 @@
 # Step 01 Sub-Spec: Core Interfaces and Command Protocol
 
 ## Objective
-Freeze a versioned, machine-readable control contract so daemon and SDK implementations can proceed without interface ambiguity.
+Freeze a baseline machine-readable control contract so daemon and SDK implementations can proceed without interface ambiguity.
 
 ## What Lives in This Sub-Spec
 - Method taxonomy and naming (`domain.method`).
@@ -23,9 +23,13 @@ Out of scope:
 3. UI implementation.
 
 ## Interface and Contract Changes
-- Freeze all v1 protocol methods listed in this sub-spec.
+- Freeze baseline protocol methods listed in this sub-spec.
 - Require `idempotency_key` on mutating calls.
 - Require dedicated event stream with monotonic `session_seq` per session.
+
+Protocol ownership note:
+1. Step 2 introduces the explicit-view protocol v1 delta and owns current active contract behavior.
+2. This Step 1 document is retained as the historical baseline reference.
 
 ## Deliverables
 1. `protocol/openrpc/lucida.v1.openrpc.json`

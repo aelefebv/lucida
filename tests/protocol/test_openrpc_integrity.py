@@ -62,4 +62,3 @@ class OpenRpcIntegrityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

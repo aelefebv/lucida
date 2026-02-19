@@ -12,6 +12,10 @@
 3. Python protocol model generation:
    - `python/lucida_sdk/protocol/generate_models.py`
    - `python/lucida_sdk/protocol/generated/models.py`
+4. In-memory core runtime (Step 02):
+   - `python/lucida_core/__init__.py`
+   - `python/lucida_core/engine.py`
+   - `python/lucida_core/errors.py`
 
 ## Planned Runtime Components (Roadmap-Aligned)
 

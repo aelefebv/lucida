@@ -391,6 +391,154 @@
         "layer_id"
       ]
     },
+    "ViewCreateRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "request_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "idempotency_key",
+        "session_id"
+      ]
+    },
+    "ViewCloseRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "request_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "idempotency_key",
+        "session_id",
+        "view_id"
+      ]
+    },
+    "ViewGetRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "request_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "session_id",
+        "view_id"
+      ]
+    },
+    "ViewBindLayerRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "request_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "idempotency_key",
+        "session_id",
+        "view_id",
+        "layer_id"
+      ]
+    },
+    "ViewUnbindLayerRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": {
+          "$ref": "../common/primitives.schema.json#/$defs/SemVer"
+        },
+        "request_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._:-]{8,128}$"
+        },
+        "session_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "layer_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        }
+      },
+      "required": [
+        "protocol_version",
+        "request_id",
+        "idempotency_key",
+        "session_id",
+        "view_id",
+        "layer_id"
+      ]
+    },
     "ViewSetAxisIndexRequest": {
       "type": "object",
       "additionalProperties": false,
@@ -410,6 +558,9 @@
         },
         "axis_index": {
           "$ref": "../common/types.schema.json#/$defs/AxisIndex"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
@@ -417,6 +568,7 @@
         "request_id",
         "idempotency_key",
         "session_id",
+        "view_id",
         "axis_index"
       ]
     },
@@ -443,6 +595,9 @@
             "$ref": "../common/primitives.schema.json#/$defs/AxisLabel"
           },
           "minItems": 1
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
@@ -450,6 +605,7 @@
         "request_id",
         "idempotency_key",
         "session_id",
+        "view_id",
         "order"
       ]
     },
@@ -478,6 +634,9 @@
           },
           "minItems": 1,
           "uniqueItems": true
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
@@ -485,6 +644,7 @@
         "request_id",
         "idempotency_key",
         "session_id",
+        "view_id",
         "channel_order"
       ]
     },
@@ -507,6 +667,9 @@
         },
         "mode": {
           "$ref": "../common/primitives.schema.json#/$defs/CameraMode"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
@@ -514,6 +677,7 @@
         "request_id",
         "idempotency_key",
         "session_id",
+        "view_id",
         "mode"
       ]
     },
@@ -536,6 +700,9 @@
         },
         "pose": {
           "$ref": "../common/types.schema.json#/$defs/CameraPose"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
@@ -543,6 +710,7 @@
         "request_id",
         "idempotency_key",
         "session_id",
+        "view_id",
         "pose"
       ]
     },
@@ -558,12 +726,16 @@
         },
         "session_id": {
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "protocol_version",
         "request_id",
-        "session_id"
+        "session_id",
+        "view_id"
       ]
     },
     "SelectionGetRequest": {
@@ -578,12 +750,16 @@
         },
         "session_id": {
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
         "protocol_version",
         "request_id",
-        "session_id"
+        "session_id",
+        "view_id"
       ]
     },
     "SelectionSetRequest": {
@@ -609,6 +785,9 @@
         "selection": {
           "type": "object",
           "additionalProperties": true
+        },
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         }
       },
       "required": [
@@ -616,6 +795,7 @@
         "request_id",
         "idempotency_key",
         "session_id",
+        "view_id",
         "selection"
       ]
     },
