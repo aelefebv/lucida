@@ -1,9 +1,5 @@
-# from examples import hello
-
-
 def main():
-    from opengl_run.examples import camera_cull
-    # hello.main()
+    pass
 
 
 if __name__ == "__main__":
