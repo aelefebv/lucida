@@ -282,6 +282,11 @@ v1 deliverables:
 
 Each roadmap step has a dedicated sub-spec in `specs/roadmap/`. These files are implementation-facing and should hold step-specific scope, interfaces, dependencies, acceptance criteria, and test gates.
 
+Operational note:
+
+1. `AGENTS.md` is the first playbook for planning and implementation sessions.
+2. `docs/context/traceability.yaml` and `docs/context/status.md` are the canonical implementation progress references.
+
 1. [`specs/roadmap/step-01-core-interfaces-and-command-protocol.md`](specs/roadmap/step-01-core-interfaces-and-command-protocol.md)
    - Source of truth for command protocol contracts, versioning rules, and schema/OpenRPC artifacts.
 2. [`specs/roadmap/step-02-nd-state-model-and-transforms.md`](specs/roadmap/step-02-nd-state-model-and-transforms.md)
@@ -322,3 +327,21 @@ This top-level spec intentionally avoids duplicating Step 1 protocol details so 
 5. Browser support is phase 2 (remote gateway), not day-one parity.
 6. Extensibility in v1 is lightweight hooks, not full plugin framework.
 7. Observability includes local logs and optional crash/usage telemetry.
+
+## 19. Context System and Governance
+
+Lucida uses a guidance-first context system to keep future coding agents and developers aligned with spec intent while minimizing process overhead.
+
+Core artifacts:
+
+1. `AGENTS.md`: operational planning/implementation workflow.
+2. `docs/context/index.yaml`: machine-readable context artifact catalog.
+3. `docs/context/traceability.yaml`: step-level spec-to-implementation mapping and status.
+4. `docs/context/status.md`: human-readable roadmap status summary.
+5. `CONTRIBUTING.md`: required validation and handoff expectations.
+
+Automation:
+
+1. `scripts/check_context.py` validates context contracts.
+2. `tests/context/test_context_contracts.py` verifies checker behavior and required templates/playbook content.
+3. `.github/workflows/context-check.yml` runs context checks on PRs and pushes.

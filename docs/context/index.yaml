@@ -1,0 +1,97 @@
+{
+  "version": "1",
+  "last_updated": "2026-02-19",
+  "artifacts": [
+    {
+      "id": "agents-playbook",
+      "path": "AGENTS.md",
+      "role": "agent-operational-playbook",
+      "owner": "lucida-core-team",
+      "update_trigger": "planning-or-implementation-workflow-changes"
+    },
+    {
+      "id": "top-level-spec",
+      "path": "SPEC.md",
+      "role": "product-intent",
+      "owner": "lucida-core-team",
+      "update_trigger": "scope-or-constraints-change"
+    },
+    {
+      "id": "roadmap-step-specs",
+      "path": "specs/roadmap",
+      "role": "step-intent",
+      "owner": "lucida-core-team",
+      "update_trigger": "step-acceptance-or-scope-change"
+    },
+    {
+      "id": "protocol-guide",
+      "path": "docs/protocol/README.md",
+      "role": "protocol-human-reference",
+      "owner": "lucida-core-team",
+      "update_trigger": "protocol-contract-behavior-change"
+    },
+    {
+      "id": "protocol-openrpc",
+      "path": "protocol/openrpc/lucida.v1.openrpc.json",
+      "role": "protocol-machine-contract",
+      "owner": "lucida-core-team",
+      "update_trigger": "method-or-schema-ref-change"
+    },
+    {
+      "id": "protocol-schemas",
+      "path": "protocol/schemas",
+      "role": "protocol-machine-contract",
+      "owner": "lucida-core-team",
+      "update_trigger": "request-response-event-error-change"
+    },
+    {
+      "id": "command-log-schema",
+      "path": "protocol/command-log/lucida.commandlog.v1.schema.json",
+      "role": "replay-contract",
+      "owner": "lucida-core-team",
+      "update_trigger": "command-log-format-change"
+    },
+    {
+      "id": "architecture-map",
+      "path": "docs/architecture/component-map.md",
+      "role": "system-shape-reference",
+      "owner": "lucida-core-team",
+      "update_trigger": "component-boundary-change"
+    },
+    {
+      "id": "adr-index",
+      "path": "docs/adr/README.md",
+      "role": "design-decision-guide",
+      "owner": "lucida-core-team",
+      "update_trigger": "adr-process-change"
+    },
+    {
+      "id": "context-status",
+      "path": "docs/context/status.md",
+      "role": "roadmap-status-summary",
+      "owner": "lucida-core-team",
+      "update_trigger": "step-status-change"
+    },
+    {
+      "id": "context-traceability",
+      "path": "docs/context/traceability.yaml",
+      "role": "spec-to-code-mapping",
+      "owner": "lucida-core-team",
+      "update_trigger": "implementation-or-test-path-change"
+    },
+    {
+      "id": "context-checker",
+      "path": "scripts/check_context.py",
+      "role": "context-validation-automation",
+      "owner": "lucida-core-team",
+      "update_trigger": "context-contract-change"
+    },
+    {
+      "id": "context-tests",
+      "path": "tests/context/test_context_contracts.py",
+      "role": "context-validation-tests",
+      "owner": "lucida-core-team",
+      "update_trigger": "context-checking-behavior-change"
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+{
+  "version": "1",
+  "last_updated": "2026-02-19",
+  "steps": [
+    {
+      "step_id": "step-01",
+      "step_spec_path": "specs/roadmap/step-01-core-interfaces-and-command-protocol.md",
+      "status": "done",
+      "implementation_paths": [
+        "docs/protocol/README.md",
+        "protocol/openrpc/lucida.v1.openrpc.json",
+        "protocol/schemas/common/primitives.schema.json",
+        "protocol/schemas/common/types.schema.json",
+        "protocol/schemas/errors/error.schema.json",
+        "protocol/schemas/events/events.schema.json",
+        "protocol/schemas/requests/methods.request.schema.json",
+        "protocol/schemas/responses/methods.response.schema.json",
+        "protocol/command-log/lucida.commandlog.v1.schema.json",
+        "python/lucida_sdk/protocol/generate_models.py",
+        "python/lucida_sdk/protocol/generated/models.py"
+      ],
+      "test_paths": [
+        "tests/protocol/test_schema_conformance.py",
+        "tests/protocol/test_openrpc_integrity.py",
+        "tests/protocol/test_protocol_policies.py",
+        "tests/protocol/test_command_log_roundtrip.py",
+        "tests/protocol/test_generated_models.py"
+      ],
+      "protocol_artifacts": [
+        "protocol/openrpc/lucida.v1.openrpc.json",
+        "protocol/schemas/common/primitives.schema.json",
+        "protocol/schemas/common/types.schema.json",
+        "protocol/schemas/errors/error.schema.json",
+        "protocol/schemas/events/events.schema.json",
+        "protocol/schemas/requests/methods.request.schema.json",
+        "protocol/schemas/responses/methods.response.schema.json",
+        "protocol/command-log/lucida.commandlog.v1.schema.json"
+      ],
+      "last_validated": "2026-02-19"
+    },
+    {
+      "step_id": "step-02",
+      "step_spec_path": "specs/roadmap/step-02-nd-state-model-and-transforms.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-03",
+      "step_spec_path": "specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-04",
+      "step_spec_path": "specs/roadmap/step-04-2d-renderer-and-controls.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-05",
+      "step_spec_path": "specs/roadmap/step-05-3d-renderer-and-cameras.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-06",
+      "step_spec_path": "specs/roadmap/step-06-points-graph-layer-and-linked-selection.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-07",
+      "step_spec_path": "specs/roadmap/step-07-daemon-session-model-and-event-stream.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-08",
+      "step_spec_path": "specs/roadmap/step-08-python-sdk-and-notebook-integration.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-09",
+      "step_spec_path": "specs/roadmap/step-09-command-log-replay.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-10",
+      "step_spec_path": "specs/roadmap/step-10-installers-and-ci-release-gates.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    },
+    {
+      "step_id": "step-11",
+      "step_spec_path": "specs/roadmap/step-11-remote-web-gateway-phase-2.md",
+      "status": "planned",
+      "implementation_paths": [],
+      "test_paths": [],
+      "protocol_artifacts": [],
+      "last_validated": ""
+    }
+  ]
+}

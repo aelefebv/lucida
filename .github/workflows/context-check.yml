@@ -1,0 +1,27 @@
+name: Context Check
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - refactor
+      - "codex/**"
+
+jobs:
+  context:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate context artifacts
+        run: python3 scripts/check_context.py
+
+      - name: Run context tests
+        run: python3 -m unittest tests/context/test_context_contracts.py -v

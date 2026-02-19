@@ -122,3 +122,12 @@ Step 01 is complete when protocol consumers can implement daemon and SDK behavio
 2. Breaking changes require a major protocol version bump and a new OpenRPC/schema set.
 3. Additive changes may only be introduced as minor versions and must preserve existing method behavior.
 4. Generated SDK protocol models must always be reproducible from schema artifacts.
+
+## Context and Traceability Touchpoints
+
+When Step 01 artifacts change, update these context files in the same change set:
+
+1. `docs/context/traceability.yaml` (step-01 implementation/test/protocol artifact mapping and `last_validated`).
+2. `docs/context/status.md` (if step status changes).
+3. `docs/context/index.yaml` (if context artifact inventory changes).
+4. `docs/protocol/README.md` (if human-readable behavior contract changes).
