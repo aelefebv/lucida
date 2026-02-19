@@ -128,16 +128,54 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "view_id": {
+          "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
+        },
         "layer_id": {
           "$ref": "../common/primitives.schema.json#/$defs/UUIDv7"
         },
+        "selection_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "query": {
+          "$ref": "../common/types.schema.json#/$defs/PointsSelectionQuery"
+        },
+        "resolved_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "selected_point_ids": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "maxItems": 4096
+        },
+        "selected_point_ids_ref": {
+          "$ref": "../common/types.schema.json#/$defs/DataRef"
+        },
+        "linked_image_context": {
+          "$ref": "../common/types.schema.json#/$defs/LinkedImageContext"
+        },
         "selection": {
-          "type": "object",
-          "additionalProperties": true
+          "oneOf": [
+            {
+              "$ref": "../common/types.schema.json#/$defs/PointsSelectionState"
+            },
+            {
+              "$ref": "../common/types.schema.json#/$defs/LegacySelectionObject"
+            }
+          ]
         }
       },
       "required": [
-        "selection"
+        "view_id",
+        "selection_version",
+        "query",
+        "resolved_count",
+        "linked_image_context"
       ]
     },
     "CommandLogReplayPayload": {

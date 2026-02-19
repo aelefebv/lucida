@@ -119,7 +119,7 @@
     {
       "step_id": "step-04",
       "step_spec_path": "specs/roadmap/step-04-2d-renderer-and-controls.md",
-      "status": "in_progress",
+      "status": "done",
       "implementation_paths": [
         "SPEC.md",
         "docs/protocol/README.md",
@@ -143,7 +143,7 @@
     {
       "step_id": "step-05",
       "step_spec_path": "specs/roadmap/step-05-3d-renderer-and-cameras.md",
-      "status": "in_progress",
+      "status": "done",
       "implementation_paths": [
         "SPEC.md",
         "docs/architecture/component-map.md",
@@ -174,11 +174,42 @@
     {
       "step_id": "step-06",
       "step_spec_path": "specs/roadmap/step-06-points-graph-layer-and-linked-selection.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
-      "protocol_artifacts": [],
-      "last_validated": ""
+      "status": "done",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/architecture/component-map.md",
+        "docs/protocol/README.md",
+        "specs/roadmap/step-06-points-graph-layer-and-linked-selection.md",
+        "protocol/openrpc/lucida.v1.openrpc.json",
+        "protocol/schemas/common/types.schema.json",
+        "protocol/schemas/requests/methods.request.schema.json",
+        "protocol/schemas/responses/methods.response.schema.json",
+        "protocol/schemas/events/events.schema.json",
+        "python/lucida_core/__init__.py",
+        "python/lucida_core/engine.py",
+        "python/lucida_core/render_points/__init__.py",
+        "python/lucida_core/render_points/model.py",
+        "python/lucida_core/render_points/planner.py",
+        "python/lucida_core/render_points/scheduler.py",
+        "python/lucida_sdk/protocol/generated/models.py",
+        "rust/crates/lucida-render-wgpu/src/lib.rs",
+        "rust/crates/lucida-render-shell/src/lib.rs",
+        ".github/workflows/step6-points.yml"
+      ],
+      "test_paths": [
+        "tests/core/test_step6_points_graph.py",
+        "tests/perf/test_step6_points_perf.py",
+        "tests/perf/baselines/step6_points_perf.json",
+        "tests/protocol/test_schema_conformance.py"
+      ],
+      "protocol_artifacts": [
+        "protocol/openrpc/lucida.v1.openrpc.json",
+        "protocol/schemas/common/types.schema.json",
+        "protocol/schemas/requests/methods.request.schema.json",
+        "protocol/schemas/responses/methods.response.schema.json",
+        "protocol/schemas/events/events.schema.json"
+      ],
+      "last_validated": "2026-02-19"
     },
     {
       "step_id": "step-07",
