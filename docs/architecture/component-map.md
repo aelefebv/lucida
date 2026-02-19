@@ -30,6 +30,10 @@
    - `rust/Cargo.toml`
    - `rust/crates/lucida-render-wgpu/*`
    - `rust/crates/lucida-render-shell/*`
+8. Step 07 daemon runtime and session/event orchestration:
+   - `python/lucida_daemon/*`
+9. Step 07 Rust daemon scaffold:
+   - `rust/crates/lucida-daemon/*`
 
 ## Planned Runtime Components (Roadmap-Aligned)
 

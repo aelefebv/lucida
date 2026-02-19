@@ -23,8 +23,10 @@ For product and implementation context, read in this order:
 6. `docs/architecture/`: architecture references and component map.
 7. `docs/adr/`: architecture decision records.
 8. `python/lucida_sdk/protocol/`: protocol model generation and generated models.
-9. `tests/protocol/`: protocol contract tests.
-10. `tests/context/`: context-system tests.
+9. `python/lucida_daemon/`: Step 07 daemon runtime orchestration package.
+10. `tests/protocol/`: protocol contract tests.
+11. `tests/daemon/`: Step 07 daemon behavior tests.
+12. `tests/context/`: context-system tests.
 
 ## Context Validation
 

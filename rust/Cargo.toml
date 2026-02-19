@@ -2,6 +2,7 @@
 members = [
   "crates/lucida-render-wgpu",
   "crates/lucida-render-shell",
+  "crates/lucida-daemon",
 ]
 resolver = "2"
 
