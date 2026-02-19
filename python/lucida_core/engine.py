@@ -427,6 +427,23 @@ class NDStateEngine:
         session = self._require_session(session_id)
         return deepcopy(session.outbox)
 
+    def session_state(self, session_id: str) -> str | None:
+        session = self._state.sessions.get(session_id)
+        if session is None:
+            return None
+        return session.state
+
+    def drop_session(self, session_id: str) -> bool:
+        session = self._state.sessions.pop(session_id, None)
+        if session is None:
+            return False
+        self._state.idempotency_cache = {
+            key: value
+            for key, value in self._state.idempotency_cache.items()
+            if key[0] != session_id
+        }
+        return True
+
     def frame_plan_for_view(self, session_id: str, view_id: str) -> dict[str, Any]:
         session = self._require_session(session_id)
         self._require_view(session, view_id)

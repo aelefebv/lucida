@@ -214,11 +214,30 @@
     {
       "step_id": "step-07",
       "step_spec_path": "specs/roadmap/step-07-daemon-session-model-and-event-stream.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
+      "status": "done",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/protocol/README.md",
+        "docs/architecture/component-map.md",
+        "specs/roadmap/step-07-daemon-session-model-and-event-stream.md",
+        "python/lucida_core/engine.py",
+        "python/lucida_daemon/__init__.py",
+        "python/lucida_daemon/config.py",
+        "python/lucida_daemon/connection.py",
+        "python/lucida_daemon/router.py",
+        "python/lucida_daemon/events.py",
+        "python/lucida_daemon/ipc.py",
+        "python/lucida_daemon/daemon.py",
+        "rust/Cargo.toml",
+        "rust/crates/lucida-daemon/Cargo.toml",
+        "rust/crates/lucida-daemon/src/lib.rs",
+        ".github/workflows/step7-daemon.yml"
+      ],
+      "test_paths": [
+        "tests/daemon/test_step7_daemon_runtime.py"
+      ],
       "protocol_artifacts": [],
-      "last_validated": ""
+      "last_validated": "2026-02-19"
     },
     {
       "step_id": "step-08",

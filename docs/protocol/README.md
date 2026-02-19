@@ -258,7 +258,6 @@ Every error includes:
    - `view_id`, `selection_version`, `query`, `resolved_count`
    - inline `selected_point_ids` for small selections
    - `selected_point_ids_ref` when selected IDs exceed inline cap (`4096`)
-   - `linked_image_context` hook payload for points-to-image integration
 6. Linked selection semantics in Step 06:
    - points selection emits linked image context hooks
    - no automatic camera/slice mutation is performed by the runtime
@@ -273,3 +272,31 @@ Every error includes:
    - kinds remain `full`, `slice`, `style`, `camera`
    - Step 06 points filter/style/LOD patch updates map to `style`
    - one coalesced plan update per view per dispatch cycle
+
+## 17. Step 07 behavior notes (no schema changes)
+
+1. Step 07 does not add methods or fields; behavior is defined behind existing contracts.
+2. Handshake-first enforcement at daemon connection boundary:
+   - `system.hello` must be first command on a new connection
+   - non-hello command before handshake returns `LUCIDA_INVALID_PARAMS`
+3. Session ownership semantics:
+   - `session.create` owner metadata is tracked by daemon
+   - ownership is informational only in Step 07 (no write lock)
+4. Session routing semantics:
+   - command execution is serialized per `session_id`
+   - distinct sessions may execute concurrently
+5. Event delivery semantics for `events.subscribe`:
+   - daemon publishes ordered per-session event deltas from runtime outbox
+   - topic filtering is strict to subscription `topics`
+   - `session_seq` remains monotonic and gap-detectable
+6. Backpressure semantics:
+   - per-subscription bounded queue default is `1024`
+   - overflow disconnects subscriber; subsequent poll attempts return typed busy error
+7. Session close + retention semantics:
+   - `session.close` transitions session to `closed`
+   - closed sessions reject mutating commands with `LUCIDA_CONFLICT`
+   - query/read methods remain available during retention window
+   - daemon removes expired closed sessions after default `60` second TTL
+8. Remote bind policy in Step 07:
+   - local IPC is production path
+   - remote listener enablement is deferred and returns unsupported behavior in this step

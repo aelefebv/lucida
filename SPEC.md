@@ -387,3 +387,26 @@ Automation:
 8. Step 06 performance target baseline:
    - planner/update smoke gate at `1M` points with p95 dispatch time under `80ms`
    - nightly regression factor default remains `1.25`
+
+## 22. Step 07 Decisions (2026-02-19)
+
+1. Step 07 is behavior-only at protocol boundary:
+   - no OpenRPC/schema method or field deltas in this step
+2. Step 07 implementation track is dual:
+   - Python daemon runtime owns executable session/event behavior
+   - Rust `lucida-daemon` crate is scaffolded for migration readiness
+3. Transport scope for Step 07 is local IPC production path:
+   - local endpoint metadata supports Unix sockets and Windows named-pipe abstractions
+   - remote listener implementation is deferred to Step 11
+4. Session ownership policy is metadata tracking only:
+   - owner connection/client info is recorded
+   - no hard write-lock enforcement in Step 07
+5. Session routing policy is serial command execution per session with concurrent execution across different sessions.
+6. Event backpressure policy is bounded queue with disconnect-on-overflow:
+   - default per-subscription queue capacity is `1024`
+7. Closed-session lifecycle policy:
+   - `session.close` moves session to `closed`
+   - closed sessions reject mutating commands and allow query methods during retention
+   - default retention TTL is `60` seconds before daemon GC removal
+8. Reconnect recovery policy is gap-detect + query recovery:
+   - no replay cursor contract is introduced in Step 07

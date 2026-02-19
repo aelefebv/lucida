@@ -10,7 +10,7 @@ Last updated: 2026-02-19
 4. Step 04: done
 5. Step 05: done
 6. Step 06: done
-7. Step 07: planned
+7. Step 07: done
 8. Step 08: planned
 9. Step 09: planned
 10. Step 10: planned
@@ -25,4 +25,5 @@ Last updated: 2026-02-19
 5. Step 05 is complete with Python reference 3D planning semantics, full-6DOF camera behavior canonicalization, standardized 3D render-mode patch controls (`mip`, `alpha`, `iso`), and Step 5 CI/perf gates.
 6. Step 05 kickoff delivered Rust renderer scaffold initiation (`lucida-render-wgpu` and `lucida-render-shell`) with compile/test baselines.
 7. Step 06 is complete with typed points/selection contracts, deterministic points planning/runtime behavior, Step 6 perf gates, and Rust points scaffold primitives.
-8. Remaining later steps are planned and tracked in `docs/context/traceability.yaml`.
+8. Step 07 is complete with Python daemon session/event orchestration, handshake-first connection gating, bounded event backpressure behavior, session retention GC policy, Step 7 cross-platform daemon CI smoke coverage, and Rust daemon scaffold crate bootstrapping.
+9. Remaining later steps are planned and tracked in `docs/context/traceability.yaml`.

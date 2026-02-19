@@ -1,0 +1,54 @@
+name: Step 7 Daemon
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - refactor
+      - "codex/**"
+  workflow_dispatch:
+
+jobs:
+  step7-cross-platform-smoke:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --python 3.12
+
+      - name: Run Step 7 daemon runtime tests
+        run: uv run --python 3.12 python -m unittest tests/daemon/test_step7_daemon_runtime.py -v
+
+  step7-rust-scaffold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run Rust workspace check
+        run: cargo check --manifest-path rust/Cargo.toml --workspace
+
+      - name: Run Rust workspace tests
+        run: cargo test --manifest-path rust/Cargo.toml --workspace
