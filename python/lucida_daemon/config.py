@@ -34,6 +34,12 @@ def validate_local_ipc_uri(uri: str) -> None:
 
 @dataclass(frozen=True)
 class RemoteBindPolicy:
+    """Daemon-local remote bind placeholder.
+
+    Step 11 remote access is served by the dedicated `lucida_gateway` sidecar.
+    This policy remains a compatibility stub and is rejected at daemon startup.
+    """
+
     enabled: bool = False
     transport: str = "tcp"
     host: str = "127.0.0.1"

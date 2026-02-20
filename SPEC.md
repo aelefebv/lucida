@@ -462,3 +462,30 @@ Automation:
 12. Python baseline for Step 08 is `>=3.12`; SDK request IDs/idempotency keys use
     UUIDv7 when available with a compatibility fallback on runtimes without
     `uuid.uuid7()`.
+
+## 24. Step 11 Decisions (2026-02-20)
+
+1. Step 11 remains protocol-boundary neutral:
+   - no OpenRPC/schema method or field changes
+2. Remote browser support is delivered through `lucida_gateway` sidecar runtime over WS envelopes.
+3. Gateway transport defaults:
+   - WS frame/tile streaming with RPC relay
+   - tile size `256`
+   - render throttle `15Hz`
+   - JPEG default quality `75`, PNG fallback
+4. Session model:
+   - attach by explicit `session_id` + `view_id`
+   - one active controller per session
+5. Security posture:
+   - static bearer token required
+   - localhost bind by default
+   - non-local bind requires TLS-termination mode
+6. Feature scope:
+   - Step 11 guarantees 2D core remote workflows
+   - 3D and points parity remain out of scope
+7. Render policy:
+   - true dataset pixel rendering for visible image layers
+   - backend support follows Step 03 policy (local/http/synthetic guaranteed; s3/gcs dependency-gated)
+8. Delivery policy:
+   - Python SDK transport surface remains unchanged in Step 11
+   - gateway auto-launches/reuses local daemon via existing registry lifecycle
