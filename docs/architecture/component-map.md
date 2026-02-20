@@ -12,27 +12,34 @@
 3. Python protocol model generation:
    - `python/lucida_sdk/protocol/generate_models.py`
    - `python/lucida_sdk/protocol/generated/models.py`
-4. In-memory core runtime (Step 02):
+4. Step 08 Python SDK runtime surface:
+   - `python/lucida_sdk/client.py`
+   - `python/lucida_sdk/transport.py`
+   - `python/lucida_sdk/events.py`
+   - `python/lucida_sdk/errors.py`
+   - `python/lucida_sdk/registry.py`
+   - `python/lucida_sdk/__init__.py`
+5. In-memory core runtime (Step 02):
    - `python/lucida_core/__init__.py`
    - `python/lucida_core/engine.py`
    - `python/lucida_core/errors.py`
-5. Step 03 IO subsystem:
+6. Step 03 IO subsystem:
    - `python/lucida_core/io/backends.py`
    - `python/lucida_core/io/cache.py`
    - `python/lucida_core/io/metadata.py`
    - `python/lucida_core/io/scheduler.py`
-6. Step 04/05/06 deterministic planning runtime:
+7. Step 04/05/06 deterministic planning runtime:
    - `python/lucida_core/render2d/*`
    - `python/lucida_core/render3d/*`
    - `python/lucida_core/render_points/*`
    - `python/lucida_core/engine.py`
-7. Step 05/06 Rust renderer scaffold kickoff:
+8. Step 05/06 Rust renderer scaffold kickoff:
    - `rust/Cargo.toml`
    - `rust/crates/lucida-render-wgpu/*`
    - `rust/crates/lucida-render-shell/*`
-8. Step 07 daemon runtime and session/event orchestration:
+9. Step 07 daemon runtime and session/event orchestration:
    - `python/lucida_daemon/*`
-9. Step 07 Rust daemon scaffold:
+10. Step 07 Rust daemon scaffold:
    - `rust/crates/lucida-daemon/*`
 
 ## Planned Runtime Components (Roadmap-Aligned)

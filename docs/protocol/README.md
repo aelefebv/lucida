@@ -300,3 +300,25 @@ Every error includes:
 8. Remote bind policy in Step 07:
    - local IPC is production path
    - remote listener enablement is deferred and returns unsupported behavior in this step
+
+## 18. Step 08 behavior notes (no schema changes)
+
+1. Step 08 does not add methods or fields; behavior is implemented as SDK-client policy around existing contracts.
+2. SDK method mapping policy:
+   - every OpenRPC method is exposed as a 1:1 Python wrapper (`domain.method` -> `domain_method`)
+3. SDK constructor policy:
+   - `connect(...)` and `launch_or_connect(...)` auto-run `system.hello`
+   - setup includes capability fetch via `system.capabilities.get`
+4. SDK request metadata defaults:
+   - `protocol_version` defaults to `1.0.0`
+   - `request_id` defaults to UUIDv7
+   - mutating methods auto-generate `idempotency_key` unless caller provides one
+5. SDK local daemon lifecycle policy:
+   - `launch_or_connect(...)` may auto-start a process-local daemon target
+   - client close disconnects connection only
+   - daemon shutdown is explicit through SDK helper API
+6. SDK event helper policy:
+   - event subscriptions are poll/iterator driven
+   - SDK enforces strict `session_seq` continuity and raises typed gap errors on violations
+   - wildcard topic subscriptions are the default continuity-safe mode
+7. External IPC SDK transport remains scaffold-only in Step 08 and is explicitly unsupported.
