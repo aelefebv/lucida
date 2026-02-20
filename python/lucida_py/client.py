@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 from uuid import uuid4
 
 
@@ -182,6 +182,46 @@ class LayerAPI:
         result = self._client._rpc("layer.remove", {"layer_id": layer_id}, session_id=session_id)
         return dict(result)
 
+    def set_sampling(
+        self,
+        session_id: str,
+        layer_id: str,
+        sampling_mode: Literal["nearest", "linear"],
+    ) -> dict[str, Any]:
+        result = self._client._rpc(
+            "layer.set_sampling",
+            {"layer_id": layer_id, "sampling_mode": sampling_mode},
+            session_id=session_id,
+        )
+        return dict(result)
+
+    def set_contrast_limits(
+        self,
+        session_id: str,
+        layer_id: str,
+        min_value: int,
+        max_value: int,
+    ) -> dict[str, Any]:
+        result = self._client._rpc(
+            "layer.set_contrast_limits",
+            {"layer_id": layer_id, "min": min_value, "max": max_value},
+            session_id=session_id,
+        )
+        return dict(result)
+
+    def auto_contrast(
+        self,
+        session_id: str,
+        layer_id: str,
+        method: str = "robust_percentile_1_99",
+    ) -> dict[str, Any]:
+        result = self._client._rpc(
+            "layer.auto_contrast",
+            {"layer_id": layer_id, "method": method},
+            session_id=session_id,
+        )
+        return dict(result)
+
 
 class ViewAPI:
     def __init__(self, client: "LucidaClient") -> None:
@@ -197,6 +237,14 @@ class ViewAPI:
 
     def set_channel_order(self, session_id: str, order: Sequence[int]) -> dict[str, Any]:
         result = self._client._rpc("view.set_channel_order", {"order": list(order)}, session_id=session_id)
+        return dict(result)
+
+    def set_render_mode(
+        self,
+        session_id: str,
+        mode: Literal["2d", "2d_stub", "3d", "graph_stub"],
+    ) -> dict[str, Any]:
+        result = self._client._rpc("view.set_render_mode", {"mode": mode}, session_id=session_id)
         return dict(result)
 
 

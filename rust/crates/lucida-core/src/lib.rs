@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use chrono::{DateTime, Utc};
 use lucida_protocol::{
     now_utc, AxisLabel, CameraState2D, CameraStateArcball, CameraStateFreefly, DatasetHandle,
-    EventEnvelope, ReplayEntry, RpcError, RpcRequestEnvelope, Transform,
+    EventEnvelope, ImageRenderState, RenderMode, ReplayEntry, RpcError, RpcRequestEnvelope,
+    SamplingMode, Transform,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -57,6 +58,7 @@ pub struct SessionState {
     pub layers: BTreeMap<String, LayerState>,
     pub view: ViewState,
     pub camera: CameraMode,
+    pub render_mode: RenderMode,
 }
 
 impl SessionState {
@@ -70,6 +72,7 @@ impl SessionState {
                 center: [0.0, 0.0],
                 zoom: 1.0,
             }),
+            render_mode: RenderMode::TwoD,
         }
     }
 }
@@ -89,6 +92,8 @@ pub enum LayerKind {
     Image {
         dataset_id: Option<String>,
         channel: Option<usize>,
+        #[serde(default)]
+        render_state: ImageRenderState,
     },
     Points {
         points_count: usize,
@@ -184,10 +189,14 @@ fn mutating_method(method: &str) -> bool {
             | "layer.add_image"
             | "layer.add_points"
             | "layer.update"
+            | "layer.set_sampling"
+            | "layer.set_contrast_limits"
+            | "layer.auto_contrast"
             | "layer.remove"
             | "view.set_axis"
             | "view.reorder_axes"
             | "view.set_channel_order"
+            | "view.set_render_mode"
             | "camera.set_mode"
             | "camera.set_pose"
     )
@@ -222,6 +231,8 @@ pub fn apply_command(
             "protocol_version": request.protocol_version,
             "events": ["state.changed", "perf.frame", "error.raised", "selection.changed"],
             "modes": ["panzoom", "arcball", "freefly"],
+            "render_modes": ["2d", "2d_stub", "3d", "graph_stub"],
+            "sampling_modes": ["nearest", "linear"],
             "transports": ["ipc"],
             "storage": ["file"]
         }),
@@ -272,7 +283,11 @@ pub fn apply_command(
             let dataset_id = session.dataset.as_ref().map(|dataset| dataset.id.clone());
             let layer = LayerState {
                 id: layer_id.clone(),
-                kind: LayerKind::Image { dataset_id, channel },
+                kind: LayerKind::Image {
+                    dataset_id,
+                    channel,
+                    render_state: ImageRenderState::default(),
+                },
                 visible: true,
                 metadata: request
                     .params
@@ -345,6 +360,82 @@ pub fn apply_command(
             }
             json!({"updated": layer_id})
         }
+        "layer.set_sampling" => {
+            let session = get_session_mut(state, request)?;
+            let layer_id = request
+                .params
+                .get("layer_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CoreError::InvalidParams("layer_id is required".to_string()))?;
+            let sampling_mode = request
+                .params
+                .get("sampling_mode")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CoreError::InvalidParams("sampling_mode is required".to_string()))?;
+            let sampling_mode = parse_sampling_mode(sampling_mode)?;
+            let render_state = image_layer_render_state_mut(session, layer_id)?;
+            render_state.sampling_mode = sampling_mode;
+            json!({
+                "layer_id": layer_id,
+                "sampling_mode": sampling_mode.as_str(),
+            })
+        }
+        "layer.set_contrast_limits" => {
+            let session = get_session_mut(state, request)?;
+            let layer_id = request
+                .params
+                .get("layer_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CoreError::InvalidParams("layer_id is required".to_string()))?;
+            let min = request
+                .params
+                .get("min")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CoreError::InvalidParams("min is required".to_string()))?;
+            let max = request
+                .params
+                .get("max")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CoreError::InvalidParams("max is required".to_string()))?;
+            let contrast_limits = parse_contrast_limits(min, max)?;
+            let render_state = image_layer_render_state_mut(session, layer_id)?;
+            render_state.contrast_limits = contrast_limits;
+            json!({
+                "layer_id": layer_id,
+                "contrast_limits": contrast_limits,
+            })
+        }
+        "layer.auto_contrast" => {
+            let session = get_session_mut(state, request)?;
+            let layer_id = request
+                .params
+                .get("layer_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CoreError::InvalidParams("layer_id is required".to_string()))?;
+            let min = request
+                .params
+                .get("min")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CoreError::InvalidParams("min is required".to_string()))?;
+            let max = request
+                .params
+                .get("max")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| CoreError::InvalidParams("max is required".to_string()))?;
+            let method = request
+                .params
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or("robust_percentile_1_99");
+            let contrast_limits = parse_contrast_limits(min, max)?;
+            let render_state = image_layer_render_state_mut(session, layer_id)?;
+            render_state.contrast_limits = contrast_limits;
+            json!({
+                "layer_id": layer_id,
+                "method": method,
+                "contrast_limits": contrast_limits,
+            })
+        }
         "layer.remove" => {
             let session = get_session_mut(state, request)?;
             let layer_id = request
@@ -406,6 +497,31 @@ pub fn apply_command(
             session.view.channel_order = order.clone();
             json!({"order": order})
         }
+        "view.set_render_mode" => {
+            let session = get_session_mut(state, request)?;
+            let mode_value = request
+                .params
+                .get("mode")
+                .and_then(Value::as_str)
+                .ok_or_else(|| CoreError::InvalidParams("mode is required".to_string()))?;
+            let requested_mode = parse_render_mode(mode_value)?;
+            let (applied_mode, fallback_reason) = if requested_mode == RenderMode::ThreeD
+                && !session_can_render_real_3d(session)
+            {
+                (
+                    RenderMode::TwoD,
+                    Some("missing dataset or visible image layer".to_string()),
+                )
+            } else {
+                (requested_mode, None)
+            };
+            session.render_mode = applied_mode;
+            json!({
+                "mode": applied_mode.as_str(),
+                "requested_mode": requested_mode.as_str(),
+                "fallback_reason": fallback_reason,
+            })
+        }
         "camera.set_mode" => {
             let session = get_session_mut(state, request)?;
             let mode = request
@@ -433,12 +549,21 @@ pub fn apply_command(
     };
 
     if mutating_method(&request.method) {
+        let render_mode = request
+            .session_id
+            .as_deref()
+            .and_then(|session_id| state.sessions.get(session_id))
+            .map(|session| session.render_mode.as_str().to_string());
         emitted_events.push(EventEnvelope {
             jsonrpc: "2.0".to_string(),
             protocol_version: request.protocol_version.clone(),
             session_id: request.session_id.clone(),
             event: "state.changed".to_string(),
-            payload: json!({"method": request.method, "request_id": request.request_id}),
+            payload: json!({
+                "method": request.method,
+                "request_id": request.request_id,
+                "render_mode": render_mode,
+            }),
             timestamp: now_utc(),
         });
     }
@@ -501,6 +626,71 @@ fn next_camera_mode(mode: &str) -> Result<CameraMode, CoreError> {
             "unsupported camera mode: {mode}"
         ))),
     }
+}
+
+fn image_layer_render_state_mut<'a>(
+    session: &'a mut SessionState,
+    layer_id: &str,
+) -> Result<&'a mut ImageRenderState, CoreError> {
+    let layer = session
+        .layers
+        .get_mut(layer_id)
+        .ok_or_else(|| CoreError::InvalidParams(format!("unknown layer_id: {layer_id}")))?;
+    match &mut layer.kind {
+        LayerKind::Image { render_state, .. } => Ok(render_state),
+        _ => Err(CoreError::InvalidParams(format!(
+            "layer {layer_id} is not an image layer"
+        ))),
+    }
+}
+
+fn parse_sampling_mode(mode: &str) -> Result<SamplingMode, CoreError> {
+    match mode {
+        "nearest" => Ok(SamplingMode::Nearest),
+        "linear" => Ok(SamplingMode::Linear),
+        _ => Err(CoreError::InvalidParams(format!(
+            "unsupported sampling mode: {mode}"
+        ))),
+    }
+}
+
+fn parse_contrast_limits(min: u64, max: u64) -> Result<[u16; 2], CoreError> {
+    if min >= max {
+        return Err(CoreError::InvalidParams(
+            "contrast limits must satisfy min < max".to_string(),
+        ));
+    }
+    if max > u16::MAX as u64 {
+        return Err(CoreError::InvalidParams(format!(
+            "contrast limit max exceeds u16 range: {max}"
+        )));
+    }
+    Ok([min as u16, max as u16])
+}
+
+fn parse_render_mode(mode: &str) -> Result<RenderMode, CoreError> {
+    match mode {
+        "2d" => Ok(RenderMode::TwoD),
+        "2d_stub" => Ok(RenderMode::TwoDStub),
+        "3d" => Ok(RenderMode::ThreeD),
+        "graph_stub" => Ok(RenderMode::GraphStub),
+        _ => Err(CoreError::InvalidParams(format!("invalid render mode: {mode}"))),
+    }
+}
+
+fn session_can_render_real_3d(session: &SessionState) -> bool {
+    session.dataset.is_some()
+        && session.layers.values().any(|layer| {
+            layer.visible
+                && matches!(
+                    layer.kind,
+                    LayerKind::Image {
+                        dataset_id: _,
+                        channel: _,
+                        render_state: _,
+                    }
+                )
+        })
 }
 
 fn apply_pose(current: &CameraMode, pose: Value) -> Result<CameraMode, CoreError> {
@@ -621,5 +811,167 @@ mod tests {
         let replayed_hash = state_hash(&replayed).expect("hash replayed state");
 
         assert_eq!(original_hash, replayed_hash);
+    }
+
+    #[test]
+    fn set_render_mode_validates_and_replays() {
+        let timestamp = now_utc();
+        let mut state = AppState::default();
+
+        let create = RpcRequestEnvelope {
+            jsonrpc: "2.0".to_string(),
+            protocol_version: "0.1.0".to_string(),
+            session_id: None,
+            request_id: "req-1".to_string(),
+            method: "session.create".to_string(),
+            params: json!({}),
+            timestamp,
+        };
+        let create_outcome = apply_command(&mut state, &create).expect("session.create should succeed");
+        assert_eq!(create_outcome.result["session_id"], json!("session-1"));
+
+        let set_mode = RpcRequestEnvelope {
+            jsonrpc: "2.0".to_string(),
+            protocol_version: "0.1.0".to_string(),
+            session_id: Some("session-1".to_string()),
+            request_id: "req-2".to_string(),
+            method: "view.set_render_mode".to_string(),
+            params: json!({"mode": "graph_stub"}),
+            timestamp,
+        };
+        let mode_outcome = apply_command(&mut state, &set_mode).expect("set_render_mode should succeed");
+        assert_eq!(mode_outcome.result["mode"], json!("graph_stub"));
+        assert_eq!(
+            mode_outcome.emitted_events[0].payload["render_mode"],
+            json!("graph_stub")
+        );
+
+        let bad_mode = RpcRequestEnvelope {
+            jsonrpc: "2.0".to_string(),
+            protocol_version: "0.1.0".to_string(),
+            session_id: Some("session-1".to_string()),
+            request_id: "req-3".to_string(),
+            method: "view.set_render_mode".to_string(),
+            params: json!({"mode": "3d_stub"}),
+            timestamp,
+        };
+        let err = apply_command(&mut state, &bad_mode).expect_err("invalid render mode should fail");
+        assert!(err.to_string().contains("invalid render mode: 3d_stub"));
+    }
+
+    #[test]
+    fn set_render_mode_falls_back_to_2d_without_dataset_or_image_layer() {
+        let timestamp = now_utc();
+        let mut state = AppState::default();
+
+        apply_command(
+            &mut state,
+            &RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: "0.1.0".to_string(),
+                session_id: None,
+                request_id: "req-1".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp,
+            },
+        )
+        .expect("session.create should succeed");
+
+        let set_mode = RpcRequestEnvelope {
+            jsonrpc: "2.0".to_string(),
+            protocol_version: "0.1.0".to_string(),
+            session_id: Some("session-1".to_string()),
+            request_id: "req-2".to_string(),
+            method: "view.set_render_mode".to_string(),
+            params: json!({"mode": "3d"}),
+            timestamp,
+        };
+        let outcome = apply_command(&mut state, &set_mode).expect("set_render_mode should succeed");
+        assert_eq!(outcome.result["requested_mode"], json!("3d"));
+        assert_eq!(outcome.result["mode"], json!("2d"));
+        assert_eq!(
+            outcome.result["fallback_reason"],
+            json!("missing dataset or visible image layer")
+        );
+    }
+
+    #[test]
+    fn image_render_state_methods_validate_and_mutate() {
+        let timestamp = now_utc();
+        let mut state = AppState::default();
+
+        apply_command(
+            &mut state,
+            &RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: "0.1.0".to_string(),
+                session_id: None,
+                request_id: "req-1".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp,
+            },
+        )
+        .expect("session.create");
+
+        apply_command(
+            &mut state,
+            &RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: "0.1.0".to_string(),
+                session_id: Some("session-1".to_string()),
+                request_id: "req-2".to_string(),
+                method: "layer.add_image".to_string(),
+                params: json!({"layer_id":"image-1","channel":0}),
+                timestamp,
+            },
+        )
+        .expect("layer.add_image");
+
+        let sampling = apply_command(
+            &mut state,
+            &RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: "0.1.0".to_string(),
+                session_id: Some("session-1".to_string()),
+                request_id: "req-3".to_string(),
+                method: "layer.set_sampling".to_string(),
+                params: json!({"layer_id":"image-1","sampling_mode":"linear"}),
+                timestamp,
+            },
+        )
+        .expect("layer.set_sampling");
+        assert_eq!(sampling.result["sampling_mode"], json!("linear"));
+
+        let contrast = apply_command(
+            &mut state,
+            &RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: "0.1.0".to_string(),
+                session_id: Some("session-1".to_string()),
+                request_id: "req-4".to_string(),
+                method: "layer.set_contrast_limits".to_string(),
+                params: json!({"layer_id":"image-1","min":128,"max":4096}),
+                timestamp,
+            },
+        )
+        .expect("layer.set_contrast_limits");
+        assert_eq!(contrast.result["contrast_limits"], json!([128, 4096]));
+
+        let auto = apply_command(
+            &mut state,
+            &RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: "0.1.0".to_string(),
+                session_id: Some("session-1".to_string()),
+                request_id: "req-5".to_string(),
+                method: "layer.auto_contrast".to_string(),
+                params: json!({"layer_id":"image-1","min":64,"max":8192}),
+                timestamp,
+            },
+        )
+        .expect("layer.auto_contrast");
+        assert_eq!(auto.result["contrast_limits"], json!([64, 8192]));
     }
 }

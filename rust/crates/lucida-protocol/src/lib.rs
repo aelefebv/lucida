@@ -118,6 +118,78 @@ pub struct CameraStateFreefly {
     pub speed: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderMode {
+    #[serde(rename = "2d")]
+    TwoD,
+    #[serde(rename = "2d_stub")]
+    TwoDStub,
+    #[serde(rename = "3d")]
+    ThreeD,
+    GraphStub,
+}
+
+impl RenderMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TwoD => "2d",
+            Self::TwoDStub => "2d_stub",
+            Self::ThreeD => "3d",
+            Self::GraphStub => "graph_stub",
+        }
+    }
+}
+
+impl Default for RenderMode {
+    fn default() -> Self {
+        Self::TwoD
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SamplingMode {
+    Nearest,
+    Linear,
+}
+
+impl SamplingMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nearest => "nearest",
+            Self::Linear => "linear",
+        }
+    }
+}
+
+impl Default for SamplingMode {
+    fn default() -> Self {
+        Self::Nearest
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImageRenderState {
+    #[serde(default)]
+    pub sampling_mode: SamplingMode,
+    #[serde(default = "default_contrast_limits")]
+    pub contrast_limits: [u16; 2],
+}
+
+impl Default for ImageRenderState {
+    fn default() -> Self {
+        Self {
+            sampling_mode: SamplingMode::Nearest,
+            contrast_limits: default_contrast_limits(),
+        }
+    }
+}
+
+fn default_contrast_limits() -> [u16; 2] {
+    [0, u16::MAX]
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PointsLayer {
     pub positions: Vec<[f32; 3]>,
@@ -276,5 +348,29 @@ mod tests {
         assert_eq!(decoded.frame_protocol_version, FRAME_PROTOCOL_VERSION);
         assert_eq!(decoded.axis_indices.z, 2);
         assert_eq!(decoded.viewport.width, 800);
+    }
+
+    #[test]
+    fn render_mode_roundtrip_uses_contract_strings() {
+        let mode = RenderMode::ThreeD;
+        let encoded = serde_json::to_string(&mode).expect("serialize render mode");
+        let decoded: RenderMode = serde_json::from_str(&encoded).expect("deserialize render mode");
+
+        assert_eq!(encoded, "\"3d\"");
+        assert_eq!(decoded, RenderMode::ThreeD);
+        assert_eq!(RenderMode::TwoD.as_str(), "2d");
+        assert_eq!(RenderMode::TwoDStub.as_str(), "2d_stub");
+    }
+
+    #[test]
+    fn sampling_mode_roundtrip_uses_contract_strings() {
+        let mode = SamplingMode::Nearest;
+        let encoded = serde_json::to_string(&mode).expect("serialize sampling mode");
+        let decoded: SamplingMode = serde_json::from_str(&encoded).expect("deserialize sampling mode");
+
+        assert_eq!(encoded, "\"nearest\"");
+        assert_eq!(decoded, SamplingMode::Nearest);
+        assert_eq!(SamplingMode::Nearest.as_str(), "nearest");
+        assert_eq!(SamplingMode::Linear.as_str(), "linear");
     }
 }

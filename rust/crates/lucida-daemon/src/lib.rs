@@ -2,19 +2,24 @@ use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use lucida_core::{
-    apply_command, build_error_event, replay_entries, state_hash, AppState, LayerKind, SessionState,
+    apply_command, build_error_event, replay_entries, state_hash, AppState, CameraMode, LayerKind,
+    SessionState,
 };
 use lucida_protocol::{
     now_utc, AuditEntry, AuditOutcome, EventEnvelope, ExportedCommandLog, FrameAxisIndices,
     FrameRequestHeader, FrameResponseHeader, FRAME_PROTOCOL_VERSION, LOG_SCHEMA_VERSION,
-    PROTOCOL_VERSION, ReplayEntry, RpcError, RpcRequestEnvelope, RpcResponseEnvelope,
+    PROTOCOL_VERSION, RenderMode, ReplayEntry, RpcError, RpcRequestEnvelope, RpcResponseEnvelope,
 };
 use lucida_render_wgpu::RendererState;
-use lucida_storage::{open_dataset, read_u16_plane, OpenDatasetOptions, StorageError};
+use lucida_storage::{
+    open_dataset, read_u16_plane, read_u16_volume, OpenDatasetOptions, StorageError, U16FramePlane,
+    U16Volume,
+};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -121,6 +126,7 @@ struct DaemonRuntime {
     audit_log: Vec<AuditEntry>,
     replay_log: Vec<ReplayEntry>,
     frame_channels: BTreeMap<String, String>,
+    volume_cache: BTreeMap<VolumeCacheKey, Arc<U16Volume>>,
 }
 
 impl Default for DaemonRuntime {
@@ -131,8 +137,35 @@ impl Default for DaemonRuntime {
             audit_log: Vec::new(),
             replay_log: Vec::new(),
             frame_channels: BTreeMap::new(),
+            volume_cache: BTreeMap::new(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VolumeCacheKey {
+    session_id: String,
+    dataset_uri: String,
+    t: usize,
+    c: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct FramePerfMetrics {
+    protocol_version: String,
+    session_id: String,
+    request_id: String,
+    render_mode: String,
+    viewport_width: u32,
+    viewport_height: u32,
+    cache_lookup_ms: f64,
+    cache_load_ms: f64,
+    raymarch_ms: f64,
+    response_prep_ms: f64,
+    encode_write_ms: f64,
+    total_ms: f64,
+    sample_count: usize,
+    cache_hit: bool,
 }
 
 impl Daemon {
@@ -314,8 +347,8 @@ impl Daemon {
             stream.read_exact(&mut header_bytes).await?;
             let parsed: Result<FrameRequestHeader, _> = serde_json::from_slice(&header_bytes);
 
-            let (response_header, payload) = match parsed {
-                Ok(header) => self.process_frame_request(header).await,
+            let (response_header, payload, perf) = match parsed {
+                Ok(header) => self.process_frame_request_with_metrics(header).await,
                 Err(err) => (
                     FrameResponseHeader {
                         request_id: "unknown".to_string(),
@@ -329,27 +362,45 @@ impl Daemon {
                         error: Some(format!("invalid frame request header: {err}")),
                     },
                     Vec::new(),
+                    None,
                 ),
             };
 
+            let encode_write_started = Instant::now();
             write_frame_response(&mut stream, &response_header, &payload).await?;
+            if let Some(mut perf) = perf {
+                perf.encode_write_ms = encode_write_started.elapsed().as_secs_f64() * 1_000.0;
+                perf.total_ms += perf.encode_write_ms;
+                self.emit_frame_perf_event(&perf, &response_header);
+            }
         }
 
         Ok(())
     }
 
+    #[cfg(test)]
     async fn process_frame_request(
         &self,
         request: FrameRequestHeader,
     ) -> (FrameResponseHeader, Vec<u8>) {
+        let (header, payload, _) = self.process_frame_request_with_metrics(request).await;
+        (header, payload)
+    }
+
+    async fn process_frame_request_with_metrics(
+        &self,
+        request: FrameRequestHeader,
+    ) -> (FrameResponseHeader, Vec<u8>, Option<FramePerfMetrics>) {
+        let overall_started = Instant::now();
         if request.frame_protocol_version != FRAME_PROTOCOL_VERSION {
-            return frame_error_response(
+            let (header, payload) = frame_error_response(
                 &request.request_id,
                 format!(
                     "frame protocol mismatch, expected {FRAME_PROTOCOL_VERSION}, got {}",
                     request.frame_protocol_version
                 ),
             );
+            return (header, payload, None);
         }
 
         let (session, state_hash_value, token_valid) = {
@@ -367,40 +418,147 @@ impl Daemon {
         };
 
         if !token_valid {
-            return frame_error_response(
+            let (header, payload) = frame_error_response(
                 &request.request_id,
                 "invalid frame channel token for session".to_string(),
             );
+            return (header, payload, None);
         }
 
         let Some(session) = session else {
-            return frame_error_response(&request.request_id, "session does not exist".to_string());
+            let (header, payload) =
+                frame_error_response(&request.request_id, "session does not exist".to_string());
+            return (header, payload, None);
         };
 
-        if !has_visible_image_layer(&session) {
-            return frame_error_response(
-                &request.request_id,
-                "session has no visible image layer".to_string(),
-            );
-        }
-
-        let Some(dataset) = session.dataset.as_ref() else {
-            return frame_error_response(
-                &request.request_id,
-                "session has no opened dataset".to_string(),
-            );
+        let mut perf = FramePerfMetrics {
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            session_id: request.session_id.clone(),
+            request_id: request.request_id.clone(),
+            render_mode: match session.render_mode {
+                RenderMode::TwoD => "2d",
+                RenderMode::TwoDStub => "2d_stub",
+                RenderMode::ThreeD => "3d",
+                RenderMode::GraphStub => "graph_stub",
+            }
+            .to_string(),
+            viewport_width: request.viewport.width,
+            viewport_height: request.viewport.height,
+            ..FramePerfMetrics::default()
         };
 
-        let axis_map = axis_indices_map(&request.axis_indices);
-        let frame = match read_u16_plane(&dataset.uri, &axis_map) {
-            Ok(frame) => frame,
-            Err(err) => {
-                return frame_error_response(&request.request_id, err.to_string());
+        let frame = match session.render_mode {
+            RenderMode::TwoD => {
+                let Some(image_layer) = resolve_visible_image_layer(&session) else {
+                    let (header, payload) = frame_error_response(
+                        &request.request_id,
+                        "session has no visible image layer".to_string(),
+                    );
+                    return (header, payload, None);
+                };
+
+                let Some(dataset) = session.dataset.as_ref() else {
+                    let (header, payload) = frame_error_response(
+                        &request.request_id,
+                        "session has no opened dataset".to_string(),
+                    );
+                    return (header, payload, None);
+                };
+
+                let axis_map =
+                    axis_indices_map_with_channel(&request.axis_indices, image_layer.channel);
+                match read_u16_plane(&dataset.uri, &axis_map) {
+                    Ok(frame) => FramePayload {
+                        width: frame.width,
+                        height: frame.height,
+                        bytes: frame.bytes,
+                    },
+                    Err(err) => {
+                        let (header, payload) = frame_error_response(&request.request_id, err.to_string());
+                        return (header, payload, None);
+                    }
+                }
+            }
+            RenderMode::TwoDStub => {
+                build_synthetic_2d_slice_frame(&request.viewport, &request.axis_indices, &session.camera)
+            }
+            RenderMode::ThreeD => {
+                let Some(image_layer) = resolve_visible_image_layer(&session) else {
+                    let (header, payload) = frame_error_response(
+                        &request.request_id,
+                        "session has no visible image layer".to_string(),
+                    );
+                    return (header, payload, None);
+                };
+                let Some(dataset) = session.dataset.as_ref() else {
+                    let (header, payload) = frame_error_response(
+                        &request.request_id,
+                        "session has no opened dataset".to_string(),
+                    );
+                    return (header, payload, None);
+                };
+                let t_index = request.axis_indices.t;
+                let c_index = image_layer.channel.unwrap_or(request.axis_indices.c);
+                let cache_key = VolumeCacheKey {
+                    session_id: request.session_id.clone(),
+                    dataset_uri: dataset.uri.clone(),
+                    t: t_index,
+                    c: c_index,
+                };
+
+                let cache_lookup_started = Instant::now();
+                let volume = {
+                    let runtime = self.runtime.lock().await;
+                    runtime.volume_cache.get(&cache_key).cloned()
+                };
+                perf.cache_lookup_ms = cache_lookup_started.elapsed().as_secs_f64() * 1_000.0;
+
+                let volume = match volume {
+                    Some(volume) => {
+                        perf.cache_hit = true;
+                        volume
+                    }
+                    None => {
+                        let axis_indices =
+                            BTreeMap::from([("t".to_string(), t_index), ("c".to_string(), c_index)]);
+                        let cache_load_started = Instant::now();
+                        let loaded = match read_u16_volume(&dataset.uri, &axis_indices) {
+                            Ok(volume) => Arc::new(volume),
+                            Err(err) => {
+                                let (header, payload) =
+                                    frame_error_response(&request.request_id, err.to_string());
+                                return (header, payload, None);
+                            }
+                        };
+                        perf.cache_load_ms = cache_load_started.elapsed().as_secs_f64() * 1_000.0;
+                        let mut runtime = self.runtime.lock().await;
+                        runtime
+                            .volume_cache
+                            .insert(cache_key.clone(), loaded.clone());
+                        loaded
+                    }
+                };
+
+                let sample_count = compute_3d_sample_count(volume.depth);
+                perf.sample_count = sample_count;
+                let raymarch_started = Instant::now();
+                let frame = build_real_3d_frame(
+                    &request.viewport,
+                    &session.camera,
+                    volume.as_ref(),
+                    sample_count,
+                );
+                perf.raymarch_ms = raymarch_started.elapsed().as_secs_f64() * 1_000.0;
+                frame
+            }
+            RenderMode::GraphStub => {
+                build_synthetic_graph_frame(&request.viewport, &request.axis_indices, &session.camera)
             }
         };
 
+        let response_prep_started = Instant::now();
         if frame.bytes.len() > MAX_FRAME_BYTES {
-            return frame_error_response(
+            let (header, payload) = frame_error_response(
                 &request.request_id,
                 format!(
                     "frame payload too large: {} bytes exceeds limit {}",
@@ -408,23 +566,64 @@ impl Daemon {
                     MAX_FRAME_BYTES
                 ),
             );
+            return (header, payload, None);
         }
 
         let payload_len = frame.bytes.len() as u32;
-        (
-            FrameResponseHeader {
-                request_id: request.request_id,
-                status: "ok".to_string(),
-                width: frame.width,
-                height: frame.height,
-                dtype: "u16".to_string(),
-                endianness: "little".to_string(),
-                payload_len,
-                state_hash: state_hash_value,
-                error: None,
-            },
-            frame.bytes,
-        )
+        let response_header = FrameResponseHeader {
+            request_id: request.request_id,
+            status: "ok".to_string(),
+            width: frame.width,
+            height: frame.height,
+            dtype: "u16".to_string(),
+            endianness: "little".to_string(),
+            payload_len,
+            state_hash: state_hash_value,
+            error: None,
+        };
+        perf.response_prep_ms = response_prep_started.elapsed().as_secs_f64() * 1_000.0;
+        perf.total_ms = overall_started.elapsed().as_secs_f64() * 1_000.0;
+        (response_header, frame.bytes, Some(perf))
+    }
+
+    fn emit_frame_perf_event(&self, perf: &FramePerfMetrics, response_header: &FrameResponseHeader) {
+        let payload = json!({
+            "source": "frame_socket",
+            "request_id": perf.request_id,
+            "render_mode": perf.render_mode,
+            "viewport": {"width": perf.viewport_width, "height": perf.viewport_height},
+            "status": response_header.status,
+            "payload_len": response_header.payload_len,
+            "frame_total_ms": perf.total_ms,
+            "cache_lookup_ms": perf.cache_lookup_ms,
+            "cache_load_ms": perf.cache_load_ms,
+            "raymarch_ms": perf.raymarch_ms,
+            "response_prep_ms": perf.response_prep_ms,
+            "encode_write_ms": perf.encode_write_ms,
+            "sample_count": perf.sample_count,
+            "cache_hit": perf.cache_hit,
+        });
+        let _ = self.events_tx.send(EventEnvelope {
+            jsonrpc: "2.0".to_string(),
+            protocol_version: perf.protocol_version.clone(),
+            session_id: Some(perf.session_id.clone()),
+            event: "perf.frame".to_string(),
+            payload,
+            timestamp: now_utc(),
+        });
+        debug!(
+            request_id = %perf.request_id,
+            render_mode = %perf.render_mode,
+            frame_total_ms = perf.total_ms,
+            raymarch_ms = perf.raymarch_ms,
+            cache_lookup_ms = perf.cache_lookup_ms,
+            cache_load_ms = perf.cache_load_ms,
+            response_prep_ms = perf.response_prep_ms,
+            encode_write_ms = perf.encode_write_ms,
+            sample_count = perf.sample_count,
+            cache_hit = perf.cache_hit,
+            "frame performance metrics"
+        );
     }
 
     async fn process_request(
@@ -542,6 +741,8 @@ impl Daemon {
                     "dataset": session.dataset,
                     "layers": session.layers.values().collect::<Vec<_>>(),
                     "view": session.view,
+                    "camera": session.camera,
+                    "render_mode": session.render_mode,
                 })
             } else {
                 json!({
@@ -549,6 +750,8 @@ impl Daemon {
                     "dataset": Value::Null,
                     "layers": [],
                     "view": Value::Null,
+                    "camera": Value::Null,
+                    "render_mode": Value::Null,
                 })
             };
             drop(runtime);
@@ -608,7 +811,11 @@ impl Daemon {
             return self.record_and_build_success(&request, result).await;
         }
 
-        let request_for_reducer = match preprocess_request(request).await {
+        let app_state_snapshot = {
+            let runtime = self.runtime.lock().await;
+            runtime.app_state.clone()
+        };
+        let request_for_reducer = match preprocess_request(request, &app_state_snapshot).await {
             Ok(request) => request,
             Err((request, storage_error)) => {
                 let rpc_error = storage_error_to_rpc(storage_error);
@@ -632,6 +839,11 @@ impl Daemon {
                 if let Some(entry) = outcome.replay_entry.clone() {
                     runtime.replay_log.push(entry);
                 }
+                maybe_invalidate_volume_cache(
+                    &mut runtime,
+                    &request_for_reducer.method,
+                    request_for_reducer.session_id.as_deref(),
+                );
 
                 let perf_payload = runtime.renderer.mark_frame(16.0);
                 let mut events = outcome.emitted_events;
@@ -750,25 +962,464 @@ impl Daemon {
     }
 }
 
-fn has_visible_image_layer(session: &SessionState) -> bool {
-    session.layers.values().any(|layer| {
-        layer.visible
-            && matches!(
-                layer.kind,
-                LayerKind::Image {
-                    dataset_id: _,
-                    channel: _,
-                }
-            )
-    })
+struct FramePayload {
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
 }
 
-fn axis_indices_map(indices: &FrameAxisIndices) -> BTreeMap<String, usize> {
+#[derive(Clone, Copy)]
+struct ActiveImageLayer {
+    channel: Option<usize>,
+}
+
+fn resolve_visible_image_layer(session: &SessionState) -> Option<ActiveImageLayer> {
+    for layer in session.layers.values() {
+        if !layer.visible {
+            continue;
+        }
+        if let LayerKind::Image { channel, .. } = &layer.kind {
+            return Some(ActiveImageLayer {
+                channel: *channel,
+            });
+        }
+    }
+    None
+}
+
+fn axis_indices_map_with_channel(
+    indices: &FrameAxisIndices,
+    channel_override: Option<usize>,
+) -> BTreeMap<String, usize> {
     let mut map = BTreeMap::new();
     map.insert("t".to_string(), indices.t);
-    map.insert("c".to_string(), indices.c);
+    map.insert("c".to_string(), channel_override.unwrap_or(indices.c));
     map.insert("z".to_string(), indices.z);
     map
+}
+
+fn build_synthetic_2d_slice_frame(
+    viewport: &lucida_protocol::FrameViewport,
+    axis: &FrameAxisIndices,
+    camera: &CameraMode,
+) -> FramePayload {
+    let width = viewport.width.max(1);
+    let height = viewport.height.max(1);
+    let mut bytes = Vec::with_capacity(width as usize * height as usize * 2);
+
+    let camera = camera_influence(camera);
+    let zoom = camera.z.abs().max(0.25);
+    let aspect = width as f32 / height as f32;
+    let slice_z = axis.z as f32 * 0.32 + axis.t as f32 * 0.07;
+
+    for y in 0..height {
+        let ny = 1.0 - ((y as f32 + 0.5) / height as f32) * 2.0;
+        for x in 0..width {
+            let nx = ((x as f32 + 0.5) / width as f32) * 2.0 - 1.0;
+
+            let wx = nx * aspect / zoom + camera.x * 0.12;
+            let wy = ny / zoom + camera.y * 0.12;
+
+            let mut intensity = 0.0f32;
+            intensity += slice_blob(wx, wy, slice_z, [0.0, 0.0, 0.0], 1.15, 0.78);
+            intensity += slice_blob(wx, wy, slice_z, [1.5, -0.5, 0.9], 0.65, 0.52);
+            intensity += slice_blob(wx, wy, slice_z, [-1.25, 0.85, -0.45], 0.72, 0.46);
+            intensity += slice_box(wx, wy, slice_z, [-1.95, -0.55, 0.25], [-1.05, 0.35, 1.15], 0.38);
+
+            let ring_r = ((wx - 0.75).powi(2) + (wy + 1.1).powi(2)).sqrt();
+            let ring = (1.0 - ((ring_r - 0.45).abs() * 7.0 + (slice_z + 0.2).abs() * 1.8)).max(0.0);
+            intensity += ring * 0.25;
+
+            let grid_x = ((wx * 2.8 + 64.0).fract() - 0.5).abs();
+            let grid_y = ((wy * 2.8 + 64.0).fract() - 0.5).abs();
+            let grid = (0.02 - grid_x.min(grid_y)).max(0.0) * 6.0;
+            intensity += grid * 0.06;
+
+            let channel_mod = 1.0 + (axis.c as f32) * 0.05;
+            intensity = (intensity * channel_mod).clamp(0.0, 1.0);
+            let value = (intensity * u16::MAX as f32).round() as u16;
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    FramePayload {
+        width,
+        height,
+        bytes,
+    }
+}
+
+fn slice_blob(x: f32, y: f32, z: f32, center: [f32; 3], radius: f32, weight: f32) -> f32 {
+    let dx = x - center[0];
+    let dy = y - center[1];
+    let dz = z - center[2];
+    if dz.abs() >= radius {
+        return 0.0;
+    }
+    let slice_radius = (radius * radius - dz * dz).sqrt();
+    let radial = (dx * dx + dy * dy).sqrt();
+    if radial >= slice_radius {
+        return 0.0;
+    }
+    let edge_falloff = 1.0 - radial / slice_radius;
+    edge_falloff.powf(1.6) * weight
+}
+
+fn slice_box(x: f32, y: f32, z: f32, min: [f32; 3], max: [f32; 3], weight: f32) -> f32 {
+    if x < min[0] || x > max[0] || y < min[1] || y > max[1] || z < min[2] || z > max[2] {
+        return 0.0;
+    }
+    let edge_x = (x - min[0]).min(max[0] - x);
+    let edge_y = (y - min[1]).min(max[1] - y);
+    let edge_z = (z - min[2]).min(max[2] - z);
+    let edge = edge_x.min(edge_y).min(edge_z);
+    (0.2 + edge * 0.5).min(1.0) * weight
+}
+
+type Vec3 = [f32; 3];
+
+#[derive(Clone, Copy)]
+struct CameraBasis {
+    origin: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+}
+
+fn build_real_3d_frame(
+    viewport: &lucida_protocol::FrameViewport,
+    camera: &CameraMode,
+    volume: &U16Volume,
+    samples: usize,
+) -> FramePayload {
+    let width = viewport.width.max(1);
+    let height = viewport.height.max(1);
+    let mut bytes = vec![0u8; width as usize * height as usize * 2];
+
+    let basis = camera_basis_for_volume(camera);
+    let aspect = width as f32 / height as f32;
+    let fov = 0.9f32;
+    let box_min = [-1.0, -1.0, -1.0];
+    let box_max = [1.0, 1.0, 1.0];
+    let mut byte_offset = 0usize;
+
+    for y in 0..height {
+        let ny = 1.0 - ((y as f32 + 0.5) / height as f32) * 2.0;
+        for x in 0..width {
+            let nx = ((x as f32 + 0.5) / width as f32) * 2.0 - 1.0;
+            let ray_dir = v_normalize(v_add(
+                basis.forward,
+                v_add(
+                    v_scale(basis.right, nx * aspect * fov),
+                    v_scale(basis.up, ny * fov),
+                ),
+            ));
+
+            let value = if let Some((t_start, t_end)) =
+                ray_aabb_interval(basis.origin, ray_dir, box_min, box_max)
+            {
+                let step = compute_intersection_step(t_start, t_end, samples);
+                let mut peak = 0u16;
+                let mut pos = v_add(basis.origin, v_scale(ray_dir, t_start));
+                let step_vec = v_scale(ray_dir, step);
+                for _ in 0..samples {
+                    peak = peak.max(sample_volume_nearest(volume, pos));
+                    if peak == u16::MAX {
+                        break;
+                    }
+                    pos = v_add(pos, step_vec);
+                }
+                peak
+            } else {
+                0u16
+            };
+
+            let value_bytes = value.to_le_bytes();
+            bytes[byte_offset] = value_bytes[0];
+            bytes[byte_offset + 1] = value_bytes[1];
+            byte_offset += 2;
+        }
+    }
+
+    FramePayload {
+        width,
+        height,
+        bytes,
+    }
+}
+
+fn compute_3d_sample_count(depth: u32) -> usize {
+    depth.clamp(48, 192) as usize
+}
+
+fn compute_intersection_step(t_start: f32, t_end: f32, samples: usize) -> f32 {
+    let span = (t_end - t_start).max(1e-5);
+    span / samples.max(1) as f32
+}
+
+fn sample_volume_nearest(volume: &U16Volume, world: Vec3) -> u16 {
+    if world[0] < -1.0
+        || world[0] > 1.0
+        || world[1] < -1.0
+        || world[1] > 1.0
+        || world[2] < -1.0
+        || world[2] > 1.0
+    {
+        return 0;
+    }
+    let nx = (world[0] + 1.0) * 0.5;
+    let ny = (world[1] + 1.0) * 0.5;
+    let nz = (world[2] + 1.0) * 0.5;
+    let x = (nx * (volume.width.saturating_sub(1) as f32)).round() as i32;
+    let y = (ny * (volume.height.saturating_sub(1) as f32)).round() as i32;
+    let z = (nz * (volume.depth.saturating_sub(1) as f32)).round() as i32;
+    if x < 0
+        || y < 0
+        || z < 0
+        || x >= volume.width as i32
+        || y >= volume.height as i32
+        || z >= volume.depth as i32
+    {
+        return 0;
+    }
+    let idx = ((z as usize * volume.height as usize + y as usize) * volume.width as usize) + x as usize;
+    volume.voxels[idx]
+}
+
+fn ray_aabb_interval(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<(f32, f32)> {
+    let mut t_min = -f32::INFINITY;
+    let mut t_max = f32::INFINITY;
+
+    for axis in 0..3 {
+        let o = origin[axis];
+        let d = dir[axis];
+        if d.abs() < 1e-6 {
+            if o < min[axis] || o > max[axis] {
+                return None;
+            }
+            continue;
+        }
+
+        let inv = 1.0 / d;
+        let mut t1 = (min[axis] - o) * inv;
+        let mut t2 = (max[axis] - o) * inv;
+        if t1 > t2 {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        t_min = t_min.max(t1);
+        t_max = t_max.min(t2);
+        if t_min > t_max {
+            return None;
+        }
+    }
+
+    if t_max <= 1e-5 {
+        return None;
+    }
+    Some((t_min.max(0.0), t_max))
+}
+
+fn camera_basis_for_volume(camera: &CameraMode) -> CameraBasis {
+    match camera {
+        CameraMode::PanZoom(state) => CameraBasis {
+            origin: [
+                state.center[0] as f32,
+                state.center[1] as f32,
+                (3.0f64 / state.zoom.max(0.1)) as f32,
+            ],
+            forward: [0.0, 0.0, -1.0],
+            right: [1.0, 0.0, 0.0],
+            up: [0.0, 1.0, 0.0],
+        },
+        CameraMode::Arcball(state) => {
+            let influence = CameraInfluence {
+                x: state.target[0] as f32,
+                y: state.target[1] as f32,
+                z: state.target[2] as f32,
+                yaw: state.yaw_pitch[0] as f32,
+                pitch: state.yaw_pitch[1] as f32,
+                roll: 0.0,
+            };
+            let mut basis = camera_basis(&influence);
+            basis.origin = v_sub(
+                [
+                    state.target[0] as f32,
+                    state.target[1] as f32,
+                    state.target[2] as f32,
+                ],
+                v_scale(basis.forward, state.distance.max(0.05) as f32),
+            );
+            basis
+        }
+        CameraMode::Freefly(state) => camera_basis(&CameraInfluence {
+            x: state.position[0] as f32,
+            y: state.position[1] as f32,
+            z: state.position[2] as f32,
+            yaw: state.yaw_pitch_roll[0] as f32,
+            pitch: state.yaw_pitch_roll[1] as f32,
+            roll: state.yaw_pitch_roll[2] as f32,
+        }),
+    }
+}
+
+fn camera_basis(camera: &CameraInfluence) -> CameraBasis {
+    let yaw = camera.yaw;
+    let pitch = camera.pitch.clamp(-1.45, 1.45);
+    let roll = camera.roll;
+
+    let forward = v_normalize([
+        yaw.sin() * pitch.cos(),
+        pitch.sin(),
+        -yaw.cos() * pitch.cos(),
+    ]);
+
+    let world_up = [0.0, 1.0, 0.0];
+    let mut right = v_cross(forward, world_up);
+    if v_length(right) < 1e-6 {
+        right = [1.0, 0.0, 0.0];
+    }
+    right = v_normalize(right);
+    let mut up = v_normalize(v_cross(right, forward));
+
+    let (sin_roll, cos_roll) = roll.sin_cos();
+    let rolled_right = v_normalize(v_add(v_scale(right, cos_roll), v_scale(up, sin_roll)));
+    up = v_normalize(v_sub(v_scale(up, cos_roll), v_scale(right, sin_roll)));
+
+    CameraBasis {
+        origin: [camera.x, camera.y, camera.z],
+        forward,
+        right: rolled_right,
+        up,
+    }
+}
+
+fn v_add(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+
+fn v_sub(a: Vec3, b: Vec3) -> Vec3 {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn v_scale(v: Vec3, scalar: f32) -> Vec3 {
+    [v[0] * scalar, v[1] * scalar, v[2] * scalar]
+}
+
+fn v_dot(a: Vec3, b: Vec3) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn v_cross(a: Vec3, b: Vec3) -> Vec3 {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+fn v_length(v: Vec3) -> f32 {
+    v_dot(v, v).sqrt()
+}
+
+fn v_normalize(v: Vec3) -> Vec3 {
+    let length = v_length(v).max(1e-9);
+    [v[0] / length, v[1] / length, v[2] / length]
+}
+
+fn build_synthetic_graph_frame(
+    viewport: &lucida_protocol::FrameViewport,
+    axis: &FrameAxisIndices,
+    camera: &CameraMode,
+) -> FramePayload {
+    let width = viewport.width.max(1);
+    let height = viewport.height.max(1);
+    let mut grid = vec![0u32; width as usize * height as usize];
+    let camera = camera_influence(camera);
+    let mut seed =
+        ((axis.t as u64) << 42) ^ ((axis.c as u64) << 21) ^ (axis.z as u64) ^ 0x9E37_79B9_7F4A_7C15;
+    seed ^= (camera.x.to_bits() as u64) ^ ((camera.y.to_bits() as u64) << 1) ^ ((camera.yaw.to_bits() as u64) << 2);
+    let point_count = 256 + ((axis.t + axis.c + axis.z) % 128);
+    let x_bias = (camera.x * 3.0) as i32;
+    let y_bias = (camera.y * 3.0) as i32;
+
+    for _ in 0..point_count {
+        seed = lcg_next(seed);
+        let px = ((seed as u32 % width) as i32 + x_bias).rem_euclid(width as i32);
+        seed = lcg_next(seed);
+        let py = ((seed as u32 % height) as i32 + y_bias).rem_euclid(height as i32);
+
+        accumulate_point(&mut grid, width, height, px, py, 12000);
+        accumulate_point(&mut grid, width, height, px - 1, py, 4000);
+        accumulate_point(&mut grid, width, height, px + 1, py, 4000);
+        accumulate_point(&mut grid, width, height, px, py - 1, 4000);
+        accumulate_point(&mut grid, width, height, px, py + 1, 4000);
+    }
+
+    let mut bytes = Vec::with_capacity(width as usize * height as usize * 2);
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y as usize * width as usize + x as usize;
+            let baseline = ((x + y) % 23) as u32 * 30;
+            let value = (grid[idx] + baseline).min(u16::MAX as u32) as u16;
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    FramePayload {
+        width,
+        height,
+        bytes,
+    }
+}
+
+struct CameraInfluence {
+    x: f32,
+    y: f32,
+    z: f32,
+    yaw: f32,
+    pitch: f32,
+    roll: f32,
+}
+
+fn camera_influence(camera: &CameraMode) -> CameraInfluence {
+    match camera {
+        CameraMode::PanZoom(state) => CameraInfluence {
+            x: state.center[0] as f32,
+            y: state.center[1] as f32,
+            z: state.zoom as f32,
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+        },
+        CameraMode::Arcball(state) => CameraInfluence {
+            x: state.target[0] as f32,
+            y: state.target[1] as f32,
+            z: state.target[2] as f32,
+            yaw: state.yaw_pitch[0] as f32,
+            pitch: state.yaw_pitch[1] as f32,
+            roll: 0.0,
+        },
+        CameraMode::Freefly(state) => CameraInfluence {
+            x: state.position[0] as f32,
+            y: state.position[1] as f32,
+            z: state.position[2] as f32,
+            yaw: state.yaw_pitch_roll[0] as f32,
+            pitch: state.yaw_pitch_roll[1] as f32,
+            roll: state.yaw_pitch_roll[2] as f32,
+        },
+    }
+}
+
+fn lcg_next(seed: u64) -> u64 {
+    seed.wrapping_mul(6364136223846793005).wrapping_add(1)
+}
+
+fn accumulate_point(grid: &mut [u32], width: u32, height: u32, x: i32, y: i32, weight: u32) {
+    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+        return;
+    }
+    let idx = y as usize * width as usize + x as usize;
+    grid[idx] = grid[idx].saturating_add(weight);
 }
 
 fn derive_frame_socket_path(control_socket_path: &Path) -> PathBuf {
@@ -792,6 +1443,22 @@ fn frame_error_response(request_id: &str, message: String) -> (FrameResponseHead
     )
 }
 
+fn maybe_invalidate_volume_cache(
+    runtime: &mut DaemonRuntime,
+    method: &str,
+    session_id: Option<&str>,
+) {
+    if !matches!(method, "dataset.open" | "dataset.close" | "session.close") {
+        return;
+    }
+    let Some(session_id) = session_id else {
+        return;
+    };
+    runtime
+        .volume_cache
+        .retain(|key, _| key.session_id != session_id);
+}
+
 fn parse_replay_entries(params: &Value) -> Result<Option<Vec<ReplayEntry>>, String> {
     let Some(value) = params.get("entries") else {
         return Ok(None);
@@ -812,11 +1479,18 @@ fn storage_error_to_rpc(error: StorageError) -> RpcError {
 
 async fn preprocess_request(
     request: RpcRequestEnvelope,
+    app_state: &AppState,
 ) -> Result<RpcRequestEnvelope, (RpcRequestEnvelope, StorageError)> {
-    if request.method != "dataset.open" {
-        return Ok(request);
+    match request.method.as_str() {
+        "dataset.open" => preprocess_dataset_open_request(request),
+        "layer.auto_contrast" => preprocess_layer_auto_contrast_request(request, app_state),
+        _ => Ok(request),
     }
+}
 
+fn preprocess_dataset_open_request(
+    request: RpcRequestEnvelope,
+) -> Result<RpcRequestEnvelope, (RpcRequestEnvelope, StorageError)> {
     let uri = request
         .params
         .get("uri")
@@ -855,6 +1529,141 @@ async fn preprocess_request(
         "read_only": options.read_only,
     });
     Ok(request)
+}
+
+fn preprocess_layer_auto_contrast_request(
+    request: RpcRequestEnvelope,
+    app_state: &AppState,
+) -> Result<RpcRequestEnvelope, (RpcRequestEnvelope, StorageError)> {
+    let Some(session_id) = request.session_id.as_deref() else {
+        return Err((
+            request.clone(),
+            StorageError::UnsupportedLayout("layer.auto_contrast requires session_id".to_string()),
+        ));
+    };
+    let session = app_state.sessions.get(session_id).ok_or_else(|| {
+        (
+            request.clone(),
+            StorageError::MissingDataset(format!("unknown session_id: {session_id}")),
+        )
+    })?;
+    let dataset_uri = session
+        .dataset
+        .as_ref()
+        .map(|dataset| dataset.uri.clone())
+        .ok_or_else(|| {
+            (
+                request.clone(),
+                StorageError::MissingDataset(format!(
+                    "session {session_id} has no opened dataset"
+                )),
+            )
+        })?;
+    let layer_id = request
+        .params
+        .get("layer_id")
+        .and_then(Value::as_str)
+        .map(ToString::to_string)
+        .ok_or_else(|| {
+            (
+                request.clone(),
+                StorageError::UnsupportedLayout("layer.auto_contrast requires layer_id".to_string()),
+            )
+        })?;
+    let layer = session.layers.get(&layer_id).ok_or_else(|| {
+        (
+            request.clone(),
+            StorageError::UnsupportedLayout(format!("unknown layer_id: {layer_id}")),
+        )
+    })?;
+    let channel_override = match &layer.kind {
+        LayerKind::Image { channel, .. } => *channel,
+        _ => {
+            return Err((
+                request.clone(),
+                StorageError::UnsupportedLayout(format!(
+                    "layer {layer_id} is not an image layer"
+                )),
+            ))
+        }
+    };
+    let method = request
+        .params
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("robust_percentile_1_99")
+        .to_string();
+    let axis_indices = &session.view.axis_indices;
+    let axis_map = BTreeMap::from([
+        ("t".to_string(), *axis_indices.get("t").unwrap_or(&0)),
+        (
+            "c".to_string(),
+            channel_override.unwrap_or(*axis_indices.get("c").unwrap_or(&0)),
+        ),
+        ("z".to_string(), *axis_indices.get("z").unwrap_or(&0)),
+    ]);
+    let plane = read_u16_plane(&dataset_uri, &axis_map).map_err(|err| (request.clone(), err))?;
+    let contrast_limits = match method.as_str() {
+        "robust_percentile_1_99" => robust_percentile_limits(&plane, 0.01, 0.99),
+        "full_range" => [0, u16::MAX],
+        other => {
+            return Err((
+                request.clone(),
+                StorageError::UnsupportedLayout(format!(
+                    "unsupported auto contrast method: {other}"
+                )),
+            ))
+        }
+    };
+
+    let mut request = request;
+    if !request.params.is_object() {
+        request.params = json!({});
+    }
+    let params = request.params.as_object_mut().expect("params object");
+    params.insert("layer_id".to_string(), json!(layer_id));
+    params.insert("method".to_string(), json!(method));
+    params.insert("min".to_string(), json!(contrast_limits[0]));
+    params.insert("max".to_string(), json!(contrast_limits[1]));
+    Ok(request)
+}
+
+fn robust_percentile_limits(plane: &U16FramePlane, low: f64, high: f64) -> [u16; 2] {
+    let mut hist = vec![0u32; (u16::MAX as usize) + 1];
+    let mut count: u64 = 0;
+    for chunk in plane.bytes.chunks_exact(2) {
+        let value = u16::from_le_bytes([chunk[0], chunk[1]]);
+        hist[value as usize] += 1;
+        count += 1;
+    }
+    if count == 0 {
+        return [0, u16::MAX];
+    }
+
+    let low_rank = ((count - 1) as f64 * low).round().clamp(0.0, (count - 1) as f64) as u64;
+    let high_rank = ((count - 1) as f64 * high)
+        .round()
+        .clamp(low_rank as f64, (count - 1) as f64) as u64;
+
+    let mut cumulative: u64 = 0;
+    let mut min_value: u16 = 0;
+    let mut max_value: u16 = u16::MAX;
+    let mut min_found = false;
+    for (value, bin_count) in hist.iter().enumerate() {
+        cumulative += *bin_count as u64;
+        if !min_found && cumulative > low_rank {
+            min_value = value as u16;
+            min_found = true;
+        }
+        if cumulative > high_rank {
+            max_value = value as u16;
+            break;
+        }
+    }
+    if min_value >= max_value {
+        max_value = min_value.saturating_add(1).max(min_value);
+    }
+    [min_value.min(max_value.saturating_sub(1)), max_value]
 }
 
 #[cfg(unix)]
@@ -916,6 +1725,16 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn sample_budget_is_depth_based_and_bounded() {
+        assert_eq!(compute_3d_sample_count(1), 48);
+        assert_eq!(compute_3d_sample_count(47), 48);
+        assert_eq!(compute_3d_sample_count(48), 48);
+        assert_eq!(compute_3d_sample_count(128), 128);
+        assert_eq!(compute_3d_sample_count(192), 192);
+        assert_eq!(compute_3d_sample_count(512), 192);
+    }
+
     #[tokio::test]
     async fn parse_socket_path_uses_flags_when_present() {
         let config = parse_socket_path(&[
@@ -948,6 +1767,8 @@ mod tests {
         let (response, _) = daemon.process_request(request).await;
         let result = response.result.expect("inspect should return result payload");
         assert_eq!(result["exists"], json!(false));
+        assert_eq!(result["camera"], Value::Null);
+        assert_eq!(result["render_mode"], Value::Null);
     }
 
     #[tokio::test]
@@ -966,6 +1787,340 @@ mod tests {
         let (response, _) = daemon.process_request(request).await;
         let error = response.error.expect("expected error");
         assert!(error.message.contains("unknown session_id"));
+    }
+
+    #[tokio::test]
+    async fn capabilities_include_3d_and_exclude_3d_stub() {
+        let daemon = Daemon::new();
+        let request = RpcRequestEnvelope {
+            jsonrpc: "2.0".to_string(),
+            protocol_version: PROTOCOL_VERSION.to_string(),
+            session_id: None,
+            request_id: "req-capabilities".to_string(),
+            method: "server.capabilities".to_string(),
+            params: json!({}),
+            timestamp: now_utc(),
+        };
+        let (response, _) = daemon.process_request(request).await;
+        let result = response.result.expect("capabilities result");
+        let render_modes = result["render_modes"]
+            .as_array()
+            .expect("render_modes array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(render_modes.contains(&"3d"));
+        assert!(!render_modes.contains(&"3d_stub"));
+    }
+
+    #[tokio::test]
+    async fn render_mode_rejects_legacy_3d_stub() {
+        let daemon = Daemon::new();
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let (response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id),
+                request_id: "req-mode".to_string(),
+                method: "view.set_render_mode".to_string(),
+                params: json!({"mode": "3d_stub"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let err = response.error.expect("legacy mode should fail");
+        assert!(err.message.contains("invalid render mode: 3d_stub"));
+    }
+
+    #[tokio::test]
+    async fn render_mode_falls_back_to_2d_without_dataset_or_layer() {
+        let daemon = Daemon::new();
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let (response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-mode".to_string(),
+                method: "view.set_render_mode".to_string(),
+                params: json!({"mode": "3d"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let result = response.result.expect("view.set_render_mode result");
+        assert_eq!(result["requested_mode"], json!("3d"));
+        assert_eq!(result["mode"], json!("2d"));
+        assert_eq!(
+            result["fallback_reason"],
+            json!("missing dataset or visible image layer")
+        );
+
+        let (inspect_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id),
+                request_id: "req-inspect".to_string(),
+                method: "session.inspect".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let inspect = inspect_response.result.expect("session.inspect");
+        assert_eq!(inspect["render_mode"], json!("2d"));
+    }
+
+    #[tokio::test]
+    async fn volume_cache_invalidates_on_dataset_close() {
+        let daemon = Daemon::new();
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/ome_zarr_v05_structured_3d");
+        let (open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-open".to_string(),
+                method: "dataset.open".to_string(),
+                params: json!({"uri": fixture_path.display().to_string(), "read_only": true}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(open_response.error.is_none());
+
+        let (layer_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-layer".to_string(),
+                method: "layer.add_image".to_string(),
+                params: json!({"layer_id":"image-1","channel":0}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(layer_response.error.is_none());
+
+        let (mode_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-mode".to_string(),
+                method: "view.set_render_mode".to_string(),
+                params: json!({"mode":"3d"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(mode_response.error.is_none());
+
+        let (frame_open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-frame-open".to_string(),
+                method: "frame.channel.open".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let frame_open_result = frame_open_response.result.expect("frame.channel.open result");
+        let channel_token = frame_open_result["channel_token"]
+            .as_str()
+            .expect("channel token")
+            .to_string();
+
+        let (frame_header, _) = daemon
+            .process_frame_request(FrameRequestHeader {
+                frame_protocol_version: FRAME_PROTOCOL_VERSION.to_string(),
+                request_id: "req-frame".to_string(),
+                channel_token,
+                session_id: session_id.clone(),
+                axis_indices: FrameAxisIndices { t: 0, c: 0, z: 0 },
+                viewport: lucida_protocol::FrameViewport {
+                    width: 32,
+                    height: 24,
+                },
+            })
+            .await;
+        assert_eq!(frame_header.status, "ok");
+
+        {
+            let runtime = daemon.runtime.lock().await;
+            assert!(
+                runtime.volume_cache.keys().any(|key| key.session_id == session_id),
+                "expected cache entry for session"
+            );
+        }
+
+        let (close_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-dataset-close".to_string(),
+                method: "dataset.close".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(close_response.error.is_none());
+
+        let runtime = daemon.runtime.lock().await;
+        assert!(
+            !runtime.volume_cache.keys().any(|key| key.session_id == session_id),
+            "cache should be cleared for closed dataset session"
+        );
+    }
+
+    #[tokio::test]
+    async fn inspect_includes_camera_and_image_render_settings() {
+        let daemon = Daemon::new();
+
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/ome_zarr_v05_structured_3d");
+        let (open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-open".to_string(),
+                method: "dataset.open".to_string(),
+                params: json!({"uri": fixture_path.display().to_string(), "read_only": true}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(open_response.error.is_none());
+
+        let (add_layer_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-add-layer".to_string(),
+                method: "layer.add_image".to_string(),
+                params: json!({"layer_id":"image-1","channel":0}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(add_layer_response.error.is_none());
+
+        let (set_sampling_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-sampling".to_string(),
+                method: "layer.set_sampling".to_string(),
+                params: json!({"layer_id":"image-1","sampling_mode":"linear"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(set_sampling_response.error.is_none());
+
+        let (set_contrast_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-contrast".to_string(),
+                method: "layer.set_contrast_limits".to_string(),
+                params: json!({"layer_id":"image-1","min":128,"max":8192}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(set_contrast_response.error.is_none());
+
+        let (inspect_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id),
+                request_id: "req-inspect".to_string(),
+                method: "session.inspect".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let inspect = inspect_response.result.expect("inspect result");
+        assert_eq!(inspect["camera"]["mode"], json!("pan_zoom"));
+        let image_layer = inspect["layers"]
+            .as_array()
+            .expect("layers array")
+            .iter()
+            .find(|layer| layer["id"] == json!("image-1"))
+            .expect("image-1 layer exists");
+        assert_eq!(
+            image_layer["kind"]["render_state"]["sampling_mode"],
+            json!("linear")
+        );
+        assert_eq!(
+            image_layer["kind"]["render_state"]["contrast_limits"],
+            json!([128, 8192])
+        );
     }
 
     #[tokio::test]
@@ -1064,6 +2219,313 @@ mod tests {
         assert_eq!(z2_payload.len(), 8 * 8 * 2);
         let z2_first = u16::from_le_bytes([z2_payload[0], z2_payload[1]]);
         assert_eq!(z2_first, 2000);
+    }
+
+    #[tokio::test]
+    async fn frame_requests_change_with_render_mode_and_stay_deterministic() {
+        let daemon = Daemon::new();
+
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/ome_zarr_v05_min");
+        let (open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-open".to_string(),
+                method: "dataset.open".to_string(),
+                params: json!({"uri": fixture_path.display().to_string(), "read_only": true}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(open_response.error.is_none());
+
+        let (layer_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-layer".to_string(),
+                method: "layer.add_image".to_string(),
+                params: json!({"layer_id":"image-1","channel":0}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(layer_response.error.is_none());
+
+        let (frame_open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-frame-open".to_string(),
+                method: "frame.channel.open".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let frame_open_result = frame_open_response.result.expect("frame.channel.open result");
+        let channel_token = frame_open_result["channel_token"]
+            .as_str()
+            .expect("channel token")
+            .to_string();
+
+        let request_frame = |request_id: &str,
+                             axis: FrameAxisIndices,
+                             channel_token: String,
+                             session_id: String| FrameRequestHeader {
+            frame_protocol_version: FRAME_PROTOCOL_VERSION.to_string(),
+            request_id: request_id.to_string(),
+            channel_token,
+            session_id,
+            axis_indices: axis,
+            viewport: lucida_protocol::FrameViewport {
+                width: 64,
+                height: 48,
+            },
+        };
+
+        let (frame_2d_header, frame_2d_payload) = daemon
+            .process_frame_request(request_frame(
+                "frame-2d",
+                FrameAxisIndices { t: 0, c: 0, z: 1 },
+                channel_token.clone(),
+                session_id.clone(),
+            ))
+            .await;
+        assert_eq!(frame_2d_header.status, "ok");
+
+        let (camera_pose_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-panzoom-zoom".to_string(),
+                method: "camera.set_pose".to_string(),
+                params: json!({"pose":{"center":[0.0,0.0],"zoom":2.0}}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(camera_pose_response.error.is_none());
+
+        let (frame_2d_zoom_header, frame_2d_zoom_payload) = daemon
+            .process_frame_request(request_frame(
+                "frame-2d-zoom",
+                FrameAxisIndices { t: 0, c: 0, z: 1 },
+                channel_token.clone(),
+                session_id.clone(),
+            ))
+            .await;
+        assert_eq!(frame_2d_zoom_header.status, "ok");
+        assert_eq!(frame_2d_payload, frame_2d_zoom_payload);
+
+        let (mode_2d_stub_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-mode-2d-stub".to_string(),
+                method: "view.set_render_mode".to_string(),
+                params: json!({"mode":"2d_stub"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(mode_2d_stub_response.error.is_none());
+
+        let (frame_2d_stub_header_a, frame_2d_stub_payload_a) = daemon
+            .process_frame_request(request_frame(
+                "frame-2d-stub-a",
+                FrameAxisIndices { t: 0, c: 0, z: 1 },
+                channel_token.clone(),
+                session_id.clone(),
+            ))
+            .await;
+        let (frame_2d_stub_header_b, frame_2d_stub_payload_b) = daemon
+            .process_frame_request(request_frame(
+                "frame-2d-stub-b",
+                FrameAxisIndices { t: 0, c: 0, z: 3 },
+                channel_token.clone(),
+                session_id.clone(),
+            ))
+            .await;
+        assert_eq!(frame_2d_stub_header_a.status, "ok");
+        assert_eq!(frame_2d_stub_header_b.status, "ok");
+        assert_ne!(frame_2d_stub_payload_a, frame_2d_stub_payload_b);
+        assert_ne!(frame_2d_payload, frame_2d_stub_payload_a);
+
+        let (mode_3d_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-mode-3d".to_string(),
+                method: "view.set_render_mode".to_string(),
+                params: json!({"mode":"3d"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(mode_3d_response.error.is_none());
+
+        let (inspect_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-inspect".to_string(),
+                method: "session.inspect".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let inspect = inspect_response.result.expect("session.inspect result");
+        assert_eq!(inspect["render_mode"], json!("3d"));
+
+        let (frame_3d_header_a, frame_3d_payload_a) = daemon
+            .process_frame_request(request_frame(
+                "frame-3d-a",
+                FrameAxisIndices { t: 0, c: 0, z: 2 },
+                channel_token.clone(),
+                session_id.clone(),
+            ))
+            .await;
+        let (frame_3d_header_b, frame_3d_payload_b) = daemon
+            .process_frame_request(request_frame(
+                "frame-3d-b",
+                FrameAxisIndices { t: 0, c: 0, z: 2 },
+                channel_token.clone(),
+                session_id.clone(),
+            ))
+            .await;
+        assert_eq!(frame_3d_header_a.status, "ok");
+        assert_eq!(frame_3d_header_b.status, "ok");
+        assert_eq!(frame_3d_payload_a, frame_3d_payload_b);
+        assert_ne!(frame_2d_payload, frame_3d_payload_a);
+
+        let (set_3d_contrast_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-set-3d-contrast".to_string(),
+                method: "layer.set_contrast_limits".to_string(),
+                params: json!({"layer_id":"image-1","min":32000,"max":40000}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(set_3d_contrast_response.error.is_none());
+
+        let (frame_3d_header_contrast, frame_3d_payload_contrast) = daemon
+            .process_frame_request(request_frame(
+                "frame-3d-contrast",
+                FrameAxisIndices { t: 0, c: 0, z: 2 },
+                channel_token.clone(),
+                session_id.clone(),
+            ))
+            .await;
+        assert_eq!(frame_3d_header_contrast.status, "ok");
+        assert_eq!(frame_3d_payload_contrast, frame_3d_payload_a);
+
+        let (frame_3d_large_header, frame_3d_large_payload) = daemon
+            .process_frame_request(FrameRequestHeader {
+                frame_protocol_version: FRAME_PROTOCOL_VERSION.to_string(),
+                request_id: "frame-3d-large".to_string(),
+                channel_token: channel_token.clone(),
+                session_id: session_id.clone(),
+                axis_indices: FrameAxisIndices { t: 0, c: 0, z: 2 },
+                viewport: lucida_protocol::FrameViewport {
+                    width: 96,
+                    height: 72,
+                },
+            })
+            .await;
+        assert_eq!(frame_3d_large_header.status, "ok");
+        assert_eq!(frame_3d_large_header.width, 96);
+        assert_eq!(frame_3d_large_header.height, 72);
+        assert_eq!(frame_3d_large_payload.len(), 96 * 72 * 2);
+        assert_ne!(frame_3d_large_payload, frame_3d_payload_a);
+
+        let (camera_mode_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-camera-freefly".to_string(),
+                method: "camera.set_mode".to_string(),
+                params: json!({"mode":"freefly"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(camera_mode_response.error.is_none());
+
+        let (camera_pose_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-camera-pose".to_string(),
+                method: "camera.set_pose".to_string(),
+                params: json!({
+                    "pose": {
+                        "position": [1.0, -2.0, 4.5],
+                        "yaw_pitch_roll": [0.4, -0.2, 0.1],
+                        "speed": 1.5
+                    }
+                }),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(camera_pose_response.error.is_none());
+
+        let (frame_3d_header_c, frame_3d_payload_c) = daemon
+            .process_frame_request(request_frame(
+                "frame-3d-c",
+                FrameAxisIndices { t: 0, c: 0, z: 2 },
+                channel_token.clone(),
+                session_id.clone(),
+            ))
+            .await;
+        assert_eq!(frame_3d_header_c.status, "ok");
+        assert_ne!(frame_3d_payload_c, frame_3d_payload_a);
+
+        let (mode_graph_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-mode-graph".to_string(),
+                method: "view.set_render_mode".to_string(),
+                params: json!({"mode":"graph_stub"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(mode_graph_response.error.is_none());
+
+        let (frame_graph_header, frame_graph_payload) = daemon
+            .process_frame_request(request_frame(
+                "frame-graph",
+                FrameAxisIndices { t: 0, c: 0, z: 2 },
+                channel_token,
+                session_id,
+            ))
+            .await;
+        assert_eq!(frame_graph_header.status, "ok");
+        assert_ne!(frame_graph_payload, frame_3d_payload_a);
     }
 
     #[tokio::test]

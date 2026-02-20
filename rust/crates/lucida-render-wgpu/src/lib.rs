@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 #[serde(rename_all = "snake_case")]
 pub enum RenderMode {
     TwoD,
-    ThreeDStub,
+    ThreeD,
     GraphStub,
 }
 
@@ -70,8 +70,8 @@ mod tests {
     #[test]
     fn renderer_mode_switches_are_stable() {
         let mut renderer = RendererState::default();
-        renderer.set_mode(RenderMode::ThreeDStub);
-        assert_eq!(renderer.mode, RenderMode::ThreeDStub);
+        renderer.set_mode(RenderMode::ThreeD);
+        assert_eq!(renderer.mode, RenderMode::ThreeD);
 
         renderer.set_mode(RenderMode::GraphStub);
         assert_eq!(renderer.mode, RenderMode::GraphStub);
