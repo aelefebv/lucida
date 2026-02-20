@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "python"))
 
 from lucida_daemon import default_local_ipc_uri
-from lucida_sdk import UnsupportedCapability, connect, launch_or_connect
+from lucida_sdk import connect, launch_or_connect
 from lucida_sdk.client import DEFAULT_PROTOCOL_VERSION, LucidaClient, RPC_METHODS
 from lucida_sdk.registry import clear_local_daemon_registry
 
@@ -87,22 +87,33 @@ class Step8SdkClientTests(unittest.TestCase):
         self.assertEqual(session_state["state"], "closed")
         client.close()
 
-    def test_command_log_methods_are_exposed_and_typed_errors_map(self) -> None:
+    def test_command_log_methods_are_exposed_and_executable(self) -> None:
         client = launch_or_connect(local_ipc_uri=self._unique_ipc_uri())
         with client.session_scope(label="step8-command-log") as session_id:
-            with self.assertRaises(UnsupportedCapability):
-                client.export_command_log(session_id=session_id, destination_uri="memory://commands.jsonl")
-            with self.assertRaises(UnsupportedCapability):
-                client.import_command_log(
-                    session_id=session_id,
-                    source_uri="memory://commands.jsonl",
-                )
-            with self.assertRaises(UnsupportedCapability):
-                client.replay_command_log(
-                    session_id=session_id,
-                    source_uri="memory://commands.jsonl",
-                    dry_run=True,
-                )
+            exported = client.export_command_log(session_id=session_id, destination_uri="memory://sdk-step9-empty.jsonl")
+            self.assertEqual(exported["record_count"], 0)
+
+            imported = client.import_command_log(session_id=session_id, source_uri="memory://sdk-step9-empty.jsonl")
+            imported_terminal = client.wait_for_job(
+                session_id=session_id,
+                job_id=str(imported["job"]["job_id"]),
+                timeout_s=5.0,
+                poll_interval_s=0.01,
+            )
+            self.assertEqual(imported_terminal["state"], "completed")
+
+            replayed = client.replay_command_log(
+                session_id=session_id,
+                source_uri="memory://sdk-step9-empty.jsonl",
+                dry_run=True,
+            )
+            replay_terminal = client.wait_for_job(
+                session_id=session_id,
+                job_id=str(replayed["job"]["job_id"]),
+                timeout_s=5.0,
+                poll_interval_s=0.01,
+            )
+            self.assertEqual(replay_terminal["state"], "completed")
         client.close()
 
 

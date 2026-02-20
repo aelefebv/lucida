@@ -273,11 +273,23 @@
     {
       "step_id": "step-09",
       "step_spec_path": "specs/roadmap/step-09-command-log-replay.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
+      "status": "done",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/protocol/README.md",
+        "docs/sdk/README.md",
+        "specs/roadmap/step-09-command-log-replay.md",
+        "python/lucida_core/command_log.py",
+        "python/lucida_core/engine.py"
+      ],
+      "test_paths": [
+        "tests/core/test_nd_state_engine.py",
+        "tests/core/test_step9_command_log.py",
+        "tests/daemon/test_step7_daemon_runtime.py",
+        "tests/sdk/test_step8_sdk_client.py"
+      ],
       "protocol_artifacts": [],
-      "last_validated": ""
+      "last_validated": "2026-02-20"
     },
     {
       "step_id": "step-10",

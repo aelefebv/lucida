@@ -168,6 +168,10 @@ All user-visible actions must map to command API operations.
 
 - Deterministic action stream for reproducibility.
 - Persist/export/import/replay supported in v1.
+- Replay targets an existing session and validates record/session compatibility before apply.
+- Replay validation is strict fail-fast on the first command divergence or event mismatch.
+- Supported command-log URIs in v1: local paths, `file://`, and `memory://`.
+- `command_log.import` performs validate-and-stage behavior (no direct session mutation).
 - Full undo/redo stack is not required in v1.
 
 ## 8. Interaction Model

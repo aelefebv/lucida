@@ -12,7 +12,7 @@ Last updated: 2026-02-20
 6. Step 06: done
 7. Step 07: done
 8. Step 08: done
-9. Step 09: planned
+9. Step 09: done
 10. Step 10: planned
 11. Step 11: planned
 
@@ -27,4 +27,5 @@ Last updated: 2026-02-20
 7. Step 06 is complete with typed points/selection contracts, deterministic points planning/runtime behavior, Step 6 perf gates, and Rust points scaffold primitives.
 8. Step 07 is complete with Python daemon session/event orchestration, handshake-first connection gating, bounded event backpressure behavior, session retention GC policy, Step 7 cross-platform daemon CI smoke coverage, and Rust daemon scaffold crate bootstrapping.
 9. Step 08 is complete with synchronous Python SDK client lifecycle (`connect`/`launch_or_connect`), 1:1 OpenRPC wrapper coverage, typed SDK exceptions, strict event polling continuity checks, local daemon registry/shutdown behavior, and notebook smoke workflow coverage.
-10. Remaining later steps are planned and tracked in `docs/context/traceability.yaml`.
+10. Step 09 is complete with command journal capture, deterministic JSONL export/import validation, strict fail-fast replay (including dry-run clone mode), and daemon/SDK command-log integration behavior behind existing protocol contracts.
+11. Remaining later steps are planned and tracked in `docs/context/traceability.yaml`.

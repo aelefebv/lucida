@@ -544,23 +544,45 @@ class NDStateEngineTests(unittest.TestCase):
         snapshot = engine.snapshot()
         self.assertIn(sub["subscription_id"], snapshot["sessions"][0]["subscriptions"])
 
-    def test_command_log_methods_are_explicitly_unsupported(self) -> None:
+    def test_command_log_methods_support_export_import_replay(self) -> None:
         engine = self._new_engine()
         session_id = self._create_session(engine)
-        for method, payload in [
-            ("command_log.export", _request(2, session_id=session_id, destination_uri="mem://commands.jsonl")),
-            (
-                "command_log.import",
-                _request(3, idempotency_key="idem-import", session_id=session_id, source_uri="mem://commands.jsonl"),
+        export_result = engine.dispatch(
+            "command_log.export",
+            _request(2, session_id=session_id, destination_uri="memory://step9-empty.jsonl"),
+        )
+        self.assertEqual(export_result["record_count"], 0)
+
+        imported = engine.dispatch(
+            "command_log.import",
+            _request(
+                3,
+                idempotency_key="idem-import",
+                session_id=session_id,
+                source_uri="memory://step9-empty.jsonl",
             ),
-            (
-                "command_log.replay",
-                _request(4, idempotency_key="idem-replay", session_id=session_id, source_uri="mem://commands.jsonl", dry_run=True),
+        )
+        import_job = engine.dispatch(
+            "job.get",
+            _request(4, session_id=session_id, job_id=imported["job"]["job_id"]),
+        )
+        self.assertEqual(import_job["state"], "completed")
+
+        replayed = engine.dispatch(
+            "command_log.replay",
+            _request(
+                5,
+                idempotency_key="idem-replay",
+                session_id=session_id,
+                source_uri="memory://step9-empty.jsonl",
+                dry_run=True,
             ),
-        ]:
-            with self.assertRaises(LucidaError) as ctx:
-                engine.dispatch(method, payload)
-            self.assertEqual(ctx.exception.code, "LUCIDA_UNSUPPORTED_CAPABILITY")
+        )
+        replay_job = engine.dispatch(
+            "job.get",
+            _request(6, session_id=session_id, job_id=replayed["job"]["job_id"]),
+        )
+        self.assertEqual(replay_job["state"], "completed")
 
 
 if __name__ == "__main__":

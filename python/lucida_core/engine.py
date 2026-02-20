@@ -19,6 +19,19 @@ from .errors import (
     unsupported,
     version_mismatch,
 )
+from .command_log import (
+    COMMAND_LOG_METHODS,
+    CommandLogStorageError,
+    CommandLogStore,
+    CommandLogValidationError,
+    build_command_record,
+    build_event_record,
+    canonicalize_logged_event,
+    canonicalize_runtime_event,
+    group_replay_steps,
+    method_params_from_request,
+    validate_records,
+)
 from .io import (
     CacheManager,
     DatasetMetadata,
@@ -209,6 +222,8 @@ class SessionState:
     frame_plans_3d: dict[str, FramePlan3D] = field(default_factory=dict)
     frame_plans_points: dict[str, FramePlanPoints] = field(default_factory=dict)
     outbox: list[dict[str, Any]] = field(default_factory=list)
+    command_journal: list[dict[str, Any]] = field(default_factory=list)
+    imported_logs: dict[str, dict[str, Any]] = field(default_factory=dict)
     session_seq: int = 0
 
 
@@ -259,6 +274,7 @@ class NDStateEngine:
         self._state = RuntimeState()
         self._cache = cache_manager or CacheManager()
         self._scheduler = io_scheduler or IOScheduler()
+        self._command_log_store = CommandLogStore()
         self._render2d_scheduler = Render2DInvalidationScheduler()
         self._render3d_scheduler = Render3DInvalidationScheduler()
         self._render_points_scheduler = RenderPointsInvalidationScheduler()
@@ -322,6 +338,16 @@ class NDStateEngine:
             if cached is not None:
                 return deepcopy(cached)
 
+        journal_session: SessionState | None = None
+        journal_outbox_offset: int | None = None
+        if method not in COMMAND_LOG_METHODS:
+            session_id = params.get("session_id")
+            if isinstance(session_id, str):
+                candidate = self._state.sessions.get(session_id)
+                if candidate is not None:
+                    journal_session = candidate
+                    journal_outbox_offset = len(candidate.outbox)
+
         handler = self._handlers[method]
         try:
             result = handler(params)
@@ -335,6 +361,13 @@ class NDStateEngine:
 
         if cache_key is not None:
             self._state.idempotency_cache[cache_key] = deepcopy(result)
+        if journal_session is not None and journal_outbox_offset is not None:
+            self._record_command_journal_entry(
+                session=journal_session,
+                method=method,
+                params=params,
+                outbox_offset=journal_outbox_offset,
+            )
         return deepcopy(result)
 
     def snapshot(self) -> dict[str, Any]:
@@ -419,6 +452,17 @@ class NDStateEngine:
                         for view_id, plan in sorted(session.frame_plans_points.items())
                     },
                     "outbox": deepcopy(session.outbox),
+                    "command_journal": deepcopy(session.command_journal),
+                    "imported_logs": {
+                        import_id: {
+                            "source_uri": staged["source_uri"],
+                            "record_count": staged["record_count"],
+                            "command_count": staged["command_count"],
+                            "event_count": staged["event_count"],
+                            "imported_at": staged["imported_at"],
+                        }
+                        for import_id, staged in sorted(session.imported_logs.items())
+                    },
                 }
             )
         return {"sessions": sessions}
@@ -485,7 +529,7 @@ class NDStateEngine:
             "idempotency_keys": True,
             "dataref_oob": True,
             "total_ordered_events": True,
-            "command_log_replay": False,
+            "command_log_replay": True,
         }
 
     def _require_session(self, session_id: str) -> SessionState:
@@ -533,6 +577,37 @@ class NDStateEngine:
         if session is None:
             return
         self._emit_event(session, "error", {"error": exc.envelope()})
+
+    def _record_command_journal_entry(
+        self,
+        *,
+        session: SessionState,
+        method: str,
+        params: dict[str, Any],
+        outbox_offset: int,
+    ) -> None:
+        if method in COMMAND_LOG_METHODS:
+            return
+        protocol_version = params.get("protocol_version")
+        request_id = params.get("request_id")
+        if not isinstance(protocol_version, str) or not isinstance(request_id, str):
+            return
+        request: dict[str, Any] = {
+            "protocol_version": protocol_version,
+            "request_id": request_id,
+            "params": method_params_from_request(params),
+        }
+        idempotency_key = params.get("idempotency_key")
+        if isinstance(idempotency_key, str) and idempotency_key:
+            request["idempotency_key"] = idempotency_key
+        entry = {
+            "recorded_at": self._clock(),
+            "correlation_id": self._uuid(),
+            "method": method,
+            "request": request,
+            "events": [deepcopy(event) for event in session.outbox[outbox_offset:]],
+        }
+        session.command_journal.append(entry)
 
     def _parse_timeout_ms(self, value: Any) -> int | None:
         if value is None:
@@ -2206,18 +2281,294 @@ class NDStateEngine:
             "transport_uri": transport_uri,
         }
 
-    def _unsupported_command_log(self, params: dict[str, Any], method: str) -> dict[str, Any]:
-        self._require_session(params["session_id"])
-        raise unsupported(
-            "Command log operations are not implemented in Step 2",
-            {"method": method, "step": "step-09"},
+    def _command_log_records_for_export(self, session: SessionState) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        seq = 1
+        for entry in session.command_journal:
+            command_record = build_command_record(
+                seq=seq,
+                recorded_at=str(entry["recorded_at"]),
+                correlation_id=str(entry["correlation_id"]),
+                method=str(entry["method"]),
+                request=deepcopy(entry["request"]),
+            )
+            records.append(command_record)
+            seq += 1
+
+            raw_events = entry.get("events", [])
+            if isinstance(raw_events, list):
+                for event in raw_events:
+                    if not isinstance(event, dict):
+                        continue
+                    event_record = build_event_record(
+                        seq=seq,
+                        recorded_at=str(event.get("emitted_at", entry["recorded_at"])),
+                        correlation_id=str(entry["correlation_id"]),
+                        event=deepcopy(event),
+                    )
+                    records.append(event_record)
+                    seq += 1
+        return records
+
+    def _deepcopy_or_identity(self, value: Any) -> Any:
+        try:
+            return deepcopy(value)
+        except Exception:  # pragma: no cover - defensive fallback
+            return value
+
+    def _clone_for_replay(self) -> NDStateEngine:
+        clone = NDStateEngine(
+            clock=self._deepcopy_or_identity(self._clock),
+            uuid_factory=self._deepcopy_or_identity(self._uuid),
+            cache_manager=self._deepcopy_or_identity(self._cache),
+            io_scheduler=self._deepcopy_or_identity(self._scheduler),
+        )
+        clone._state = deepcopy(self._state)
+        clone._command_log_store = self._command_log_store
+        return clone
+
+    def _load_and_validate_log_records(self, source_uri: str) -> list[dict[str, Any]]:
+        try:
+            raw_records = self._command_log_store.read_records(uri=source_uri)
+        except CommandLogStorageError as exc:
+            message = str(exc)
+            if "Unsupported command log URI scheme" in message:
+                raise unsupported(
+                    "Command log URI scheme is unsupported",
+                    {"source_uri": source_uri, "error": message},
+                ) from exc
+            if "does not exist" in message:
+                raise not_found("Command log source does not exist", {"source_uri": source_uri, "error": message}) from exc
+            raise io_failure(
+                "Command log source_uri is unavailable",
+                {"source_uri": source_uri, "error": message},
+                retryable=False,
+            ) from exc
+        except CommandLogValidationError as exc:
+            raise invalid_params("Command log validation failed", {"source_uri": source_uri, "error": str(exc)}) from exc
+        try:
+            return validate_records(raw_records, protocol_version=ProtocolVersion)
+        except CommandLogValidationError as exc:
+            message = str(exc)
+            if "Unsupported command protocol_version" in message or "Unsupported event protocol_version" in message:
+                raise version_mismatch(
+                    "Command log protocol version is incompatible",
+                    {"source_uri": source_uri, "error": message, "supported": ProtocolVersion},
+                ) from exc
+            raise invalid_params("Command log validation failed", {"source_uri": source_uri, "error": message}) from exc
+
+    def _validate_replay_target(self, *, records: list[dict[str, Any]], session_id: str) -> None:
+        for record in records:
+            if record["kind"] != "command":
+                continue
+            method = str(record["method"])
+            if method in COMMAND_LOG_METHODS:
+                raise invalid_params("Replay logs must not contain command_log.* methods", {"method": method})
+            request = record["request"]
+            params = request["params"]
+            command_session_id = params.get("session_id")
+            if not isinstance(command_session_id, str):
+                raise invalid_params(
+                    "Replay command records must include request.params.session_id",
+                    {"method": method},
+                )
+            if command_session_id != session_id:
+                raise conflict(
+                    "Replay command targets a different session_id",
+                    {
+                        "method": method,
+                        "command_session_id": command_session_id,
+                        "target_session_id": session_id,
+                    },
+                )
+
+    def _replay_command_stream(
+        self,
+        *,
+        session: SessionState,
+        replay_id: str,
+        source_uri: str,
+        dry_run: bool,
+    ) -> None:
+        applied_commands = 0
+        total_commands = 0
+        self._emit_event(
+            session,
+            "command_log.replay",
+            {
+                "replay_id": replay_id,
+                "state": "started",
+                "applied_commands": applied_commands,
+                "total_commands": total_commands,
+            },
         )
 
+        try:
+            records = self._load_and_validate_log_records(source_uri)
+            self._validate_replay_target(records=records, session_id=session.session_id)
+            try:
+                steps = group_replay_steps(records)
+            except CommandLogValidationError as exc:
+                raise invalid_params(
+                    "Replay command/event grouping failed",
+                    {"source_uri": source_uri, "error": str(exc)},
+                ) from exc
+            total_commands = len(steps)
+            target_engine = self._clone_for_replay() if dry_run else self
+            target_session = target_engine._require_session(session.session_id)
+
+            for step in steps:
+                command = step.command
+                request = command["request"]
+                replay_params = deepcopy(request["params"])
+                replay_params["protocol_version"] = request["protocol_version"]
+                replay_params["request_id"] = request["request_id"]
+                idempotency_key = request.get("idempotency_key")
+                if isinstance(idempotency_key, str):
+                    replay_params["idempotency_key"] = idempotency_key
+
+                baseline_events = len(target_session.outbox)
+                method = str(command["method"])
+                target_engine.dispatch(method, replay_params)
+
+                emitted = target_session.outbox[baseline_events:]
+                expected = [canonicalize_logged_event(record) for record in step.expected_events]
+                actual = [canonicalize_runtime_event(event) for event in emitted]
+                if expected != actual:
+                    raise conflict(
+                        "Replay determinism validation failed",
+                        {
+                            "replay_id": replay_id,
+                            "method": method,
+                            "expected_events": expected,
+                            "actual_events": actual,
+                        },
+                    )
+
+                applied_commands += 1
+                self._emit_event(
+                    session,
+                    "command_log.replay",
+                    {
+                        "replay_id": replay_id,
+                        "state": "progress",
+                        "applied_commands": applied_commands,
+                        "total_commands": total_commands,
+                    },
+                )
+
+            self._emit_event(
+                session,
+                "command_log.replay",
+                {
+                    "replay_id": replay_id,
+                    "state": "completed",
+                    "applied_commands": applied_commands,
+                    "total_commands": total_commands,
+                },
+            )
+        except LucidaError:
+            self._emit_event(
+                session,
+                "command_log.replay",
+                {
+                    "replay_id": replay_id,
+                    "state": "failed",
+                    "applied_commands": applied_commands,
+                    "total_commands": total_commands,
+                },
+            )
+            raise
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            self._emit_event(
+                session,
+                "command_log.replay",
+                {
+                    "replay_id": replay_id,
+                    "state": "failed",
+                    "applied_commands": applied_commands,
+                    "total_commands": total_commands,
+                },
+            )
+            raise internal(
+                "Replay operation failed",
+                {"replay_id": replay_id, "source_uri": source_uri, "error": str(exc)},
+            ) from exc
+
     def _command_log_export(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._unsupported_command_log(params, "command_log.export")
+        session = self._require_session(params["session_id"])
+        destination_uri = params.get("destination_uri")
+        if not isinstance(destination_uri, str) or not destination_uri:
+            raise invalid_params("destination_uri must be a non-empty string", {"destination_uri": destination_uri})
+        records = self._command_log_records_for_export(session)
+        try:
+            record_count = self._command_log_store.write_records(uri=destination_uri, records=records)
+        except CommandLogStorageError as exc:
+            message = str(exc)
+            if "Unsupported command log URI scheme" in message:
+                raise unsupported(
+                    "Command log URI scheme is unsupported",
+                    {"destination_uri": destination_uri, "error": message},
+                ) from exc
+            raise io_failure(
+                "Failed to write command log destination",
+                {"destination_uri": destination_uri, "error": message},
+                retryable=False,
+            ) from exc
+        return {
+            "session_id": session.session_id,
+            "destination_uri": destination_uri,
+            "record_count": record_count,
+        }
 
     def _command_log_import(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._unsupported_command_log(params, "command_log.import")
+        session = self._require_session(params["session_id"])
+        source_uri = params.get("source_uri")
+        if not isinstance(source_uri, str) or not source_uri:
+            raise invalid_params("source_uri must be a non-empty string", {"source_uri": source_uri})
+
+        import_id = self._uuid()
+        job_id = self._uuid()
+        accepted = self._job_accept(session, job_id)
+
+        def operation() -> dict[str, Any]:
+            records = self._load_and_validate_log_records(source_uri)
+            command_count = sum(1 for record in records if record["kind"] == "command")
+            event_count = sum(1 for record in records if record["kind"] == "event")
+            session.imported_logs[import_id] = {
+                "source_uri": source_uri,
+                "record_count": len(records),
+                "command_count": command_count,
+                "event_count": event_count,
+                "imported_at": self._clock(),
+                "records": deepcopy(records),
+            }
+            return {"session_id": session.session_id, "import_id": import_id}
+
+        session.pending_job_ops[job_id] = operation
+        return {"session_id": session.session_id, "import_id": import_id, "job": accepted}
 
     def _command_log_replay(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._unsupported_command_log(params, "command_log.replay")
+        session = self._require_session(params["session_id"])
+        source_uri = params.get("source_uri")
+        if not isinstance(source_uri, str) or not source_uri:
+            raise invalid_params("source_uri must be a non-empty string", {"source_uri": source_uri})
+        dry_run = params.get("dry_run")
+        if not isinstance(dry_run, bool):
+            raise invalid_params("dry_run must be boolean", {"dry_run": dry_run})
+
+        replay_id = self._uuid()
+        job_id = self._uuid()
+        accepted = self._job_accept(session, job_id)
+
+        def operation() -> dict[str, Any]:
+            self._replay_command_stream(
+                session=session,
+                replay_id=replay_id,
+                source_uri=source_uri,
+                dry_run=dry_run,
+            )
+            return {"session_id": session.session_id, "replay_id": replay_id}
+
+        session.pending_job_ops[job_id] = operation
+        return {"session_id": session.session_id, "replay_id": replay_id, "job": accepted}
