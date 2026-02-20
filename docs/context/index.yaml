@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "last_updated": "2026-02-19",
+  "last_updated": "2026-02-20",
   "artifacts": [
     {
       "id": "agents-playbook",
@@ -64,6 +64,13 @@
       "role": "design-decision-guide",
       "owner": "lucida-core-team",
       "update_trigger": "adr-process-change"
+    },
+    {
+      "id": "release-runbook",
+      "path": "docs/release/README.md",
+      "role": "release-operations-guide",
+      "owner": "lucida-core-team",
+      "update_trigger": "release-policy-or-pipeline-change"
     },
     {
       "id": "context-status",

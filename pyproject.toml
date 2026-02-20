@@ -1,7 +1,11 @@
+[build-system]
+requires = ["hatchling>=1.26.0"]
+build-backend = "hatchling.build"
+
 [project]
 name = "lucida"
 version = "0.1.0"
-description = "Add your description here"
+description = "Lightweight, high-performance, cross-platform ND microscopy viewer"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,4 +19,23 @@ s3 = [
 ]
 gcs = [
     "gcsfs>=2024.2.0",
+]
+
+[tool.hatch.build]
+sources = ["python"]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "python/lucida_sdk",
+    "python/lucida_daemon",
+    "python/lucida_core",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "README.md",
+    "pyproject.toml",
+    "python/lucida_sdk/**",
+    "python/lucida_daemon/**",
+    "python/lucida_core/**",
 ]
