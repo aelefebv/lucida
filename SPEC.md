@@ -410,3 +410,38 @@ Automation:
    - default retention TTL is `60` seconds before daemon GC removal
 8. Reconnect recovery policy is gap-detect + query recovery:
    - no replay cursor contract is introduced in Step 07
+
+## 23. Step 08 Decisions (2026-02-20)
+
+1. Step 08 remains behavior-only at protocol boundary:
+   - no OpenRPC/schema method or field changes in this step
+2. SDK transport model is hybrid:
+   - Step 08 implements in-process daemon transport
+   - external IPC transport remains scaffold-only and explicitly unsupported
+3. Python SDK execution model is synchronous-first for scripts and notebook workflows.
+4. SDK lifecycle constructors auto-run handshake:
+   - `connect(...)` and `launch_or_connect(...)` both perform `system.hello`
+   - capabilities are fetched on setup
+5. Local daemon lifecycle policy:
+   - `launch_or_connect(...)` auto-starts missing local daemon targets
+   - daemon persists after client close
+   - teardown is explicit via `shutdown_local_daemon(...)`
+6. API parity policy:
+   - every OpenRPC method is exposed as a 1:1 wrapper (`domain.method` -> `domain_method`)
+   - minimal ergonomic helpers are required (`session_scope`, `wait_for_job`, `subscribe_events`)
+7. Request metadata defaults:
+   - `protocol_version = "1.0.0"` by default
+   - `request_id` auto-generated as UUIDv7
+   - mutating methods auto-generate `idempotency_key` unless caller supplies one
+8. Error policy:
+   - SDK exposes typed exception subclasses mapped from protocol error codes
+   - event continuity violations raise typed `EventGapError`
+9. Event policy:
+   - subscription API is polling/iterator based
+   - strict `session_seq` continuity checks are enforced and gaps raise errors
+10. Command-log SDK methods are exposed in Step 08 surface:
+    - runtime behavior remains Step 09-owned and may return unsupported until implemented
+11. Documentation deliverables for Step 08 include:
+    - `docs/sdk/README.md`
+    - committed runnable notebook smoke workflow
+12. Python baseline for Step 08 is raised to `>=3.14`.

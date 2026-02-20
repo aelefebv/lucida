@@ -1,6 +1,6 @@
 # Roadmap Status
 
-Last updated: 2026-02-19
+Last updated: 2026-02-20
 
 ## Step Status
 
@@ -11,7 +11,7 @@ Last updated: 2026-02-19
 5. Step 05: done
 6. Step 06: done
 7. Step 07: done
-8. Step 08: planned
+8. Step 08: done
 9. Step 09: planned
 10. Step 10: planned
 11. Step 11: planned
@@ -26,4 +26,5 @@ Last updated: 2026-02-19
 6. Step 05 kickoff delivered Rust renderer scaffold initiation (`lucida-render-wgpu` and `lucida-render-shell`) with compile/test baselines.
 7. Step 06 is complete with typed points/selection contracts, deterministic points planning/runtime behavior, Step 6 perf gates, and Rust points scaffold primitives.
 8. Step 07 is complete with Python daemon session/event orchestration, handshake-first connection gating, bounded event backpressure behavior, session retention GC policy, Step 7 cross-platform daemon CI smoke coverage, and Rust daemon scaffold crate bootstrapping.
-9. Remaining later steps are planned and tracked in `docs/context/traceability.yaml`.
+9. Step 08 is complete with synchronous Python SDK client lifecycle (`connect`/`launch_or_connect`), 1:1 OpenRPC wrapper coverage, typed SDK exceptions, strict event polling continuity checks, local daemon registry/shutdown behavior, and notebook smoke workflow coverage.
+10. Remaining later steps are planned and tracked in `docs/context/traceability.yaml`.

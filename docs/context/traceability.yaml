@@ -1,6 +1,6 @@
 {
   "version": "1",
-  "last_updated": "2026-02-19",
+  "last_updated": "2026-02-20",
   "steps": [
     {
       "step_id": "step-01",
@@ -242,11 +242,33 @@
     {
       "step_id": "step-08",
       "step_spec_path": "specs/roadmap/step-08-python-sdk-and-notebook-integration.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
+      "status": "done",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/architecture/component-map.md",
+        "docs/protocol/README.md",
+        "specs/roadmap/step-08-python-sdk-and-notebook-integration.md",
+        "pyproject.toml",
+        "python/lucida_sdk/__init__.py",
+        "python/lucida_sdk/client.py",
+        "python/lucida_sdk/events.py",
+        "python/lucida_sdk/errors.py",
+        "python/lucida_sdk/ids.py",
+        "python/lucida_sdk/registry.py",
+        "python/lucida_sdk/transport.py",
+        "docs/sdk/README.md",
+        "docs/sdk/notebooks/step8_core_image_flow.ipynb"
+      ],
+      "test_paths": [
+        "tests/sdk/test_step8_sdk_client.py",
+        "tests/sdk/test_step8_error_mapping.py",
+        "tests/sdk/test_step8_events.py",
+        "tests/sdk/test_step8_registry.py",
+        "tests/sdk/test_step8_notebook_smoke.py",
+        "tests/protocol/test_generated_models.py"
+      ],
       "protocol_artifacts": [],
-      "last_validated": ""
+      "last_validated": "2026-02-20"
     },
     {
       "step_id": "step-09",
