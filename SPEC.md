@@ -444,4 +444,6 @@ Automation:
 11. Documentation deliverables for Step 08 include:
     - `docs/sdk/README.md`
     - committed runnable notebook smoke workflow
-12. Python baseline for Step 08 is raised to `>=3.14`.
+12. Python baseline for Step 08 is `>=3.12`; SDK request IDs/idempotency keys use
+    UUIDv7 when available with a compatibility fallback on runtimes without
+    `uuid.uuid7()`.
