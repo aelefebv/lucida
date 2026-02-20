@@ -90,7 +90,7 @@ jobs:
 
       - name: Run protocol and generated model tests
         run: |
-          uv run --python 3.12 python -m unittest \
+          PYTHONPATH=tests/protocol uv run --python 3.12 python -m unittest \
             tests/protocol/test_generated_models.py \
             tests/protocol/test_openrpc_integrity.py \
             tests/protocol/test_schema_conformance.py \
