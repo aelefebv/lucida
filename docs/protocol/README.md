@@ -353,3 +353,39 @@ Every error includes:
 9. Failure signaling:
    - replay/import failures surface through standard `job.lifecycle` failed state and typed error envelopes.
    - replay additionally emits a terminal `command_log.replay` event with `state = failed`.
+
+## 20. Step 11 behavior notes (no schema changes)
+
+1. Step 11 keeps OpenRPC/schema artifacts unchanged.
+2. Remote browser access is implemented through `lucida_gateway` WS envelopes over existing daemon methods/events.
+3. Gateway endpoints:
+   - `GET /healthz`
+   - `GET /v1/ws` (token required)
+4. Gateway frame types:
+   - `attach`
+   - `rpc.request`
+   - `rpc.response`
+   - `rpc.error`
+   - `event`
+   - `render.tile`
+   - `render.status`
+5. Attach semantics:
+   - browser attaches by explicit `session_id` + `view_id`
+   - gateway enforces one active controller per session
+6. RPC relay semantics:
+   - gateway forwards existing Lucida methods behind the same typed error envelopes
+   - requests with mismatched `session_id` against attached session are rejected with typed conflict
+7. Event semantics:
+   - gateway manages daemon `events.subscribe` lifecycle
+   - forwarded events preserve source ordering and `session_seq` continuity
+8. Render semantics:
+   - Step 11 streams true 2D image-layer pixels as changed tiles (`256px`)
+   - default encoding is `jpeg` (quality `75`) with `png` fallback
+   - render updates are throttled to `15` Hz per connection
+9. Degradation policy:
+   - bounded render queue drops stale frames first
+   - repeated overflow can close slow connections with backpressure signaling
+10. Security posture:
+   - localhost bind default
+   - non-local bind requires explicit TLS-termination mode
+   - daemon native `remote_bind` remains unsupported; gateway is the remote path

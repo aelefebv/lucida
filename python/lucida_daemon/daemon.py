@@ -61,7 +61,7 @@ class LucidaDaemon:
         self._config.validate()
         if self._config.remote_bind.enabled:
             raise unsupported(
-                "Remote listener startup is deferred to Step 11",
+                "Remote listener startup is not implemented in lucida-daemon; use lucida_gateway for Step 11 remote access",
                 {"step": "step-11", "transport": self._config.remote_bind.transport},
             )
         return self._ipc.start()
@@ -101,6 +101,12 @@ class LucidaDaemon:
             "client_version": owner.client_version,
             "recorded_at": owner.recorded_at,
         }
+
+    def snapshot(self) -> dict[str, Any]:
+        return self._engine.snapshot()
+
+    def frame_plan_for_view(self, *, session_id: str, view_id: str) -> dict[str, Any]:
+        return self._engine.frame_plan_for_view(session_id, view_id)
 
     def dispatch(self, connection_id: str, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._ipc.ensure_started()

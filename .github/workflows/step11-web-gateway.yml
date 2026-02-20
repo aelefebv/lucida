@@ -1,0 +1,43 @@
+name: Step 11 Web Gateway
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - refactor
+      - "codex/**"
+  workflow_dispatch:
+
+jobs:
+  step11-gateway-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --python 3.12
+
+      - name: Run Step 11 gateway integration tests
+        run: uv run --python 3.12 python -m unittest tests/gateway/test_step11_gateway.py -v
+
+      - name: Run Step 11 gateway component tests
+        run: uv run --python 3.12 python -m unittest tests/gateway/test_step11_gateway_components.py -v
+
+      - name: Run Step 11 gateway perf smoke
+        env:
+          LUCIDA_STEP11_GATEWAY_P95_MS: "150"
+          LUCIDA_STEP11_GATEWAY_MIN_FPS: "10"
+        run: uv run --python 3.12 python -m unittest tests/perf/test_step11_gateway_perf.py -v

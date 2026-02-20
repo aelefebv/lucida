@@ -326,9 +326,38 @@
     {
       "step_id": "step-11",
       "step_spec_path": "specs/roadmap/step-11-remote-web-gateway-phase-2.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
+      "status": "in_progress",
+      "implementation_paths": [
+        "SPEC.md",
+        "docs/protocol/README.md",
+        "docs/architecture/component-map.md",
+        "specs/roadmap/step-11-remote-web-gateway-phase-2.md",
+        "docs/gateway/README.md",
+        "docs/web-gateway/reference-client/index.html",
+        "docs/web-gateway/reference-client/app.js",
+        "docs/web-gateway/reference-client/styles.css",
+        "python/lucida_gateway/__init__.py",
+        "python/lucida_gateway/__main__.py",
+        "python/lucida_gateway/auth.py",
+        "python/lucida_gateway/bridge.py",
+        "python/lucida_gateway/cli.py",
+        "python/lucida_gateway/config.py",
+        "python/lucida_gateway/render.py",
+        "python/lucida_gateway/server.py",
+        "python/lucida_gateway/tiles.py",
+        "python/lucida_daemon/config.py",
+        "python/lucida_daemon/daemon.py",
+        "pyproject.toml",
+        "uv.lock",
+        ".github/workflows/step11-web-gateway.yml",
+        "docs/context/status.md",
+        "docs/context/traceability.yaml"
+      ],
+      "test_paths": [
+        "tests/gateway/test_step11_gateway.py",
+        "tests/gateway/test_step11_gateway_components.py",
+        "tests/perf/test_step11_gateway_perf.py"
+      ],
       "protocol_artifacts": [],
       "last_validated": ""
     }

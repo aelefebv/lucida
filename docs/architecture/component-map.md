@@ -41,6 +41,9 @@
    - `python/lucida_daemon/*`
 10. Step 07 Rust daemon scaffold:
    - `rust/crates/lucida-daemon/*`
+11. Step 11 web gateway runtime (in progress):
+   - `python/lucida_gateway/*`
+   - `docs/web-gateway/reference-client/*`
 
 ## Planned Runtime Components (Roadmap-Aligned)
 
@@ -49,7 +52,7 @@
 3. `lucida-daemon` (sessions, RPC routing, event stream).
 4. `lucida-py` (SDK and notebook integration).
 5. Packaging/release layer (installers and CI gates).
-6. Phase-2 remote web gateway.
+6. Phase-2 remote web gateway hardening and rollout expansion.
 
 ## Dependency Flow (High-Level)
 

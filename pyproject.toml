@@ -9,7 +9,9 @@ description = "Lightweight, high-performance, cross-platform ND microscopy viewe
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "aiohttp>=3.13.0",
     "fsspec>=2024.2.0",
+    "Pillow>=10.4.0",
     "zarr>=2.18.0,<4",
 ]
 
@@ -29,6 +31,7 @@ packages = [
     "python/lucida_sdk",
     "python/lucida_daemon",
     "python/lucida_core",
+    "python/lucida_gateway",
 ]
 
 [tool.hatch.build.targets.sdist]
@@ -38,4 +41,5 @@ include = [
     "python/lucida_sdk/**",
     "python/lucida_daemon/**",
     "python/lucida_core/**",
+    "python/lucida_gateway/**",
 ]
