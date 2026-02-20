@@ -1,2 +1,0 @@
-"""Lucida protocol package."""
-

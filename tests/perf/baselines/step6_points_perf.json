@@ -1,5 +1,0 @@
-{
-  "planner_dispatch_p95_ms": 45.0,
-  "planner_dispatch_avg_ms": 30.0,
-  "notes": "Step 06 points planner baseline captured for deterministic metadata-driven 1M-point dispatch loops."
-}

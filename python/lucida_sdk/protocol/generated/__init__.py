@@ -1,2 +1,0 @@
-"""Generated protocol models."""
-

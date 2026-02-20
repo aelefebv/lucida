@@ -1,491 +1,118 @@
-# Lucida SPEC
-
-## 1. Overview
-
-Lucida is a lightweight, high-performance, cross-platform n-dimensional image viewer for microscopy datasets.
-
-It targets Napari-like workflows with stricter priorities:
-- lower overhead
-- higher responsiveness
-- fewer bugs
-- minimal dependencies
-- full scriptability
-
-Lucida must run on:
-- Windows
-- macOS
-- Linux
-
-Primary dataset format:
-- OME-Zarr (read-heavy focus for very large datasets, including terabyte-scale archives)
-
-## 2. Product Goals
-
-1. Provide fluid interactive visualization for ND microscopy data (2D + 3D + channel/time navigation).
-2. Make every viewer action programmable through a stable API.
-3. Support "viewer as separate process" workflows (notebooks/scripts controlling a live window).
-4. Handle anisotropic voxel spacing correctly in rendering and navigation.
-5. Support ND point/graph visualization (millions of points) with interactive filtering and selection.
-6. Keep core runtime lean with optional extras for non-core capabilities.
-
-## 3. Non-Goals (v1)
-
-1. Multi-tenant production-grade server isolation/authz.
-2. Full plugin marketplace/framework parity with Napari.
-3. Heavy in-app analytics pipelines (clustering/embedding/etc.) as core features.
-4. Full browser parity with desktop in v1.
-
-## 4. Scope (v1)
-
-### In Scope
-
-1. 2D image viewing with pan/zoom camera.
-2. 3D volume viewing with:
-   - arcball camera
-   - free-fly camera
-3. ND axis controls:
-   - canonical axis model
-   - channel/time traversal
-   - axis reordering
-   - channel reordering/visibility
-4. OME-Zarr IO:
-   - read v0.4 and v0.5
-   - write/export v0.5
-5. Storage backends:
-   - local filesystem
-   - HTTP(S)
-   - S3-compatible object stores
-   - GCS object stores
-6. Long-lived daemon process + session model.
-7. Typed Python SDK for scripting and Jupyter workflows.
-8. Command log capture and deterministic replay.
-9. ND graph/point visualization:
-   - millions of points
-   - GPU rendering + LOD
-   - filtering/coloring/selection
-   - linked selection hooks to image views
-10. Desktop installers + pip SDK distribution.
-11. Local logs + optional crash and usage telemetry.
-
-### Out of Scope (v1)
-
-1. Full plugin framework lifecycle/discovery.
-2. Multi-user tenancy model.
-3. Browser-native rendering parity.
-
-## 5. Core Architecture
-
-### 5.1 Language/Component Split
-
-- Rust core for performance-critical runtime:
-  - state model
-  - IO/caching/scheduling
-  - rendering pipeline
-  - process daemon
-- Python SDK for scripting ergonomics and notebook integration.
-
-### 5.2 Main Components
-
-1. `lucida-core` (Rust)
-   - canonical ND state graph
-   - axis semantics
-   - transform math
-   - command processing
-2. `lucida-render-wgpu` (Rust)
-   - WebGPU primary renderer
-   - 2D/3D/points pipelines
-   - fallback path for unsupported hardware (limited feature mode)
-3. `lucida-daemon` (Rust)
-   - long-lived process
-   - session/window lifecycle
-   - RPC server + event streaming
-4. `lucida-py` (Python)
-   - typed API client
-   - notebook workflows
-   - replay and automation helpers
-5. `lucida-desktop` (packaging)
-   - signed installers for Windows/macOS/Linux
-6. `lucida-web-gateway` (Phase 2)
-   - remote browser client support via streamed render output + input relay
-
-## 6. Data and Axis Model
-
-### 6.1 Canonical Axis Semantics
-
-- Core axis labels use canonical names (`t`, `c`, `z`, `y`, `x`, plus additional named dims).
-- Source datasets can have arbitrary order; adapters map source order to canonical model.
-- Internal API remains canonical and stable.
-
-### 6.2 Anisotropy
-
-- Physical scaling is represented in world-space transforms.
-- Rendering and camera controls must respect anisotropic spacing.
-
-### 6.3 OME-Zarr Contract
-
-- Read compatibility: OME-Zarr 0.4 and 0.5.
-- Write compatibility: OME-Zarr 0.5.
-- Multiscale metadata must be preserved and surfaced through API.
-
-## 7. API and Process Contract
-
-### 7.1 Control Protocol
-
-- JSON-RPC 2.0.
-- Active protocol line: Lucida protocol v1 (`1.0.0`) with explicit view resources.
-- Default local transport:
-  - Unix sockets (macOS/Linux)
-  - named pipes (Windows)
-- Optional remote transport:
-  - TCP/WebSocket with token auth and TLS guidance
-
-### 7.2 Python SDK (public surface)
-
-- `launch_or_connect(...)`
-- `connect(...)`
-- `create_session(...)`
-- `open_dataset(...)`
-- `export_dataset(...)`
-- `add_image_layer(...)`
-- `add_points_layer(...)`
-- `create_view(...)`
-- `close_view(...)`
-- `bind_layer_to_view(...)`
-- `unbind_layer_from_view(...)`
-- `set_axis_index(...)`
-- `reorder_axes(...)`
-- `set_channel_order(...)`
-- `set_camera_mode(...)`
-- `set_camera_pose(...)`
-- `subscribe_events(...)`
-- `export_command_log(...)`
-- `import_command_log(...)`
-- `replay_command_log(...)`
-
-All user-visible actions must map to command API operations.
-
-### 7.3 Command Log
-
-- Deterministic action stream for reproducibility.
-- Persist/export/import/replay supported in v1.
-- Replay targets an existing session and validates record/session compatibility before apply.
-- Replay validation is strict fail-fast on the first command divergence or event mismatch.
-- Supported command-log URIs in v1: local paths, `file://`, and `memory://`.
-- `command_log.import` performs validate-and-stage behavior (no direct session mutation).
-- Full undo/redo stack is not required in v1.
-
-## 8. Interaction Model
-
-### 8.1 2D Camera
-
-- Pan/zoom optimized for microscopy inspection.
-- Smooth wheel and drag behavior, low-latency updates.
-
-### 8.2 3D Cameras
-
-- Arcball for object-centric exploration.
-- Free-fly for scene-centric navigation (FPS-like control).
-
-### 8.3 ND Controls
-
-- Channel/time stepping.
-- Axis slider and reorder controls.
-- Visibility toggles and render property changes per channel/layer.
-- Multiple explicit views per session for side-by-side workflows.
-
-## 9. ND Graph/Points Visualization
-
-v1 is visualization-first (not analytics-first):
-- render millions of points interactively
-- color by attribute
-- filter by attribute ranges/categories
-- box/lasso selection
-- linked selection callbacks to image context
-- GPU LOD/downsampling strategy to maintain responsiveness
-
-## 10. Security and Remote Operation
-
-### 10.1 v1 Security Posture
-
-- Single-user trusted-network model.
-- Localhost bind by default.
-- Remote bind is explicit opt-in.
-- Token-based access for remote control endpoints.
-- TLS strongly recommended for non-localhost deployment.
-
-### 10.2 Credentials
-
-- Standard cloud credential mechanisms for S3 and signed HTTP.
-- No custom auth plugin framework in v1.
-
-## 11. Performance and Resource Targets (v1)
-
-1. Cold startup: under 2 seconds on target hardware.
-2. 2D interactive latency (p95): under 50 ms after cache warmup.
-3. 2D cached navigation: near 60 FPS.
-4. 3D camera interaction: at least 30 FPS on target hardware.
-5. Idle memory footprint: around or under 300 MB in baseline session.
-6. UI thread remains responsive during background IO.
-
-Target hardware baseline:
-- modern GPUs (roughly 2020+ integrated/discrete, Apple M-series included)
-
-## 12. Dependency Policy
-
-1. Lean core dependency surface.
-2. Optional advanced features as extras.
-3. Prefer maintained, widely adopted libraries.
-4. Avoid heavyweight GUI stack lock-in for core rendering path.
-
-## 13. Testing Strategy
-
-No mock-heavy middle-layer tests. Prioritize unit and e2e/integration on real paths.
-
-### 13.1 Unit Tests
-
-- axis remapping correctness
-- transform math (including anisotropy)
-- camera state transitions
-- command serialization/replay determinism
-
-### 13.2 Integration Tests
-
-- real OME-Zarr fixtures over:
-  - local filesystem
-  - HTTP(S)
-  - S3-compatible storage
-  - GCS-compatible storage
-
-### 13.3 End-to-End Tests
-
-- daemon + Python SDK workflows
-- live session mutation from scripts/notebooks
-- event stream correctness
-- layer/camera/axis state coherence
-
-### 13.4 Performance Tests
-
-- latency/FPS/memory budgets enforced in CI
-
-### 13.5 Platform Coverage
-
-- CI must pass on Windows, macOS, Linux
-
-## 14. Distribution
-
-v1 deliverables:
-1. Cross-platform desktop installers.
-2. Pip-installable Python SDK for scripting and notebook control.
-
-Step 10 distribution contract:
-1. Release tags are `vX.Y.Z` or `vX.Y.Z-rc.N`, and only tags on commits reachable from `main` can publish.
-2. Desktop artifacts are signed, x86_64-only in v1 step-10 scope:
-   - `lucida-render-shell-v<version>-macos-x86_64.dmg`
-   - `lucida-render-shell-v<version>-windows-x86_64.msi`
-   - `lucida-render-shell-v<version>-linux-x86_64.AppImage`
-3. Python package artifacts are `lucida` wheel + sdist, with prerelease mapping:
-   - semver prerelease `X.Y.Z-rc.N` maps to Python `X.Y.ZrcN`
-4. Stable tags publish to PyPI; prerelease tags publish to TestPyPI.
-5. Release artifacts must ship with checksums, per-artifact SBOM, and provenance attestations.
-
-## 15. Roadmap (high-level)
-
-1. Define baseline protocol interfaces (Step 1) and introduce explicit-view protocol v1 delta in Step 2.
-2. Implement ND state model and transform system with deterministic transitions and multi-view semantics.
-3. Implement OME-Zarr IO + cache scheduler, including `dataset.export`.
-4. Implement Step 04 2D renderer/control semantics baseline in Python runtime.
-5. Kick off Rust renderer scaffold in Step 05, then implement 3D renderer + arcball/free-fly cameras.
-6. Implement points/graph layer with linked selection.
-7. Implement daemon session model + event stream.
-8. Implement Python SDK + notebook integration.
-9. Implement command log replay.
-10. Implement installers + CI/release gates.
-11. Phase 2: remote web gateway.
-
-## 16. Roadmap Sub-Spec Table of Contents
-
-Each roadmap step has a dedicated sub-spec in `specs/roadmap/`. These files are implementation-facing and should hold step-specific scope, interfaces, dependencies, acceptance criteria, and test gates.
-
-Operational note:
-
-1. `AGENTS.md` is the first playbook for planning and implementation sessions.
-2. `docs/context/traceability.yaml` and `docs/context/status.md` are the canonical implementation progress references.
-
-1. [`specs/roadmap/step-01-core-interfaces-and-command-protocol.md`](specs/roadmap/step-01-core-interfaces-and-command-protocol.md)
-   - Source of truth for command protocol contracts, versioning rules, and schema/OpenRPC artifacts.
-2. [`specs/roadmap/step-02-nd-state-model-and-transforms.md`](specs/roadmap/step-02-nd-state-model-and-transforms.md)
-   - ND state graph, axis semantics, anisotropic world transforms, and deterministic state transitions.
-3. [`specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md`](specs/roadmap/step-03-ome-zarr-io-and-cache-scheduler.md)
-   - OME-Zarr adapters, remote/local backend behavior, chunk scheduling, and cache policy.
-4. [`specs/roadmap/step-04-2d-renderer-and-controls.md`](specs/roadmap/step-04-2d-renderer-and-controls.md)
-   - Deterministic 2D planning semantics, pan/zoom controls, and interaction/perf acceptance gates.
-5. [`specs/roadmap/step-05-3d-renderer-and-cameras.md`](specs/roadmap/step-05-3d-renderer-and-cameras.md)
-   - Rust renderer scaffold kickoff plus 3D render modes and camera semantics for arcball/free-fly workflows.
-6. [`specs/roadmap/step-06-points-graph-layer-and-linked-selection.md`](specs/roadmap/step-06-points-graph-layer-and-linked-selection.md)
-   - Million-point rendering, LOD behavior, selection contracts, and linked-view interactions.
-7. [`specs/roadmap/step-07-daemon-session-model-and-event-stream.md`](specs/roadmap/step-07-daemon-session-model-and-event-stream.md)
-   - Daemon lifecycle, multi-session behavior, and event delivery guarantees.
-8. [`specs/roadmap/step-08-python-sdk-and-notebook-integration.md`](specs/roadmap/step-08-python-sdk-and-notebook-integration.md)
-   - SDK surface, generated typing behavior, notebook control workflows, and client ergonomics.
-9. [`specs/roadmap/step-09-command-log-replay.md`](specs/roadmap/step-09-command-log-replay.md)
-   - Export/import/replay semantics, determinism constraints, and replay safety checks.
-10. [`specs/roadmap/step-10-installers-and-ci-release-gates.md`](specs/roadmap/step-10-installers-and-ci-release-gates.md)
-   - Packaging matrix, signing/distribution requirements, and CI release criteria.
-11. [`specs/roadmap/step-11-remote-web-gateway-phase-2.md`](specs/roadmap/step-11-remote-web-gateway-phase-2.md)
-   - Phase 2 browser gateway architecture, transport rules, and security posture.
-
-## 17. Step 1 Protocol Baseline (Frozen)
-
-The detailed Step 1 protocol baseline is now maintained only in:
-
-- [`specs/roadmap/step-01-core-interfaces-and-command-protocol.md`](specs/roadmap/step-01-core-interfaces-and-command-protocol.md)
-
-This top-level spec intentionally avoids duplicating Step 1 protocol details so there is a single source of truth.
-
-## 18. Explicit Assumptions and Defaults
-
-1. Rust core + Python SDK is the default architecture.
-2. WebGPU is primary rendering backend with constrained fallback path.
-3. Protocol v1 is the active control contract line and includes explicit view resources.
-4. v1 supports local/HTTP/S3/GCS OME-Zarr access.
-5. Browser support is phase 2 (remote gateway), not day-one parity.
-6. Extensibility in v1 is lightweight hooks, not full plugin framework.
-7. Observability includes local logs and optional crash/usage telemetry.
-8. During pre-release, protocol `1.0.0` may evolve in-place with additive updates, and in-repo OpenRPC/schema artifacts are the source of truth.
-
-## 19. Context System and Governance
-
-Lucida uses a guidance-first context system to keep future coding agents and developers aligned with spec intent while minimizing process overhead.
-
-Core artifacts:
-
-1. `AGENTS.md`: operational planning/implementation workflow.
-2. `docs/context/index.yaml`: machine-readable context artifact catalog.
-3. `docs/context/traceability.yaml`: step-level spec-to-implementation mapping and status.
-4. `docs/context/status.md`: human-readable roadmap status summary.
-5. `CONTRIBUTING.md`: required validation and handoff expectations.
-
-Automation:
-
-1. `scripts/check_context.py` validates context contracts.
-2. `tests/context/test_context_contracts.py` verifies checker behavior and required templates/playbook content.
-3. `.github/workflows/context-check.yml` runs context checks on PRs and pushes.
-
-## 20. Step 05 Kickoff Decisions (2026-02-19)
-
-1. Step 05 remains behavior-only at the protocol boundary (no schema/OpenRPC changes).
-2. Step 05 execution is dual-track:
-   - Python reference runtime implements deterministic Step 05 3D semantics.
-   - Rust renderer scaffold/workspace bootstrap starts in Step 05 kickoff.
-3. Minimum 3D render-mode contract for image layers is `mip`, `alpha`, and `iso` via standardized `layer.update.patch` keys.
-4. Camera policy for Step 05 is full 6DOF in both `arcball` and `freefly` modes (no world-up lock).
-5. Step 04 remains the deterministic 2D semantics baseline, and Step 05 builds on that baseline while Rust runtime scaffolding begins.
-
-## 21. Step 06 Decisions (2026-02-19)
-
-1. Step 06 keeps existing RPC methods and introduces additive typed points/selection payloads in protocol line `1.0.0`.
-2. Graph support in Step 06 is optional `edges_ref` on `layer.add_points`; no `layer.add_graph` method is introduced.
-3. Selection contract is canonical hybrid query+resolved state:
-   - selection query geometry/filter metadata is retained
-   - resolved selected IDs are retained inline up to `4096` IDs, otherwise via `DataRef`
-4. Linked selection in Step 06 is points-to-image hooks only:
-   - emit linked image context in events
-   - no automatic image camera/slice mutation by runtime
-   - bidirectional sync is deferred
-5. Step 06 default LOD policy is deterministic frustum/filter followed by screen-grid constrained sampling.
-6. Default Step 06 patch controls for points layers:
-   - `lod_cell_px = 2`
-   - `lod_max_points = 250000`
-7. Step 06 implementation track is dual:
-   - Python runtime owns deterministic semantics and acceptance tests
-   - Rust renderer scaffold adds points-pipeline primitives and compile-time tests
-8. Step 06 performance target baseline:
-   - planner/update smoke gate at `1M` points with p95 dispatch time under `80ms`
-   - nightly regression factor default remains `1.25`
-
-## 22. Step 07 Decisions (2026-02-19)
-
-1. Step 07 is behavior-only at protocol boundary:
-   - no OpenRPC/schema method or field deltas in this step
-2. Step 07 implementation track is dual:
-   - Python daemon runtime owns executable session/event behavior
-   - Rust `lucida-daemon` crate is scaffolded for migration readiness
-3. Transport scope for Step 07 is local IPC production path:
-   - local endpoint metadata supports Unix sockets and Windows named-pipe abstractions
-   - remote listener implementation is deferred to Step 11
-4. Session ownership policy is metadata tracking only:
-   - owner connection/client info is recorded
-   - no hard write-lock enforcement in Step 07
-5. Session routing policy is serial command execution per session with concurrent execution across different sessions.
-6. Event backpressure policy is bounded queue with disconnect-on-overflow:
-   - default per-subscription queue capacity is `1024`
-7. Closed-session lifecycle policy:
-   - `session.close` moves session to `closed`
-   - closed sessions reject mutating commands and allow query methods during retention
-   - default retention TTL is `60` seconds before daemon GC removal
-8. Reconnect recovery policy is gap-detect + query recovery:
-   - no replay cursor contract is introduced in Step 07
-
-## 23. Step 08 Decisions (2026-02-20)
-
-1. Step 08 remains behavior-only at protocol boundary:
-   - no OpenRPC/schema method or field changes in this step
-2. SDK transport model is hybrid:
-   - Step 08 implements in-process daemon transport
-   - external IPC transport remains scaffold-only and explicitly unsupported
-3. Python SDK execution model is synchronous-first for scripts and notebook workflows.
-4. SDK lifecycle constructors auto-run handshake:
-   - `connect(...)` and `launch_or_connect(...)` both perform `system.hello`
-   - capabilities are fetched on setup
-5. Local daemon lifecycle policy:
-   - `launch_or_connect(...)` auto-starts missing local daemon targets
-   - daemon persists after client close
-   - teardown is explicit via `shutdown_local_daemon(...)`
-6. API parity policy:
-   - every OpenRPC method is exposed as a 1:1 wrapper (`domain.method` -> `domain_method`)
-   - minimal ergonomic helpers are required (`session_scope`, `wait_for_job`, `subscribe_events`)
-7. Request metadata defaults:
-   - `protocol_version = "1.0.0"` by default
-   - `request_id` auto-generated as UUIDv7
-   - mutating methods auto-generate `idempotency_key` unless caller supplies one
-8. Error policy:
-   - SDK exposes typed exception subclasses mapped from protocol error codes
-   - event continuity violations raise typed `EventGapError`
-9. Event policy:
-   - subscription API is polling/iterator based
-   - strict `session_seq` continuity checks are enforced and gaps raise errors
-10. Command-log SDK methods are exposed in Step 08 surface:
-    - runtime behavior remains Step 09-owned and may return unsupported until implemented
-11. Documentation deliverables for Step 08 include:
-    - `docs/sdk/README.md`
-    - committed runnable notebook smoke workflow
-12. Python baseline for Step 08 is `>=3.12`; SDK request IDs/idempotency keys use
-    UUIDv7 when available with a compatibility fallback on runtimes without
-    `uuid.uuid7()`.
-
-## 24. Step 11 Decisions (2026-02-20)
-
-1. Step 11 remains protocol-boundary neutral:
-   - no OpenRPC/schema method or field changes
-2. Remote browser support is delivered through `lucida_gateway` sidecar runtime over WS envelopes.
-3. Gateway transport defaults:
-   - WS frame/tile streaming with RPC relay
-   - tile size `256`
-   - render throttle `15Hz`
-   - JPEG default quality `75`, PNG fallback
-4. Session model:
-   - attach by explicit `session_id` + `view_id`
-   - one active controller per session
-5. Security posture:
-   - static bearer token required
-   - localhost bind by default
-   - non-local bind requires TLS-termination mode
-6. Feature scope:
-   - Step 11 guarantees 2D core remote workflows
-   - 3D and points parity remain out of scope
-7. Render policy:
-   - true dataset pixel rendering for visible image layers
-   - backend support follows Step 03 policy (local/http/synthetic guaranteed; s3/gcs dependency-gated)
-8. Delivery policy:
-   - Python SDK transport surface remains unchanged in Step 11
-   - gateway auto-launches/reuses local daemon via existing registry lifecycle
+# Lucida SPEC Plan
+
+## Summary
+1. Build Lucida as a cross-platform desktop ND microscopy viewer with a Rust core and Python SDK.
+2. Includes 2D, 3D, and ND graph visualization, not just 2D-first.
+3. OME-Zarr is the primary storage format, with local, HTTP(S), and GCS support.
+4. Every user action is API-addressable and replayable through a command log.
+5. Browser access via remote gateway.
+6. The living spec artifact will be `/Users/austin/GitHub/lucida/SPEC.md`.
+
+## Product goals
+1. Fast and responsive interaction with terabyte-scale microscopy datasets.
+2. Lean dependency footprint with minimal runtime bloat.
+3. Reliable cross-platform behavior on Windows, macOS, and Linux.
+4. Script-first architecture for notebooks and automation workflows.
+5. Strong handling of anisotropy, axis remapping, channels, and time.
+
+## Non-goals for v1
+1. Multi-tenant production SaaS security model.
+2. Full Napari-style plugin ecosystem.
+3. In-app heavy analytics (clustering/embedding pipelines).
+
+## Public APIs, interfaces, and types
+### Control protocol
+1. JSON-RPC 2.0 is the control protocol.
+2. Default transport is local IPC (Unix sockets on macOS/Linux, named pipes on Windows).
+3. Optional remote mode uses TCP/WebSocket with token auth and TLS guidance.
+
+### Python SDK (`pip`)
+1. `LucidaClient.connect(...)` and `LucidaClient.launch_or_connect(...)`.
+2. `session.create(...)` and `session.close(...)`.
+3. `dataset.open(uri, axis_map=..., read_only=True)` and `dataset.close(...)`.
+4. `layer.add_image(...)`, `layer.add_points(...)`, `layer.update(...)`, `layer.remove(...)`.
+5. `view.set_axis(axis, index)`, `view.reorder_axes(order)`, `view.set_channel_order(order)`.
+6. `camera.set_mode("panzoom"|"arcball"|"freefly")`, `camera.set_pose(...)`.
+7. `events.subscribe(...)` for state/perf/errors/selections.
+8. `command_log.export(...)`, `command_log.import(...)`, `command_log.replay(...)`.
+
+### Canonical core types
+1. `AxisLabel`: canonical labels (`t`, `c`, `z`, `y`, `x`, plus extra labels).
+2. `AxisSpec`: label, size, unit.
+3. `Transform`: scale and translate vectors for world-space mapping.
+4. `DatasetHandle`: id, uri, ome_version, multiscale metadata.
+5. `CameraState2D`, `CameraStateArcball`, `CameraStateFreefly`.
+6. `PointsLayer`: positions plus columnar attributes and LOD policy.
+7. `CommandEnvelope`: id, method, params, timestamp.
+
+## Architecture
+1. `lucida-core` (Rust): ND state graph, transforms, scheduling, cache policy.
+2. `lucida-render-wgpu` (Rust): WebGPU renderer for 2D, 3D, and points.
+3. `lucida-daemon` (Rust): process lifecycle, windows/sessions, RPC server, event stream.
+4. `lucida-py` (Python): typed client SDK and notebook integration.
+5. `lucida-desktop` (packaging): signed installers for all 3 OS families.
+6. `lucida-web-gateway` (phase 2): browser access by streaming frames/tiles and relaying input.
+
+## Dependency policy
+1. Core remains lean, stable, and framework-light.
+2. Primary Rust dependencies: `wgpu`, `winit`, `zarrs`, `opendal`, `tokio`, `serde`, `tracing`.
+3. Python SDK dependencies remain minimal and typed.
+4. Optional capabilities are shipped as extras, not core requirements.
+5. No Qt-based core dependency.
+
+## OME-Zarr and data contract
+1. Read support includes OME-Zarr v0.4 and v0.5.
+2. Write/export targets OME-Zarr v0.5.
+3. Storage backends: local filesystem, HTTP(S), and GCS-compatible object stores.
+4. Credentials: standard cloud auth flows (env/config/instance roles), no custom auth plugin stack in v1.
+5. Anisotropy is handled.
+6. Axis handling uses canonical labels with adapter-level remapping from source order.
+
+## Interaction and camera behavior
+1. 2D mode uses pan/zoom controls optimized for microscopy navigation.
+2. 3D arcball mode supports orbit-centric exploration.
+3. 3D free-fly mode supports FPS-like navigation for volumetric inspection.
+4. Axis sliders and controls support channel/time traversal and axis reordering.
+5. Channel visibility/order and render properties are scriptable and UI-accessible.
+6. All interactive changes emit command events for reproducibility.
+
+## ND graph support
+1. v1 graph scope is visualization-first for millions of points.
+2. Core interactions include color-by-attribute, filtering, and box/lasso selection.
+3. Linked selection hooks connect graph subsets with image layers.
+4. GPU rendering includes LOD/downsampling safeguards for responsiveness.
+5. Heavy analytics are expected in external scripts/notebooks and pushed into viewer state.
+
+## Process model and notebook workflows
+1. Lucida runs as a long-lived daemon hosting one or more sessions/windows.
+2. Multiple clients can attach concurrently and issue commands.
+3. Jupyter workflows use the Python SDK to mutate viewer state live.
+4. Deterministic command logging enables replay, shareable workflows, and debugging.
+
+## Web support
+1. Browser clients connect through a remote gateway that streams rendered output and relays input/commands.
+2. Default security posture is single-user trusted-network usage.
+3. Localhost binding is default; remote bind is explicit opt-in with token/TLS.
+
+## Performance and quality targets
+1. Cold startup target is under 2 seconds on target hardware.
+2. 2D interaction p95 target is under 50 ms after initial cache warmup.
+3. Cached 2D navigation target is near 60 FPS.
+4. 3D camera interaction target is at least 30 FPS on target hardware.
+5. Idle memory target is under roughly 300 MB in baseline sessions.
+6. UI thread must remain responsive during metadata and chunk IO activity.
+
+## Testing and acceptance criteria
+1. Unit tests cover axis remapping, transform math, camera state transitions, and command serialization/replay determinism.
+2. Integration tests use real OME-Zarr fixtures over local, HTTP, and GCS paths (no mock middle-layer tests).
+3. End-to-end tests validate daemon + SDK workflows from scripts/notebooks against observed state/events.
+4. Rendering tests validate 2D, 3D, and points behavior with regression thresholds.
+5. Performance tests enforce latency, FPS, and memory budgets in CI.
+6. Release gating requires green checks on Windows, macOS, and Linux runners.
+
+## Assumptions and defaults
+1. v1 must include 2D + 3D + graph support, with graph features focused on visualization and interaction.
+2. Extensibility in v1 is lightweight hooks, not a full plugin platform.
+3. Observability is local logging plus optional crash/usage telemetry.
+4. Distribution includes a pip SDK.
+5. Security scope is single-user trusted network for remote mode in v1.
