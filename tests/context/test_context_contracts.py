@@ -3,7 +3,9 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+import re
 import tempfile
+import tomllib
 import unittest
 
 
@@ -174,6 +176,53 @@ class ContextContractTests(unittest.TestCase):
 
         for snippet in required_snippets:
             self.assertIn(snippet, content)
+
+    def test_workflow_python_pins_are_compatible_with_project_requirement(self) -> None:
+        pyproject_path = REPO_ROOT / "pyproject.toml"
+        self.assertTrue(pyproject_path.exists())
+        pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+        project = pyproject.get("project")
+        self.assertIsInstance(project, dict)
+        requires_python = project.get("requires-python")
+        self.assertIsInstance(requires_python, str)
+
+        min_match = re.search(r">=\s*(\d+)\.(\d+)", requires_python)
+        self.assertIsNotNone(
+            min_match,
+            f"Unable to parse minimum Python version from requires-python: {requires_python}",
+        )
+        assert min_match is not None
+        min_version = (int(min_match.group(1)), int(min_match.group(2)))
+
+        workflow_dir = REPO_ROOT / ".github" / "workflows"
+        workflow_paths = sorted(workflow_dir.glob("*.yml"))
+        self.assertGreater(len(workflow_paths), 0)
+
+        mismatches: list[str] = []
+        unpinned: list[str] = []
+
+        for workflow_path in workflow_paths:
+            content = workflow_path.read_text(encoding="utf-8")
+            pinned_versions = set(re.findall(r"python-version:\s*[\"']?(\d+\.\d+)", content))
+            pinned_versions.update(re.findall(r"--python\s+(\d+\.\d+)", content))
+
+            rel_path = str(workflow_path.relative_to(REPO_ROOT))
+            if not pinned_versions:
+                unpinned.append(rel_path)
+                continue
+
+            for version_str in sorted(pinned_versions):
+                major, minor = (int(part) for part in version_str.split(".", maxsplit=1))
+                if (major, minor) < min_version:
+                    mismatches.append(
+                        f"{rel_path} pins Python {version_str} below requires-python {requires_python}"
+                    )
+
+        if unpinned:
+            self.fail("Missing explicit Python pin(s): " + ", ".join(unpinned))
+        if mismatches:
+            self.fail("\n".join(mismatches))
 
 
 if __name__ == "__main__":

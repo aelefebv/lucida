@@ -34,6 +34,10 @@ python3 -m unittest tests/context/test_context_contracts.py -v
 
 Run additional targeted tests for the touched subsystem (for example protocol tests if protocol contracts changed).
 
+## Python Version Alignment
+If a PR changes `pyproject.toml` `requires-python`, it must also update matching
+Python pins in `.github/workflows/*.yml` (`python-version` and any `uv ... --python ...` commands).
+
 ## PR Handoff Expectations
 Final PR summary should include:
 

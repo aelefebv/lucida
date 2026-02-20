@@ -53,6 +53,14 @@ Before final handoff, agents SHOULD:
    - remaining risks or TODOs
    - next recommended step
 
+## Python Version Guardrail
+When changing Python runtime requirements, agents SHOULD update both sides in the
+same PR:
+
+1. `pyproject.toml` `project.requires-python`
+2. CI/runtime pins in `.github/workflows/*.yml` (`python-version` and any
+   `uv ... --python ...` usage)
+
 ## Guidance Policy
 This playbook is guidance-first.
 
