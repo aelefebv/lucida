@@ -25,16 +25,26 @@
 1. JSON-RPC 2.0 is the control protocol.
 2. Default transport is local IPC (Unix sockets on macOS/Linux, named pipes on Windows).
 3. Optional remote mode uses TCP/WebSocket with token auth and TLS guidance.
+4. Protocol envelopes include `protocol_version`, and server/client must fail fast on incompatible versions.
+5. Frame payload transport is a dedicated local frame socket using length-prefixed binary messages with JSON headers.
 
 ### Python SDK (`pip`)
 1. `LucidaClient.connect(...)` and `LucidaClient.launch_or_connect(...)`.
 2. `session.create(...)` and `session.close(...)`.
-3. `dataset.open(uri, axis_map=..., read_only=True)` and `dataset.close(...)`.
-4. `layer.add_image(...)`, `layer.add_points(...)`, `layer.update(...)`, `layer.remove(...)`.
-5. `view.set_axis(axis, index)`, `view.reorder_axes(order)`, `view.set_channel_order(order)`.
-6. `camera.set_mode("panzoom"|"arcball"|"freefly")`, `camera.set_pose(...)`.
-7. `events.subscribe(...)` for state/perf/errors/selections.
-8. `command_log.export(...)`, `command_log.import(...)`, `command_log.replay(...)`.
+3. `session.inspect(...)` for session attach and app state introspection.
+4. `dataset.open(uri, axis_map=..., read_only=True)` and `dataset.close(...)`.
+5. `layer.add_image(...)`, `layer.add_points(...)`, `layer.update(...)`, `layer.remove(...)`.
+6. `view.set_axis(axis, index)`, `view.reorder_axes(order)`, `view.set_channel_order(order)`.
+7. `camera.set_mode("panzoom"|"arcball"|"freefly")`, `camera.set_pose(...)`.
+8. `events.subscribe(...)` for state/perf/errors/selections.
+9. `frame_channel.open(...)` returns frame socket info and channel token for app render clients.
+10. `command_log.export(...)`, `command_log.import(...)`, `command_log.replay(...)`.
+
+### Command logging contract
+1. `audit_log` stores all inbound RPC traffic and outcomes, including errors.
+2. `replay_log` stores canonical state-mutating commands only, in deterministic replay order.
+3. `command_log.export(...)` returns both logs and includes `log_schema_version`.
+4. `command_log.replay(...)` must use the same reducer path as live execution.
 
 ### Canonical core types
 1. `AxisLabel`: canonical labels (`t`, `c`, `z`, `y`, `x`, plus extra labels).
@@ -109,6 +119,7 @@
 4. Rendering tests validate 2D, 3D, and points behavior with regression thresholds.
 5. Performance tests enforce latency, FPS, and memory budgets in CI.
 6. Release gating requires green checks on Windows, macOS, and Linux runners.
+7. Slice 1 acceptance script: `/Users/austin/GitHub/lucida/python/examples/slice1_demo.py` must complete successfully.
 
 ## Assumptions and defaults
 1. v1 must include 2D + 3D + graph support, with graph features focused on visualization and interaction.
@@ -116,3 +127,26 @@
 3. Observability is local logging plus optional crash/usage telemetry.
 4. Distribution includes a pip SDK.
 5. Security scope is single-user trusted network for remote mode in v1.
+
+## Incremental Delivery Plan
+1. **Slice 0: Contract + Skeleton**
+2. Deliverables: Rust workspace scaffold, protocol types, daemon process skeleton, IPC transport abstraction, Python package skeleton.
+3. Acceptance: daemon starts, `health.ping` works from Python, protocol compatibility checks pass in CI matrix.
+4. **Slice 1: Notebook-Driven 2D MVP**
+5. Deliverables: local OME-Zarr v0.5 open, image layer add, 2D pan/zoom + axis stepping, full `audit_log`, deterministic `replay_log`.
+6. Acceptance: scripted notebook flow reaches equivalent replay state hash.
+7. **Slice 2: 3D + Graph Renderable Stubs**
+8. Deliverables: arcball/freefly camera transitions, synthetic 3D path, synthetic points graph path, selection/perf events.
+9. Acceptance: scripted mode transitions and selections replay safely.
+10. **Slice 3: Data/Axis Hardening**
+11. Deliverables: axis remapping validator, anisotropy transform checks, explicit 0.4 adapter seam.
+12. Acceptance: fixtures validate canonical axis behavior and transform correctness.
+13. **Slice 4: Remote Data Backends**
+14. Deliverables: HTTP(S) and GCS-compatible adapters through shared storage abstraction.
+15. Acceptance: integration opens real fixtures via local/HTTP/GCS-compatible endpoints.
+16. **Slice 5: Performance + Reliability Gates**
+17. Deliverables: startup timing probes, frame metrics, cache policy tuning, IO responsiveness safeguards.
+18. Acceptance: CI enforces startup/latency/FPS/memory budgets.
+19. **Slice 6: Packaging + Remote Gateway**
+20. Deliverables: desktop packaging per OS and gateway prototype for frame stream + command relay.
+21. Acceptance: signed/bundled smoke tests + trusted-network token flow.

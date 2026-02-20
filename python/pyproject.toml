@@ -1,0 +1,10 @@
+[project]
+name = "lucida-py"
+version = "0.1.0"
+description = "Typed Python SDK for Lucida daemon"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
