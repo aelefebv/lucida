@@ -294,11 +294,34 @@
     {
       "step_id": "step-10",
       "step_spec_path": "specs/roadmap/step-10-installers-and-ci-release-gates.md",
-      "status": "planned",
-      "implementation_paths": [],
-      "test_paths": [],
+      "status": "done",
+      "implementation_paths": [
+        "SPEC.md",
+        "pyproject.toml",
+        "specs/roadmap/step-10-installers-and-ci-release-gates.md",
+        "docs/release/README.md",
+        "docs/adr/ADR-0002-release-packaging-and-signing.md",
+        "scripts/release/parse_tag_version.py",
+        "scripts/release/verify_version_sync.py",
+        "scripts/release/build_macos_dmg.sh",
+        "scripts/release/build_windows_msi.ps1",
+        "scripts/release/build_linux_appimage.sh",
+        "scripts/release/generate_checksums.sh",
+        "scripts/release/publish_pypi.sh",
+        "scripts/release/create_github_release.sh",
+        ".github/workflows/step10-release-gates.yml",
+        ".github/workflows/step10-tag-release.yml",
+        "docs/context/index.yaml",
+        "docs/context/status.md",
+        "docs/context/traceability.yaml"
+      ],
+      "test_paths": [
+        "tests/release/test_step10_version_mapping.py",
+        "tests/release/test_step10_version_sync.py",
+        "tests/release/test_step10_workflow_contracts.py"
+      ],
       "protocol_artifacts": [],
-      "last_validated": ""
+      "last_validated": "2026-02-20"
     },
     {
       "step_id": "step-11",

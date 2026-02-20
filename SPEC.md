@@ -277,6 +277,17 @@ v1 deliverables:
 1. Cross-platform desktop installers.
 2. Pip-installable Python SDK for scripting and notebook control.
 
+Step 10 distribution contract:
+1. Release tags are `vX.Y.Z` or `vX.Y.Z-rc.N`, and only tags on commits reachable from `main` can publish.
+2. Desktop artifacts are signed, x86_64-only in v1 step-10 scope:
+   - `lucida-render-shell-v<version>-macos-x86_64.dmg`
+   - `lucida-render-shell-v<version>-windows-x86_64.msi`
+   - `lucida-render-shell-v<version>-linux-x86_64.AppImage`
+3. Python package artifacts are `lucida` wheel + sdist, with prerelease mapping:
+   - semver prerelease `X.Y.Z-rc.N` maps to Python `X.Y.ZrcN`
+4. Stable tags publish to PyPI; prerelease tags publish to TestPyPI.
+5. Release artifacts must ship with checksums, per-artifact SBOM, and provenance attestations.
+
 ## 15. Roadmap (high-level)
 
 1. Define baseline protocol interfaces (Step 1) and introduce explicit-view protocol v1 delta in Step 2.

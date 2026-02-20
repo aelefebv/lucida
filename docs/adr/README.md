@@ -17,3 +17,4 @@ Use ADRs for cross-cutting or hard-to-reverse design decisions.
 Example:
 
 - `ADR-0001-context-governance.md`
+- `ADR-0002-release-packaging-and-signing.md`
