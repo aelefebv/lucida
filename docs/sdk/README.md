@@ -81,7 +81,7 @@ for event in subscription.iter_events(max_idle_polls=3):
 `EventSubscription` enforces strict `session_seq` continuity. Any gap or out-of-order sequence raises `EventGapError`.
 For strict continuity checks, wildcard topic subscriptions are the safest default.
 
-## Command-Log Methods in Step 08
+## Command-Log Methods
 
 Command-log wrappers are exposed now:
 
@@ -89,7 +89,11 @@ Command-log wrappers are exposed now:
 2. `command_log_import`
 3. `command_log_replay`
 
-Runtime semantics for those operations remain Step 09-owned. Current runtimes may return `UnsupportedCapability`.
+Step 09 runtimes implement these methods with:
+
+1. synchronous export response with `record_count`
+2. async import/replay jobs
+3. replay progress events (`command_log.replay`)
 
 ## Notebook Example
 

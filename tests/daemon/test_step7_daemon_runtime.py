@@ -267,6 +267,69 @@ class Step7DaemonRuntimeTests(unittest.TestCase):
         self.assertEqual(session["state"], "active")
         self.assertTrue(any(str(job["job_id"]) == job_id for job in jobs["jobs"]))
 
+    def test_command_log_jobs_are_observable_over_event_stream(self) -> None:
+        daemon, _ = self._new_daemon()
+        req = RequestFactory()
+        conn = daemon.connect()
+        self._hello(daemon, conn, req)
+        session_id = str(daemon.dispatch(conn, "session.create", req.build(idempotency_key="idem-step9-session"))["session_id"])
+        sub = daemon.dispatch(
+            conn,
+            "events.subscribe",
+            req.build(session_id=session_id, topics=["job.lifecycle", "command_log.replay"]),
+        )
+        sub_id = str(sub["subscription_id"])
+
+        daemon.dispatch(
+            conn,
+            "command_log.export",
+            req.build(session_id=session_id, destination_uri="memory://daemon-step9-empty.jsonl"),
+        )
+        imported = daemon.dispatch(
+            conn,
+            "command_log.import",
+            req.build(
+                idempotency_key="idem-step9-import",
+                session_id=session_id,
+                source_uri="memory://daemon-step9-empty.jsonl",
+            ),
+        )
+        daemon.dispatch(
+            conn,
+            "job.get",
+            req.build(session_id=session_id, job_id=str(imported["job"]["job_id"])),
+        )
+
+        replayed = daemon.dispatch(
+            conn,
+            "command_log.replay",
+            req.build(
+                idempotency_key="idem-step9-replay",
+                session_id=session_id,
+                source_uri="memory://daemon-step9-empty.jsonl",
+                dry_run=True,
+            ),
+        )
+        daemon.dispatch(
+            conn,
+            "job.get",
+            req.build(session_id=session_id, job_id=str(replayed["job"]["job_id"])),
+        )
+
+        events = daemon.poll_events(
+            connection_id=conn,
+            session_id=session_id,
+            subscription_id=sub_id,
+            limit=100,
+        )
+        replay_states = [
+            event["payload"]["state"]
+            for event in events
+            if event["event_type"] == "command_log.replay" and event["payload"]["replay_id"] == replayed["replay_id"]
+        ]
+        self.assertIn("started", replay_states)
+        self.assertIn("completed", replay_states)
+
     def test_closed_sessions_reject_mutations_and_expire_after_ttl(self) -> None:
         daemon, manual_clock = self._new_daemon(retention_seconds=60)
         req = RequestFactory()

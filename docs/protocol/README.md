@@ -322,3 +322,34 @@ Every error includes:
    - SDK enforces strict `session_seq` continuity and raises typed gap errors on violations
    - wildcard topic subscriptions are the default continuity-safe mode
 7. External IPC SDK transport remains scaffold-only in Step 08 and is explicitly unsupported.
+
+## 19. Step 09 behavior notes (no schema changes)
+
+1. Step 09 does not add methods or fields; behavior is defined behind existing command-log contracts.
+2. Capability policy:
+   - `system.hello` and `system.capabilities.get` report `command_log_replay = true` when Step 09 behavior is active.
+3. Recording policy:
+   - runtime records session-scoped commands (`session_id` present) and their resulting events.
+   - `command_log.*` methods are excluded from journal capture to avoid recursive logs.
+4. Export policy (`command_log.export`):
+   - response is synchronous with `{session_id, destination_uri, record_count}`.
+   - record stream is JSONL with contiguous `seq` starting at `1`.
+   - deterministic serialization is used for stable fixture bytes.
+5. URI policy:
+   - supported: local path, `file://`, `memory://`.
+   - unsupported URI schemes return `LUCIDA_UNSUPPORTED_CAPABILITY`.
+6. Import policy (`command_log.import`):
+   - async job validates JSONL record shape, sequence integrity, and protocol compatibility.
+   - successful imports stage normalized records under `import_id` for session-local reuse.
+   - malformed records fail fast with typed validation errors.
+7. Replay policy (`command_log.replay`):
+   - async job replays command records in order against the target session.
+   - replay validates `request.params.session_id` for every command against request `session_id`.
+   - replay uses strict fail-fast validation against expected event anchors.
+   - replay event envelope `command_log.replay` emits states: `started`, `progress`, `completed`, `failed`.
+8. Dry-run replay policy:
+   - `dry_run=true` executes replay against an isolated cloned runtime state.
+   - dry-run does not mutate the live target session state.
+9. Failure signaling:
+   - replay/import failures surface through standard `job.lifecycle` failed state and typed error envelopes.
+   - replay additionally emits a terminal `command_log.replay` event with `state = failed`.
