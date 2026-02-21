@@ -112,7 +112,13 @@ impl Default for ViewState {
     fn default() -> Self {
         Self {
             axis_indices: BTreeMap::new(),
-            axis_order: vec!["t".to_string(), "c".to_string(), "z".to_string(), "y".to_string(), "x".to_string()],
+            axis_order: vec![
+                "t".to_string(),
+                "c".to_string(),
+                "z".to_string(),
+                "y".to_string(),
+                "x".to_string(),
+            ],
             channel_order: Vec::new(),
         }
     }
@@ -256,9 +262,12 @@ pub fn apply_command(
                 .params
                 .get("dataset_handle")
                 .cloned()
-                .ok_or_else(|| CoreError::InvalidParams("dataset_handle is required".to_string()))?;
-            let handle: DatasetHandle = serde_json::from_value(handle_value)
-                .map_err(|err| CoreError::InvalidParams(format!("invalid dataset_handle: {err}")))?;
+                .ok_or_else(|| {
+                    CoreError::InvalidParams("dataset_handle is required".to_string())
+                })?;
+            let handle: DatasetHandle = serde_json::from_value(handle_value).map_err(|err| {
+                CoreError::InvalidParams(format!("invalid dataset_handle: {err}"))
+            })?;
             session.dataset = Some(handle.clone());
             json!({"dataset": handle})
         }
@@ -471,10 +480,9 @@ pub fn apply_command(
                 .ok_or_else(|| CoreError::InvalidParams("order is required".to_string()))?
                 .iter()
                 .map(|value| {
-                    value
-                        .as_str()
-                        .map(ToString::to_string)
-                        .ok_or_else(|| CoreError::InvalidParams("order entries must be strings".to_string()))
+                    value.as_str().map(ToString::to_string).ok_or_else(|| {
+                        CoreError::InvalidParams("order entries must be strings".to_string())
+                    })
                 })
                 .collect::<Result<Vec<String>, CoreError>>()?;
             session.view.axis_order = order.clone();
@@ -505,16 +513,15 @@ pub fn apply_command(
                 .and_then(Value::as_str)
                 .ok_or_else(|| CoreError::InvalidParams("mode is required".to_string()))?;
             let requested_mode = parse_render_mode(mode_value)?;
-            let (applied_mode, fallback_reason) = if requested_mode == RenderMode::ThreeD
-                && !session_can_render_real_3d(session)
-            {
-                (
-                    RenderMode::TwoD,
-                    Some("missing dataset or visible image layer".to_string()),
-                )
-            } else {
-                (requested_mode, None)
-            };
+            let (applied_mode, fallback_reason) =
+                if requested_mode == RenderMode::ThreeD && !session_can_render_real_3d(session) {
+                    (
+                        RenderMode::TwoD,
+                        Some("missing dataset or visible image layer".to_string()),
+                    )
+                } else {
+                    (requested_mode, None)
+                };
             session.render_mode = applied_mode;
             json!({
                 "mode": applied_mode.as_str(),
@@ -674,7 +681,9 @@ fn parse_render_mode(mode: &str) -> Result<RenderMode, CoreError> {
         "2d_stub" => Ok(RenderMode::TwoDStub),
         "3d" => Ok(RenderMode::ThreeD),
         "graph_stub" => Ok(RenderMode::GraphStub),
-        _ => Err(CoreError::InvalidParams(format!("invalid render mode: {mode}"))),
+        _ => Err(CoreError::InvalidParams(format!(
+            "invalid render mode: {mode}"
+        ))),
     }
 }
 
@@ -827,7 +836,8 @@ mod tests {
             params: json!({}),
             timestamp,
         };
-        let create_outcome = apply_command(&mut state, &create).expect("session.create should succeed");
+        let create_outcome =
+            apply_command(&mut state, &create).expect("session.create should succeed");
         assert_eq!(create_outcome.result["session_id"], json!("session-1"));
 
         let set_mode = RpcRequestEnvelope {
@@ -839,7 +849,8 @@ mod tests {
             params: json!({"mode": "graph_stub"}),
             timestamp,
         };
-        let mode_outcome = apply_command(&mut state, &set_mode).expect("set_render_mode should succeed");
+        let mode_outcome =
+            apply_command(&mut state, &set_mode).expect("set_render_mode should succeed");
         assert_eq!(mode_outcome.result["mode"], json!("graph_stub"));
         assert_eq!(
             mode_outcome.emitted_events[0].payload["render_mode"],
@@ -855,7 +866,8 @@ mod tests {
             params: json!({"mode": "3d_stub"}),
             timestamp,
         };
-        let err = apply_command(&mut state, &bad_mode).expect_err("invalid render mode should fail");
+        let err =
+            apply_command(&mut state, &bad_mode).expect_err("invalid render mode should fail");
         assert!(err.to_string().contains("invalid render mode: 3d_stub"));
     }
 

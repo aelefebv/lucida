@@ -15,6 +15,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+rayon.workspace = true
 lucida-core = { path = "../lucida-core" }
 lucida-protocol = { path = "../lucida-protocol" }
 lucida-storage = { path = "../lucida-storage" }

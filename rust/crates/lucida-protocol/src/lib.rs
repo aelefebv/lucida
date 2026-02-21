@@ -366,7 +366,8 @@ mod tests {
     fn sampling_mode_roundtrip_uses_contract_strings() {
         let mode = SamplingMode::Nearest;
         let encoded = serde_json::to_string(&mode).expect("serialize sampling mode");
-        let decoded: SamplingMode = serde_json::from_str(&encoded).expect("deserialize sampling mode");
+        let decoded: SamplingMode =
+            serde_json::from_str(&encoded).expect("deserialize sampling mode");
 
         assert_eq!(encoded, "\"nearest\"");
         assert_eq!(decoded, SamplingMode::Nearest);
