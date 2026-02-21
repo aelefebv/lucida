@@ -6,7 +6,7 @@ mod unix_app {
     use std::collections::{BTreeMap, BTreeSet};
     use std::io::{BufRead, BufReader, BufWriter, Read, Write};
     use std::os::unix::net::UnixStream;
-    use std::sync::mpsc::{self, Receiver, TryRecvError};
+    use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -31,10 +31,27 @@ mod unix_app {
     const FREEFLY_CANONICAL_POSITION: [f64; 3] = [0.0, 0.0, 3.2];
     const FREEFLY_CANONICAL_YPR: [f64; 3] = [0.0, 0.0, 0.0];
     const FREEFLY_CANONICAL_SPEED: f64 = 1.5;
-    const INTERACTIVE_LONG_SIDE_CAP: u32 = 640;
+    const INTERACTIVE_LONG_SIDE_CAP_MAX: u32 = 640;
+    const INTERACTIVE_LONG_SIDE_CAP_MIN: u32 = 360;
+    const INTERACTIVE_LONG_SIDE_CAP_REDUCE_FACTOR: f64 = 0.85;
+    const INTERACTIVE_LONG_SIDE_CAP_INCREASE_FACTOR: f64 = 1.10;
+    const RAYMARCH_MS_DECREASE_THRESHOLD: f64 = 24.0;
+    const RAYMARCH_MS_INCREASE_THRESHOLD: f64 = 14.0;
+    const RAYMARCH_MS_HARD_SPIKE_THRESHOLD: f64 = 80.0;
+    const RAYMARCH_MS_SETTLE_THRESHOLD: f64 = 26.0;
     const INTERACTIVE_SHORT_SIDE_MIN: u32 = 180;
     const INTERACTIVE_IDLE_TO_SETTLE: Duration = Duration::from_millis(150);
     const INTERACTIVE_SETTLE_HYSTERESIS: Duration = Duration::from_millis(120);
+    const INTERACTIVE_SPIKE_HOLD: Duration = Duration::from_millis(600);
+    const HUD_MARGIN_X: u32 = 12;
+    const HUD_MARGIN_Y: u32 = 12;
+    const HUD_PADDING_X: u32 = 8;
+    const HUD_PADDING_Y: u32 = 8;
+    const HUD_GLYPH_W: u32 = 5;
+    const HUD_GLYPH_H: u32 = 7;
+    const HUD_GLYPH_SPACING_X: u32 = 1;
+    const HUD_LINE_SPACING_Y: u32 = 3;
+    const HUD_PIXEL_SCALE: u32 = 2;
 
     const SHADER_SOURCE: &str = r#"
 struct RenderParams {
@@ -137,6 +154,60 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+    const OVERLAY_SHADER_SOURCE: &str = r#"
+struct OverlayParams {
+  viewport: vec4<f32>, // viewport_w, viewport_h, enabled, _
+  rect: vec4<f32>,     // origin_x, origin_y, size_w, size_h
+};
+
+@group(0) @binding(0) var overlay_tex: texture_2d<f32>;
+@group(0) @binding(1) var overlay_sampler: sampler;
+@group(0) @binding(2) var<uniform> params: OverlayParams;
+
+struct VertexOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
+  var positions = array<vec2<f32>, 3>(
+    vec2<f32>(-1.0, -3.0),
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 3.0,  1.0),
+  );
+  var uvs = array<vec2<f32>, 3>(
+    vec2<f32>(0.0, 2.0),
+    vec2<f32>(0.0, 0.0),
+    vec2<f32>(2.0, 0.0),
+  );
+
+  var out: VertexOut;
+  out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+  out.uv = uvs[vertex_index];
+  return out;
+}
+
+@fragment
+fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+  if (params.viewport.z < 0.5) {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  }
+
+  let px = vec2<f32>(input.uv.x * params.viewport.x, input.uv.y * params.viewport.y);
+  let rel = px - params.rect.xy;
+  if (rel.x < 0.0 || rel.y < 0.0 || rel.x >= params.rect.z || rel.y >= params.rect.w) {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+  }
+
+  let uv = vec2<f32>(
+    rel.x / max(params.rect.z, 1.0),
+    rel.y / max(params.rect.w, 1.0)
+  );
+  return textureSample(overlay_tex, overlay_sampler, uv);
+}
+"#;
+
     #[derive(Debug)]
     struct AppArgs {
         socket_path: String,
@@ -197,7 +268,12 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             Ok(Self { reader, writer })
         }
 
-        fn request(&mut self, method: &str, session_id: Option<&str>, params: Value) -> Result<Value> {
+        fn request(
+            &mut self,
+            method: &str,
+            session_id: Option<&str>,
+            params: Value,
+        ) -> Result<Value> {
             let request = RpcRequestEnvelope {
                 jsonrpc: "2.0".to_string(),
                 protocol_version: PROTOCOL_VERSION.to_string(),
@@ -218,8 +294,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 bail!("control socket closed while waiting for {method} response");
             }
 
-            let response: RpcResponseEnvelope = serde_json::from_str(&line)
-                .with_context(|| format!("parse {method} response"))?;
+            let response: RpcResponseEnvelope =
+                serde_json::from_str(&line).with_context(|| format!("parse {method} response"))?;
             if let Some(error) = response.error {
                 bail!("{method} failed: {}", error.message);
             }
@@ -235,6 +311,131 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         state_hash: String,
     }
 
+    #[derive(Clone, Debug)]
+    struct FrameRequestSpec {
+        render_mode: String,
+        axis_indices: FrameAxisIndices,
+        viewport: FrameViewport,
+        camera_generation: u64,
+    }
+
+    impl FrameRequestSpec {
+        fn same_as(&self, other: &Self) -> bool {
+            self.render_mode == other.render_mode
+                && self.axis_indices.t == other.axis_indices.t
+                && self.axis_indices.c == other.axis_indices.c
+                && self.axis_indices.z == other.axis_indices.z
+                && self.viewport.width == other.viewport.width
+                && self.viewport.height == other.viewport.height
+                && self.camera_generation == other.camera_generation
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct FrameRequestEnvelope {
+        seq: u64,
+        spec: FrameRequestSpec,
+        reason: String,
+    }
+
+    #[derive(Debug)]
+    struct FrameWorkerResult {
+        seq: u64,
+        reason: String,
+        frame: Result<FrameImage, String>,
+        roundtrip_ms: f64,
+    }
+
+    struct FrameRequestCompletion {
+        apply_result: bool,
+        dispatch_next: Option<FrameRequestEnvelope>,
+    }
+
+    #[derive(Default)]
+    struct FrameRequestScheduler {
+        next_seq: u64,
+        in_flight: Option<FrameRequestEnvelope>,
+        pending_latest: Option<FrameRequestSpec>,
+        dropped_stale: u64,
+    }
+
+    impl FrameRequestScheduler {
+        fn request(
+            &mut self,
+            spec: FrameRequestSpec,
+            reason: &str,
+        ) -> Option<FrameRequestEnvelope> {
+            if let Some(current) = self.in_flight.as_ref() {
+                if current.spec.same_as(&spec) {
+                    return None;
+                }
+                if let Some(pending) = self.pending_latest.as_ref() {
+                    if pending.same_as(&spec) {
+                        return None;
+                    }
+                    self.dropped_stale = self.dropped_stale.saturating_add(1);
+                }
+                self.pending_latest = Some(spec);
+                return None;
+            }
+            Some(self.dispatch(spec, reason))
+        }
+
+        fn complete(&mut self, seq: u64) -> FrameRequestCompletion {
+            let Some(in_flight) = self.in_flight.take() else {
+                self.dropped_stale = self.dropped_stale.saturating_add(1);
+                return FrameRequestCompletion {
+                    apply_result: false,
+                    dispatch_next: None,
+                };
+            };
+            if in_flight.seq != seq {
+                self.dropped_stale = self.dropped_stale.saturating_add(1);
+                self.in_flight = Some(in_flight);
+                return FrameRequestCompletion {
+                    apply_result: false,
+                    dispatch_next: None,
+                };
+            }
+
+            let dispatch_next = self.pending_latest.take().and_then(|next| {
+                if next.same_as(&in_flight.spec) {
+                    None
+                } else {
+                    Some(self.dispatch(next, "latest"))
+                }
+            });
+
+            FrameRequestCompletion {
+                apply_result: true,
+                dispatch_next,
+            }
+        }
+
+        fn is_in_flight(&self) -> bool {
+            self.in_flight.is_some()
+        }
+
+        fn has_pending_latest(&self) -> bool {
+            self.pending_latest.is_some()
+        }
+
+        fn dropped_stale(&self) -> u64 {
+            self.dropped_stale
+        }
+
+        fn dispatch(&mut self, spec: FrameRequestSpec, reason: &str) -> FrameRequestEnvelope {
+            self.next_seq = self.next_seq.saturating_add(1);
+            let envelope = FrameRequestEnvelope {
+                seq: self.next_seq,
+                spec,
+                reason: reason.to_string(),
+            };
+            self.in_flight = Some(envelope.clone());
+            envelope
+        }
+    }
+
     struct FrameClient {
         stream: UnixStream,
         channel_token: String,
@@ -243,8 +444,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
     impl FrameClient {
         fn connect(socket_path: &str, channel_token: String, session_id: String) -> Result<Self> {
-            let stream =
-                UnixStream::connect(socket_path).with_context(|| format!("connect frame socket {socket_path}"))?;
+            let stream = UnixStream::connect(socket_path)
+                .with_context(|| format!("connect frame socket {socket_path}"))?;
             Ok(Self {
                 stream,
                 channel_token,
@@ -284,8 +485,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             self.stream
                 .read_exact(&mut response_header_bytes)
                 .context("read frame response header")?;
-            let response_header: FrameResponseHeader = serde_json::from_slice(&response_header_bytes)
-                .context("parse frame response header")?;
+            let response_header: FrameResponseHeader =
+                serde_json::from_slice(&response_header_bytes)
+                    .context("parse frame response header")?;
 
             if response_header.status != "ok" {
                 bail!(
@@ -310,6 +512,38 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 state_hash: response_header.state_hash,
             })
         }
+    }
+
+    fn spawn_frame_worker(
+        mut frame: FrameClient,
+    ) -> (Sender<FrameRequestEnvelope>, Receiver<FrameWorkerResult>) {
+        let (request_tx, request_rx) = mpsc::channel::<FrameRequestEnvelope>();
+        let (result_tx, result_rx) = mpsc::channel::<FrameWorkerResult>();
+        std::thread::spawn(move || {
+            while let Ok(request) = request_rx.recv() {
+                let started = Instant::now();
+                let frame_result = frame
+                    .request_frame(
+                        Uuid::new_v4().to_string(),
+                        request.spec.axis_indices.clone(),
+                        request.spec.viewport.clone(),
+                    )
+                    .map_err(|err| err.to_string());
+                let roundtrip_ms = started.elapsed().as_secs_f64() * 1_000.0;
+                if result_tx
+                    .send(FrameWorkerResult {
+                        seq: request.seq,
+                        reason: request.reason,
+                        frame: frame_result,
+                        roundtrip_ms,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        (request_tx, result_rx)
     }
 
     #[derive(Debug, Deserialize)]
@@ -403,9 +637,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     struct AppClient {
         session_id: String,
         control: ControlClient,
-        frame: FrameClient,
+        frame_socket_path: String,
+        frame_channel_token: String,
+        frame_request_tx: Sender<FrameRequestEnvelope>,
+        frame_result_rx: Receiver<FrameWorkerResult>,
         events_rx: Receiver<EventEnvelope>,
         active_image_layer_id: String,
+        axis_bounds: AxisBounds,
         axis_indices: FrameAxisIndices,
         last_good_axis_indices: FrameAxisIndices,
         render_mode: String,
@@ -418,6 +656,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         freefly_pose: FreeflyPose,
         last_state_hash: String,
         daemon_frame_perf: Option<DaemonFramePerf>,
+        daemon_frame_perf_version: u64,
     }
 
     #[derive(Clone, Copy)]
@@ -425,6 +664,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         position: [f64; 3],
         yaw_pitch_roll: [f64; 3],
         speed: f64,
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    struct AxisBounds {
+        t_max: Option<usize>,
+        c_max: Option<usize>,
+        z_max: Option<usize>,
     }
 
     impl Default for FreeflyPose {
@@ -443,6 +689,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         raymarch_ms: f64,
         cache_ms: f64,
         encode_write_ms: f64,
+        bricks_traversed: u64,
+        bricks_sampled: u64,
+        samples_taken: u64,
+        skip_ratio: f64,
+        raymarch_parallel: bool,
+        raymarch_workers: u64,
+        rows_parallelized: u64,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -501,17 +754,18 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 first_visible_image_layer(&inspect.layers)
                     .ok_or_else(|| anyhow!("session {session_id} has no visible image layer"))?;
 
+            let axis_bounds = axis_bounds_from_dataset(inspect.dataset.as_ref());
             let mut axis_indices = frame_axis_from_view(inspect.view.as_ref());
             if let Some(channel) = image_channel {
                 axis_indices.c = channel;
             }
-            let render_mode = inspect
-                .render_mode
-                .unwrap_or_else(|| "2d".to_string());
+            axis_indices = clamp_axis_indices(axis_indices, axis_bounds);
+            let render_mode = inspect.render_mode.unwrap_or_else(|| "2d".to_string());
             let (camera_mode, pan_center, zoom, freefly_pose) =
                 camera_state_from_inspect(inspect.camera.as_ref());
 
-            let frame_open_value = control.request("frame.channel.open", Some(&session_id), json!({}))?;
+            let frame_open_value =
+                control.request("frame.channel.open", Some(&session_id), json!({}))?;
             let frame_channel: FrameChannelOpenResponse = serde_json::from_value(frame_open_value)?;
             if frame_channel.frame_protocol_version != FRAME_PROTOCOL_VERSION {
                 bail!(
@@ -526,17 +780,22 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
             let frame = FrameClient::connect(
                 &frame_channel.frame_socket_path,
-                frame_channel.channel_token,
+                frame_channel.channel_token.clone(),
                 session_id.clone(),
             )?;
+            let (frame_request_tx, frame_result_rx) = spawn_frame_worker(frame);
             let events_rx = spawn_event_listener(&control_socket_path, &session_id)?;
 
             Ok(Self {
                 session_id,
                 control,
-                frame,
+                frame_socket_path: frame_channel.frame_socket_path,
+                frame_channel_token: frame_channel.channel_token,
+                frame_request_tx,
+                frame_result_rx,
                 events_rx,
                 active_image_layer_id,
+                axis_bounds,
                 last_good_axis_indices: axis_indices.clone(),
                 axis_indices,
                 mode_label: render_mode_label(&render_mode),
@@ -549,65 +808,84 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 freefly_pose,
                 last_state_hash: "uninitialized".to_string(),
                 daemon_frame_perf: None,
+                daemon_frame_perf_version: 0,
             })
         }
 
-        fn request_frame(&mut self, viewport_width: u32, viewport_height: u32) -> Result<FrameImage> {
-            let viewport = FrameViewport {
-                width: viewport_width.max(1),
-                height: viewport_height.max(1),
-            };
-            let request_id = Uuid::new_v4().to_string();
-            let attempt = self
-                .frame
-                .request_frame(request_id, self.axis_indices.clone(), viewport.clone());
+        fn enqueue_frame_request(&self, request: FrameRequestEnvelope) -> Result<()> {
+            self.frame_request_tx
+                .send(request)
+                .map_err(|_| anyhow!("frame worker request channel is closed, restart lucida-app"))
+        }
 
-            let frame = match attempt {
-                Ok(frame) => frame,
-                Err(err) => {
-                    let message = err.to_string();
-                    if !message.contains("axis index out of bounds") {
-                        return Err(err);
-                    }
-                    if same_axis_indices(&self.axis_indices, &self.last_good_axis_indices) {
-                        for candidate_z in (0..self.axis_indices.z).rev() {
-                            self.axis_indices.z = candidate_z;
-                            self.control.request(
-                                "view.set_axis",
-                                Some(&self.session_id),
-                                json!({"axis": "z", "index": candidate_z}),
-                            )?;
-                            if let Ok(frame) = self.frame.request_frame(
-                                Uuid::new_v4().to_string(),
-                                self.axis_indices.clone(),
-                                viewport.clone(),
-                            ) {
-                                self.last_state_hash = frame.state_hash.clone();
-                                self.last_good_axis_indices = self.axis_indices.clone();
-                                return Ok(frame);
-                            }
-                        }
-                        return Err(err);
-                    }
-
-                    self.restore_last_good_axes()?;
-                    self.frame.request_frame(
-                        Uuid::new_v4().to_string(),
-                        self.axis_indices.clone(),
-                        viewport,
-                    )?
+        fn poll_frame_result(&self) -> Result<Option<FrameWorkerResult>> {
+            match self.frame_result_rx.try_recv() {
+                Ok(result) => Ok(Some(result)),
+                Err(TryRecvError::Empty) => Ok(None),
+                Err(TryRecvError::Disconnected) => {
+                    bail!("frame worker disconnected, restart lucida-app");
                 }
-            };
+            }
+        }
 
+        fn record_frame_state(&mut self, frame: &FrameImage) {
             self.last_state_hash = frame.state_hash.clone();
             self.last_good_axis_indices = self.axis_indices.clone();
-            Ok(frame)
+        }
+
+        fn recover_axis_bounds(&mut self) -> Result<bool> {
+            let clamped = clamp_axis_indices(self.axis_indices.clone(), self.axis_bounds);
+            if !same_axis_indices(&clamped, &self.axis_indices) {
+                self.axis_indices = clamped;
+                for (axis, index) in [
+                    ("t", self.axis_indices.t),
+                    ("c", self.axis_indices.c),
+                    ("z", self.axis_indices.z),
+                ] {
+                    self.control.request(
+                        "view.set_axis",
+                        Some(&self.session_id),
+                        json!({"axis": axis, "index": index}),
+                    )?;
+                }
+                return Ok(true);
+            }
+            if !same_axis_indices(&self.axis_indices, &self.last_good_axis_indices) {
+                self.restore_last_good_axes()?;
+                return Ok(true);
+            }
+            if self.axis_indices.z > 0 {
+                self.axis_indices.z = self.axis_indices.z.saturating_sub(1);
+                self.control.request(
+                    "view.set_axis",
+                    Some(&self.session_id),
+                    json!({"axis": "z", "index": self.axis_indices.z}),
+                )?;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
+        fn reconnect_frame_worker(&mut self) -> Result<()> {
+            let frame = FrameClient::connect(
+                &self.frame_socket_path,
+                self.frame_channel_token.clone(),
+                self.session_id.clone(),
+            )?;
+            let (request_tx, result_rx) = spawn_frame_worker(frame);
+            self.frame_request_tx = request_tx;
+            self.frame_result_rx = result_rx;
+            Ok(())
         }
 
         fn apply_key(&mut self, key_code: KeyCode) -> Result<RenderUpdate> {
             match key_code {
                 KeyCode::BracketRight | KeyCode::PageUp => self.step_z(1),
                 KeyCode::BracketLeft | KeyCode::PageDown => self.step_z(-1),
+                KeyCode::ArrowLeft => self.step_c(-1),
+                KeyCode::ArrowRight => self.step_c(1),
+                KeyCode::Comma => self.step_t(-1),
+                KeyCode::Period => self.step_t(1),
                 KeyCode::Equal => {
                     if self.render_mode == "3d" {
                         self.freefly_pose.speed = (self.freefly_pose.speed * 1.1).min(10.0);
@@ -690,15 +968,46 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         }
 
         fn step_z(&mut self, delta: i32) -> Result<RenderUpdate> {
-            self.axis_indices.z = if delta >= 0 {
-                self.axis_indices.z.saturating_add(delta as usize)
-            } else {
-                self.axis_indices.z.saturating_sub((-delta) as usize)
-            };
+            let next = next_axis_index(self.axis_indices.z, delta);
+            let bounded = clamp_axis_index(next, self.axis_bounds.z_max);
+            if bounded == self.axis_indices.z {
+                return Ok(RenderUpdate::None);
+            }
+            self.axis_indices.z = bounded;
             self.control.request(
                 "view.set_axis",
                 Some(&self.session_id),
                 json!({"axis": "z", "index": self.axis_indices.z}),
+            )?;
+            Ok(RenderUpdate::FrameAndRedraw)
+        }
+
+        fn step_t(&mut self, delta: i32) -> Result<RenderUpdate> {
+            let next = next_axis_index(self.axis_indices.t, delta);
+            let bounded = clamp_axis_index(next, self.axis_bounds.t_max);
+            if bounded == self.axis_indices.t {
+                return Ok(RenderUpdate::None);
+            }
+            self.axis_indices.t = bounded;
+            self.control.request(
+                "view.set_axis",
+                Some(&self.session_id),
+                json!({"axis": "t", "index": self.axis_indices.t}),
+            )?;
+            Ok(RenderUpdate::FrameAndRedraw)
+        }
+
+        fn step_c(&mut self, delta: i32) -> Result<RenderUpdate> {
+            let next = next_axis_index(self.axis_indices.c, delta);
+            let bounded = clamp_axis_index(next, self.axis_bounds.c_max);
+            if bounded == self.axis_indices.c {
+                return Ok(RenderUpdate::None);
+            }
+            self.axis_indices.c = bounded;
+            self.control.request(
+                "view.set_axis",
+                Some(&self.session_id),
+                json!({"axis": "c", "index": self.axis_indices.c}),
             )?;
             Ok(RenderUpdate::FrameAndRedraw)
         }
@@ -818,7 +1127,11 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
         fn has_non_default_freefly_pose(&self) -> bool {
             !approx_vec3(self.freefly_pose.position, FREEFLY_CANONICAL_POSITION, 1e-6)
-                || !approx_vec3(self.freefly_pose.yaw_pitch_roll, FREEFLY_CANONICAL_YPR, 1e-6)
+                || !approx_vec3(
+                    self.freefly_pose.yaw_pitch_roll,
+                    FREEFLY_CANONICAL_YPR,
+                    1e-6,
+                )
                 || (self.freefly_pose.speed - FREEFLY_CANONICAL_SPEED).abs() > 1e-6
         }
 
@@ -839,7 +1152,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             self.freefly_pose.yaw_pitch_roll = apply_local_look_deltas(
                 self.freefly_pose.yaw_pitch_roll,
                 delta_x * sensitivity,
-                -delta_y * sensitivity,
+                delta_y * sensitivity,
                 0.0,
             );
             self.commit_freefly_pose()?;
@@ -951,8 +1264,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                     "sampling_mode": next.as_str(),
                 }),
             )?;
-            self.sampling_mode = parse_sampling_mode_value(response.get("sampling_mode"))
-                .unwrap_or(next);
+            self.sampling_mode =
+                parse_sampling_mode_value(response.get("sampling_mode")).unwrap_or(next);
             Ok(RenderUpdate::RedrawOnly)
         }
 
@@ -1028,8 +1341,11 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         }
 
         fn apply_inspect_state(&mut self, inspect: &SessionInspectResponse) {
+            self.axis_bounds = axis_bounds_from_dataset(inspect.dataset.as_ref());
             self.axis_indices = frame_axis_from_view(inspect.view.as_ref());
-            if let Some((layer_id, channel, image_render_state)) = first_visible_image_layer(&inspect.layers) {
+            if let Some((layer_id, channel, image_render_state)) =
+                first_visible_image_layer(&inspect.layers)
+            {
                 self.active_image_layer_id = layer_id;
                 if let Some(channel) = channel {
                     self.axis_indices.c = channel;
@@ -1037,6 +1353,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 self.sampling_mode = image_render_state.sampling_mode;
                 self.contrast_limits = image_render_state.contrast_limits;
             }
+            self.axis_indices = clamp_axis_indices(self.axis_indices.clone(), self.axis_bounds);
             if let Some(camera) = inspect.camera.as_ref() {
                 match camera {
                     CameraSummary::PanZoom { center, zoom } => {
@@ -1142,23 +1459,24 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                                 .unwrap_or_default();
                             if is_render_relevant_method(method) {
                                 self.sync_axis_state()?;
-                                let event_update = if method == "camera.set_pose"
-                                    || method == "camera.set_mode"
-                                {
-                                    self.camera_motion_update()
-                                } else if method == "layer.set_sampling"
-                                    || method == "layer.set_contrast_limits"
-                                    || method == "layer.auto_contrast"
-                                {
-                                    RenderUpdate::RedrawOnly
-                                } else {
-                                    RenderUpdate::FrameAndRedraw
-                                };
+                                let event_update =
+                                    if method == "camera.set_pose" || method == "camera.set_mode" {
+                                        self.camera_motion_update()
+                                    } else if method == "layer.set_sampling"
+                                        || method == "layer.set_contrast_limits"
+                                        || method == "layer.auto_contrast"
+                                    {
+                                        RenderUpdate::RedrawOnly
+                                    } else {
+                                        RenderUpdate::FrameAndRedraw
+                                    };
                                 update = update.merge(event_update);
                             }
                         } else if event.event == "perf.frame" {
                             if let Some(perf) = parse_daemon_frame_perf(&event.payload) {
                                 self.daemon_frame_perf = Some(perf);
+                                self.daemon_frame_perf_version =
+                                    self.daemon_frame_perf_version.saturating_add(1);
                             }
                         }
                     }
@@ -1172,9 +1490,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         }
 
         fn sync_axis_state(&mut self) -> Result<()> {
-            let inspect_value = self
-                .control
-                .request("session.inspect", Some(&self.session_id), json!({}))?;
+            let inspect_value =
+                self.control
+                    .request("session.inspect", Some(&self.session_id), json!({}))?;
             let inspect: SessionInspectResponse = serde_json::from_value(inspect_value)?;
             self.apply_inspect_state(&inspect);
             Ok(())
@@ -1215,12 +1533,29 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         }
     }
 
+    fn compact_error_for_hud(message: &str) -> String {
+        let trimmed = message.trim();
+        if trimmed.is_empty() {
+            return "unknown".to_string();
+        }
+        let first_line = trimmed.split('\n').next().unwrap_or(trimmed);
+        first_line.chars().take(56).collect()
+    }
+
     fn uses_camera_transform(render_mode: &str) -> bool {
         matches!(render_mode, "2d" | "2d_stub")
     }
 
     fn same_axis_indices(left: &FrameAxisIndices, right: &FrameAxisIndices) -> bool {
         left.t == right.t && left.c == right.c && left.z == right.z
+    }
+
+    fn next_axis_index(current: usize, delta: i32) -> usize {
+        if delta >= 0 {
+            current.saturating_add(delta as usize)
+        } else {
+            current.saturating_sub((-delta) as usize)
+        }
     }
 
     fn is_continuous_3d_key(code: KeyCode) -> bool {
@@ -1404,6 +1739,48 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         }
     }
 
+    fn axis_bounds_from_dataset(dataset: Option<&Value>) -> AxisBounds {
+        let Some(dataset) = dataset else {
+            return AxisBounds::default();
+        };
+        let canonical_axes = dataset
+            .get("multiscale_metadata")
+            .and_then(|metadata| metadata.get("canonical_axes"))
+            .and_then(Value::as_array);
+        AxisBounds {
+            t_max: axis_max_index(canonical_axes, "t"),
+            c_max: axis_max_index(canonical_axes, "c"),
+            z_max: axis_max_index(canonical_axes, "z"),
+        }
+    }
+
+    fn axis_max_index(canonical_axes: Option<&Vec<Value>>, label: &str) -> Option<usize> {
+        let axes = canonical_axes?;
+        for axis in axes {
+            if axis.get("label").and_then(Value::as_str) != Some(label) {
+                continue;
+            }
+            let size = axis.get("size").and_then(Value::as_u64)?;
+            if size == 0 {
+                return Some(0);
+            }
+            return Some(size.saturating_sub(1) as usize);
+        }
+        None
+    }
+
+    fn clamp_axis_index(index: usize, axis_max: Option<usize>) -> usize {
+        axis_max.map(|max| index.min(max)).unwrap_or(index)
+    }
+
+    fn clamp_axis_indices(indices: FrameAxisIndices, bounds: AxisBounds) -> FrameAxisIndices {
+        FrameAxisIndices {
+            t: clamp_axis_index(indices.t, bounds.t_max),
+            c: clamp_axis_index(indices.c, bounds.c_max),
+            z: clamp_axis_index(indices.z, bounds.z_max),
+        }
+    }
+
     fn default_contrast_limits() -> [u16; 2] {
         DEFAULT_CONTRAST_LIMITS
     }
@@ -1442,11 +1819,46 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         let cache_lookup_ms = payload.get("cache_lookup_ms")?.as_f64().unwrap_or(0.0);
         let cache_load_ms = payload.get("cache_load_ms")?.as_f64().unwrap_or(0.0);
         let encode_write_ms = payload.get("encode_write_ms")?.as_f64().unwrap_or(0.0);
+        let bricks_traversed = payload
+            .get("bricks_traversed")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let bricks_sampled = payload
+            .get("bricks_sampled")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let samples_taken = payload
+            .get("samples_taken")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let skip_ratio = payload
+            .get("skip_ratio")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        let raymarch_parallel = payload
+            .get("raymarch_parallel")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let raymarch_workers = payload
+            .get("raymarch_workers")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let rows_parallelized = payload
+            .get("rows_parallelized")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         Some(DaemonFramePerf {
             total_ms,
             raymarch_ms,
             cache_ms: cache_lookup_ms + cache_load_ms,
             encode_write_ms,
+            bricks_traversed,
+            bricks_sampled,
+            samples_taken,
+            skip_ratio,
+            raymarch_parallel,
+            raymarch_workers,
+            rows_parallelized,
         })
     }
 
@@ -1614,9 +2026,15 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             let world_y = ny * scale_y / zoom.max(0.05) + pan_center[1];
             let sample_x = world_x * 0.5 + 0.5;
             let sample_y = 0.5 - world_y * 0.5;
-            [sample_x * image_width.max(1.0) - 0.5, sample_y * image_height.max(1.0) - 0.5]
+            [
+                sample_x * image_width.max(1.0) - 0.5,
+                sample_y * image_height.max(1.0) - 0.5,
+            ]
         } else {
-            [uv[0] * image_width.max(1.0) - 0.5, uv[1] * image_height.max(1.0) - 0.5]
+            [
+                uv[0] * image_width.max(1.0) - 0.5,
+                uv[1] * image_height.max(1.0) - 0.5,
+            ]
         }
     }
 
@@ -1628,12 +2046,16 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         -raw_steps
     }
 
-    fn interactive_3d_viewport(full_width: u32, full_height: u32) -> (u32, u32) {
+    fn interactive_3d_viewport(
+        full_width: u32,
+        full_height: u32,
+        long_side_cap: u32,
+    ) -> (u32, u32) {
         let full_width = full_width.max(1);
         let full_height = full_height.max(1);
         let long = full_width.max(full_height) as f64;
         let short = full_width.min(full_height) as f64;
-        let mut scale = (INTERACTIVE_LONG_SIDE_CAP as f64 / long).min(1.0);
+        let mut scale = (long_side_cap.max(1) as f64 / long).min(1.0);
         let scaled_short = short * scale;
         if scaled_short < INTERACTIVE_SHORT_SIDE_MIN as f64
             && short >= INTERACTIVE_SHORT_SIDE_MIN as f64
@@ -1644,6 +2066,18 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         let width = ((full_width as f64 * scale).round() as u32).clamp(1, full_width);
         let height = ((full_height as f64 * scale).round() as u32).clamp(1, full_height);
         (width, height)
+    }
+
+    fn next_interactive_long_side_cap(current: u32, raymarch_ms: f64) -> u32 {
+        let current = current.clamp(INTERACTIVE_LONG_SIDE_CAP_MIN, INTERACTIVE_LONG_SIDE_CAP_MAX);
+        let next = if raymarch_ms > RAYMARCH_MS_DECREASE_THRESHOLD {
+            (current as f64 * INTERACTIVE_LONG_SIDE_CAP_REDUCE_FACTOR).round() as u32
+        } else if raymarch_ms < RAYMARCH_MS_INCREASE_THRESHOLD {
+            (current as f64 * INTERACTIVE_LONG_SIDE_CAP_INCREASE_FACTOR).round() as u32
+        } else {
+            current
+        };
+        next.clamp(INTERACTIVE_LONG_SIDE_CAP_MIN, INTERACTIVE_LONG_SIDE_CAP_MAX)
     }
 
     fn can_settle_interactive_tier(
@@ -1659,6 +2093,23 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         };
         now.duration_since(last_input_at) >= INTERACTIVE_IDLE_TO_SETTLE
             && now.duration_since(entered_at) >= INTERACTIVE_SETTLE_HYSTERESIS
+    }
+
+    fn should_hold_interactive(now: Instant, hold_until: Option<Instant>) -> bool {
+        hold_until.map(|until| now < until).unwrap_or(false)
+    }
+
+    fn should_dispatch_settled_frame(
+        is_3d_mode: bool,
+        tier: FrameQualityTier,
+        daemon_perf: Option<DaemonFramePerf>,
+    ) -> bool {
+        if !is_3d_mode || tier != FrameQualityTier::Settled {
+            return true;
+        }
+        daemon_perf
+            .map(|perf| perf.raymarch_ms <= RAYMARCH_MS_SETTLE_THRESHOLD)
+            .unwrap_or(true)
     }
 
     fn auto_fit_zoom(
@@ -1680,7 +2131,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         center[0].abs() < 1e-6 && center[1].abs() < 1e-6 && (zoom - 1.0).abs() < 1e-3
     }
 
-    fn camera_state_from_inspect(camera: Option<&CameraSummary>) -> (String, [f64; 2], f64, FreeflyPose) {
+    fn camera_state_from_inspect(
+        camera: Option<&CameraSummary>,
+    ) -> (String, [f64; 2], f64, FreeflyPose) {
         match camera {
             Some(CameraSummary::PanZoom { center, zoom }) => (
                 "panzoom".to_string(),
@@ -1708,11 +2161,19 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 1.0,
                 FreeflyPose::default(),
             ),
-            None => ("panzoom".to_string(), [0.0, 0.0], 1.0, FreeflyPose::default()),
+            None => (
+                "panzoom".to_string(),
+                [0.0, 0.0],
+                1.0,
+                FreeflyPose::default(),
+            ),
         }
     }
 
-    fn spawn_event_listener(control_socket_path: &str, session_id: &str) -> Result<Receiver<EventEnvelope>> {
+    fn spawn_event_listener(
+        control_socket_path: &str,
+        session_id: &str,
+    ) -> Result<Receiver<EventEnvelope>> {
         let stream = UnixStream::connect(control_socket_path)
             .with_context(|| format!("connect event stream {control_socket_path}"))?;
         let mut reader = BufReader::new(stream.try_clone()?);
@@ -1736,8 +2197,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         if subscribe_response_line.trim().is_empty() {
             bail!("events.subscribe did not return a response");
         }
-        let subscribe_response: RpcResponseEnvelope = serde_json::from_str(&subscribe_response_line)
-            .context("parse events.subscribe response")?;
+        let subscribe_response: RpcResponseEnvelope =
+            serde_json::from_str(&subscribe_response_line)
+                .context("parse events.subscribe response")?;
         if let Some(error) = subscribe_response.error {
             bail!("events.subscribe failed: {}", error.message);
         }
@@ -1799,6 +2261,41 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct OverlayParamsUniform {
+        viewport: [f32; 4],
+        rect: [f32; 4],
+    }
+
+    impl OverlayParamsUniform {
+        fn new() -> Self {
+            Self {
+                viewport: [1.0, 1.0, 1.0, 0.0],
+                rect: [HUD_MARGIN_X as f32, HUD_MARGIN_Y as f32, 1.0, 1.0],
+            }
+        }
+
+        fn encode_bytes(&self) -> [u8; 32] {
+            let mut bytes = [0u8; 32];
+            let mut write_f32 = |offset: usize, value: f32| {
+                bytes[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+            };
+            for (idx, value) in self.viewport.iter().enumerate() {
+                write_f32(idx * 4, *value);
+            }
+            for (idx, value) in self.rect.iter().enumerate() {
+                write_f32(16 + idx * 4, *value);
+            }
+            bytes
+        }
+    }
+
+    struct OverlayRaster {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    }
+
     struct GpuRenderer {
         _instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
@@ -1806,13 +2303,22 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         queue: wgpu::Queue,
         config: wgpu::SurfaceConfiguration,
         render_pipeline: wgpu::RenderPipeline,
+        overlay_pipeline: wgpu::RenderPipeline,
         bind_group_layout: wgpu::BindGroupLayout,
         bind_group: wgpu::BindGroup,
+        overlay_bind_group_layout: wgpu::BindGroupLayout,
+        overlay_bind_group: wgpu::BindGroup,
         texture: wgpu::Texture,
         texture_view: wgpu::TextureView,
+        overlay_texture: wgpu::Texture,
+        overlay_texture_view: wgpu::TextureView,
+        overlay_sampler: wgpu::Sampler,
         texture_size: (u32, u32),
+        overlay_size: (u32, u32),
         render_params: RenderParamsUniform,
         render_params_buffer: wgpu::Buffer,
+        overlay_params: OverlayParamsUniform,
+        overlay_params_buffer: wgpu::Buffer,
     }
 
     impl GpuRenderer {
@@ -1820,12 +2326,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             let instance = wgpu::Instance::default();
             let surface = instance.create_surface(window.clone())?;
 
-            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            }))
-            .ok_or_else(|| anyhow!("unable to acquire suitable GPU adapter"))?;
+            let adapter =
+                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                }))
+                .ok_or_else(|| anyhow!("unable to acquire suitable GPU adapter"))?;
 
             let (device, queue) = pollster::block_on(adapter.request_device(
                 &wgpu::DeviceDescriptor {
@@ -1868,6 +2375,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 label: Some("lucida-frame-shader"),
                 source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(SHADER_SOURCE)),
             });
+            let overlay_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("lucida-overlay-shader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(OVERLAY_SHADER_SOURCE)),
+            });
 
             let bind_group_layout =
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1889,7 +2400,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Uniform,
                                 has_dynamic_offset: false,
-                                min_binding_size: Some(std::num::NonZeroU64::new(48).expect("nonzero")),
+                                min_binding_size: Some(
+                                    std::num::NonZeroU64::new(48).expect("nonzero"),
+                                ),
                             },
                             count: None,
                         },
@@ -1927,6 +2440,71 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 multiview: None,
             });
 
+            let overlay_bind_group_layout =
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("lucida-overlay-bind-group-layout"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Texture {
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                view_dimension: wgpu::TextureViewDimension::D2,
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: Some(
+                                    std::num::NonZeroU64::new(32).expect("nonzero"),
+                                ),
+                            },
+                            count: None,
+                        },
+                    ],
+                });
+            let overlay_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("lucida-overlay-pipeline-layout"),
+                    bind_group_layouts: &[&overlay_bind_group_layout],
+                    push_constant_ranges: &[],
+                });
+            let overlay_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("lucida-overlay-pipeline"),
+                layout: Some(&overlay_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &overlay_shader,
+                    entry_point: "vs_main",
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &overlay_shader,
+                    entry_point: "fs_main",
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: config.format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+            });
+
             let render_params = RenderParamsUniform::new();
             let render_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("lucida-render-params"),
@@ -1935,6 +2513,14 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 mapped_at_creation: false,
             });
             queue.write_buffer(&render_params_buffer, 0, &render_params.encode_bytes());
+            let overlay_params = OverlayParamsUniform::new();
+            let overlay_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("lucida-overlay-params"),
+                size: 32,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&overlay_params_buffer, 0, &overlay_params.encode_bytes());
 
             let (texture, texture_view) = create_frame_texture(&device, 1, 1);
             let bind_group = create_frame_bind_group(
@@ -1942,6 +2528,24 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 &bind_group_layout,
                 &texture_view,
                 &render_params_buffer,
+            );
+            let (overlay_texture, overlay_texture_view) = create_overlay_texture(&device, 1, 1);
+            let overlay_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("lucida-overlay-sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Nearest,
+                min_filter: wgpu::FilterMode::Nearest,
+                mipmap_filter: wgpu::FilterMode::Nearest,
+                ..Default::default()
+            });
+            let overlay_bind_group = create_overlay_bind_group(
+                &device,
+                &overlay_bind_group_layout,
+                &overlay_texture_view,
+                &overlay_sampler,
+                &overlay_params_buffer,
             );
 
             config.width = size.width.max(1);
@@ -1954,13 +2558,22 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 queue,
                 config,
                 render_pipeline,
+                overlay_pipeline,
                 bind_group_layout,
                 bind_group,
+                overlay_bind_group_layout,
+                overlay_bind_group,
                 texture,
                 texture_view,
+                overlay_texture,
+                overlay_texture_view,
+                overlay_sampler,
                 texture_size: (1, 1),
+                overlay_size: (1, 1),
                 render_params,
                 render_params_buffer,
+                overlay_params,
+                overlay_params_buffer,
             })
         }
 
@@ -2083,8 +2696,79 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 viewport_width.max(1) as f32,
                 viewport_height.max(1) as f32,
             ];
-            self.queue
-                .write_buffer(&self.render_params_buffer, 0, &self.render_params.encode_bytes());
+            self.queue.write_buffer(
+                &self.render_params_buffer,
+                0,
+                &self.render_params.encode_bytes(),
+            );
+            self.overlay_params.viewport[0] = viewport_width.max(1) as f32;
+            self.overlay_params.viewport[1] = viewport_height.max(1) as f32;
+            self.queue.write_buffer(
+                &self.overlay_params_buffer,
+                0,
+                &self.overlay_params.encode_bytes(),
+            );
+        }
+
+        fn update_debug_overlay(&mut self, lines: &[String], show: bool) {
+            self.overlay_params.viewport[2] = if show { 1.0 } else { 0.0 };
+            if show {
+                let raster = build_debug_overlay_raster(lines);
+                self.overlay_params.rect[2] = raster.width as f32;
+                self.overlay_params.rect[3] = raster.height as f32;
+                if self.overlay_size != (raster.width, raster.height) {
+                    let (overlay_texture, overlay_texture_view) =
+                        create_overlay_texture(&self.device, raster.width, raster.height);
+                    self.overlay_texture = overlay_texture;
+                    self.overlay_texture_view = overlay_texture_view;
+                    self.overlay_size = (raster.width, raster.height);
+                    self.overlay_bind_group = create_overlay_bind_group(
+                        &self.device,
+                        &self.overlay_bind_group_layout,
+                        &self.overlay_texture_view,
+                        &self.overlay_sampler,
+                        &self.overlay_params_buffer,
+                    );
+                }
+
+                let unpadded_bytes_per_row = raster.width as usize * 4;
+                let padded_bytes_per_row =
+                    ((unpadded_bytes_per_row + wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize - 1)
+                        / wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize)
+                        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
+                let mut padded = vec![0u8; padded_bytes_per_row * raster.height as usize];
+                for row in 0..raster.height as usize {
+                    let src_start = row * unpadded_bytes_per_row;
+                    let src_end = src_start + unpadded_bytes_per_row;
+                    let dst_start = row * padded_bytes_per_row;
+                    let dst_end = dst_start + unpadded_bytes_per_row;
+                    padded[dst_start..dst_end].copy_from_slice(&raster.rgba[src_start..src_end]);
+                }
+                self.queue.write_texture(
+                    wgpu::ImageCopyTexture {
+                        texture: &self.overlay_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &padded,
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(padded_bytes_per_row as u32),
+                        rows_per_image: Some(raster.height),
+                    },
+                    wgpu::Extent3d {
+                        width: raster.width,
+                        height: raster.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+            self.queue.write_buffer(
+                &self.overlay_params_buffer,
+                0,
+                &self.overlay_params.encode_bytes(),
+            );
         }
 
         fn render(&mut self) -> Result<()> {
@@ -2128,6 +2812,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 });
                 render_pass.set_pipeline(&self.render_pipeline);
                 render_pass.set_bind_group(0, &self.bind_group, &[]);
+                render_pass.draw(0..3, 0..1);
+                render_pass.set_pipeline(&self.overlay_pipeline);
+                render_pass.set_bind_group(0, &self.overlay_bind_group, &[]);
                 render_pass.draw(0..3, 0..1);
             }
             self.queue.submit(Some(encoder.finish()));
@@ -2185,6 +2872,353 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         })
     }
 
+    fn create_overlay_texture(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("lucida-overlay-texture"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, texture_view)
+    }
+
+    fn create_overlay_bind_group(
+        device: &wgpu::Device,
+        bind_group_layout: &wgpu::BindGroupLayout,
+        texture_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        overlay_params_buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("lucida-overlay-bind-group"),
+            layout: bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: overlay_params_buffer,
+                        offset: 0,
+                        size: Some(std::num::NonZeroU64::new(32).expect("nonzero")),
+                    }),
+                },
+            ],
+        })
+    }
+
+    fn build_debug_overlay_raster(lines: &[String]) -> OverlayRaster {
+        let lines = if lines.is_empty() {
+            vec![String::from("NO METRICS")]
+        } else {
+            lines.to_vec()
+        };
+        let max_chars = lines
+            .iter()
+            .map(|line| line.len())
+            .max()
+            .unwrap_or(1)
+            .max(1) as u32;
+        let scaled_glyph_w = HUD_GLYPH_W * HUD_PIXEL_SCALE;
+        let scaled_glyph_h = HUD_GLYPH_H * HUD_PIXEL_SCALE;
+        let scaled_glyph_spacing_x = HUD_GLYPH_SPACING_X * HUD_PIXEL_SCALE;
+        let scaled_line_spacing_y = HUD_LINE_SPACING_Y * HUD_PIXEL_SCALE;
+        let char_w = scaled_glyph_w + scaled_glyph_spacing_x;
+        let line_h = scaled_glyph_h + scaled_line_spacing_y;
+        let width = HUD_PADDING_X * 2 + max_chars * char_w + 1;
+        let height = HUD_PADDING_Y * 2 + lines.len() as u32 * line_h + 1;
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+
+        fill_rect(
+            &mut rgba,
+            width,
+            height,
+            0,
+            0,
+            width,
+            height,
+            [6, 10, 14, 205],
+        );
+        stroke_rect(
+            &mut rgba,
+            width,
+            height,
+            0,
+            0,
+            width,
+            height,
+            [70, 92, 108, 240],
+        );
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let y = HUD_PADDING_Y + line_idx as u32 * line_h;
+            draw_overlay_text(
+                &mut rgba,
+                width,
+                height,
+                HUD_PADDING_X,
+                y,
+                &line.to_ascii_uppercase(),
+                [215, 226, 235, 255],
+            );
+        }
+
+        OverlayRaster {
+            width: width.max(1),
+            height: height.max(1),
+            rgba,
+        }
+    }
+
+    fn fill_rect(
+        rgba: &mut [u8],
+        width: u32,
+        height: u32,
+        x: u32,
+        y: u32,
+        rect_w: u32,
+        rect_h: u32,
+        color: [u8; 4],
+    ) {
+        let max_x = (x + rect_w).min(width);
+        let max_y = (y + rect_h).min(height);
+        for yy in y..max_y {
+            for xx in x..max_x {
+                let idx = ((yy * width + xx) * 4) as usize;
+                rgba[idx..idx + 4].copy_from_slice(&color);
+            }
+        }
+    }
+
+    fn stroke_rect(
+        rgba: &mut [u8],
+        width: u32,
+        height: u32,
+        x: u32,
+        y: u32,
+        rect_w: u32,
+        rect_h: u32,
+        color: [u8; 4],
+    ) {
+        if rect_w == 0 || rect_h == 0 {
+            return;
+        }
+        fill_rect(rgba, width, height, x, y, rect_w, 1, color);
+        fill_rect(
+            rgba,
+            width,
+            height,
+            x,
+            y + rect_h.saturating_sub(1),
+            rect_w,
+            1,
+            color,
+        );
+        fill_rect(rgba, width, height, x, y, 1, rect_h, color);
+        fill_rect(
+            rgba,
+            width,
+            height,
+            x + rect_w.saturating_sub(1),
+            y,
+            1,
+            rect_h,
+            color,
+        );
+    }
+
+    fn draw_overlay_text(
+        rgba: &mut [u8],
+        width: u32,
+        height: u32,
+        mut x: u32,
+        y: u32,
+        text: &str,
+        color: [u8; 4],
+    ) {
+        for ch in text.chars() {
+            draw_overlay_char(rgba, width, height, x, y, ch, color);
+            x += (HUD_GLYPH_W + HUD_GLYPH_SPACING_X) * HUD_PIXEL_SCALE;
+        }
+    }
+
+    fn draw_overlay_char(
+        rgba: &mut [u8],
+        width: u32,
+        height: u32,
+        x: u32,
+        y: u32,
+        ch: char,
+        color: [u8; 4],
+    ) {
+        let glyph = hud_glyph(ch);
+        for (row, bits) in glyph.iter().enumerate() {
+            for col in 0..HUD_GLYPH_W {
+                let mask = 1 << (HUD_GLYPH_W - 1 - col);
+                if (bits & mask) == 0 {
+                    continue;
+                }
+                let px = x + col * HUD_PIXEL_SCALE;
+                let py = y + row as u32 * HUD_PIXEL_SCALE;
+                fill_rect(
+                    rgba,
+                    width,
+                    height,
+                    px,
+                    py,
+                    HUD_PIXEL_SCALE,
+                    HUD_PIXEL_SCALE,
+                    color,
+                );
+            }
+        }
+    }
+
+    fn hud_glyph(ch: char) -> [u8; 7] {
+        match ch {
+            '0' => [
+                0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110,
+            ],
+            '1' => [
+                0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+            ],
+            '2' => [
+                0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111,
+            ],
+            '3' => [
+                0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110,
+            ],
+            '4' => [
+                0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010,
+            ],
+            '5' => [
+                0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110,
+            ],
+            '6' => [
+                0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110,
+            ],
+            '7' => [
+                0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000,
+            ],
+            '8' => [
+                0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110,
+            ],
+            '9' => [
+                0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110,
+            ],
+            'A' => [
+                0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+            ],
+            'B' => [
+                0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110,
+            ],
+            'C' => [
+                0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110,
+            ],
+            'D' => [
+                0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100,
+            ],
+            'E' => [
+                0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111,
+            ],
+            'F' => [
+                0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000,
+            ],
+            'G' => [
+                0b01111, 0b10000, 0b10000, 0b10011, 0b10001, 0b10001, 0b01110,
+            ],
+            'I' => [
+                0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110,
+            ],
+            'K' => [
+                0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001,
+            ],
+            'L' => [
+                0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+            ],
+            'M' => [
+                0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001,
+            ],
+            'N' => [
+                0b10001, 0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001,
+            ],
+            'O' => [
+                0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+            ],
+            'P' => [
+                0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000,
+            ],
+            'Q' => [
+                0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101,
+            ],
+            'R' => [
+                0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001,
+            ],
+            'S' => [
+                0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
+            ],
+            'T' => [
+                0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
+            ],
+            'U' => [
+                0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+            ],
+            'Y' => [
+                0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100,
+            ],
+            'Z' => [
+                0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111,
+            ],
+            ':' => [
+                0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000,
+            ],
+            '.' => [
+                0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00100, 0b00100,
+            ],
+            '-' => [
+                0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
+            ],
+            '(' => [
+                0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010,
+            ],
+            ')' => [
+                0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000,
+            ],
+            '[' => [
+                0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110,
+            ],
+            ']' => [
+                0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110,
+            ],
+            '/' => [
+                0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b00000, 0b00000,
+            ],
+            ' ' => [0, 0, 0, 0, 0, 0, 0],
+            _ => [
+                0b11111, 0b10001, 0b00100, 0b00100, 0b00100, 0b10001, 0b11111,
+            ],
+        }
+    }
+
     struct LucidaApp {
         client: AppClient,
         window: Option<Arc<Window>>,
@@ -2195,10 +3229,16 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         pending_auto_fit: bool,
         pending_3d_bootstrap: bool,
         frame_quality_tier: FrameQualityTier,
+        interactive_long_side_cap: u32,
+        camera_generation: u64,
+        show_debug_hud: bool,
+        force_interactive_until: Option<Instant>,
         interactive_since: Option<Instant>,
         last_3d_input_at: Option<Instant>,
+        last_adapted_perf_version: u64,
         tracked_image_layer_id: Option<String>,
         tracked_render_mode: String,
+        frame_scheduler: FrameRequestScheduler,
         mouse_pan_active: bool,
         mouse_look_active: bool,
         last_cursor_pos: Option<(f64, f64)>,
@@ -2209,6 +3249,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         frame_rtt_ms_ema: f64,
         upload_ms_ema: f64,
         present_ms_ema: f64,
+        last_worker_error: Option<String>,
     }
 
     impl LucidaApp {
@@ -2226,10 +3267,16 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 pending_auto_fit,
                 pending_3d_bootstrap: false,
                 frame_quality_tier: FrameQualityTier::Settled,
+                interactive_long_side_cap: INTERACTIVE_LONG_SIDE_CAP_MAX,
+                camera_generation: 0,
+                show_debug_hud: true,
+                force_interactive_until: None,
                 interactive_since: None,
                 last_3d_input_at: None,
+                last_adapted_perf_version: 0,
                 tracked_image_layer_id,
                 tracked_render_mode,
+                frame_scheduler: FrameRequestScheduler::default(),
                 mouse_pan_active: false,
                 mouse_look_active: false,
                 last_cursor_pos: None,
@@ -2240,6 +3287,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 frame_rtt_ms_ema: 0.0,
                 upload_ms_ema: 0.0,
                 present_ms_ema: 0.0,
+                last_worker_error: None,
             }
         }
 
@@ -2265,6 +3313,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 return;
             }
             let now = Instant::now();
+            self.camera_generation = self.camera_generation.saturating_add(1);
             self.last_3d_input_at = Some(now);
             if self.frame_quality_tier != FrameQualityTier::Interactive {
                 self.frame_quality_tier = FrameQualityTier::Interactive;
@@ -2277,6 +3326,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         fn maybe_settle_3d_quality(&mut self) {
             if !self.client.is_3d_mode() {
                 self.frame_quality_tier = FrameQualityTier::Settled;
+                self.interactive_long_side_cap = INTERACTIVE_LONG_SIDE_CAP_MAX;
+                self.force_interactive_until = None;
                 self.interactive_since = None;
                 self.last_3d_input_at = None;
                 return;
@@ -2285,6 +3336,15 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 return;
             }
             let now = Instant::now();
+            if should_hold_interactive(now, self.force_interactive_until) {
+                return;
+            }
+            self.force_interactive_until = None;
+            if let Some(perf) = self.client.daemon_frame_perf {
+                if perf.raymarch_ms > RAYMARCH_MS_SETTLE_THRESHOLD {
+                    return;
+                }
+            }
             if can_settle_interactive_tier(now, self.last_3d_input_at, self.interactive_since) {
                 self.frame_quality_tier = FrameQualityTier::Settled;
                 self.needs_frame = true;
@@ -2292,9 +3352,48 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             }
         }
 
+        fn maybe_adapt_interactive_quality(&mut self) {
+            if !self.client.is_3d_mode() {
+                self.interactive_long_side_cap = INTERACTIVE_LONG_SIDE_CAP_MAX;
+                self.last_adapted_perf_version = self.client.daemon_frame_perf_version;
+                self.force_interactive_until = None;
+                return;
+            }
+            if self.last_adapted_perf_version == self.client.daemon_frame_perf_version {
+                return;
+            }
+            self.last_adapted_perf_version = self.client.daemon_frame_perf_version;
+            let Some(perf) = self.client.daemon_frame_perf else {
+                return;
+            };
+            let now = Instant::now();
+            if perf.raymarch_ms >= RAYMARCH_MS_HARD_SPIKE_THRESHOLD {
+                self.interactive_long_side_cap = INTERACTIVE_LONG_SIDE_CAP_MIN;
+                self.force_interactive_until = Some(now + INTERACTIVE_SPIKE_HOLD);
+                if self.frame_quality_tier != FrameQualityTier::Interactive {
+                    self.frame_quality_tier = FrameQualityTier::Interactive;
+                    self.interactive_since = Some(now);
+                }
+                self.needs_frame = true;
+                self.needs_redraw = true;
+                return;
+            }
+            let next_cap =
+                next_interactive_long_side_cap(self.interactive_long_side_cap, perf.raymarch_ms);
+            if next_cap == self.interactive_long_side_cap {
+                return;
+            }
+            self.interactive_long_side_cap = next_cap;
+            if self.frame_quality_tier == FrameQualityTier::Interactive {
+                self.needs_frame = true;
+                self.needs_redraw = true;
+            }
+        }
+
         fn frame_request_size(&self, full_width: u32, full_height: u32) -> (u32, u32) {
-            if self.client.is_3d_mode() && self.frame_quality_tier == FrameQualityTier::Interactive {
-                interactive_3d_viewport(full_width, full_height)
+            if self.client.is_3d_mode() && self.frame_quality_tier == FrameQualityTier::Interactive
+            {
+                interactive_3d_viewport(full_width, full_height, self.interactive_long_side_cap)
             } else {
                 (full_width.max(1), full_height.max(1))
             }
@@ -2318,6 +3417,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             if entering_3d {
                 self.pending_3d_bootstrap = true;
                 self.frame_quality_tier = FrameQualityTier::Settled;
+                self.interactive_long_side_cap = INTERACTIVE_LONG_SIDE_CAP_MAX;
+                self.force_interactive_until = None;
                 self.interactive_since = None;
                 self.last_3d_input_at = None;
                 self.needs_frame = true;
@@ -2325,6 +3426,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             } else if self.tracked_render_mode != "3d" {
                 self.pending_3d_bootstrap = false;
                 self.frame_quality_tier = FrameQualityTier::Settled;
+                self.interactive_long_side_cap = INTERACTIVE_LONG_SIDE_CAP_MAX;
+                self.force_interactive_until = None;
                 self.interactive_since = None;
                 self.last_3d_input_at = None;
             }
@@ -2370,18 +3473,135 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             }
 
             self.client.pan_center = [0.0, 0.0];
-            self.client.zoom = auto_fit_zoom(viewport_width, viewport_height, image_width, image_height);
+            self.client.zoom =
+                auto_fit_zoom(viewport_width, viewport_height, image_width, image_height);
             self.client.commit_panzoom_pose()?;
             self.pending_auto_fit = false;
             Ok(())
         }
 
-        fn refresh_frame_and_title(&mut self) -> Result<()> {
-            let size = self
-                .window
-                .as_ref()
-                .map(|window| window.inner_size())
-                .ok_or_else(|| anyhow!("window is not initialized"))?;
+        fn debug_overlay_lines(&self) -> Vec<String> {
+            let daemon_perf = self.client.daemon_frame_perf.unwrap_or_default();
+            let mode = match self.client.render_mode.as_str() {
+                "2d" => "2D",
+                "2d_stub" => "2S",
+                "3d" => "3D",
+                "graph_stub" => "GR",
+                _ => "??",
+            };
+            let sampling = if matches!(self.client.sampling_mode, SamplingMode::Linear) {
+                "L"
+            } else {
+                "N"
+            };
+            let quality_label = if self.client.is_3d_mode() {
+                self.frame_quality_tier.label()
+            } else {
+                "-"
+            };
+            vec![
+                format!(
+                    "M:{} Q:{}({}) A:{}/{}/{} ZM:{:.2}",
+                    mode,
+                    quality_label,
+                    self.interactive_long_side_cap,
+                    self.client.axis_indices.t,
+                    self.client.axis_indices.c,
+                    self.client.axis_indices.z,
+                    self.client.zoom
+                ),
+                format!(
+                    "FPS:{:.1} SPD:{:.2} SMP:{}",
+                    self.fps_ema.max(0.0),
+                    self.client.freefly_pose.speed,
+                    sampling
+                ),
+                format!(
+                    "NET:{:.1} UP:{:.1} PR:{:.1}",
+                    self.frame_rtt_ms_ema.max(0.0),
+                    self.upload_ms_ema.max(0.0),
+                    self.present_ms_ema.max(0.0),
+                ),
+                format!(
+                    "D:{:.1} R:{:.1} C:{:.1} E:{:.1}",
+                    daemon_perf.total_ms.max(0.0),
+                    daemon_perf.raymarch_ms.max(0.0),
+                    daemon_perf.cache_ms.max(0.0),
+                    daemon_perf.encode_write_ms.max(0.0),
+                ),
+                format!(
+                    "SK:{:.2} BT:{} BS:{} SM:{}",
+                    daemon_perf.skip_ratio.clamp(0.0, 1.0),
+                    daemon_perf.bricks_traversed,
+                    daemon_perf.bricks_sampled,
+                    daemon_perf.samples_taken
+                ),
+                format!(
+                    "PAR:{} W:{} RW:{}",
+                    if daemon_perf.raymarch_parallel { 1 } else { 0 },
+                    daemon_perf.raymarch_workers,
+                    daemon_perf.rows_parallelized
+                ),
+                format!(
+                    "WK:IF{} P{} DS{}",
+                    if self.frame_scheduler.is_in_flight() {
+                        1
+                    } else {
+                        0
+                    },
+                    if self.frame_scheduler.has_pending_latest() {
+                        1
+                    } else {
+                        0
+                    },
+                    self.frame_scheduler.dropped_stale()
+                ),
+                format!(
+                    "CT:{}-{} SID:{}",
+                    self.client.contrast_limits[0],
+                    self.client.contrast_limits[1],
+                    self.client.session_id.chars().last().unwrap_or('?')
+                ),
+                format!(
+                    "ERR:{}",
+                    self.last_worker_error
+                        .as_deref()
+                        .map(compact_error_for_hud)
+                        .unwrap_or_else(|| "none".to_string())
+                ),
+            ]
+        }
+
+        fn can_dispatch_settled_request(&self) -> bool {
+            should_dispatch_settled_frame(
+                self.client.is_3d_mode(),
+                self.frame_quality_tier,
+                self.client.daemon_frame_perf,
+            )
+        }
+
+        fn build_desired_frame_request(&self) -> Option<FrameRequestSpec> {
+            if !self.needs_frame {
+                return None;
+            }
+            let size = self.window.as_ref().map(|window| window.inner_size())?;
+            let (request_width, request_height) =
+                self.frame_request_size(size.width.max(1), size.height.max(1));
+            Some(FrameRequestSpec {
+                render_mode: self.client.render_mode.clone(),
+                axis_indices: self.client.axis_indices.clone(),
+                viewport: FrameViewport {
+                    width: request_width.max(1),
+                    height: request_height.max(1),
+                },
+                camera_generation: self.camera_generation,
+            })
+        }
+
+        fn dispatch_frame_request_if_needed(&mut self) -> Result<()> {
+            if !self.needs_frame {
+                return Ok(());
+            }
             if self.pending_3d_bootstrap && self.client.is_3d_mode() {
                 if self.client.should_skip_3d_entry_bootstrap() {
                     self.pending_3d_bootstrap = false;
@@ -2390,23 +3610,38 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                     self.note_3d_camera_input();
                 }
             }
-            let (request_width, request_height) =
-                self.frame_request_size(size.width.max(1), size.height.max(1));
-            let frame_request_started = Instant::now();
-            let frame = self.client.request_frame(request_width, request_height)?;
-            let frame_rtt_ms = frame_request_started.elapsed().as_secs_f64() * 1_000.0;
+            if !self.can_dispatch_settled_request() {
+                return Ok(());
+            }
+            let Some(spec) = self.build_desired_frame_request() else {
+                return Ok(());
+            };
+            if let Some(request) = self.frame_scheduler.request(spec, "update") {
+                self.client.enqueue_frame_request(request)?;
+            }
+            self.needs_frame = false;
+            Ok(())
+        }
+
+        fn apply_frame_to_renderer(&mut self, frame: &FrameImage, frame_rtt_ms: f64) -> Result<()> {
             self.frame_rtt_ms_ema = Self::smooth_ema(self.frame_rtt_ms_ema, frame_rtt_ms);
+            let size = self
+                .window
+                .as_ref()
+                .map(|window| window.inner_size())
+                .ok_or_else(|| anyhow!("window is not initialized"))?;
             let (image_width, image_height) = {
                 let renderer = self
                     .renderer
                     .as_mut()
                     .ok_or_else(|| anyhow!("renderer is not initialized"))?;
                 let upload_started = Instant::now();
-                renderer.update_frame(&frame)?;
+                renderer.update_frame(frame)?;
                 let upload_ms = upload_started.elapsed().as_secs_f64() * 1_000.0;
                 self.upload_ms_ema = Self::smooth_ema(self.upload_ms_ema, upload_ms);
                 renderer.image_dimensions()
             };
+            self.client.record_frame_state(frame);
             self.maybe_bootstrap_3d_entry(&frame.payload)?;
             self.maybe_apply_auto_fit(
                 size.width.max(1),
@@ -2414,23 +3649,44 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 image_width,
                 image_height,
             )?;
-            let renderer = self
-                .renderer
-                .as_mut()
-                .ok_or_else(|| anyhow!("renderer is not initialized"))?;
-            renderer.update_view_params(
-                size.width.max(1),
-                size.height.max(1),
-                &self.client.render_mode,
-                self.client.pan_center,
-                self.client.zoom,
-                self.client.sampling_mode,
-                self.client.contrast_limits,
-            );
-            if let Some(window) = self.window.as_ref() {
-                update_window_title(window, self);
+            self.needs_redraw = true;
+            Ok(())
+        }
+
+        fn drain_frame_worker(&mut self) -> Result<()> {
+            loop {
+                let Some(result) = self.client.poll_frame_result()? else {
+                    break;
+                };
+                let completion = self.frame_scheduler.complete(result.seq);
+                if let Some(next) = completion.dispatch_next {
+                    self.client.enqueue_frame_request(next)?;
+                }
+                if !completion.apply_result {
+                    continue;
+                }
+                match result.frame {
+                    Ok(frame) => {
+                        self.last_worker_error = None;
+                        self.apply_frame_to_renderer(&frame, result.roundtrip_ms)?;
+                    }
+                    Err(message) => {
+                        if message.contains("axis index out of bounds")
+                            && self.client.recover_axis_bounds()?
+                        {
+                            self.needs_frame = true;
+                            self.needs_redraw = true;
+                            continue;
+                        }
+                        self.last_worker_error = Some(format!(
+                            "{} [{}]",
+                            compact_error_for_hud(&message),
+                            compact_error_for_hud(&result.reason)
+                        ));
+                        self.needs_redraw = true;
+                    }
+                }
             }
-            self.needs_frame = false;
             Ok(())
         }
 
@@ -2531,16 +3787,14 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                         }
                     } else {
                         let zoom_steps = normalized_scroll_steps(raw_steps);
-                        let (cursor_x, cursor_y) = self
-                            .last_cursor_pos
-                            .unwrap_or_else(|| {
-                                let size = self
-                                    .window
-                                    .as_ref()
-                                    .map(|w| w.inner_size())
-                                    .unwrap_or_default();
-                                (size.width as f64 * 0.5, size.height as f64 * 0.5)
-                            });
+                        let (cursor_x, cursor_y) = self.last_cursor_pos.unwrap_or_else(|| {
+                            let size = self
+                                .window
+                                .as_ref()
+                                .map(|w| w.inner_size())
+                                .unwrap_or_default();
+                            (size.width as f64 * 0.5, size.height as f64 * 0.5)
+                        });
                         let viewport = self
                             .window
                             .as_ref()
@@ -2579,27 +3833,27 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                     state,
                     button: MouseButton::Left,
                     ..
-                } => {
-                    match state {
-                        ElementState::Pressed => {
-                            self.mouse_pan_active = self.client.can_pan_with_mouse();
-                            self.mouse_look_active = self.client.can_mouse_look_3d();
-                            self.last_cursor_pos = None;
-                        }
-                        ElementState::Released => {
-                            self.mouse_pan_active = false;
-                            self.mouse_look_active = false;
-                            self.last_cursor_pos = None;
-                        }
+                } => match state {
+                    ElementState::Pressed => {
+                        self.mouse_pan_active = self.client.can_pan_with_mouse();
+                        self.mouse_look_active = self.client.can_mouse_look_3d();
+                        self.last_cursor_pos = None;
                     }
-                }
+                    ElementState::Released => {
+                        self.mouse_pan_active = false;
+                        self.mouse_look_active = false;
+                        self.last_cursor_pos = None;
+                    }
+                },
                 WindowEvent::CursorMoved { position, .. } => {
                     let current = (position.x, position.y);
                     if self.mouse_pan_active {
                         if let Some((last_x, last_y)) = self.last_cursor_pos {
                             let delta_x = current.0 - last_x;
                             let delta_y = current.1 - last_y;
-                            if let Some(size) = self.window.as_ref().map(|window| window.inner_size()) {
+                            if let Some(size) =
+                                self.window.as_ref().map(|window| window.inner_size())
+                            {
                                 let image_dims = self
                                     .renderer
                                     .as_ref()
@@ -2659,7 +3913,13 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                     if let PhysicalKey::Code(code) = event.physical_key {
                         match event.state {
                             ElementState::Pressed => {
-                                if is_continuous_3d_key(code) {
+                                if code == KeyCode::KeyH && !event.repeat {
+                                    self.show_debug_hud = !self.show_debug_hud;
+                                    self.needs_redraw = true;
+                                    if let Some(window) = &self.window {
+                                        window.request_redraw();
+                                    }
+                                } else if is_continuous_3d_key(code) {
                                     self.held_keys.insert(code);
                                 } else {
                                     match self.client.apply_key(code) {
@@ -2700,24 +3960,21 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                     }
                 }
                 WindowEvent::RedrawRequested => {
-                    if self.needs_frame {
-                        if let Err(err) = self.refresh_frame_and_title() {
-                            eprintln!("frame refresh failed: {err}");
-                            event_loop.exit();
-                            return;
-                        }
-                    }
-                    if let (Some(renderer), Some(window)) = (self.renderer.as_mut(), self.window.as_ref()) {
+                    if let Some(window) = self.window.as_ref() {
                         let size = window.inner_size();
-                        renderer.update_view_params(
-                            size.width.max(1),
-                            size.height.max(1),
-                            &self.client.render_mode,
-                            self.client.pan_center,
-                            self.client.zoom,
-                            self.client.sampling_mode,
-                            self.client.contrast_limits,
-                        );
+                        let debug_lines = self.debug_overlay_lines();
+                        if let Some(renderer) = self.renderer.as_mut() {
+                            renderer.update_view_params(
+                                size.width.max(1),
+                                size.height.max(1),
+                                &self.client.render_mode,
+                                self.client.pan_center,
+                                self.client.zoom,
+                                self.client.sampling_mode,
+                                self.client.contrast_limits,
+                            );
+                            renderer.update_debug_overlay(&debug_lines, self.show_debug_hud);
+                        }
                     }
                     let render_result = if let Some(renderer) = self.renderer.as_mut() {
                         renderer.render()
@@ -2761,6 +4018,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
             match self.client.poll_control_events() {
                 Ok(update) => {
+                    if self.client.is_3d_mode() && update.needs_frame() {
+                        self.camera_generation = self.camera_generation.saturating_add(1);
+                    }
                     self.apply_render_update(update);
                     self.track_layer_changes();
                     self.track_render_mode_changes();
@@ -2772,7 +4032,47 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 }
             }
 
+            self.maybe_adapt_interactive_quality();
             self.maybe_settle_3d_quality();
+            if let Err(err) = self.dispatch_frame_request_if_needed() {
+                let message = compact_error_for_hud(&err.to_string());
+                match self.client.reconnect_frame_worker() {
+                    Ok(()) => {
+                        self.last_worker_error = Some(format!("{} [reconnected]", message));
+                        self.frame_scheduler = FrameRequestScheduler::default();
+                        self.needs_frame = true;
+                    }
+                    Err(reconnect_err) => {
+                        self.last_worker_error = Some(format!(
+                            "{} [reconnect:{}]",
+                            message,
+                            compact_error_for_hud(&reconnect_err.to_string())
+                        ));
+                    }
+                }
+                self.needs_redraw = true;
+            }
+            if let Err(err) = self.drain_frame_worker() {
+                let message = compact_error_for_hud(&err.to_string());
+                match self.client.reconnect_frame_worker() {
+                    Ok(()) => {
+                        self.last_worker_error = Some(format!("{} [reconnected]", message));
+                        self.frame_scheduler = FrameRequestScheduler::default();
+                        self.needs_frame = true;
+                    }
+                    Err(reconnect_err) => {
+                        self.last_worker_error = Some(format!(
+                            "{} [reconnect:{}]",
+                            message,
+                            compact_error_for_hud(&reconnect_err.to_string())
+                        ));
+                    }
+                }
+                self.needs_redraw = true;
+            }
+            if self.frame_scheduler.is_in_flight() {
+                self.needs_redraw = true;
+            }
 
             if self.needs_redraw || self.needs_frame {
                 if let Some(window) = &self.window {
@@ -2785,32 +4085,12 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     fn update_window_title(window: &Window, app: &LucidaApp) {
         let client = &app.client;
         let hotkeys = mode_hotkeys_hint(&client.render_mode);
-        let daemon_perf = client.daemon_frame_perf.unwrap_or_default();
-        let quality_label = if client.is_3d_mode() {
-            app.frame_quality_tier.label()
-        } else {
-            "-"
-        };
         let title = format!(
-            "Lucida Viewer | session={} | mode={} | q={} | z={} | zoom={:.2} | sampling={} | contrast=[{},{}] | speed={:.2} | fps={:.1} | net={:.1}ms upload={:.1}ms present={:.1}ms daemon={:.1}/{:.1}/{:.1}/{:.1}ms | state={} | hotkeys: {}",
+            "Lucida Viewer | session={} | mode={} | hud={} | fps={:.1} | hotkeys: {}",
             client.session_id,
             client.mode_label,
-            quality_label,
-            client.axis_indices.z,
-            client.zoom,
-            client.sampling_mode.as_str(),
-            client.contrast_limits[0],
-            client.contrast_limits[1],
-            client.freefly_pose.speed,
+            if app.show_debug_hud { "ON" } else { "OFF" },
             app.fps_ema.max(0.0),
-            app.frame_rtt_ms_ema.max(0.0),
-            app.upload_ms_ema.max(0.0),
-            app.present_ms_ema.max(0.0),
-            daemon_perf.total_ms.max(0.0),
-            daemon_perf.raymarch_ms.max(0.0),
-            daemon_perf.cache_ms.max(0.0),
-            daemon_perf.encode_write_ms.max(0.0),
-            &client.last_state_hash.chars().take(12).collect::<String>(),
             hotkeys,
         );
         window.set_title(&title);
@@ -2818,21 +4098,26 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
     fn mode_hotkeys_hint(mode: &str) -> &'static str {
         if mode == "3d" {
-            "1/2/3/4 mode, arrows or [/]/PgUp/PgDn z, left-drag look, wheel speed, R reset pose, WASD move, E/Q up/down, IJKL pitch/yaw, U/O roll, +/- speed, M sampling, C auto-contrast, V reset contrast, Z/X contrast width"
+            "1/2/3/4 mode, [/]/PgUp/PgDn or up/down z, left/right c, ,/. t, left-drag look, wheel speed, R reset pose, WASD move, E/Q up/down, IJKL pitch/yaw, U/O roll, +/- speed, M sampling, C auto-contrast, V reset contrast, Z/X contrast width, H HUD"
         } else {
-            "1/2/3/4 mode, arrows or [/]/PgUp/PgDn z, wheel up=in/down=out, left-drag pan (2D), +/- zoom, M sampling, C auto-contrast, V reset contrast, Z/X contrast width, WASD/EQ/IJKL/UO only in 3D"
+            "1/2/3/4 mode, [/]/PgUp/PgDn or up/down z, left/right c, ,/. t, wheel up=in/down=out, left-drag pan (2D), +/- zoom, M sampling, C auto-contrast, V reset contrast, Z/X contrast width, H HUD, WASD/EQ/IJKL/UO only in 3D"
         }
     }
 
     #[cfg(test)]
     mod tests {
         use super::{
-            apply_local_look_deltas, basis_to_yaw_pitch_roll, freefly_pose_to_basis,
-            can_settle_interactive_tier, interactive_3d_viewport, normalized_scroll_steps,
-            pan_center_for_cursor_anchor, payload_has_nonzero_u16, robust_percentile_limits_u16,
-            rotate_vec_around_axis, texel_coords_from_uv_for_mode, world_point_from_cursor,
-            zoom_scale_factor,
+            apply_local_look_deltas, axis_bounds_from_dataset, basis_to_yaw_pitch_roll,
+            can_settle_interactive_tier, clamp_axis_indices, freefly_pose_to_basis,
+            interactive_3d_viewport, next_axis_index, next_interactive_long_side_cap,
+            normalized_scroll_steps, pan_center_for_cursor_anchor, payload_has_nonzero_u16,
+            robust_percentile_limits_u16, rotate_vec_around_axis, should_dispatch_settled_frame,
+            should_hold_interactive, texel_coords_from_uv_for_mode, world_point_from_cursor,
+            zoom_scale_factor, AxisBounds, DaemonFramePerf, FrameQualityTier,
+            FrameRequestScheduler, FrameRequestSpec,
         };
+        use lucida_protocol::{FrameAxisIndices, FrameViewport};
+        use serde_json::json;
         use std::{
             f64::consts::{FRAC_PI_2, PI},
             time::{Duration, Instant},
@@ -2859,6 +4144,47 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         }
 
         #[test]
+        fn next_axis_index_is_saturating_for_both_directions() {
+            assert_eq!(next_axis_index(0, -1), 0);
+            assert_eq!(next_axis_index(2, -1), 1);
+            assert_eq!(next_axis_index(3, 2), 5);
+        }
+
+        #[test]
+        fn axis_bounds_parse_from_canonical_layout_metadata() {
+            let dataset = json!({
+                "multiscale_metadata": {
+                    "canonical_axes": [
+                        {"label": "t", "size": 3},
+                        {"label": "c", "size": 2},
+                        {"label": "z", "size": 24},
+                        {"label": "y", "size": 128},
+                        {"label": "x", "size": 128}
+                    ]
+                }
+            });
+            let bounds = axis_bounds_from_dataset(Some(&dataset));
+            assert_eq!(bounds.t_max, Some(2));
+            assert_eq!(bounds.c_max, Some(1));
+            assert_eq!(bounds.z_max, Some(23));
+        }
+
+        #[test]
+        fn clamp_axis_indices_honors_configured_bounds() {
+            let bounded = clamp_axis_indices(
+                FrameAxisIndices { t: 5, c: 9, z: 30 },
+                AxisBounds {
+                    t_max: Some(2),
+                    c_max: Some(1),
+                    z_max: Some(23),
+                },
+            );
+            assert_eq!(bounded.t, 2);
+            assert_eq!(bounded.c, 1);
+            assert_eq!(bounded.z, 23);
+        }
+
+        #[test]
         fn pixel_density_is_invariant_across_viewport_resize_for_fixed_zoom() {
             let image_width = 512u32;
             let image_height = 256u32;
@@ -2866,10 +4192,24 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             let center = [0.0f64, 0.0f64];
 
             let world_a0 = world_point_from_cursor(
-                399.0, 299.0, 800.0, 600.0, image_width, image_height, center, zoom,
+                399.0,
+                299.0,
+                800.0,
+                600.0,
+                image_width,
+                image_height,
+                center,
+                zoom,
             );
             let world_a1 = world_point_from_cursor(
-                400.0, 299.0, 800.0, 600.0, image_width, image_height, center, zoom,
+                400.0,
+                299.0,
+                800.0,
+                600.0,
+                image_width,
+                image_height,
+                center,
+                zoom,
             );
             let dtexel_a = (world_a1[0] - world_a0[0]) * (image_width as f64) * 0.5;
 
@@ -2992,16 +4332,30 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
         #[test]
         fn interactive_viewport_respects_quality_caps() {
-            let (w, h) = interactive_3d_viewport(1920, 1080);
+            let (w, h) = interactive_3d_viewport(1920, 1080, 640);
             assert_eq!(w, 640);
             assert_eq!(h, 360);
         }
 
         #[test]
         fn interactive_viewport_does_not_exceed_native_dimensions() {
-            let (w, h) = interactive_3d_viewport(320, 200);
+            let (w, h) = interactive_3d_viewport(320, 200, 640);
             assert_eq!(w, 320);
             assert_eq!(h, 200);
+        }
+
+        #[test]
+        fn interactive_cap_adapts_up_and_down_with_raymarch_time() {
+            let down = next_interactive_long_side_cap(640, 30.0);
+            assert!(down < 640);
+            assert!(down >= 360);
+
+            let up = next_interactive_long_side_cap(360, 8.0);
+            assert!(up > 360);
+            assert!(up <= 640);
+
+            let stable = next_interactive_long_side_cap(500, 18.0);
+            assert_eq!(stable, 500);
         }
 
         #[test]
@@ -3018,6 +4372,20 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 enough_idle,
                 entered
             ));
+        }
+
+        #[test]
+        fn interactive_hold_window_blocks_settle_until_expired() {
+            let start = Instant::now();
+            assert!(should_hold_interactive(
+                start + Duration::from_millis(100),
+                Some(start + Duration::from_millis(200))
+            ));
+            assert!(!should_hold_interactive(
+                start + Duration::from_millis(220),
+                Some(start + Duration::from_millis(200))
+            ));
+            assert!(!should_hold_interactive(start, None));
         }
 
         #[test]
@@ -3038,7 +4406,8 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             let pitch_delta = -0.25;
             let after_pose = apply_local_look_deltas(pose, 0.0, pitch_delta, 0.0);
             let after = freefly_pose_to_basis(after_pose);
-            let expected_forward = rotate_vec_around_axis(before.forward, before.right, pitch_delta);
+            let expected_forward =
+                rotate_vec_around_axis(before.forward, before.right, pitch_delta);
             approx_vec3(after.forward, expected_forward, 1e-6);
         }
 
@@ -3064,18 +4433,116 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             let mouse_sensitivity = 0.004;
             let dx = yaw_delta / mouse_sensitivity;
             let dy = -pitch_delta / mouse_sensitivity;
-            let mouse_pose = apply_local_look_deltas(
-                pose,
-                dx * mouse_sensitivity,
-                -dy * mouse_sensitivity,
-                0.0,
-            );
+            let mouse_pose =
+                apply_local_look_deltas(pose, dx * mouse_sensitivity, -dy * mouse_sensitivity, 0.0);
 
             let keyboard_basis = freefly_pose_to_basis(keyboard_pose);
             let mouse_basis = freefly_pose_to_basis(mouse_pose);
             approx_vec3(keyboard_basis.forward, mouse_basis.forward, 1e-8);
             approx_vec3(keyboard_basis.right, mouse_basis.right, 1e-8);
             approx_vec3(keyboard_basis.up, mouse_basis.up, 1e-8);
+        }
+
+        fn make_spec(z: usize, width: u32, height: u32) -> FrameRequestSpec {
+            FrameRequestSpec {
+                render_mode: "3d".to_string(),
+                axis_indices: FrameAxisIndices { t: 0, c: 0, z },
+                viewport: FrameViewport { width, height },
+                camera_generation: z as u64,
+            }
+        }
+
+        #[test]
+        fn frame_scheduler_latest_wins_and_coalesces_duplicates() {
+            let mut scheduler = FrameRequestScheduler::default();
+            let first = scheduler
+                .request(make_spec(0, 640, 360), "camera")
+                .expect("first request should dispatch");
+            assert_eq!(first.seq, 1);
+            assert!(scheduler.is_in_flight());
+
+            assert!(scheduler
+                .request(make_spec(1, 640, 360), "camera")
+                .is_none());
+            assert!(scheduler.has_pending_latest());
+            assert!(scheduler
+                .request(make_spec(1, 640, 360), "camera")
+                .is_none());
+
+            let completion = scheduler.complete(1);
+            assert!(completion.apply_result);
+            let next = completion
+                .dispatch_next
+                .expect("latest pending request should dispatch");
+            assert_eq!(next.seq, 2);
+            assert!(next.spec.same_as(&make_spec(1, 640, 360)));
+        }
+
+        #[test]
+        fn frame_scheduler_replacing_pending_latest_increments_drop_counter() {
+            let mut scheduler = FrameRequestScheduler::default();
+            let first = scheduler
+                .request(make_spec(0, 640, 360), "camera")
+                .expect("first request should dispatch");
+            assert_eq!(first.seq, 1);
+            assert!(scheduler
+                .request(make_spec(1, 640, 360), "camera")
+                .is_none());
+            assert!(scheduler
+                .request(make_spec(2, 640, 360), "camera")
+                .is_none());
+            assert_eq!(scheduler.dropped_stale(), 1);
+        }
+
+        #[test]
+        fn frame_scheduler_discards_stale_result_seq() {
+            let mut scheduler = FrameRequestScheduler::default();
+            let first = scheduler
+                .request(make_spec(0, 640, 360), "camera")
+                .expect("first request should dispatch");
+            assert_eq!(first.seq, 1);
+
+            let stale = scheduler.complete(999);
+            assert!(!stale.apply_result);
+            assert_eq!(scheduler.dropped_stale(), 1);
+            assert!(scheduler.is_in_flight(), "in-flight request should remain");
+
+            let valid = scheduler.complete(first.seq);
+            assert!(valid.apply_result);
+            assert!(valid.dispatch_next.is_none());
+            assert!(!scheduler.is_in_flight());
+        }
+
+        #[test]
+        fn settled_dispatch_is_blocked_when_raymarch_cost_is_too_high() {
+            let high_cost = DaemonFramePerf {
+                raymarch_ms: 40.0,
+                ..DaemonFramePerf::default()
+            };
+            let low_cost = DaemonFramePerf {
+                raymarch_ms: 10.0,
+                ..DaemonFramePerf::default()
+            };
+            assert!(!should_dispatch_settled_frame(
+                true,
+                FrameQualityTier::Settled,
+                Some(high_cost),
+            ));
+            assert!(should_dispatch_settled_frame(
+                true,
+                FrameQualityTier::Settled,
+                Some(low_cost),
+            ));
+            assert!(should_dispatch_settled_frame(
+                true,
+                FrameQualityTier::Interactive,
+                Some(high_cost),
+            ));
+            assert!(should_dispatch_settled_frame(
+                false,
+                FrameQualityTier::Settled,
+                Some(high_cost),
+            ));
         }
     }
 

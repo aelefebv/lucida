@@ -85,6 +85,7 @@
 4. Credentials: standard cloud auth flows (env/config/instance roles), no custom auth plugin stack in v1.
 5. Anisotropy is handled.
 6. Axis handling uses canonical labels with adapter-level remapping from source order.
+7. Current local read path supports chunked `z/y/x` assembly for `u16` uncompressed data; `t/c` chunks are expected to be `1` in this phase.
 
 ## Interaction and camera behavior
 1. 2D mode uses pan/zoom controls optimized for microscopy navigation, including mouse-wheel zoom and left-drag panning.
@@ -101,6 +102,10 @@
 12. Slice 2B.1 adds mouse-look in `3d` (left-drag yaw/pitch), wheel speed scaling in `3d`, and `R` reset to canonical freefly pose.
 13. Entering `3d` performs one-shot shared bootstrap by default: canonical freefly pose and robust `(1,99)` contrast from the first 3D frame unless camera+contrast already appear user-tuned.
 14. Slice 2B.2 adds app-local adaptive 3D frame quality tiers (`Interactive` while moving, `Settled` on idle) without changing daemon-owned replay state.
+15. Slice 2B.4 adds daemon-side brick-majorant skip traversal for `3d` raymarch so close-volume navigation reduces empty-space sampling while preserving deterministic output for the same camera and viewport.
+16. Slice 2B.4 extends 3D diagnostics with skip metrics (`bricks_traversed`, `bricks_sampled`, `samples_taken`, `skip_ratio`) and app-local adaptive interactive cap tuning (`360..640`) driven by daemon `raymarch_ms`.
+17. Slice 2B.5 adds row-parallel daemon 3D raymarch execution (`rayon`) and app-side async frame scheduling (`single in-flight + latest-wins`) so heavy 3D frames do not block UI input/redraw loops.
+18. App keyboard axis stepping supports `z`, `c`, and `t` traversal in attached sessions (`up/down` or `[`/`]` for `z`, `left/right` for `c`, `,/.` for `t`) and works in `3d` as long as the image layer is not channel-pinned.
 
 ## ND graph support
 1. v1 graph scope is visualization-first for millions of points.
@@ -139,6 +144,13 @@
 8. Slice 2B acceptance script: `/Users/austin/GitHub/lucida/python/examples/slice2_real_3d_demo.py` must establish a session with `view.set_render_mode("3d")` against `/Users/austin/GitHub/lucida/fixtures/ome_zarr_v05_structured_3d`.
 9. Slice 2B.1 acceptance: switching from 2D to `3d` with extreme prior 2D pan/zoom must still produce visible non-black structure without manual rescue contrast changes.
 10. Slice 2B.2 acceptance: in release builds, active 3D navigation should sustain interactive responsiveness via adaptive quality and return to full-detail frames after brief idle.
+11. Slice 2B.4 acceptance: near-volume 3D navigation should show non-zero skip metrics with reduced `samples_taken` versus theoretical full-loop sampling, while settled frames remain full-resolution and deterministic for fixed camera/viewports.
+12. Slice 2B.5 acceptance: close/inside-volume 3D navigation should avoid perceptual hard stalls, with async frame worker diagnostics visible and interactive heavy-frame times targeting sub-250ms in release workflows.
+13. Slice 3A acceptance script: `/Users/austin/GitHub/lucida/python/examples/slice3a_layout_demo.py` must successfully exercise axis remap, 0.4 smoke open/read, and anisotropic 3D mode setup.
+14. Slice 3A acceptance: `dataset.open` must surface normalized layout metadata (`layout_version`, `canonical_axes`, `canonical_to_source_dim`, `implicit_singleton_axes`, `spatial_scale_zyx`) and fail fast on invalid remaps or ambiguous 0.4 axis metadata.
+15. Slice 3A acceptance: 3D rendering must apply metadata-derived anisotropy scales while preserving deterministic payloads for fixed `(camera, axes, viewport)`.
+16. Slice 3A acceptance: multi-`t`/multi-`c` fixtures must be traversable in `3d` with axis mutations reflected in frame payload changes.
+17. Slice 3A stress workflow: a generated large local fixture with many `t*c*z` chunk files must remain navigable in attached 3D sessions (axis traversal + camera motion) without protocol changes.
 
 ## Assumptions and defaults
 1. v1 must include 2D + 3D + graph support, with graph features focused on visualization and interaction.
@@ -169,15 +181,21 @@
 19. **Slice 2B.2 (current increment): 3D Performance Pass**
 20. Deliverables: daemon 3D raymarch cost reductions (depth-based sample budget and incremental stepping), app adaptive 3D frame request resolution (`Interactive`/`Settled`), and frame timing HUD metrics (socket roundtrip/upload/present + daemon timings).
 21. Acceptance: active 3D navigation uses interactive tier for smoother FPS and transitions back to settled full-resolution frames after idle with hysteresis guard.
-22. **Slice 3: Data/Axis Hardening**
-23. Deliverables: axis remapping validator, anisotropy transform checks, explicit 0.4 adapter seam.
-24. Acceptance: fixtures validate canonical axis behavior and transform correctness.
-25. **Slice 4: Remote Data Backends**
-26. Deliverables: HTTP(S) and GCS-compatible adapters through shared storage abstraction.
-27. Acceptance: integration opens real fixtures via local/HTTP/GCS-compatible endpoints.
-28. **Slice 5: Performance + Reliability Gates**
-29. Deliverables: startup timing probes, frame metrics, cache policy tuning, IO responsiveness safeguards.
-30. Acceptance: CI enforces startup/latency/FPS/memory budgets.
-31. **Slice 6: Packaging + Remote Gateway**
-32. Deliverables: desktop packaging per OS and gateway prototype for frame stream + command relay.
-33. Acceptance: signed/bundled smoke tests + trusted-network token flow.
+22. **Slice 2B.4 (current increment): Near-Volume 3D Acceleration**
+23. Deliverables: daemon `AcceleratedVolume` cache entries with brick maxima (`8^3` voxels/brick), DDA brick traversal with skip rules (`brick_max == 0` or `brick_max <= peak`), skip diagnostics in `perf.frame`, and app dynamic interactive long-side cap (`360..640`) derived from `raymarch_ms` thresholds.
+24. Acceptance: close-volume 3D navigation avoids pathological slowdown, reports skip metrics in diagnostics, and keeps replay/state semantics unchanged because adaptive policy is app-local request behavior.
+25. **Slice 2B.5 (current increment): Near-Volume Spike Stall Elimination**
+26. Deliverables: daemon row-parallel `3d` raymarch (`rayon`) with deterministic output/stats reduction, app async frame worker (single in-flight, latest pending coalesce, stale-result discard), and additional HUD diagnostics (`worker in-flight/pending/dropped` + daemon parallel metadata).
+27. Acceptance: close-volume 3D navigation remains responsive without UI hard stalls, while settled/full-resolution refresh still occurs once costs permit and replay/state schemas remain unchanged.
+28. **Slice 3A (current increment): Axis Remap + Anisotropy + 0.4 Adapter Seam**
+29. Deliverables: typed storage `DatasetLayout` resolver, axis remap enforcement in real chunk addressing, implicit singleton `t/c` handling, metadata-normalized layout fields in dataset handle payloads, explicit 0.4 best-effort seam with fail-fast ambiguity errors, and 3D anisotropy enforcement from `coordinateTransformations.scale`.
+30. Acceptance: real deterministic fixtures (`ome_zarr_v05_axis_remap`, `ome_zarr_v05_anisotropic_3d`, `ome_zarr_v04_smoke`) validate remap correctness, explicit 0.4 behavior, and anisotropic 3D rendering differences while keeping frame determinism for fixed input state.
+31. **Slice 4: Remote Data Backends**
+32. Deliverables: HTTP(S) and GCS-compatible adapters through shared storage abstraction.
+33. Acceptance: integration opens real fixtures via local/HTTP/GCS-compatible endpoints.
+34. **Slice 5: Performance + Reliability Gates**
+35. Deliverables: startup timing probes, frame metrics, cache policy tuning, IO responsiveness safeguards.
+36. Acceptance: CI enforces startup/latency/FPS/memory budgets.
+37. **Slice 6: Packaging + Remote Gateway**
+38. Deliverables: desktop packaging per OS and gateway prototype for frame stream + command relay.
+39. Acceptance: signed/bundled smoke tests + trusted-network token flow.

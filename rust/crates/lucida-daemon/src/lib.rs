@@ -12,14 +12,15 @@ use lucida_core::{
 };
 use lucida_protocol::{
     now_utc, AuditEntry, AuditOutcome, EventEnvelope, ExportedCommandLog, FrameAxisIndices,
-    FrameRequestHeader, FrameResponseHeader, FRAME_PROTOCOL_VERSION, LOG_SCHEMA_VERSION,
-    PROTOCOL_VERSION, RenderMode, ReplayEntry, RpcError, RpcRequestEnvelope, RpcResponseEnvelope,
+    FrameRequestHeader, FrameResponseHeader, RenderMode, ReplayEntry, RpcError, RpcRequestEnvelope,
+    RpcResponseEnvelope, FRAME_PROTOCOL_VERSION, LOG_SCHEMA_VERSION, PROTOCOL_VERSION,
 };
 use lucida_render_wgpu::RendererState;
 use lucida_storage::{
     open_dataset, read_u16_plane, read_u16_volume, OpenDatasetOptions, StorageError, U16FramePlane,
     U16Volume,
 };
+use rayon::prelude::*;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -30,6 +31,7 @@ use uuid::Uuid;
 use tokio::net::{UnixListener, UnixStream};
 
 const MAX_FRAME_BYTES: usize = 32 * 1024 * 1024;
+const BRICK_SIZE_VOXELS: u32 = 8;
 
 pub trait LocalTransport {
     type Listener;
@@ -126,7 +128,7 @@ struct DaemonRuntime {
     audit_log: Vec<AuditEntry>,
     replay_log: Vec<ReplayEntry>,
     frame_channels: BTreeMap<String, String>,
-    volume_cache: BTreeMap<VolumeCacheKey, Arc<U16Volume>>,
+    volume_cache: BTreeMap<VolumeCacheKey, Arc<AcceleratedVolume>>,
 }
 
 impl Default for DaemonRuntime {
@@ -150,6 +152,14 @@ struct VolumeCacheKey {
     c: usize,
 }
 
+#[derive(Clone, Debug)]
+struct AcceleratedVolume {
+    volume: Arc<U16Volume>,
+    brick_size: u32,
+    grid: [u32; 3],
+    brick_max: Vec<u16>,
+}
+
 #[derive(Clone, Debug, Default)]
 struct FramePerfMetrics {
     protocol_version: String,
@@ -166,6 +176,13 @@ struct FramePerfMetrics {
     total_ms: f64,
     sample_count: usize,
     cache_hit: bool,
+    bricks_traversed: u64,
+    bricks_sampled: u64,
+    samples_taken: u64,
+    skip_ratio: f64,
+    raymarch_parallel: bool,
+    raymarch_workers: usize,
+    rows_parallelized: u32,
 }
 
 impl Daemon {
@@ -465,23 +482,27 @@ impl Daemon {
                     return (header, payload, None);
                 };
 
-                let axis_map =
+                let axis_indices =
                     axis_indices_map_with_channel(&request.axis_indices, image_layer.channel);
-                match read_u16_plane(&dataset.uri, &axis_map) {
+                let axis_remap = dataset_axis_remap(dataset);
+                match read_u16_plane(&dataset.uri, &axis_indices, &axis_remap) {
                     Ok(frame) => FramePayload {
                         width: frame.width,
                         height: frame.height,
                         bytes: frame.bytes,
                     },
                     Err(err) => {
-                        let (header, payload) = frame_error_response(&request.request_id, err.to_string());
+                        let (header, payload) =
+                            frame_error_response(&request.request_id, err.to_string());
                         return (header, payload, None);
                     }
                 }
             }
-            RenderMode::TwoDStub => {
-                build_synthetic_2d_slice_frame(&request.viewport, &request.axis_indices, &session.camera)
-            }
+            RenderMode::TwoDStub => build_synthetic_2d_slice_frame(
+                &request.viewport,
+                &request.axis_indices,
+                &session.camera,
+            ),
             RenderMode::ThreeD => {
                 let Some(image_layer) = resolve_visible_image_layer(&session) else {
                     let (header, payload) = frame_error_response(
@@ -499,6 +520,8 @@ impl Daemon {
                 };
                 let t_index = request.axis_indices.t;
                 let c_index = image_layer.channel.unwrap_or(request.axis_indices.c);
+                let axis_remap = dataset_axis_remap(dataset);
+                let spatial_scale_zyx = dataset_spatial_scale_zyx(dataset);
                 let cache_key = VolumeCacheKey {
                     session_id: request.session_id.clone(),
                     dataset_uri: dataset.uri.clone(),
@@ -519,17 +542,29 @@ impl Daemon {
                         volume
                     }
                     None => {
-                        let axis_indices =
-                            BTreeMap::from([("t".to_string(), t_index), ("c".to_string(), c_index)]);
+                        let axis_indices = BTreeMap::from([
+                            ("t".to_string(), t_index),
+                            ("c".to_string(), c_index),
+                        ]);
                         let cache_load_started = Instant::now();
-                        let loaded = match read_u16_volume(&dataset.uri, &axis_indices) {
-                            Ok(volume) => Arc::new(volume),
+                        let loaded = match read_u16_volume(&dataset.uri, &axis_indices, &axis_remap)
+                        {
+                            Ok(volume) => volume,
                             Err(err) => {
                                 let (header, payload) =
                                     frame_error_response(&request.request_id, err.to_string());
                                 return (header, payload, None);
                             }
                         };
+                        let loaded =
+                            match build_accelerated_volume(Arc::new(loaded), BRICK_SIZE_VOXELS) {
+                                Ok(volume) => Arc::new(volume),
+                                Err(err) => {
+                                    let (header, payload) =
+                                        frame_error_response(&request.request_id, err.to_string());
+                                    return (header, payload, None);
+                                }
+                            };
                         perf.cache_load_ms = cache_load_started.elapsed().as_secs_f64() * 1_000.0;
                         let mut runtime = self.runtime.lock().await;
                         runtime
@@ -539,21 +574,34 @@ impl Daemon {
                     }
                 };
 
-                let sample_count = compute_3d_sample_count(volume.depth);
+                let sample_count = compute_3d_sample_count(volume.volume.depth);
                 perf.sample_count = sample_count;
                 let raymarch_started = Instant::now();
-                let frame = build_real_3d_frame(
+                let (frame, stats) = build_real_3d_frame(
                     &request.viewport,
                     &session.camera,
                     volume.as_ref(),
                     sample_count,
+                    spatial_scale_zyx,
                 );
                 perf.raymarch_ms = raymarch_started.elapsed().as_secs_f64() * 1_000.0;
+                perf.bricks_traversed = stats.bricks_traversed;
+                perf.bricks_sampled = stats.bricks_sampled;
+                perf.samples_taken = stats.samples_taken;
+                if stats.bricks_traversed > 0 {
+                    perf.skip_ratio = ((stats.bricks_traversed - stats.bricks_sampled) as f64)
+                        / stats.bricks_traversed as f64;
+                }
+                perf.raymarch_parallel = true;
+                perf.raymarch_workers = rayon::current_num_threads();
+                perf.rows_parallelized = request.viewport.height.max(1);
                 frame
             }
-            RenderMode::GraphStub => {
-                build_synthetic_graph_frame(&request.viewport, &request.axis_indices, &session.camera)
-            }
+            RenderMode::GraphStub => build_synthetic_graph_frame(
+                &request.viewport,
+                &request.axis_indices,
+                &session.camera,
+            ),
         };
 
         let response_prep_started = Instant::now();
@@ -586,7 +634,11 @@ impl Daemon {
         (response_header, frame.bytes, Some(perf))
     }
 
-    fn emit_frame_perf_event(&self, perf: &FramePerfMetrics, response_header: &FrameResponseHeader) {
+    fn emit_frame_perf_event(
+        &self,
+        perf: &FramePerfMetrics,
+        response_header: &FrameResponseHeader,
+    ) {
         let payload = json!({
             "source": "frame_socket",
             "request_id": perf.request_id,
@@ -602,6 +654,13 @@ impl Daemon {
             "encode_write_ms": perf.encode_write_ms,
             "sample_count": perf.sample_count,
             "cache_hit": perf.cache_hit,
+            "bricks_traversed": perf.bricks_traversed,
+            "bricks_sampled": perf.bricks_sampled,
+            "samples_taken": perf.samples_taken,
+            "skip_ratio": perf.skip_ratio,
+            "raymarch_parallel": perf.raymarch_parallel,
+            "raymarch_workers": perf.raymarch_workers,
+            "rows_parallelized": perf.rows_parallelized,
         });
         let _ = self.events_tx.send(EventEnvelope {
             jsonrpc: "2.0".to_string(),
@@ -622,6 +681,13 @@ impl Daemon {
             encode_write_ms = perf.encode_write_ms,
             sample_count = perf.sample_count,
             cache_hit = perf.cache_hit,
+            bricks_traversed = perf.bricks_traversed,
+            bricks_sampled = perf.bricks_sampled,
+            samples_taken = perf.samples_taken,
+            skip_ratio = perf.skip_ratio,
+            raymarch_parallel = perf.raymarch_parallel,
+            raymarch_workers = perf.raymarch_workers,
+            rows_parallelized = perf.rows_parallelized,
             "frame performance metrics"
         );
     }
@@ -675,7 +741,9 @@ impl Daemon {
                         message: err,
                         data: None,
                     };
-                    let response = self.record_and_build_error(&request, rpc_error.clone()).await;
+                    let response = self
+                        .record_and_build_error(&request, rpc_error.clone())
+                        .await;
                     let event = build_error_event(
                         &request.protocol_version,
                         request.session_id.clone(),
@@ -723,7 +791,9 @@ impl Daemon {
                     message: "session.inspect requires session_id".to_string(),
                     data: None,
                 };
-                let response = self.record_and_build_error(&request, rpc_error.clone()).await;
+                let response = self
+                    .record_and_build_error(&request, rpc_error.clone())
+                    .await;
                 let event = build_error_event(
                     &request.protocol_version,
                     request.session_id.clone(),
@@ -765,7 +835,9 @@ impl Daemon {
                     message: "frame.channel.open requires session_id".to_string(),
                     data: None,
                 };
-                let response = self.record_and_build_error(&request, rpc_error.clone()).await;
+                let response = self
+                    .record_and_build_error(&request, rpc_error.clone())
+                    .await;
                 let event = build_error_event(
                     &request.protocol_version,
                     request.session_id.clone(),
@@ -784,7 +856,9 @@ impl Daemon {
                     data: None,
                 };
                 drop(runtime);
-                let response = self.record_and_build_error(&request, rpc_error.clone()).await;
+                let response = self
+                    .record_and_build_error(&request, rpc_error.clone())
+                    .await;
                 let event = build_error_event(
                     &request.protocol_version,
                     request.session_id.clone(),
@@ -819,7 +893,9 @@ impl Daemon {
             Ok(request) => request,
             Err((request, storage_error)) => {
                 let rpc_error = storage_error_to_rpc(storage_error);
-                let response = self.record_and_build_error(&request, rpc_error.clone()).await;
+                let response = self
+                    .record_and_build_error(&request, rpc_error.clone())
+                    .await;
                 let event = build_error_event(
                     &request.protocol_version,
                     request.session_id.clone(),
@@ -979,9 +1055,7 @@ fn resolve_visible_image_layer(session: &SessionState) -> Option<ActiveImageLaye
             continue;
         }
         if let LayerKind::Image { channel, .. } = &layer.kind {
-            return Some(ActiveImageLayer {
-                channel: *channel,
-            });
+            return Some(ActiveImageLayer { channel: *channel });
         }
     }
     None
@@ -1024,7 +1098,14 @@ fn build_synthetic_2d_slice_frame(
             intensity += slice_blob(wx, wy, slice_z, [0.0, 0.0, 0.0], 1.15, 0.78);
             intensity += slice_blob(wx, wy, slice_z, [1.5, -0.5, 0.9], 0.65, 0.52);
             intensity += slice_blob(wx, wy, slice_z, [-1.25, 0.85, -0.45], 0.72, 0.46);
-            intensity += slice_box(wx, wy, slice_z, [-1.95, -0.55, 0.25], [-1.05, 0.35, 1.15], 0.38);
+            intensity += slice_box(
+                wx,
+                wy,
+                slice_z,
+                [-1.95, -0.55, 0.25],
+                [-1.05, 0.35, 1.15],
+                0.38,
+            );
 
             let ring_r = ((wx - 0.75).powi(2) + (wy + 1.1).powi(2)).sqrt();
             let ring = (1.0 - ((ring_r - 0.45).abs() * 7.0 + (slice_z + 0.2).abs() * 1.8)).max(0.0);
@@ -1086,65 +1167,91 @@ struct CameraBasis {
     up: Vec3,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct RaymarchStats {
+    bricks_traversed: u64,
+    bricks_sampled: u64,
+    samples_taken: u64,
+}
+
 fn build_real_3d_frame(
     viewport: &lucida_protocol::FrameViewport,
     camera: &CameraMode,
-    volume: &U16Volume,
+    volume: &AcceleratedVolume,
     samples: usize,
-) -> FramePayload {
+    spatial_scale_zyx: [f32; 3],
+) -> (FramePayload, RaymarchStats) {
     let width = viewport.width.max(1);
     let height = viewport.height.max(1);
-    let mut bytes = vec![0u8; width as usize * height as usize * 2];
+    let row_bytes = width as usize * 2;
+    let mut bytes = vec![0u8; row_bytes * height as usize];
 
     let basis = camera_basis_for_volume(camera);
     let aspect = width as f32 / height as f32;
     let fov = 0.9f32;
-    let box_min = [-1.0, -1.0, -1.0];
-    let box_max = [1.0, 1.0, 1.0];
-    let mut byte_offset = 0usize;
+    let half_extents = normalized_volume_half_extents(volume.volume.as_ref(), spatial_scale_zyx);
+    let box_min = [-half_extents[0], -half_extents[1], -half_extents[2]];
+    let box_max = [half_extents[0], half_extents[1], half_extents[2]];
+    let stats = bytes
+        .par_chunks_mut(row_bytes)
+        .enumerate()
+        .map(|(y, row)| {
+            let mut row_stats = RaymarchStats::default();
+            let y = y as u32;
+            let ny = 1.0 - ((y as f32 + 0.5) / height as f32) * 2.0;
+            for x in 0..width {
+                let nx = ((x as f32 + 0.5) / width as f32) * 2.0 - 1.0;
+                let ray_dir = v_normalize(v_add(
+                    basis.forward,
+                    v_add(
+                        v_scale(basis.right, nx * aspect * fov),
+                        v_scale(basis.up, ny * fov),
+                    ),
+                ));
 
-    for y in 0..height {
-        let ny = 1.0 - ((y as f32 + 0.5) / height as f32) * 2.0;
-        for x in 0..width {
-            let nx = ((x as f32 + 0.5) / width as f32) * 2.0 - 1.0;
-            let ray_dir = v_normalize(v_add(
-                basis.forward,
-                v_add(
-                    v_scale(basis.right, nx * aspect * fov),
-                    v_scale(basis.up, ny * fov),
-                ),
-            ));
+                let value = if let Some((t_start, t_end)) =
+                    ray_aabb_interval(basis.origin, ray_dir, box_min, box_max)
+                {
+                    let (peak, ray_stats) = raymarch_mip_brick_skip(
+                        volume,
+                        basis.origin,
+                        ray_dir,
+                        t_start,
+                        t_end,
+                        samples,
+                        half_extents,
+                    );
+                    row_stats.bricks_traversed += ray_stats.bricks_traversed;
+                    row_stats.bricks_sampled += ray_stats.bricks_sampled;
+                    row_stats.samples_taken += ray_stats.samples_taken;
+                    peak
+                } else {
+                    0u16
+                };
+                let pixel_offset = x as usize * 2;
+                let value_bytes = value.to_le_bytes();
+                row[pixel_offset] = value_bytes[0];
+                row[pixel_offset + 1] = value_bytes[1];
+            }
+            row_stats
+        })
+        .reduce(RaymarchStats::default, merge_raymarch_stats);
 
-            let value = if let Some((t_start, t_end)) =
-                ray_aabb_interval(basis.origin, ray_dir, box_min, box_max)
-            {
-                let step = compute_intersection_step(t_start, t_end, samples);
-                let mut peak = 0u16;
-                let mut pos = v_add(basis.origin, v_scale(ray_dir, t_start));
-                let step_vec = v_scale(ray_dir, step);
-                for _ in 0..samples {
-                    peak = peak.max(sample_volume_nearest(volume, pos));
-                    if peak == u16::MAX {
-                        break;
-                    }
-                    pos = v_add(pos, step_vec);
-                }
-                peak
-            } else {
-                0u16
-            };
+    (
+        FramePayload {
+            width,
+            height,
+            bytes,
+        },
+        stats,
+    )
+}
 
-            let value_bytes = value.to_le_bytes();
-            bytes[byte_offset] = value_bytes[0];
-            bytes[byte_offset + 1] = value_bytes[1];
-            byte_offset += 2;
-        }
-    }
-
-    FramePayload {
-        width,
-        height,
-        bytes,
+fn merge_raymarch_stats(left: RaymarchStats, right: RaymarchStats) -> RaymarchStats {
+    RaymarchStats {
+        bricks_traversed: left.bricks_traversed + right.bricks_traversed,
+        bricks_sampled: left.bricks_sampled + right.bricks_sampled,
+        samples_taken: left.samples_taken + right.samples_taken,
     }
 }
 
@@ -1157,19 +1264,236 @@ fn compute_intersection_step(t_start: f32, t_end: f32, samples: usize) -> f32 {
     span / samples.max(1) as f32
 }
 
-fn sample_volume_nearest(volume: &U16Volume, world: Vec3) -> u16 {
-    if world[0] < -1.0
-        || world[0] > 1.0
-        || world[1] < -1.0
-        || world[1] > 1.0
-        || world[2] < -1.0
-        || world[2] > 1.0
+fn build_accelerated_volume(volume: Arc<U16Volume>, brick_size: u32) -> Result<AcceleratedVolume> {
+    let brick_size = brick_size.max(1);
+    let grid_x = volume.width.div_ceil(brick_size);
+    let grid_y = volume.height.div_ceil(brick_size);
+    let grid_z = volume.depth.div_ceil(brick_size);
+    let brick_count = (grid_x as usize)
+        .checked_mul(grid_y as usize)
+        .and_then(|value| value.checked_mul(grid_z as usize))
+        .ok_or_else(|| anyhow!("accelerated volume brick grid overflow"))?;
+    let mut brick_max = vec![0u16; brick_count];
+    let width = volume.width as usize;
+    let height = volume.height as usize;
+
+    for z in 0..volume.depth as usize {
+        let bz = z as u32 / brick_size;
+        for y in 0..volume.height as usize {
+            let by = y as u32 / brick_size;
+            let row_offset = (z * height + y) * width;
+            for x in 0..volume.width as usize {
+                let value = volume.voxels[row_offset + x];
+                if value == 0 {
+                    continue;
+                }
+                let bx = x as u32 / brick_size;
+                let brick_idx = brick_linear_index([bx, by, bz], [grid_x, grid_y, grid_z]);
+                if value > brick_max[brick_idx] {
+                    brick_max[brick_idx] = value;
+                }
+            }
+        }
+    }
+
+    Ok(AcceleratedVolume {
+        volume,
+        brick_size,
+        grid: [grid_x, grid_y, grid_z],
+        brick_max,
+    })
+}
+
+fn raymarch_mip_brick_skip(
+    volume: &AcceleratedVolume,
+    origin_world: Vec3,
+    dir_world: Vec3,
+    t_start: f32,
+    t_end: f32,
+    samples: usize,
+    half_extents: Vec3,
+) -> (u16, RaymarchStats) {
+    let mut stats = RaymarchStats::default();
+    let total_span = (t_end - t_start).max(1e-5);
+    let sample_density = samples.max(1) as f32 / total_span;
+    let volume_dims = [
+        volume.volume.width.max(1) as f32,
+        volume.volume.height.max(1) as f32,
+        volume.volume.depth.max(1) as f32,
+    ];
+    let origin_voxel = world_to_voxel_space(origin_world, volume_dims, half_extents);
+    let dir_voxel = [
+        dir_world[0] * volume_dims[0] / (2.0 * half_extents[0].max(1e-6)),
+        dir_world[1] * volume_dims[1] / (2.0 * half_extents[1].max(1e-6)),
+        dir_world[2] * volume_dims[2] / (2.0 * half_extents[2].max(1e-6)),
+    ];
+    let start_t = (t_start + 1e-5).min(t_end);
+    let start_pos = [
+        origin_voxel[0] + dir_voxel[0] * start_t,
+        origin_voxel[1] + dir_voxel[1] * start_t,
+        origin_voxel[2] + dir_voxel[2] * start_t,
+    ];
+    let mut brick = [
+        voxel_to_brick_index(start_pos[0], volume.brick_size, volume.grid[0]),
+        voxel_to_brick_index(start_pos[1], volume.brick_size, volume.grid[1]),
+        voxel_to_brick_index(start_pos[2], volume.brick_size, volume.grid[2]),
+    ];
+    let traversal = init_brick_traversal(
+        origin_voxel,
+        dir_voxel,
+        brick,
+        volume.brick_size,
+        volume.grid,
+        volume_dims,
+    );
+    let mut t_curr = t_start;
+    let mut t_next = traversal.t_next;
+    let mut t_delta = traversal.t_delta;
+    let steps = traversal.steps;
+    let mut peak = 0u16;
+
+    while t_curr < t_end {
+        if brick[0] < 0
+            || brick[1] < 0
+            || brick[2] < 0
+            || brick[0] >= volume.grid[0] as i32
+            || brick[1] >= volume.grid[1] as i32
+            || brick[2] >= volume.grid[2] as i32
+        {
+            break;
+        }
+
+        let seg_end = t_end.min(t_next[0].min(t_next[1].min(t_next[2])));
+        if seg_end > t_curr + 1e-6 {
+            stats.bricks_traversed += 1;
+            let brick_idx = brick_linear_index(
+                [brick[0] as u32, brick[1] as u32, brick[2] as u32],
+                volume.grid,
+            );
+            let brick_peak = volume.brick_max[brick_idx];
+            if brick_peak > peak {
+                stats.bricks_sampled += 1;
+                let seg_samples = ((seg_end - t_curr) * sample_density).ceil() as usize;
+                let seg_samples = seg_samples.max(1);
+                let step = compute_intersection_step(t_curr, seg_end, seg_samples);
+                let mut sample_t = t_curr;
+                for _ in 0..seg_samples {
+                    peak = peak.max(sample_volume_nearest(
+                        volume.volume.as_ref(),
+                        v_add(origin_world, v_scale(dir_world, sample_t)),
+                        half_extents,
+                    ));
+                    stats.samples_taken += 1;
+                    if peak == u16::MAX {
+                        return (peak, stats);
+                    }
+                    sample_t += step;
+                }
+            }
+        }
+
+        if seg_end >= t_end - 1e-6 {
+            break;
+        }
+
+        let advance_eps = 1e-6;
+        t_curr = seg_end.max(t_curr + advance_eps);
+        for axis in 0..3 {
+            if (t_next[axis] - seg_end).abs() <= 1e-5 {
+                brick[axis] += steps[axis];
+                t_next[axis] += t_delta[axis];
+            }
+        }
+        for axis in 0..3 {
+            if t_next[axis] < t_curr {
+                t_next[axis] = t_curr + 1e-5;
+            }
+            if !t_delta[axis].is_finite() {
+                t_delta[axis] = f32::INFINITY;
+            }
+        }
+    }
+
+    (peak, stats)
+}
+
+struct BrickTraversalInit {
+    steps: [i32; 3],
+    t_next: [f32; 3],
+    t_delta: [f32; 3],
+}
+
+fn init_brick_traversal(
+    origin_voxel: Vec3,
+    dir_voxel: Vec3,
+    brick: [i32; 3],
+    brick_size: u32,
+    grid: [u32; 3],
+    volume_dims: [f32; 3],
+) -> BrickTraversalInit {
+    let mut steps = [0i32; 3];
+    let mut t_next = [f32::INFINITY; 3];
+    let mut t_delta = [f32::INFINITY; 3];
+    let brick_size = brick_size as f32;
+    for axis in 0..3 {
+        let dir = dir_voxel[axis];
+        if dir.abs() < 1e-6 {
+            continue;
+        }
+        let current_brick = brick[axis].clamp(0, grid[axis] as i32 - 1);
+        if dir > 0.0 {
+            steps[axis] = 1;
+            let next_boundary = ((current_brick + 1) as f32 * brick_size).min(volume_dims[axis]);
+            t_next[axis] = (next_boundary - origin_voxel[axis]) / dir;
+            t_delta[axis] = brick_size / dir;
+        } else {
+            steps[axis] = -1;
+            let next_boundary = (current_brick as f32 * brick_size).max(0.0);
+            t_next[axis] = (next_boundary - origin_voxel[axis]) / dir;
+            t_delta[axis] = -brick_size / dir;
+        }
+        if t_next[axis] < 0.0 {
+            t_next[axis] = 0.0;
+        }
+    }
+    BrickTraversalInit {
+        steps,
+        t_next,
+        t_delta,
+    }
+}
+
+fn brick_linear_index(brick: [u32; 3], grid: [u32; 3]) -> usize {
+    ((brick[2] as usize * grid[1] as usize + brick[1] as usize) * grid[0] as usize)
+        + brick[0] as usize
+}
+
+fn world_to_voxel_space(world: Vec3, dims: [f32; 3], half_extents: [f32; 3]) -> Vec3 {
+    [
+        ((world[0] + half_extents[0]) / (2.0 * half_extents[0].max(1e-6))) * dims[0],
+        ((world[1] + half_extents[1]) / (2.0 * half_extents[1].max(1e-6))) * dims[1],
+        ((world[2] + half_extents[2]) / (2.0 * half_extents[2].max(1e-6))) * dims[2],
+    ]
+}
+
+fn voxel_to_brick_index(voxel: f32, brick_size: u32, grid_len: u32) -> i32 {
+    let brick = (voxel.max(0.0) / brick_size.max(1) as f32).floor() as i32;
+    brick.clamp(0, grid_len.saturating_sub(1) as i32)
+}
+
+fn sample_volume_nearest(volume: &U16Volume, world: Vec3, half_extents: [f32; 3]) -> u16 {
+    if world[0] < -half_extents[0]
+        || world[0] > half_extents[0]
+        || world[1] < -half_extents[1]
+        || world[1] > half_extents[1]
+        || world[2] < -half_extents[2]
+        || world[2] > half_extents[2]
     {
         return 0;
     }
-    let nx = (world[0] + 1.0) * 0.5;
-    let ny = (world[1] + 1.0) * 0.5;
-    let nz = (world[2] + 1.0) * 0.5;
+    let nx = (world[0] + half_extents[0]) / (2.0 * half_extents[0].max(1e-6));
+    let ny = (world[1] + half_extents[1]) / (2.0 * half_extents[1].max(1e-6));
+    let nz = (world[2] + half_extents[2]) / (2.0 * half_extents[2].max(1e-6));
     let x = (nx * (volume.width.saturating_sub(1) as f32)).round() as i32;
     let y = (ny * (volume.height.saturating_sub(1) as f32)).round() as i32;
     let z = (nz * (volume.depth.saturating_sub(1) as f32)).round() as i32;
@@ -1182,8 +1506,24 @@ fn sample_volume_nearest(volume: &U16Volume, world: Vec3) -> u16 {
     {
         return 0;
     }
-    let idx = ((z as usize * volume.height as usize + y as usize) * volume.width as usize) + x as usize;
+    let idx =
+        ((z as usize * volume.height as usize + y as usize) * volume.width as usize) + x as usize;
     volume.voxels[idx]
+}
+
+fn normalized_volume_half_extents(volume: &U16Volume, spatial_scale_zyx: [f32; 3]) -> Vec3 {
+    let sx = spatial_scale_zyx[2].max(1e-6);
+    let sy = spatial_scale_zyx[1].max(1e-6);
+    let sz = spatial_scale_zyx[0].max(1e-6);
+    let extent_x = volume.width.max(1) as f32 * sx;
+    let extent_y = volume.height.max(1) as f32 * sy;
+    let extent_z = volume.depth.max(1) as f32 * sz;
+    let max_extent = extent_x.max(extent_y).max(extent_z).max(1e-6);
+    [
+        (extent_x / max_extent).max(1e-3),
+        (extent_y / max_extent).max(1e-3),
+        (extent_z / max_extent).max(1e-3),
+    ]
 }
 
 fn ray_aabb_interval(origin: Vec3, dir: Vec3, min: Vec3, max: Vec3) -> Option<(f32, f32)> {
@@ -1337,7 +1677,9 @@ fn build_synthetic_graph_frame(
     let camera = camera_influence(camera);
     let mut seed =
         ((axis.t as u64) << 42) ^ ((axis.c as u64) << 21) ^ (axis.z as u64) ^ 0x9E37_79B9_7F4A_7C15;
-    seed ^= (camera.x.to_bits() as u64) ^ ((camera.y.to_bits() as u64) << 1) ^ ((camera.yaw.to_bits() as u64) << 2);
+    seed ^= (camera.x.to_bits() as u64)
+        ^ ((camera.y.to_bits() as u64) << 1)
+        ^ ((camera.yaw.to_bits() as u64) << 2);
     let point_count = 256 + ((axis.t + axis.c + axis.z) % 128);
     let x_bias = (camera.x * 3.0) as i32;
     let y_bias = (camera.y * 3.0) as i32;
@@ -1477,6 +1819,40 @@ fn storage_error_to_rpc(error: StorageError) -> RpcError {
     }
 }
 
+fn dataset_axis_remap(dataset: &lucida_protocol::DatasetHandle) -> BTreeMap<String, String> {
+    dataset
+        .multiscale_metadata
+        .get("axis_map")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<BTreeMap<String, String>>(value).ok())
+        .unwrap_or_default()
+}
+
+fn dataset_spatial_scale_zyx(dataset: &lucida_protocol::DatasetHandle) -> [f32; 3] {
+    let Some(values) = dataset
+        .multiscale_metadata
+        .get("spatial_scale_zyx")
+        .and_then(Value::as_array)
+    else {
+        return [1.0, 1.0, 1.0];
+    };
+    if values.len() != 3 {
+        return [1.0, 1.0, 1.0];
+    }
+
+    let mut scales = [1.0f32; 3];
+    for (index, value) in values.iter().enumerate() {
+        let Some(scale) = value.as_f64() else {
+            return [1.0, 1.0, 1.0];
+        };
+        if !scale.is_finite() || scale <= 0.0 {
+            return [1.0, 1.0, 1.0];
+        }
+        scales[index] = scale as f32;
+    }
+    scales
+}
+
 async fn preprocess_request(
     request: RpcRequestEnvelope,
     app_state: &AppState,
@@ -1547,18 +1923,13 @@ fn preprocess_layer_auto_contrast_request(
             StorageError::MissingDataset(format!("unknown session_id: {session_id}")),
         )
     })?;
-    let dataset_uri = session
-        .dataset
-        .as_ref()
-        .map(|dataset| dataset.uri.clone())
-        .ok_or_else(|| {
-            (
-                request.clone(),
-                StorageError::MissingDataset(format!(
-                    "session {session_id} has no opened dataset"
-                )),
-            )
-        })?;
+    let dataset = session.dataset.as_ref().ok_or_else(|| {
+        (
+            request.clone(),
+            StorageError::MissingDataset(format!("session {session_id} has no opened dataset")),
+        )
+    })?;
+    let dataset_uri = dataset.uri.clone();
     let layer_id = request
         .params
         .get("layer_id")
@@ -1567,7 +1938,9 @@ fn preprocess_layer_auto_contrast_request(
         .ok_or_else(|| {
             (
                 request.clone(),
-                StorageError::UnsupportedLayout("layer.auto_contrast requires layer_id".to_string()),
+                StorageError::UnsupportedLayout(
+                    "layer.auto_contrast requires layer_id".to_string(),
+                ),
             )
         })?;
     let layer = session.layers.get(&layer_id).ok_or_else(|| {
@@ -1581,9 +1954,7 @@ fn preprocess_layer_auto_contrast_request(
         _ => {
             return Err((
                 request.clone(),
-                StorageError::UnsupportedLayout(format!(
-                    "layer {layer_id} is not an image layer"
-                )),
+                StorageError::UnsupportedLayout(format!("layer {layer_id} is not an image layer")),
             ))
         }
     };
@@ -1602,7 +1973,9 @@ fn preprocess_layer_auto_contrast_request(
         ),
         ("z".to_string(), *axis_indices.get("z").unwrap_or(&0)),
     ]);
-    let plane = read_u16_plane(&dataset_uri, &axis_map).map_err(|err| (request.clone(), err))?;
+    let dataset_axis_remap = dataset_axis_remap(dataset);
+    let plane = read_u16_plane(&dataset_uri, &axis_map, &dataset_axis_remap)
+        .map_err(|err| (request.clone(), err))?;
     let contrast_limits = match method.as_str() {
         "robust_percentile_1_99" => robust_percentile_limits(&plane, 0.01, 0.99),
         "full_range" => [0, u16::MAX],
@@ -1640,7 +2013,9 @@ fn robust_percentile_limits(plane: &U16FramePlane, low: f64, high: f64) -> [u16;
         return [0, u16::MAX];
     }
 
-    let low_rank = ((count - 1) as f64 * low).round().clamp(0.0, (count - 1) as f64) as u64;
+    let low_rank = ((count - 1) as f64 * low)
+        .round()
+        .clamp(0.0, (count - 1) as f64) as u64;
     let high_rank = ((count - 1) as f64 * high)
         .round()
         .clamp(low_rank as f64, (count - 1) as f64) as u64;
@@ -1719,7 +2094,7 @@ pub fn parse_socket_path(args: &[String]) -> DaemonConfig {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
 
     use serde_json::json;
 
@@ -1733,6 +2108,78 @@ mod tests {
         assert_eq!(compute_3d_sample_count(128), 128);
         assert_eq!(compute_3d_sample_count(192), 192);
         assert_eq!(compute_3d_sample_count(512), 192);
+    }
+
+    #[test]
+    fn merge_raymarch_stats_accumulates_all_counters() {
+        let left = RaymarchStats {
+            bricks_traversed: 2,
+            bricks_sampled: 1,
+            samples_taken: 32,
+        };
+        let right = RaymarchStats {
+            bricks_traversed: 3,
+            bricks_sampled: 2,
+            samples_taken: 64,
+        };
+        let merged = merge_raymarch_stats(left, right);
+        assert_eq!(merged.bricks_traversed, 5);
+        assert_eq!(merged.bricks_sampled, 3);
+        assert_eq!(merged.samples_taken, 96);
+    }
+
+    #[test]
+    fn accelerated_volume_tracks_brick_maxima() {
+        let width = 9usize;
+        let height = 8usize;
+        let depth = 8usize;
+        let mut voxels = vec![0u16; width * height * depth];
+        let voxel_idx = |x: usize, y: usize, z: usize| ((z * height + y) * width) + x;
+        voxels[voxel_idx(1, 2, 3)] = 1200;
+        voxels[voxel_idx(8, 6, 7)] = 48000;
+        let volume = Arc::new(U16Volume {
+            width: width as u32,
+            height: height as u32,
+            depth: depth as u32,
+            voxels,
+        });
+
+        let accelerated = build_accelerated_volume(volume, 8).expect("accelerated volume");
+        assert_eq!(accelerated.grid, [2, 1, 1]);
+        assert_eq!(accelerated.brick_max.len(), 2);
+        assert_eq!(accelerated.brick_max[0], 1200);
+        assert_eq!(accelerated.brick_max[1], 48000);
+    }
+
+    #[test]
+    fn raymarch_skips_empty_bricks_for_sparse_volume() {
+        let width = 16usize;
+        let height = 16usize;
+        let depth = 16usize;
+        let mut voxels = vec![0u16; width * height * depth];
+        let voxel_idx = |x: usize, y: usize, z: usize| ((z * height + y) * width) + x;
+        for z in 0..8usize {
+            voxels[voxel_idx(8, 8, z)] = 42000;
+        }
+        let volume = Arc::new(U16Volume {
+            width: width as u32,
+            height: height as u32,
+            depth: depth as u32,
+            voxels,
+        });
+        let accelerated =
+            build_accelerated_volume(volume, BRICK_SIZE_VOXELS).expect("accelerated volume");
+        let origin = [0.0, 0.0, 3.2];
+        let dir = [0.0, 0.0, -1.0];
+        let (t_start, t_end) = ray_aabb_interval(origin, dir, [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
+            .expect("ray intersects volume");
+        let (peak, stats) =
+            raymarch_mip_brick_skip(&accelerated, origin, dir, t_start, t_end, 128, [1.0; 3]);
+        assert!(peak > 0);
+        assert!(stats.bricks_traversed > 0);
+        assert!(stats.bricks_sampled > 0);
+        assert!(stats.bricks_sampled < stats.bricks_traversed);
+        assert!(stats.samples_taken > 0);
     }
 
     #[tokio::test]
@@ -1765,7 +2212,9 @@ mod tests {
         };
 
         let (response, _) = daemon.process_request(request).await;
-        let result = response.result.expect("inspect should return result payload");
+        let result = response
+            .result
+            .expect("inspect should return result payload");
         assert_eq!(result["exists"], json!(false));
         assert_eq!(result["camera"], Value::Null);
         assert_eq!(result["render_mode"], Value::Null);
@@ -1971,7 +2420,9 @@ mod tests {
                 timestamp: now_utc(),
             })
             .await;
-        let frame_open_result = frame_open_response.result.expect("frame.channel.open result");
+        let frame_open_result = frame_open_response
+            .result
+            .expect("frame.channel.open result");
         let channel_token = frame_open_result["channel_token"]
             .as_str()
             .expect("channel token")
@@ -1995,7 +2446,10 @@ mod tests {
         {
             let runtime = daemon.runtime.lock().await;
             assert!(
-                runtime.volume_cache.keys().any(|key| key.session_id == session_id),
+                runtime
+                    .volume_cache
+                    .keys()
+                    .any(|key| key.session_id == session_id),
                 "expected cache entry for session"
             );
         }
@@ -2015,7 +2469,10 @@ mod tests {
 
         let runtime = daemon.runtime.lock().await;
         assert!(
-            !runtime.volume_cache.keys().any(|key| key.session_id == session_id),
+            !runtime
+                .volume_cache
+                .keys()
+                .any(|key| key.session_id == session_id),
             "cache should be cleared for closed dataset session"
         );
     }
@@ -2142,8 +2599,8 @@ mod tests {
             .expect("session id string")
             .to_string();
 
-        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../fixtures/ome_zarr_v05_min");
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ome_zarr_v05_min");
         let open_request = RpcRequestEnvelope {
             jsonrpc: "2.0".to_string(),
             protocol_version: PROTOCOL_VERSION.to_string(),
@@ -2166,7 +2623,10 @@ mod tests {
             timestamp: now_utc(),
         };
         let (layer_response, _) = daemon.process_request(layer_request).await;
-        assert!(layer_response.error.is_none(), "layer.add_image should succeed");
+        assert!(
+            layer_response.error.is_none(),
+            "layer.add_image should succeed"
+        );
 
         let frame_open_request = RpcRequestEnvelope {
             jsonrpc: "2.0".to_string(),
@@ -2178,7 +2638,9 @@ mod tests {
             timestamp: now_utc(),
         };
         let (frame_open_response, _) = daemon.process_request(frame_open_request).await;
-        let frame_open_result = frame_open_response.result.expect("frame.channel.open result");
+        let frame_open_result = frame_open_response
+            .result
+            .expect("frame.channel.open result");
         let channel_token = frame_open_result["channel_token"]
             .as_str()
             .expect("frame token")
@@ -2241,8 +2703,8 @@ mod tests {
             .expect("session id")
             .to_string();
 
-        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../fixtures/ome_zarr_v05_min");
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ome_zarr_v05_min");
         let (open_response, _) = daemon
             .process_request(RpcRequestEnvelope {
                 jsonrpc: "2.0".to_string(),
@@ -2280,7 +2742,9 @@ mod tests {
                 timestamp: now_utc(),
             })
             .await;
-        let frame_open_result = frame_open_response.result.expect("frame.channel.open result");
+        let frame_open_result = frame_open_response
+            .result
+            .expect("frame.channel.open result");
         let channel_token = frame_open_result["channel_token"]
             .as_str()
             .expect("channel token")
@@ -2529,6 +2993,586 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn three_d_perf_reports_brick_skip_metrics() {
+        let daemon = Daemon::new();
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/ome_zarr_v05_structured_3d");
+        let (open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-open".to_string(),
+                method: "dataset.open".to_string(),
+                params: json!({"uri": fixture_path.display().to_string(), "read_only": true}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(open_response.error.is_none());
+
+        let (layer_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-layer".to_string(),
+                method: "layer.add_image".to_string(),
+                params: json!({"layer_id":"image-1","channel":0}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(layer_response.error.is_none());
+
+        let (mode_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-mode".to_string(),
+                method: "view.set_render_mode".to_string(),
+                params: json!({"mode":"3d"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(mode_response.error.is_none());
+
+        let (frame_open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-frame-open".to_string(),
+                method: "frame.channel.open".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let frame_open_result = frame_open_response
+            .result
+            .expect("frame.channel.open result");
+        let channel_token = frame_open_result["channel_token"]
+            .as_str()
+            .expect("channel token")
+            .to_string();
+        let request = FrameRequestHeader {
+            frame_protocol_version: FRAME_PROTOCOL_VERSION.to_string(),
+            request_id: "frame-3d-perf".to_string(),
+            channel_token,
+            session_id,
+            axis_indices: FrameAxisIndices { t: 0, c: 0, z: 0 },
+            viewport: lucida_protocol::FrameViewport {
+                width: 64,
+                height: 48,
+            },
+        };
+        let (header, _payload, perf) = daemon.process_frame_request_with_metrics(request).await;
+        assert_eq!(header.status, "ok");
+        let perf = perf.expect("3d perf metrics");
+        assert!(perf.sample_count > 0);
+        assert!(perf.bricks_traversed > 0);
+        assert!(perf.bricks_sampled > 0);
+        assert!(perf.bricks_sampled <= perf.bricks_traversed);
+        assert!(perf.samples_taken > 0);
+        assert!((0.0..=1.0).contains(&perf.skip_ratio));
+        assert!(perf.raymarch_parallel);
+        assert!(perf.raymarch_workers > 0);
+        assert_eq!(perf.rows_parallelized, header.height);
+
+        let theoretical_full_samples =
+            perf.sample_count as u64 * header.width as u64 * header.height as u64;
+        assert!(perf.samples_taken < theoretical_full_samples);
+    }
+
+    #[tokio::test]
+    async fn dataset_open_with_axis_remap_surfaces_normalized_layout() {
+        let daemon = Daemon::new();
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/ome_zarr_v05_axis_remap");
+        let (open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id),
+                request_id: "req-open".to_string(),
+                method: "dataset.open".to_string(),
+                params: json!({
+                    "uri": fixture_path.display().to_string(),
+                    "read_only": true,
+                    "axis_map": {"channel": "c"}
+                }),
+                timestamp: now_utc(),
+            })
+            .await;
+
+        assert!(open_response.error.is_none(), "dataset.open should succeed");
+        let result = open_response.result.expect("dataset.open result");
+        let metadata = &result["dataset"]["multiscale_metadata"];
+        assert_eq!(metadata["layout_version"], json!(1));
+        assert_eq!(metadata["canonical_to_source_dim"]["z"], json!(0));
+        assert_eq!(metadata["canonical_to_source_dim"]["c"], json!(3));
+        assert_eq!(metadata["implicit_singleton_axes"], json!(["t"]));
+        assert_eq!(metadata["spatial_scale_zyx"], json!([1.8, 0.5, 0.5]));
+    }
+
+    #[tokio::test]
+    async fn ome_zarr_v04_smoke_opens_and_reads_frame() {
+        let daemon = Daemon::new();
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ome_zarr_v04_smoke");
+        let (open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-open".to_string(),
+                method: "dataset.open".to_string(),
+                params: json!({"uri": fixture_path.display().to_string(), "read_only": true}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(open_response.error.is_none(), "dataset.open should succeed");
+        let result = open_response.result.expect("dataset.open result");
+        assert_eq!(
+            result["dataset"]["multiscale_metadata"]["compatibility_mode"],
+            json!("best_effort_0_4")
+        );
+
+        let (layer_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-layer".to_string(),
+                method: "layer.add_image".to_string(),
+                params: json!({"layer_id":"image-1","channel":0}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(layer_response.error.is_none());
+
+        let (frame_open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-frame-open".to_string(),
+                method: "frame.channel.open".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let frame_open_result = frame_open_response
+            .result
+            .expect("frame.channel.open result");
+        let channel_token = frame_open_result["channel_token"]
+            .as_str()
+            .expect("channel token")
+            .to_string();
+
+        let (header, payload) = daemon
+            .process_frame_request(FrameRequestHeader {
+                frame_protocol_version: FRAME_PROTOCOL_VERSION.to_string(),
+                request_id: "frame-v04".to_string(),
+                channel_token,
+                session_id,
+                axis_indices: FrameAxisIndices { t: 0, c: 0, z: 2 },
+                viewport: lucida_protocol::FrameViewport {
+                    width: 64,
+                    height: 64,
+                },
+            })
+            .await;
+        assert_eq!(header.status, "ok");
+        assert_eq!(header.width, 16);
+        assert_eq!(header.height, 16);
+        assert_eq!(payload.len(), 16 * 16 * 2);
+        let first = u16::from_le_bytes([payload[0], payload[1]]);
+        assert_eq!(first, 3000);
+    }
+
+    #[tokio::test]
+    async fn unsupported_ome_zarr_v04_ambiguity_returns_explicit_error() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        std::fs::write(
+            temp_dir.path().join(".zattrs"),
+            r#"{"multiscales":[{"version":"0.4","datasets":[{"path":"0"}]}]}"#,
+        )
+        .expect("write root attrs");
+        std::fs::create_dir_all(temp_dir.path().join("0")).expect("create array dir");
+        std::fs::write(
+            temp_dir.path().join("0/.zarray"),
+            r#"{
+                "zarr_format": 2,
+                "shape": [4,8,8],
+                "chunks": [1,8,8],
+                "dtype": "<u2",
+                "compressor": null,
+                "dimension_separator": "/"
+            }"#,
+        )
+        .expect("write zarray");
+
+        let daemon = Daemon::new();
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let (open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id),
+                request_id: "req-open".to_string(),
+                method: "dataset.open".to_string(),
+                params: json!({"uri": temp_dir.path().display().to_string(), "read_only": true}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let error = open_response.error.expect("expected error");
+        assert!(error.message.contains("ambiguous axis metadata"));
+    }
+
+    #[tokio::test]
+    async fn anisotropic_fixture_changes_three_d_payload_vs_isotropic() {
+        let daemon = Daemon::new();
+
+        async fn open_three_d_session(
+            daemon: &Daemon,
+            fixture: PathBuf,
+            session_suffix: &str,
+        ) -> (String, String) {
+            let (create_response, _) = daemon
+                .process_request(RpcRequestEnvelope {
+                    jsonrpc: "2.0".to_string(),
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    session_id: None,
+                    request_id: format!("req-create-{session_suffix}"),
+                    method: "session.create".to_string(),
+                    params: json!({}),
+                    timestamp: now_utc(),
+                })
+                .await;
+            let session_id = create_response.result.expect("session.create result")["session_id"]
+                .as_str()
+                .expect("session id")
+                .to_string();
+
+            let (open_response, _) = daemon
+                .process_request(RpcRequestEnvelope {
+                    jsonrpc: "2.0".to_string(),
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    session_id: Some(session_id.clone()),
+                    request_id: format!("req-open-{session_suffix}"),
+                    method: "dataset.open".to_string(),
+                    params: json!({"uri": fixture.display().to_string(), "read_only": true}),
+                    timestamp: now_utc(),
+                })
+                .await;
+            assert!(open_response.error.is_none());
+
+            let (layer_response, _) = daemon
+                .process_request(RpcRequestEnvelope {
+                    jsonrpc: "2.0".to_string(),
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    session_id: Some(session_id.clone()),
+                    request_id: format!("req-layer-{session_suffix}"),
+                    method: "layer.add_image".to_string(),
+                    params: json!({"layer_id":"image-1","channel":0}),
+                    timestamp: now_utc(),
+                })
+                .await;
+            assert!(layer_response.error.is_none());
+
+            let (mode_response, _) = daemon
+                .process_request(RpcRequestEnvelope {
+                    jsonrpc: "2.0".to_string(),
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    session_id: Some(session_id.clone()),
+                    request_id: format!("req-mode-{session_suffix}"),
+                    method: "view.set_render_mode".to_string(),
+                    params: json!({"mode":"3d"}),
+                    timestamp: now_utc(),
+                })
+                .await;
+            assert!(mode_response.error.is_none());
+
+            let (camera_mode_response, _) = daemon
+                .process_request(RpcRequestEnvelope {
+                    jsonrpc: "2.0".to_string(),
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    session_id: Some(session_id.clone()),
+                    request_id: format!("req-camera-mode-{session_suffix}"),
+                    method: "camera.set_mode".to_string(),
+                    params: json!({"mode":"freefly"}),
+                    timestamp: now_utc(),
+                })
+                .await;
+            assert!(camera_mode_response.error.is_none());
+
+            let (camera_pose_response, _) = daemon
+                .process_request(RpcRequestEnvelope {
+                    jsonrpc: "2.0".to_string(),
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    session_id: Some(session_id.clone()),
+                    request_id: format!("req-camera-pose-{session_suffix}"),
+                    method: "camera.set_pose".to_string(),
+                    params: json!({"pose":{"position":[0.0,0.0,3.2],"yaw_pitch_roll":[0.0,0.0,0.0],"speed":1.5}}),
+                    timestamp: now_utc(),
+                })
+                .await;
+            assert!(camera_pose_response.error.is_none());
+
+            let (frame_open_response, _) = daemon
+                .process_request(RpcRequestEnvelope {
+                    jsonrpc: "2.0".to_string(),
+                    protocol_version: PROTOCOL_VERSION.to_string(),
+                    session_id: Some(session_id.clone()),
+                    request_id: format!("req-frame-open-{session_suffix}"),
+                    method: "frame.channel.open".to_string(),
+                    params: json!({}),
+                    timestamp: now_utc(),
+                })
+                .await;
+            let frame_open_result = frame_open_response
+                .result
+                .expect("frame.channel.open result");
+            let channel_token = frame_open_result["channel_token"]
+                .as_str()
+                .expect("channel token")
+                .to_string();
+            (session_id, channel_token)
+        }
+
+        let isotropic_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/ome_zarr_v05_isotropic_3d");
+        let anisotropic_fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../fixtures/ome_zarr_v05_anisotropic_3d");
+
+        let (iso_session, iso_token) =
+            open_three_d_session(&daemon, isotropic_fixture, "iso").await;
+        let (aniso_session, aniso_token) =
+            open_three_d_session(&daemon, anisotropic_fixture, "aniso").await;
+
+        let (iso_header, iso_payload) = daemon
+            .process_frame_request(FrameRequestHeader {
+                frame_protocol_version: FRAME_PROTOCOL_VERSION.to_string(),
+                request_id: "frame-iso".to_string(),
+                channel_token: iso_token,
+                session_id: iso_session,
+                axis_indices: FrameAxisIndices { t: 0, c: 0, z: 0 },
+                viewport: lucida_protocol::FrameViewport {
+                    width: 96,
+                    height: 72,
+                },
+            })
+            .await;
+        let (aniso_header, aniso_payload) = daemon
+            .process_frame_request(FrameRequestHeader {
+                frame_protocol_version: FRAME_PROTOCOL_VERSION.to_string(),
+                request_id: "frame-aniso".to_string(),
+                channel_token: aniso_token,
+                session_id: aniso_session,
+                axis_indices: FrameAxisIndices { t: 0, c: 0, z: 0 },
+                viewport: lucida_protocol::FrameViewport {
+                    width: 96,
+                    height: 72,
+                },
+            })
+            .await;
+
+        assert_eq!(iso_header.status, "ok");
+        assert_eq!(aniso_header.status, "ok");
+        assert_ne!(iso_payload, aniso_payload);
+    }
+
+    #[tokio::test]
+    async fn three_d_payload_changes_across_t_and_c_axes() {
+        let daemon = Daemon::new();
+        let (create_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: None,
+                request_id: "req-create".to_string(),
+                method: "session.create".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let session_id = create_response.result.expect("session.create result")["session_id"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../fixtures/ome_zarr_v05_tc_3d");
+        let (open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-open".to_string(),
+                method: "dataset.open".to_string(),
+                params: json!({"uri": fixture_path.display().to_string(), "read_only": true}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(open_response.error.is_none());
+
+        let (layer_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-layer".to_string(),
+                method: "layer.add_image".to_string(),
+                params: json!({"layer_id":"image-1"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(layer_response.error.is_none());
+
+        let (mode_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-mode".to_string(),
+                method: "view.set_render_mode".to_string(),
+                params: json!({"mode":"3d"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(mode_response.error.is_none());
+
+        let (camera_mode_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-camera-mode".to_string(),
+                method: "camera.set_mode".to_string(),
+                params: json!({"mode":"freefly"}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(camera_mode_response.error.is_none());
+
+        let (camera_pose_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-camera-pose".to_string(),
+                method: "camera.set_pose".to_string(),
+                params: json!({"pose":{"position":[0.0,0.0,3.2],"yaw_pitch_roll":[0.0,0.0,0.0],"speed":1.5}}),
+                timestamp: now_utc(),
+            })
+            .await;
+        assert!(camera_pose_response.error.is_none());
+
+        let (frame_open_response, _) = daemon
+            .process_request(RpcRequestEnvelope {
+                jsonrpc: "2.0".to_string(),
+                protocol_version: PROTOCOL_VERSION.to_string(),
+                session_id: Some(session_id.clone()),
+                request_id: "req-frame-open".to_string(),
+                method: "frame.channel.open".to_string(),
+                params: json!({}),
+                timestamp: now_utc(),
+            })
+            .await;
+        let frame_open_result = frame_open_response
+            .result
+            .expect("frame.channel.open result");
+        let channel_token = frame_open_result["channel_token"]
+            .as_str()
+            .expect("channel token")
+            .to_string();
+
+        let request = |request_id: &str, t: usize, c: usize| FrameRequestHeader {
+            frame_protocol_version: FRAME_PROTOCOL_VERSION.to_string(),
+            request_id: request_id.to_string(),
+            channel_token: channel_token.clone(),
+            session_id: session_id.clone(),
+            axis_indices: FrameAxisIndices { t, c, z: 12 },
+            viewport: lucida_protocol::FrameViewport {
+                width: 96,
+                height: 72,
+            },
+        };
+
+        let (header_a, payload_a) = daemon.process_frame_request(request("frame-a", 0, 0)).await;
+        let (header_b, payload_b) = daemon.process_frame_request(request("frame-b", 1, 0)).await;
+        let (header_c, payload_c) = daemon.process_frame_request(request("frame-c", 1, 2)).await;
+        assert_eq!(header_a.status, "ok");
+        assert_eq!(header_b.status, "ok");
+        assert_eq!(header_c.status, "ok");
+        assert_ne!(payload_a, payload_b);
+        assert_ne!(payload_b, payload_c);
+    }
+
+    #[tokio::test]
     async fn frame_request_rejects_invalid_token() {
         let daemon = Daemon::new();
         let (header, payload) = daemon
@@ -2546,12 +3590,10 @@ mod tests {
             .await;
         assert_eq!(header.status, "error");
         assert!(payload.is_empty());
-        assert!(
-            header
-                .error
-                .as_deref()
-                .unwrap_or_default()
-                .contains("invalid frame channel token")
-        );
+        assert!(header
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("invalid frame channel token"));
     }
 }
