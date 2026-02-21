@@ -730,10 +730,10 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
 
             let mut rotate_local = [0.0f64, 0.0, 0.0];
             if held_keys.contains(&KeyCode::KeyJ) {
-                rotate_local[0] -= 1.0;
+                rotate_local[0] += 1.0;
             }
             if held_keys.contains(&KeyCode::KeyL) {
-                rotate_local[0] += 1.0;
+                rotate_local[0] -= 1.0;
             }
             if held_keys.contains(&KeyCode::KeyI) {
                 rotate_local[1] += 1.0;
@@ -754,7 +754,7 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 return Ok(false);
             }
 
-            let (forward, right, up) = freefly_basis(self.freefly_pose.yaw_pitch_roll);
+            let basis = freefly_pose_to_basis(self.freefly_pose.yaw_pitch_roll);
             if moving {
                 let length = length3(move_local).max(1e-9);
                 let move_local = [
@@ -764,9 +764,15 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 ];
                 let step = self.freefly_pose.speed * dt_s * 2.5;
                 let world_delta = [
-                    right[0] * move_local[0] + up[0] * move_local[1] + forward[0] * move_local[2],
-                    right[1] * move_local[0] + up[1] * move_local[1] + forward[1] * move_local[2],
-                    right[2] * move_local[0] + up[2] * move_local[1] + forward[2] * move_local[2],
+                    basis.right[0] * move_local[0]
+                        + basis.up[0] * move_local[1]
+                        + basis.forward[0] * move_local[2],
+                    basis.right[1] * move_local[0]
+                        + basis.up[1] * move_local[1]
+                        + basis.forward[1] * move_local[2],
+                    basis.right[2] * move_local[0]
+                        + basis.up[2] * move_local[1]
+                        + basis.forward[2] * move_local[2],
                 ];
                 self.freefly_pose.position[0] += world_delta[0] * step;
                 self.freefly_pose.position[1] += world_delta[1] * step;
@@ -781,15 +787,12 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                     rotate_local[2] / length,
                 ];
                 let rotation_speed = dt_s * 1.8;
-                let (yaw_delta, pitch_delta) = remap_look_deltas_by_roll(
+                self.freefly_pose.yaw_pitch_roll = apply_local_look_deltas(
+                    self.freefly_pose.yaw_pitch_roll,
                     rotate_local[0] * rotation_speed,
                     rotate_local[1] * rotation_speed,
-                    self.freefly_pose.yaw_pitch_roll[2],
+                    rotate_local[2] * rotation_speed,
                 );
-                self.freefly_pose.yaw_pitch_roll[0] += yaw_delta;
-                self.freefly_pose.yaw_pitch_roll[1] =
-                    (self.freefly_pose.yaw_pitch_roll[1] + pitch_delta).clamp(-1.45, 1.45);
-                self.freefly_pose.yaw_pitch_roll[2] += rotate_local[2] * rotation_speed;
             }
 
             self.commit_freefly_pose()?;
@@ -833,14 +836,12 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
                 return Ok(RenderUpdate::None);
             }
             let sensitivity = 0.004;
-            let (yaw_delta, pitch_delta) = remap_look_deltas_by_roll(
+            self.freefly_pose.yaw_pitch_roll = apply_local_look_deltas(
+                self.freefly_pose.yaw_pitch_roll,
                 delta_x * sensitivity,
                 -delta_y * sensitivity,
-                self.freefly_pose.yaw_pitch_roll[2],
+                0.0,
             );
-            self.freefly_pose.yaw_pitch_roll[0] += yaw_delta;
-            self.freefly_pose.yaw_pitch_roll[1] =
-                (self.freefly_pose.yaw_pitch_roll[1] + pitch_delta).clamp(-1.45, 1.45);
             self.commit_freefly_pose()?;
             Ok(RenderUpdate::FrameAndRedraw)
         }
@@ -1240,9 +1241,16 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         )
     }
 
-    fn freefly_basis(yaw_pitch_roll: [f64; 3]) -> ([f64; 3], [f64; 3], [f64; 3]) {
+    #[derive(Clone, Copy, Debug)]
+    struct OrientationBasis {
+        forward: [f64; 3],
+        right: [f64; 3],
+        up: [f64; 3],
+    }
+
+    fn freefly_pose_to_basis(yaw_pitch_roll: [f64; 3]) -> OrientationBasis {
         let yaw = yaw_pitch_roll[0];
-        let pitch = yaw_pitch_roll[1];
+        let pitch = yaw_pitch_roll[1].clamp(-1.45, 1.45);
         let roll = yaw_pitch_roll[2];
 
         let mut forward = [
@@ -1252,13 +1260,9 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         ];
         forward = normalize3(forward);
 
-        let world_up = [0.0, 1.0, 0.0];
-        let mut right = cross3(forward, world_up);
-        if length3(right) < 1e-6 {
-            right = [1.0, 0.0, 0.0];
-        }
-        right = normalize3(right);
-        let mut up = normalize3(cross3(right, forward));
+        let mut reference = reference_basis_from_forward(forward);
+        let right = reference.right;
+        let up = reference.up;
 
         let (sin_roll, cos_roll) = roll.sin_cos();
         let rolled_right = normalize3([
@@ -1266,13 +1270,16 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
             right[1] * cos_roll + up[1] * sin_roll,
             right[2] * cos_roll + up[2] * sin_roll,
         ]);
-        up = normalize3([
+        reference.up = normalize3([
             up[0] * cos_roll - right[0] * sin_roll,
             up[1] * cos_roll - right[1] * sin_roll,
             up[2] * cos_roll - right[2] * sin_roll,
         ]);
-
-        (forward, rolled_right, up)
+        OrientationBasis {
+            forward,
+            right: rolled_right,
+            up: reference.up,
+        }
     }
 
     fn cross3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -1292,18 +1299,99 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         [v[0] / len, v[1] / len, v[2] / len]
     }
 
+    fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    fn scale3(v: [f64; 3], s: f64) -> [f64; 3] {
+        [v[0] * s, v[1] * s, v[2] * s]
+    }
+
+    fn add3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+
+    fn reference_basis_from_forward(forward: [f64; 3]) -> OrientationBasis {
+        let mut right = cross3(forward, [0.0, 1.0, 0.0]);
+        if length3(right) < 1e-6 {
+            right = cross3(forward, [1.0, 0.0, 0.0]);
+        }
+        right = normalize3(right);
+        let up = normalize3(cross3(right, forward));
+        OrientationBasis { forward, right, up }
+    }
+
+    fn orthonormalize_basis(basis: OrientationBasis) -> OrientationBasis {
+        let mut forward = normalize3(basis.forward);
+        let right_candidate = cross3(forward, basis.up);
+        let mut right = if length3(right_candidate) < 1e-6 {
+            reference_basis_from_forward(forward).right
+        } else {
+            normalize3(right_candidate)
+        };
+        if dot3(right, basis.right) < 0.0 {
+            right = scale3(right, -1.0);
+        }
+        let up = normalize3(cross3(right, forward));
+        if dot3(forward, basis.forward) < 0.0 {
+            forward = scale3(forward, -1.0);
+        }
+        OrientationBasis { forward, right, up }
+    }
+
+    fn rotate_vec_around_axis(vector: [f64; 3], axis: [f64; 3], angle: f64) -> [f64; 3] {
+        if angle.abs() < 1e-12 {
+            return vector;
+        }
+        let axis = normalize3(axis);
+        let (sin_theta, cos_theta) = angle.sin_cos();
+        let term_a = scale3(vector, cos_theta);
+        let term_b = scale3(cross3(axis, vector), sin_theta);
+        let term_c = scale3(axis, dot3(axis, vector) * (1.0 - cos_theta));
+        add3(add3(term_a, term_b), term_c)
+    }
+
+    fn basis_to_yaw_pitch_roll(basis: OrientationBasis) -> [f64; 3] {
+        let basis = orthonormalize_basis(basis);
+        let pitch = basis.forward[1].clamp(-1.0, 1.0).asin().clamp(-1.45, 1.45);
+        let yaw = basis.forward[0].atan2(-basis.forward[2]);
+        let reference = reference_basis_from_forward(basis.forward);
+        let sin_roll = dot3(basis.right, reference.up);
+        let cos_roll = dot3(basis.right, reference.right);
+        let roll = sin_roll.atan2(cos_roll);
+        [yaw, pitch, roll]
+    }
+
+    fn apply_local_look_deltas(
+        yaw_pitch_roll: [f64; 3],
+        yaw_delta: f64,
+        pitch_delta: f64,
+        roll_delta: f64,
+    ) -> [f64; 3] {
+        let mut basis = freefly_pose_to_basis(yaw_pitch_roll);
+
+        basis.forward = rotate_vec_around_axis(basis.forward, basis.up, yaw_delta);
+        basis.right = rotate_vec_around_axis(basis.right, basis.up, yaw_delta);
+        basis.up = rotate_vec_around_axis(basis.up, basis.up, yaw_delta);
+        basis = orthonormalize_basis(basis);
+
+        basis.forward = rotate_vec_around_axis(basis.forward, basis.right, pitch_delta);
+        basis.up = rotate_vec_around_axis(basis.up, basis.right, pitch_delta);
+        basis.right = rotate_vec_around_axis(basis.right, basis.right, pitch_delta);
+        basis = orthonormalize_basis(basis);
+
+        basis.right = rotate_vec_around_axis(basis.right, basis.forward, roll_delta);
+        basis.up = rotate_vec_around_axis(basis.up, basis.forward, roll_delta);
+        basis.forward = rotate_vec_around_axis(basis.forward, basis.forward, roll_delta);
+        basis = orthonormalize_basis(basis);
+
+        basis_to_yaw_pitch_roll(basis)
+    }
+
     fn approx_vec3(left: [f64; 3], right: [f64; 3], eps: f64) -> bool {
         (left[0] - right[0]).abs() <= eps
             && (left[1] - right[1]).abs() <= eps
             && (left[2] - right[2]).abs() <= eps
-    }
-
-    fn remap_look_deltas_by_roll(local_yaw: f64, local_pitch: f64, roll: f64) -> (f64, f64) {
-        let (sin_roll, cos_roll) = roll.sin_cos();
-        (
-            local_yaw * cos_roll - local_pitch * sin_roll,
-            local_yaw * sin_roll + local_pitch * cos_roll,
-        )
     }
 
     fn frame_axis_from_view(view: Option<&ViewSummary>) -> FrameAxisIndices {
@@ -2739,18 +2827,28 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
     #[cfg(test)]
     mod tests {
         use super::{
+            apply_local_look_deltas, basis_to_yaw_pitch_roll, freefly_pose_to_basis,
             can_settle_interactive_tier, interactive_3d_viewport, normalized_scroll_steps,
             pan_center_for_cursor_anchor, payload_has_nonzero_u16, robust_percentile_limits_u16,
-            remap_look_deltas_by_roll, texel_coords_from_uv_for_mode, world_point_from_cursor,
+            rotate_vec_around_axis, texel_coords_from_uv_for_mode, world_point_from_cursor,
             zoom_scale_factor,
         };
-        use std::{f64::consts::FRAC_PI_2, time::{Duration, Instant}};
+        use std::{
+            f64::consts::{FRAC_PI_2, PI},
+            time::{Duration, Instant},
+        };
 
         fn approx_eq(left: f64, right: f64, eps: f64) {
             assert!(
                 (left - right).abs() <= eps,
                 "left={left}, right={right}, eps={eps}"
             );
+        }
+
+        fn approx_vec3(left: [f64; 3], right: [f64; 3], eps: f64) {
+            approx_eq(left[0], right[0], eps);
+            approx_eq(left[1], right[1], eps);
+            approx_eq(left[2], right[2], eps);
         }
 
         #[test]
@@ -2923,18 +3021,61 @@ fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
         }
 
         #[test]
-        fn look_deltas_follow_camera_roll_space() {
-            let (yaw0, pitch0) = remap_look_deltas_by_roll(0.4, -0.2, 0.0);
-            approx_eq(yaw0, 0.4, 1e-9);
-            approx_eq(pitch0, -0.2, 1e-9);
+        fn local_yaw_is_camera_aligned_after_ninety_degree_roll() {
+            let pose = [0.0, 0.0, FRAC_PI_2];
+            let before = freefly_pose_to_basis(pose);
+            let yaw_delta = 0.3;
+            let after_pose = apply_local_look_deltas(pose, yaw_delta, 0.0, 0.0);
+            let after = freefly_pose_to_basis(after_pose);
+            let expected_forward = rotate_vec_around_axis(before.forward, before.up, yaw_delta);
+            approx_vec3(after.forward, expected_forward, 1e-6);
+        }
 
-            let (yaw_r, pitch_r) = remap_look_deltas_by_roll(0.4, 0.0, FRAC_PI_2);
-            assert!(yaw_r.abs() < 1e-6);
-            assert!(pitch_r.abs() > 0.35);
+        #[test]
+        fn local_pitch_is_camera_aligned_after_arbitrary_roll_and_yaw() {
+            let pose = [0.7, 0.2, 1.1];
+            let before = freefly_pose_to_basis(pose);
+            let pitch_delta = -0.25;
+            let after_pose = apply_local_look_deltas(pose, 0.0, pitch_delta, 0.0);
+            let after = freefly_pose_to_basis(after_pose);
+            let expected_forward = rotate_vec_around_axis(before.forward, before.right, pitch_delta);
+            approx_vec3(after.forward, expected_forward, 1e-6);
+        }
 
-            let (yaw_p, pitch_p) = remap_look_deltas_by_roll(0.0, 0.4, FRAC_PI_2);
-            assert!(pitch_p.abs() < 1e-6);
-            assert!(yaw_p.abs() > 0.35);
+        #[test]
+        fn pose_basis_roundtrip_is_orientation_stable() {
+            let pose = [0.9, -0.3, PI * 0.42];
+            let basis_a = freefly_pose_to_basis(pose);
+            let pose_b = basis_to_yaw_pitch_roll(basis_a);
+            let basis_b = freefly_pose_to_basis(pose_b);
+            approx_vec3(basis_a.forward, basis_b.forward, 1e-6);
+            approx_vec3(basis_a.right, basis_b.right, 1e-6);
+            approx_vec3(basis_a.up, basis_b.up, 1e-6);
+        }
+
+        #[test]
+        fn mouse_and_keyboard_look_match_for_equal_local_deltas() {
+            let pose = [0.3, -0.1, 0.8];
+            let yaw_delta = 0.14;
+            let pitch_delta = -0.09;
+
+            let keyboard_pose = apply_local_look_deltas(pose, yaw_delta, pitch_delta, 0.0);
+
+            let mouse_sensitivity = 0.004;
+            let dx = yaw_delta / mouse_sensitivity;
+            let dy = -pitch_delta / mouse_sensitivity;
+            let mouse_pose = apply_local_look_deltas(
+                pose,
+                dx * mouse_sensitivity,
+                -dy * mouse_sensitivity,
+                0.0,
+            );
+
+            let keyboard_basis = freefly_pose_to_basis(keyboard_pose);
+            let mouse_basis = freefly_pose_to_basis(mouse_pose);
+            approx_vec3(keyboard_basis.forward, mouse_basis.forward, 1e-8);
+            approx_vec3(keyboard_basis.right, mouse_basis.right, 1e-8);
+            approx_vec3(keyboard_basis.up, mouse_basis.up, 1e-8);
         }
     }
 
