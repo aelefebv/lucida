@@ -1,4 +1,13 @@
+"""Top-level module entrypoint for the Lucida CLI."""
+
+
 def main():
+    """Run the main CLI entrypoint.
+
+    Returns
+    -------
+    None
+    """
     pass
 
 

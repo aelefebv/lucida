@@ -1,3 +1,5 @@
+"""OME-Zarr metadata reader with validation and best-effort normalization."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -22,6 +24,25 @@ _AXIS_TYPES = {"x", "y", "z", "c", "t"}
 
 @dataclass(slots=True)
 class OMEZarrReadResult:
+    """Container for OME-Zarr metadata extracted from a store.
+
+    Attributes
+    ----------
+    axes:
+        Parsed axes metadata.
+    shape:
+        Shape of the base multiscale level.
+    dtype:
+        Numpy dtype for arrays.
+    channels:
+        Parsed channel definitions.
+    multiscales:
+        Parsed multiscale image definitions.
+    raw_metadata:
+        Collected raw metadata for diagnostics.
+    recommended_tile_px:
+        Suggested tile dimensions.
+    """
     axes: list[AxisDef]
     shape: list[int]
     dtype: str
@@ -35,6 +56,20 @@ def read_omezarr(
     uri: str,
     include_full_raw_metadata: bool = False,
 ) -> tuple[OMEZarrReadResult, list[ApiWarning]]:
+    """Read and normalize multiscale metadata from an OME-Zarr dataset URI.
+
+    Parameters
+    ----------
+    uri:
+        URI of the OME-Zarr dataset.
+    include_full_raw_metadata:
+        Include full root and array metadata when true.
+
+    Returns
+    -------
+    tuple[OMEZarrReadResult, list[ApiWarning]]
+        Parsed dataset summary and warnings.
+    """
     warnings: list[ApiWarning] = []
     try:
         mapper = fsspec.get_mapper(uri)
@@ -243,6 +278,13 @@ def read_omezarr(
 
 
 def _attrs_dict(attrs: Any) -> dict[str, Any]:
+    """Convert Zarr attributes-like objects into dictionaries.
+
+    Parameters
+    ----------
+    attrs:
+        Raw attributes object.
+    """
     if hasattr(attrs, "asdict"):
         raw = attrs.asdict()
         if isinstance(raw, dict):
@@ -253,6 +295,15 @@ def _attrs_dict(attrs: Any) -> dict[str, Any]:
 
 
 def _normalize_chunks(chunks: Any, shape: list[int]) -> list[int]:
+    """Normalize chunk metadata to a list aligned with array shape.
+
+    Parameters
+    ----------
+    chunks:
+        Raw chunks metadata from Zarr.
+    shape:
+        Array shape used if chunks are missing.
+    """
     if chunks is None:
         return shape
     if isinstance(chunks, tuple):
@@ -266,6 +317,15 @@ def _extract_transform_values(
     transformations: Any,
     transform_type: str,
 ) -> list[float] | None:
+    """Extract transformation vectors from coordinate transformation metadata.
+
+    Parameters
+    ----------
+    transformations:
+        Iterable of transformation dictionaries.
+    transform_type:
+        Requested transform key (e.g., ``scale`` or ``translation``).
+    """
     if not isinstance(transformations, list):
         return None
     for transformation in transformations:
@@ -294,6 +354,21 @@ def _compute_downsample_factors(
     level_scale: list[float] | None,
     level_index: int,
 ) -> tuple[list[float], bool]:
+    """Compute downsample factors for a multiscale level.
+
+    Parameters
+    ----------
+    base_shape:
+        Shape of level 0.
+    level_shape:
+        Shape for the requested level.
+    base_scale:
+        Scale metadata for level 0.
+    level_scale:
+        Scale metadata for the requested level.
+    level_index:
+        Current pyramid level index.
+    """
     if level_index == 0:
         return [1.0 for _ in level_shape], False
 
@@ -326,6 +401,23 @@ def _parse_axes(
     warnings: list[ApiWarning],
     multiscale_index: int,
 ) -> tuple[list[str], list[AxisDef]]:
+    """Parse axes metadata and return axis order plus axis definitions.
+
+    Parameters
+    ----------
+    axes_raw:
+        Raw axis descriptors from metadata.
+    shape:
+        Shape for positional fallback.
+    base_scale:
+        Base-level scale values.
+    base_translation:
+        Base-level translation values.
+    warnings:
+        Warning accumulator for inferred metadata decisions.
+    multiscale_index:
+        Index of the multiscale being parsed.
+    """
     if not isinstance(axes_raw, list) or len(axes_raw) != len(shape):
         warnings.append(
             ApiWarning(
@@ -395,6 +487,20 @@ def _parse_axes(
 
 
 def _resolve_axis_role(axis_type: str | None, axis_name: str) -> str:
+    """Map axis type or name to a canonical Lucida axis role.
+
+    Parameters
+    ----------
+    axis_type:
+        Advertised axis type from metadata.
+    axis_name:
+        Axis name to infer from when type is missing.
+
+    Returns
+    -------
+    str
+        Canonical axis role used by Lucida.
+    """
     if axis_type in _AXIS_TYPES:
         return axis_type
 
@@ -414,6 +520,15 @@ def _resolve_axis_role(axis_type: str | None, axis_name: str) -> str:
 
 
 def _parse_channels(omero: Any, warnings: list[ApiWarning]) -> list[ChannelDef]:
+    """Parse channels from OME metadata.
+
+    Parameters
+    ----------
+    omero:
+        OME metadata subtree.
+    warnings:
+        Warning sink for parse issues.
+    """
     if not isinstance(omero, dict):
         return []
 
@@ -489,6 +604,13 @@ def _parse_channels(omero: Any, warnings: list[ApiWarning]) -> list[ChannelDef]:
 
 
 def _parse_color(raw_color: Any) -> tuple[float, float, float, float] | None:
+    """Parse color values from a hex string.
+
+    Parameters
+    ----------
+    raw_color:
+        Raw color field from metadata.
+    """
     if not isinstance(raw_color, str):
         return None
 
@@ -513,6 +635,13 @@ def _parse_color(raw_color: Any) -> tuple[float, float, float, float] | None:
 
 
 def _parse_suggested_contrast(window: Any) -> SuggestedContrast | None:
+    """Parse optional contrast hints from a metadata window record.
+
+    Parameters
+    ----------
+    window:
+        Raw window metadata dictionary.
+    """
     if not isinstance(window, dict):
         return None
 
@@ -526,6 +655,13 @@ def _parse_suggested_contrast(window: Any) -> SuggestedContrast | None:
 
 
 def _first_float(*values: Any) -> float | None:
+    """Return the first value that can be coerced to float.
+
+    Parameters
+    ----------
+    values:
+        Candidate values to parse.
+    """
     for value in values:
         if value is None:
             continue
@@ -540,6 +676,15 @@ def _infer_recommended_tile_px(
     axes: list[AxisDef],
     chunks: list[int],
 ) -> tuple[int, int] | None:
+    """Infer tile dimensions from axis roles and chunk sizes.
+
+    Parameters
+    ----------
+    axes:
+        Parsed axis definitions.
+    chunks:
+        Chunk geometry in axis order.
+    """
     x_index = next((idx for idx, axis in enumerate(axes) if axis.role == "x"), None)
     y_index = next((idx for idx, axis in enumerate(axes) if axis.role == "y"), None)
     if x_index is None or y_index is None:
@@ -552,6 +697,15 @@ def _infer_recommended_tile_px(
 
 
 def _collect_array_attrs(*, attrs: dict[str, Any], include_full: bool) -> dict[str, Any]:
+    """Collect array-level attrs with optional truncation.
+
+    Parameters
+    ----------
+    attrs:
+        Source array attributes.
+    include_full:
+        Keep full attrs when true; otherwise use a safe subset.
+    """
     attrs = _to_json_compatible(attrs)
     if include_full:
         return attrs
@@ -560,6 +714,13 @@ def _collect_array_attrs(*, attrs: dict[str, Any], include_full: bool) -> dict[s
 
 
 def _to_json_compatible(value: Any) -> Any:
+    """Return values as JSON-serializable primitives recursively.
+
+    Parameters
+    ----------
+    value:
+        Arbitrary object.
+    """
     if isinstance(value, dict):
         return {str(key): _to_json_compatible(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -569,4 +730,3 @@ def _to_json_compatible(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
     return value
-

@@ -1,3 +1,5 @@
+"""Core in-memory service implementation for Lucida datasets and views."""
+
 from __future__ import annotations
 
 import copy
@@ -42,12 +44,32 @@ from lucida.models.view_state import (
 
 
 def generate_dataset_id(normalized_uri: str) -> str:
+    """Build a deterministic dataset identifier from a normalized URI.
+
+    Parameters
+    ----------
+    normalized_uri:
+        Canonical URI string (e.g., ``file://`` URI).
+    """
     digest = hashlib.sha256(normalized_uri.encode("utf-8")).hexdigest()[:16]
     return f"ds_{digest}"
 
 
 @dataclass(slots=True)
 class SessionRecord:
+    """Session record tracking datasets and views.
+
+    Attributes
+    ----------
+    session_id:
+        Session identifier.
+    created_at:
+        Session creation timestamp.
+    dataset_ids:
+        Attached dataset ids.
+    view_ids:
+        Attached view ids.
+    """
     session_id: str
     created_at: datetime
     dataset_ids: set[str] = field(default_factory=set)
@@ -56,18 +78,51 @@ class SessionRecord:
 
 @dataclass(slots=True)
 class DatasetRecord:
+    """Dataset record with session membership tracking.
+
+    Attributes
+    ----------
+    dataset_summary:
+        Cached dataset summary.
+    session_ids:
+        Sessions currently attached to this dataset.
+    """
     dataset_summary: DatasetSummary
     session_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(slots=True)
 class ViewRecord:
+    """Stored view state tied to a session.
+
+    Attributes
+    ----------
+    session_id:
+        Owning session id.
+    view_state:
+        Persisted view state.
+    """
     session_id: str
     view_state: ViewState
 
 
 class DatasetService:
+    """Thread-safe in-memory service used by CLI and API handlers.
+
+    Attributes
+    ----------
+    sessions_by_id:
+        Session id to :class:`SessionRecord` mapping.
+    datasets_by_id:
+        Dataset id to :class:`DatasetRecord` mapping.
+    views_by_id:
+        View id to :class:`ViewRecord` mapping.
+    _compat_session_id:
+        Lazily created compatibility session id used for no-session flows.
+    """
+
     def __init__(self) -> None:
+        """Initialize in-memory stores and synchronization lock."""
         self._lock = threading.RLock()
         self.sessions_by_id: dict[str, SessionRecord] = {}
         self.datasets_by_id: dict[str, DatasetRecord] = {}
@@ -82,6 +137,19 @@ class DatasetService:
         session_id: str | None = None,
         include_full_raw_metadata: bool = False,
     ) -> DatasetOpenResponse:
+        """Open a dataset and upsert its metadata into the active session.
+
+        Parameters
+        ----------
+        uri:
+            Source URI/path for the OME-Zarr dataset.
+        dataset_id:
+            Optional explicit dataset identifier.
+        session_id:
+            Optional session to attach the dataset.
+        include_full_raw_metadata:
+            Keep full metadata payload when true.
+        """
         with self._lock:
             session = self._resolve_session(session_id)
             normalized_uri = normalize_uri(uri)
@@ -122,6 +190,7 @@ class DatasetService:
             return DatasetOpenResponse(dataset_summary=dataset_summary, warnings=warnings)
 
     def create_session(self) -> SessionCreateResponse:
+        """Create and persist a new explicit session."""
         with self._lock:
             session = self._create_session_record()
             return SessionCreateResponse(session_id=session.session_id, created_at=session.created_at)
@@ -137,6 +206,25 @@ class DatasetService:
         selectors: list[AxisSelector] | None = None,
         view_2d: View2D | None = None,
     ) -> ViewCreateResponse:
+        """Create a new view for a dataset with normalized selectors and viewport.
+
+        Parameters
+        ----------
+        dataset_id:
+            Dataset identifier to view.
+        session_id:
+            Optional owning session id.
+        mode:
+            Render mode (``2d`` supported in this service).
+        multiscale_name:
+            Optional explicit multiscale name.
+        viewport:
+            Optional viewport override.
+        selectors:
+            Optional selectors to initialize the view.
+        view_2d:
+            Optional explicit 2D view configuration.
+        """
         with self._lock:
             session = self._resolve_session(session_id)
             dataset_summary = self._resolve_dataset_for_session(
@@ -204,6 +292,15 @@ class DatasetService:
             )
 
     def get_view(self, *, view_id: str, session_id: str | None = None) -> ViewGetResponse:
+        """Get a view by id and optional session scope.
+
+        Parameters
+        ----------
+        view_id:
+            Identifier for the target view.
+        session_id:
+            Optional session guard.
+        """
         with self._lock:
             view_record = self.views_by_id.get(view_id)
             if view_record is None:
@@ -233,6 +330,17 @@ class DatasetService:
         patch: list[dict[str, Any]],
         session_id: str | None = None,
     ) -> ViewUpdateResponse:
+        """Apply a JSON patch to an existing view and return updated state.
+
+        Parameters
+        ----------
+        view_id:
+            Target view id.
+        patch:
+            RFC6902 operations to apply.
+        session_id:
+            Optional owning session id.
+        """
         with self._lock:
             view_record = self.views_by_id.get(view_id)
             if view_record is None:
@@ -320,6 +428,13 @@ class DatasetService:
             )
 
     def _resolve_session(self, session_id: str | None) -> SessionRecord:
+        """Resolve a provided session id or use a compatibility session.
+
+        Parameters
+        ----------
+        session_id:
+            Optional session id, defaults to compatibility session when omitted.
+        """
         if session_id is not None:
             return self._require_session(session_id)
         if self._compat_session_id is None:
@@ -328,6 +443,13 @@ class DatasetService:
         return self.sessions_by_id[self._compat_session_id]
 
     def _require_session(self, session_id: str) -> SessionRecord:
+        """Raise a typed error if the session does not exist.
+
+        Parameters
+        ----------
+        session_id:
+            Session identifier to resolve.
+        """
         session = self.sessions_by_id.get(session_id)
         if session is None:
             raise LucidaError(
@@ -339,6 +461,13 @@ class DatasetService:
         return session
 
     def _create_session_record(self, prefix: str = "session") -> SessionRecord:
+        """Create and store a new session record.
+
+        Parameters
+        ----------
+        prefix:
+            Prefix for generated session id.
+        """
         session_id = f"{prefix}_{uuid.uuid4().hex[:16]}"
         session = SessionRecord(session_id=session_id, created_at=datetime.now(tz=timezone.utc))
         self.sessions_by_id[session_id] = session
@@ -351,6 +480,17 @@ class DatasetService:
         session: SessionRecord,
         attach_if_missing: bool,
     ) -> DatasetSummary:
+        """Resolve a dataset for a session and optionally attach membership.
+
+        Parameters
+        ----------
+        dataset_id:
+            Identifier of dataset to resolve.
+        session:
+            Session record for membership checks.
+        attach_if_missing:
+            Attach dataset to session if not already associated.
+        """
         dataset_record = self.datasets_by_id.get(dataset_id)
         if dataset_record is None:
             raise LucidaError(
@@ -367,6 +507,15 @@ class DatasetService:
     def _resolve_primary_dataset_for_view(
         self, *, view_state: ViewState, session: SessionRecord
     ) -> DatasetSummary:
+        """Resolve the primary dataset referenced by the first layer of a view.
+
+        Parameters
+        ----------
+        view_state:
+            View state pointing at target dataset.
+        session:
+            Owning session record.
+        """
         dataset_ref = view_state.datasets[0]
         dataset_summary = self._resolve_dataset_for_session(
             dataset_id=dataset_ref.dataset_id,
@@ -379,6 +528,15 @@ class DatasetService:
     def _validate_multiscale_name(
         self, dataset_summary: DatasetSummary, multiscale_name: str
     ) -> None:
+        """Validate that a named multiscale exists for the dataset.
+
+        Parameters
+        ----------
+        dataset_summary:
+            Dataset metadata containing multiscale names.
+        multiscale_name:
+            Candidate multiscale identifier.
+        """
         available = {multiscale.name for multiscale in dataset_summary.multiscales}
         if multiscale_name not in available:
             raise LucidaError(
@@ -393,6 +551,15 @@ class DatasetService:
             )
 
     def _validate_immutable_view_fields(self, *, current: ViewState, candidate: ViewState) -> None:
+        """Reject patches that attempt to change immutable view fields.
+
+        Parameters
+        ----------
+        current:
+            Stored view state before update.
+        candidate:
+            Candidate view state after patch.
+        """
         if current.view_id != candidate.view_id:
             raise LucidaError(
                 code="invalid_patch",
@@ -416,9 +583,17 @@ class DatasetService:
             )
 
     def _default_viewport(self) -> Viewport:
+        """Return default viewport dimensions used for new views."""
         return Viewport(width_px=1024, height_px=1024, pixel_ratio=1.0)
 
     def _default_selectors(self, dataset_summary: DatasetSummary) -> list[AxisSelector]:
+        """Create initial selectors from dataset axes.
+
+        Parameters
+        ----------
+        dataset_summary:
+            Source dataset metadata.
+        """
         selectors = [
             AxisSelector(axis=axis.name, kind="index", index=0, clamp=True)
             for axis in dataset_summary.axes
@@ -434,6 +609,15 @@ class DatasetService:
         dataset_summary: DatasetSummary,
         selectors: list[AxisSelector],
     ) -> View2D:
+        """Build a default 2D view state for a dataset and selector set.
+
+        Parameters
+        ----------
+        dataset_summary:
+            Dataset metadata used for axis-to-world mapping.
+        selectors:
+            Active axis selectors.
+        """
         axis_by_role = {axis.role: axis for axis in dataset_summary.axes}
         x_axis = axis_by_role.get("x", dataset_summary.axes[-1])
         y_axis = axis_by_role.get("y", dataset_summary.axes[-2] if len(dataset_summary.axes) > 1 else x_axis)
@@ -458,6 +642,15 @@ class DatasetService:
     def _default_image_layer(
         self, dataset_summary: DatasetSummary, multiscale_name: str
     ) -> LayerState:
+        """Construct a default image layer for a new view.
+
+        Parameters
+        ----------
+        dataset_summary:
+            Source dataset summary.
+        multiscale_name:
+            Name of the multiscale to bind.
+        """
         channels = self._default_image_channels(dataset_summary)
         channel_mode: str
         if len(channels) <= 1:
@@ -480,6 +673,13 @@ class DatasetService:
         )
 
     def _default_image_channels(self, dataset_summary: DatasetSummary) -> list[ImageChannelSettings]:
+        """Build default per-channel settings from metadata or axis cardinality.
+
+        Parameters
+        ----------
+        dataset_summary:
+            Source dataset summary with optional channel metadata.
+        """
         channels: list[ImageChannelSettings] = []
         if dataset_summary.channels:
             for channel in dataset_summary.channels:
@@ -526,6 +726,17 @@ class DatasetService:
         dataset_summary: DatasetSummary,
         selectors: list[AxisSelector],
     ) -> tuple[View2D, list[ApiWarning]]:
+        """Normalize slice axis/index and clamp values when needed.
+
+        Parameters
+        ----------
+        view_2d:
+            Optional 2D view config.
+        dataset_summary:
+            Metadata used for bounds and axis validation.
+        selectors:
+            Current selectors used for default slice resolution.
+        """
         warnings: list[ApiWarning] = []
         if view_2d is None:
             return self._default_view_2d(dataset_summary=dataset_summary, selectors=selectors), warnings
@@ -579,6 +790,15 @@ class DatasetService:
     def _select_slice_axis(
         self, dataset_summary: DatasetSummary, selectors: list[AxisSelector]
     ) -> str:
+        """Choose a slice axis, preferring explicit Z axis selectors.
+
+        Parameters
+        ----------
+        dataset_summary:
+            Dataset metadata to inspect axis roles.
+        selectors:
+            Active selectors for axis selection.
+        """
         axis_by_name = {axis.name: axis for axis in dataset_summary.axes}
         for selector in selectors:
             axis = axis_by_name.get(selector.axis)
@@ -587,6 +807,15 @@ class DatasetService:
         return selectors[0].axis
 
     def _selector_index_for_axis(self, *, selectors: list[AxisSelector], axis_name: str) -> int:
+        """Return a usable integer index for an axis selector.
+
+        Parameters
+        ----------
+        selectors:
+            Axis selector list.
+        axis_name:
+            Axis to query.
+        """
         selector = next((item for item in selectors if item.axis == axis_name), None)
         if selector is None:
             return 0
@@ -605,6 +834,17 @@ class DatasetService:
         dataset_summary: DatasetSummary,
         operation: str,
     ) -> tuple[list[AxisSelector], list[ApiWarning]]:
+        """Normalize selectors and emit warnings for clamped values.
+
+        Parameters
+        ----------
+        selectors:
+            Raw selectors requested by caller or patch.
+        dataset_summary:
+            Dataset context for bounds validation.
+        operation:
+            Operation name for error context.
+        """
         if not selectors:
             raise LucidaError(
                 code="selector_out_of_bounds",
@@ -649,6 +889,15 @@ class DatasetService:
     def _normalize_index_selector(
         self, *, selector: AxisSelector, axis_size: int
     ) -> tuple[AxisSelector, ApiWarning | None]:
+        """Clamp or validate a single-axis index selector.
+
+        Parameters
+        ----------
+        selector:
+            Candidate selector.
+        axis_size:
+            Size of the axis being constrained.
+        """
         assert selector.index is not None
         requested = selector.index
         if not selector.clamp and not (0 <= requested < axis_size):
@@ -680,6 +929,15 @@ class DatasetService:
     def _normalize_range_selector(
         self, *, selector: AxisSelector, axis_size: int
     ) -> tuple[AxisSelector, ApiWarning | None]:
+        """Clamp/validate a range selector and guarantee non-empty ranges.
+
+        Parameters
+        ----------
+        selector:
+            Candidate selector.
+        axis_size:
+            Size of the axis being constrained.
+        """
         assert selector.start is not None
         assert selector.end_exclusive is not None
         requested_start = selector.start
@@ -733,6 +991,15 @@ class DatasetService:
     def _normalize_set_selector(
         self, *, selector: AxisSelector, axis_size: int
     ) -> tuple[AxisSelector, ApiWarning | None]:
+        """Normalize set selectors by de-duplicating and clamping values.
+
+        Parameters
+        ----------
+        selector:
+            Candidate selector.
+        axis_size:
+            Size of the axis being constrained.
+        """
         assert selector.indices is not None
         requested_indices = selector.indices
 
@@ -786,9 +1053,19 @@ class DatasetService:
         )
 
     def _generate_view_id(self) -> str:
+        """Generate a stable view identifier."""
         return f"view_{uuid.uuid4().hex[:16]}"
 
     def _with_state_hash(self, *, view_state: ViewState, state_version: int) -> ViewState:
+        """Attach state hash and version to a normalized view payload.
+
+        Parameters
+        ----------
+        view_state:
+            Raw view state.
+        state_version:
+            Monotonic state version to persist.
+        """
         base_state = view_state.model_copy(
             update={
                 "state_version": state_version,
@@ -800,6 +1077,13 @@ class DatasetService:
         return base_state.model_copy(update={"state_hash": computed_hash}, deep=True)
 
     def _compute_state_hash(self, view_state: ViewState) -> str:
+        """Compute a deterministic hash from the canonicalized view state.
+
+        Parameters
+        ----------
+        view_state:
+            Normalized view state to hash.
+        """
         payload = view_state.model_dump(mode="python")
         payload.pop("state_hash", None)
         payload.pop("state_version", None)
@@ -808,6 +1092,13 @@ class DatasetService:
         return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
     def _canonicalize_for_hash(self, value: Any) -> Any:
+        """Canonicalize values for deterministic hashing.
+
+        Parameters
+        ----------
+        value:
+            Arbitrary value in the view state tree.
+        """
         if isinstance(value, datetime):
             return value.isoformat()
         if isinstance(value, dict):

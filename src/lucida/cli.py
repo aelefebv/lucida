@@ -1,3 +1,5 @@
+"""Typer-based command line interface for local/HTTP Lucida usage."""
+
 from __future__ import annotations
 
 import json
@@ -35,6 +37,23 @@ def dataset_open(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
+    """Open a dataset locally or via API and print a compact summary.
+
+    Parameters
+    ----------
+    uri:
+        OME-Zarr dataset URI or local filesystem path.
+    dataset_id:
+        Optional explicit dataset identifier.
+    session_id:
+        Optional session id to scope dataset attachment.
+    full_raw_metadata:
+        Return full raw metadata payloads when true.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
     try:
         if base_url:
             with LucidaClient(base_url=base_url) as client:
@@ -88,6 +107,15 @@ def session_create(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
+    """Create a new session via local service or API.
+
+    Parameters
+    ----------
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
     try:
         if base_url:
             with LucidaClient(base_url=base_url) as client:
@@ -136,6 +164,33 @@ def view_create(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
+    """Create a new view and emit either JSON or a short text summary.
+
+    Parameters
+    ----------
+    dataset_id:
+        Target dataset identifier.
+    session_id:
+        Optional session id to scope the view.
+    mode:
+        Render mode (currently ``2d``/``3d`` accepted by schema).
+    multiscale_name:
+        Optional target multiscale name.
+    width_px:
+        Requested viewport width in pixels.
+    height_px:
+        Requested viewport height in pixels.
+    pixel_ratio:
+        Device pixel ratio.
+    selectors_file:
+        Optional JSON file containing selector definitions.
+    view_2d_file:
+        Optional JSON file containing `view_2d`.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
     try:
         selectors_value = _load_selectors(selectors_file)
         view_2d_value = _load_view_2d(view_2d_file)
@@ -189,6 +244,19 @@ def view_get(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
+    """Fetch and print an existing view state.
+
+    Parameters
+    ----------
+    view_id:
+        Target view identifier.
+    session_id:
+        Optional session id to scope lookup.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
     try:
         if base_url:
             with LucidaClient(base_url=base_url) as client:
@@ -220,6 +288,21 @@ def view_update(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
+    """Apply an RFC6902 JSON patch to a view.
+
+    Parameters
+    ----------
+    view_id:
+        Target view identifier.
+    patch_file:
+        Path containing JSON array patch operations.
+    session_id:
+        Optional session id for scoping.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
     try:
         patch = _load_patch(patch_file)
         if base_url:
@@ -254,6 +337,25 @@ def view_set_dim(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
+    """Set a single-axis index selector value.
+
+    Parameters
+    ----------
+    view_id:
+        Target view identifier.
+    axis:
+        Axis name to set.
+    index:
+        New index value.
+    session_id:
+        Optional session id for scoping.
+    clamp:
+        Clamp values to axis bounds when true.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
     response = _run_selector_helper(
         helper="index",
         view_id=view_id,
@@ -279,6 +381,27 @@ def view_set_range(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
+    """Set an axis selector to an index range.
+
+    Parameters
+    ----------
+    view_id:
+        Target view identifier.
+    axis:
+        Axis name to set.
+    start:
+        Start offset (inclusive).
+    end_exclusive:
+        End offset (exclusive).
+    session_id:
+        Optional session id for scoping.
+    clamp:
+        Clamp values to axis bounds when true.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
     response = _run_selector_helper(
         helper="range",
         view_id=view_id,
@@ -303,6 +426,25 @@ def view_set_set(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
+    """Set an axis selector to an explicit set of indices.
+
+    Parameters
+    ----------
+    view_id:
+        Target view identifier.
+    axis:
+        Axis name to set.
+    indices:
+        New index values.
+    session_id:
+        Optional session id for scoping.
+    clamp:
+        Clamp values to axis bounds when true.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
     response = _run_selector_helper(
         helper="set",
         view_id=view_id,
@@ -325,6 +467,25 @@ def _run_selector_helper(
     base_url: str | None,
     payload: dict[str, Any],
 ) -> Any:
+    """Build a selector update and apply it via client or local service.
+
+    Parameters
+    ----------
+    helper:
+        Selector mode: ``index``, ``range``, or ``set``.
+    view_id:
+        Target view identifier.
+    axis:
+        Axis name being updated.
+    session_id:
+        Optional session scope.
+    clamp:
+        Apply clamping for out-of-bounds values.
+    base_url:
+        Optional API endpoint base URL.
+    payload:
+        Parsed selector payload from CLI argument parsing.
+    """
     try:
         if base_url:
             with LucidaClient(base_url=base_url) as client:
@@ -382,6 +543,15 @@ def _run_selector_helper(
 
 
 def _emit_view_update_response(response: Any, *, output_json: bool) -> None:
+    """Write a view update response in requested output format.
+
+    Parameters
+    ----------
+    response:
+        Response model from a successful view update.
+    output_json:
+        If true, emit JSON string.
+    """
     payload = response.model_dump(mode="json")
     if output_json:
         typer.echo(json.dumps(payload, indent=2))
@@ -393,6 +563,13 @@ def _emit_view_update_response(response: Any, *, output_json: bool) -> None:
 
 
 def _load_patch(path: Path) -> list[dict[str, Any]]:
+    """Load an RFC6902 patch from JSON file.
+
+    Parameters
+    ----------
+    path:
+        JSON file path containing patch list.
+    """
     loaded = json.loads(path.read_text())
     if not isinstance(loaded, list):
         raise ValueError("patch file must contain a JSON array.")
@@ -402,6 +579,13 @@ def _load_patch(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_selectors(path: Path | None) -> list[AxisSelector] | None:
+    """Load selectors from JSON if a path is provided.
+
+    Parameters
+    ----------
+    path:
+        Optional JSON file path containing axis selectors.
+    """
     if path is None:
         return None
     loaded = json.loads(path.read_text())
@@ -411,6 +595,13 @@ def _load_selectors(path: Path | None) -> list[AxisSelector] | None:
 
 
 def _load_view_2d(path: Path | None) -> View2D | None:
+    """Load an optional 2D view payload from file.
+
+    Parameters
+    ----------
+    path:
+        Optional JSON file path containing `view_2d`.
+    """
     if path is None:
         return None
     loaded = json.loads(path.read_text())
@@ -420,6 +611,13 @@ def _load_view_2d(path: Path | None) -> View2D | None:
 
 
 def _emit_exception(exc: Exception) -> None:
+    """Emit a normalized Lucida exception payload and exit with error.
+
+    Parameters
+    ----------
+    exc:
+        Exception raised by command execution.
+    """
     if isinstance(exc, LucidaError):
         typer.echo(json.dumps(as_api_error_payload(exc), indent=2))
     else:
@@ -433,6 +631,13 @@ def _emit_exception(exc: Exception) -> None:
 
 
 def _emit_client_error(exc: LucidaClientError) -> None:
+    """Emit a generic client transport error and exit.
+
+    Parameters
+    ----------
+    exc:
+        HTTP/client transport exception.
+    """
     typer.echo(
         json.dumps(
             {"code": "dataset_open_failed", "message": str(exc), "details": {}},
@@ -443,6 +648,7 @@ def _emit_client_error(exc: LucidaClientError) -> None:
 
 
 def main() -> None:
+    """Launch the Typer application."""
     app()
 
 

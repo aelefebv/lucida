@@ -1,7 +1,5 @@
 # LLM‑First N‑Dimensional Image Viewer (Lightweight Napari‑style) — Technical Specification
 
-Version: 0.1 (draft)  
-Date: 2026‑02‑22  
 Primary goal: a small, fast, agent‑driven N‑D viewer that can open large microscopy datasets (OME‑Zarr), navigate in 2D and 3D, and produce reproducible “snapshots” plus machine‑readable manifests.
 
 ---
@@ -257,17 +255,6 @@ Why this choice:
 - Predictable performance for parallel chunk fetch/decode and caching.
 - Cross-platform GPU backend via wgpu (Vulkan/Metal/D3D12).
 - Headless deployment is straightforward; avoids GUI driver issues.
-
-### 11.2 Alternate MVP Stack (fast prototyping)
-All-Python server:
-- I/O: zarr + fsspec + numcodecs
-- Rendering: wgpu-py / pygfx
-- API: FastAPI
-Tradeoff: faster iteration but potentially less throughput and harder performance tuning.
-
-### 11.3 Not recommended for MVP
-- OpenGL-first stacks (driver variability, headless pain).
-- C++/VTK for “lightweight” target (dependency/build complexity).
 
 ---
 

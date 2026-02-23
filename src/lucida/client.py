@@ -1,3 +1,5 @@
+"""Synchronous HTTP client for interacting with the Lucida API."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -19,10 +21,21 @@ from lucida.models.api import (
 
 
 class LucidaClientError(Exception):
+    """Raised for request failures returned by the Lucida API."""
     pass
 
 
 class LucidaClient:
+    """Simple typed client for Lucida REST endpoints.
+
+    Attributes
+    ----------
+    _client:
+        Underlying :class:`httpx.Client`.
+    _owns_client:
+        True when this object owns and must close the underlying client.
+    """
+
     def __init__(
         self,
         base_url: str = "http://127.0.0.1:8000",
@@ -30,6 +43,17 @@ class LucidaClient:
         timeout: float = 30.0,
         client: httpx.Client | None = None,
     ) -> None:
+        """Create a client bound to a base URL and optional transport.
+
+        Parameters
+        ----------
+        base_url:
+            Base URL for HTTP calls.
+        timeout:
+            Request timeout in seconds.
+        client:
+            Optional preconfigured :class:`httpx.Client`.
+        """
         if client is None:
             self._client = httpx.Client(base_url=base_url, timeout=timeout)
             self._owns_client = True
@@ -38,13 +62,16 @@ class LucidaClient:
             self._owns_client = False
 
     def close(self) -> None:
+        """Close the owned HTTP client transport."""
         if self._owns_client:
             self._client.close()
 
     def __enter__(self) -> "LucidaClient":
+        """Return this client for context-manager usage."""
         return self
 
     def __exit__(self, _: Any, __: Any, ___: Any) -> None:
+        """Close the client when exiting a ``with`` block."""
         self.close()
 
     def open_dataset(
@@ -54,6 +81,19 @@ class LucidaClient:
         session_id: str | None = None,
         include_full_raw_metadata: bool = False,
     ) -> DatasetOpenResponse:
+        """Open a dataset and return a dataset summary response.
+
+        Parameters
+        ----------
+        uri:
+            Dataset URI or local path.
+        dataset_id:
+            Optional override for the generated dataset identifier.
+        session_id:
+            Optional session to attach the opened dataset.
+        include_full_raw_metadata:
+            Include full metadata payload when true.
+        """
         request = DatasetOpenRequest(
             uri=uri,
             dataset_id=dataset_id,
@@ -64,6 +104,7 @@ class LucidaClient:
         return DatasetOpenResponse.model_validate(payload)
 
     def create_session(self) -> SessionCreateResponse:
+        """Create a new dataset/view session."""
         request = SessionCreateRequest()
         payload = self._post("/session/create", request.model_dump(mode="json"))
         return SessionCreateResponse.model_validate(payload)
@@ -79,6 +120,25 @@ class LucidaClient:
         selectors: list[dict[str, Any]] | None = None,
         view_2d: dict[str, Any] | None = None,
     ) -> ViewCreateResponse:
+        """Create a new view bound to a dataset and optional selectors.
+
+        Parameters
+        ----------
+        dataset_id:
+            ID of an already-open dataset.
+        session_id:
+            Optional session id to attach this view.
+        mode:
+            Render mode (currently ``2d``/``3d`` supported by service policy).
+        multiscale_name:
+            Optional target multiscale name within the dataset.
+        viewport:
+            Optional viewport override.
+        selectors:
+            Initial axis selector list.
+        view_2d:
+            Optional 2D view configuration.
+        """
         request = ViewCreateRequest(
             dataset_id=dataset_id,
             session_id=session_id,
@@ -92,6 +152,15 @@ class LucidaClient:
         return ViewCreateResponse.model_validate(payload)
 
     def get_view(self, *, view_id: str, session_id: str | None = None) -> ViewGetResponse:
+        """Fetch the current state for an existing view.
+
+        Parameters
+        ----------
+        view_id:
+            View identifier.
+        session_id:
+            Optional session scoping guard.
+        """
         response = self._client.get(
             f"/view/{view_id}",
             params={"session_id": session_id} if session_id is not None else None,
@@ -106,6 +175,17 @@ class LucidaClient:
         patch: list[dict[str, Any]],
         session_id: str | None = None,
     ) -> ViewUpdateResponse:
+        """Apply a JSON patch to an existing view state.
+
+        Parameters
+        ----------
+        view_id:
+            Target view id.
+        patch:
+            RFC6902 JSON patch operations.
+        session_id:
+            Optional session id to enforce scope.
+        """
         request = ViewUpdateRequest(view_id=view_id, patch=patch, session_id=session_id)
         payload = self._post("/view/update", request.model_dump(mode="json"))
         return ViewUpdateResponse.model_validate(payload)
@@ -119,6 +199,21 @@ class LucidaClient:
         session_id: str | None = None,
         clamp: bool = True,
     ) -> ViewUpdateResponse:
+        """Update a single-axis index selector.
+
+        Parameters
+        ----------
+        view_id:
+            Target view id.
+        axis:
+            Axis name to update.
+        index:
+            Axis index to apply.
+        session_id:
+            Optional session scope.
+        clamp:
+            Clamp out-of-range values into bounds when true.
+        """
         selectors = self._selectors_with_replacement(
             view_id=view_id,
             axis=axis,
@@ -141,6 +236,23 @@ class LucidaClient:
         session_id: str | None = None,
         clamp: bool = True,
     ) -> ViewUpdateResponse:
+        """Update an axis to a range selector.
+
+        Parameters
+        ----------
+        view_id:
+            Target view id.
+        axis:
+            Axis name to update.
+        start:
+            Range start index, inclusive.
+        end_exclusive:
+            Range end index, exclusive.
+        session_id:
+            Optional session scope.
+        clamp:
+            Clamp out-of-range values into bounds when true.
+        """
         selectors = self._selectors_with_replacement(
             view_id=view_id,
             axis=axis,
@@ -168,6 +280,21 @@ class LucidaClient:
         session_id: str | None = None,
         clamp: bool = True,
     ) -> ViewUpdateResponse:
+        """Update an axis to an explicit set of indices.
+
+        Parameters
+        ----------
+        view_id:
+            Target view id.
+        axis:
+            Axis name to update.
+        indices:
+            Replacement index set.
+        session_id:
+            Optional session scope.
+        clamp:
+            Clamp out-of-range values into bounds when true.
+        """
         selectors = self._selectors_with_replacement(
             view_id=view_id,
             axis=axis,
@@ -193,16 +320,50 @@ class LucidaClient:
         replacement: dict[str, Any],
         session_id: str | None,
     ) -> list[dict[str, Any]]:
+        """Load current selectors and replace one axis entry.
+
+        Parameters
+        ----------
+        view_id:
+            Target view identifier.
+        axis:
+            Axis name to replace.
+        replacement:
+            New selector payload.
+        session_id:
+            Optional session scope.
+        """
         view = self.get_view(view_id=view_id, session_id=session_id).view_state
         selectors = [selector.model_dump(mode="json") for selector in view.selectors if selector.axis != axis]
         selectors.append(replacement)
         return selectors
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST payload to the API and return the parsed JSON payload.
+
+        Parameters
+        ----------
+        path:
+            Relative endpoint path.
+        payload:
+            Request payload dictionary.
+        """
         response = self._client.post(path, json=payload)
         return self._validate_response(response)
 
     def _validate_response(self, response: httpx.Response) -> dict[str, Any]:
+        """Raise client-side errors for failed responses and return JSON.
+
+        Parameters
+        ----------
+        response:
+            HTTP response from the Lucida API.
+
+        Returns
+        -------
+        dict[str, Any]
+            Parsed JSON payload.
+        """
         if response.is_error:
             try:
                 api_error = ApiError.model_validate(response.json())
