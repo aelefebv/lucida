@@ -47,3 +47,15 @@ def test_dataset_open_endpoint_invalid_request_error(local_omezarr_uri: str) -> 
     assert payload["code"] == "invalid_request"
     assert payload["message"] == "Request validation failed."
     assert "details" in payload
+
+
+def test_dataset_open_endpoint_unknown_session_error(local_omezarr_uri: str) -> None:
+    client = TestClient(create_app())
+    response = client.post(
+        "/dataset/open",
+        json={"schema_version": 1, "uri": local_omezarr_uri, "session_id": "session_missing"},
+    )
+
+    assert response.status_code == 404
+    payload = response.json()
+    assert payload["code"] == "session_not_found"

@@ -10,6 +10,9 @@ import numpy as np
 import pytest
 import zarr
 
+from lucida.server.app import create_app
+from lucida.service.dataset_service import DatasetService
+
 
 def _open_group_for_write(uri: str) -> zarr.Group:
     parsed = urlparse(uri)
@@ -122,3 +125,15 @@ def tolerant_omezarr_uri(tmp_path: Path) -> str:
 @pytest.fixture()
 def invalid_omezarr_uri(tmp_path: Path) -> str:
     return create_invalid_zarr(str(tmp_path / "invalid.zarr"))
+
+
+@pytest.fixture()
+def dataset_service() -> DatasetService:
+    return DatasetService()
+
+
+@pytest.fixture()
+def api_client(dataset_service: DatasetService):
+    from fastapi.testclient import TestClient
+
+    return TestClient(create_app(dataset_service=dataset_service))
