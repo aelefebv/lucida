@@ -8,9 +8,9 @@ dependencies = [
     "fastapi>=0.116.0",
     "fsspec>=2025.7.0",
     "httpx>=0.28.1",
+    "jsonpatch>=1.33",
     "numpy>=2.3.2",
     "pydantic>=2.11.7",
-    "pytest>=8.4.1",
     "typer>=0.16.1",
     "uvicorn>=0.35.0",
     "zarr>=3.1.2",
@@ -22,3 +22,10 @@ lucida = "lucida.cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+    "jupyter>=1.1.1",
+    "pytest>=9.0.2",
+]
