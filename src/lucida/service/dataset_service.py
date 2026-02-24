@@ -10,6 +10,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import jsonpatch
@@ -439,7 +440,8 @@ class DatasetService:
     def render_image(
         self,
         *,
-        view_id: str,
+        view_id: str | None = None,
+        view_state: ViewState | None = None,
         output: RenderOutputSpec,
         session_id: str | None = None,
         request_id: str | None = None,
@@ -450,7 +452,9 @@ class DatasetService:
         Parameters
         ----------
         view_id:
-            Target view id.
+            Optional target view id for stateful rendering.
+        view_state:
+            Optional inline view state for stateless rendering.
         output:
             Render output specification.
         session_id:
@@ -478,29 +482,56 @@ class DatasetService:
                 status_code=422,
             )
 
-        with self._lock:
-            view_record = self.views_by_id.get(view_id)
-            if view_record is None:
-                raise LucidaError(
-                    code="view_not_found",
-                    message="View was not found.",
-                    details={"view_id": view_id},
-                    status_code=404,
-                )
+        if (view_id is None) == (view_state is None):
+            raise LucidaError(
+                code="invalid_render_request",
+                message="Render request must provide exactly one of view_id or view_state.",
+                details={
+                    "has_view_id": view_id is not None,
+                    "has_view_state": view_state is not None,
+                },
+                status_code=422,
+            )
 
+        resolved_request_id = request_id or f"req_{uuid.uuid4().hex[:16]}"
+        render_id = f"ren_{uuid.uuid4().hex[:16]}"
+
+        with self._lock:
+            scoped_session: SessionRecord | None = None
             if session_id is not None:
-                session = self._require_session(session_id)
-                if view_id not in session.view_ids:
+                scoped_session = self._require_session(session_id)
+
+            stored_view_record: ViewRecord | None = None
+            stored_view_state: ViewState | None = None
+            response_view_id: str | None = None
+            response_state_version: int | None = None
+
+            if view_id is not None:
+                stored_view_record = self.views_by_id.get(view_id)
+                if stored_view_record is None:
+                    raise LucidaError(
+                        code="view_not_found",
+                        message="View was not found.",
+                        details={"view_id": view_id},
+                        status_code=404,
+                    )
+
+                if scoped_session is not None and view_id not in scoped_session.view_ids:
                     raise LucidaError(
                         code="view_not_found",
                         message="View was not found in session.",
                         details={"view_id": view_id, "session_id": session_id},
                         status_code=404,
                     )
-            else:
-                session = self.sessions_by_id[view_record.session_id]
 
-            effective_payload = view_record.view_state.model_dump(mode="json")
+                stored_view_state = stored_view_record.view_state
+                effective_payload = stored_view_state.model_dump(mode="json")
+                response_view_id = stored_view_state.view_id
+                response_state_version = stored_view_state.state_version
+            else:
+                assert view_state is not None
+                effective_payload = view_state.model_dump(mode="json")
+
             if overrides_json_patch:
                 try:
                     effective_payload = jsonpatch.apply_patch(
@@ -519,10 +550,19 @@ class DatasetService:
             try:
                 effective_view = ViewState.model_validate(effective_payload)
             except ValidationError as exc:
+                code = "invalid_patch" if view_id is not None else "invalid_render_request"
+                message = (
+                    "Render-time patched view state did not validate."
+                    if view_id is not None
+                    else "Provided view_state did not validate."
+                )
                 raise LucidaError(
-                    code="invalid_patch",
-                    message="Render-time patched view state did not validate.",
-                    details={"view_id": view_id, "errors": exc.errors()},
+                    code=code,
+                    message=message,
+                    details={
+                        "view_id": view_id,
+                        "errors": exc.errors(),
+                    },
                     status_code=422,
                 ) from exc
 
@@ -534,15 +574,37 @@ class DatasetService:
                     status_code=422,
                 )
 
-            self._validate_immutable_view_fields(
-                current=view_record.view_state,
-                candidate=effective_view,
-            )
+            if stored_view_state is not None:
+                assert stored_view_record is not None
+                self._validate_immutable_view_fields(
+                    current=stored_view_state,
+                    candidate=effective_view,
+                )
 
-            primary_dataset_summary = self._resolve_primary_dataset_for_view(
-                view_state=effective_view,
-                session=session,
-            )
+                dataset_session = (
+                    scoped_session
+                    if scoped_session is not None
+                    else self.sessions_by_id[stored_view_record.session_id]
+                )
+                primary_dataset_summary = self._resolve_primary_dataset_for_view(
+                    view_state=effective_view,
+                    session=dataset_session,
+                )
+            else:
+                dataset_ref = effective_view.datasets[0]
+                dataset_record = self.datasets_by_id.get(dataset_ref.dataset_id)
+                if dataset_record is None:
+                    raise LucidaError(
+                        code="dataset_not_found",
+                        message="Dataset was not found.",
+                        details={"dataset_id": dataset_ref.dataset_id},
+                        status_code=404,
+                    )
+                self._validate_multiscale_name(
+                    dataset_record.dataset_summary,
+                    dataset_ref.multiscale_name,
+                )
+                primary_dataset_summary = dataset_record.dataset_summary
 
             selectors, selector_warnings = self._normalize_selectors(
                 selectors=effective_view.selectors,
@@ -562,7 +624,6 @@ class DatasetService:
             )
 
             state_hash = self._compute_state_hash(effective_view)
-            state_version = view_record.view_state.state_version
 
         render_result = render_view_to_png(
             dataset_summary=primary_dataset_summary,
@@ -571,27 +632,39 @@ class DatasetService:
         )
 
         payload_bytes = render_result.png_bytes
-        payload_b64 = base64.b64encode(payload_bytes).decode("ascii")
         payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
 
         warnings = [*selector_warnings, *view_warnings, *render_result.warnings]
-        resolved_request_id = request_id or f"req_{uuid.uuid4().hex[:16]}"
-        render_id = f"ren_{uuid.uuid4().hex[:16]}"
+        if output.delivery == "inline_base64":
+            artifact = RenderImageArtifact(
+                width_px=output.width_px,
+                height_px=output.height_px,
+                delivery="inline_base64",
+                bytes_base64=base64.b64encode(payload_bytes).decode("ascii"),
+                sha256=payload_sha256,
+            )
+        else:
+            output_path = self._resolve_snapshot_output_path(
+                requested_path=output.file_path,
+                render_id=render_id,
+            )
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(payload_bytes)
+            artifact = RenderImageArtifact(
+                width_px=output.width_px,
+                height_px=output.height_px,
+                delivery="file_path",
+                file_path=str(output_path),
+                sha256=payload_sha256,
+            )
 
         return RenderImageResponse(
             request_id=resolved_request_id,
             render_id=render_id,
-            view_id=view_id,
+            view_id=response_view_id,
             state_hash=state_hash,
-            state_version=state_version,
-            images=[
-                RenderImageArtifact(
-                    width_px=output.width_px,
-                    height_px=output.height_px,
-                    bytes_base64=payload_b64,
-                    sha256=payload_sha256,
-                )
-            ],
+            state_version=response_state_version,
+            images=[artifact],
             meta=RenderMeta(
                 dataset_id=primary_dataset_summary.dataset_id,
                 multiscale_name=effective_view.datasets[0].multiscale_name,
@@ -605,6 +678,31 @@ class DatasetService:
             ),
             warnings=warnings,
         )
+
+    def _resolve_snapshot_output_path(self, *, requested_path: str | None, render_id: str) -> Path:
+        output_root = (Path(__file__).resolve().parents[3] / "output").resolve(strict=False)
+        if requested_path is None:
+            target = output_root / "snapshots" / f"{render_id}.png"
+        else:
+            requested = Path(requested_path).expanduser()
+            if requested.is_absolute():
+                target = requested
+            else:
+                target = output_root / requested
+        resolved_target = target.resolve(strict=False)
+        try:
+            resolved_target.relative_to(output_root)
+        except ValueError as exc:
+            raise LucidaError(
+                code="render_output_path_invalid",
+                message="Requested render output path must be under the output directory.",
+                details={
+                    "requested_path": requested_path,
+                    "output_root": str(output_root),
+                },
+                status_code=422,
+            ) from exc
+        return resolved_target
 
     def _resolve_session(self, session_id: str | None) -> SessionRecord:
         """Resolve a provided session id or use a compatibility session.

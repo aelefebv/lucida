@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 from io import BytesIO
+from pathlib import Path
+import uuid
 
 from PIL import Image
 from typer.testing import CliRunner
@@ -16,7 +18,7 @@ def _decode_size(payload_b64: str) -> tuple[int, int]:
     return image.size
 
 
-def test_cli_render_and_navigation(render_omezarr_uri: str) -> None:
+def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> None:
     cli_module._LOCAL_SERVICE = DatasetService()
     runner = CliRunner()
 
@@ -72,3 +74,83 @@ def test_cli_render_and_navigation(render_omezarr_uri: str) -> None:
     assert payload["status"] == "ok"
     assert payload["images"][0]["mime"] == "image/png"
     assert _decode_size(payload["images"][0]["bytes_base64"]) == (72, 56)
+
+    view_get_result = runner.invoke(
+        cli_module.app,
+        ["view", "get", "--view-id", view_id, "--json"],
+    )
+    assert view_get_result.exit_code == 0
+    view_state_payload = json.loads(view_get_result.stdout)["view_state"]
+    view_state_file = tmp_path / "view_state.json"
+    view_state_file.write_text(json.dumps(view_state_payload), encoding="utf-8")
+
+    stateless_result = runner.invoke(
+        cli_module.app,
+        [
+            "render",
+            "image",
+            "--view-state-file",
+            str(view_state_file),
+            "--width-px",
+            "64",
+            "--height-px",
+            "48",
+            "--json",
+        ],
+    )
+    assert stateless_result.exit_code == 0
+    stateless_payload = json.loads(stateless_result.stdout)
+    assert stateless_payload["status"] == "ok"
+    assert stateless_payload["view_id"] is None
+    assert stateless_payload["state_version"] is None
+    assert _decode_size(stateless_payload["images"][0]["bytes_base64"]) == (64, 48)
+
+    output_root = Path(__file__).resolve().parents[1] / "output"
+    output_relative = f"snapshots/test-cli-{uuid.uuid4().hex}.png"
+    file_result = runner.invoke(
+        cli_module.app,
+        [
+            "render",
+            "image",
+            "--view-id",
+            view_id,
+            "--width-px",
+            "64",
+            "--height-px",
+            "48",
+            "--delivery",
+            "file_path",
+            "--file-path",
+            output_relative,
+            "--json",
+        ],
+    )
+    assert file_result.exit_code == 0
+    file_payload = json.loads(file_result.stdout)
+    file_output_path = Path(file_payload["images"][0]["file_path"])
+    try:
+        assert file_output_path.exists()
+        assert file_output_path.is_relative_to(output_root)
+
+        invalid_one_of = runner.invoke(
+            cli_module.app,
+            [
+                "render",
+                "image",
+                "--view-id",
+                view_id,
+                "--view-state-file",
+                str(view_state_file),
+                "--width-px",
+                "64",
+                "--height-px",
+                "48",
+                "--json",
+            ],
+        )
+        assert invalid_one_of.exit_code == 1
+        invalid_payload = json.loads(invalid_one_of.stdout)
+        assert invalid_payload["code"] == "invalid_request"
+    finally:
+        if file_output_path.exists():
+            file_output_path.unlink()
