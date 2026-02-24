@@ -441,6 +441,309 @@ def run_milestone2_cases(
     return cases
 
 
+def run_milestone3_cases(
+    *,
+    adapter: BackendAdapter,
+    dataset_uris: Phase1DatasetUris,
+    output_root: Path,
+) -> list[RawCaseResult]:
+    cases: list[RawCaseResult] = []
+    created_output_paths: list[Path] = []
+
+    def record(
+        *,
+        name: str,
+        method: str,
+        case_path: str,
+        request_path: str | None = None,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status_code, body = adapter.request(
+            method=method,
+            path=request_path or case_path,
+            json_body=json_body,
+            params=params,
+        )
+        cases.append(
+            RawCaseResult(
+                name=name,
+                method=method,
+                path=case_path,
+                status_code=status_code,
+                body=body,
+            )
+        )
+        return body
+
+    try:
+        render_dataset_open = record(
+            name="render_dataset_open_success",
+            method="POST",
+            case_path="/dataset/open",
+            json_body={"schema_version": 1, "uri": dataset_uris.render_uri},
+        )
+        render_dataset_id = str(render_dataset_open["dataset_summary"]["dataset_id"])
+
+        render_view_create = record(
+            name="render_view_create_success",
+            method="POST",
+            case_path="/view/create",
+            json_body={"schema_version": 1, "dataset_id": render_dataset_id, "mode": "2d"},
+        )
+        render_view_id = str(render_view_create["view_state"]["view_id"])
+
+        render_view_get = record(
+            name="render_view_get_success",
+            method="GET",
+            case_path="/view/{view_id}",
+            request_path=f"/view/{render_view_id}",
+        )
+        render_view_state = render_view_get["view_state"]
+
+        record(
+            name="render_image_success_stateful_inline",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 64,
+                    "height_px": 48,
+                },
+            },
+        )
+
+        record(
+            name="render_image_invalid_patch_error",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "overrides_json_patch": [
+                    {"op": "replace", "path": "/selectors/100/index", "value": 1}
+                ],
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 64,
+                    "height_px": 48,
+                },
+            },
+        )
+
+        record(
+            name="render_image_session_not_found_error",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "session_id": "session_missing",
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 64,
+                    "height_px": 48,
+                },
+            },
+        )
+
+        record(
+            name="render_image_output_too_large_error",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 5000,
+                    "height_px": 48,
+                },
+            },
+        )
+
+        record(
+            name="render_image_stateless_inline_success",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_state": render_view_state,
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 40,
+                    "height_px": 30,
+                },
+            },
+        )
+
+        render_file_path = f"snapshots/milestone3-{uuid.uuid4().hex}.png"
+        render_file_delivery = record(
+            name="render_image_file_delivery_success",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "output": {
+                    "format": "png",
+                    "delivery": "file_path",
+                    "file_path": render_file_path,
+                    "width_px": 40,
+                    "height_px": 30,
+                },
+            },
+        )
+        artifact_file_path = render_file_delivery.get("images", [{}])[0].get("file_path")
+        if isinstance(artifact_file_path, str):
+            created_output_paths.append(Path(artifact_file_path))
+
+        record(
+            name="render_image_invalid_request_both_view_and_state",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "view_state": render_view_state,
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 32,
+                    "height_px": 24,
+                },
+            },
+        )
+
+        record(
+            name="render_image_invalid_request_neither_view_nor_state",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 32,
+                    "height_px": 24,
+                },
+            },
+        )
+
+        record(
+            name="render_image_output_path_invalid_error",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "output": {
+                    "format": "png",
+                    "delivery": "file_path",
+                    "file_path": "../bad.png",
+                    "width_px": 32,
+                    "height_px": 24,
+                },
+            },
+        )
+
+        missing_dataset_state = copy.deepcopy(render_view_state)
+        missing_dataset_state["datasets"] = [dict(render_view_state["datasets"][0])]
+        missing_dataset_state["datasets"][0]["dataset_id"] = "ds_missing"
+        record(
+            name="render_image_stateless_missing_dataset_error",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_state": missing_dataset_state,
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 32,
+                    "height_px": 24,
+                },
+            },
+        )
+
+        record(
+            name="render_view_update_warning_setup_success",
+            method="POST",
+            case_path="/view/update",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "patch": [
+                    {
+                        "op": "replace",
+                        "path": "/selectors",
+                        "value": [
+                            {
+                                "axis": "z",
+                                "kind": "range",
+                                "start": 1,
+                                "end_exclusive": 4,
+                                "clamp": True,
+                            },
+                            {"axis": "c", "kind": "index", "index": 0, "clamp": True},
+                            {
+                                "axis": "t",
+                                "kind": "range",
+                                "start": 0,
+                                "end_exclusive": 1,
+                                "clamp": True,
+                            },
+                        ],
+                    },
+                    {
+                        "op": "replace",
+                        "path": "/view_2d/slice/slab",
+                        "value": {"thickness_vox": 5, "mode": "single"},
+                    },
+                    {
+                        "op": "replace",
+                        "path": "/performance",
+                        "value": {"lod_mode": "fixed", "fixed_level": 99},
+                    },
+                ],
+            },
+        )
+
+        record(
+            name="render_image_warning_bundle_success",
+            method="POST",
+            case_path="/render/image",
+            json_body={
+                "schema_version": 1,
+                "view_id": render_view_id,
+                "output": {
+                    "format": "png",
+                    "delivery": "inline_base64",
+                    "width_px": 64,
+                    "height_px": 48,
+                },
+            },
+        )
+    finally:
+        for output_path in created_output_paths:
+            if output_path.exists():
+                try:
+                    output_path.relative_to(output_root)
+                except ValueError:
+                    continue
+                output_path.unlink()
+
+    return cases
+
+
 def run_phase1_cases(
     *,
     adapter: BackendAdapter,

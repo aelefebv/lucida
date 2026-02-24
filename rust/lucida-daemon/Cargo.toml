@@ -5,7 +5,9 @@ edition = "2021"
 
 [dependencies]
 axum = { version = "0.8.4", features = ["http1", "json"] }
+base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["serde"] }
+image = { version = "0.25.6", default-features = false, features = ["png"] }
 json-patch = "4.1.0"
 percent-encoding = "2.3.2"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -13,6 +15,7 @@ serde_json = "1.0.145"
 sha2 = "0.10.9"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "sync"] }
 uuid = { version = "1.18.1", features = ["v4"] }
+zstd = "0.13.2"
 
 [dev-dependencies]
 http-body-util = "0.1.3"
