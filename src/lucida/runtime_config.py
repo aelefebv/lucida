@@ -94,7 +94,7 @@ def _resolve_backend(
     if env_value is not None:
         return _normalize_backend(env_value), "env"
 
-    return "python", "default"
+    return "rust", "default"
 
 
 def _resolve_base_url(

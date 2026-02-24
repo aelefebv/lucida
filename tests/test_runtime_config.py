@@ -11,11 +11,11 @@ from lucida.runtime_config import (
 )
 
 
-def test_runtime_config_defaults_to_python_local_mode() -> None:
+def test_runtime_config_defaults_to_rust_http_mode() -> None:
     resolved = resolve_runtime_config(env={})
-    assert resolved.backend == "python"
-    assert resolved.base_url == DEFAULT_PYTHON_BASE_URL
-    assert resolved.use_http is False
+    assert resolved.backend == "rust"
+    assert resolved.base_url == DEFAULT_RUST_BASE_URL
+    assert resolved.use_http is True
 
 
 def test_runtime_config_env_rust_uses_http_default_url() -> None:
@@ -38,13 +38,24 @@ def test_runtime_config_precedence_override_then_env() -> None:
     assert resolved.use_http is True
 
 
+def test_runtime_config_env_python_uses_local_mode_default_url() -> None:
+    resolved = resolve_runtime_config(env={"LUCIDA_BACKEND": "python"})
+    assert resolved.backend == "python"
+    assert resolved.base_url == DEFAULT_PYTHON_BASE_URL
+    assert resolved.use_http is False
+
+
 def test_cli_runtime_transport_resolution(monkeypatch) -> None:
     monkeypatch.delenv("LUCIDA_BACKEND", raising=False)
     monkeypatch.delenv("LUCIDA_BASE_URL", raising=False)
-    assert _resolve_cli_base_url(None) is None
+    assert _resolve_cli_base_url(None) == DEFAULT_RUST_BASE_URL
 
     monkeypatch.setenv("LUCIDA_BACKEND", "rust")
     assert _resolve_cli_base_url(None) == DEFAULT_RUST_BASE_URL
+
+    monkeypatch.setenv("LUCIDA_BACKEND", "python")
+    monkeypatch.delenv("LUCIDA_BASE_URL", raising=False)
+    assert _resolve_cli_base_url(None) is None
 
     monkeypatch.setenv("LUCIDA_BACKEND", "python")
     monkeypatch.setenv("LUCIDA_BASE_URL", "http://127.0.0.1:9933")

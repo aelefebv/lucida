@@ -6,6 +6,11 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() {
     init_tracing();
+    let active_features = feature_list();
+    tracing::info!(
+        active_features = %active_features,
+        "starting lucida-daemon",
+    );
 
     let bind_addr = env::var("LUCIDA_DAEMON_ADDR").unwrap_or_else(|_| "127.0.0.1:3000".to_owned());
     let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -24,4 +29,16 @@ fn init_tracing() {
         .with_env_filter(env_filter)
         .with_target(true)
         .try_init();
+}
+
+fn feature_list() -> String {
+    let mut features: Vec<&'static str> = Vec::new();
+    #[cfg(feature = "gpu")]
+    features.push("gpu");
+    #[cfg(feature = "software")]
+    features.push("software");
+    if features.is_empty() {
+        return "none".to_owned();
+    }
+    features.join(",")
 }

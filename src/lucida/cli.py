@@ -1073,7 +1073,8 @@ def _load_view_2d(path: Path | None) -> View2D | None:
 def _resolve_cli_base_url(base_url_override: str | None) -> str | None:
     """Resolve effective HTTP URL for CLI commands.
 
-    Python backend defaults to in-process local service. Rust backend always uses HTTP.
+    Rust backend defaults to HTTP transport. Python backend uses in-process local
+    service when selected and no explicit base URL is provided.
     """
     runtime = resolve_runtime_config(base_url_override=base_url_override)
     if runtime.use_http:

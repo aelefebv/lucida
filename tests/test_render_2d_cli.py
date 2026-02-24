@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from io import BytesIO
+import os
 from pathlib import Path
 import uuid
 
@@ -13,6 +14,13 @@ import lucida.cli as cli_module
 from lucida.service.dataset_service import DatasetService
 
 
+def _python_backend_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["LUCIDA_BACKEND"] = "python"
+    env.pop("LUCIDA_BASE_URL", None)
+    return env
+
+
 def _decode_size(payload_b64: str) -> tuple[int, int]:
     image = Image.open(BytesIO(base64.b64decode(payload_b64))).convert("RGBA")
     return image.size
@@ -21,10 +29,12 @@ def _decode_size(payload_b64: str) -> tuple[int, int]:
 def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> None:
     cli_module._LOCAL_SERVICE = DatasetService()
     runner = CliRunner()
+    python_env = _python_backend_env()
 
     open_result = runner.invoke(
         cli_module.app,
         ["dataset", "open", "--uri", render_omezarr_uri, "--json"],
+        env=python_env,
     )
     assert open_result.exit_code == 0
     dataset_id = json.loads(open_result.stdout)["dataset_summary"]["dataset_id"]
@@ -32,6 +42,7 @@ def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> N
     create_result = runner.invoke(
         cli_module.app,
         ["view", "create", "--dataset-id", dataset_id, "--json"],
+        env=python_env,
     )
     assert create_result.exit_code == 0
     view_id = json.loads(create_result.stdout)["view_state"]["view_id"]
@@ -39,6 +50,7 @@ def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> N
     set_plane_result = runner.invoke(
         cli_module.app,
         ["view", "set-plane", "--view-id", view_id, "--plane", "xz", "--json"],
+        env=python_env,
     )
     assert set_plane_result.exit_code == 0
     assert json.loads(set_plane_result.stdout)["view_state"]["view_2d"]["plane"] == "xz"
@@ -46,12 +58,14 @@ def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> N
     pan_result = runner.invoke(
         cli_module.app,
         ["view", "pan", "--view-id", view_id, "--dx-px", "10", "--dy-px", "-4", "--json"],
+        env=python_env,
     )
     assert pan_result.exit_code == 0
 
     zoom_result = runner.invoke(
         cli_module.app,
         ["view", "zoom", "--view-id", view_id, "--factor", "0.75", "--json"],
+        env=python_env,
     )
     assert zoom_result.exit_code == 0
 
@@ -68,6 +82,7 @@ def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> N
             "56",
             "--json",
         ],
+        env=python_env,
     )
     assert render_result.exit_code == 0
     payload = json.loads(render_result.stdout)
@@ -78,6 +93,7 @@ def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> N
     view_get_result = runner.invoke(
         cli_module.app,
         ["view", "get", "--view-id", view_id, "--json"],
+        env=python_env,
     )
     assert view_get_result.exit_code == 0
     view_state_payload = json.loads(view_get_result.stdout)["view_state"]
@@ -97,6 +113,7 @@ def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> N
             "48",
             "--json",
         ],
+        env=python_env,
     )
     assert stateless_result.exit_code == 0
     stateless_payload = json.loads(stateless_result.stdout)
@@ -124,6 +141,7 @@ def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> N
             output_relative,
             "--json",
         ],
+        env=python_env,
     )
     assert file_result.exit_code == 0
     file_payload = json.loads(file_result.stdout)
@@ -147,6 +165,7 @@ def test_cli_render_and_navigation(render_omezarr_uri: str, tmp_path: Path) -> N
                 "48",
                 "--json",
             ],
+            env=python_env,
         )
         assert invalid_one_of.exit_code == 1
         invalid_payload = json.loads(invalid_one_of.stdout)

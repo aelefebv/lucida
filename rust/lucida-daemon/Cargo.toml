@@ -3,6 +3,11 @@ name = "lucida-daemon"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["gpu"]
+gpu = []
+software = []
+
 [dependencies]
 axum = { version = "0.8.4", features = ["http1", "json"] }
 base64 = "0.22.1"
