@@ -17,6 +17,7 @@ use crate::dto::render::{
 };
 use crate::dto::view_state::{RenderMode, ViewState};
 use crate::error::ApiError;
+use crate::render_cache::SessionCacheSnapshot;
 use crate::render_cpu::render_view_to_png;
 use crate::state::{require_session, SharedAppState};
 use crate::view_state_core::{
@@ -102,8 +103,11 @@ pub async fn render_image(
         selector_warnings,
         view_warnings,
         state_hash,
+        cache_registry,
+        cache_session_id,
     ) = {
         let mut app_state = state.write().await;
+        let cache_registry = app_state.render_caches.clone();
 
         let scoped_session_id = if let Some(session_id) = request.session_id.as_deref() {
             require_session(&app_state, session_id)?;
@@ -266,6 +270,9 @@ pub async fn render_image(
         effective_view.view_2d = Some(normalized_view_2d);
 
         let state_hash = compute_state_hash(&effective_view);
+        let cache_session_id = scoped_session_id
+            .clone()
+            .unwrap_or_else(|| effective_view.session_id.clone());
 
         (
             effective_view,
@@ -276,10 +283,29 @@ pub async fn render_image(
             selector_warnings,
             view_warnings,
             state_hash,
+            cache_registry,
+            cache_session_id,
         )
     };
 
-    let render_result = render_view_to_png(&dataset_summary, &effective_view, &request.output)?;
+    let (render_result, cache_snapshot, cache_budgets) = {
+        let mut cache_state = cache_registry.write().await;
+        let cache_budgets =
+            cache_state.resolve_effective_budgets(effective_view.performance.as_ref());
+        let render_result = render_view_to_png(
+            &dataset_summary,
+            &effective_view,
+            &request.output,
+            &mut cache_state,
+            &cache_session_id,
+            cache_budgets,
+        )?;
+        let cache_snapshot = cache_state.session_snapshot(&cache_session_id);
+        (render_result, cache_snapshot, cache_budgets)
+    };
+
+    log_cache_snapshot(&cache_session_id, cache_snapshot.as_ref(), cache_budgets);
+
     let payload_sha256 = {
         let mut hasher = Sha256::new();
         hasher.update(&render_result.png_bytes);
@@ -361,6 +387,34 @@ pub async fn render_image(
         },
         warnings,
     }))
+}
+
+fn log_cache_snapshot(
+    session_id: &str,
+    cache_snapshot: Option<&SessionCacheSnapshot>,
+    cache_budgets: crate::render_cache::EffectiveCacheBudgets,
+) {
+    if let Some(snapshot) = cache_snapshot {
+        tracing::debug!(
+            target: "lucida.cache",
+            session_id = session_id,
+            cpu_hits = snapshot.cpu.hits,
+            cpu_misses = snapshot.cpu.misses,
+            cpu_inserts = snapshot.cpu.inserts,
+            cpu_evictions = snapshot.cpu.evictions,
+            cpu_current_bytes = snapshot.cpu.current_bytes,
+            cpu_max_bytes = snapshot.cpu.max_bytes,
+            gpu_hits = snapshot.gpu.hits,
+            gpu_misses = snapshot.gpu.misses,
+            gpu_inserts = snapshot.gpu.inserts,
+            gpu_evictions = snapshot.gpu.evictions,
+            gpu_current_bytes = snapshot.gpu.current_bytes,
+            gpu_max_bytes = snapshot.gpu.max_bytes,
+            configured_cpu_budget = cache_budgets.max_cpu_cache_bytes,
+            configured_gpu_budget = cache_budgets.max_gpu_cache_bytes,
+            "render cache snapshot"
+        );
+    }
 }
 
 fn parse_render_image_request(payload: Value) -> Result<ParsedRenderImageRequest, ApiError> {

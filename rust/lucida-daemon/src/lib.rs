@@ -2,6 +2,7 @@ pub mod dataset_open;
 pub mod dto;
 pub mod error;
 pub mod omezarr;
+pub mod render_cache;
 pub mod render_cpu;
 pub mod render_image;
 pub mod session_create;
@@ -9,6 +10,7 @@ pub mod state;
 pub mod uri;
 pub mod view_state_core;
 pub mod view_state_routes;
+pub mod view_state_transfer_routes;
 
 use axum::{
     routing::{get, post},
@@ -21,6 +23,7 @@ use crate::render_image::render_image;
 use crate::session_create::session_create;
 use crate::state::{new_shared_state, SharedAppState};
 use crate::view_state_routes::{view_create, view_get, view_update};
+use crate::view_state_transfer_routes::{export_viewstate, import_viewstate};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +49,8 @@ pub fn app_with_state(state: SharedAppState) -> Router {
         .route("/view/create", post(view_create))
         .route("/view/{view_id}", get(view_get))
         .route("/view/update", post(view_update))
+        .route("/export/viewstate", post(export_viewstate))
+        .route("/import/viewstate", post(import_viewstate))
         .route("/render/image", post(render_image))
         .with_state(state)
 }

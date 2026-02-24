@@ -167,8 +167,9 @@ fn parse_required_non_empty_string(
                 if as_str.is_empty() {
                     errors.push(json!({
                         "loc": ["body", key],
-                        "msg": "String should have at least 1 character.",
+                        "msg": "String should have at least 1 character",
                         "type": "string_too_short",
+                        "input": as_str,
                         "ctx": {"min_length": 1},
                     }));
                     None
@@ -208,8 +209,9 @@ fn parse_optional_non_empty_string(
         if as_str.is_empty() {
             errors.push(json!({
                 "loc": ["body", key],
-                "msg": "String should have at least 1 character.",
+                "msg": "String should have at least 1 character",
                 "type": "string_too_short",
+                "input": as_str,
                 "ctx": {"min_length": 1},
             }));
             return None;

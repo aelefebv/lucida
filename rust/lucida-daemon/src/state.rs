@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::dto::dataset_summary::DatasetSummary;
 use crate::dto::view_state::ViewState;
 use crate::error::ApiError;
+use crate::render_cache::{new_shared_render_cache_registry, SharedRenderCacheRegistry};
 
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
@@ -31,12 +32,25 @@ pub struct ViewRecord {
     pub view_state: ViewState,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct AppState {
     pub sessions_by_id: HashMap<String, SessionRecord>,
     pub datasets_by_id: HashMap<String, DatasetRecord>,
     pub views_by_id: HashMap<String, ViewRecord>,
     pub compat_session_id: Option<String>,
+    pub render_caches: SharedRenderCacheRegistry,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            sessions_by_id: HashMap::new(),
+            datasets_by_id: HashMap::new(),
+            views_by_id: HashMap::new(),
+            compat_session_id: None,
+            render_caches: new_shared_render_cache_registry(),
+        }
+    }
 }
 
 pub type SharedAppState = Arc<RwLock<AppState>>;
