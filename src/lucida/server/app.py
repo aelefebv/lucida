@@ -18,6 +18,7 @@ from lucida.models.api import (
     ViewUpdateRequest,
     ViewUpdateResponse,
 )
+from lucida.models.render import RenderImageRequest, RenderImageResponse
 from lucida.service.dataset_service import DatasetService
 
 
@@ -144,6 +145,23 @@ def create_app(dataset_service: DatasetService | None = None) -> FastAPI:
             view_id=request.view_id,
             patch=request.patch,
             session_id=request.session_id,
+        )
+
+    @app.post("/render/image", response_model=RenderImageResponse)
+    async def render_image(request: RenderImageRequest) -> RenderImageResponse:
+        """Render a view into a PNG image payload.
+
+        Parameters
+        ----------
+        request:
+            Parsed render request.
+        """
+        return service.render_image(
+            view_id=request.view_id,
+            session_id=request.session_id,
+            request_id=request.request_id,
+            overrides_json_patch=request.overrides_json_patch,
+            output=request.output,
         )
 
     return app

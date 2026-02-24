@@ -10,6 +10,7 @@ import typer
 
 from lucida.client import LucidaClient, LucidaClientError
 from lucida.errors import LucidaError, as_api_error_payload
+from lucida.models.render import RenderOutputSpec
 from lucida.models.view_state import AxisSelector, View2D, Viewport
 from lucida.service.dataset_service import DatasetService
 
@@ -17,11 +18,19 @@ app = typer.Typer(no_args_is_help=True)
 dataset_app = typer.Typer(no_args_is_help=True)
 session_app = typer.Typer(no_args_is_help=True)
 view_app = typer.Typer(no_args_is_help=True)
+render_app = typer.Typer(no_args_is_help=True)
 app.add_typer(dataset_app, name="dataset")
 app.add_typer(session_app, name="session")
 app.add_typer(view_app, name="view")
+app.add_typer(render_app, name="render")
 
 _LOCAL_SERVICE = DatasetService()
+
+_PLANE_ROLES: dict[str, tuple[str, str, str]] = {
+    "xy": ("x", "y", "z"),
+    "xz": ("x", "z", "y"),
+    "yz": ("y", "z", "x"),
+}
 
 
 @dataset_app.command("open")
@@ -457,6 +466,125 @@ def view_set_set(
     _emit_view_update_response(response, output_json=output_json)
 
 
+@view_app.command("set-plane")
+def view_set_plane(
+    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    plane: str = typer.Option(..., "--plane", help="Plane: xy, xz, or yz."),
+    session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Set view plane while preserving projected center."""
+    response = _run_navigation_helper(
+        helper="set-plane",
+        view_id=view_id,
+        session_id=session_id,
+        base_url=base_url,
+        payload={"plane": plane},
+    )
+    _emit_view_update_response(response, output_json=output_json)
+
+
+@view_app.command("pan")
+def view_pan(
+    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    dx_px: float = typer.Option(..., "--dx-px", help="Pan delta in screen pixels (x)."),
+    dy_px: float = typer.Option(..., "--dy-px", help="Pan delta in screen pixels (y)."),
+    session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Pan the 2D camera by pixel deltas."""
+    response = _run_navigation_helper(
+        helper="pan",
+        view_id=view_id,
+        session_id=session_id,
+        base_url=base_url,
+        payload={"dx_px": dx_px, "dy_px": dy_px},
+    )
+    _emit_view_update_response(response, output_json=output_json)
+
+
+@view_app.command("zoom")
+def view_zoom(
+    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    factor: float = typer.Option(..., "--factor", help="Multiplicative zoom factor (>0)."),
+    session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Multiply 2D camera zoom by factor."""
+    response = _run_navigation_helper(
+        helper="zoom",
+        view_id=view_id,
+        session_id=session_id,
+        base_url=base_url,
+        payload={"factor": factor},
+    )
+    _emit_view_update_response(response, output_json=output_json)
+
+
+@render_app.command("image")
+def render_image(
+    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    width_px: int = typer.Option(..., "--width-px", help="Output width in pixels."),
+    height_px: int = typer.Option(..., "--height-px", help="Output height in pixels."),
+    session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
+    request_id: str | None = typer.Option(None, "--request-id", help="Optional request id."),
+    patch_file: Path | None = typer.Option(
+        None,
+        "--patch-file",
+        help="Optional JSON file with render-time RFC6902 overrides.",
+    ),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Render a PNG image for a view."""
+    try:
+        overrides = _load_patch(patch_file) if patch_file is not None else None
+        if base_url:
+            with LucidaClient(base_url=base_url) as client:
+                response = client.render_image(
+                    view_id=view_id,
+                    width_px=width_px,
+                    height_px=height_px,
+                    session_id=session_id,
+                    request_id=request_id,
+                    overrides_json_patch=overrides,
+                )
+        else:
+            response = _LOCAL_SERVICE.render_image(
+                view_id=view_id,
+                output=RenderOutputSpec(width_px=width_px, height_px=height_px),
+                session_id=session_id,
+                request_id=request_id,
+                overrides_json_patch=overrides,
+            )
+    except LucidaError as exc:
+        _emit_exception(exc)
+    except LucidaClientError as exc:
+        _emit_client_error(exc)
+    except ValueError as exc:
+        _emit_exception(exc)
+
+    payload = response.model_dump(mode="json")
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    typer.echo(f"render_id: {payload['render_id']}")
+    typer.echo(f"request_id: {payload['request_id']}")
+    typer.echo(f"status: {payload['status']}")
+    typer.echo(f"image_sha256: {payload['images'][0]['sha256']}")
+
+
 def _run_selector_helper(
     *,
     helper: str,
@@ -540,6 +668,159 @@ def _run_selector_helper(
     except LucidaClientError as exc:
         _emit_client_error(exc)
     raise AssertionError("unreachable")
+
+
+def _run_navigation_helper(
+    *,
+    helper: str,
+    view_id: str,
+    session_id: str | None,
+    base_url: str | None,
+    payload: dict[str, Any],
+) -> Any:
+    """Run pan/zoom/plane operations via HTTP client or local service."""
+    try:
+        if base_url:
+            with LucidaClient(base_url=base_url) as client:
+                if helper == "set-plane":
+                    return client.set_plane(
+                        view_id=view_id,
+                        plane=payload["plane"],
+                        session_id=session_id,
+                    )
+                if helper == "pan":
+                    return client.pan(
+                        view_id=view_id,
+                        dx_px=float(payload["dx_px"]),
+                        dy_px=float(payload["dy_px"]),
+                        session_id=session_id,
+                    )
+                return client.zoom(
+                    view_id=view_id,
+                    factor=float(payload["factor"]),
+                    session_id=session_id,
+                )
+
+        view = _LOCAL_SERVICE.get_view(view_id=view_id, session_id=session_id).view_state
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+
+        if helper == "set-plane":
+            patch = _build_set_plane_patch(
+                view_payload=view.model_dump(mode="json"),
+                plane=payload["plane"],
+            )
+        elif helper == "pan":
+            zoom = float(view.view_2d.camera.zoom)
+            pixel_ratio = float(view.viewport.pixel_ratio)
+            if zoom <= 0:
+                raise ValueError("zoom must be > 0.")
+            center_x, center_y = view.view_2d.camera.center_world
+            delta_x = float(payload["dx_px"]) / (zoom * pixel_ratio)
+            delta_y = float(payload["dy_px"]) / (zoom * pixel_ratio)
+            patch = [
+                {
+                    "op": "replace",
+                    "path": "/view_2d/camera/center_world",
+                    "value": [float(center_x) + delta_x, float(center_y) + delta_y],
+                }
+            ]
+        else:
+            factor = float(payload["factor"])
+            if factor <= 0:
+                raise ValueError("zoom factor must be > 0.")
+            patch = [
+                {
+                    "op": "replace",
+                    "path": "/view_2d/camera/zoom",
+                    "value": float(view.view_2d.camera.zoom) * factor,
+                }
+            ]
+
+        return _LOCAL_SERVICE.update_view(
+            view_id=view_id,
+            session_id=session_id,
+            patch=patch,
+        )
+    except (LucidaError, ValueError) as exc:
+        _emit_exception(exc)
+    except LucidaClientError as exc:
+        _emit_client_error(exc)
+    raise AssertionError("unreachable")
+
+
+def _build_set_plane_patch(*, view_payload: dict[str, Any], plane: str) -> list[dict[str, Any]]:
+    if plane not in _PLANE_ROLES:
+        raise ValueError(f"unsupported plane: {plane}")
+
+    view_2d = view_payload.get("view_2d")
+    if not isinstance(view_2d, dict):
+        raise ValueError("view has no 2d state.")
+
+    current_plane = str(view_2d.get("plane", "xy"))
+    if current_plane not in _PLANE_ROLES:
+        current_plane = "xy"
+
+    current_u_role, current_v_role, current_orth_role = _PLANE_ROLES[current_plane]
+    target_u_role, target_v_role, target_orth_role = _PLANE_ROLES[plane]
+
+    camera = view_2d.get("camera") or {}
+    center_world = camera.get("center_world") or [0.0, 0.0]
+    if len(center_world) != 2:
+        center_world = [0.0, 0.0]
+
+    slice_payload = view_2d.get("slice") or {}
+    selectors = view_payload.get("selectors") or []
+    if not isinstance(selectors, list):
+        selectors = []
+
+    current_slice_index = slice_payload.get("index")
+    if current_slice_index is None:
+        current_slice_index = _selector_first_index(
+            selectors=selectors,
+            axis=slice_payload.get("axis"),
+        )
+    if current_slice_index is None:
+        current_slice_index = 0
+
+    role_values: dict[str, float] = {
+        current_u_role: float(center_world[0]),
+        current_v_role: float(center_world[1]),
+        current_orth_role: float(current_slice_index),
+    }
+
+    new_center = [
+        float(role_values.get(target_u_role, float(center_world[0]))),
+        float(role_values.get(target_v_role, float(center_world[1]))),
+    ]
+    next_slice = dict(slice_payload)
+    next_slice["index"] = int(round(role_values.get(target_orth_role, 0.0)))
+
+    return [
+        {"op": "replace", "path": "/view_2d/plane", "value": plane},
+        {"op": "replace", "path": "/view_2d/camera/center_world", "value": new_center},
+        {"op": "replace", "path": "/view_2d/slice", "value": next_slice},
+    ]
+
+
+def _selector_first_index(*, selectors: list[dict[str, Any]], axis: Any) -> int | None:
+    if not isinstance(axis, str):
+        return None
+    for selector in selectors:
+        if not isinstance(selector, dict):
+            continue
+        if selector.get("axis") != axis:
+            continue
+        kind = selector.get("kind")
+        if kind == "index" and isinstance(selector.get("index"), int):
+            return int(selector["index"])
+        if kind == "range" and isinstance(selector.get("start"), int):
+            return int(selector["start"])
+        if kind == "set" and isinstance(selector.get("indices"), list) and selector["indices"]:
+            first = selector["indices"][0]
+            if isinstance(first, int):
+                return int(first)
+    return None
 
 
 def _emit_view_update_response(response: Any, *, output_json: bool) -> None:

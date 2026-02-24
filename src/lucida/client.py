@@ -18,6 +18,14 @@ from lucida.models.api import (
     ViewUpdateRequest,
     ViewUpdateResponse,
 )
+from lucida.models.render import RenderImageRequest, RenderImageResponse, RenderOutputSpec
+
+
+_PLANE_ROLES: dict[str, tuple[str, str, str]] = {
+    "xy": ("x", "y", "z"),
+    "xz": ("x", "z", "y"),
+    "yz": ("y", "z", "x"),
+}
 
 
 class LucidaClientError(Exception):
@@ -190,6 +198,107 @@ class LucidaClient:
         payload = self._post("/view/update", request.model_dump(mode="json"))
         return ViewUpdateResponse.model_validate(payload)
 
+    def render_image(
+        self,
+        *,
+        view_id: str,
+        width_px: int,
+        height_px: int,
+        session_id: str | None = None,
+        request_id: str | None = None,
+        overrides_json_patch: list[dict[str, Any]] | None = None,
+    ) -> RenderImageResponse:
+        """Render an image for an existing view.
+
+        Parameters
+        ----------
+        view_id:
+            Target view id.
+        width_px:
+            Output image width.
+        height_px:
+            Output image height.
+        session_id:
+            Optional session id to enforce scope.
+        request_id:
+            Optional caller-provided request id.
+        overrides_json_patch:
+            Optional RFC6902 patch applied ephemerally at render time.
+        """
+        request = RenderImageRequest(
+            view_id=view_id,
+            session_id=session_id,
+            request_id=request_id,
+            overrides_json_patch=overrides_json_patch,
+            output=RenderOutputSpec(width_px=width_px, height_px=height_px),
+        )
+        payload = self._post("/render/image", request.model_dump(mode="json"))
+        return RenderImageResponse.model_validate(payload)
+
+    def set_plane(
+        self,
+        *,
+        view_id: str,
+        plane: str,
+        session_id: str | None = None,
+    ) -> ViewUpdateResponse:
+        """Set 2D plane while preserving projected world center."""
+        view = self.get_view(view_id=view_id, session_id=session_id).view_state
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+
+        patch = self._set_plane_patch(view=view.model_dump(mode="json"), plane=plane)
+        return self.update_view(view_id=view_id, session_id=session_id, patch=patch)
+
+    def pan(
+        self,
+        *,
+        view_id: str,
+        dx_px: float,
+        dy_px: float,
+        session_id: str | None = None,
+    ) -> ViewUpdateResponse:
+        """Pan camera in screen pixels."""
+        view = self.get_view(view_id=view_id, session_id=session_id).view_state
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+
+        zoom = float(view.view_2d.camera.zoom)
+        pixel_ratio = float(view.viewport.pixel_ratio)
+        if zoom <= 0:
+            raise ValueError("zoom must be > 0.")
+
+        delta_x = float(dx_px) / (zoom * pixel_ratio)
+        delta_y = float(dy_px) / (zoom * pixel_ratio)
+        center_x, center_y = view.view_2d.camera.center_world
+        patch = [
+            {
+                "op": "replace",
+                "path": "/view_2d/camera/center_world",
+                "value": [float(center_x) + delta_x, float(center_y) + delta_y],
+            }
+        ]
+        return self.update_view(view_id=view_id, session_id=session_id, patch=patch)
+
+    def zoom(
+        self,
+        *,
+        view_id: str,
+        factor: float,
+        session_id: str | None = None,
+    ) -> ViewUpdateResponse:
+        """Multiply camera zoom by the provided factor."""
+        if factor <= 0:
+            raise ValueError("zoom factor must be > 0.")
+
+        view = self.get_view(view_id=view_id, session_id=session_id).view_state
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+
+        next_zoom = float(view.view_2d.camera.zoom) * float(factor)
+        patch = [{"op": "replace", "path": "/view_2d/camera/zoom", "value": next_zoom}]
+        return self.update_view(view_id=view_id, session_id=session_id, patch=patch)
+
     def set_dim(
         self,
         *,
@@ -337,6 +446,75 @@ class LucidaClient:
         selectors = [selector.model_dump(mode="json") for selector in view.selectors if selector.axis != axis]
         selectors.append(replacement)
         return selectors
+
+    def _set_plane_patch(self, *, view: dict[str, Any], plane: str) -> list[dict[str, Any]]:
+        if plane not in _PLANE_ROLES:
+            raise ValueError(f"unsupported plane: {plane}")
+
+        view_2d = view.get("view_2d")
+        if not isinstance(view_2d, dict):
+            raise ValueError("view has no 2d state.")
+
+        current_plane = str(view_2d.get("plane", "xy"))
+        if current_plane not in _PLANE_ROLES:
+            current_plane = "xy"
+
+        current_u_role, current_v_role, current_orth_role = _PLANE_ROLES[current_plane]
+        target_u_role, target_v_role, target_orth_role = _PLANE_ROLES[plane]
+
+        camera = view_2d.get("camera") or {}
+        center_world = camera.get("center_world") or [0.0, 0.0]
+        if len(center_world) != 2:
+            center_world = [0.0, 0.0]
+
+        slice_payload = view_2d.get("slice") or {}
+        selectors = view.get("selectors") or []
+        if not isinstance(selectors, list):
+            selectors = []
+
+        current_slice_index = slice_payload.get("index")
+        if current_slice_index is None:
+            current_slice_index = self._selector_index(selectors=selectors, axis=slice_payload.get("axis"))
+        if current_slice_index is None:
+            current_slice_index = 0
+
+        role_values: dict[str, float] = {
+            current_u_role: float(center_world[0]),
+            current_v_role: float(center_world[1]),
+            current_orth_role: float(current_slice_index),
+        }
+
+        new_center = [
+            float(role_values.get(target_u_role, float(center_world[0]))),
+            float(role_values.get(target_v_role, float(center_world[1]))),
+        ]
+        next_slice = dict(slice_payload)
+        next_slice["index"] = int(round(role_values.get(target_orth_role, 0.0)))
+
+        return [
+            {"op": "replace", "path": "/view_2d/plane", "value": plane},
+            {"op": "replace", "path": "/view_2d/camera/center_world", "value": new_center},
+            {"op": "replace", "path": "/view_2d/slice", "value": next_slice},
+        ]
+
+    def _selector_index(self, *, selectors: list[dict[str, Any]], axis: Any) -> int | None:
+        if not isinstance(axis, str):
+            return None
+        for selector in selectors:
+            if not isinstance(selector, dict):
+                continue
+            if selector.get("axis") != axis:
+                continue
+            kind = selector.get("kind")
+            if kind == "index" and isinstance(selector.get("index"), int):
+                return int(selector["index"])
+            if kind == "range" and isinstance(selector.get("start"), int):
+                return int(selector["start"])
+            if kind == "set" and isinstance(selector.get("indices"), list) and selector["indices"]:
+                first = selector["indices"][0]
+                if isinstance(first, int):
+                    return int(first)
+        return None
 
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """POST payload to the API and return the parsed JSON payload.

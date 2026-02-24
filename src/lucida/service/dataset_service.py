@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import hashlib
 import json
 import threading
@@ -26,6 +27,13 @@ from lucida.models.api import (
     ViewUpdateResponse,
 )
 from lucida.models.dataset_summary import DatasetHints, DatasetSummary
+from lucida.models.render import (
+    RenderImageArtifact,
+    RenderImageResponse,
+    RenderMeta,
+    RenderOutputSpec,
+    RenderTimingMs,
+)
 from lucida.models.view_state import (
     AxisSelector,
     Camera2D,
@@ -41,6 +49,7 @@ from lucida.models.view_state import (
     ViewState,
     Viewport,
 )
+from lucida.service.render_2d import render_view_to_png
 
 
 def generate_dataset_id(normalized_uri: str) -> str:
@@ -427,6 +436,176 @@ class DatasetService:
                 selectors_applied=selectors,
             )
 
+    def render_image(
+        self,
+        *,
+        view_id: str,
+        output: RenderOutputSpec,
+        session_id: str | None = None,
+        request_id: str | None = None,
+        overrides_json_patch: list[dict[str, Any]] | None = None,
+    ) -> RenderImageResponse:
+        """Render a view into a PNG image response.
+
+        Parameters
+        ----------
+        view_id:
+            Target view id.
+        output:
+            Render output specification.
+        session_id:
+            Optional session id for membership checks.
+        request_id:
+            Optional caller-provided request id.
+        overrides_json_patch:
+            Optional RFC6902 patch applied ephemerally for this render.
+        """
+        if (
+            output.width_px > 4096
+            or output.height_px > 4096
+            or (output.width_px * output.height_px) > 16_777_216
+        ):
+            raise LucidaError(
+                code="render_output_too_large",
+                message="Requested render output exceeds configured limits.",
+                details={
+                    "width_px": output.width_px,
+                    "height_px": output.height_px,
+                    "max_width_px": 4096,
+                    "max_height_px": 4096,
+                    "max_pixels": 16_777_216,
+                },
+                status_code=422,
+            )
+
+        with self._lock:
+            view_record = self.views_by_id.get(view_id)
+            if view_record is None:
+                raise LucidaError(
+                    code="view_not_found",
+                    message="View was not found.",
+                    details={"view_id": view_id},
+                    status_code=404,
+                )
+
+            if session_id is not None:
+                session = self._require_session(session_id)
+                if view_id not in session.view_ids:
+                    raise LucidaError(
+                        code="view_not_found",
+                        message="View was not found in session.",
+                        details={"view_id": view_id, "session_id": session_id},
+                        status_code=404,
+                    )
+            else:
+                session = self.sessions_by_id[view_record.session_id]
+
+            effective_payload = view_record.view_state.model_dump(mode="json")
+            if overrides_json_patch:
+                try:
+                    effective_payload = jsonpatch.apply_patch(
+                        effective_payload,
+                        overrides_json_patch,
+                        in_place=False,
+                    )
+                except Exception as exc:
+                    raise LucidaError(
+                        code="invalid_patch",
+                        message="Failed to apply render-time JSON patch overrides.",
+                        details={"view_id": view_id, "reason": str(exc)},
+                        status_code=422,
+                    ) from exc
+
+            try:
+                effective_view = ViewState.model_validate(effective_payload)
+            except ValidationError as exc:
+                raise LucidaError(
+                    code="invalid_patch",
+                    message="Render-time patched view state did not validate.",
+                    details={"view_id": view_id, "errors": exc.errors()},
+                    status_code=422,
+                ) from exc
+
+            if effective_view.mode != "2d":
+                raise LucidaError(
+                    code="unsupported_mode",
+                    message="Only mode=2d is supported in this slice.",
+                    details={"mode": effective_view.mode},
+                    status_code=422,
+                )
+
+            self._validate_immutable_view_fields(
+                current=view_record.view_state,
+                candidate=effective_view,
+            )
+
+            primary_dataset_summary = self._resolve_primary_dataset_for_view(
+                view_state=effective_view,
+                session=session,
+            )
+
+            selectors, selector_warnings = self._normalize_selectors(
+                selectors=effective_view.selectors,
+                dataset_summary=primary_dataset_summary,
+                operation="render_image",
+            )
+            effective_view = effective_view.model_copy(update={"selectors": selectors}, deep=True)
+
+            normalized_view_2d, view_warnings = self._normalize_view_2d(
+                view_2d=effective_view.view_2d,
+                dataset_summary=primary_dataset_summary,
+                selectors=selectors,
+            )
+            effective_view = effective_view.model_copy(
+                update={"view_2d": normalized_view_2d},
+                deep=True,
+            )
+
+            state_hash = self._compute_state_hash(effective_view)
+            state_version = view_record.view_state.state_version
+
+        render_result = render_view_to_png(
+            dataset_summary=primary_dataset_summary,
+            view_state=effective_view,
+            output=output,
+        )
+
+        payload_bytes = render_result.png_bytes
+        payload_b64 = base64.b64encode(payload_bytes).decode("ascii")
+        payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
+
+        warnings = [*selector_warnings, *view_warnings, *render_result.warnings]
+        resolved_request_id = request_id or f"req_{uuid.uuid4().hex[:16]}"
+        render_id = f"ren_{uuid.uuid4().hex[:16]}"
+
+        return RenderImageResponse(
+            request_id=resolved_request_id,
+            render_id=render_id,
+            view_id=view_id,
+            state_hash=state_hash,
+            state_version=state_version,
+            images=[
+                RenderImageArtifact(
+                    width_px=output.width_px,
+                    height_px=output.height_px,
+                    bytes_base64=payload_b64,
+                    sha256=payload_sha256,
+                )
+            ],
+            meta=RenderMeta(
+                dataset_id=primary_dataset_summary.dataset_id,
+                multiscale_name=effective_view.datasets[0].multiscale_name,
+                pyramid_level_used=render_result.pyramid_level_used,
+                selectors_applied=selectors,
+                timing_ms=(
+                    render_result.timing_ms
+                    if render_result.timing_ms is not None
+                    else RenderTimingMs(total=0.0, io=0.0, decode=0.0, gpu_upload=0.0, render=0.0)
+                ),
+            ),
+            warnings=warnings,
+        )
+
     def _resolve_session(self, session_id: str | None) -> SessionRecord:
         """Resolve a provided session id or use a compatibility session.
 
@@ -618,11 +797,23 @@ class DatasetService:
         selectors:
             Active axis selectors.
         """
-        axis_by_role = {axis.role: axis for axis in dataset_summary.axes}
-        x_axis = axis_by_role.get("x", dataset_summary.axes[-1])
-        y_axis = axis_by_role.get("y", dataset_summary.axes[-2] if len(dataset_summary.axes) > 1 else x_axis)
-
-        slice_axis = self._select_slice_axis(dataset_summary, selectors)
+        u_role, v_role, orth_role = self._plane_role_triplet("xy")
+        u_axis_name = self._axis_name_for_role(
+            dataset_summary=dataset_summary,
+            role=u_role,
+            plane="xy",
+        )
+        v_axis_name = self._axis_name_for_role(
+            dataset_summary=dataset_summary,
+            role=v_role,
+            plane="xy",
+        )
+        slice_axis = self._axis_name_for_role(
+            dataset_summary=dataset_summary,
+            role=orth_role,
+            plane="xy",
+        )
+        axis_sizes = {axis.name: axis.size for axis in dataset_summary.axes}
         slice_index = self._selector_index_for_axis(selectors=selectors, axis_name=slice_axis)
 
         return View2D(
@@ -633,7 +824,10 @@ class DatasetService:
                 slab=SlabSettings(thickness_vox=1, mode="single"),
             ),
             camera=Camera2D(
-                center_world=(float(x_axis.size) / 2.0, float(y_axis.size) / 2.0),
+                center_world=(
+                    float(axis_sizes[u_axis_name]) / 2.0,
+                    float(axis_sizes[v_axis_name]) / 2.0,
+                ),
                 zoom=1.0,
                 rotation_deg=0.0,
             ),
@@ -738,26 +932,37 @@ class DatasetService:
             Current selectors used for default slice resolution.
         """
         warnings: list[ApiWarning] = []
-        if view_2d is None:
-            return self._default_view_2d(dataset_summary=dataset_summary, selectors=selectors), warnings
+        resolved_view = view_2d or self._default_view_2d(
+            dataset_summary=dataset_summary,
+            selectors=selectors,
+        )
 
-        axis_sizes = {axis.name: axis.size for axis in dataset_summary.axes}
-        default_slice_axis = self._select_slice_axis(dataset_summary, selectors)
-
-        slice_axis = view_2d.slice.axis if view_2d.slice and view_2d.slice.axis else default_slice_axis
-        if slice_axis not in axis_sizes:
+        _, _, orth_role = self._plane_role_triplet(resolved_view.plane)
+        slice_axis = self._axis_name_for_role(
+            dataset_summary=dataset_summary,
+            role=orth_role,
+            plane=resolved_view.plane,
+        )
+        requested_slice_axis = (
+            resolved_view.slice.axis if resolved_view.slice and resolved_view.slice.axis else None
+        )
+        if requested_slice_axis is not None and requested_slice_axis != slice_axis:
             warnings.append(
                 ApiWarning(
-                    code="slice_axis_fallback",
-                    message="Slice axis was invalid and replaced with default axis.",
-                    details={"requested_axis": slice_axis, "fallback_axis": default_slice_axis},
+                    code="slice_axis_forced_to_plane",
+                    message="Slice axis was replaced to match plane orthogonal axis.",
+                    details={
+                        "plane": resolved_view.plane,
+                        "requested_axis": requested_slice_axis,
+                        "applied_axis": slice_axis,
+                    },
                 )
             )
-            slice_axis = default_slice_axis
 
+        axis_sizes = {axis.name: axis.size for axis in dataset_summary.axes}
         slice_index = (
-            view_2d.slice.index
-            if view_2d.slice is not None and view_2d.slice.index is not None
+            resolved_view.slice.index
+            if resolved_view.slice is not None and resolved_view.slice.index is not None
             else self._selector_index_for_axis(selectors=selectors, axis_name=slice_axis)
         )
         clamped_slice_index = max(0, min(slice_index, axis_sizes[slice_axis] - 1))
@@ -773,9 +978,9 @@ class DatasetService:
                     },
                 )
             )
-        slab = view_2d.slice.slab if view_2d.slice and view_2d.slice.slab else SlabSettings()
+        slab = resolved_view.slice.slab if resolved_view.slice and resolved_view.slice.slab else SlabSettings()
 
-        normalized_view = view_2d.model_copy(
+        normalized_view = resolved_view.model_copy(
             update={
                 "slice": SliceSettings(
                     axis=slice_axis,
@@ -786,6 +991,44 @@ class DatasetService:
             deep=True,
         )
         return normalized_view, warnings
+
+    def _plane_role_triplet(self, plane: str) -> tuple[str, str, str]:
+        mapping: dict[str, tuple[str, str, str]] = {
+            "xy": ("x", "y", "z"),
+            "xz": ("x", "z", "y"),
+            "yz": ("y", "z", "x"),
+        }
+        roles = mapping.get(plane)
+        if roles is None:
+            raise LucidaError(
+                code="unsupported_plane",
+                message="Requested 2D plane is unsupported.",
+                details={"plane": plane},
+                status_code=422,
+            )
+        return roles
+
+    def _axis_name_for_role(
+        self,
+        *,
+        dataset_summary: DatasetSummary,
+        role: str,
+        plane: str,
+    ) -> str:
+        axis = next((item for item in dataset_summary.axes if item.role == role), None)
+        if axis is None:
+            missing_roles = [r for r in self._plane_role_triplet(plane) if not any(a.role == r for a in dataset_summary.axes)]
+            raise LucidaError(
+                code="unsupported_plane",
+                message="Requested plane is unsupported for dataset axes.",
+                details={
+                    "plane": plane,
+                    "missing_roles": missing_roles,
+                    "dataset_id": dataset_summary.dataset_id,
+                },
+                status_code=422,
+            )
+        return axis.name
 
     def _select_slice_axis(
         self, dataset_summary: DatasetSummary, selectors: list[AxisSelector]

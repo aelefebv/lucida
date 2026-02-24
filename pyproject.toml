@@ -10,6 +10,7 @@ dependencies = [
     "httpx>=0.28.1",
     "jsonpatch>=1.33",
     "numpy>=2.3.2",
+    "pillow>=11.3.0",
     "pydantic>=2.11.7",
     "typer>=0.16.1",
     "uvicorn>=0.35.0",
