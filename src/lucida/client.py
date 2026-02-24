@@ -24,6 +24,7 @@ from lucida.models.api import (
 )
 from lucida.models.render import RenderImageRequest, RenderImageResponse, RenderOutputSpec
 from lucida.models.view_state import ViewState
+from lucida.runtime_config import BackendKind, RuntimeConfig, resolve_runtime_config
 
 
 _PLANE_ROLES: dict[str, tuple[str, str, str]] = {
@@ -47,30 +48,43 @@ class LucidaClient:
         Underlying :class:`httpx.Client`.
     _owns_client:
         True when this object owns and must close the underlying client.
+    _runtime_config:
+        Resolved runtime settings used for HTTP transport initialization.
     """
 
     def __init__(
         self,
-        base_url: str = "http://127.0.0.1:8000",
+        base_url: str | None = None,
         *,
         timeout: float = 30.0,
         client: httpx.Client | None = None,
+        backend: BackendKind | None = None,
+        runtime_config: RuntimeConfig | None = None,
     ) -> None:
         """Create a client bound to a base URL and optional transport.
 
         Parameters
         ----------
         base_url:
-            Base URL for HTTP calls.
+            Optional HTTP base URL override.
         timeout:
             Request timeout in seconds.
         client:
             Optional preconfigured :class:`httpx.Client`.
+        backend:
+            Optional backend override (``python`` or ``rust``).
+        runtime_config:
+            Optional pre-resolved runtime configuration.
         """
         if client is None:
-            self._client = httpx.Client(base_url=base_url, timeout=timeout)
+            self._runtime_config = runtime_config or resolve_runtime_config(
+                backend_override=backend,
+                base_url_override=base_url,
+            )
+            self._client = httpx.Client(base_url=self._runtime_config.base_url, timeout=timeout)
             self._owns_client = True
         else:
+            self._runtime_config = runtime_config
             self._client = client
             self._owns_client = False
 

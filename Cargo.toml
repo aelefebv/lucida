@@ -1,0 +1,3 @@
+[workspace]
+members = ["rust/lucida-daemon"]
+resolver = "2"

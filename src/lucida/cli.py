@@ -12,6 +12,7 @@ from lucida.client import LucidaClient, LucidaClientError
 from lucida.errors import LucidaError, as_api_error_payload
 from lucida.models.render import RenderOutputSpec
 from lucida.models.view_state import AxisSelector, View2D, ViewState, Viewport
+from lucida.runtime_config import resolve_runtime_config
 from lucida.service.dataset_service import DatasetService
 
 app = typer.Typer(no_args_is_help=True)
@@ -64,8 +65,9 @@ def dataset_open(
         Optional HTTP base URL for API mode.
     """
     try:
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 response = client.open_dataset(
                     uri=uri,
                     dataset_id=dataset_id,
@@ -126,8 +128,9 @@ def session_create(
         Optional HTTP base URL for API mode.
     """
     try:
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 response = client.create_session()
         else:
             response = _LOCAL_SERVICE.create_session()
@@ -205,8 +208,9 @@ def view_create(
         view_2d_value = _load_view_2d(view_2d_file)
         viewport = Viewport(width_px=width_px, height_px=height_px, pixel_ratio=pixel_ratio)
 
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 response = client.create_view(
                     dataset_id=dataset_id,
                     session_id=session_id,
@@ -267,8 +271,9 @@ def view_get(
         Optional HTTP base URL for API mode.
     """
     try:
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 response = client.get_view(view_id=view_id, session_id=session_id)
         else:
             response = _LOCAL_SERVICE.get_view(view_id=view_id, session_id=session_id)
@@ -317,8 +322,9 @@ def view_export(
         Optional HTTP base URL for API mode.
     """
     try:
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 response = client.export_viewstate(view_id=view_id, session_id=session_id)
         else:
             response = _LOCAL_SERVICE.export_viewstate(view_id=view_id, session_id=session_id)
@@ -373,8 +379,9 @@ def view_import(
         if view_state_value is None:
             raise ValueError("view-state file is required.")
 
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 response = client.import_viewstate(
                     view_state=view_state_value.model_dump(mode="json"),
                     session_id=session_id,
@@ -429,8 +436,9 @@ def view_update(
     """
     try:
         patch = _load_patch(patch_file)
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 response = client.update_view(view_id=view_id, patch=patch, session_id=session_id)
         else:
             response = _LOCAL_SERVICE.update_view(view_id=view_id, patch=patch, session_id=session_id)
@@ -687,8 +695,9 @@ def render_image(
         view_state_value = _load_view_state(view_state_file) if view_state_file is not None else None
         overrides = _load_patch(patch_file) if patch_file is not None else None
         file_path_value = str(file_path) if file_path is not None else None
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 response = client.render_image(
                     view_id=view_id,
                     view_state=(
@@ -767,8 +776,9 @@ def _run_selector_helper(
         Parsed selector payload from CLI argument parsing.
     """
     try:
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 if helper == "index":
                     return client.set_dim(
                         view_id=view_id,
@@ -832,8 +842,9 @@ def _run_navigation_helper(
 ) -> Any:
     """Run pan/zoom/plane operations via HTTP client or local service."""
     try:
-        if base_url:
-            with LucidaClient(base_url=base_url) as client:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        if resolved_base_url is not None:
+            with LucidaClient(base_url=resolved_base_url) as client:
                 if helper == "set-plane":
                     return client.set_plane(
                         view_id=view_id,
@@ -1057,6 +1068,17 @@ def _load_view_2d(path: Path | None) -> View2D | None:
     if not isinstance(loaded, dict):
         raise ValueError("view2d file must contain a JSON object.")
     return View2D.model_validate(loaded)
+
+
+def _resolve_cli_base_url(base_url_override: str | None) -> str | None:
+    """Resolve effective HTTP URL for CLI commands.
+
+    Python backend defaults to in-process local service. Rust backend always uses HTTP.
+    """
+    runtime = resolve_runtime_config(base_url_override=base_url_override)
+    if runtime.use_http:
+        return runtime.base_url
+    return None
 
 
 def _emit_exception(exc: Exception) -> None:

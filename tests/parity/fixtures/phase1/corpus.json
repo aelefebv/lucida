@@ -1,0 +1,2618 @@
+{
+  "schema_version": 1,
+  "generated_from": "real_http_responses",
+  "cases": [
+    {
+      "name": "dataset_open_success",
+      "method": "POST",
+      "path": "/dataset/open",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "dataset_summary": {
+          "schema_version": 1,
+          "dataset_id": "<dataset_id_1>",
+          "uri": "<uri_1>",
+          "opened_at": "<timestamp>",
+          "axes": [
+            {
+              "name": "t",
+              "role": "t",
+              "size": 1,
+              "unit": null,
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            },
+            {
+              "name": "c",
+              "role": "c",
+              "size": 2,
+              "unit": null,
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            },
+            {
+              "name": "z",
+              "role": "z",
+              "size": 4,
+              "unit": "micron",
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            },
+            {
+              "name": "y",
+              "role": "y",
+              "size": 8,
+              "unit": "micron",
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            },
+            {
+              "name": "x",
+              "role": "x",
+              "size": 10,
+              "unit": "micron",
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            }
+          ],
+          "shape": [
+            1,
+            2,
+            4,
+            8,
+            10
+          ],
+          "dtype": "uint16",
+          "world_units": "micron",
+          "channels": [
+            {
+              "index": 0,
+              "name": "DNA",
+              "color_rgba": [
+                1.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "suggested_contrast": {
+                "min": 10.0,
+                "max": 400.0,
+                "policy": "fixed",
+                "p_low": null,
+                "p_high": null
+              },
+              "suggested_gamma": null
+            },
+            {
+              "index": 1,
+              "name": "RNA",
+              "color_rgba": [
+                0.0,
+                1.0,
+                0.0,
+                1.0
+              ],
+              "suggested_contrast": {
+                "min": 20.0,
+                "max": 200.0,
+                "policy": "fixed",
+                "p_low": null,
+                "p_high": null
+              },
+              "suggested_gamma": null
+            }
+          ],
+          "multiscales": [
+            {
+              "name": "primary",
+              "axes_order": [
+                "t",
+                "c",
+                "z",
+                "y",
+                "x"
+              ],
+              "levels": [
+                {
+                  "level": 0,
+                  "path": "0",
+                  "shape": [
+                    1,
+                    2,
+                    4,
+                    8,
+                    10
+                  ],
+                  "chunks": [
+                    1,
+                    1,
+                    2,
+                    4,
+                    5
+                  ],
+                  "downsample_factors": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ],
+                  "dtype": "uint16"
+                },
+                {
+                  "level": 1,
+                  "path": "1",
+                  "shape": [
+                    1,
+                    2,
+                    2,
+                    4,
+                    5
+                  ],
+                  "chunks": [
+                    1,
+                    1,
+                    1,
+                    2,
+                    3
+                  ],
+                  "downsample_factors": [
+                    1.0,
+                    1.0,
+                    2.0,
+                    2.0,
+                    2.0
+                  ],
+                  "dtype": "uint16"
+                }
+              ]
+            }
+          ],
+          "hints": {
+            "recommended_tile_px": [
+              64,
+              64
+            ],
+            "is_remote": false
+          },
+          "raw_metadata": {
+            "root": {
+              "multiscales": [
+                {
+                  "axes": [
+                    {
+                      "name": "t",
+                      "type": "t"
+                    },
+                    {
+                      "name": "c",
+                      "type": "c"
+                    },
+                    {
+                      "name": "z",
+                      "type": "z",
+                      "unit": "micron"
+                    },
+                    {
+                      "name": "y",
+                      "type": "y",
+                      "unit": "micron"
+                    },
+                    {
+                      "name": "x",
+                      "type": "x",
+                      "unit": "micron"
+                    }
+                  ],
+                  "datasets": [
+                    {
+                      "path": "0",
+                      "coordinateTransformations": [
+                        {
+                          "type": "scale",
+                          "scale": [
+                            1,
+                            1,
+                            1,
+                            1,
+                            1
+                          ]
+                        },
+                        {
+                          "type": "translation",
+                          "translation": [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "path": "1",
+                      "coordinateTransformations": [
+                        {
+                          "type": "scale",
+                          "scale": [
+                            1,
+                            1,
+                            2,
+                            2,
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "name": "primary"
+                }
+              ],
+              "omero": {
+                "channels": [
+                  {
+                    "label": "DNA",
+                    "color": "FF0000",
+                    "window": {
+                      "start": 10,
+                      "end": 400
+                    },
+                    "index": 0
+                  },
+                  {
+                    "label": "RNA",
+                    "color": "00FF00",
+                    "window": {
+                      "start": 20,
+                      "end": 200
+                    },
+                    "index": 1
+                  }
+                ]
+              }
+            },
+            "levels": [
+              {
+                "multiscale_name": "primary",
+                "multiscale_index": 0,
+                "level": 0,
+                "path": "0",
+                "coordinate_transformations": [
+                  {
+                    "type": "scale",
+                    "scale": [
+                      1,
+                      1,
+                      1,
+                      1,
+                      1
+                    ]
+                  },
+                  {
+                    "type": "translation",
+                    "translation": [
+                      0,
+                      0,
+                      0,
+                      0,
+                      0
+                    ]
+                  }
+                ],
+                "array_attrs": {}
+              },
+              {
+                "multiscale_name": "primary",
+                "multiscale_index": 0,
+                "level": 1,
+                "path": "1",
+                "coordinate_transformations": [
+                  {
+                    "type": "scale",
+                    "scale": [
+                      1,
+                      1,
+                      2,
+                      2,
+                      2
+                    ]
+                  }
+                ],
+                "array_attrs": {}
+              }
+            ]
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "dataset_open_invalid_metadata_error",
+      "method": "POST",
+      "path": "/dataset/open",
+      "status_code": 422,
+      "body": {
+        "code": "invalid_omezarr",
+        "message": "Dataset is missing required OME-Zarr multiscales metadata.",
+        "details": {
+          "uri": "<uri_2>"
+        }
+      }
+    },
+    {
+      "name": "dataset_open_invalid_request_error",
+      "method": "POST",
+      "path": "/dataset/open",
+      "status_code": 422,
+      "body": {
+        "code": "invalid_request",
+        "message": "Request validation failed.",
+        "details": {
+          "errors": [
+            {
+              "type": "string_too_short",
+              "loc": [
+                "body",
+                "dataset_id"
+              ],
+              "msg": "String should have at least 1 character",
+              "input": "",
+              "ctx": {
+                "min_length": 1
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "session_create_success",
+      "method": "POST",
+      "path": "/session/create",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "session_id": "<session_id_1>",
+        "created_at": "<timestamp>"
+      }
+    },
+    {
+      "name": "dataset_open_unknown_session_error",
+      "method": "POST",
+      "path": "/dataset/open",
+      "status_code": 404,
+      "body": {
+        "code": "session_not_found",
+        "message": "Session was not found.",
+        "details": {
+          "session_id": "<session_id_2>"
+        }
+      }
+    },
+    {
+      "name": "dataset_open_with_session_success",
+      "method": "POST",
+      "path": "/dataset/open",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "dataset_summary": {
+          "schema_version": 1,
+          "dataset_id": "<dataset_id_1>",
+          "uri": "<uri_1>",
+          "opened_at": "<timestamp>",
+          "axes": [
+            {
+              "name": "t",
+              "role": "t",
+              "size": 1,
+              "unit": null,
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            },
+            {
+              "name": "c",
+              "role": "c",
+              "size": 2,
+              "unit": null,
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            },
+            {
+              "name": "z",
+              "role": "z",
+              "size": 4,
+              "unit": "micron",
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            },
+            {
+              "name": "y",
+              "role": "y",
+              "size": 8,
+              "unit": "micron",
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            },
+            {
+              "name": "x",
+              "role": "x",
+              "size": 10,
+              "unit": "micron",
+              "scale": 1.0,
+              "translation": 0.0,
+              "direction": 1
+            }
+          ],
+          "shape": [
+            1,
+            2,
+            4,
+            8,
+            10
+          ],
+          "dtype": "uint16",
+          "world_units": "micron",
+          "channels": [
+            {
+              "index": 0,
+              "name": "DNA",
+              "color_rgba": [
+                1.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "suggested_contrast": {
+                "min": 10.0,
+                "max": 400.0,
+                "policy": "fixed",
+                "p_low": null,
+                "p_high": null
+              },
+              "suggested_gamma": null
+            },
+            {
+              "index": 1,
+              "name": "RNA",
+              "color_rgba": [
+                0.0,
+                1.0,
+                0.0,
+                1.0
+              ],
+              "suggested_contrast": {
+                "min": 20.0,
+                "max": 200.0,
+                "policy": "fixed",
+                "p_low": null,
+                "p_high": null
+              },
+              "suggested_gamma": null
+            }
+          ],
+          "multiscales": [
+            {
+              "name": "primary",
+              "axes_order": [
+                "t",
+                "c",
+                "z",
+                "y",
+                "x"
+              ],
+              "levels": [
+                {
+                  "level": 0,
+                  "path": "0",
+                  "shape": [
+                    1,
+                    2,
+                    4,
+                    8,
+                    10
+                  ],
+                  "chunks": [
+                    1,
+                    1,
+                    2,
+                    4,
+                    5
+                  ],
+                  "downsample_factors": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ],
+                  "dtype": "uint16"
+                },
+                {
+                  "level": 1,
+                  "path": "1",
+                  "shape": [
+                    1,
+                    2,
+                    2,
+                    4,
+                    5
+                  ],
+                  "chunks": [
+                    1,
+                    1,
+                    1,
+                    2,
+                    3
+                  ],
+                  "downsample_factors": [
+                    1.0,
+                    1.0,
+                    2.0,
+                    2.0,
+                    2.0
+                  ],
+                  "dtype": "uint16"
+                }
+              ]
+            }
+          ],
+          "hints": {
+            "recommended_tile_px": [
+              64,
+              64
+            ],
+            "is_remote": false
+          },
+          "raw_metadata": {
+            "root": {
+              "multiscales": [
+                {
+                  "axes": [
+                    {
+                      "name": "t",
+                      "type": "t"
+                    },
+                    {
+                      "name": "c",
+                      "type": "c"
+                    },
+                    {
+                      "name": "z",
+                      "type": "z",
+                      "unit": "micron"
+                    },
+                    {
+                      "name": "y",
+                      "type": "y",
+                      "unit": "micron"
+                    },
+                    {
+                      "name": "x",
+                      "type": "x",
+                      "unit": "micron"
+                    }
+                  ],
+                  "datasets": [
+                    {
+                      "path": "0",
+                      "coordinateTransformations": [
+                        {
+                          "type": "scale",
+                          "scale": [
+                            1,
+                            1,
+                            1,
+                            1,
+                            1
+                          ]
+                        },
+                        {
+                          "type": "translation",
+                          "translation": [
+                            0,
+                            0,
+                            0,
+                            0,
+                            0
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "path": "1",
+                      "coordinateTransformations": [
+                        {
+                          "type": "scale",
+                          "scale": [
+                            1,
+                            1,
+                            2,
+                            2,
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  ],
+                  "name": "primary"
+                }
+              ],
+              "omero": {
+                "channels": [
+                  {
+                    "label": "DNA",
+                    "color": "FF0000",
+                    "window": {
+                      "start": 10,
+                      "end": 400
+                    },
+                    "index": 0
+                  },
+                  {
+                    "label": "RNA",
+                    "color": "00FF00",
+                    "window": {
+                      "start": 20,
+                      "end": 200
+                    },
+                    "index": 1
+                  }
+                ]
+              }
+            },
+            "levels": [
+              {
+                "multiscale_name": "primary",
+                "multiscale_index": 0,
+                "level": 0,
+                "path": "0",
+                "coordinate_transformations": [
+                  {
+                    "type": "scale",
+                    "scale": [
+                      1,
+                      1,
+                      1,
+                      1,
+                      1
+                    ]
+                  },
+                  {
+                    "type": "translation",
+                    "translation": [
+                      0,
+                      0,
+                      0,
+                      0,
+                      0
+                    ]
+                  }
+                ],
+                "array_attrs": {}
+              },
+              {
+                "multiscale_name": "primary",
+                "multiscale_index": 0,
+                "level": 1,
+                "path": "1",
+                "coordinate_transformations": [
+                  {
+                    "type": "scale",
+                    "scale": [
+                      1,
+                      1,
+                      2,
+                      2,
+                      2
+                    ]
+                  }
+                ],
+                "array_attrs": {}
+              }
+            ]
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "view_create_success",
+      "method": "POST",
+      "path": "/view/create",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "view_state": {
+          "schema_version": 1,
+          "view_id": "<view_id_1>",
+          "session_id": "<session_id_1>",
+          "created_at": "<timestamp>",
+          "mode": "2d",
+          "datasets": [
+            {
+              "dataset_id": "<dataset_id_1>",
+              "multiscale_name": "primary"
+            }
+          ],
+          "viewport": {
+            "width_px": 1024,
+            "height_px": 1024,
+            "pixel_ratio": 1.0
+          },
+          "selectors": [
+            {
+              "axis": "t",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            },
+            {
+              "axis": "c",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            },
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            }
+          ],
+          "view_2d": {
+            "plane": "xy",
+            "slice": {
+              "axis": "z",
+              "index": 0,
+              "slab": {
+                "thickness_vox": 1,
+                "mode": "single"
+              }
+            },
+            "camera": {
+              "center_world": [
+                5.0,
+                4.0
+              ],
+              "zoom": 1.0,
+              "rotation_deg": 0.0
+            }
+          },
+          "view_3d": null,
+          "layers": [
+            {
+              "layer_id": "image_0",
+              "type": "image",
+              "dataset_id": "<dataset_id_1>",
+              "source": {
+                "multiscale_name": "primary",
+                "array_path": null
+              },
+              "visible": true,
+              "opacity": 1.0,
+              "image": {
+                "channel_mode": "composite",
+                "channels": [
+                  {
+                    "index": 0,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 10.0,
+                      "max": 400.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 1,
+                    "enabled": true,
+                    "color_rgba": [
+                      0.0,
+                      1.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 20.0,
+                      "max": 200.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  }
+                ],
+                "interpolation": "linear"
+              },
+              "labels": null
+            }
+          ],
+          "render_settings": null,
+          "performance": null,
+          "state_hash": "<state_hash_1>",
+          "state_version": 0
+        },
+        "warnings": [],
+        "selectors_applied": [
+          {
+            "axis": "t",
+            "kind": "index",
+            "index": 0,
+            "start": null,
+            "end_exclusive": null,
+            "indices": null,
+            "clamp": true
+          },
+          {
+            "axis": "c",
+            "kind": "index",
+            "index": 0,
+            "start": null,
+            "end_exclusive": null,
+            "indices": null,
+            "clamp": true
+          },
+          {
+            "axis": "z",
+            "kind": "index",
+            "index": 0,
+            "start": null,
+            "end_exclusive": null,
+            "indices": null,
+            "clamp": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "view_get_success",
+      "method": "GET",
+      "path": "/view/{view_id}",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "view_state": {
+          "schema_version": 1,
+          "view_id": "<view_id_1>",
+          "session_id": "<session_id_1>",
+          "created_at": "<timestamp>",
+          "mode": "2d",
+          "datasets": [
+            {
+              "dataset_id": "<dataset_id_1>",
+              "multiscale_name": "primary"
+            }
+          ],
+          "viewport": {
+            "width_px": 1024,
+            "height_px": 1024,
+            "pixel_ratio": 1.0
+          },
+          "selectors": [
+            {
+              "axis": "t",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            },
+            {
+              "axis": "c",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            },
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            }
+          ],
+          "view_2d": {
+            "plane": "xy",
+            "slice": {
+              "axis": "z",
+              "index": 0,
+              "slab": {
+                "thickness_vox": 1,
+                "mode": "single"
+              }
+            },
+            "camera": {
+              "center_world": [
+                5.0,
+                4.0
+              ],
+              "zoom": 1.0,
+              "rotation_deg": 0.0
+            }
+          },
+          "view_3d": null,
+          "layers": [
+            {
+              "layer_id": "image_0",
+              "type": "image",
+              "dataset_id": "<dataset_id_1>",
+              "source": {
+                "multiscale_name": "primary",
+                "array_path": null
+              },
+              "visible": true,
+              "opacity": 1.0,
+              "image": {
+                "channel_mode": "composite",
+                "channels": [
+                  {
+                    "index": 0,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 10.0,
+                      "max": 400.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 1,
+                    "enabled": true,
+                    "color_rgba": [
+                      0.0,
+                      1.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 20.0,
+                      "max": 200.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  }
+                ],
+                "interpolation": "linear"
+              },
+              "labels": null
+            }
+          ],
+          "render_settings": null,
+          "performance": null,
+          "state_hash": "<state_hash_1>",
+          "state_version": 0
+        }
+      }
+    },
+    {
+      "name": "view_update_success",
+      "method": "POST",
+      "path": "/view/update",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "view_state": {
+          "schema_version": 1,
+          "view_id": "<view_id_1>",
+          "session_id": "<session_id_1>",
+          "created_at": "<timestamp>",
+          "mode": "2d",
+          "datasets": [
+            {
+              "dataset_id": "<dataset_id_1>",
+              "multiscale_name": "primary"
+            }
+          ],
+          "viewport": {
+            "width_px": 1024,
+            "height_px": 1024,
+            "pixel_ratio": 1.0
+          },
+          "selectors": [
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 2,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            }
+          ],
+          "view_2d": {
+            "plane": "xy",
+            "slice": {
+              "axis": "z",
+              "index": 0,
+              "slab": {
+                "thickness_vox": 1,
+                "mode": "single"
+              }
+            },
+            "camera": {
+              "center_world": [
+                5.0,
+                4.0
+              ],
+              "zoom": 1.0,
+              "rotation_deg": 0.0
+            }
+          },
+          "view_3d": null,
+          "layers": [
+            {
+              "layer_id": "image_0",
+              "type": "image",
+              "dataset_id": "<dataset_id_1>",
+              "source": {
+                "multiscale_name": "primary",
+                "array_path": null
+              },
+              "visible": true,
+              "opacity": 1.0,
+              "image": {
+                "channel_mode": "composite",
+                "channels": [
+                  {
+                    "index": 0,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 10.0,
+                      "max": 400.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 1,
+                    "enabled": true,
+                    "color_rgba": [
+                      0.0,
+                      1.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 20.0,
+                      "max": 200.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  }
+                ],
+                "interpolation": "linear"
+              },
+              "labels": null
+            }
+          ],
+          "render_settings": null,
+          "performance": null,
+          "state_hash": "<state_hash_2>",
+          "state_version": 1
+        },
+        "warnings": [],
+        "selectors_applied": [
+          {
+            "axis": "z",
+            "kind": "index",
+            "index": 2,
+            "start": null,
+            "end_exclusive": null,
+            "indices": null,
+            "clamp": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "view_create_unknown_dataset_error",
+      "method": "POST",
+      "path": "/view/create",
+      "status_code": 404,
+      "body": {
+        "code": "dataset_not_found",
+        "message": "Dataset was not found.",
+        "details": {
+          "dataset_id": "<dataset_id_2>"
+        }
+      }
+    },
+    {
+      "name": "view_create_unsupported_mode_error",
+      "method": "POST",
+      "path": "/view/create",
+      "status_code": 422,
+      "body": {
+        "code": "unsupported_mode",
+        "message": "Only mode=2d is supported in this slice.",
+        "details": {
+          "mode": "3d"
+        }
+      }
+    },
+    {
+      "name": "view_update_selector_out_of_bounds_error",
+      "method": "POST",
+      "path": "/view/update",
+      "status_code": 422,
+      "body": {
+        "code": "selector_out_of_bounds",
+        "message": "Selector index is out of bounds and clamp is disabled.",
+        "details": {
+          "axis": "z",
+          "index": 999,
+          "size": 4
+        }
+      }
+    },
+    {
+      "name": "export_viewstate_success",
+      "method": "POST",
+      "path": "/export/viewstate",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "export_id": "<export_id_1>",
+        "exported_at": "<timestamp>",
+        "source_view_id": "<source_view_id_1>",
+        "view_state": {
+          "schema_version": 1,
+          "view_id": "<view_id_1>",
+          "session_id": "<session_id_1>",
+          "created_at": "<timestamp>",
+          "mode": "2d",
+          "datasets": [
+            {
+              "dataset_id": "<dataset_id_1>",
+              "multiscale_name": "primary"
+            }
+          ],
+          "viewport": {
+            "width_px": 1024,
+            "height_px": 1024,
+            "pixel_ratio": 1.0
+          },
+          "selectors": [
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 2,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            }
+          ],
+          "view_2d": {
+            "plane": "xy",
+            "slice": {
+              "axis": "z",
+              "index": 0,
+              "slab": {
+                "thickness_vox": 1,
+                "mode": "single"
+              }
+            },
+            "camera": {
+              "center_world": [
+                5.0,
+                4.0
+              ],
+              "zoom": 1.0,
+              "rotation_deg": 0.0
+            }
+          },
+          "view_3d": null,
+          "layers": [
+            {
+              "layer_id": "image_0",
+              "type": "image",
+              "dataset_id": "<dataset_id_1>",
+              "source": {
+                "multiscale_name": "primary",
+                "array_path": null
+              },
+              "visible": true,
+              "opacity": 1.0,
+              "image": {
+                "channel_mode": "composite",
+                "channels": [
+                  {
+                    "index": 0,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 10.0,
+                      "max": 400.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 1,
+                    "enabled": true,
+                    "color_rgba": [
+                      0.0,
+                      1.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 20.0,
+                      "max": 200.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  }
+                ],
+                "interpolation": "linear"
+              },
+              "labels": null
+            }
+          ],
+          "render_settings": null,
+          "performance": null,
+          "state_hash": "<state_hash_2>",
+          "state_version": 1
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "export_viewstate_unknown_session_error",
+      "method": "POST",
+      "path": "/export/viewstate",
+      "status_code": 404,
+      "body": {
+        "code": "session_not_found",
+        "message": "Session was not found.",
+        "details": {
+          "session_id": "<session_id_2>"
+        }
+      }
+    },
+    {
+      "name": "import_viewstate_success",
+      "method": "POST",
+      "path": "/import/viewstate",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "import_id": "<import_id_1>",
+        "imported_from_view_id": "<imported_from_view_id_1>",
+        "view_state": {
+          "schema_version": 1,
+          "view_id": "<view_id_2>",
+          "session_id": "<session_id_1>",
+          "created_at": "<timestamp>",
+          "mode": "2d",
+          "datasets": [
+            {
+              "dataset_id": "<dataset_id_1>",
+              "multiscale_name": "primary"
+            }
+          ],
+          "viewport": {
+            "width_px": 1024,
+            "height_px": 1024,
+            "pixel_ratio": 1.0
+          },
+          "selectors": [
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 2,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            }
+          ],
+          "view_2d": {
+            "plane": "xy",
+            "slice": {
+              "axis": "z",
+              "index": 0,
+              "slab": {
+                "thickness_vox": 1,
+                "mode": "single"
+              }
+            },
+            "camera": {
+              "center_world": [
+                5.0,
+                4.0
+              ],
+              "zoom": 1.0,
+              "rotation_deg": 0.0
+            }
+          },
+          "view_3d": null,
+          "layers": [
+            {
+              "layer_id": "image_0",
+              "type": "image",
+              "dataset_id": "<dataset_id_1>",
+              "source": {
+                "multiscale_name": "primary",
+                "array_path": null
+              },
+              "visible": true,
+              "opacity": 1.0,
+              "image": {
+                "channel_mode": "composite",
+                "channels": [
+                  {
+                    "index": 0,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 10.0,
+                      "max": 400.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 1,
+                    "enabled": true,
+                    "color_rgba": [
+                      0.0,
+                      1.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 20.0,
+                      "max": 200.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  }
+                ],
+                "interpolation": "linear"
+              },
+              "labels": null
+            }
+          ],
+          "render_settings": null,
+          "performance": null,
+          "state_hash": "<state_hash_3>",
+          "state_version": 0
+        },
+        "warnings": [],
+        "selectors_applied": [
+          {
+            "axis": "z",
+            "kind": "index",
+            "index": 2,
+            "start": null,
+            "end_exclusive": null,
+            "indices": null,
+            "clamp": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "import_viewstate_unsupported_mode_error",
+      "method": "POST",
+      "path": "/import/viewstate",
+      "status_code": 422,
+      "body": {
+        "code": "unsupported_mode",
+        "message": "Only mode=2d is supported in this slice.",
+        "details": {
+          "mode": "3d"
+        }
+      }
+    },
+    {
+      "name": "render_dataset_open_success",
+      "method": "POST",
+      "path": "/dataset/open",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "dataset_summary": {
+          "schema_version": 1,
+          "dataset_id": "<dataset_id_3>",
+          "uri": "<uri_3>",
+          "opened_at": "<timestamp>",
+          "axes": [
+            {
+              "name": "t",
+              "role": "t",
+              "size": 1,
+              "unit": null,
+              "scale": 1.0,
+              "translation": null,
+              "direction": 1
+            },
+            {
+              "name": "c",
+              "role": "c",
+              "size": 3,
+              "unit": null,
+              "scale": 1.0,
+              "translation": null,
+              "direction": 1
+            },
+            {
+              "name": "z",
+              "role": "z",
+              "size": 4,
+              "unit": null,
+              "scale": 1.0,
+              "translation": null,
+              "direction": 1
+            },
+            {
+              "name": "y",
+              "role": "y",
+              "size": 5,
+              "unit": null,
+              "scale": 1.0,
+              "translation": null,
+              "direction": 1
+            },
+            {
+              "name": "x",
+              "role": "x",
+              "size": 6,
+              "unit": null,
+              "scale": 1.0,
+              "translation": null,
+              "direction": 1
+            }
+          ],
+          "shape": [
+            1,
+            3,
+            4,
+            5,
+            6
+          ],
+          "dtype": "uint16",
+          "world_units": "micron",
+          "channels": [
+            {
+              "index": 0,
+              "name": "c0",
+              "color_rgba": [
+                1.0,
+                1.0,
+                1.0,
+                1.0
+              ],
+              "suggested_contrast": {
+                "min": 0.0,
+                "max": 500.0,
+                "policy": "fixed",
+                "p_low": null,
+                "p_high": null
+              },
+              "suggested_gamma": null
+            },
+            {
+              "index": 1,
+              "name": "c1",
+              "color_rgba": [
+                1.0,
+                0.0,
+                0.0,
+                1.0
+              ],
+              "suggested_contrast": {
+                "min": 0.0,
+                "max": 1500.0,
+                "policy": "fixed",
+                "p_low": null,
+                "p_high": null
+              },
+              "suggested_gamma": null
+            },
+            {
+              "index": 2,
+              "name": "c2",
+              "color_rgba": [
+                0.0,
+                1.0,
+                0.0,
+                1.0
+              ],
+              "suggested_contrast": {
+                "min": 0.0,
+                "max": 2500.0,
+                "policy": "fixed",
+                "p_low": null,
+                "p_high": null
+              },
+              "suggested_gamma": null
+            }
+          ],
+          "multiscales": [
+            {
+              "name": "primary",
+              "axes_order": [
+                "t",
+                "c",
+                "z",
+                "y",
+                "x"
+              ],
+              "levels": [
+                {
+                  "level": 0,
+                  "path": "0",
+                  "shape": [
+                    1,
+                    3,
+                    4,
+                    5,
+                    6
+                  ],
+                  "chunks": [
+                    1,
+                    1,
+                    2,
+                    3,
+                    3
+                  ],
+                  "downsample_factors": [
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0
+                  ],
+                  "dtype": "uint16"
+                },
+                {
+                  "level": 1,
+                  "path": "1",
+                  "shape": [
+                    1,
+                    3,
+                    2,
+                    3,
+                    3
+                  ],
+                  "chunks": [
+                    1,
+                    1,
+                    1,
+                    2,
+                    2
+                  ],
+                  "downsample_factors": [
+                    1.0,
+                    1.0,
+                    2.0,
+                    2.0,
+                    2.0
+                  ],
+                  "dtype": "uint16"
+                }
+              ]
+            }
+          ],
+          "hints": {
+            "recommended_tile_px": [
+              64,
+              64
+            ],
+            "is_remote": false
+          },
+          "raw_metadata": {
+            "root": {
+              "multiscales": [
+                {
+                  "name": "primary",
+                  "axes": [
+                    {
+                      "name": "t",
+                      "type": "t"
+                    },
+                    {
+                      "name": "c",
+                      "type": "c"
+                    },
+                    {
+                      "name": "z",
+                      "type": "z"
+                    },
+                    {
+                      "name": "y",
+                      "type": "y"
+                    },
+                    {
+                      "name": "x",
+                      "type": "x"
+                    }
+                  ],
+                  "datasets": [
+                    {
+                      "path": "0",
+                      "coordinateTransformations": [
+                        {
+                          "type": "scale",
+                          "scale": [
+                            1,
+                            1,
+                            1,
+                            1,
+                            1
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "path": "1",
+                      "coordinateTransformations": [
+                        {
+                          "type": "scale",
+                          "scale": [
+                            1,
+                            1,
+                            2,
+                            2,
+                            2
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ],
+              "omero": {
+                "channels": [
+                  {
+                    "index": 0,
+                    "label": "c0",
+                    "color": "ffffff",
+                    "window": {
+                      "start": 0,
+                      "end": 500
+                    }
+                  },
+                  {
+                    "index": 1,
+                    "label": "c1",
+                    "color": "ff0000",
+                    "window": {
+                      "start": 0,
+                      "end": 1500
+                    }
+                  },
+                  {
+                    "index": 2,
+                    "label": "c2",
+                    "color": "00ff00",
+                    "window": {
+                      "start": 0,
+                      "end": 2500
+                    }
+                  }
+                ]
+              }
+            },
+            "levels": [
+              {
+                "multiscale_name": "primary",
+                "multiscale_index": 0,
+                "level": 0,
+                "path": "0",
+                "coordinate_transformations": [
+                  {
+                    "type": "scale",
+                    "scale": [
+                      1,
+                      1,
+                      1,
+                      1,
+                      1
+                    ]
+                  }
+                ],
+                "array_attrs": {}
+              },
+              {
+                "multiscale_name": "primary",
+                "multiscale_index": 0,
+                "level": 1,
+                "path": "1",
+                "coordinate_transformations": [
+                  {
+                    "type": "scale",
+                    "scale": [
+                      1,
+                      1,
+                      2,
+                      2,
+                      2
+                    ]
+                  }
+                ],
+                "array_attrs": {}
+              }
+            ]
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "render_view_create_success",
+      "method": "POST",
+      "path": "/view/create",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "view_state": {
+          "schema_version": 1,
+          "view_id": "<view_id_3>",
+          "session_id": "<session_id_3>",
+          "created_at": "<timestamp>",
+          "mode": "2d",
+          "datasets": [
+            {
+              "dataset_id": "<dataset_id_3>",
+              "multiscale_name": "primary"
+            }
+          ],
+          "viewport": {
+            "width_px": 1024,
+            "height_px": 1024,
+            "pixel_ratio": 1.0
+          },
+          "selectors": [
+            {
+              "axis": "t",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            },
+            {
+              "axis": "c",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            },
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            }
+          ],
+          "view_2d": {
+            "plane": "xy",
+            "slice": {
+              "axis": "z",
+              "index": 0,
+              "slab": {
+                "thickness_vox": 1,
+                "mode": "single"
+              }
+            },
+            "camera": {
+              "center_world": [
+                3.0,
+                2.5
+              ],
+              "zoom": 1.0,
+              "rotation_deg": 0.0
+            }
+          },
+          "view_3d": null,
+          "layers": [
+            {
+              "layer_id": "image_0",
+              "type": "image",
+              "dataset_id": "<dataset_id_3>",
+              "source": {
+                "multiscale_name": "primary",
+                "array_path": null
+              },
+              "visible": true,
+              "opacity": 1.0,
+              "image": {
+                "channel_mode": "composite",
+                "channels": [
+                  {
+                    "index": 0,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      1.0,
+                      1.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 0.0,
+                      "max": 500.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 1,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 0.0,
+                      "max": 1500.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 2,
+                    "enabled": true,
+                    "color_rgba": [
+                      0.0,
+                      1.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 0.0,
+                      "max": 2500.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  }
+                ],
+                "interpolation": "linear"
+              },
+              "labels": null
+            }
+          ],
+          "render_settings": null,
+          "performance": null,
+          "state_hash": "<state_hash_4>",
+          "state_version": 0
+        },
+        "warnings": [],
+        "selectors_applied": [
+          {
+            "axis": "t",
+            "kind": "index",
+            "index": 0,
+            "start": null,
+            "end_exclusive": null,
+            "indices": null,
+            "clamp": true
+          },
+          {
+            "axis": "c",
+            "kind": "index",
+            "index": 0,
+            "start": null,
+            "end_exclusive": null,
+            "indices": null,
+            "clamp": true
+          },
+          {
+            "axis": "z",
+            "kind": "index",
+            "index": 0,
+            "start": null,
+            "end_exclusive": null,
+            "indices": null,
+            "clamp": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "render_view_get_success",
+      "method": "GET",
+      "path": "/view/{view_id}",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "view_state": {
+          "schema_version": 1,
+          "view_id": "<view_id_3>",
+          "session_id": "<session_id_3>",
+          "created_at": "<timestamp>",
+          "mode": "2d",
+          "datasets": [
+            {
+              "dataset_id": "<dataset_id_3>",
+              "multiscale_name": "primary"
+            }
+          ],
+          "viewport": {
+            "width_px": 1024,
+            "height_px": 1024,
+            "pixel_ratio": 1.0
+          },
+          "selectors": [
+            {
+              "axis": "t",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            },
+            {
+              "axis": "c",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            },
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 0,
+              "start": null,
+              "end_exclusive": null,
+              "indices": null,
+              "clamp": true
+            }
+          ],
+          "view_2d": {
+            "plane": "xy",
+            "slice": {
+              "axis": "z",
+              "index": 0,
+              "slab": {
+                "thickness_vox": 1,
+                "mode": "single"
+              }
+            },
+            "camera": {
+              "center_world": [
+                3.0,
+                2.5
+              ],
+              "zoom": 1.0,
+              "rotation_deg": 0.0
+            }
+          },
+          "view_3d": null,
+          "layers": [
+            {
+              "layer_id": "image_0",
+              "type": "image",
+              "dataset_id": "<dataset_id_3>",
+              "source": {
+                "multiscale_name": "primary",
+                "array_path": null
+              },
+              "visible": true,
+              "opacity": 1.0,
+              "image": {
+                "channel_mode": "composite",
+                "channels": [
+                  {
+                    "index": 0,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      1.0,
+                      1.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 0.0,
+                      "max": 500.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 1,
+                    "enabled": true,
+                    "color_rgba": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 0.0,
+                      "max": 1500.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  },
+                  {
+                    "index": 2,
+                    "enabled": true,
+                    "color_rgba": [
+                      0.0,
+                      1.0,
+                      0.0,
+                      1.0
+                    ],
+                    "contrast": {
+                      "policy": "fixed",
+                      "min": 0.0,
+                      "max": 2500.0,
+                      "p_low": 1.0,
+                      "p_high": 99.0
+                    },
+                    "gamma": 1.0
+                  }
+                ],
+                "interpolation": "linear"
+              },
+              "labels": null
+            }
+          ],
+          "render_settings": null,
+          "performance": null,
+          "state_hash": "<state_hash_4>",
+          "state_version": 0
+        }
+      }
+    },
+    {
+      "name": "render_image_success_stateful_inline",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "request_id": "<request_id_1>",
+        "render_id": "<render_id_1>",
+        "status": "ok",
+        "completion": 1.0,
+        "view_id": "<view_id_3>",
+        "state_hash": "<state_hash_4>",
+        "state_version": 0,
+        "images": [
+          {
+            "role": "main",
+            "mime": "image/png",
+            "width_px": 64,
+            "height_px": 48,
+            "delivery": "inline_base64",
+            "bytes_base64": "<image_bytes>",
+            "sha256": "<image_sha256>"
+          }
+        ],
+        "meta": {
+          "dataset_id": "<dataset_id_3>",
+          "multiscale_name": "primary",
+          "pyramid_level_used": 0,
+          "selectors_applied": [
+            {
+              "axis": "t",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            },
+            {
+              "axis": "c",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            },
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            }
+          ],
+          "timing_ms": {
+            "total": "<timing_ms>",
+            "io": "<timing_ms>",
+            "decode": "<timing_ms>",
+            "gpu_upload": "<timing_ms>",
+            "render": "<timing_ms>"
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "render_image_invalid_patch_error",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 422,
+      "body": {
+        "code": "invalid_patch",
+        "message": "Failed to apply render-time JSON patch overrides.",
+        "details": {
+          "view_id": "<view_id_3>",
+          "reason": "index '100' is out of bounds"
+        }
+      }
+    },
+    {
+      "name": "render_image_session_not_found_error",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 404,
+      "body": {
+        "code": "session_not_found",
+        "message": "Session was not found.",
+        "details": {
+          "session_id": "<session_id_2>"
+        }
+      }
+    },
+    {
+      "name": "render_image_output_too_large_error",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 422,
+      "body": {
+        "code": "render_output_too_large",
+        "message": "Requested render output exceeds configured limits.",
+        "details": {
+          "width_px": 5000,
+          "height_px": 48,
+          "max_width_px": 4096,
+          "max_height_px": 4096,
+          "max_pixels": 16777216
+        }
+      }
+    },
+    {
+      "name": "render_image_stateless_inline_success",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "request_id": "<request_id_2>",
+        "render_id": "<render_id_2>",
+        "status": "ok",
+        "completion": 1.0,
+        "state_hash": "<state_hash_4>",
+        "images": [
+          {
+            "role": "main",
+            "mime": "image/png",
+            "width_px": 40,
+            "height_px": 30,
+            "delivery": "inline_base64",
+            "bytes_base64": "<image_bytes>",
+            "sha256": "<image_sha256>"
+          }
+        ],
+        "meta": {
+          "dataset_id": "<dataset_id_3>",
+          "multiscale_name": "primary",
+          "pyramid_level_used": 0,
+          "selectors_applied": [
+            {
+              "axis": "t",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            },
+            {
+              "axis": "c",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            },
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            }
+          ],
+          "timing_ms": {
+            "total": "<timing_ms>",
+            "io": "<timing_ms>",
+            "decode": "<timing_ms>",
+            "gpu_upload": "<timing_ms>",
+            "render": "<timing_ms>"
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "render_image_file_delivery_success",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 200,
+      "body": {
+        "schema_version": 1,
+        "request_id": "<request_id_3>",
+        "render_id": "<render_id_3>",
+        "status": "ok",
+        "completion": 1.0,
+        "view_id": "<view_id_3>",
+        "state_hash": "<state_hash_4>",
+        "state_version": 0,
+        "images": [
+          {
+            "role": "main",
+            "mime": "image/png",
+            "width_px": 40,
+            "height_px": 30,
+            "delivery": "file_path",
+            "file_path": "<path>",
+            "sha256": "<image_sha256>"
+          }
+        ],
+        "meta": {
+          "dataset_id": "<dataset_id_3>",
+          "multiscale_name": "primary",
+          "pyramid_level_used": 0,
+          "selectors_applied": [
+            {
+              "axis": "t",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            },
+            {
+              "axis": "c",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            },
+            {
+              "axis": "z",
+              "kind": "index",
+              "index": 0,
+              "clamp": true
+            }
+          ],
+          "timing_ms": {
+            "total": "<timing_ms>",
+            "io": "<timing_ms>",
+            "decode": "<timing_ms>",
+            "gpu_upload": "<timing_ms>",
+            "render": "<timing_ms>"
+          }
+        },
+        "warnings": []
+      }
+    },
+    {
+      "name": "render_image_invalid_request_both_view_and_state",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 422,
+      "body": {
+        "code": "invalid_render_request",
+        "message": "Render request must provide exactly one of view_id or view_state.",
+        "details": {
+          "errors": [
+            {
+              "type": "value_error",
+              "loc": [
+                "body"
+              ],
+              "msg": "Value error, Exactly one of view_id or view_state must be provided.",
+              "input": {
+                "schema_version": 1,
+                "view_id": "<view_id_3>",
+                "view_state": {
+                  "schema_version": 1,
+                  "view_id": "<view_id_3>",
+                  "session_id": "<session_id_3>",
+                  "created_at": "<timestamp>",
+                  "mode": "2d",
+                  "datasets": [
+                    {
+                      "dataset_id": "<dataset_id_3>",
+                      "multiscale_name": "primary"
+                    }
+                  ],
+                  "viewport": {
+                    "width_px": 1024,
+                    "height_px": 1024,
+                    "pixel_ratio": 1.0
+                  },
+                  "selectors": [
+                    {
+                      "axis": "t",
+                      "kind": "index",
+                      "index": 0,
+                      "start": null,
+                      "end_exclusive": null,
+                      "indices": null,
+                      "clamp": true
+                    },
+                    {
+                      "axis": "c",
+                      "kind": "index",
+                      "index": 0,
+                      "start": null,
+                      "end_exclusive": null,
+                      "indices": null,
+                      "clamp": true
+                    },
+                    {
+                      "axis": "z",
+                      "kind": "index",
+                      "index": 0,
+                      "start": null,
+                      "end_exclusive": null,
+                      "indices": null,
+                      "clamp": true
+                    }
+                  ],
+                  "view_2d": {
+                    "plane": "xy",
+                    "slice": {
+                      "axis": "z",
+                      "index": 0,
+                      "slab": {
+                        "thickness_vox": 1,
+                        "mode": "single"
+                      }
+                    },
+                    "camera": {
+                      "center_world": [
+                        3.0,
+                        2.5
+                      ],
+                      "zoom": 1.0,
+                      "rotation_deg": 0.0
+                    }
+                  },
+                  "view_3d": null,
+                  "layers": [
+                    {
+                      "layer_id": "image_0",
+                      "type": "image",
+                      "dataset_id": "<dataset_id_3>",
+                      "source": {
+                        "multiscale_name": "primary",
+                        "array_path": null
+                      },
+                      "visible": true,
+                      "opacity": 1.0,
+                      "image": {
+                        "channel_mode": "composite",
+                        "channels": [
+                          {
+                            "index": 0,
+                            "enabled": true,
+                            "color_rgba": [
+                              1.0,
+                              1.0,
+                              1.0,
+                              1.0
+                            ],
+                            "contrast": {
+                              "policy": "fixed",
+                              "min": 0.0,
+                              "max": 500.0,
+                              "p_low": 1.0,
+                              "p_high": 99.0
+                            },
+                            "gamma": 1.0
+                          },
+                          {
+                            "index": 1,
+                            "enabled": true,
+                            "color_rgba": [
+                              1.0,
+                              0.0,
+                              0.0,
+                              1.0
+                            ],
+                            "contrast": {
+                              "policy": "fixed",
+                              "min": 0.0,
+                              "max": 1500.0,
+                              "p_low": 1.0,
+                              "p_high": 99.0
+                            },
+                            "gamma": 1.0
+                          },
+                          {
+                            "index": 2,
+                            "enabled": true,
+                            "color_rgba": [
+                              0.0,
+                              1.0,
+                              0.0,
+                              1.0
+                            ],
+                            "contrast": {
+                              "policy": "fixed",
+                              "min": 0.0,
+                              "max": 2500.0,
+                              "p_low": 1.0,
+                              "p_high": 99.0
+                            },
+                            "gamma": 1.0
+                          }
+                        ],
+                        "interpolation": "linear"
+                      },
+                      "labels": null
+                    }
+                  ],
+                  "render_settings": null,
+                  "performance": null,
+                  "state_hash": "<state_hash_4>",
+                  "state_version": 0
+                },
+                "output": {
+                  "format": "png",
+                  "delivery": "inline_base64",
+                  "width_px": 32,
+                  "height_px": 24
+                }
+              },
+              "ctx": {
+                "error": "Exactly one of view_id or view_state must be provided."
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "render_image_invalid_request_neither_view_nor_state",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 422,
+      "body": {
+        "code": "invalid_render_request",
+        "message": "Render request must provide exactly one of view_id or view_state.",
+        "details": {
+          "errors": [
+            {
+              "type": "value_error",
+              "loc": [
+                "body"
+              ],
+              "msg": "Value error, Exactly one of view_id or view_state must be provided.",
+              "input": {
+                "schema_version": 1,
+                "output": {
+                  "format": "png",
+                  "delivery": "inline_base64",
+                  "width_px": 32,
+                  "height_px": 24
+                }
+              },
+              "ctx": {
+                "error": "Exactly one of view_id or view_state must be provided."
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "render_image_output_path_invalid_error",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 422,
+      "body": {
+        "code": "render_output_path_invalid",
+        "message": "Requested render output path must be under the output directory.",
+        "details": {
+          "requested_path": "<requested_path>",
+          "output_root": "<path>"
+        }
+      }
+    },
+    {
+      "name": "render_image_stateless_missing_dataset_error",
+      "method": "POST",
+      "path": "/render/image",
+      "status_code": 404,
+      "body": {
+        "code": "dataset_not_found",
+        "message": "Dataset was not found.",
+        "details": {
+          "dataset_id": "<dataset_id_2>"
+        }
+      }
+    }
+  ]
+}
