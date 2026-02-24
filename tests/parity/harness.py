@@ -744,6 +744,189 @@ def run_milestone3_cases(
     return cases
 
 
+def run_milestone4_cases(
+    *,
+    adapter: BackendAdapter,
+    dataset_uris: Phase1DatasetUris,
+) -> list[RawCaseResult]:
+    cases: list[RawCaseResult] = []
+
+    def record(
+        *,
+        name: str,
+        method: str,
+        case_path: str,
+        request_path: str | None = None,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status_code, body = adapter.request(
+            method=method,
+            path=request_path or case_path,
+            json_body=json_body,
+            params=params,
+        )
+        cases.append(
+            RawCaseResult(
+                name=name,
+                method=method,
+                path=case_path,
+                status_code=status_code,
+                body=body,
+            )
+        )
+        return body
+
+    session_create_success = record(
+        name="session_create_success",
+        method="POST",
+        case_path="/session/create",
+        json_body={"schema_version": 1},
+    )
+    session_id = str(session_create_success["session_id"])
+
+    dataset_open_with_session_success = record(
+        name="dataset_open_with_session_success",
+        method="POST",
+        case_path="/dataset/open",
+        json_body={"schema_version": 1, "uri": dataset_uris.local_uri, "session_id": session_id},
+    )
+    dataset_id = str(dataset_open_with_session_success["dataset_summary"]["dataset_id"])
+
+    view_create_success = record(
+        name="view_create_success",
+        method="POST",
+        case_path="/view/create",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "dataset_id": dataset_id,
+            "mode": "2d",
+        },
+    )
+    view_id = str(view_create_success["view_state"]["view_id"])
+
+    export_success = record(
+        name="export_viewstate_success",
+        method="POST",
+        case_path="/export/viewstate",
+        json_body={
+            "schema_version": 1,
+            "view_id": view_id,
+            "session_id": session_id,
+        },
+    )
+    exported_view_state = export_success["view_state"]
+
+    record(
+        name="export_viewstate_unknown_session_error",
+        method="POST",
+        case_path="/export/viewstate",
+        json_body={
+            "schema_version": 1,
+            "view_id": view_id,
+            "session_id": "session_missing",
+        },
+    )
+
+    second_session = record(
+        name="session_create_second_success",
+        method="POST",
+        case_path="/session/create",
+        json_body={"schema_version": 1},
+    )
+    second_session_id = str(second_session["session_id"])
+    record(
+        name="export_viewstate_wrong_session_error",
+        method="POST",
+        case_path="/export/viewstate",
+        json_body={
+            "schema_version": 1,
+            "view_id": view_id,
+            "session_id": second_session_id,
+        },
+    )
+
+    record(
+        name="import_viewstate_success",
+        method="POST",
+        case_path="/import/viewstate",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_state": exported_view_state,
+        },
+    )
+
+    record(
+        name="import_viewstate_compat_session_success",
+        method="POST",
+        case_path="/import/viewstate",
+        json_body={"schema_version": 1, "view_state": exported_view_state},
+    )
+
+    missing_dataset_state = copy.deepcopy(exported_view_state)
+    missing_dataset_state["datasets"][0]["dataset_id"] = "ds_missing"
+    for layer in missing_dataset_state["layers"]:
+        if layer.get("dataset_id") is not None:
+            layer["dataset_id"] = "ds_missing"
+    record(
+        name="import_viewstate_missing_dataset_error",
+        method="POST",
+        case_path="/import/viewstate",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_state": missing_dataset_state,
+        },
+    )
+
+    unsupported_mode_state = copy.deepcopy(exported_view_state)
+    unsupported_mode_state["mode"] = "3d"
+    unsupported_mode_state["view_3d"] = {}
+    record(
+        name="import_viewstate_unsupported_mode_error",
+        method="POST",
+        case_path="/import/viewstate",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_state": unsupported_mode_state,
+        },
+    )
+
+    multi_dataset_state = copy.deepcopy(exported_view_state)
+    multi_dataset_state["datasets"] = [
+        *multi_dataset_state["datasets"],
+        copy.deepcopy(multi_dataset_state["datasets"][0]),
+    ]
+    record(
+        name="import_viewstate_multi_dataset_error",
+        method="POST",
+        case_path="/import/viewstate",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_state": multi_dataset_state,
+        },
+    )
+
+    layer_mismatch_state = copy.deepcopy(exported_view_state)
+    layer_mismatch_state["layers"][0]["dataset_id"] = "ds_other"
+    record(
+        name="import_viewstate_layer_mismatch_error",
+        method="POST",
+        case_path="/import/viewstate",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_state": layer_mismatch_state,
+        },
+    )
+
+    return cases
+
+
 def run_phase1_cases(
     *,
     adapter: BackendAdapter,

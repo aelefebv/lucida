@@ -20,6 +20,7 @@ _TOKENIZED_STRING_KEYS = {
     "render_id",
     "source_view_id",
     "imported_from_view_id",
+    "primary_dataset_id",
     "state_hash",
     "uri",
 }

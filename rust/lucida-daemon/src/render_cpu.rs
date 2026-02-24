@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use axum::http::StatusCode;
@@ -19,6 +20,7 @@ use crate::dto::view_state::{
     InterpolationMode, LayerState, LayerType, SlabMode, SlabSettings, ViewState,
 };
 use crate::error::ApiError;
+use crate::render_cache::{EffectiveCacheBudgets, RenderCacheRegistry};
 use crate::uri::file_uri_to_path;
 use crate::view_state_core::plane_name;
 
@@ -72,7 +74,12 @@ pub fn render_view_to_png(
     dataset_summary: &DatasetSummary,
     view_state: &ViewState,
     output: &RenderOutputSpec,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+    cache_budgets: EffectiveCacheBudgets,
 ) -> Result<RenderCpuResult, ApiError> {
+    cache_registry.ensure_session_budgets(cache_session_id, cache_budgets);
+
     let Some(view_2d) = view_state.view_2d.as_ref() else {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -189,7 +196,17 @@ pub fn render_view_to_png(
         let (level, level_warnings) = choose_level(multiscale, view_state, u_axis, v_axis);
         warnings.extend(level_warnings);
 
-        let loaded_array = load_level_array(&dataset_root, level).map_err(|reason| {
+        let loaded_array = load_level_array(
+            &dataset_root,
+            level,
+            cache_registry,
+            cache_session_id,
+            &format!(
+                "{}|{}|{}",
+                dataset_summary.dataset_id, multiscale.name, level.path
+            ),
+        )
+        .map_err(|reason| {
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "render_failed",
@@ -1240,7 +1257,13 @@ fn resolve_background_rgba(view_state: &ViewState) -> [f32; 4] {
     [0.0, 0.0, 0.0, 1.0]
 }
 
-fn load_level_array(root_path: &Path, level: &MultiscaleLevelDef) -> Result<LoadedArray, String> {
+fn load_level_array(
+    root_path: &Path,
+    level: &MultiscaleLevelDef,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+    cache_scope: &str,
+) -> Result<LoadedArray, String> {
     let level_path = root_path.join(&level.path);
     let metadata_path = level_path.join("zarr.json");
     let metadata_raw = fs::read_to_string(&metadata_path).map_err(|error| error.to_string())?;
@@ -1278,18 +1301,36 @@ fn load_level_array(root_path: &Path, level: &MultiscaleLevelDef) -> Result<Load
 
     for_each_index(&chunk_counts, |chunk_index| {
         let chunk_path = level_path.join(chunk_key(chunk_index, &storage_meta.separator));
-        let decoded_chunk = if chunk_path.exists() {
-            match fs::File::open(&chunk_path).and_then(|mut file| {
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes)?;
-                Ok(bytes)
-            }) {
-                Ok(raw_bytes) => decode_chunk(raw_bytes, &storage_meta.codecs).unwrap_or_default(),
-                Err(_) => Vec::new(),
-            }
-        } else {
-            Vec::new()
-        };
+        let cache_key = format!(
+            "{cache_scope}|{}|{}|{}",
+            storage_meta.dtype,
+            storage_meta.codecs.join(","),
+            chunk_path.to_string_lossy(),
+        );
+
+        let decoded_chunk: Arc<[u8]> =
+            if let Some(hit) = cache_registry.get_cpu_chunk(cache_session_id, &cache_key) {
+                hit
+            } else {
+                let decoded = if chunk_path.exists() {
+                    match fs::File::open(&chunk_path).and_then(|mut file| {
+                        let mut bytes = Vec::new();
+                        file.read_to_end(&mut bytes)?;
+                        Ok(bytes)
+                    }) {
+                        Ok(raw_bytes) => {
+                            decode_chunk(raw_bytes, &storage_meta.codecs).unwrap_or_default()
+                        }
+                        Err(_) => Vec::new(),
+                    }
+                } else {
+                    Vec::new()
+                };
+
+                let payload = Arc::<[u8]>::from(decoded.into_boxed_slice());
+                cache_registry.put_cpu_chunk(cache_session_id, cache_key, payload.clone());
+                payload
+            };
 
         let full_strides = c_order_strides(&shape);
         let chunk_strides = c_order_strides(&storage_meta.chunk_shape);

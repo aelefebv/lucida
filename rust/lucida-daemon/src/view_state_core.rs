@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use axum::http::StatusCode;
+use chrono::Utc;
 use serde_json::{json, Number, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -487,6 +488,55 @@ pub fn validate_view_state(view_state: &ViewState) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+pub fn validate_import_dataset_scope(view_state: &ViewState) -> Result<(), ApiError> {
+    if view_state.datasets.len() != 1 {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_viewstate_import",
+            "Imported view state must reference exactly one dataset.",
+            Some(json!({ "dataset_count": view_state.datasets.len() })),
+        ));
+    }
+
+    let primary_dataset_id = view_state.datasets[0].dataset_id.clone();
+    let mismatched_layer_ids: Vec<String> = view_state
+        .layers
+        .iter()
+        .filter_map(|layer| {
+            let dataset_id = layer.dataset_id.as_ref()?;
+            if *dataset_id == primary_dataset_id {
+                None
+            } else {
+                Some(layer.layer_id.clone())
+            }
+        })
+        .collect();
+
+    if !mismatched_layer_ids.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_viewstate_import",
+            "Layer dataset references must match imported primary dataset.",
+            Some(json!({
+                "primary_dataset_id": primary_dataset_id,
+                "mismatched_layer_ids": mismatched_layer_ids,
+            })),
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn rebase_imported_view_identity(view_state: &ViewState, session_id: &str) -> ViewState {
+    let mut rebased = view_state.clone();
+    rebased.view_id = generate_view_id();
+    rebased.session_id = session_id.to_owned();
+    rebased.created_at = Some(Utc::now());
+    rebased.state_hash = None;
+    rebased.state_version = 0;
+    rebased
 }
 
 pub fn with_state_hash(view_state: &ViewState, state_version: u64) -> ViewState {
