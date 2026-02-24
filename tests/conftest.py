@@ -102,6 +102,55 @@ def create_invalid_zarr(uri: str) -> str:
     return uri
 
 
+def create_render_omezarr(uri: str) -> str:
+    root = _open_group_for_write(uri)
+
+    shape_level0 = (1, 3, 4, 5, 6)
+    data_level0 = np.zeros(shape_level0, dtype=np.uint16)
+    for c in range(shape_level0[1]):
+        for z in range(shape_level0[2]):
+            for y in range(shape_level0[3]):
+                for x in range(shape_level0[4]):
+                    data_level0[0, c, z, y, x] = np.uint16((c * 1000) + (z * 100) + (y * 10) + x)
+
+    data_level1 = data_level0[:, :, ::2, ::2, ::2]
+
+    root.create_array("0", data=data_level0, chunks=(1, 1, 2, 3, 3), overwrite=True)
+    root.create_array("1", data=data_level1, chunks=(1, 1, 1, 2, 2), overwrite=True)
+
+    root.attrs["multiscales"] = [
+        {
+            "name": "primary",
+            "axes": [
+                {"name": "t", "type": "t"},
+                {"name": "c", "type": "c"},
+                {"name": "z", "type": "z"},
+                {"name": "y", "type": "y"},
+                {"name": "x", "type": "x"},
+            ],
+            "datasets": [
+                {
+                    "path": "0",
+                    "coordinateTransformations": [{"type": "scale", "scale": [1, 1, 1, 1, 1]}],
+                },
+                {
+                    "path": "1",
+                    "coordinateTransformations": [{"type": "scale", "scale": [1, 1, 2, 2, 2]}],
+                },
+            ],
+        }
+    ]
+
+    root.attrs["omero"] = {
+        "channels": [
+            {"index": 0, "label": "c0", "color": "ffffff", "window": {"start": 0, "end": 500}},
+            {"index": 1, "label": "c1", "color": "ff0000", "window": {"start": 0, "end": 1500}},
+            {"index": 2, "label": "c2", "color": "00ff00", "window": {"start": 0, "end": 2500}},
+        ]
+    }
+    return uri
+
+
 @pytest.fixture()
 def local_omezarr_uri(tmp_path: Path) -> str:
     return create_sample_omezarr(str(tmp_path / "sample.zarr"))
@@ -125,6 +174,11 @@ def tolerant_omezarr_uri(tmp_path: Path) -> str:
 @pytest.fixture()
 def invalid_omezarr_uri(tmp_path: Path) -> str:
     return create_invalid_zarr(str(tmp_path / "invalid.zarr"))
+
+
+@pytest.fixture()
+def render_omezarr_uri(tmp_path: Path) -> str:
+    return create_render_omezarr(str(tmp_path / "render.zarr"))
 
 
 @pytest.fixture()
