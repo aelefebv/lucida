@@ -1,4 +1,4 @@
-"""Typer-based command line interface for local/HTTP Lucida usage."""
+"""Typer-based command line interface for Rust-daemon HTTP usage."""
 
 from __future__ import annotations
 
@@ -10,10 +10,8 @@ import typer
 
 from lucida.client import LucidaClient, LucidaClientError
 from lucida.errors import LucidaError, as_api_error_payload
-from lucida.models.render import RenderOutputSpec
 from lucida.models.view_state import AxisSelector, View2D, ViewState, Viewport
 from lucida.runtime_config import resolve_runtime_config
-from lucida.service.dataset_service import DatasetService
 
 app = typer.Typer(no_args_is_help=True)
 dataset_app = typer.Typer(no_args_is_help=True)
@@ -24,15 +22,6 @@ app.add_typer(dataset_app, name="dataset")
 app.add_typer(session_app, name="session")
 app.add_typer(view_app, name="view")
 app.add_typer(render_app, name="render")
-
-_LOCAL_SERVICE = DatasetService()
-
-_PLANE_ROLES: dict[str, tuple[str, str, str]] = {
-    "xy": ("x", "y", "z"),
-    "xz": ("x", "z", "y"),
-    "yz": ("y", "z", "x"),
-}
-
 
 @dataset_app.command("open")
 def dataset_open(
@@ -66,16 +55,8 @@ def dataset_open(
     """
     try:
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                response = client.open_dataset(
-                    uri=uri,
-                    dataset_id=dataset_id,
-                    session_id=session_id,
-                    include_full_raw_metadata=full_raw_metadata,
-                )
-        else:
-            response = _LOCAL_SERVICE.open_dataset(
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.open_dataset(
                 uri=uri,
                 dataset_id=dataset_id,
                 session_id=session_id,
@@ -118,7 +99,7 @@ def session_create(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
-    """Create a new session via local service or API.
+    """Create a new session via API.
 
     Parameters
     ----------
@@ -129,11 +110,8 @@ def session_create(
     """
     try:
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                response = client.create_session()
-        else:
-            response = _LOCAL_SERVICE.create_session()
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.create_session()
     except LucidaError as exc:
         typer.echo(json.dumps(as_api_error_payload(exc), indent=2))
         raise typer.Exit(code=1) from exc
@@ -209,28 +187,17 @@ def view_create(
         viewport = Viewport(width_px=width_px, height_px=height_px, pixel_ratio=pixel_ratio)
 
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                response = client.create_view(
-                    dataset_id=dataset_id,
-                    session_id=session_id,
-                    mode=mode,
-                    multiscale_name=multiscale_name,
-                    viewport=viewport.model_dump(mode="json"),
-                    selectors=[item.model_dump(mode="json") for item in selectors_value]
-                    if selectors_value is not None
-                    else None,
-                    view_2d=view_2d_value.model_dump(mode="json") if view_2d_value else None,
-                )
-        else:
-            response = _LOCAL_SERVICE.create_view(
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.create_view(
                 dataset_id=dataset_id,
                 session_id=session_id,
                 mode=mode,
                 multiscale_name=multiscale_name,
-                viewport=viewport,
-                selectors=selectors_value,
-                view_2d=view_2d_value,
+                viewport=viewport.model_dump(mode="json"),
+                selectors=[item.model_dump(mode="json") for item in selectors_value]
+                if selectors_value is not None
+                else None,
+                view_2d=view_2d_value.model_dump(mode="json") if view_2d_value else None,
             )
     except (LucidaError, ValueError) as exc:
         _emit_exception(exc)
@@ -272,11 +239,8 @@ def view_get(
     """
     try:
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                response = client.get_view(view_id=view_id, session_id=session_id)
-        else:
-            response = _LOCAL_SERVICE.get_view(view_id=view_id, session_id=session_id)
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.get_view(view_id=view_id, session_id=session_id)
     except LucidaError as exc:
         _emit_exception(exc)
     except LucidaClientError as exc:
@@ -323,11 +287,8 @@ def view_export(
     """
     try:
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                response = client.export_viewstate(view_id=view_id, session_id=session_id)
-        else:
-            response = _LOCAL_SERVICE.export_viewstate(view_id=view_id, session_id=session_id)
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.export_viewstate(view_id=view_id, session_id=session_id)
     except LucidaError as exc:
         _emit_exception(exc)
     except LucidaClientError as exc:
@@ -380,15 +341,9 @@ def view_import(
             raise ValueError("view-state file is required.")
 
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                response = client.import_viewstate(
-                    view_state=view_state_value.model_dump(mode="json"),
-                    session_id=session_id,
-                )
-        else:
-            response = _LOCAL_SERVICE.import_viewstate(
-                view_state=view_state_value,
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.import_viewstate(
+                view_state=view_state_value.model_dump(mode="json"),
                 session_id=session_id,
             )
     except (LucidaError, ValueError) as exc:
@@ -437,11 +392,8 @@ def view_update(
     try:
         patch = _load_patch(patch_file)
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                response = client.update_view(view_id=view_id, patch=patch, session_id=session_id)
-        else:
-            response = _LOCAL_SERVICE.update_view(view_id=view_id, patch=patch, session_id=session_id)
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.update_view(view_id=view_id, patch=patch, session_id=session_id)
     except LucidaError as exc:
         _emit_exception(exc)
     except LucidaClientError as exc:
@@ -696,33 +648,18 @@ def render_image(
         overrides = _load_patch(patch_file) if patch_file is not None else None
         file_path_value = str(file_path) if file_path is not None else None
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                response = client.render_image(
-                    view_id=view_id,
-                    view_state=(
-                        view_state_value.model_dump(mode="json")
-                        if view_state_value is not None
-                        else None
-                    ),
-                    width_px=width_px,
-                    height_px=height_px,
-                    delivery=delivery,
-                    file_path=file_path_value,
-                    session_id=session_id,
-                    request_id=request_id,
-                    overrides_json_patch=overrides,
-                )
-        else:
-            response = _LOCAL_SERVICE.render_image(
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.render_image(
                 view_id=view_id,
-                view_state=view_state_value,
-                output=RenderOutputSpec(
-                    width_px=width_px,
-                    height_px=height_px,
-                    delivery=delivery,
-                    file_path=file_path_value,
+                view_state=(
+                    view_state_value.model_dump(mode="json")
+                    if view_state_value is not None
+                    else None
                 ),
+                width_px=width_px,
+                height_px=height_px,
+                delivery=delivery,
+                file_path=file_path_value,
                 session_id=session_id,
                 request_id=request_id,
                 overrides_json_patch=overrides,
@@ -756,7 +693,7 @@ def _run_selector_helper(
     base_url: str | None,
     payload: dict[str, Any],
 ) -> Any:
-    """Build a selector update and apply it via client or local service.
+    """Build a selector update and apply it via HTTP client.
 
     Parameters
     ----------
@@ -777,54 +714,31 @@ def _run_selector_helper(
     """
     try:
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                if helper == "index":
-                    return client.set_dim(
-                        view_id=view_id,
-                        axis=axis,
-                        index=payload["index"],
-                        session_id=session_id,
-                        clamp=clamp,
-                    )
-                if helper == "range":
-                    return client.set_axis_range(
-                        view_id=view_id,
-                        axis=axis,
-                        start=payload["start"],
-                        end_exclusive=payload["end_exclusive"],
-                        session_id=session_id,
-                        clamp=clamp,
-                    )
-                return client.set_axis_set(
+        with LucidaClient(base_url=resolved_base_url) as client:
+            if helper == "index":
+                return client.set_dim(
                     view_id=view_id,
                     axis=axis,
-                    indices=payload["indices"],
+                    index=payload["index"],
                     session_id=session_id,
                     clamp=clamp,
                 )
-
-        view = _LOCAL_SERVICE.get_view(view_id=view_id, session_id=session_id).view_state
-        selectors = [item.model_dump(mode="json") for item in view.selectors if item.axis != axis]
-        if helper == "index":
-            selectors.append({"axis": axis, "kind": "index", "index": payload["index"], "clamp": clamp})
-        elif helper == "range":
-            selectors.append(
-                {
-                    "axis": axis,
-                    "kind": "range",
-                    "start": payload["start"],
-                    "end_exclusive": payload["end_exclusive"],
-                    "clamp": clamp,
-                }
+            if helper == "range":
+                return client.set_axis_range(
+                    view_id=view_id,
+                    axis=axis,
+                    start=payload["start"],
+                    end_exclusive=payload["end_exclusive"],
+                    session_id=session_id,
+                    clamp=clamp,
+                )
+            return client.set_axis_set(
+                view_id=view_id,
+                axis=axis,
+                indices=payload["indices"],
+                session_id=session_id,
+                clamp=clamp,
             )
-        else:
-            selectors.append({"axis": axis, "kind": "set", "indices": payload["indices"], "clamp": clamp})
-        return _LOCAL_SERVICE.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
-        )
     except LucidaError as exc:
         _emit_exception(exc)
     except LucidaClientError as exc:
@@ -840,150 +754,33 @@ def _run_navigation_helper(
     base_url: str | None,
     payload: dict[str, Any],
 ) -> Any:
-    """Run pan/zoom/plane operations via HTTP client or local service."""
+    """Run pan/zoom/plane operations via HTTP client."""
     try:
         resolved_base_url = _resolve_cli_base_url(base_url)
-        if resolved_base_url is not None:
-            with LucidaClient(base_url=resolved_base_url) as client:
-                if helper == "set-plane":
-                    return client.set_plane(
-                        view_id=view_id,
-                        plane=payload["plane"],
-                        session_id=session_id,
-                    )
-                if helper == "pan":
-                    return client.pan(
-                        view_id=view_id,
-                        dx_px=float(payload["dx_px"]),
-                        dy_px=float(payload["dy_px"]),
-                        session_id=session_id,
-                    )
-                return client.zoom(
+        with LucidaClient(base_url=resolved_base_url) as client:
+            if helper == "set-plane":
+                return client.set_plane(
                     view_id=view_id,
-                    factor=float(payload["factor"]),
+                    plane=payload["plane"],
                     session_id=session_id,
                 )
-
-        view = _LOCAL_SERVICE.get_view(view_id=view_id, session_id=session_id).view_state
-        if view.view_2d is None:
-            raise ValueError("view has no 2d state.")
-
-        if helper == "set-plane":
-            patch = _build_set_plane_patch(
-                view_payload=view.model_dump(mode="json"),
-                plane=payload["plane"],
+            if helper == "pan":
+                return client.pan(
+                    view_id=view_id,
+                    dx_px=float(payload["dx_px"]),
+                    dy_px=float(payload["dy_px"]),
+                    session_id=session_id,
+                )
+            return client.zoom(
+                view_id=view_id,
+                factor=float(payload["factor"]),
+                session_id=session_id,
             )
-        elif helper == "pan":
-            zoom = float(view.view_2d.camera.zoom)
-            pixel_ratio = float(view.viewport.pixel_ratio)
-            if zoom <= 0:
-                raise ValueError("zoom must be > 0.")
-            center_x, center_y = view.view_2d.camera.center_world
-            delta_x = float(payload["dx_px"]) / (zoom * pixel_ratio)
-            delta_y = float(payload["dy_px"]) / (zoom * pixel_ratio)
-            patch = [
-                {
-                    "op": "replace",
-                    "path": "/view_2d/camera/center_world",
-                    "value": [float(center_x) + delta_x, float(center_y) + delta_y],
-                }
-            ]
-        else:
-            factor = float(payload["factor"])
-            if factor <= 0:
-                raise ValueError("zoom factor must be > 0.")
-            patch = [
-                {
-                    "op": "replace",
-                    "path": "/view_2d/camera/zoom",
-                    "value": float(view.view_2d.camera.zoom) * factor,
-                }
-            ]
-
-        return _LOCAL_SERVICE.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=patch,
-        )
     except (LucidaError, ValueError) as exc:
         _emit_exception(exc)
     except LucidaClientError as exc:
         _emit_client_error(exc)
     raise AssertionError("unreachable")
-
-
-def _build_set_plane_patch(*, view_payload: dict[str, Any], plane: str) -> list[dict[str, Any]]:
-    if plane not in _PLANE_ROLES:
-        raise ValueError(f"unsupported plane: {plane}")
-
-    view_2d = view_payload.get("view_2d")
-    if not isinstance(view_2d, dict):
-        raise ValueError("view has no 2d state.")
-
-    current_plane = str(view_2d.get("plane", "xy"))
-    if current_plane not in _PLANE_ROLES:
-        current_plane = "xy"
-
-    current_u_role, current_v_role, current_orth_role = _PLANE_ROLES[current_plane]
-    target_u_role, target_v_role, target_orth_role = _PLANE_ROLES[plane]
-
-    camera = view_2d.get("camera") or {}
-    center_world = camera.get("center_world") or [0.0, 0.0]
-    if len(center_world) != 2:
-        center_world = [0.0, 0.0]
-
-    slice_payload = view_2d.get("slice") or {}
-    selectors = view_payload.get("selectors") or []
-    if not isinstance(selectors, list):
-        selectors = []
-
-    current_slice_index = slice_payload.get("index")
-    if current_slice_index is None:
-        current_slice_index = _selector_first_index(
-            selectors=selectors,
-            axis=slice_payload.get("axis"),
-        )
-    if current_slice_index is None:
-        current_slice_index = 0
-
-    role_values: dict[str, float] = {
-        current_u_role: float(center_world[0]),
-        current_v_role: float(center_world[1]),
-        current_orth_role: float(current_slice_index),
-    }
-
-    new_center = [
-        float(role_values.get(target_u_role, float(center_world[0]))),
-        float(role_values.get(target_v_role, float(center_world[1]))),
-    ]
-    next_slice = dict(slice_payload)
-    next_slice["index"] = int(round(role_values.get(target_orth_role, 0.0)))
-
-    return [
-        {"op": "replace", "path": "/view_2d/plane", "value": plane},
-        {"op": "replace", "path": "/view_2d/camera/center_world", "value": new_center},
-        {"op": "replace", "path": "/view_2d/slice", "value": next_slice},
-    ]
-
-
-def _selector_first_index(*, selectors: list[dict[str, Any]], axis: Any) -> int | None:
-    if not isinstance(axis, str):
-        return None
-    for selector in selectors:
-        if not isinstance(selector, dict):
-            continue
-        if selector.get("axis") != axis:
-            continue
-        kind = selector.get("kind")
-        if kind == "index" and isinstance(selector.get("index"), int):
-            return int(selector["index"])
-        if kind == "range" and isinstance(selector.get("start"), int):
-            return int(selector["start"])
-        if kind == "set" and isinstance(selector.get("indices"), list) and selector["indices"]:
-            first = selector["indices"][0]
-            if isinstance(first, int):
-                return int(first)
-    return None
 
 
 def _emit_view_update_response(response: Any, *, output_json: bool) -> None:
@@ -1070,16 +867,13 @@ def _load_view_2d(path: Path | None) -> View2D | None:
     return View2D.model_validate(loaded)
 
 
-def _resolve_cli_base_url(base_url_override: str | None) -> str | None:
+def _resolve_cli_base_url(base_url_override: str | None) -> str:
     """Resolve effective HTTP URL for CLI commands.
 
-    Rust backend defaults to HTTP transport. Python backend uses in-process local
-    service when selected and no explicit base URL is provided.
+    Rust backend always uses HTTP transport.
     """
     runtime = resolve_runtime_config(base_url_override=base_url_override)
-    if runtime.use_http:
-        return runtime.base_url
-    return None
+    return runtime.base_url
 
 
 def _emit_exception(exc: Exception) -> None:

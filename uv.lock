@@ -383,22 +383,6 @@ wheels = [
 ]
 
 [[package]]
-name = "fastapi"
-version = "0.132.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "annotated-doc" },
-    { name = "pydantic" },
-    { name = "starlette" },
-    { name = "typing-extensions" },
-    { name = "typing-inspection" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a0/55/f1b4d4e478a0a1b4b1113d0f610a1b08e539b69900f97fdc97155d62fdee/fastapi-0.132.0.tar.gz", hash = "sha256:ef687847936d8a57ea6ea04cf9a85fe5f2c6ba64e22bfa721467094b69d48d92", size = 372422 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a8/de/6171c3363bbc5e01686e200e0880647c9270daa476d91030435cf14d32f5/fastapi-0.132.0-py3-none-any.whl", hash = "sha256:3c487d5afce196fa8ea509ae1531e96ccd5cdd2fd6eae78b73e2c20fba706689", size = 104652 },
-]
-
-[[package]]
 name = "fastjsonschema"
 version = "2.21.2"
 source = { registry = "https://pypi.org/simple" }
@@ -619,18 +603,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/77/e8/a3f261a66e4663f22700bc8a17c08cb83e91fbf086726e7a228398968981/json5-0.13.0.tar.gz", hash = "sha256:b1edf8d487721c0bf64d83c28e91280781f6e21f4a797d3261c7c828d4c165bf", size = 52441 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/9e/038522f50ceb7e74f1f991bf1b699f24b0c2bbe7c390dd36ad69f4582258/json5-0.13.0-py3-none-any.whl", hash = "sha256:9a08e1dd65f6a4d4c6fa82d216cf2477349ec2346a38fd70cc11d2557499fbcc", size = 36163 },
-]
-
-[[package]]
-name = "jsonpatch"
-version = "1.33"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "jsonpointer" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/42/78/18813351fe5d63acad16aec57f94ec2b70a09e53ca98145589e185423873/jsonpatch-1.33.tar.gz", hash = "sha256:9fcd4009c41e6d12348b4a0ff2563ba56a2923a7dfee731d004e212e1ee5030c", size = 21699 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/73/07/02e16ed01e04a374e644b575638ec7987ae846d25ad97bcc9945a3ee4b0e/jsonpatch-1.33-py2.py3-none-any.whl", hash = "sha256:0ae28c0cd062bbd8b8ecc26d7d164fbbea9652a1a3693f3b956c1eae5145dade", size = 12898 },
 ]
 
 [[package]]
@@ -894,44 +866,38 @@ name = "lucida"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fastapi" },
-    { name = "fsspec" },
     { name = "httpx" },
-    { name = "jsonpatch" },
-    { name = "numpy" },
-    { name = "pillow" },
     { name = "pydantic" },
     { name = "typer" },
-    { name = "uvicorn" },
-    { name = "zarr" },
 ]
 
 [package.dev-dependencies]
 dev = [
+    { name = "fsspec" },
     { name = "ipykernel" },
     { name = "jupyter" },
+    { name = "numpy" },
+    { name = "pillow" },
     { name = "pytest" },
+    { name = "zarr" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "fastapi", specifier = ">=0.116.0" },
-    { name = "fsspec", specifier = ">=2025.7.0" },
     { name = "httpx", specifier = ">=0.28.1" },
-    { name = "jsonpatch", specifier = ">=1.33" },
-    { name = "numpy", specifier = ">=2.3.2" },
-    { name = "pillow", specifier = ">=11.3.0" },
     { name = "pydantic", specifier = ">=2.11.7" },
     { name = "typer", specifier = ">=0.16.1" },
-    { name = "uvicorn", specifier = ">=0.35.0" },
-    { name = "zarr", specifier = ">=3.1.2" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fsspec", specifier = ">=2025.7.0" },
     { name = "ipykernel", specifier = ">=7.2.0" },
     { name = "jupyter", specifier = ">=1.1.1" },
+    { name = "numpy", specifier = ">=2.3.2" },
+    { name = "pillow", specifier = ">=11.3.0" },
     { name = "pytest", specifier = ">=9.0.2" },
+    { name = "zarr", specifier = ">=3.1.2" },
 ]
 
 [[package]]
@@ -1872,19 +1838,6 @@ wheels = [
 ]
 
 [[package]]
-name = "starlette"
-version = "0.52.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "anyio" },
-    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c4/68/79977123bb7be889ad680d79a40f339082c1978b5cfcf62c2d8d196873ac/starlette-0.52.1.tar.gz", hash = "sha256:834edd1b0a23167694292e94f597773bc3f89f362be6effee198165a35d62933", size = 2653702 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/0d/13d1d239a25cbfb19e740db83143e95c772a1fe10202dda4b76792b114dd/starlette-0.52.1-py3-none-any.whl", hash = "sha256:0029d43eb3d273bc4f83a08720b4912ea4b071087a3b48db01b7c839f7954d74", size = 74272 },
-]
-
-[[package]]
 name = "terminado"
 version = "0.18.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1999,19 +1952,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/24/5f1b3bdffd70275f6661c76461e25f024d5a38a46f04aaca912426a2b1d3/urllib3-2.6.3.tar.gz", hash = "sha256:1b62b6884944a57dbe321509ab94fd4d3b307075e0c2eae991ac71ee15ad38ed", size = 435556 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/39/08/aaaad47bc4e9dc8c725e68f9d04865dbcb2052843ff09c97b08904852d84/urllib3-2.6.3-py3-none-any.whl", hash = "sha256:bf272323e553dfb2e87d9bfd225ca7b0f467b919d7bbd355436d3fd37cb0acd4", size = 131584 },
-]
-
-[[package]]
-name = "uvicorn"
-version = "0.41.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "click" },
-    { name = "h11" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/32/ce/eeb58ae4ac36fe09e3842eb02e0eb676bf2c53ae062b98f1b2531673efdd/uvicorn-0.41.0.tar.gz", hash = "sha256:09d11cf7008da33113824ee5a1c6422d89fbc2ff476540d69a34c87fab8b571a", size = 82633 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/83/e4/d04a086285c20886c0daad0e026f250869201013d18f81d9ff5eada73a88/uvicorn-0.41.0-py3-none-any.whl", hash = "sha256:29e35b1d2c36a04b9e180d4007ede3bcb32a85fbdfd6c6aeb3f26839de088187", size = 68783 },
 ]
 
 [[package]]

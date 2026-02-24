@@ -5,16 +5,9 @@ description = "Lightweight, high-performance, cross-platform ND microscopy viewe
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.116.0",
-    "fsspec>=2025.7.0",
     "httpx>=0.28.1",
-    "jsonpatch>=1.33",
-    "numpy>=2.3.2",
-    "pillow>=11.3.0",
     "pydantic>=2.11.7",
     "typer>=0.16.1",
-    "uvicorn>=0.35.0",
-    "zarr>=3.1.2",
 ]
 
 [project.scripts]
@@ -26,7 +19,11 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "fsspec>=2025.7.0",
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
+    "numpy>=2.3.2",
+    "pillow>=11.3.0",
     "pytest>=9.0.2",
+    "zarr>=3.1.2",
 ]
