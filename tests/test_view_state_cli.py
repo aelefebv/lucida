@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -9,13 +10,22 @@ import lucida.cli as cli_module
 from lucida.service.dataset_service import DatasetService
 
 
+def _python_backend_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["LUCIDA_BACKEND"] = "python"
+    env.pop("LUCIDA_BASE_URL", None)
+    return env
+
+
 def test_cli_view_flow(local_omezarr_uri: str, tmp_path: Path) -> None:
     cli_module._LOCAL_SERVICE = DatasetService()
     runner = CliRunner()
+    python_env = _python_backend_env()
 
     open_result = runner.invoke(
         cli_module.app,
         ["dataset", "open", "--uri", local_omezarr_uri, "--json"],
+        env=python_env,
     )
     assert open_result.exit_code == 0
     dataset_payload = json.loads(open_result.stdout)
@@ -24,6 +34,7 @@ def test_cli_view_flow(local_omezarr_uri: str, tmp_path: Path) -> None:
     create_result = runner.invoke(
         cli_module.app,
         ["view", "create", "--dataset-id", dataset_id, "--json"],
+        env=python_env,
     )
     assert create_result.exit_code == 0
     create_payload = json.loads(create_result.stdout)
@@ -32,6 +43,7 @@ def test_cli_view_flow(local_omezarr_uri: str, tmp_path: Path) -> None:
     set_dim_result = runner.invoke(
         cli_module.app,
         ["view", "set-dim", "--view-id", view_id, "--axis", "z", "--index", "3", "--json"],
+        env=python_env,
     )
     assert set_dim_result.exit_code == 0
     set_dim_payload = json.loads(set_dim_result.stdout)
@@ -53,6 +65,7 @@ def test_cli_view_flow(local_omezarr_uri: str, tmp_path: Path) -> None:
             "4",
             "--json",
         ],
+        env=python_env,
     )
     assert set_range_result.exit_code == 0
     set_range_payload = json.loads(set_range_result.stdout)
@@ -76,6 +89,7 @@ def test_cli_view_flow(local_omezarr_uri: str, tmp_path: Path) -> None:
             "2",
             "--json",
         ],
+        env=python_env,
     )
     assert set_set_result.exit_code == 0
     set_set_payload = json.loads(set_set_result.stdout)
@@ -97,6 +111,7 @@ def test_cli_view_flow(local_omezarr_uri: str, tmp_path: Path) -> None:
     update_result = runner.invoke(
         cli_module.app,
         ["view", "update", "--view-id", view_id, "--patch-file", str(patch_path), "--json"],
+        env=python_env,
     )
     assert update_result.exit_code == 0
     update_payload = json.loads(update_result.stdout)
@@ -105,6 +120,7 @@ def test_cli_view_flow(local_omezarr_uri: str, tmp_path: Path) -> None:
     get_result = runner.invoke(
         cli_module.app,
         ["view", "get", "--view-id", view_id, "--json"],
+        env=python_env,
     )
     assert get_result.exit_code == 0
     get_payload = json.loads(get_result.stdout)
