@@ -14,6 +14,10 @@ from lucida.models.api import (
     SessionCreateResponse,
     ViewCreateRequest,
     ViewCreateResponse,
+    ViewStateExportRequest,
+    ViewStateExportResponse,
+    ViewStateImportRequest,
+    ViewStateImportResponse,
     ViewGetResponse,
     ViewUpdateRequest,
     ViewUpdateResponse,
@@ -165,6 +169,34 @@ def create_app(dataset_service: DatasetService | None = None) -> FastAPI:
         return service.update_view(
             view_id=request.view_id,
             patch=request.patch,
+            session_id=request.session_id,
+        )
+
+    @app.post("/export/viewstate", response_model=ViewStateExportResponse)
+    async def export_viewstate(request: ViewStateExportRequest) -> ViewStateExportResponse:
+        """Export a persisted view state payload.
+
+        Parameters
+        ----------
+        request:
+            Parsed export request.
+        """
+        return service.export_viewstate(
+            view_id=request.view_id,
+            session_id=request.session_id,
+        )
+
+    @app.post("/import/viewstate", response_model=ViewStateImportResponse)
+    async def import_viewstate(request: ViewStateImportRequest) -> ViewStateImportResponse:
+        """Import a view state payload as a new persisted view.
+
+        Parameters
+        ----------
+        request:
+            Parsed import request.
+        """
+        return service.import_viewstate(
+            view_state=request.view_state,
             session_id=request.session_id,
         )
 

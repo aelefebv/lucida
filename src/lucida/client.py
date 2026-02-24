@@ -14,6 +14,10 @@ from lucida.models.api import (
     SessionCreateResponse,
     ViewCreateRequest,
     ViewCreateResponse,
+    ViewStateExportRequest,
+    ViewStateExportResponse,
+    ViewStateImportRequest,
+    ViewStateImportResponse,
     ViewGetResponse,
     ViewUpdateRequest,
     ViewUpdateResponse,
@@ -198,6 +202,50 @@ class LucidaClient:
         request = ViewUpdateRequest(view_id=view_id, patch=patch, session_id=session_id)
         payload = self._post("/view/update", request.model_dump(mode="json"))
         return ViewUpdateResponse.model_validate(payload)
+
+    def export_viewstate(
+        self,
+        *,
+        view_id: str,
+        session_id: str | None = None,
+    ) -> ViewStateExportResponse:
+        """Export a full persisted view state payload.
+
+        Parameters
+        ----------
+        view_id:
+            Source view identifier.
+        session_id:
+            Optional session scope guard.
+        """
+        request = ViewStateExportRequest(view_id=view_id, session_id=session_id)
+        payload = self._post("/export/viewstate", request.model_dump(mode="json"))
+        return ViewStateExportResponse.model_validate(payload)
+
+    def import_viewstate(
+        self,
+        *,
+        view_state: ViewState | dict[str, Any],
+        session_id: str | None = None,
+    ) -> ViewStateImportResponse:
+        """Import a view state payload as a new persisted view.
+
+        Parameters
+        ----------
+        view_state:
+            Source view state payload.
+        session_id:
+            Optional target session id.
+        """
+        normalized_view_state = (
+            view_state.model_dump(mode="json") if isinstance(view_state, ViewState) else view_state
+        )
+        request = ViewStateImportRequest(
+            session_id=session_id,
+            view_state=normalized_view_state,
+        )
+        payload = self._post("/import/viewstate", request.model_dump(mode="json"))
+        return ViewStateImportResponse.model_validate(payload)
 
     def render_image(
         self,
