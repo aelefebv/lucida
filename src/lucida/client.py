@@ -19,6 +19,7 @@ from lucida.models.api import (
     ViewUpdateResponse,
 )
 from lucida.models.render import RenderImageRequest, RenderImageResponse, RenderOutputSpec
+from lucida.models.view_state import ViewState
 
 
 _PLANE_ROLES: dict[str, tuple[str, str, str]] = {
@@ -201,9 +202,12 @@ class LucidaClient:
     def render_image(
         self,
         *,
-        view_id: str,
+        view_id: str | None = None,
+        view_state: ViewState | dict[str, Any] | None = None,
         width_px: int,
         height_px: int,
+        delivery: str = "inline_base64",
+        file_path: str | None = None,
         session_id: str | None = None,
         request_id: str | None = None,
         overrides_json_patch: list[dict[str, Any]] | None = None,
@@ -213,11 +217,17 @@ class LucidaClient:
         Parameters
         ----------
         view_id:
-            Target view id.
+            Optional target view id for stateful rendering.
+        view_state:
+            Optional inline view state for stateless rendering.
         width_px:
             Output image width.
         height_px:
             Output image height.
+        delivery:
+            Output delivery mode: ``inline_base64`` or ``file_path``.
+        file_path:
+            Optional file path when ``delivery=file_path``.
         session_id:
             Optional session id to enforce scope.
         request_id:
@@ -225,12 +235,21 @@ class LucidaClient:
         overrides_json_patch:
             Optional RFC6902 patch applied ephemerally at render time.
         """
+        normalized_view_state = (
+            view_state.model_dump(mode="json") if isinstance(view_state, ViewState) else view_state
+        )
         request = RenderImageRequest(
             view_id=view_id,
+            view_state=normalized_view_state,
             session_id=session_id,
             request_id=request_id,
             overrides_json_patch=overrides_json_patch,
-            output=RenderOutputSpec(width_px=width_px, height_px=height_px),
+            output=RenderOutputSpec(
+                width_px=width_px,
+                height_px=height_px,
+                delivery=delivery,
+                file_path=file_path,
+            ),
         )
         payload = self._post("/render/image", request.model_dump(mode="json"))
         return RenderImageResponse.model_validate(payload)

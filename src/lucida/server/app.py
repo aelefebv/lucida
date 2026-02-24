@@ -64,12 +64,33 @@ def create_app(dataset_service: DatasetService | None = None) -> FastAPI:
         error:
             Validation exception details.
         """
+        raw_errors = error.errors()
+        errors: list[dict[str, object]] = []
+        for item in raw_errors:
+            normalized = dict(item)
+            ctx = normalized.get("ctx")
+            if isinstance(ctx, dict):
+                normalized["ctx"] = {
+                    key: str(value) if isinstance(value, Exception) else value
+                    for key, value in ctx.items()
+                }
+            errors.append(normalized)
+        if any("view_id or view_state" in str(item.get("msg", "")) for item in errors):
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "code": "invalid_render_request",
+                    "message": "Render request must provide exactly one of view_id or view_state.",
+                    "details": {"errors": errors},
+                },
+            )
+
         return JSONResponse(
             status_code=422,
             content={
                 "code": "invalid_request",
                 "message": "Request validation failed.",
-                "details": {"errors": error.errors()},
+                "details": {"errors": errors},
             },
         )
 
@@ -147,7 +168,7 @@ def create_app(dataset_service: DatasetService | None = None) -> FastAPI:
             session_id=request.session_id,
         )
 
-    @app.post("/render/image", response_model=RenderImageResponse)
+    @app.post("/render/image", response_model=RenderImageResponse, response_model_exclude_none=True)
     async def render_image(request: RenderImageRequest) -> RenderImageResponse:
         """Render a view into a PNG image payload.
 
@@ -158,6 +179,7 @@ def create_app(dataset_service: DatasetService | None = None) -> FastAPI:
         """
         return service.render_image(
             view_id=request.view_id,
+            view_state=request.view_state,
             session_id=request.session_id,
             request_id=request.request_id,
             overrides_json_patch=request.overrides_json_patch,

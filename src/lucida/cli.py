@@ -11,7 +11,7 @@ import typer
 from lucida.client import LucidaClient, LucidaClientError
 from lucida.errors import LucidaError, as_api_error_payload
 from lucida.models.render import RenderOutputSpec
-from lucida.models.view_state import AxisSelector, View2D, Viewport
+from lucida.models.view_state import AxisSelector, View2D, ViewState, Viewport
 from lucida.service.dataset_service import DatasetService
 
 app = typer.Typer(no_args_is_help=True)
@@ -532,9 +532,24 @@ def view_zoom(
 
 @render_app.command("image")
 def render_image(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
+    view_state_file: Path | None = typer.Option(
+        None,
+        "--view-state-file",
+        help="Optional JSON file containing a full ViewState object.",
+    ),
     width_px: int = typer.Option(..., "--width-px", help="Output width in pixels."),
     height_px: int = typer.Option(..., "--height-px", help="Output height in pixels."),
+    delivery: str = typer.Option(
+        "inline_base64",
+        "--delivery",
+        help="Delivery mode: inline_base64 or file_path.",
+    ),
+    file_path: Path | None = typer.Option(
+        None,
+        "--file-path",
+        help="Optional file output path when --delivery file_path.",
+    ),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     request_id: str | None = typer.Option(None, "--request-id", help="Optional request id."),
     patch_file: Path | None = typer.Option(
@@ -549,13 +564,27 @@ def render_image(
 ) -> None:
     """Render a PNG image for a view."""
     try:
+        if (view_id is None) == (view_state_file is None):
+            raise ValueError("Provide exactly one of --view-id or --view-state-file.")
+        if delivery not in {"inline_base64", "file_path"}:
+            raise ValueError("delivery must be one of: inline_base64, file_path.")
+
+        view_state_value = _load_view_state(view_state_file) if view_state_file is not None else None
         overrides = _load_patch(patch_file) if patch_file is not None else None
+        file_path_value = str(file_path) if file_path is not None else None
         if base_url:
             with LucidaClient(base_url=base_url) as client:
                 response = client.render_image(
                     view_id=view_id,
+                    view_state=(
+                        view_state_value.model_dump(mode="json")
+                        if view_state_value is not None
+                        else None
+                    ),
                     width_px=width_px,
                     height_px=height_px,
+                    delivery=delivery,
+                    file_path=file_path_value,
                     session_id=session_id,
                     request_id=request_id,
                     overrides_json_patch=overrides,
@@ -563,7 +592,13 @@ def render_image(
         else:
             response = _LOCAL_SERVICE.render_image(
                 view_id=view_id,
-                output=RenderOutputSpec(width_px=width_px, height_px=height_px),
+                view_state=view_state_value,
+                output=RenderOutputSpec(
+                    width_px=width_px,
+                    height_px=height_px,
+                    delivery=delivery,
+                    file_path=file_path_value,
+                ),
                 session_id=session_id,
                 request_id=request_id,
                 overrides_json_patch=overrides,
@@ -583,6 +618,8 @@ def render_image(
     typer.echo(f"request_id: {payload['request_id']}")
     typer.echo(f"status: {payload['status']}")
     typer.echo(f"image_sha256: {payload['images'][0]['sha256']}")
+    if "file_path" in payload["images"][0]:
+        typer.echo(f"file_path: {payload['images'][0]['file_path']}")
 
 
 def _run_selector_helper(
@@ -857,6 +894,22 @@ def _load_patch(path: Path) -> list[dict[str, Any]]:
     if not all(isinstance(item, dict) for item in loaded):
         raise ValueError("patch array elements must be objects.")
     return loaded
+
+
+def _load_view_state(path: Path | None) -> ViewState | None:
+    """Load a full view state JSON document if provided.
+
+    Parameters
+    ----------
+    path:
+        Optional JSON path containing a serialized view state.
+    """
+    if path is None:
+        return None
+    loaded = json.loads(path.read_text())
+    if not isinstance(loaded, dict):
+        raise ValueError("view-state file must contain a JSON object.")
+    return ViewState.model_validate(loaded)
 
 
 def _load_selectors(path: Path | None) -> list[AxisSelector] | None:

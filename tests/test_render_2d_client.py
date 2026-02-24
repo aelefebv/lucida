@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 from io import BytesIO
+from pathlib import Path
+import uuid
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -20,6 +22,8 @@ def test_client_render_and_navigation_helpers(render_omezarr_uri: str) -> None:
     service = DatasetService()
     app = create_app(dataset_service=service)
     http_client = TestClient(app)
+    explicit_path: Path | None = None
+    auto_path: Path | None = None
 
     try:
         client = LucidaClient(client=http_client)
@@ -65,7 +69,47 @@ def test_client_render_and_navigation_helpers(render_omezarr_uri: str) -> None:
         assert rendered.images[0].mime == "image/png"
         assert _decode_size(rendered.images[0].bytes_base64) == (96, 64)
 
+        output_root = Path(__file__).resolve().parents[1] / "output"
+        relative_path = f"snapshots/test-client-{uuid.uuid4().hex}.png"
+        rendered_file = client.render_image(
+            view_id=created.view_state.view_id,
+            session_id=session.session_id,
+            width_px=80,
+            height_px=56,
+            delivery="file_path",
+            file_path=relative_path,
+        )
+        explicit_path = Path(rendered_file.images[0].file_path or "")
+        assert explicit_path.exists()
+        assert explicit_path.is_relative_to(output_root)
+        assert rendered_file.images[0].bytes_base64 is None
+
+        stateless_inline = client.render_image(
+            view_state=client.get_view(view_id=created.view_state.view_id).view_state,
+            session_id=session.session_id,
+            width_px=72,
+            height_px=48,
+        )
+        assert stateless_inline.view_id is None
+        assert stateless_inline.state_version is None
+        assert _decode_size(stateless_inline.images[0].bytes_base64) == (72, 48)
+
+        stateless_file = client.render_image(
+            view_state=client.get_view(view_id=created.view_state.view_id).view_state,
+            session_id=session.session_id,
+            width_px=64,
+            height_px=40,
+            delivery="file_path",
+        )
+        auto_path = Path(stateless_file.images[0].file_path or "")
+        assert auto_path.exists()
+        assert auto_path.is_relative_to(output_root / "snapshots")
+
         fetched = client.get_view(view_id=created.view_state.view_id, session_id=session.session_id)
         assert fetched.view_state.state_version == 3
     finally:
+        if explicit_path is not None and explicit_path.exists():
+            explicit_path.unlink()
+        if auto_path is not None and auto_path.exists():
+            auto_path.unlink()
         http_client.close()
