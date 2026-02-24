@@ -20,5 +20,5 @@ jobs:
 
       - name: Run Milestone 5 gate script
         run: |
-          chmod +x scripts/ci_milestone5.sh
-          ./scripts/ci_milestone5.sh
+          chmod +x scripts/ci/milestone5.sh
+          ./scripts/ci/milestone5.sh

@@ -1,30 +1,37 @@
 ## Lucida
 
-Rust daemon + Python client/CLI for Phase 1 OME-Zarr workflows.
+Rust daemon backend with a Python typed client/CLI.
 
-## Runtime Defaults
+Repository layout reference: `docs/architecture/repo-layout.md`.
 
-- Default backend is `rust`.
-- Default Rust base URL is `http://127.0.0.1:3000`.
-- Python fallback is explicit:
-  - `LUCIDA_BACKEND=python` for local in-process behavior.
-  - optional `LUCIDA_BASE_URL=http://...` for Python HTTP mode.
+## Runtime Model
 
-Examples:
+- Backend is Rust-daemon-only.
+- Default base URL is `http://127.0.0.1:3000`.
+- Override with `LUCIDA_BASE_URL` or `--base-url`.
+- `LUCIDA_BACKEND` is removed.
+- `LucidaClient(backend=...)` is removed.
+
+## Run
+
+Start the daemon:
 
 ```bash
-# Rust default (HTTP)
-uv run lucida dataset open --uri /path/to/data.zarr --json
+cargo run -p lucida-daemon
+```
 
-# Explicit Python fallback (in-process local service)
-LUCIDA_BACKEND=python uv run lucida dataset open --uri /path/to/data.zarr --json
+Use the Python CLI/client against the daemon:
+
+```bash
+uv run lucida dataset open --uri /path/to/data.zarr --json
+# or
+LUCIDA_BASE_URL=http://127.0.0.1:4000 uv run lucida session create --json
 ```
 
 ## Build Rust Daemon
 
 ```bash
 cargo build -p lucida-daemon
-cargo run -p lucida-daemon
 ```
 
 ## Release Packaging
@@ -32,7 +39,7 @@ cargo run -p lucida-daemon
 Build a host-targeted release artifact and SHA-256 checksum:
 
 ```bash
-./scripts/release_lucida_daemon.sh
+./scripts/release/lucida_daemon.sh
 ```
 
 Outputs land under `output/releases/`.
@@ -53,8 +60,8 @@ shasum -a 256 -c lucida-daemon-<target-triple>.sha256
 
 ## Milestone 5 Gate
 
-Run the full Milestone 5 stabilization gate locally:
+Run the full stabilization gate locally:
 
 ```bash
-./scripts/ci_milestone5.sh
+./scripts/ci/milestone5.sh
 ```
