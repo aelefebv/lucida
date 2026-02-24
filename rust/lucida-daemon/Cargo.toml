@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.8.4", features = ["http1", "json"] }
 chrono = { version = "0.4.42", features = ["serde"] }
+json-patch = "4.1.0"
 percent-encoding = "2.3.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

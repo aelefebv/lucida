@@ -169,6 +169,278 @@ def run_dataset_open_cases(
     return cases
 
 
+def run_milestone2_cases(
+    *,
+    adapter: BackendAdapter,
+    dataset_uris: Phase1DatasetUris,
+) -> list[RawCaseResult]:
+    cases: list[RawCaseResult] = []
+
+    def record(
+        *,
+        name: str,
+        method: str,
+        case_path: str,
+        request_path: str | None = None,
+        json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        status_code, body = adapter.request(
+            method=method,
+            path=request_path or case_path,
+            json_body=json_body,
+            params=params,
+        )
+        cases.append(
+            RawCaseResult(
+                name=name,
+                method=method,
+                path=case_path,
+                status_code=status_code,
+                body=body,
+            )
+        )
+        return body
+
+    session_create_success = record(
+        name="session_create_success",
+        method="POST",
+        case_path="/session/create",
+        json_body={"schema_version": 1},
+    )
+    session_id = str(session_create_success["session_id"])
+
+    dataset_open_with_session_success = record(
+        name="dataset_open_with_session_success",
+        method="POST",
+        case_path="/dataset/open",
+        json_body={"schema_version": 1, "uri": dataset_uris.local_uri, "session_id": session_id},
+    )
+    dataset_id = str(dataset_open_with_session_success["dataset_summary"]["dataset_id"])
+
+    view_create_success = record(
+        name="view_create_success",
+        method="POST",
+        case_path="/view/create",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "dataset_id": dataset_id,
+            "mode": "2d",
+        },
+    )
+    view_id = str(view_create_success["view_state"]["view_id"])
+
+    record(
+        name="view_get_success",
+        method="GET",
+        case_path="/view/{view_id}",
+        request_path=f"/view/{view_id}",
+        params={"session_id": session_id},
+    )
+
+    record(
+        name="view_update_success",
+        method="POST",
+        case_path="/view/update",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 2, "clamp": True}],
+                }
+            ],
+        },
+    )
+
+    record(
+        name="view_update_index_clamped_success",
+        method="POST",
+        case_path="/view/update",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 999, "clamp": True}],
+                }
+            ],
+        },
+    )
+
+    record(
+        name="view_update_range_clamped_success",
+        method="POST",
+        case_path="/view/update",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [
+                        {
+                            "axis": "z",
+                            "kind": "range",
+                            "start": 100,
+                            "end_exclusive": 200,
+                            "clamp": True,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    record(
+        name="view_update_set_clamped_success",
+        method="POST",
+        case_path="/view/update",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [
+                        {
+                            "axis": "z",
+                            "kind": "set",
+                            "indices": [-1, 2, 200, 2],
+                            "clamp": True,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    record(
+        name="view_update_selector_index_out_of_bounds_error",
+        method="POST",
+        case_path="/view/update",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 999, "clamp": False}],
+                }
+            ],
+        },
+    )
+
+    record(
+        name="view_update_selector_range_out_of_bounds_error",
+        method="POST",
+        case_path="/view/update",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [
+                        {
+                            "axis": "z",
+                            "kind": "range",
+                            "start": 5,
+                            "end_exclusive": 6,
+                            "clamp": False,
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    record(
+        name="view_update_selector_set_out_of_bounds_error",
+        method="POST",
+        case_path="/view/update",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "set", "indices": [999], "clamp": False}],
+                }
+            ],
+        },
+    )
+
+    record(
+        name="view_update_invalid_patch_error",
+        method="POST",
+        case_path="/view/update",
+        json_body={
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [{"op": "replace", "path": "/selectors/100/index", "value": 1}],
+        },
+    )
+
+    record(
+        name="view_create_unknown_dataset_error",
+        method="POST",
+        case_path="/view/create",
+        json_body={"schema_version": 1, "dataset_id": "ds_missing", "mode": "2d"},
+    )
+
+    record(
+        name="view_create_unsupported_mode_error",
+        method="POST",
+        case_path="/view/create",
+        json_body={"schema_version": 1, "dataset_id": dataset_id, "mode": "3d"},
+    )
+
+    other_session_create = record(
+        name="session_create_second_success",
+        method="POST",
+        case_path="/session/create",
+        json_body={"schema_version": 1},
+    )
+    other_session_id = str(other_session_create["session_id"])
+
+    record(
+        name="view_get_wrong_session_error",
+        method="GET",
+        case_path="/view/{view_id}",
+        request_path=f"/view/{view_id}",
+        params={"session_id": other_session_id},
+    )
+
+    record(
+        name="view_get_unknown_session_error",
+        method="GET",
+        case_path="/view/{view_id}",
+        request_path=f"/view/{view_id}",
+        params={"session_id": "session_missing"},
+    )
+
+    return cases
+
+
 def run_phase1_cases(
     *,
     adapter: BackendAdapter,

@@ -8,7 +8,7 @@ use crate::dto::api::{DatasetOpenRequest, DatasetOpenResponse};
 use crate::dto::dataset_summary::{DatasetHints, DatasetSummary};
 use crate::error::ApiError;
 use crate::omezarr::read_omezarr;
-use crate::state::{create_session_record, DatasetRecord, SharedAppState};
+use crate::state::{ensure_dataset_attached, resolve_session_id, DatasetRecord, SharedAppState};
 use crate::uri::{generate_dataset_id, is_remote_uri, normalize_uri};
 
 pub async fn dataset_open(
@@ -66,10 +66,7 @@ pub async fn dataset_open(
                 session_ids: std::collections::HashSet::new(),
             });
         dataset_record.dataset_summary = dataset_summary.clone();
-        dataset_record.session_ids.insert(session_id.clone());
-        if let Some(session) = app_state.sessions_by_id.get_mut(&session_id) {
-            session.dataset_ids.insert(resolved_dataset_id);
-        }
+        ensure_dataset_attached(&mut app_state, &resolved_dataset_id, &session_id);
     }
 
     Ok(Json(DatasetOpenResponse {
@@ -77,31 +74,6 @@ pub async fn dataset_open(
         dataset_summary,
         warnings,
     }))
-}
-
-fn resolve_session_id(
-    state: &mut crate::state::AppState,
-    session_id: Option<&str>,
-) -> Result<String, ApiError> {
-    if let Some(session_id) = session_id {
-        if state.sessions_by_id.contains_key(session_id) {
-            return Ok(session_id.to_owned());
-        }
-        return Err(ApiError::new(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            "Session was not found.",
-            Some(json!({ "session_id": session_id })),
-        ));
-    }
-    if state.compat_session_id.is_none() {
-        let compat_session = create_session_record(state, "compat");
-        state.compat_session_id = Some(compat_session.session_id.clone());
-    }
-    Ok(state
-        .compat_session_id
-        .clone()
-        .expect("compat session id must be initialized"))
 }
 
 fn parse_dataset_open_request(payload: Value) -> Result<DatasetOpenRequest, ApiError> {
