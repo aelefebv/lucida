@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ import zarr
 
 from lucida.server.app import create_app
 from lucida.service.dataset_service import DatasetService
+from rust_daemon import start_rust_daemon
 
 
 def _open_group_for_write(uri: str) -> zarr.Group:
@@ -191,3 +193,15 @@ def api_client(dataset_service: DatasetService):
     from fastapi.testclient import TestClient
 
     return TestClient(create_app(dataset_service=dataset_service))
+
+
+@pytest.fixture(scope="session")
+def rust_daemon_base_url() -> str:
+    daemon = start_rust_daemon(
+        repo_root=Path(__file__).resolve().parents[1],
+        env=dict(os.environ),
+    )
+    try:
+        yield daemon.base_url
+    finally:
+        daemon.stop()

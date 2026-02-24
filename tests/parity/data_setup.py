@@ -151,6 +151,8 @@ def create_render_omezarr(uri: str) -> str:
 class Phase1DatasetUris:
     local_uri: str
     invalid_uri: str
+    tolerant_uri: str
+    raw_metadata_uri: str
     render_uri: str
 
 
@@ -158,5 +160,15 @@ def build_phase1_dataset_uris(tmp_path: Path) -> Phase1DatasetUris:
     return Phase1DatasetUris(
         local_uri=create_sample_omezarr(str(tmp_path / "sample.zarr")),
         invalid_uri=create_invalid_zarr(str(tmp_path / "invalid.zarr")),
+        tolerant_uri=create_sample_omezarr(
+            str(tmp_path / "tolerant.zarr"),
+            include_multiscale_name=False,
+            include_level_one_scale=False,
+            include_channel_indices=False,
+        ),
+        raw_metadata_uri=create_sample_omezarr(
+            str(tmp_path / "raw-metadata.zarr"),
+            extra_root_attrs={"custom_attr": "present"},
+        ),
         render_uri=create_render_omezarr(str(tmp_path / "render.zarr")),
     )
