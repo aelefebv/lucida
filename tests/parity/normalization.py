@@ -62,6 +62,40 @@ def normalize_cases(cases: list[RawCaseResult]) -> list[NormalizedCaseResult]:
     return normalized
 
 
+def normalize_dataset_open_cases(cases: list[RawCaseResult]) -> list[NormalizedCaseResult]:
+    state = _NormalizationState()
+    normalized: list[NormalizedCaseResult] = []
+    for case in cases:
+        normalized_body = copy.deepcopy(case.body)
+        normalized_body = _normalize_dataset_open_error_details(normalized_body)
+        normalized_body = _normalize_value(
+            normalized_body,
+            parent_key=None,
+            path=(),
+            state=state,
+        )
+        normalized.append(
+            NormalizedCaseResult(
+                name=case.name,
+                method=case.method,
+                path=case.path,
+                status_code=case.status_code,
+                body=normalized_body,
+            )
+        )
+    return normalized
+
+
+def _normalize_dataset_open_error_details(payload: dict[str, Any]) -> dict[str, Any]:
+    if "schema_version" in payload:
+        return payload
+    if "code" in payload and "message" in payload and "details" in payload:
+        normalized = dict(payload)
+        normalized["details"] = "<error_details>"
+        return normalized
+    return payload
+
+
 def _normalize_value(
     value: Any,
     *,

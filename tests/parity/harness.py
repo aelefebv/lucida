@@ -99,6 +99,76 @@ def create_backend_adapter(backend: str, *, base_url: str | None = None) -> Back
     raise ValueError("Unsupported backend. Expected one of: python, rust.")
 
 
+def run_dataset_open_cases(
+    *,
+    adapter: BackendAdapter,
+    dataset_uris: Phase1DatasetUris,
+) -> list[RawCaseResult]:
+    cases: list[RawCaseResult] = []
+
+    def record(
+        *,
+        name: str,
+        json_body: dict[str, Any],
+    ) -> None:
+        status_code, body = adapter.request(
+            method="POST",
+            path="/dataset/open",
+            json_body=json_body,
+        )
+        cases.append(
+            RawCaseResult(
+                name=name,
+                method="POST",
+                path="/dataset/open",
+                status_code=status_code,
+                body=body,
+            )
+        )
+
+    record(
+        name="dataset_open_success",
+        json_body={"schema_version": 1, "uri": dataset_uris.local_uri},
+    )
+    record(
+        name="dataset_open_invalid_metadata_error",
+        json_body={"schema_version": 1, "uri": dataset_uris.invalid_uri},
+    )
+    record(
+        name="dataset_open_invalid_request_error",
+        json_body={"schema_version": 1, "uri": dataset_uris.local_uri, "dataset_id": ""},
+    )
+    record(
+        name="dataset_open_unknown_session_error",
+        json_body={
+            "schema_version": 1,
+            "uri": dataset_uris.local_uri,
+            "session_id": "session_missing",
+        },
+    )
+    record(
+        name="dataset_open_tolerant_warnings_success",
+        json_body={"schema_version": 1, "uri": dataset_uris.tolerant_uri},
+    )
+    record(
+        name="dataset_open_raw_metadata_curated_success",
+        json_body={
+            "schema_version": 1,
+            "uri": dataset_uris.raw_metadata_uri,
+            "include_full_raw_metadata": False,
+        },
+    )
+    record(
+        name="dataset_open_raw_metadata_full_success",
+        json_body={
+            "schema_version": 1,
+            "uri": dataset_uris.raw_metadata_uri,
+            "include_full_raw_metadata": True,
+        },
+    )
+    return cases
+
+
 def run_phase1_cases(
     *,
     adapter: BackendAdapter,
