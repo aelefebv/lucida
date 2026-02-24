@@ -228,3 +228,93 @@ class ViewUpdateResponse(ModelBase):
     view_state: ViewState
     warnings: list[ApiWarning] = Field(default_factory=list)
     selectors_applied: list[AxisSelector] = Field(default_factory=list)
+
+
+class ViewStateExportRequest(ModelBase):
+    """Request body for exporting a persisted view state.
+
+    Attributes
+    ----------
+    schema_version:
+        API schema version.
+    view_id:
+        Identifier for the source view.
+    session_id:
+        Optional session scope check.
+    """
+
+    schema_version: Literal[1] = 1
+    view_id: str = Field(min_length=1)
+    session_id: str | None = Field(default=None, min_length=1)
+
+
+class ViewStateExportResponse(ModelBase):
+    """Response body containing a full exported view state payload.
+
+    Attributes
+    ----------
+    schema_version:
+        API schema version.
+    export_id:
+        Generated export identifier.
+    exported_at:
+        Export timestamp (UTC).
+    source_view_id:
+        Identifier of the exported view.
+    view_state:
+        Full persisted view state.
+    warnings:
+        Export warnings.
+    """
+
+    schema_version: Literal[1] = 1
+    export_id: str = Field(min_length=1)
+    exported_at: datetime
+    source_view_id: str = Field(min_length=1)
+    view_state: ViewState
+    warnings: list[ApiWarning] = Field(default_factory=list)
+
+
+class ViewStateImportRequest(ModelBase):
+    """Request body for importing a view state into runtime storage.
+
+    Attributes
+    ----------
+    schema_version:
+        API schema version.
+    session_id:
+        Optional target session id.
+    view_state:
+        View state payload to import.
+    """
+
+    schema_version: Literal[1] = 1
+    session_id: str | None = Field(default=None, min_length=1)
+    view_state: ViewState
+
+
+class ViewStateImportResponse(ModelBase):
+    """Response body after importing a view state as a new persisted view.
+
+    Attributes
+    ----------
+    schema_version:
+        API schema version.
+    import_id:
+        Generated import identifier.
+    imported_from_view_id:
+        Original source view id from imported payload.
+    view_state:
+        Newly persisted imported view state.
+    warnings:
+        Import warnings emitted during normalization.
+    selectors_applied:
+        Final normalized selectors.
+    """
+
+    schema_version: Literal[1] = 1
+    import_id: str = Field(min_length=1)
+    imported_from_view_id: str | None = Field(default=None, min_length=1)
+    view_state: ViewState
+    warnings: list[ApiWarning] = Field(default_factory=list)
+    selectors_applied: list[AxisSelector] = Field(default_factory=list)

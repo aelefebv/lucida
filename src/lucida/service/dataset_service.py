@@ -24,6 +24,8 @@ from lucida.models.api import (
     DatasetOpenResponse,
     SessionCreateResponse,
     ViewCreateResponse,
+    ViewStateExportResponse,
+    ViewStateImportResponse,
     ViewGetResponse,
     ViewUpdateResponse,
 )
@@ -437,6 +439,118 @@ class DatasetService:
                 selectors_applied=selectors,
             )
 
+    def export_viewstate(
+        self,
+        *,
+        view_id: str,
+        session_id: str | None = None,
+    ) -> ViewStateExportResponse:
+        """Export a full persisted view state payload.
+
+        Parameters
+        ----------
+        view_id:
+            Source view identifier.
+        session_id:
+            Optional session id for scope enforcement.
+        """
+        with self._lock:
+            view_record = self.views_by_id.get(view_id)
+            if view_record is None:
+                raise LucidaError(
+                    code="view_not_found",
+                    message="View was not found.",
+                    details={"view_id": view_id},
+                    status_code=404,
+                )
+
+            if session_id is not None:
+                session = self._require_session(session_id)
+                if view_id not in session.view_ids:
+                    raise LucidaError(
+                        code="view_not_found",
+                        message="View was not found in session.",
+                        details={"view_id": view_id, "session_id": session_id},
+                        status_code=404,
+                    )
+
+            return ViewStateExportResponse(
+                export_id=f"exp_{uuid.uuid4().hex[:16]}",
+                exported_at=datetime.now(tz=timezone.utc),
+                source_view_id=view_id,
+                view_state=view_record.view_state,
+            )
+
+    def import_viewstate(
+        self,
+        *,
+        view_state: ViewState,
+        session_id: str | None = None,
+    ) -> ViewStateImportResponse:
+        """Import a view state payload as a new persisted view.
+
+        Parameters
+        ----------
+        view_state:
+            Source view state to import.
+        session_id:
+            Optional target session id.
+        """
+        with self._lock:
+            session = self._resolve_session(session_id)
+
+            if view_state.mode != "2d":
+                raise LucidaError(
+                    code="unsupported_mode",
+                    message="Only mode=2d is supported in this slice.",
+                    details={"mode": view_state.mode},
+                    status_code=422,
+                )
+
+            self._validate_import_dataset_scope(view_state=view_state)
+
+            primary_dataset_summary = self._resolve_primary_dataset_for_view(
+                view_state=view_state,
+                session=session,
+            )
+
+            selectors, selector_warnings = self._normalize_selectors(
+                selectors=view_state.selectors,
+                dataset_summary=primary_dataset_summary,
+                operation="import_viewstate",
+            )
+            normalized_view = view_state.model_copy(update={"selectors": selectors}, deep=True)
+
+            normalized_view_2d, view_warnings = self._normalize_view_2d(
+                view_2d=normalized_view.view_2d,
+                dataset_summary=primary_dataset_summary,
+                selectors=selectors,
+            )
+            normalized_view = normalized_view.model_copy(
+                update={"view_2d": normalized_view_2d},
+                deep=True,
+            )
+
+            rebased_view = self._rebase_imported_view_identity(
+                view_state=normalized_view,
+                session_id=session.session_id,
+            )
+            finalized_view = self._with_state_hash(view_state=rebased_view, state_version=0)
+
+            self.views_by_id[finalized_view.view_id] = ViewRecord(
+                session_id=session.session_id,
+                view_state=finalized_view,
+            )
+            session.view_ids.add(finalized_view.view_id)
+
+            return ViewStateImportResponse(
+                import_id=f"imp_{uuid.uuid4().hex[:16]}",
+                imported_from_view_id=view_state.view_id,
+                view_state=finalized_view,
+                warnings=[*selector_warnings, *view_warnings],
+                selectors_applied=selectors,
+            )
+
     def render_image(
         self,
         *,
@@ -801,6 +915,60 @@ class DatasetService:
         )
         self._validate_multiscale_name(dataset_summary, dataset_ref.multiscale_name)
         return dataset_summary
+
+    def _validate_import_dataset_scope(self, *, view_state: ViewState) -> None:
+        """Validate import payload dataset references for this slice policy.
+
+        Parameters
+        ----------
+        view_state:
+            Candidate imported view state.
+        """
+        if len(view_state.datasets) != 1:
+            raise LucidaError(
+                code="invalid_viewstate_import",
+                message="Imported view state must reference exactly one dataset.",
+                details={"dataset_count": len(view_state.datasets)},
+                status_code=422,
+            )
+
+        primary_dataset_id = view_state.datasets[0].dataset_id
+        mismatched_layers = [
+            layer.layer_id
+            for layer in view_state.layers
+            if layer.dataset_id is not None and layer.dataset_id != primary_dataset_id
+        ]
+        if mismatched_layers:
+            raise LucidaError(
+                code="invalid_viewstate_import",
+                message="Layer dataset references must match imported primary dataset.",
+                details={
+                    "primary_dataset_id": primary_dataset_id,
+                    "mismatched_layer_ids": mismatched_layers,
+                },
+                status_code=422,
+            )
+
+    def _rebase_imported_view_identity(self, *, view_state: ViewState, session_id: str) -> ViewState:
+        """Rebase imported identity/version fields to runtime-managed values.
+
+        Parameters
+        ----------
+        view_state:
+            Normalized imported view state.
+        session_id:
+            Target owning session id.
+        """
+        return view_state.model_copy(
+            update={
+                "view_id": self._generate_view_id(),
+                "session_id": session_id,
+                "created_at": datetime.now(tz=timezone.utc),
+                "state_hash": None,
+                "state_version": 0,
+            },
+            deep=True,
+        )
 
     def _validate_multiscale_name(
         self, dataset_summary: DatasetSummary, multiscale_name: str

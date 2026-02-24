@@ -287,6 +287,121 @@ def view_get(
     typer.echo(f"state_version: {view_state['state_version']}")
 
 
+@view_app.command("export")
+def view_export(
+    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Optional output file path for exported view_state JSON payload.",
+    ),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Export a full persisted view state.
+
+    Parameters
+    ----------
+    view_id:
+        Source view identifier.
+    session_id:
+        Optional session id for scope checks.
+    out:
+        Optional file path for writing import-ready ``view_state`` JSON.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
+    try:
+        if base_url:
+            with LucidaClient(base_url=base_url) as client:
+                response = client.export_viewstate(view_id=view_id, session_id=session_id)
+        else:
+            response = _LOCAL_SERVICE.export_viewstate(view_id=view_id, session_id=session_id)
+    except LucidaError as exc:
+        _emit_exception(exc)
+    except LucidaClientError as exc:
+        _emit_client_error(exc)
+
+    payload = response.model_dump(mode="json")
+    if out is not None:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload["view_state"], indent=2), encoding="utf-8")
+
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    typer.echo(f"export_id: {payload['export_id']}")
+    typer.echo(f"source_view_id: {payload['source_view_id']}")
+    if out is not None:
+        typer.echo(f"out: {out}")
+
+
+@view_app.command("import")
+def view_import(
+    view_state_file: Path = typer.Option(
+        ...,
+        "--view-state-file",
+        help="JSON file containing the serialized ViewState payload to import.",
+    ),
+    session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Import a view state as a new persisted view.
+
+    Parameters
+    ----------
+    view_state_file:
+        JSON file path containing a full ``ViewState`` object.
+    session_id:
+        Optional target session id.
+    output_json:
+        Emit machine-readable JSON output.
+    base_url:
+        Optional HTTP base URL for API mode.
+    """
+    try:
+        view_state_value = _load_view_state(view_state_file)
+        if view_state_value is None:
+            raise ValueError("view-state file is required.")
+
+        if base_url:
+            with LucidaClient(base_url=base_url) as client:
+                response = client.import_viewstate(
+                    view_state=view_state_value.model_dump(mode="json"),
+                    session_id=session_id,
+                )
+        else:
+            response = _LOCAL_SERVICE.import_viewstate(
+                view_state=view_state_value,
+                session_id=session_id,
+            )
+    except (LucidaError, ValueError) as exc:
+        _emit_exception(exc)
+    except LucidaClientError as exc:
+        _emit_client_error(exc)
+
+    payload = response.model_dump(mode="json")
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    typer.echo(f"import_id: {payload['import_id']}")
+    typer.echo(f"imported_from_view_id: {payload['imported_from_view_id']}")
+    view_state = payload["view_state"]
+    typer.echo(f"view_id: {view_state['view_id']}")
+    typer.echo(f"state_hash: {view_state['state_hash']}")
+    typer.echo(f"state_version: {view_state['state_version']}")
+
+
 @view_app.command("update")
 def view_update(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
