@@ -94,6 +94,18 @@ select {
   color: var(--ink);
 }
 
+input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+
+.checkbox-label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.36rem;
+}
+
 button {
   border: 1px solid var(--accent);
   background: var(--accent);
@@ -156,6 +168,14 @@ button.secondary {
   border-radius: 0.65rem;
   background: #fff;
   padding: 0.65rem;
+}
+
+.viewport-note {
+  margin: 0 0 0.5rem;
+  min-height: 1.1rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
 }
 
 .viewport {

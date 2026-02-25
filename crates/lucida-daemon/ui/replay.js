@@ -7,6 +7,7 @@ const state = {
   stream: null,
   renderCache: new Map(),
   selectedRunId: null,
+  renderVersion: 0,
 };
 
 const el = {
@@ -14,6 +15,7 @@ const el = {
   eventLimit: document.querySelector("#event-limit"),
   renderWidth: document.querySelector("#render-width"),
   renderHeight: document.querySelector("#render-height"),
+  rerenderMissing: document.querySelector("#rerender-missing"),
   loadRun: document.querySelector("#load-run"),
   refreshRuns: document.querySelector("#refresh-runs"),
   status: document.querySelector("#status"),
@@ -23,6 +25,7 @@ const el = {
   playbackSpeed: document.querySelector("#playback-speed"),
   frameSlider: document.querySelector("#frame-slider"),
   frameIndicator: document.querySelector("#frame-indicator"),
+  viewportNote: document.querySelector("#viewport-note"),
   viewport: document.querySelector("#viewport"),
   changes: document.querySelector("#changes"),
   eventList: document.querySelector("#event-list"),
@@ -87,6 +90,7 @@ async function loadSelectedRun() {
   const payload = await fetchJSON(`/usage/runs/${encodeURIComponent(runId)}?limit=${limit}`);
   const events = Array.isArray(payload.events) ? payload.events : [];
   state.frames = buildFrames(events);
+  state.renderCache.clear();
   state.currentFrameIndex = Math.max(0, state.frames.length - 1);
   renderEventList();
   renderFrame();
@@ -96,7 +100,7 @@ async function loadSelectedRun() {
 
 function buildFrames(events) {
   const sorted = [...events].sort((a, b) => Number(a.id) - Number(b.id));
-  return sorted.map((event, index) => {
+  const frames = sorted.map((event, index) => {
     const inlineArtifact = extractInlineRenderArtifact(event);
     const inlineImageUrl =
       inlineArtifact && inlineArtifact.bytes_base64
@@ -109,6 +113,19 @@ function buildFrames(events) {
       viewState,
       inlineImageUrl,
     };
+  });
+  recomputeFrameMetadata(frames);
+  return frames;
+}
+
+function recomputeFrameMetadata(frames) {
+  let latestInlineFrameIndex = -1;
+  frames.forEach((frame, index) => {
+    frame.frameIndex = index;
+    if (frame.inlineImageUrl) {
+      latestInlineFrameIndex = index;
+    }
+    frame.latestInlineFrameIndex = latestInlineFrameIndex;
   });
 }
 
@@ -228,6 +245,7 @@ async function renderFrame() {
     el.frameIndicator.textContent = "frame 0/0";
     el.frameSlider.max = "0";
     el.frameSlider.value = "0";
+    el.viewportNote.textContent = "";
     el.viewport.innerHTML = "<p>Select a run and frame.</p>";
     el.changes.innerHTML = "";
     return;
@@ -241,41 +259,90 @@ async function renderFrame() {
   const frame = state.frames[state.currentFrameIndex];
   const previous = state.currentFrameIndex > 0 ? state.frames[state.currentFrameIndex - 1] : null;
   renderStateDiff(previous?.viewState ?? null, frame.viewState);
-  await renderViewport(frame);
+  const renderVersion = (state.renderVersion += 1);
+  await renderViewport(frame, renderVersion);
 }
 
-async function renderViewport(frame) {
+function setViewportNote(text) {
+  el.viewportNote.textContent = text;
+}
+
+async function renderViewport(frame, renderVersion) {
   el.viewport.innerHTML = "<p>Rendering frame...</p>";
+  setViewportNote("");
   try {
-    const imageUrl = await resolveFrameImage(frame);
-    if (!imageUrl) {
+    const resolved = await resolveFrameImage(frame);
+    if (renderVersion !== state.renderVersion) {
+      return;
+    }
+    if (!resolved) {
       el.viewport.innerHTML =
         "<p>No inline render artifact was captured for this action. A replay render could not be generated.</p>";
+      setViewportNote("No captured image available for this action.");
       return;
     }
     const img = document.createElement("img");
-    img.src = imageUrl;
+    img.src = resolved.imageUrl;
     img.alt = "agent viewport replay frame";
     el.viewport.innerHTML = "";
     el.viewport.appendChild(img);
+
+    if (resolved.source === "inline") {
+      setViewportNote("Captured render from this action.");
+    } else if (resolved.source === "fallback-inline" && resolved.sourceFrame) {
+      setViewportNote(
+        `No render output on this action. Showing latest captured frame ${resolved.sourceFrame.frameIndex + 1}.`,
+      );
+    } else {
+      setViewportNote("Re-rendered from view state (slower mode).");
+    }
   } catch (error) {
+    if (renderVersion !== state.renderVersion) {
+      return;
+    }
     el.viewport.innerHTML = `<p>${String(error)}</p>`;
+    setViewportNote("Failed to resolve replay frame image.");
   }
+}
+
+function getLatestInlineFrame(frame) {
+  if (!frame || typeof frame.latestInlineFrameIndex !== "number") {
+    return null;
+  }
+  const index = frame.latestInlineFrameIndex;
+  if (index < 0 || index >= state.frames.length) {
+    return null;
+  }
+  const candidate = state.frames[index];
+  if (!candidate || !candidate.inlineImageUrl) {
+    return null;
+  }
+  return candidate;
 }
 
 async function resolveFrameImage(frame) {
   if (frame.inlineImageUrl) {
-    return frame.inlineImageUrl;
+    return { imageUrl: frame.inlineImageUrl, source: "inline", sourceFrame: frame };
   }
+  const fallbackFrame = getLatestInlineFrame(frame);
+  const rerenderAllowed = Boolean(el.rerenderMissing.checked) && !state.isPlaying;
+  if (fallbackFrame && !rerenderAllowed) {
+    return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+  }
+
   if (!frame.viewState) {
+    if (fallbackFrame) {
+      return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+    }
     return null;
   }
 
   const width = Math.max(64, Math.min(2048, Number(el.renderWidth.value || "768")));
   const height = Math.max(64, Math.min(2048, Number(el.renderHeight.value || "768")));
-  const cacheKey = `${frame.event.id}:${width}x${height}`;
+  const cacheId = frame.event.state_hash ? String(frame.event.state_hash) : String(frame.event.id);
+  const cacheKey = `${cacheId}:${width}x${height}`;
   if (state.renderCache.has(cacheKey)) {
-    return state.renderCache.get(cacheKey);
+    return { imageUrl: state.renderCache.get(cacheKey), source: "rerender", sourceFrame: frame };
   }
 
   const payload = {
@@ -295,16 +362,22 @@ async function resolveFrameImage(frame) {
     body: JSON.stringify(payload),
   });
   if (!response.ok) {
+    if (fallbackFrame) {
+      return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+    }
     return null;
   }
   const rendered = await response.json();
   const artifact = Array.isArray(rendered.images) ? rendered.images[0] : null;
   if (!artifact || !artifact.bytes_base64) {
+    if (fallbackFrame) {
+      return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+    }
     return null;
   }
   const url = `data:${artifact.mime || "image/png"};base64,${artifact.bytes_base64}`;
   state.renderCache.set(cacheKey, url);
-  return url;
+  return { imageUrl: url, source: "rerender", sourceFrame: frame };
 }
 
 function renderStateDiff(previous, current) {
@@ -490,8 +563,8 @@ function connectRunStream(runId) {
       if (!newFrame) {
         return;
       }
-      newFrame.frameIndex = state.frames.length;
       state.frames.push(newFrame);
+      recomputeFrameMetadata(state.frames);
       el.frameSlider.max = String(Math.max(0, state.frames.length - 1));
       if (!state.isPlaying) {
         state.currentFrameIndex = state.frames.length - 1;
@@ -547,6 +620,10 @@ el.playbackSpeed.addEventListener("change", () => {
     stopPlayback();
     startPlayback();
   }
+});
+
+el.rerenderMissing.addEventListener("change", () => {
+  renderFrame();
 });
 
 window.addEventListener("beforeunload", () => {
