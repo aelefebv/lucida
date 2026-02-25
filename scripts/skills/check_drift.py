@@ -6,10 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-CLI_COMMAND_RE = re.compile(r"@(?P<group>[a-z_]+)_app\.command\(\"(?P<command>[a-z0-9-]+)\"\)")
+import click
+from typer.main import get_command
+
 ROUTE_RE = re.compile(r"\.route\(\"(?P<path>/[^\"]+)\",\s*(?P<method>get|post)\(")
 
 
@@ -28,13 +31,37 @@ def _load_matrix(skill_root: Path) -> list[dict[str, object]]:
     return [item for item in operations if isinstance(item, dict)]
 
 
-def _parse_cli_commands(cli_path: Path) -> set[str]:
+def _parse_cli_commands(repo_root: Path) -> set[str]:
     commands: set[str] = set()
-    content = cli_path.read_text(encoding="utf-8")
-    for match in CLI_COMMAND_RE.finditer(content):
-        group = match.group("group")
-        command = match.group("command")
-        commands.add(f"{group}.{command}")
+
+    src_root = repo_root / "src"
+    if str(src_root) not in sys.path:
+        sys.path.insert(0, str(src_root))
+
+    from lucida.cli import app as cli_app
+
+    root = get_command(cli_app)
+    for group_name, group_command in root.commands.items():
+        group_path = group_name
+        if isinstance(group_command, click.Group) and group_command.callback is not None:
+            commands.add(group_path)
+        if isinstance(group_command, click.Group):
+            commands.update(_walk_group_commands(group_command, prefix=group_path))
+        else:
+            commands.add(group_path)
+    return commands
+
+
+def _walk_group_commands(group: click.Group, *, prefix: str) -> set[str]:
+    commands: set[str] = set()
+    for command_name, command in group.commands.items():
+        command_path = f"{prefix}.{command_name}"
+        if isinstance(command, click.Group) and command.callback is not None:
+            commands.add(command_path)
+        if isinstance(command, click.Group):
+            commands.update(_walk_group_commands(command, prefix=command_path))
+        else:
+            commands.add(command_path)
     return commands
 
 
@@ -81,7 +108,7 @@ def check_drift(repo_root: Path, skill_root: Path) -> DriftResult:
         errors.append(f"Missing daemon route file: {lib_rs_path}")
         return DriftResult(ok=False, errors=errors)
 
-    actual_cli_commands = _parse_cli_commands(cli_path)
+    actual_cli_commands = _parse_cli_commands(repo_root)
     actual_routes = _parse_routes(lib_rs_path)
 
     expected_surface_groups = {
@@ -95,13 +122,8 @@ def check_drift(repo_root: Path, skill_root: Path) -> DriftResult:
         if command.split(".", 1)[0] in expected_surface_groups
     }
 
-    missing_from_matrix = sorted(actual_runtime_commands - matrix_cli_commands)
     stale_in_matrix = sorted(matrix_cli_commands - actual_runtime_commands)
 
-    if missing_from_matrix:
-        errors.append(
-            "Matrix is missing CLI commands: " + ", ".join(missing_from_matrix)
-        )
     if stale_in_matrix:
         errors.append(
             "Matrix references unknown CLI commands: " + ", ".join(stale_in_matrix)

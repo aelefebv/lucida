@@ -55,6 +55,24 @@ def test_client_render_and_navigation_helpers(
             )
             assert zoomed.view_state.state_version == 3
 
+            rotated = client.rotate(
+                view_id=created.view_state.view_id,
+                degrees=15.0,
+                session_id=session.session_id,
+            )
+            assert rotated.view_state.state_version == 4
+            assert rotated.view_state.view_2d is not None
+            assert rotated.view_state.view_2d.camera.rotation_deg == 15.0
+
+            rotated_delta = client.rotate(
+                view_id=created.view_state.view_id,
+                delta_degrees=-5.0,
+                session_id=session.session_id,
+            )
+            assert rotated_delta.view_state.state_version == 5
+            assert rotated_delta.view_state.view_2d is not None
+            assert rotated_delta.view_state.view_2d.camera.rotation_deg == 10.0
+
             rendered = client.render_image(
                 view_id=created.view_state.view_id,
                 session_id=session.session_id,
@@ -102,7 +120,7 @@ def test_client_render_and_navigation_helpers(
             assert auto_path.is_relative_to(output_root / "snapshots")
 
             fetched = client.get_view(view_id=created.view_state.view_id, session_id=session.session_id)
-            assert fetched.view_state.state_version == 3
+            assert fetched.view_state.state_version == 5
     finally:
         if explicit_path is not None and explicit_path.exists():
             explicit_path.unlink()

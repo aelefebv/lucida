@@ -567,6 +567,51 @@ class LucidaClient:
             agent_name=agent_name,
         )
 
+    def rotate(
+        self,
+        *,
+        view_id: str,
+        degrees: float | None = None,
+        delta_degrees: float | None = None,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> ViewUpdateResponse:
+        """Set or adjust 2D camera rotation.
+
+        Exactly one of ``degrees`` or ``delta_degrees`` must be provided.
+        """
+        if (degrees is None) == (delta_degrees is None):
+            raise ValueError("provide exactly one of degrees or delta_degrees.")
+
+        view = self.get_view(
+            view_id=view_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        ).view_state
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+
+        current_rotation = float(view.view_2d.camera.rotation_deg)
+        next_rotation = (
+            float(degrees)
+            if degrees is not None
+            else current_rotation + float(delta_degrees)
+        )
+        patch = [{"op": "replace", "path": "/view_2d/camera/rotation_deg", "value": next_rotation}]
+        return self.update_view(
+            view_id=view_id,
+            session_id=session_id,
+            patch=patch,
+            expected_state_version=view.state_version,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        )
+
     def set_dim(
         self,
         *,

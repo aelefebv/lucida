@@ -1,8 +1,8 @@
-# view.set-plane
+# view.set.plane
 
 ## Command
 ```bash
-uv run lucida view set-plane --view-id <view_id> --plane xz --session-id <session_id> --json
+uv run lucida view set plane --view-id <view_id> --plane xz --session-id <session_id> --json
 ```
 
 ## Required Inputs

@@ -69,7 +69,8 @@ def test_cli_view_flow(
         app,
         [
             "view",
-            "set-dim",
+            "set",
+            "dim",
             "--view-id",
             view_id,
             "--axis",
@@ -91,7 +92,8 @@ def test_cli_view_flow(
         app,
         [
             "view",
-            "set-range",
+            "set",
+            "range",
             "--view-id",
             view_id,
             "--axis",
@@ -115,7 +117,8 @@ def test_cli_view_flow(
         app,
         [
             "view",
-            "set-set",
+            "set",
+            "set",
             "--view-id",
             view_id,
             "--axis",
@@ -203,6 +206,7 @@ def test_cli_view_flow(
         [
             "view",
             "get",
+            "state",
             "--view-id",
             view_id,
             "--session-id",
@@ -214,3 +218,19 @@ def test_cli_view_flow(
     assert get_result.exit_code == 0
     get_payload = json.loads(get_result.stdout)
     assert get_payload["view_state"]["view_id"] == view_id
+
+
+def test_cli_view_legacy_aliases_removed() -> None:
+    runner = CliRunner()
+
+    set_dim_result = runner.invoke(app, ["view", "set-dim", "--help"])
+    assert set_dim_result.exit_code != 0
+    assert "No such command" in set_dim_result.output
+
+    pan_result = runner.invoke(app, ["view", "pan", "--help"])
+    assert pan_result.exit_code != 0
+    assert "No such command" in pan_result.output
+
+    bare_get_result = runner.invoke(app, ["view", "get", "--view-id", "view_123", "--json"])
+    assert bare_get_result.exit_code != 0
+    assert "No such option" in bare_get_result.output

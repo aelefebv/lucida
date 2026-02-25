@@ -1,8 +1,8 @@
-# view.zoom
+# view.move.zoom
 
 ## Command
 ```bash
-uv run lucida view zoom --view-id <view_id> --factor 1.5 --session-id <session_id> --json
+uv run lucida view move zoom --view-id <view_id> --factor 1.5 --session-id <session_id> --json
 ```
 
 ## Required Inputs

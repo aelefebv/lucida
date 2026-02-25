@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from lucida.cli import _resolve_cli_base_url
 from lucida.client import LucidaClient
+from lucida.commands.common import resolve_cli_base_url
 from lucida.runtime_config import DEFAULT_RUST_BASE_URL, resolve_runtime_config
 
 
@@ -34,12 +34,12 @@ def test_runtime_config_ignores_blank_values() -> None:
 
 def test_cli_runtime_transport_resolution(monkeypatch) -> None:
     monkeypatch.delenv("LUCIDA_BASE_URL", raising=False)
-    assert _resolve_cli_base_url(None) == DEFAULT_RUST_BASE_URL
+    assert resolve_cli_base_url(None) == DEFAULT_RUST_BASE_URL
 
     monkeypatch.setenv("LUCIDA_BASE_URL", "http://127.0.0.1:9933")
-    assert _resolve_cli_base_url(None) == "http://127.0.0.1:9933"
+    assert resolve_cli_base_url(None) == "http://127.0.0.1:9933"
 
-    assert _resolve_cli_base_url("http://127.0.0.1:9944") == "http://127.0.0.1:9944"
+    assert resolve_cli_base_url("http://127.0.0.1:9944") == "http://127.0.0.1:9944"
 
 
 def test_client_runtime_base_url_defaults(monkeypatch) -> None:

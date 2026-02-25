@@ -4,6 +4,7 @@
 
 - `crates/lucida-daemon/`: Rust daemon implementation (HTTP server, rendering, dataset I/O, daemon tests).
 - `src/lucida/`: Python client/CLI package and typed API contracts.
+- `src/lucida/commands/`: modular Typer CLI command groups (dataset/session/view/render/usage).
 - `tests/python/`: Python test suite grouped by responsibility.
 - `skills/`: canonical cross-agent skill packages and adapter metadata.
 - `notebooks/`: runnable notebooks grouped by milestone and phase.

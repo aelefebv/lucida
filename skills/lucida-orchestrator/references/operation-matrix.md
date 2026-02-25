@@ -7,17 +7,17 @@
   - [`view.create`](#viewcreate)
   - [`render.image`](#renderimage)
 - [View Lifecycle](#view-lifecycle)
-  - [`view.get`](#viewget)
+  - [`view.get.state`](#viewgetstate)
   - [`view.update`](#viewupdate)
   - [`view.export`](#viewexport)
   - [`view.import`](#viewimport)
 - [Selector and Camera Helpers](#selector-and-camera-helpers)
-  - [`view.set-dim`](#viewset-dim)
-  - [`view.set-range`](#viewset-range)
-  - [`view.set-set`](#viewset-set)
-  - [`view.set-plane`](#viewset-plane)
-  - [`view.pan`](#viewpan)
-  - [`view.zoom`](#viewzoom)
+  - [`view.set.dim`](#viewsetdim)
+  - [`view.set.range`](#viewsetrange)
+  - [`view.set.set`](#viewsetset)
+  - [`view.set.plane`](#viewsetplane)
+  - [`view.move.pan`](#viewmovepan)
+  - [`view.move.zoom`](#viewmovezoom)
 - [Machine-Readable Source](#machine-readable-source)
 
 ## Bootstrap Sequence
@@ -48,8 +48,8 @@
 
 ## View Lifecycle
 
-### `view.get`
-- CLI command id: `view.get`
+### `view.get.state`
+- CLI command id: `view.get.state`
 - HTTP route: `GET /view/{view_id}`
 - Required inputs: `view_id`
 - Expected outputs: `view_state.state_hash`, `view_state.state_version`
@@ -74,38 +74,38 @@
 
 ## Selector and Camera Helpers
 
-### `view.set-dim`
-- CLI command id: `view.set-dim`
+### `view.set.dim`
+- CLI command id: `view.set.dim`
 - HTTP route: `POST /view/update`
 - Required inputs: `view_id`, `axis`, `index`
 - Expected outputs: `view_state.selectors`, `view_state.state_hash`
 
-### `view.set-range`
-- CLI command id: `view.set-range`
+### `view.set.range`
+- CLI command id: `view.set.range`
 - HTTP route: `POST /view/update`
 - Required inputs: `view_id`, `axis`, `start`, `end_exclusive`
 - Expected outputs: `view_state.selectors`, `view_state.state_hash`
 
-### `view.set-set`
-- CLI command id: `view.set-set`
+### `view.set.set`
+- CLI command id: `view.set.set`
 - HTTP route: `POST /view/update`
 - Required inputs: `view_id`, `axis`, `indices`
 - Expected outputs: `view_state.selectors`, `view_state.state_hash`
 
-### `view.set-plane`
-- CLI command id: `view.set-plane`
+### `view.set.plane`
+- CLI command id: `view.set.plane`
 - HTTP route: `POST /view/update`
 - Required inputs: `view_id`, `plane`
 - Expected outputs: `view_state.view_2d.plane`, `view_state.state_hash`
 
-### `view.pan`
-- CLI command id: `view.pan`
+### `view.move.pan`
+- CLI command id: `view.move.pan`
 - HTTP route: `POST /view/update`
 - Required inputs: `view_id`, `dx_px`, `dy_px`
 - Expected outputs: `view_state.view_2d.camera.center_world`, `view_state.state_hash`
 
-### `view.zoom`
-- CLI command id: `view.zoom`
+### `view.move.zoom`
+- CLI command id: `view.move.zoom`
 - HTTP route: `POST /view/update`
 - Required inputs: `view_id`, `factor`
 - Expected outputs: `view_state.view_2d.camera.zoom`, `view_state.state_hash`

@@ -1,8 +1,8 @@
-# view.set-range
+# view.set.range
 
 ## Command
 ```bash
-uv run lucida view set-range --view-id <view_id> --axis z --start 0 --end-exclusive 2 --session-id <session_id> --json
+uv run lucida view set range --view-id <view_id> --axis z --start 0 --end-exclusive 2 --session-id <session_id> --json
 ```
 
 ## Required Inputs
