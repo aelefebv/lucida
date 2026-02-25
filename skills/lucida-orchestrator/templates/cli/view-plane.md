@@ -1,18 +1,19 @@
-# view.zoom
+# view.plane
 
 ## Command
 ```bash
-lucida view zoom --view-id <view_id> --factor 1.5 --session-id <session_id> --json
+lucida view plane --view-id <view_id> --plane xz --session-id <session_id> --json
 ```
 
 ## Required Inputs
 - `view_id`
-- `factor`
+- `plane`
 
 ## Expected Output Fields
-- `view_state.view_2d.camera.zoom`
+- `view_state.view_2d.plane`
 - `view_state.state_hash`
 
 ## Common Failure Codes
 - `view_not_found`
 - `invalid_patch`
+- `unsupported_plane`

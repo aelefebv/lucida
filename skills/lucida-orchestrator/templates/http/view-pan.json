@@ -1,5 +1,5 @@
 {
-  "operation_id": "view.move.pan",
+  "operation_id": "view.pan",
   "method": "POST",
   "path": "/view/update",
   "request": {

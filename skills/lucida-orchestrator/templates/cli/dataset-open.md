@@ -2,7 +2,7 @@
 
 ## Command
 ```bash
-uv run lucida dataset open --uri <dataset_uri> --dataset-id <dataset_id> --session-id <session_id> --json
+lucida dataset open --uri <dataset_uri> --dataset-id <dataset_id> --session-id <session_id> --json
 ```
 
 ## Required Inputs

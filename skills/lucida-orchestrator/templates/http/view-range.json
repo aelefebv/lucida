@@ -1,5 +1,5 @@
 {
-  "operation_id": "view.set.range",
+  "operation_id": "view.range",
   "method": "POST",
   "path": "/view/update",
   "request": {

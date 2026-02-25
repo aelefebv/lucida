@@ -13,7 +13,7 @@ Use this skill to choose the correct operation, execute it via CLI or HTTP, and 
 1. Confirm daemon URL (`LUCIDA_BASE_URL` or default `http://127.0.0.1:3000`).
 2. Confirm daemon is healthy (`GET /healthz`).
 3. Confirm required tools are available (`uv --version`, `cargo --version`, `python --version`).
-4. Prefer `uv run lucida ...` for operator-facing workflows.
+4. Prefer `lucida ...` for operator-facing workflows.
 5. Prefer HTTP templates when integrating with non-CLI agents.
 
 ## Operation Matrix

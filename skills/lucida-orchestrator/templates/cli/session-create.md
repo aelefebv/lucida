@@ -2,7 +2,7 @@
 
 ## Command
 ```bash
-uv run lucida session create --json
+lucida session create --json
 ```
 
 ## Required Inputs

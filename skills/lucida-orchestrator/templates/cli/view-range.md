@@ -1,14 +1,15 @@
-# view.set.dim
+# view.range
 
 ## Command
 ```bash
-uv run lucida view set dim --view-id <view_id> --axis z --index 1 --session-id <session_id> --json
+lucida view range --view-id <view_id> --axis z --start 0 --end-exclusive 2 --session-id <session_id> --json
 ```
 
 ## Required Inputs
 - `view_id`
 - `axis`
-- `index`
+- `start`
+- `end_exclusive`
 
 ## Expected Output Fields
 - `view_state.selectors`

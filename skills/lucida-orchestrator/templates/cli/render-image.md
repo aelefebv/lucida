@@ -2,7 +2,7 @@
 
 ## Command
 ```bash
-uv run lucida render image --view-id <view_id> --width-px 256 --height-px 192 --delivery inline_base64 --session-id <session_id> --json
+lucida render image --view-id <view_id> --width-px 256 --height-px 192 --delivery inline_base64 --session-id <session_id> --json
 ```
 
 ## Required Inputs

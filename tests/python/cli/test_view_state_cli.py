@@ -22,7 +22,6 @@ def test_cli_view_flow(
         runner,
         [
             "view",
-            "set",
             "dim",
             "--view-id",
             view_context.view_id,
@@ -43,7 +42,6 @@ def test_cli_view_flow(
         runner,
         [
             "view",
-            "set",
             "range",
             "--view-id",
             view_context.view_id,
@@ -62,12 +60,11 @@ def test_cli_view_flow(
     z_range_selector = next(item for item in set_range_payload["selectors_applied"] if item["axis"] == "z")
     assert z_range_selector["start"] == 1
 
-    set_set_payload = run_cli_json(
+    set_indices_payload = run_cli_json(
         runner,
         [
             "view",
-            "set",
-            "set",
+            "indices",
             "--view-id",
             view_context.view_id,
             "--axis",
@@ -84,7 +81,7 @@ def test_cli_view_flow(
         ],
         env=cli_env,
     )
-    z_set_selector = next(item for item in set_set_payload["selectors_applied"] if item["axis"] == "z")
+    z_set_selector = next(item for item in set_indices_payload["selectors_applied"] if item["axis"] == "z")
     assert z_set_selector["indices"] == [0, 2]
 
     patch_path = tmp_path / "patch.json"
@@ -172,11 +169,10 @@ def test_cli_view_flow(
     )
     assert "state_conflict" in conflict_payload["message"]
 
-    get_payload = run_cli_json(
+    state_payload = run_cli_json(
         runner,
         [
             "view",
-            "get",
             "state",
             "--view-id",
             view_context.view_id,
@@ -186,24 +182,24 @@ def test_cli_view_flow(
         ],
         env=cli_env,
     )
-    assert get_payload["view_state"]["view_id"] == view_context.view_id
+    assert state_payload["view_state"]["view_id"] == view_context.view_id
 
 
-def test_cli_view_legacy_aliases_removed() -> None:
+def test_cli_view_grouped_commands_removed() -> None:
     runner = CliRunner()
 
-    set_dim_result = run_cli(runner, ["view", "set-dim", "--help"], env={})
-    assert set_dim_result.exit_code != 0
-    assert "No such command" in set_dim_result.output
+    set_group_result = run_cli(runner, ["view", "set", "--help"], env={})
+    assert set_group_result.exit_code != 0
+    assert "No such command" in set_group_result.output
 
-    pan_result = run_cli(runner, ["view", "pan", "--help"], env={})
-    assert pan_result.exit_code != 0
-    assert "No such command" in pan_result.output
+    move_group_result = run_cli(runner, ["view", "move", "--help"], env={})
+    assert move_group_result.exit_code != 0
+    assert "No such command" in move_group_result.output
 
-    bare_get_result = run_cli(
+    get_group_result = run_cli(
         runner,
-        ["view", "get", "--view-id", "view_123", "--json"],
+        ["view", "get", "--help"],
         env={},
     )
-    assert bare_get_result.exit_code != 0
-    assert "No such option" in bare_get_result.output
+    assert get_group_result.exit_code != 0
+    assert "No such command" in get_group_result.output

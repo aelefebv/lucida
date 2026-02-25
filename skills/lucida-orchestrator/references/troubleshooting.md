@@ -28,7 +28,7 @@
 - Cause: malformed RFC6902 patch or invalid post-patch view state.
 - Recovery:
   1. Validate patch array shape and operation paths.
-  2. Apply smallest possible patch and re-check `view.get.state` output.
+  2. Apply smallest possible patch and re-check `view.state` output.
 
 ## `dataset_not_found`
 - Cause: dataset id not opened in runtime state.
