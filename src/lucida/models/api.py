@@ -201,12 +201,15 @@ class ViewUpdateRequest(ModelBase):
         Optional session identifier.
     view_id:
         Target view identifier.
+    expected_state_version:
+        Optional optimistic concurrency guard for state version.
     patch:
         JSON patch operations.
     """
     schema_version: Literal[1] = 1
     session_id: str | None = Field(default=None, min_length=1)
     view_id: str = Field(min_length=1)
+    expected_state_version: int | None = Field(default=None, ge=0)
     patch: list[dict[str, Any]] = Field(min_length=1)
 
 

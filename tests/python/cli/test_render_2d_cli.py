@@ -76,7 +76,8 @@ def test_cli_render_and_navigation(
         app,
         [
             "view",
-            "set-plane",
+            "set",
+            "plane",
             "--view-id",
             view_id,
             "--plane",
@@ -94,6 +95,7 @@ def test_cli_render_and_navigation(
         app,
         [
             "view",
+            "move",
             "pan",
             "--view-id",
             view_id,
@@ -113,6 +115,7 @@ def test_cli_render_and_navigation(
         app,
         [
             "view",
+            "move",
             "zoom",
             "--view-id",
             view_id,
@@ -125,6 +128,89 @@ def test_cli_render_and_navigation(
         env=cli_env,
     )
     assert zoom_result.exit_code == 0
+
+    set_rotation_result = runner.invoke(
+        app,
+        [
+            "view",
+            "set",
+            "rotation",
+            "--view-id",
+            view_id,
+            "--rotation-deg",
+            "15",
+            "--session-id",
+            session_id,
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert set_rotation_result.exit_code == 0
+    assert json.loads(set_rotation_result.stdout)["view_state"]["view_2d"]["camera"]["rotation_deg"] == 15.0
+
+    move_rotate_result = runner.invoke(
+        app,
+        [
+            "view",
+            "move",
+            "rotate",
+            "--view-id",
+            view_id,
+            "--delta-deg",
+            "-5",
+            "--session-id",
+            session_id,
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert move_rotate_result.exit_code == 0
+    assert json.loads(move_rotate_result.stdout)["view_state"]["view_2d"]["camera"]["rotation_deg"] == 10.0
+
+    bounds_result = runner.invoke(
+        app,
+        [
+            "view",
+            "get",
+            "bounds",
+            "--view-id",
+            view_id,
+            "--session-id",
+            session_id,
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert bounds_result.exit_code == 0
+    bounds_payload = json.loads(bounds_result.stdout)
+    assert bounds_payload["axes"] == {"u": "x", "v": "z"}
+    assert bounds_payload["visible_bounds_world"]["u_min"] < bounds_payload["visible_bounds_world"]["u_max"]
+    assert bounds_payload["visible_bounds_world"]["v_min"] < bounds_payload["visible_bounds_world"]["v_max"]
+
+    screenshot_result = runner.invoke(
+        app,
+        [
+            "view",
+            "get",
+            "screenshot",
+            "--view-id",
+            view_id,
+            "--width-px",
+            "40",
+            "--height-px",
+            "30",
+            "--session-id",
+            session_id,
+            "--delivery",
+            "inline_base64",
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert screenshot_result.exit_code == 0
+    screenshot_payload = json.loads(screenshot_result.stdout)
+    assert screenshot_payload["status"] == "ok"
+    assert _decode_size(screenshot_payload["images"][0]["bytes_base64"]) == (40, 30)
 
     render_result = runner.invoke(
         app,
@@ -154,6 +240,7 @@ def test_cli_render_and_navigation(
         [
             "view",
             "get",
+            "state",
             "--view-id",
             view_id,
             "--session-id",
@@ -188,6 +275,26 @@ def test_cli_render_and_navigation(
     assert stateless_payload["view_id"] is None
     assert stateless_payload["state_version"] is None
     assert _decode_size(stateless_payload["images"][0]["bytes_base64"]) == (64, 48)
+
+    stateless_inline_result = runner.invoke(
+        app,
+        [
+            "render",
+            "image",
+            "--view-state-json",
+            json.dumps(view_state_payload),
+            "--width-px",
+            "32",
+            "--height-px",
+            "24",
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert stateless_inline_result.exit_code == 0
+    stateless_inline_payload = json.loads(stateless_inline_result.stdout)
+    assert stateless_inline_payload["status"] == "ok"
+    assert _decode_size(stateless_inline_payload["images"][0]["bytes_base64"]) == (32, 24)
 
     output_root = Path(__file__).resolve().parents[3] / "output"
     output_relative = f"snapshots/test-cli-{uuid.uuid4().hex}.png"

@@ -1,8 +1,8 @@
-# view.set-set
+# view.set.set
 
 ## Command
 ```bash
-uv run lucida view set-set --view-id <view_id> --axis z --index 0 --index 2 --session-id <session_id> --json
+uv run lucida view set set --view-id <view_id> --axis z --index 0 --index 2 --session-id <session_id> --json
 ```
 
 ## Required Inputs

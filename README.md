@@ -68,6 +68,12 @@ Use the Python CLI/client against the daemon:
 uv run lucida dataset open --uri /path/to/data.zarr --json
 # or
 LUCIDA_BASE_URL=http://127.0.0.1:4000 uv run lucida session create --json
+# action-oriented view updates
+uv run lucida view set dim --view-id <view_id> --axis z --index 3 --json
+uv run lucida view move pan --view-id <view_id> --dx-px 20 --dy-px -10 --json
+# information-oriented retrieval
+uv run lucida view get bounds --view-id <view_id> --json
+uv run lucida view get screenshot --view-id <view_id> --json
 ```
 
 ## Build Rust Daemon

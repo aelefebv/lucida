@@ -1,5 +1,5 @@
 {
-  "operation_id": "view.set-dim",
+  "operation_id": "view.set.dim",
   "method": "POST",
   "path": "/view/update",
   "request": {

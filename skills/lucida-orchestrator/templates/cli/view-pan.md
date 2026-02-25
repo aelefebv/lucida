@@ -1,8 +1,8 @@
-# view.pan
+# view.move.pan
 
 ## Command
 ```bash
-uv run lucida view pan --view-id <view_id> --dx-px 48 --dy-px -24 --session-id <session_id> --json
+uv run lucida view move pan --view-id <view_id> --dx-px 48 --dy-px -24 --session-id <session_id> --json
 ```
 
 ## Required Inputs

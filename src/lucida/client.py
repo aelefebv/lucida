@@ -284,6 +284,7 @@ class LucidaClient:
         *,
         view_id: str,
         patch: list[dict[str, Any]],
+        expected_state_version: int | None = None,
         session_id: str | None = None,
         agent_run_id: str | None = None,
         agent_step_id: str | None = None,
@@ -297,10 +298,17 @@ class LucidaClient:
             Target view id.
         patch:
             RFC6902 JSON patch operations.
+        expected_state_version:
+            Optional optimistic concurrency guard for state version.
         session_id:
             Optional session id to enforce scope.
         """
-        request = ViewUpdateRequest(view_id=view_id, patch=patch, session_id=session_id)
+        request = ViewUpdateRequest(
+            view_id=view_id,
+            patch=patch,
+            session_id=session_id,
+            expected_state_version=expected_state_version,
+        )
         payload = self._post(
             "/view/update",
             request.model_dump(mode="json"),
@@ -470,6 +478,7 @@ class LucidaClient:
             view_id=view_id,
             session_id=session_id,
             patch=patch,
+            expected_state_version=view.state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -516,6 +525,7 @@ class LucidaClient:
             view_id=view_id,
             session_id=session_id,
             patch=patch,
+            expected_state_version=view.state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -551,6 +561,52 @@ class LucidaClient:
             view_id=view_id,
             session_id=session_id,
             patch=patch,
+            expected_state_version=view.state_version,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        )
+
+    def rotate(
+        self,
+        *,
+        view_id: str,
+        degrees: float | None = None,
+        delta_degrees: float | None = None,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> ViewUpdateResponse:
+        """Set or adjust 2D camera rotation.
+
+        Exactly one of ``degrees`` or ``delta_degrees`` must be provided.
+        """
+        if (degrees is None) == (delta_degrees is None):
+            raise ValueError("provide exactly one of degrees or delta_degrees.")
+
+        view = self.get_view(
+            view_id=view_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        ).view_state
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+
+        current_rotation = float(view.view_2d.camera.rotation_deg)
+        next_rotation = (
+            float(degrees)
+            if degrees is not None
+            else current_rotation + float(delta_degrees)
+        )
+        patch = [{"op": "replace", "path": "/view_2d/camera/rotation_deg", "value": next_rotation}]
+        return self.update_view(
+            view_id=view_id,
+            session_id=session_id,
+            patch=patch,
+            expected_state_version=view.state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -583,7 +639,7 @@ class LucidaClient:
         clamp:
             Clamp out-of-range values into bounds when true.
         """
-        selectors = self._selectors_with_replacement(
+        selectors, expected_state_version = self._selectors_with_replacement(
             view_id=view_id,
             axis=axis,
             replacement={"axis": axis, "kind": "index", "index": index, "clamp": clamp},
@@ -596,6 +652,7 @@ class LucidaClient:
             view_id=view_id,
             session_id=session_id,
             patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
+            expected_state_version=expected_state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -631,7 +688,7 @@ class LucidaClient:
         clamp:
             Clamp out-of-range values into bounds when true.
         """
-        selectors = self._selectors_with_replacement(
+        selectors, expected_state_version = self._selectors_with_replacement(
             view_id=view_id,
             axis=axis,
             replacement={
@@ -650,6 +707,7 @@ class LucidaClient:
             view_id=view_id,
             session_id=session_id,
             patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
+            expected_state_version=expected_state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -682,7 +740,7 @@ class LucidaClient:
         clamp:
             Clamp out-of-range values into bounds when true.
         """
-        selectors = self._selectors_with_replacement(
+        selectors, expected_state_version = self._selectors_with_replacement(
             view_id=view_id,
             axis=axis,
             replacement={
@@ -700,6 +758,7 @@ class LucidaClient:
             view_id=view_id,
             session_id=session_id,
             patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
+            expected_state_version=expected_state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -774,7 +833,7 @@ class LucidaClient:
         agent_run_id: str | None,
         agent_step_id: str | None,
         agent_name: str | None,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], int]:
         """Load current selectors and replace one axis entry.
 
         Parameters
@@ -797,7 +856,7 @@ class LucidaClient:
         ).view_state
         selectors = [selector.model_dump(mode="json") for selector in view.selectors if selector.axis != axis]
         selectors.append(replacement)
-        return selectors
+        return selectors, int(view.state_version)
 
     def _set_plane_patch(self, *, view: dict[str, Any], plane: str) -> list[dict[str, Any]]:
         if plane not in _PLANE_ROLES:

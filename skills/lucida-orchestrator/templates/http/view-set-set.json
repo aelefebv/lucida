@@ -1,5 +1,5 @@
 {
-  "operation_id": "view.set-set",
+  "operation_id": "view.set.set",
   "method": "POST",
   "path": "/view/update",
   "request": {

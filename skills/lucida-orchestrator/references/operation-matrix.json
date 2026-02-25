@@ -61,9 +61,9 @@
       ]
     },
     {
-      "id": "view.get",
+      "id": "view.get.state",
       "title": "Get view",
-      "cli_command": "view.get",
+      "cli_command": "view.get.state",
       "http_method": "GET",
       "http_path": "/view/{view_id}",
       "cli_template": "templates/cli/view-get.md",
@@ -144,9 +144,9 @@
       ]
     },
     {
-      "id": "view.set-dim",
+      "id": "view.set.dim",
       "title": "Set index selector",
-      "cli_command": "view.set-dim",
+      "cli_command": "view.set.dim",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-set-dim.md",
@@ -166,9 +166,9 @@
       ]
     },
     {
-      "id": "view.set-range",
+      "id": "view.set.range",
       "title": "Set range selector",
-      "cli_command": "view.set-range",
+      "cli_command": "view.set.range",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-set-range.md",
@@ -189,9 +189,9 @@
       ]
     },
     {
-      "id": "view.set-set",
+      "id": "view.set.set",
       "title": "Set explicit selector set",
-      "cli_command": "view.set-set",
+      "cli_command": "view.set.set",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-set-set.md",
@@ -211,9 +211,9 @@
       ]
     },
     {
-      "id": "view.set-plane",
+      "id": "view.set.plane",
       "title": "Set active plane",
-      "cli_command": "view.set-plane",
+      "cli_command": "view.set.plane",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-set-plane.md",
@@ -233,9 +233,9 @@
       ]
     },
     {
-      "id": "view.pan",
+      "id": "view.move.pan",
       "title": "Pan camera",
-      "cli_command": "view.pan",
+      "cli_command": "view.move.pan",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-pan.md",
@@ -255,9 +255,9 @@
       ]
     },
     {
-      "id": "view.zoom",
+      "id": "view.move.zoom",
       "title": "Zoom camera",
-      "cli_command": "view.zoom",
+      "cli_command": "view.move.zoom",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-zoom.md",

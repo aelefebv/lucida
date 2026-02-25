@@ -1,5 +1,5 @@
 {
-  "operation_id": "view.get",
+  "operation_id": "view.get.state",
   "method": "GET",
   "path": "/view/<view_id>",
   "query": {

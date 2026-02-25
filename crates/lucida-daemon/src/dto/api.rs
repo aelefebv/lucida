@@ -96,6 +96,7 @@ pub struct ViewUpdateRequest {
     pub schema_version: u8,
     pub session_id: Option<String>,
     pub view_id: String,
+    pub expected_state_version: Option<u64>,
     pub patch: Vec<Value>,
 }
 
