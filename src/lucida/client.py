@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -23,8 +24,13 @@ from lucida.models.api import (
     ViewUpdateResponse,
 )
 from lucida.models.render import RenderImageRequest, RenderImageResponse, RenderOutputSpec
+from lucida.models.usage import UsageEventsResponse, UsageRunDetailResponse, UsageRunsResponse
 from lucida.models.view_state import ViewState
 from lucida.runtime_config import RuntimeConfig, resolve_runtime_config
+
+_HEADER_AGENT_RUN_ID = "X-Lucida-Agent-Run-Id"
+_HEADER_AGENT_STEP_ID = "X-Lucida-Agent-Step-Id"
+_HEADER_AGENT_NAME = "X-Lucida-Agent-Name"
 
 
 _PLANE_ROLES: dict[str, tuple[str, str, str]] = {
@@ -59,6 +65,9 @@ class LucidaClient:
         timeout: float = 30.0,
         client: httpx.Client | None = None,
         runtime_config: RuntimeConfig | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> None:
         """Create a client bound to a base URL and optional transport.
 
@@ -72,6 +81,12 @@ class LucidaClient:
             Optional preconfigured :class:`httpx.Client`.
         runtime_config:
             Optional pre-resolved runtime configuration.
+        agent_run_id:
+            Optional default agent run identifier sent as telemetry header.
+        agent_step_id:
+            Optional default agent step identifier sent as telemetry header.
+        agent_name:
+            Optional default agent name sent as telemetry header.
         """
         if client is None:
             self._runtime_config = runtime_config or resolve_runtime_config(
@@ -83,6 +98,9 @@ class LucidaClient:
             self._runtime_config = runtime_config
             self._client = client
             self._owns_client = False
+        self._default_agent_run_id = agent_run_id
+        self._default_agent_step_id = agent_step_id
+        self._default_agent_name = agent_name
 
     def close(self) -> None:
         """Close the owned HTTP client transport."""
@@ -97,12 +115,36 @@ class LucidaClient:
         """Close the client when exiting a ``with`` block."""
         self.close()
 
+    def _agent_headers(
+        self,
+        *,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> dict[str, str] | None:
+        run_id = agent_run_id if agent_run_id is not None else self._default_agent_run_id
+        step_id = agent_step_id if agent_step_id is not None else self._default_agent_step_id
+        resolved_name = agent_name if agent_name is not None else self._default_agent_name
+
+        headers: dict[str, str] = {}
+        if run_id:
+            headers[_HEADER_AGENT_RUN_ID] = run_id
+        if step_id:
+            headers[_HEADER_AGENT_STEP_ID] = step_id
+        if resolved_name:
+            headers[_HEADER_AGENT_NAME] = resolved_name
+        return headers or None
+
     def open_dataset(
         self,
         uri: str,
         dataset_id: str | None = None,
         session_id: str | None = None,
         include_full_raw_metadata: bool = False,
+        *,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> DatasetOpenResponse:
         """Open a dataset and return a dataset summary response.
 
@@ -123,13 +165,35 @@ class LucidaClient:
             session_id=session_id,
             include_full_raw_metadata=include_full_raw_metadata,
         )
-        payload = self._post("/dataset/open", request.model_dump(mode="json"))
+        payload = self._post(
+            "/dataset/open",
+            request.model_dump(mode="json"),
+            headers=self._agent_headers(
+                agent_run_id=agent_run_id,
+                agent_step_id=agent_step_id,
+                agent_name=agent_name,
+            ),
+        )
         return DatasetOpenResponse.model_validate(payload)
 
-    def create_session(self) -> SessionCreateResponse:
+    def create_session(
+        self,
+        *,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> SessionCreateResponse:
         """Create a new dataset/view session."""
         request = SessionCreateRequest()
-        payload = self._post("/session/create", request.model_dump(mode="json"))
+        payload = self._post(
+            "/session/create",
+            request.model_dump(mode="json"),
+            headers=self._agent_headers(
+                agent_run_id=agent_run_id,
+                agent_step_id=agent_step_id,
+                agent_name=agent_name,
+            ),
+        )
         return SessionCreateResponse.model_validate(payload)
 
     def create_view(
@@ -142,6 +206,9 @@ class LucidaClient:
         viewport: dict[str, Any] | None = None,
         selectors: list[dict[str, Any]] | None = None,
         view_2d: dict[str, Any] | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewCreateResponse:
         """Create a new view bound to a dataset and optional selectors.
 
@@ -171,10 +238,26 @@ class LucidaClient:
             selectors=selectors,
             view_2d=view_2d,
         )
-        payload = self._post("/view/create", request.model_dump(mode="json"))
+        payload = self._post(
+            "/view/create",
+            request.model_dump(mode="json"),
+            headers=self._agent_headers(
+                agent_run_id=agent_run_id,
+                agent_step_id=agent_step_id,
+                agent_name=agent_name,
+            ),
+        )
         return ViewCreateResponse.model_validate(payload)
 
-    def get_view(self, *, view_id: str, session_id: str | None = None) -> ViewGetResponse:
+    def get_view(
+        self,
+        *,
+        view_id: str,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> ViewGetResponse:
         """Fetch the current state for an existing view.
 
         Parameters
@@ -187,6 +270,11 @@ class LucidaClient:
         response = self._client.get(
             f"/view/{view_id}",
             params={"session_id": session_id} if session_id is not None else None,
+            headers=self._agent_headers(
+                agent_run_id=agent_run_id,
+                agent_step_id=agent_step_id,
+                agent_name=agent_name,
+            ),
         )
         payload = self._validate_response(response)
         return ViewGetResponse.model_validate(payload)
@@ -197,6 +285,9 @@ class LucidaClient:
         view_id: str,
         patch: list[dict[str, Any]],
         session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Apply a JSON patch to an existing view state.
 
@@ -210,7 +301,15 @@ class LucidaClient:
             Optional session id to enforce scope.
         """
         request = ViewUpdateRequest(view_id=view_id, patch=patch, session_id=session_id)
-        payload = self._post("/view/update", request.model_dump(mode="json"))
+        payload = self._post(
+            "/view/update",
+            request.model_dump(mode="json"),
+            headers=self._agent_headers(
+                agent_run_id=agent_run_id,
+                agent_step_id=agent_step_id,
+                agent_name=agent_name,
+            ),
+        )
         return ViewUpdateResponse.model_validate(payload)
 
     def export_viewstate(
@@ -218,6 +317,9 @@ class LucidaClient:
         *,
         view_id: str,
         session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewStateExportResponse:
         """Export a full persisted view state payload.
 
@@ -229,7 +331,15 @@ class LucidaClient:
             Optional session scope guard.
         """
         request = ViewStateExportRequest(view_id=view_id, session_id=session_id)
-        payload = self._post("/export/viewstate", request.model_dump(mode="json"))
+        payload = self._post(
+            "/export/viewstate",
+            request.model_dump(mode="json"),
+            headers=self._agent_headers(
+                agent_run_id=agent_run_id,
+                agent_step_id=agent_step_id,
+                agent_name=agent_name,
+            ),
+        )
         return ViewStateExportResponse.model_validate(payload)
 
     def import_viewstate(
@@ -237,6 +347,9 @@ class LucidaClient:
         *,
         view_state: ViewState | dict[str, Any],
         session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewStateImportResponse:
         """Import a view state payload as a new persisted view.
 
@@ -254,7 +367,15 @@ class LucidaClient:
             session_id=session_id,
             view_state=normalized_view_state,
         )
-        payload = self._post("/import/viewstate", request.model_dump(mode="json"))
+        payload = self._post(
+            "/import/viewstate",
+            request.model_dump(mode="json"),
+            headers=self._agent_headers(
+                agent_run_id=agent_run_id,
+                agent_step_id=agent_step_id,
+                agent_name=agent_name,
+            ),
+        )
         return ViewStateImportResponse.model_validate(payload)
 
     def render_image(
@@ -269,6 +390,9 @@ class LucidaClient:
         session_id: str | None = None,
         request_id: str | None = None,
         overrides_json_patch: list[dict[str, Any]] | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> RenderImageResponse:
         """Render an image for an existing view.
 
@@ -309,7 +433,15 @@ class LucidaClient:
                 file_path=file_path,
             ),
         )
-        payload = self._post("/render/image", request.model_dump(mode="json"))
+        payload = self._post(
+            "/render/image",
+            request.model_dump(mode="json"),
+            headers=self._agent_headers(
+                agent_run_id=agent_run_id,
+                agent_step_id=agent_step_id,
+                agent_name=agent_name,
+            ),
+        )
         return RenderImageResponse.model_validate(payload)
 
     def set_plane(
@@ -318,14 +450,30 @@ class LucidaClient:
         view_id: str,
         plane: str,
         session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Set 2D plane while preserving projected world center."""
-        view = self.get_view(view_id=view_id, session_id=session_id).view_state
+        view = self.get_view(
+            view_id=view_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        ).view_state
         if view.view_2d is None:
             raise ValueError("view has no 2d state.")
 
         patch = self._set_plane_patch(view=view.model_dump(mode="json"), plane=plane)
-        return self.update_view(view_id=view_id, session_id=session_id, patch=patch)
+        return self.update_view(
+            view_id=view_id,
+            session_id=session_id,
+            patch=patch,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        )
 
     def pan(
         self,
@@ -334,9 +482,18 @@ class LucidaClient:
         dx_px: float,
         dy_px: float,
         session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Pan camera in screen pixels."""
-        view = self.get_view(view_id=view_id, session_id=session_id).view_state
+        view = self.get_view(
+            view_id=view_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        ).view_state
         if view.view_2d is None:
             raise ValueError("view has no 2d state.")
 
@@ -355,7 +512,14 @@ class LucidaClient:
                 "value": [float(center_x) + delta_x, float(center_y) + delta_y],
             }
         ]
-        return self.update_view(view_id=view_id, session_id=session_id, patch=patch)
+        return self.update_view(
+            view_id=view_id,
+            session_id=session_id,
+            patch=patch,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        )
 
     def zoom(
         self,
@@ -363,18 +527,34 @@ class LucidaClient:
         view_id: str,
         factor: float,
         session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Multiply camera zoom by the provided factor."""
         if factor <= 0:
             raise ValueError("zoom factor must be > 0.")
 
-        view = self.get_view(view_id=view_id, session_id=session_id).view_state
+        view = self.get_view(
+            view_id=view_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        ).view_state
         if view.view_2d is None:
             raise ValueError("view has no 2d state.")
 
         next_zoom = float(view.view_2d.camera.zoom) * float(factor)
         patch = [{"op": "replace", "path": "/view_2d/camera/zoom", "value": next_zoom}]
-        return self.update_view(view_id=view_id, session_id=session_id, patch=patch)
+        return self.update_view(
+            view_id=view_id,
+            session_id=session_id,
+            patch=patch,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        )
 
     def set_dim(
         self,
@@ -384,6 +564,9 @@ class LucidaClient:
         index: int,
         session_id: str | None = None,
         clamp: bool = True,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Update a single-axis index selector.
 
@@ -405,11 +588,17 @@ class LucidaClient:
             axis=axis,
             replacement={"axis": axis, "kind": "index", "index": index, "clamp": clamp},
             session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
         )
         return self.update_view(
             view_id=view_id,
             session_id=session_id,
             patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
         )
 
     def set_axis_range(
@@ -421,6 +610,9 @@ class LucidaClient:
         end_exclusive: int,
         session_id: str | None = None,
         clamp: bool = True,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Update an axis to a range selector.
 
@@ -450,11 +642,17 @@ class LucidaClient:
                 "clamp": clamp,
             },
             session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
         )
         return self.update_view(
             view_id=view_id,
             session_id=session_id,
             patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
         )
 
     def set_axis_set(
@@ -465,6 +663,9 @@ class LucidaClient:
         indices: list[int],
         session_id: str | None = None,
         clamp: bool = True,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Update an axis to an explicit set of indices.
 
@@ -491,12 +692,77 @@ class LucidaClient:
                 "clamp": clamp,
             },
             session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
         )
         return self.update_view(
             view_id=view_id,
             session_id=session_id,
             patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
         )
+
+    def list_usage_events(
+        self,
+        *,
+        limit: int = 100,
+        before_id: int | None = None,
+        run_id: str | None = None,
+        endpoint: str | None = None,
+        status_code: int | None = None,
+        from_ts: str | None = None,
+        to_ts: str | None = None,
+    ) -> UsageEventsResponse:
+        """List usage telemetry events."""
+        params: dict[str, Any] = {"limit": limit}
+        if before_id is not None:
+            params["before_id"] = before_id
+        if run_id is not None:
+            params["run_id"] = run_id
+        if endpoint is not None:
+            params["endpoint"] = endpoint
+        if status_code is not None:
+            params["status_code"] = status_code
+        if from_ts is not None:
+            params["from_ts"] = from_ts
+        if to_ts is not None:
+            params["to_ts"] = to_ts
+
+        payload = self._get("/usage/events", params=params)
+        return UsageEventsResponse.model_validate(payload)
+
+    def list_usage_runs(
+        self,
+        *,
+        limit: int = 50,
+        before_start_ts: str | None = None,
+    ) -> UsageRunsResponse:
+        """List usage run aggregates."""
+        params: dict[str, Any] = {"limit": limit}
+        if before_start_ts is not None:
+            params["before_start_ts"] = before_start_ts
+        payload = self._get("/usage/runs", params=params)
+        return UsageRunsResponse.model_validate(payload)
+
+    def get_usage_run(
+        self,
+        *,
+        run_id: str,
+        event_limit: int = 200,
+    ) -> UsageRunDetailResponse:
+        """Fetch one run summary and recent events."""
+        payload = self._get(f"/usage/runs/{run_id}", params={"limit": event_limit})
+        return UsageRunDetailResponse.model_validate(payload)
+
+    def usage_events_stream_url(self, *, run_id: str | None = None) -> str:
+        """Build the SSE stream URL for usage events."""
+        base_url = str(self._client.base_url).rstrip("/")
+        if run_id is None:
+            return f"{base_url}/usage/events/stream"
+        return f"{base_url}/usage/events/stream?{urlencode({'run_id': run_id})}"
 
     def _selectors_with_replacement(
         self,
@@ -505,6 +771,9 @@ class LucidaClient:
         axis: str,
         replacement: dict[str, Any],
         session_id: str | None,
+        agent_run_id: str | None,
+        agent_step_id: str | None,
+        agent_name: str | None,
     ) -> list[dict[str, Any]]:
         """Load current selectors and replace one axis entry.
 
@@ -519,7 +788,13 @@ class LucidaClient:
         session_id:
             Optional session scope.
         """
-        view = self.get_view(view_id=view_id, session_id=session_id).view_state
+        view = self.get_view(
+            view_id=view_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        ).view_state
         selectors = [selector.model_dump(mode="json") for selector in view.selectors if selector.axis != axis]
         selectors.append(replacement)
         return selectors
@@ -593,7 +868,24 @@ class LucidaClient:
                     return int(first)
         return None
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _get(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """GET JSON payload from the API and return parsed response."""
+        response = self._client.get(path, params=params, headers=headers)
+        return self._validate_response(response)
+
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         """POST payload to the API and return the parsed JSON payload.
 
         Parameters
@@ -602,8 +894,10 @@ class LucidaClient:
             Relative endpoint path.
         payload:
             Request payload dictionary.
+        headers:
+            Optional HTTP headers for agent tracing metadata.
         """
-        response = self._client.post(path, json=payload)
+        response = self._client.post(path, json=payload, headers=headers)
         return self._validate_response(response)
 
     def _validate_response(self, response: httpx.Response) -> dict[str, Any]:

@@ -26,6 +26,13 @@ from .render import (
     RenderOutputSpec,
     RenderTimingMs,
 )
+from .usage import (
+    UsageEvent,
+    UsageEventsResponse,
+    UsageRunDetailResponse,
+    UsageRunSummary,
+    UsageRunsResponse,
+)
 from .view_state import AxisSelector, ViewState
 
 __all__ = [
@@ -50,6 +57,11 @@ __all__ = [
     "RenderImageArtifact",
     "RenderMeta",
     "RenderTimingMs",
+    "UsageEvent",
+    "UsageEventsResponse",
+    "UsageRunSummary",
+    "UsageRunsResponse",
+    "UsageRunDetailResponse",
     "AxisSelector",
     "DatasetSummary",
     "ViewState",

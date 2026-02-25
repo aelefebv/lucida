@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lucida Usage</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <div class="background-shape shape-a" aria-hidden="true"></div>
+    <div class="background-shape shape-b" aria-hidden="true"></div>
+    <main class="layout">
+      <header class="masthead">
+        <h1>Lucida Agent Usage</h1>
+        <p>Live timeline and run analytics for llm-first viewer sessions.</p>
+      </header>
+
+      <section class="panel controls-panel">
+        <div class="control-grid">
+          <label>
+            Run ID
+            <input id="filter-run-id" type="text" placeholder="agent_run_..." />
+          </label>
+          <label>
+            Endpoint
+            <input id="filter-endpoint" type="text" placeholder="/render/image" />
+          </label>
+          <label>
+            Status Code
+            <input id="filter-status-code" type="number" min="100" max="599" placeholder="200" />
+          </label>
+          <label>
+            Limit
+            <input id="filter-limit" type="number" min="1" max="500" value="100" />
+          </label>
+        </div>
+        <div class="control-actions">
+          <button id="apply-filters">Apply Filters</button>
+          <button id="clear-run-filter" class="secondary">Clear Run Filter</button>
+          <span id="status-pill" class="status-pill">connecting...</span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>Run Summary</h2>
+          <button id="refresh-runs" class="secondary">Refresh</button>
+        </div>
+        <div id="run-list" class="run-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>Timeline</h2>
+          <button id="refresh-events" class="secondary">Refresh</button>
+        </div>
+        <div id="events-list" class="events-list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="section-title">
+          <h2>Render Preview</h2>
+        </div>
+        <div id="render-preview" class="preview">
+          <p>Select a render event to preview output.</p>
+        </div>
+      </section>
+    </main>
+    <script src="/ui/app.js"></script>
+  </body>
+</html>

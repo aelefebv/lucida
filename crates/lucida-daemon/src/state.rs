@@ -11,6 +11,7 @@ use crate::dto::dataset_summary::DatasetSummary;
 use crate::dto::view_state::ViewState;
 use crate::error::ApiError;
 use crate::render_cache::{new_shared_render_cache_registry, SharedRenderCacheRegistry};
+use crate::usage::{new_shared_usage_telemetry, SharedUsageTelemetry};
 
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
@@ -39,16 +40,25 @@ pub struct AppState {
     pub views_by_id: HashMap<String, ViewRecord>,
     pub compat_session_id: Option<String>,
     pub render_caches: SharedRenderCacheRegistry,
+    pub usage: SharedUsageTelemetry,
 }
 
 impl Default for AppState {
     fn default() -> Self {
+        let usage = new_shared_usage_telemetry().expect("usage telemetry must initialize");
+        Self::with_usage(usage)
+    }
+}
+
+impl AppState {
+    pub fn with_usage(usage: SharedUsageTelemetry) -> Self {
         Self {
             sessions_by_id: HashMap::new(),
             datasets_by_id: HashMap::new(),
             views_by_id: HashMap::new(),
             compat_session_id: None,
             render_caches: new_shared_render_cache_registry(),
+            usage,
         }
     }
 }
@@ -57,6 +67,10 @@ pub type SharedAppState = Arc<RwLock<AppState>>;
 
 pub fn new_shared_state() -> SharedAppState {
     Arc::new(RwLock::new(AppState::default()))
+}
+
+pub fn new_shared_state_with_usage(usage: SharedUsageTelemetry) -> SharedAppState {
+    Arc::new(RwLock::new(AppState::with_usage(usage)))
 }
 
 pub fn create_session_record(state: &mut AppState, prefix: &str) -> SessionRecord {

@@ -816,6 +816,76 @@ Note: these are included for developer reference. Implementations may use genera
 - Make LOD selection explicit and explainable: LOD chosen such that voxel-to-screen pixel ratio stays within a target band.
 - Return both “draft” and “final” semantics; allow clients to request final for stable analysis snapshots.
 
+## 15. Usage Telemetry + Embedded UI (Phase 4)
+
+### 15.1 Purpose
+
+Provide local operator visibility into how LLM agents use the viewer API:
+
+- Live operation timeline.
+- Per-run aggregate metrics.
+- Render response preview support when inline image bytes are available.
+
+### 15.2 Correlation Headers
+
+All core endpoints should accept optional request headers:
+
+- `X-Lucida-Agent-Run-Id`
+- `X-Lucida-Agent-Step-Id`
+- `X-Lucida-Agent-Name`
+
+These headers are additive and must not change endpoint request/response bodies.
+
+### 15.3 Usage API Endpoints
+
+- `GET /usage/events`
+  - Query: `limit`, `before_id`, `run_id`, `endpoint`, `status_code`, `from_ts`, `to_ts`
+  - Returns reverse-chronological usage events with request/response payload snapshots.
+- `GET /usage/runs`
+  - Query: `limit`, `before_start_ts`
+  - Returns run-level aggregates (`event_count`, `error_count`, `render_count`, p50/p95 latency).
+- `GET /usage/runs/{run_id}`
+  - Returns one run summary plus recent events.
+- `GET /usage/events/stream`
+  - SSE stream of newly recorded usage events, optional `run_id` filter.
+
+### 15.4 Embedded UI Routes
+
+- `GET /ui`
+- `GET /ui/*` static assets
+
+The UI is zero-build static web assets served by the daemon and consumes `/usage/*` APIs plus SSE.
+
+### 15.5 Telemetry Storage + Retention
+
+Default storage target:
+
+- `output/usage/lucida_usage.sqlite`
+
+Retention defaults:
+
+- Max age: 14 days
+- Max rows: 50,000 events
+- Max DB size: 1 GiB
+
+Pruning triggers:
+
+- Daemon startup
+- After each usage event insert
+
+Environment overrides:
+
+- `LUCIDA_USAGE_DB_PATH`
+- `LUCIDA_USAGE_RETENTION_DAYS`
+- `LUCIDA_USAGE_MAX_EVENTS`
+- `LUCIDA_USAGE_MAX_DB_BYTES`
+
+### 15.6 SSE Semantics
+
+- Event name: `usage_event`
+- Data payload: JSON-encoded usage event object.
+- Intended for local dashboard live updates; clients may reconnect and hydrate history via `GET /usage/events`.
+
 ---
 
 End of spec.
