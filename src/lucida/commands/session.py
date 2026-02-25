@@ -6,10 +6,10 @@ import json
 
 import typer
 
-from lucida.client import LucidaClient, LucidaClientError
+from lucida.client import LucidaClientError
 from lucida.errors import LucidaError
 
-from .common import emit_client_error, emit_exception, resolve_cli_base_url
+from .common import create_cli_client, emit_client_error, emit_exception
 
 session_app = typer.Typer(no_args_is_help=True)
 
@@ -23,8 +23,7 @@ def session_create(
 ) -> None:
     """Create a new session via API."""
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.create_session()
     except LucidaError as exc:
         emit_exception(exc)

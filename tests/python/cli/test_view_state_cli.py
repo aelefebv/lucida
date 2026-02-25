@@ -1,18 +1,12 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from lucida.cli import app
-
-
-def _rust_backend_env(base_url: str) -> dict[str, str]:
-    env = dict(os.environ)
-    env["LUCIDA_BASE_URL"] = base_url
-    return env
+from cli_helpers import build_cli_env, create_view_context, run_cli, run_cli_json
 
 
 def test_cli_view_flow(
@@ -21,81 +15,38 @@ def test_cli_view_flow(
     tmp_path: Path,
 ) -> None:
     runner = CliRunner()
-    cli_env = _rust_backend_env(rust_daemon_base_url)
+    cli_env = build_cli_env(base_url=rust_daemon_base_url)
+    view_context = create_view_context(runner, env=cli_env, dataset_uri=local_omezarr_uri)
 
-    session_result = runner.invoke(
-        app,
-        ["session", "create", "--json"],
-        env=cli_env,
-    )
-    assert session_result.exit_code == 0
-    session_id = json.loads(session_result.stdout)["session_id"]
-
-    open_result = runner.invoke(
-        app,
-        [
-            "dataset",
-            "open",
-            "--uri",
-            local_omezarr_uri,
-            "--session-id",
-            session_id,
-            "--json",
-        ],
-        env=cli_env,
-    )
-    assert open_result.exit_code == 0
-    dataset_payload = json.loads(open_result.stdout)
-    dataset_id = dataset_payload["dataset_summary"]["dataset_id"]
-
-    create_result = runner.invoke(
-        app,
-        [
-            "view",
-            "create",
-            "--dataset-id",
-            dataset_id,
-            "--session-id",
-            session_id,
-            "--json",
-        ],
-        env=cli_env,
-    )
-    assert create_result.exit_code == 0
-    create_payload = json.loads(create_result.stdout)
-    view_id = create_payload["view_state"]["view_id"]
-
-    set_dim_result = runner.invoke(
-        app,
+    set_dim_payload = run_cli_json(
+        runner,
         [
             "view",
             "set",
             "dim",
             "--view-id",
-            view_id,
+            view_context.view_id,
             "--axis",
             "z",
             "--index",
             "3",
             "--session-id",
-            session_id,
+            view_context.session_id,
             "--json",
         ],
         env=cli_env,
     )
-    assert set_dim_result.exit_code == 0
-    set_dim_payload = json.loads(set_dim_result.stdout)
     z_selector = next(item for item in set_dim_payload["selectors_applied"] if item["axis"] == "z")
     assert z_selector["index"] == 3
 
-    set_range_result = runner.invoke(
-        app,
+    set_range_payload = run_cli_json(
+        runner,
         [
             "view",
             "set",
             "range",
             "--view-id",
-            view_id,
+            view_context.view_id,
             "--axis",
             "z",
             "--start",
@@ -103,24 +54,22 @@ def test_cli_view_flow(
             "--end-exclusive",
             "4",
             "--session-id",
-            session_id,
+            view_context.session_id,
             "--json",
         ],
         env=cli_env,
     )
-    assert set_range_result.exit_code == 0
-    set_range_payload = json.loads(set_range_result.stdout)
     z_range_selector = next(item for item in set_range_payload["selectors_applied"] if item["axis"] == "z")
     assert z_range_selector["start"] == 1
 
-    set_set_result = runner.invoke(
-        app,
+    set_set_payload = run_cli_json(
+        runner,
         [
             "view",
             "set",
             "set",
             "--view-id",
-            view_id,
+            view_context.view_id,
             "--axis",
             "z",
             "--index",
@@ -130,13 +79,11 @@ def test_cli_view_flow(
             "--index",
             "2",
             "--session-id",
-            session_id,
+            view_context.session_id,
             "--json",
         ],
         env=cli_env,
     )
-    assert set_set_result.exit_code == 0
-    set_set_payload = json.loads(set_set_result.stdout)
     z_set_selector = next(item for item in set_set_payload["selectors_applied"] if item["axis"] == "z")
     assert z_set_selector["indices"] == [0, 2]
 
@@ -153,32 +100,30 @@ def test_cli_view_flow(
         ),
         encoding="utf-8",
     )
-    update_result = runner.invoke(
-        app,
+    update_payload = run_cli_json(
+        runner,
         [
             "view",
             "update",
             "--view-id",
-            view_id,
+            view_context.view_id,
             "--patch-file",
             str(patch_path),
             "--session-id",
-            session_id,
+            view_context.session_id,
             "--json",
         ],
         env=cli_env,
     )
-    assert update_result.exit_code == 0
-    update_payload = json.loads(update_result.stdout)
     assert update_payload["view_state"]["state_version"] >= 1
 
-    inline_patch_result = runner.invoke(
-        app,
+    inline_patch_payload = run_cli_json(
+        runner,
         [
             "view",
             "update",
             "--view-id",
-            view_id,
+            view_context.view_id,
             "--patch-json",
             json.dumps(
                 [
@@ -192,45 +137,73 @@ def test_cli_view_flow(
             "--expected-state-version",
             str(update_payload["view_state"]["state_version"]),
             "--session-id",
-            session_id,
+            view_context.session_id,
             "--json",
         ],
         env=cli_env,
     )
-    assert inline_patch_result.exit_code == 0
-    inline_patch_payload = json.loads(inline_patch_result.stdout)
     assert inline_patch_payload["view_state"]["state_version"] == update_payload["view_state"]["state_version"] + 1
 
-    get_result = runner.invoke(
-        app,
+    conflict_payload = run_cli_json(
+        runner,
+        [
+            "view",
+            "update",
+            "--view-id",
+            view_context.view_id,
+            "--patch-json",
+            json.dumps(
+                [
+                    {
+                        "op": "replace",
+                        "path": "/selectors",
+                        "value": [{"axis": "z", "kind": "index", "index": 0, "clamp": True}],
+                    }
+                ]
+            ),
+            "--expected-state-version",
+            "0",
+            "--session-id",
+            view_context.session_id,
+            "--json",
+        ],
+        env=cli_env,
+        expected_exit=1,
+    )
+    assert "state_conflict" in conflict_payload["message"]
+
+    get_payload = run_cli_json(
+        runner,
         [
             "view",
             "get",
             "state",
             "--view-id",
-            view_id,
+            view_context.view_id,
             "--session-id",
-            session_id,
+            view_context.session_id,
             "--json",
         ],
         env=cli_env,
     )
-    assert get_result.exit_code == 0
-    get_payload = json.loads(get_result.stdout)
-    assert get_payload["view_state"]["view_id"] == view_id
+    assert get_payload["view_state"]["view_id"] == view_context.view_id
 
 
 def test_cli_view_legacy_aliases_removed() -> None:
     runner = CliRunner()
 
-    set_dim_result = runner.invoke(app, ["view", "set-dim", "--help"])
+    set_dim_result = run_cli(runner, ["view", "set-dim", "--help"], env={})
     assert set_dim_result.exit_code != 0
     assert "No such command" in set_dim_result.output
 
-    pan_result = runner.invoke(app, ["view", "pan", "--help"])
+    pan_result = run_cli(runner, ["view", "pan", "--help"], env={})
     assert pan_result.exit_code != 0
     assert "No such command" in pan_result.output
 
-    bare_get_result = runner.invoke(app, ["view", "get", "--view-id", "view_123", "--json"])
+    bare_get_result = run_cli(
+        runner,
+        ["view", "get", "--view-id", "view_123", "--json"],
+        env={},
+    )
     assert bare_get_result.exit_code != 0
     assert "No such option" in bare_get_result.output

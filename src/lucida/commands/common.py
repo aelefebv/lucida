@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, NoReturn
 
 import typer
 
-from lucida.client import LucidaClientError
+from lucida.client import LucidaClient, LucidaClientError
 from lucida.errors import LucidaError, as_api_error_payload
 from lucida.models.view_state import AxisSelector, View2D, ViewState
 from lucida.runtime_config import resolve_runtime_config
@@ -97,6 +98,26 @@ def resolve_cli_base_url(base_url_override: str | None) -> str:
     """Resolve effective HTTP URL for CLI commands."""
     runtime = resolve_runtime_config(base_url_override=base_url_override)
     return runtime.base_url
+
+
+def create_cli_client(base_url_override: str | None) -> LucidaClient:
+    """Create a Lucida client with CLI runtime/env defaults."""
+    return LucidaClient(
+        base_url=resolve_cli_base_url(base_url_override),
+        agent_run_id=_read_optional_env("LUCIDA_AGENT_RUN_ID"),
+        agent_step_id=_read_optional_env("LUCIDA_AGENT_STEP_ID"),
+        agent_name=_read_optional_env("LUCIDA_AGENT_NAME"),
+    )
+
+
+def _read_optional_env(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    return normalized
 
 
 def emit_exception(exc: Exception) -> NoReturn:

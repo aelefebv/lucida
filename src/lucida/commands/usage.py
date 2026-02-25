@@ -6,10 +6,10 @@ import json
 
 import typer
 
-from lucida.client import LucidaClient, LucidaClientError
+from lucida.client import LucidaClientError
 from lucida.errors import LucidaError
 
-from .common import emit_client_error, emit_exception, resolve_cli_base_url
+from .common import create_cli_client, emit_client_error, emit_exception
 
 usage_app = typer.Typer(no_args_is_help=True)
 
@@ -30,8 +30,7 @@ def usage_events(
 ) -> None:
     """List usage telemetry events."""
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.list_usage_events(
                 limit=limit,
                 before_id=before_id,
@@ -72,8 +71,7 @@ def usage_runs(
 ) -> None:
     """List usage run aggregates."""
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.list_usage_runs(limit=limit, before_start_ts=before_start_ts)
     except LucidaError as exc:
         emit_exception(exc)
@@ -104,8 +102,7 @@ def usage_run(
 ) -> None:
     """Fetch one usage run summary and recent events."""
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.get_usage_run(run_id=run_id, event_limit=event_limit)
     except LucidaError as exc:
         emit_exception(exc)
@@ -134,8 +131,7 @@ def usage_stream_url(
 ) -> None:
     """Build the usage events SSE stream URL."""
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             stream_url = client.usage_events_stream_url(run_id=run_id)
     except LucidaError as exc:
         emit_exception(exc)

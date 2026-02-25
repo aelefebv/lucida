@@ -8,19 +8,19 @@ from typing import Any
 
 import typer
 
-from lucida.client import LucidaClient, LucidaClientError
+from lucida.client import LucidaClientError
 from lucida.errors import LucidaError
 from lucida.models.api import ViewCreateResponse, ViewStateImportResponse, ViewUpdateResponse
 from lucida.models.view_state import ViewState, Viewport
 
 from .common import (
+    create_cli_client,
     emit_client_error,
     emit_exception,
     load_patch,
     load_selectors,
     load_view_2d,
     load_view_state,
-    resolve_cli_base_url,
 )
 
 view_app = typer.Typer(no_args_is_help=True)
@@ -68,8 +68,7 @@ def view_create(
         view_2d_value = load_view_2d(view_2d_file, view_2d_json)
         viewport = Viewport(width_px=width_px, height_px=height_px, pixel_ratio=pixel_ratio)
 
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.create_view(
                 dataset_id=dataset_id,
                 session_id=session_id,
@@ -113,8 +112,7 @@ def view_export(
 ) -> None:
     """Export a full persisted view state."""
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.export_viewstate(view_id=view_id, session_id=session_id)
     except LucidaError as exc:
         emit_exception(exc)
@@ -160,8 +158,7 @@ def view_import(
         if view_state_value is None:
             raise ValueError("view-state input is required.")
 
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.import_viewstate(
                 view_state=view_state_value.model_dump(mode="json"),
                 session_id=session_id,
@@ -208,8 +205,7 @@ def view_update(
     """Apply an RFC6902 JSON patch to a view."""
     try:
         patch = load_patch(patch_file, patch_json)
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.update_view(
                 view_id=view_id,
                 patch=patch,
@@ -571,8 +567,7 @@ def view_get_screenshot(
     try:
         if delivery not in {"inline_base64", "file_path"}:
             raise ValueError("delivery must be one of: inline_base64, file_path.")
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             view_state = client.get_view(view_id=view_id, session_id=session_id).view_state
             resolved_width_px = width_px if width_px is not None else view_state.viewport.width_px
             resolved_height_px = height_px if height_px is not None else view_state.viewport.height_px
@@ -604,8 +599,7 @@ def view_get_screenshot(
 
 
 def _get_view_state(*, view_id: str, session_id: str | None, base_url: str | None) -> ViewState:
-    resolved_base_url = resolve_cli_base_url(base_url)
-    with LucidaClient(base_url=resolved_base_url) as client:
+    with create_cli_client(base_url) as client:
         response = client.get_view(view_id=view_id, session_id=session_id)
     return response.view_state
 
@@ -618,8 +612,7 @@ def _emit_view_state(
     base_url: str | None,
 ) -> None:
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.get_view(view_id=view_id, session_id=session_id)
     except LucidaError as exc:
         emit_exception(exc)
@@ -647,8 +640,7 @@ def _run_selector_helper(
     payload: dict[str, Any],
 ) -> ViewUpdateResponse:
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             if helper == "index":
                 return client.set_dim(
                     view_id=view_id,
@@ -689,8 +681,7 @@ def _run_navigation_helper(
     payload: dict[str, Any],
 ) -> ViewUpdateResponse:
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             if helper == "set-plane":
                 return client.set_plane(
                     view_id=view_id,

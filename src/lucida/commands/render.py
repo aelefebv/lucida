@@ -7,10 +7,16 @@ from pathlib import Path
 
 import typer
 
-from lucida.client import LucidaClient, LucidaClientError
+from lucida.client import LucidaClientError
 from lucida.errors import LucidaError
 
-from .common import emit_client_error, emit_exception, load_patch, load_view_state, resolve_cli_base_url
+from .common import (
+    create_cli_client,
+    emit_client_error,
+    emit_exception,
+    load_patch,
+    load_view_state,
+)
 
 render_app = typer.Typer(no_args_is_help=True)
 
@@ -74,8 +80,7 @@ def render_image(
             else None
         )
         file_path_value = str(file_path) if file_path is not None else None
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.render_image(
                 view_id=view_id,
                 view_state=(

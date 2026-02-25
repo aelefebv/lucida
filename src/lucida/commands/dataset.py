@@ -6,10 +6,10 @@ import json
 
 import typer
 
-from lucida.client import LucidaClient, LucidaClientError
+from lucida.client import LucidaClientError
 from lucida.errors import LucidaError
 
-from .common import emit_client_error, emit_exception, resolve_cli_base_url
+from .common import create_cli_client, emit_client_error, emit_exception
 
 dataset_app = typer.Typer(no_args_is_help=True)
 
@@ -29,8 +29,7 @@ def dataset_open(
 ) -> None:
     """Open a dataset locally or via API and print a compact summary."""
     try:
-        resolved_base_url = resolve_cli_base_url(base_url)
-        with LucidaClient(base_url=resolved_base_url) as client:
+        with create_cli_client(base_url) as client:
             response = client.open_dataset(
                 uri=uri,
                 dataset_id=dataset_id,
