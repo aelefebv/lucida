@@ -848,15 +848,28 @@ These headers are additive and must not change endpoint request/response bodies.
   - Returns one run summary plus recent events.
 - `GET /usage/events/stream`
   - SSE stream of newly recorded usage events, optional `run_id` filter.
+- `GET /usage/thumbs/{*path}`
+  - Serves persisted render thumbnail PNGs under `output/usage/thumbs/*`.
+  - Path traversal is rejected.
+- `GET /session/list`
+  - Returns active in-memory sessions with dataset/view counts and ids.
+- `GET /view/list`
+  - Query: `session_id` (optional)
+  - Returns active in-memory views; can be filtered by session.
+- `GET /view/events/stream`
+  - Query: `view_id` (required), `session_id` (optional)
+  - SSE stream of view-scoped real-time events (`view_event`) for browser live mirror clients.
 
 ### 15.4 Embedded UI Routes
 
 - `GET /ui`
+- `GET /ui/live`
 - `GET /ui/replay`
 - `GET /ui/*` static assets
 
 The UI is zero-build static web assets served by the daemon and consumes `/usage/*` APIs plus SSE.
-`/ui` is the timeline/analytics surface. `/ui/replay` is a decoupled visual playback surface for step-through action replay.
+`/ui` is the timeline/analytics surface. `/ui/live` is a read-only real-time mirror for one `view_id`.
+`/ui/replay` is a decoupled visual playback surface for step-through action replay.
 
 ### 15.5 Telemetry Storage + Retention
 
@@ -887,6 +900,27 @@ Environment overrides:
 - Event name: `usage_event`
 - Data payload: JSON-encoded usage event object.
 - Intended for local dashboard live updates; clients may reconnect and hydrate history via `GET /usage/events`.
+- Event name: `view_event`
+- Data payload schema:
+  - `schema_version`
+  - `event_type` (`view_state_committed` | `render_completed`)
+  - `occurred_at_utc`
+  - `endpoint`
+  - `view_id`
+  - `session_id`
+  - `state_hash`
+  - `state_version`
+  - `render_id`
+  - `thumbnail` (`url`, `sha256`, `width_px`, `height_px`) when available
+- Intended for real-time browser mirroring of one explicit `view_id`.
+
+### 15.7 Thumbnail Persistence
+
+- Render thumbnails are generated from successful `/render/image` inline payloads.
+- Thumbnails are resized to fit within a 320px max edge and encoded as PNG.
+- Files are stored under `output/usage/thumbs/YYYY-MM-DD/<render_id>.png`.
+- Usage telemetry stores thumbnail metadata under `response_json.usage_thumbnail`; full render bytes remain omitted.
+- Thumbnail folders are pruned by retention age during telemetry prune cycles.
 
 ---
 

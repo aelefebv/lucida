@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration as StdDuration, Instant};
 
 use axum::http::{HeaderMap, Method};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde_json::{json, Value};
@@ -497,6 +497,43 @@ impl UsageTelemetry {
                     format!("failed to checkpoint usage db during pruning: {error}")
                 })?;
         }
+        self.prune_thumbnail_files(cutoff.date_naive())?;
+        Ok(())
+    }
+
+    fn prune_thumbnail_files(&self, cutoff_date: NaiveDate) -> Result<(), String> {
+        let thumb_root = usage_thumbnail_root();
+        if !thumb_root.exists() {
+            return Ok(());
+        }
+        let entries = fs::read_dir(&thumb_root).map_err(|error| {
+            format!(
+                "failed to list thumbnail directory '{}': {error}",
+                thumb_root.display()
+            )
+        })?;
+        for entry_result in entries {
+            let entry =
+                entry_result.map_err(|error| format!("failed to read thumbnail entry: {error}"))?;
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let Ok(date) = NaiveDate::parse_from_str(name, "%Y-%m-%d") else {
+                continue;
+            };
+            if date < cutoff_date {
+                fs::remove_dir_all(&path).map_err(|error| {
+                    format!(
+                        "failed to remove pruned thumbnail directory '{}': {error}",
+                        path.display()
+                    )
+                })?;
+            }
+        }
         Ok(())
     }
 
@@ -753,6 +790,23 @@ fn default_usage_db_path() -> PathBuf {
         .join("output")
         .join("usage")
         .join("lucida_usage.sqlite")
+}
+
+pub fn usage_data_root() -> PathBuf {
+    default_usage_db_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("..")
+                .join("output")
+                .join("usage")
+        })
+}
+
+pub fn usage_thumbnail_root() -> PathBuf {
+    usage_data_root().join("thumbs")
 }
 
 pub fn normalize_instrumented_endpoint(method: &Method, path: &str) -> Option<String> {

@@ -106,9 +106,14 @@ function buildFrames(events) {
   const sorted = [...events].sort((a, b) => Number(a.id) - Number(b.id));
   const frames = sorted.map((event, index) => {
     const inlineArtifact = extractInlineRenderArtifact(event);
+    const thumbnailUrl = extractThumbnailUrl(event);
+    const inlineBytes = inlineArtifact ? inlineArtifact.bytes_base64 : null;
     const inlineImageUrl =
-      inlineArtifact && inlineArtifact.bytes_base64
-        ? `data:${inlineArtifact.mime || "image/png"};base64,${inlineArtifact.bytes_base64}`
+      inlineArtifact &&
+      typeof inlineBytes === "string" &&
+      inlineBytes !== "<omitted>" &&
+      inlineBytes.length > 0
+        ? `data:${inlineArtifact.mime || "image/png"};base64,${inlineBytes}`
         : null;
     const viewState = extractViewState(event);
     return {
@@ -116,6 +121,7 @@ function buildFrames(events) {
       event,
       viewState,
       inlineImageUrl,
+      thumbnailUrl,
     };
   });
   recomputeFrameMetadata(frames);
@@ -124,12 +130,17 @@ function buildFrames(events) {
 
 function recomputeFrameMetadata(frames) {
   let latestInlineFrameIndex = -1;
+  let latestVisualFrameIndex = -1;
   frames.forEach((frame, index) => {
     frame.frameIndex = index;
     if (frame.inlineImageUrl) {
       latestInlineFrameIndex = index;
     }
+    if (frame.inlineImageUrl || frame.thumbnailUrl) {
+      latestVisualFrameIndex = index;
+    }
     frame.latestInlineFrameIndex = latestInlineFrameIndex;
+    frame.latestVisualFrameIndex = latestVisualFrameIndex;
   });
 }
 
@@ -139,6 +150,18 @@ function extractInlineRenderArtifact(event) {
     return null;
   }
   return response.images[0];
+}
+
+function extractThumbnailUrl(event) {
+  const response = event && typeof event.response_json === "object" ? event.response_json : null;
+  if (!response || typeof response.usage_thumbnail !== "object" || response.usage_thumbnail === null) {
+    return null;
+  }
+  const url = response.usage_thumbnail.url;
+  if (typeof url !== "string" || url.trim() === "") {
+    return null;
+  }
+  return url;
 }
 
 function extractViewState(event) {
@@ -198,6 +221,8 @@ function renderRunEventRow(frame, active) {
   }
   if (frame.inlineImageUrl) {
     meta.appendChild(chip("inline-image"));
+  } else if (frame.thumbnailUrl) {
+    meta.appendChild(chip("thumb"));
   } else if (frame.viewState) {
     meta.appendChild(chip("view-state"));
   }
@@ -304,9 +329,15 @@ async function renderViewport(frame, renderVersion) {
 
     if (resolved.source === "inline") {
       setViewportNote("Captured render from this action.");
+    } else if (resolved.source === "thumbnail") {
+      setViewportNote("Thumbnail captured for this action.");
     } else if (resolved.source === "fallback-inline" && resolved.sourceFrame) {
       setViewportNote(
         `No render output on this action. Showing latest captured frame ${resolved.sourceFrame.frameIndex + 1}.`,
+      );
+    } else if (resolved.source === "fallback-thumbnail" && resolved.sourceFrame) {
+      setViewportNote(
+        `No render output on this action. Showing latest thumbnail frame ${resolved.sourceFrame.frameIndex + 1}.`,
       );
     } else {
       setViewportNote("Re-rendered from view state (slower mode).");
@@ -320,16 +351,16 @@ async function renderViewport(frame, renderVersion) {
   }
 }
 
-function getLatestInlineFrame(frame) {
-  if (!frame || typeof frame.latestInlineFrameIndex !== "number") {
+function getLatestVisualFrame(frame) {
+  if (!frame || typeof frame.latestVisualFrameIndex !== "number") {
     return null;
   }
-  const index = frame.latestInlineFrameIndex;
+  const index = frame.latestVisualFrameIndex;
   if (index < 0 || index >= state.frames.length) {
     return null;
   }
   const candidate = state.frames[index];
-  if (!candidate || !candidate.inlineImageUrl) {
+  if (!candidate || (!candidate.inlineImageUrl && !candidate.thumbnailUrl)) {
     return null;
   }
   return candidate;
@@ -339,15 +370,28 @@ async function resolveFrameImage(frame) {
   if (frame.inlineImageUrl) {
     return { imageUrl: frame.inlineImageUrl, source: "inline", sourceFrame: frame };
   }
-  const fallbackFrame = getLatestInlineFrame(frame);
+  if (frame.thumbnailUrl) {
+    return { imageUrl: frame.thumbnailUrl, source: "thumbnail", sourceFrame: frame };
+  }
+  const fallbackFrame = getLatestVisualFrame(frame);
   const rerenderAllowed = Boolean(el.rerenderMissing.checked) && !state.isPlaying;
   if (fallbackFrame && !rerenderAllowed) {
-    return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+    if (fallbackFrame.inlineImageUrl) {
+      return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+    }
+    if (fallbackFrame.thumbnailUrl) {
+      return { imageUrl: fallbackFrame.thumbnailUrl, source: "fallback-thumbnail", sourceFrame: fallbackFrame };
+    }
   }
 
   if (!frame.viewState) {
     if (fallbackFrame) {
-      return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+      if (fallbackFrame.inlineImageUrl) {
+        return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+      }
+      if (fallbackFrame.thumbnailUrl) {
+        return { imageUrl: fallbackFrame.thumbnailUrl, source: "fallback-thumbnail", sourceFrame: fallbackFrame };
+      }
     }
     return null;
   }
@@ -378,7 +422,12 @@ async function resolveFrameImage(frame) {
   });
   if (!response.ok) {
     if (fallbackFrame) {
-      return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+      if (fallbackFrame.inlineImageUrl) {
+        return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+      }
+      if (fallbackFrame.thumbnailUrl) {
+        return { imageUrl: fallbackFrame.thumbnailUrl, source: "fallback-thumbnail", sourceFrame: fallbackFrame };
+      }
     }
     return null;
   }
@@ -386,7 +435,12 @@ async function resolveFrameImage(frame) {
   const artifact = Array.isArray(rendered.images) ? rendered.images[0] : null;
   if (!artifact || !artifact.bytes_base64) {
     if (fallbackFrame) {
-      return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+      if (fallbackFrame.inlineImageUrl) {
+        return { imageUrl: fallbackFrame.inlineImageUrl, source: "fallback-inline", sourceFrame: fallbackFrame };
+      }
+      if (fallbackFrame.thumbnailUrl) {
+        return { imageUrl: fallbackFrame.thumbnailUrl, source: "fallback-thumbnail", sourceFrame: fallbackFrame };
+      }
     }
     return null;
   }

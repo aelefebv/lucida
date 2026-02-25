@@ -12,6 +12,7 @@ use crate::dto::view_state::ViewState;
 use crate::error::ApiError;
 use crate::render_cache::{new_shared_render_cache_registry, SharedRenderCacheRegistry};
 use crate::usage::{new_shared_usage_telemetry, SharedUsageTelemetry};
+use crate::view_events::{new_shared_view_event_bus, SharedViewEventBus};
 
 #[derive(Debug, Clone)]
 pub struct SessionRecord {
@@ -41,6 +42,7 @@ pub struct AppState {
     pub compat_session_id: Option<String>,
     pub render_caches: SharedRenderCacheRegistry,
     pub usage: SharedUsageTelemetry,
+    pub view_events: SharedViewEventBus,
 }
 
 impl Default for AppState {
@@ -59,6 +61,7 @@ impl AppState {
             compat_session_id: None,
             render_caches: new_shared_render_cache_registry(),
             usage,
+            view_events: new_shared_view_event_bus(),
         }
     }
 }

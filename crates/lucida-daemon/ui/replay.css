@@ -46,6 +46,12 @@ body {
   color: var(--muted);
 }
 
+.top-links {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .link-btn {
   display: inline-block;
   border: 1px solid var(--line);

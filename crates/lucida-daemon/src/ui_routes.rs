@@ -10,6 +10,9 @@ const APP_JS: &str = include_str!("../ui/app.js");
 const REPLAY_HTML: &str = include_str!("../ui/replay.html");
 const REPLAY_CSS: &str = include_str!("../ui/replay.css");
 const REPLAY_JS: &str = include_str!("../ui/replay.js");
+const LIVE_HTML: &str = include_str!("../ui/live.html");
+const LIVE_CSS: &str = include_str!("../ui/live.css");
+const LIVE_JS: &str = include_str!("../ui/live.js");
 
 pub async fn ui_index() -> Html<&'static str> {
     Html(INDEX_HTML)
@@ -17,6 +20,10 @@ pub async fn ui_index() -> Html<&'static str> {
 
 pub async fn ui_replay() -> Html<&'static str> {
     Html(REPLAY_HTML)
+}
+
+pub async fn ui_live() -> Html<&'static str> {
+    Html(LIVE_HTML)
 }
 
 pub async fn ui_asset(Path(path): Path<String>) -> Result<(HeaderMap, &'static str), ApiError> {
@@ -28,6 +35,9 @@ pub async fn ui_asset(Path(path): Path<String>) -> Result<(HeaderMap, &'static s
         "replay" | "replay.html" => Ok((html_headers(), REPLAY_HTML)),
         "replay.css" => Ok((css_headers(), REPLAY_CSS)),
         "replay.js" => Ok((js_headers(), REPLAY_JS)),
+        "live" | "live.html" => Ok((html_headers(), LIVE_HTML)),
+        "live.css" => Ok((css_headers(), LIVE_CSS)),
+        "live.js" => Ok((js_headers(), LIVE_JS)),
         _ => Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "ui_asset_not_found",

@@ -6,7 +6,9 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::dto::api::{ViewCreateResponse, ViewGetResponse, ViewUpdateResponse};
+use crate::dto::api::{
+    ViewCreateResponse, ViewGetResponse, ViewListItem, ViewListResponse, ViewUpdateResponse,
+};
 use crate::dto::view_state::{AxisSelector, DatasetRef, RenderMode, View2D, ViewState, Viewport};
 use crate::error::ApiError;
 use crate::request_validation::{
@@ -24,6 +26,11 @@ use crate::view_state_core::{
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ViewGetQuery {
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ViewListQuery {
     pub session_id: Option<String>,
 }
 
@@ -191,6 +198,53 @@ pub async fn view_get(
     Ok(Json(ViewGetResponse {
         schema_version: 1,
         view_state: view_record.view_state.clone(),
+    }))
+}
+
+pub async fn view_list(
+    Query(query): Query<ViewListQuery>,
+    State(state): State<SharedAppState>,
+) -> Result<Json<ViewListResponse>, ApiError> {
+    let views = {
+        let app_state = state.read().await;
+        if let Some(session_id) = query.session_id.as_deref() {
+            require_session(&app_state, session_id)?;
+        }
+
+        let mut items = app_state
+            .views_by_id
+            .values()
+            .filter(|record| match query.session_id.as_deref() {
+                Some(session_id) => record.session_id == session_id,
+                None => true,
+            })
+            .map(|record| ViewListItem {
+                view_id: record.view_state.view_id.clone(),
+                session_id: record.session_id.clone(),
+                created_at: record.view_state.created_at,
+                mode: record.view_state.mode.clone(),
+                dataset_ids: record
+                    .view_state
+                    .datasets
+                    .iter()
+                    .map(|dataset| dataset.dataset_id.clone())
+                    .collect(),
+                state_hash: record.view_state.state_hash.clone(),
+                state_version: record.view_state.state_version,
+            })
+            .collect::<Vec<ViewListItem>>();
+        items.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.view_id.cmp(&left.view_id))
+        });
+        items
+    };
+
+    Ok(Json(ViewListResponse {
+        schema_version: 1,
+        views,
     }))
 }
 

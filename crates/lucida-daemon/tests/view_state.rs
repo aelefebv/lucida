@@ -566,6 +566,184 @@ async fn duplicate_selector_axes_are_rejected() {
     assert_eq!(payload["details"]["axis"], "z");
 }
 
+#[tokio::test]
+async fn session_list_returns_active_sessions() {
+    let router = app();
+
+    let first = request_json(
+        &router,
+        "POST",
+        "/session/create",
+        json!({"schema_version": 1}),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_session_id = read_json_body(first).await["session_id"]
+        .as_str()
+        .expect("first session_id")
+        .to_owned();
+
+    let second = request_json(
+        &router,
+        "POST",
+        "/session/create",
+        json!({"schema_version": 1}),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_session_id = read_json_body(second).await["session_id"]
+        .as_str()
+        .expect("second session_id")
+        .to_owned();
+
+    let listed = request_get(&router, "/session/list", None).await;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let payload = read_json_body(listed).await;
+    assert_eq!(payload["schema_version"], 1);
+    let sessions = payload["sessions"].as_array().expect("sessions array");
+    assert!(sessions
+        .iter()
+        .any(|item| item["session_id"] == first_session_id));
+    assert!(sessions
+        .iter()
+        .any(|item| item["session_id"] == second_session_id));
+}
+
+#[tokio::test]
+async fn view_list_returns_active_views_and_supports_session_filter() {
+    let router = app();
+    let dataset_path = unique_dataset_path("view-list-filter");
+    create_sample_omezarr(&dataset_path, SampleDatasetOptions::default());
+
+    let session_one = request_json(
+        &router,
+        "POST",
+        "/session/create",
+        json!({"schema_version": 1}),
+    )
+    .await;
+    assert_eq!(session_one.status(), StatusCode::OK);
+    let session_one_id = read_json_body(session_one).await["session_id"]
+        .as_str()
+        .expect("session one id")
+        .to_owned();
+
+    let session_two = request_json(
+        &router,
+        "POST",
+        "/session/create",
+        json!({"schema_version": 1}),
+    )
+    .await;
+    assert_eq!(session_two.status(), StatusCode::OK);
+    let session_two_id = read_json_body(session_two).await["session_id"]
+        .as_str()
+        .expect("session two id")
+        .to_owned();
+
+    let opened_one = request_json(
+        &router,
+        "POST",
+        "/dataset/open",
+        json!({
+            "schema_version": 1,
+            "uri": dataset_path.to_string_lossy(),
+            "session_id": session_one_id,
+        }),
+    )
+    .await;
+    assert_eq!(opened_one.status(), StatusCode::OK);
+    let dataset_id = read_json_body(opened_one).await["dataset_summary"]["dataset_id"]
+        .as_str()
+        .expect("dataset_id")
+        .to_owned();
+
+    let opened_two = request_json(
+        &router,
+        "POST",
+        "/dataset/open",
+        json!({
+            "schema_version": 1,
+            "uri": dataset_path.to_string_lossy(),
+            "session_id": session_two_id,
+        }),
+    )
+    .await;
+    assert_eq!(opened_two.status(), StatusCode::OK);
+
+    let created_one = request_json(
+        &router,
+        "POST",
+        "/view/create",
+        json!({
+            "schema_version": 1,
+            "session_id": session_one_id,
+            "dataset_id": dataset_id,
+            "mode": "2d",
+        }),
+    )
+    .await;
+    assert_eq!(created_one.status(), StatusCode::OK);
+    let view_one_id = read_json_body(created_one).await["view_state"]["view_id"]
+        .as_str()
+        .expect("view one id")
+        .to_owned();
+
+    let created_two = request_json(
+        &router,
+        "POST",
+        "/view/create",
+        json!({
+            "schema_version": 1,
+            "session_id": session_two_id,
+            "dataset_id": dataset_id,
+            "mode": "2d",
+        }),
+    )
+    .await;
+    assert_eq!(created_two.status(), StatusCode::OK);
+    let view_two_id = read_json_body(created_two).await["view_state"]["view_id"]
+        .as_str()
+        .expect("view two id")
+        .to_owned();
+
+    let listed = request_get(&router, "/view/list", None).await;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed_payload = read_json_body(listed).await;
+    let views = listed_payload["views"].as_array().expect("views array");
+    assert!(views.iter().any(|item| item["view_id"] == view_one_id));
+    assert!(views.iter().any(|item| item["view_id"] == view_two_id));
+
+    let filtered = request_get(
+        &router,
+        "/view/list",
+        Some(&[("session_id", session_one_id.as_str())]),
+    )
+    .await;
+    assert_eq!(filtered.status(), StatusCode::OK);
+    let filtered_payload = read_json_body(filtered).await;
+    let filtered_views = filtered_payload["views"]
+        .as_array()
+        .expect("filtered views");
+    assert!(filtered_views
+        .iter()
+        .all(|item| item["session_id"] == session_one_id));
+    assert!(filtered_views
+        .iter()
+        .any(|item| item["view_id"] == view_one_id));
+    assert!(!filtered_views
+        .iter()
+        .any(|item| item["view_id"] == view_two_id));
+
+    let missing_session = request_get(
+        &router,
+        "/view/list",
+        Some(&[("session_id", "session_missing")]),
+    )
+    .await;
+    assert_eq!(missing_session.status(), StatusCode::NOT_FOUND);
+}
+
 async fn request_json(
     router: &axum::Router,
     method: &str,

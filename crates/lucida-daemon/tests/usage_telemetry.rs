@@ -7,8 +7,9 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
-use lucida_daemon::state::new_shared_state_with_usage;
+use lucida_daemon::state::{new_shared_state, new_shared_state_with_usage};
 use lucida_daemon::usage::{new_shared_usage_telemetry_with_config, UsageConfig};
+use lucida_daemon::view_events::ViewEventType;
 use lucida_daemon::{app, app_with_state};
 use serde_json::{json, Value};
 use support::create_render_omezarr;
@@ -135,6 +136,30 @@ async fn usage_events_runs_and_error_capture_work_end_to_end() {
     assert!(events
         .iter()
         .any(|event| event["status_code"] == 422 && !event["error_code"].is_null()));
+    let successful_render = events
+        .iter()
+        .find(|event| event["endpoint"] == "/render/image" && event["status_code"] == 200)
+        .expect("successful render event");
+    let thumbnail_url = successful_render["response_json"]["usage_thumbnail"]["url"]
+        .as_str()
+        .expect("thumbnail url");
+    assert!(thumbnail_url.starts_with("/usage/thumbs/"));
+    let thumbnail_response = request_get(&router, thumbnail_url, None).await;
+    assert_eq!(thumbnail_response.status(), StatusCode::OK);
+    assert_eq!(content_type(&thumbnail_response), "image/png");
+    let thumbnail_body = thumbnail_response
+        .into_body()
+        .collect()
+        .await
+        .expect("read thumbnail")
+        .to_bytes();
+    assert!(!thumbnail_body.is_empty());
+
+    let failed_render = events
+        .iter()
+        .find(|event| event["endpoint"] == "/render/image" && event["status_code"] == 422)
+        .expect("failed render event");
+    assert!(failed_render["response_json"]["usage_thumbnail"].is_null());
 
     let runs_response = request_get(&router, "/usage/runs", Some(&[("limit", "200")])).await;
     assert_eq!(runs_response.status(), StatusCode::OK);
@@ -206,6 +231,373 @@ async fn usage_events_stream_emits_new_events() {
     .expect("stream timeout");
     let chunk = chunk.expect("stream should emit at least one event chunk");
     assert!(chunk.contains("usage_event") || chunk.contains("agent_run_id"));
+}
+
+#[tokio::test]
+async fn view_events_stream_emits_view_update_and_render_events() {
+    let router = app();
+    let run_id = format!("view-stream-{}", Uuid::new_v4().simple());
+    let dataset_path = unique_dataset_path("view-events-stream");
+    create_render_omezarr(&dataset_path);
+
+    let session_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/session/create",
+        json!({"schema_version": 1}),
+        &run_id,
+        "view-stream-session",
+    )
+    .await;
+    assert_eq!(session_response.status(), StatusCode::OK);
+    let session_id = read_json_body(session_response).await["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
+
+    let open_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/dataset/open",
+        json!({
+            "schema_version": 1,
+            "uri": dataset_path.to_string_lossy(),
+            "session_id": session_id,
+        }),
+        &run_id,
+        "view-stream-open",
+    )
+    .await;
+    assert_eq!(open_response.status(), StatusCode::OK);
+    let dataset_id = read_json_body(open_response).await["dataset_summary"]["dataset_id"]
+        .as_str()
+        .expect("dataset_id")
+        .to_owned();
+
+    let create_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/view/create",
+        json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "dataset_id": dataset_id,
+            "mode": "2d",
+        }),
+        &run_id,
+        "view-stream-create",
+    )
+    .await;
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let view_id = read_json_body(create_response).await["view_state"]["view_id"]
+        .as_str()
+        .expect("view_id")
+        .to_owned();
+
+    let stream_response = request_get(
+        &router,
+        "/view/events/stream",
+        Some(&[
+            ("view_id", view_id.as_str()),
+            ("session_id", session_id.as_str()),
+        ]),
+    )
+    .await;
+    assert_eq!(stream_response.status(), StatusCode::OK);
+    let mut stream_body = stream_response.into_body();
+
+    let update_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 1, "clamp": true}],
+                }
+            ],
+        }),
+        &run_id,
+        "view-stream-update",
+    )
+    .await;
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let update_event = wait_for_sse_event(&mut stream_body, Duration::from_secs(5), |event| {
+        event["event_type"] == "view_state_committed" && event["endpoint"] == "/view/update"
+    })
+    .await
+    .expect("view update stream event");
+    assert_eq!(update_event["view_id"], view_id);
+    assert_eq!(update_event["session_id"], session_id);
+    assert!(update_event["state_hash"].as_str().is_some());
+    assert!(update_event["state_version"].as_u64().is_some());
+
+    let render_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "session_id": session_id,
+            "output": {
+                "format": "png",
+                "delivery": "inline_base64",
+                "width_px": 96,
+                "height_px": 72,
+            },
+        }),
+        &run_id,
+        "view-stream-render",
+    )
+    .await;
+    assert_eq!(render_response.status(), StatusCode::OK);
+    let render_event = wait_for_sse_event(&mut stream_body, Duration::from_secs(5), |event| {
+        event["event_type"] == "render_completed" && event["endpoint"] == "/render/image"
+    })
+    .await
+    .expect("render stream event");
+    assert_eq!(render_event["view_id"], view_id);
+    assert_eq!(render_event["session_id"], session_id);
+    assert!(render_event["render_id"].as_str().is_some());
+    assert!(render_event["state_hash"].as_str().is_some());
+    assert!(render_event["thumbnail"]["url"]
+        .as_str()
+        .expect("thumbnail url")
+        .starts_with("/usage/thumbs/"));
+}
+
+#[tokio::test]
+async fn view_event_bus_emits_create_and_update_commits() {
+    let state = new_shared_state();
+    let view_events = {
+        let app_state = state.read().await;
+        app_state.view_events.clone()
+    };
+    let mut receiver = view_events.subscribe();
+    let router = app_with_state(state.clone());
+    let run_id = format!("view-bus-{}", Uuid::new_v4().simple());
+    let dataset_path = unique_dataset_path("view-events-bus");
+    create_render_omezarr(&dataset_path);
+
+    let session_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/session/create",
+        json!({"schema_version": 1}),
+        &run_id,
+        "view-bus-session",
+    )
+    .await;
+    assert_eq!(session_response.status(), StatusCode::OK);
+    let session_id = read_json_body(session_response).await["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
+
+    let open_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/dataset/open",
+        json!({
+            "schema_version": 1,
+            "uri": dataset_path.to_string_lossy(),
+            "session_id": session_id,
+        }),
+        &run_id,
+        "view-bus-open",
+    )
+    .await;
+    assert_eq!(open_response.status(), StatusCode::OK);
+    let dataset_id = read_json_body(open_response).await["dataset_summary"]["dataset_id"]
+        .as_str()
+        .expect("dataset_id")
+        .to_owned();
+
+    let create_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/view/create",
+        json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "dataset_id": dataset_id,
+            "mode": "2d",
+        }),
+        &run_id,
+        "view-bus-create",
+    )
+    .await;
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let view_id = read_json_body(create_response).await["view_state"]["view_id"]
+        .as_str()
+        .expect("view_id")
+        .to_owned();
+
+    let create_event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = receiver.recv().await.ok()?;
+            if event.event_type == ViewEventType::ViewStateCommitted
+                && event.endpoint == "/view/create"
+            {
+                return Some(event);
+            }
+        }
+    })
+    .await
+    .expect("create event timeout")
+    .expect("create event");
+    assert_eq!(create_event.view_id, view_id);
+    assert_eq!(
+        create_event.session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+
+    let update_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 3, "clamp": true}],
+                }
+            ],
+        }),
+        &run_id,
+        "view-bus-update",
+    )
+    .await;
+    assert_eq!(update_response.status(), StatusCode::OK);
+
+    let update_event = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let event = receiver.recv().await.ok()?;
+            if event.event_type == ViewEventType::ViewStateCommitted
+                && event.endpoint == "/view/update"
+            {
+                return Some(event);
+            }
+        }
+    })
+    .await
+    .expect("update event timeout")
+    .expect("update event");
+    assert_eq!(update_event.view_id, view_id);
+    assert_eq!(
+        update_event.session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn view_events_stream_filters_by_session_id() {
+    let router = app();
+    let run_id = format!("view-filter-{}", Uuid::new_v4().simple());
+    let dataset_path = unique_dataset_path("view-events-filter");
+    create_render_omezarr(&dataset_path);
+
+    let session_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/session/create",
+        json!({"schema_version": 1}),
+        &run_id,
+        "view-filter-session",
+    )
+    .await;
+    assert_eq!(session_response.status(), StatusCode::OK);
+    let session_id = read_json_body(session_response).await["session_id"]
+        .as_str()
+        .expect("session_id")
+        .to_owned();
+
+    let open_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/dataset/open",
+        json!({
+            "schema_version": 1,
+            "uri": dataset_path.to_string_lossy(),
+            "session_id": session_id,
+        }),
+        &run_id,
+        "view-filter-open",
+    )
+    .await;
+    assert_eq!(open_response.status(), StatusCode::OK);
+    let dataset_id = read_json_body(open_response).await["dataset_summary"]["dataset_id"]
+        .as_str()
+        .expect("dataset_id")
+        .to_owned();
+
+    let create_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/view/create",
+        json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "dataset_id": dataset_id,
+            "mode": "2d",
+        }),
+        &run_id,
+        "view-filter-create",
+    )
+    .await;
+    assert_eq!(create_response.status(), StatusCode::OK);
+    let view_id = read_json_body(create_response).await["view_state"]["view_id"]
+        .as_str()
+        .expect("view_id")
+        .to_owned();
+
+    let stream_response = request_get(
+        &router,
+        "/view/events/stream",
+        Some(&[
+            ("view_id", view_id.as_str()),
+            ("session_id", "session_missing"),
+        ]),
+    )
+    .await;
+    assert_eq!(stream_response.status(), StatusCode::OK);
+    let mut stream_body = stream_response.into_body();
+
+    let update_response = request_json_with_agent(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "session_id": session_id,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 2, "clamp": true}],
+                }
+            ],
+        }),
+        &run_id,
+        "view-filter-update",
+    )
+    .await;
+    assert_eq!(update_response.status(), StatusCode::OK);
+
+    let maybe_event =
+        wait_for_sse_event(&mut stream_body, Duration::from_millis(450), |_| true).await;
+    assert!(maybe_event.is_none());
 }
 
 #[tokio::test]
@@ -299,6 +691,67 @@ async fn ui_assets_are_served() {
     let replay_js = request_get(&router, "/ui/replay.js", None).await;
     assert_eq!(replay_js.status(), StatusCode::OK);
     assert!(content_type(&replay_js).contains("application/javascript"));
+
+    let live = request_get(&router, "/ui/live", None).await;
+    assert_eq!(live.status(), StatusCode::OK);
+    assert!(content_type(&live).contains("text/html"));
+    let live_body = read_body(live).await;
+    assert!(live_body.contains("Live View Mirror"));
+
+    let live_css = request_get(&router, "/ui/live.css", None).await;
+    assert_eq!(live_css.status(), StatusCode::OK);
+    assert!(content_type(&live_css).contains("text/css"));
+
+    let live_js = request_get(&router, "/ui/live.js", None).await;
+    assert_eq!(live_js.status(), StatusCode::OK);
+    assert!(content_type(&live_js).contains("application/javascript"));
+
+    let traversal = request_get(&router, "/usage/thumbs/../escape.png", None).await;
+    assert_eq!(traversal.status(), StatusCode::NOT_FOUND);
+}
+
+async fn wait_for_sse_event<F>(
+    stream_body: &mut Body,
+    timeout: Duration,
+    predicate: F,
+) -> Option<Value>
+where
+    F: Fn(&Value) -> bool,
+{
+    tokio::time::timeout(timeout, async {
+        loop {
+            match stream_body.frame().await {
+                None => return None,
+                Some(Ok(frame)) => {
+                    let Some(data) = frame.data_ref() else {
+                        continue;
+                    };
+                    let text = String::from_utf8_lossy(data);
+                    if let Some(event) = parse_sse_json_payload(&text) {
+                        if predicate(&event) {
+                            return Some(event);
+                        }
+                    }
+                }
+                Some(Err(_)) => return None,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+fn parse_sse_json_payload(chunk: &str) -> Option<Value> {
+    for line in chunk.lines() {
+        let Some(payload) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if let Ok(parsed) = serde_json::from_str::<Value>(payload) {
+            return Some(parsed);
+        }
+    }
+    None
 }
 
 async fn request_json_with_agent(

@@ -251,17 +251,36 @@ function renderPreview() {
   }
 
   const image = selected.response_json?.images?.[0];
+  const thumbnailUrl = selected.response_json?.usage_thumbnail?.url;
+  const inlineBytes = image?.bytes_base64;
+  const hasInlineBytes =
+    typeof inlineBytes === "string" && inlineBytes !== "<omitted>" && inlineBytes.length > 0;
   if (!image) {
+    if (thumbnailUrl) {
+      const img = document.createElement("img");
+      img.alt = "render preview thumbnail";
+      img.src = thumbnailUrl;
+      elements.renderPreview.appendChild(img);
+      return;
+    }
     const text = document.createElement("p");
     text.textContent = "Render response has no image artifact.";
     elements.renderPreview.appendChild(text);
     return;
   }
 
-  if (image.bytes_base64 && image.mime) {
+  if (hasInlineBytes && image.mime) {
     const img = document.createElement("img");
     img.alt = "render preview";
-    img.src = `data:${image.mime};base64,${image.bytes_base64}`;
+    img.src = `data:${image.mime};base64,${inlineBytes}`;
+    elements.renderPreview.appendChild(img);
+    return;
+  }
+
+  if (thumbnailUrl) {
+    const img = document.createElement("img");
+    img.alt = "render preview thumbnail";
+    img.src = thumbnailUrl;
     elements.renderPreview.appendChild(img);
     return;
   }

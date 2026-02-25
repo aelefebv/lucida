@@ -77,6 +77,12 @@ body {
   gap: 1rem;
 }
 
+.nav-links {
+  display: flex;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
 .nav-link {
   border: 1px solid var(--border);
   border-radius: 0.44rem;

@@ -54,6 +54,24 @@ pub struct SessionCreateResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionListItem {
+    pub session_id: String,
+    pub created_at: DateTime<Utc>,
+    pub dataset_count: u64,
+    pub view_count: u64,
+    pub dataset_ids: Vec<String>,
+    pub view_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SessionListResponse {
+    pub schema_version: u8,
+    pub sessions: Vec<SessionListItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ViewMode {
     #[serde(rename = "2d")]
     TwoD,
@@ -88,6 +106,25 @@ pub struct ViewCreateResponse {
 pub struct ViewGetResponse {
     pub schema_version: u8,
     pub view_state: ViewState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ViewListItem {
+    pub view_id: String,
+    pub session_id: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub mode: crate::dto::view_state::RenderMode,
+    pub dataset_ids: Vec<String>,
+    pub state_hash: Option<String>,
+    pub state_version: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ViewListResponse {
+    pub schema_version: u8,
+    pub views: Vec<ViewListItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

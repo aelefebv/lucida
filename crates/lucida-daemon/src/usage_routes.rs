@@ -1,7 +1,8 @@
 use std::convert::Infallible;
+use std::path::{Component, Path as FsPath, PathBuf};
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::Json;
 use chrono::{DateTime, Utc};
@@ -12,7 +13,9 @@ use tokio_stream::StreamExt;
 use crate::dto::usage::{UsageEventsResponse, UsageRunDetailResponse, UsageRunsResponse};
 use crate::error::ApiError;
 use crate::state::SharedAppState;
-use crate::usage::{invalid_usage_query_error, UsageEventsFilter, UsageRunsFilter};
+use crate::usage::{
+    invalid_usage_query_error, usage_thumbnail_root, UsageEventsFilter, UsageRunsFilter,
+};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UsageEventsQuery {
@@ -137,6 +140,41 @@ pub async fn usage_events_stream(
     )
 }
 
+pub async fn usage_thumbnail_asset(
+    Path(path): Path<String>,
+) -> Result<(HeaderMap, Vec<u8>), ApiError> {
+    let relative_path = normalize_thumbnail_relative_path(&path)?;
+    let root = usage_thumbnail_root();
+    let full_path = root.join(relative_path);
+    let bytes = std::fs::read(&full_path).map_err(|error| {
+        let code = if error.kind() == std::io::ErrorKind::NotFound {
+            "usage_thumbnail_not_found"
+        } else {
+            "usage_thumbnail_read_failed"
+        };
+        let status = if error.kind() == std::io::ErrorKind::NotFound {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        };
+        ApiError::new(
+            status,
+            code,
+            "Usage thumbnail was not found.",
+            Some(serde_json::json!({
+                "path": path,
+            })),
+        )
+    })?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "image/png".parse().expect("valid image content type"),
+    );
+    Ok((headers, bytes))
+}
+
 fn parse_usage_events_filter(query: UsageEventsQuery) -> Result<UsageEventsFilter, ApiError> {
     let from_ts = query
         .from_ts
@@ -213,4 +251,42 @@ fn usage_query_failed(reason: String) -> ApiError {
         "Usage query failed.",
         Some(serde_json::json!({ "reason": reason })),
     )
+}
+
+fn normalize_thumbnail_relative_path(path: &str) -> Result<PathBuf, ApiError> {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "usage_thumbnail_not_found",
+            "Usage thumbnail was not found.",
+            Some(serde_json::json!({ "path": path })),
+        ));
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in FsPath::new(trimmed).components() {
+        match component {
+            Component::Normal(value) => normalized.push(value),
+            Component::CurDir => {}
+            _ => {
+                return Err(ApiError::new(
+                    StatusCode::NOT_FOUND,
+                    "usage_thumbnail_not_found",
+                    "Usage thumbnail was not found.",
+                    Some(serde_json::json!({ "path": path })),
+                ))
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "usage_thumbnail_not_found",
+            "Usage thumbnail was not found.",
+            Some(serde_json::json!({ "path": path })),
+        ));
+    }
+    Ok(normalized)
 }

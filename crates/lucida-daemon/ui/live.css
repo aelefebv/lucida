@@ -1,0 +1,224 @@
+:root {
+  --bg: #091223;
+  --panel: rgba(20, 31, 54, 0.78);
+  --panel-border: rgba(143, 171, 219, 0.32);
+  --text: #f4f7ff;
+  --muted: #b9c9eb;
+  --accent: #59c2ff;
+  --accent-strong: #78ffcf;
+  --danger: #ff8d8d;
+  --mono: "SFMono-Regular", Menlo, Monaco, "Courier New", monospace;
+  --sans:
+    "Avenir Next", Avenir, "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  font-family: var(--sans);
+  background:
+    radial-gradient(1200px 800px at 12% 14%, rgba(109, 198, 255, 0.21), transparent 70%),
+    radial-gradient(1200px 800px at 88% 6%, rgba(120, 255, 207, 0.15), transparent 65%),
+    linear-gradient(145deg, #060c19 0%, #081529 38%, #050a14 100%);
+}
+
+.page {
+  width: min(1280px, 94vw);
+  margin: 1.25rem auto 2rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.panel {
+  border: 1px solid var(--panel-border);
+  background: var(--panel);
+  border-radius: 1rem;
+  padding: 1rem;
+  backdrop-filter: blur(8px);
+}
+
+.topbar {
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.75rem;
+}
+
+.topbar p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+}
+
+.links {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.link-btn,
+button {
+  border: 1px solid rgba(123, 225, 255, 0.6);
+  background: linear-gradient(135deg, rgba(39, 151, 233, 0.32), rgba(60, 225, 183, 0.25));
+  color: var(--text);
+  border-radius: 999px;
+  padding: 0.5rem 0.95rem;
+  text-decoration: none;
+  cursor: pointer;
+  font-weight: 600;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, border-color 0.12s ease;
+}
+
+button.secondary,
+.link-btn.secondary {
+  background: rgba(14, 24, 42, 0.72);
+  border-color: rgba(143, 171, 219, 0.45);
+}
+
+button:hover,
+.link-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 8px 20px rgba(26, 101, 179, 0.25);
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  gap: 0.85rem;
+  align-items: end;
+}
+
+label {
+  display: grid;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+input,
+select {
+  width: 100%;
+  padding: 0.55rem 0.65rem;
+  border-radius: 0.6rem;
+  border: 1px solid rgba(143, 171, 219, 0.45);
+  background: rgba(8, 15, 28, 0.78);
+  color: var(--text);
+  font-family: var(--sans);
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.status-row {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 0.75rem;
+}
+
+.status-item {
+  border: 1px solid rgba(143, 171, 219, 0.28);
+  border-radius: 0.75rem;
+  padding: 0.6rem 0.65rem;
+  background: rgba(7, 12, 24, 0.66);
+}
+
+.status-label {
+  display: block;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.status-value {
+  font-size: 0.92rem;
+}
+
+.status-code {
+  color: var(--accent-strong);
+  font-family: var(--mono);
+  font-size: 0.86rem;
+}
+
+.viewport-panel h2,
+.thumbs-panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+.note {
+  margin: 0 0 0.6rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.viewport {
+  min-height: 420px;
+  border-radius: 0.8rem;
+  border: 1px solid rgba(143, 171, 219, 0.4);
+  background: rgba(2, 8, 16, 0.84);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.viewport img {
+  max-width: 100%;
+  max-height: 70vh;
+  display: block;
+}
+
+.thumbs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.55rem;
+}
+
+.thumb-card {
+  border: 1px solid rgba(143, 171, 219, 0.33);
+  border-radius: 0.65rem;
+  background: rgba(6, 13, 24, 0.74);
+  padding: 0.35rem;
+}
+
+.thumb-card img {
+  width: 100%;
+  border-radius: 0.45rem;
+  display: block;
+}
+
+.thumb-meta {
+  margin-top: 0.35rem;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.danger {
+  color: var(--danger);
+}
+
+@media (max-width: 960px) {
+  .controls {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+
+  .status-row {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+
+  .viewport {
+    min-height: 280px;
+  }
+}

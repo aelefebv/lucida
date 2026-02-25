@@ -12,6 +12,7 @@ Repository layout reference: `docs/architecture/repo-layout.md`.
 - `LUCIDA_BACKEND` is removed.
 - `LucidaClient(backend=...)` is removed.
 - Embedded usage UI is served at [`/ui`](http://127.0.0.1:3000/ui).
+- Read-only live view UI is served at [`/ui/live`](http://127.0.0.1:3000/ui/live).
 - Dedicated visual replay UI is served at [`/ui/replay`](http://127.0.0.1:3000/ui/replay).
 
 ## Usage Telemetry + UI
@@ -20,7 +21,12 @@ Lucida now records request/response usage telemetry for core viewer endpoints an
 
 - Timeline/analytics APIs under `/usage/*`
 - Live SSE stream at `/usage/events/stream`
+- View-targeted SSE stream at `/view/events/stream?view_id=...`
+- Active session discovery at `/session/list`
+- Active view discovery at `/view/list` (optional `session_id` filter)
+- Thumbnail assets at `/usage/thumbs/*`
 - Embedded dashboard UI at `/ui`
+- Read-only live mirror UI at `/ui/live`
 - Decoupled visual playback UI at `/ui/replay` (step-through actions + frame replay)
 
 Telemetry defaults:
@@ -102,6 +108,21 @@ lucida context clear
 ```
 
 For a short end-to-end Zarr smoke test, see `docs/cli-zarr-testing.md`.
+
+## Convert OME-TIFF to OME-Zarr
+
+Generate OME-Zarr datasets from one or more OME-TIFF inputs:
+
+```bash
+uv sync --group dev
+uv run python scripts/data/convert_ome_tiff_to_omezarr.py /path/to/input.ome.tif --output /path/to/input.zarr --overwrite --json
+```
+
+Batch conversion into a directory:
+
+```bash
+uv run python scripts/data/convert_ome_tiff_to_omezarr.py /path/a.ome.tif /path/b.ome.tif --out-dir /path/to/out --overwrite
+```
 
 ## Build Rust Daemon
 
