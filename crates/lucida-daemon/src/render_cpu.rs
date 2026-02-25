@@ -51,13 +51,13 @@ struct PlaneData {
 
 #[derive(Debug, Clone)]
 struct LoadedArray {
-    shape: Vec<usize>,
     data: Vec<f32>,
+    strides: Vec<usize>,
 }
 
 impl LoadedArray {
     fn value_at(&self, indices: &[usize]) -> f32 {
-        let linear = linear_index(indices, &c_order_strides(&self.shape));
+        let linear = linear_index(indices, &self.strides);
         self.data[linear]
     }
 }
@@ -105,6 +105,7 @@ pub fn render_view_to_png(
         )
     })?;
     let io_after_open = Instant::now();
+    let render_start = Instant::now();
 
     let role_to_axis = roles_to_axis(dataset_summary);
     let (u_role, v_role, orth_role) = plane_roles(&view_2d.plane);
@@ -327,7 +328,7 @@ pub fn render_view_to_png(
         rgba_u8[index * 4 + 3] = (canvas_alpha[index].clamp(0.0, 1.0) * 255.0).round() as u8;
     }
 
-    let encode_start = Instant::now();
+    let render_end = Instant::now();
     let mut png_bytes: Vec<u8> = Vec::new();
     let encoder = PngEncoder::new(&mut png_bytes);
     encoder
@@ -356,7 +357,7 @@ pub fn render_view_to_png(
             io: (io_after_open - io_start).as_secs_f64() * 1000.0,
             decode: 0.0,
             gpu_upload: 0.0,
-            render: (end_total - encode_start).as_secs_f64() * 1000.0,
+            render: (render_end - render_start).as_secs_f64() * 1000.0,
         }),
     })
 }
@@ -1286,6 +1287,8 @@ fn load_level_array(
         .iter()
         .fold(1usize, |acc, item| acc.saturating_mul(*item));
     let mut full = vec![0.0_f32; total_values];
+    let full_strides = c_order_strides(&shape);
+    let chunk_strides = c_order_strides(&storage_meta.chunk_shape);
 
     let chunk_counts: Vec<usize> = shape
         .iter()
@@ -1299,7 +1302,7 @@ fn load_level_array(
         })
         .collect();
 
-    for_each_index(&chunk_counts, |chunk_index| {
+    for_each_index_result(&chunk_counts, |chunk_index| {
         let chunk_path = level_path.join(chunk_key(chunk_index, &storage_meta.separator));
         let cache_key = format!(
             "{cache_scope}|{}|{}|{}",
@@ -1313,16 +1316,21 @@ fn load_level_array(
                 hit
             } else {
                 let decoded = if chunk_path.exists() {
-                    match fs::File::open(&chunk_path).and_then(|mut file| {
-                        let mut bytes = Vec::new();
-                        file.read_to_end(&mut bytes)?;
-                        Ok(bytes)
-                    }) {
-                        Ok(raw_bytes) => {
-                            decode_chunk(raw_bytes, &storage_meta.codecs).unwrap_or_default()
-                        }
-                        Err(_) => Vec::new(),
-                    }
+                    let raw_bytes = fs::File::open(&chunk_path)
+                        .and_then(|mut file| {
+                            let mut bytes = Vec::new();
+                            file.read_to_end(&mut bytes)?;
+                            Ok(bytes)
+                        })
+                        .map_err(|error| {
+                            format!("failed to read chunk '{}': {error}", chunk_path.display())
+                        })?;
+                    decode_chunk(raw_bytes, &storage_meta.codecs).map_err(|reason| {
+                        format!(
+                            "failed to decode chunk '{}': {reason}",
+                            chunk_path.display()
+                        )
+                    })?
                 } else {
                     Vec::new()
                 };
@@ -1331,9 +1339,6 @@ fn load_level_array(
                 cache_registry.put_cpu_chunk(cache_session_id, cache_key, payload.clone());
                 payload
             };
-
-        let full_strides = c_order_strides(&shape);
-        let chunk_strides = c_order_strides(&storage_meta.chunk_shape);
 
         let mut actual_shape: Vec<usize> = Vec::with_capacity(shape.len());
         let mut start: Vec<usize> = Vec::with_capacity(shape.len());
@@ -1356,9 +1361,13 @@ fn load_level_array(
                 decode_value(&decoded_chunk, &storage_meta.dtype, byte_offset).unwrap_or(0.0);
             full[global_linear] = value;
         });
-    });
+        Ok::<(), String>(())
+    })?;
 
-    Ok(LoadedArray { shape, data: full })
+    Ok(LoadedArray {
+        data: full,
+        strides: full_strides,
+    })
 }
 
 fn parse_array_storage_metadata(metadata_json: &Value) -> Result<ArrayStorageMetadata, String> {
@@ -1535,6 +1544,36 @@ where
             index[axis] = 0;
             if axis == 0 {
                 return;
+            }
+        }
+    }
+}
+
+fn for_each_index_result<F, E>(shape: &[usize], mut callback: F) -> Result<(), E>
+where
+    F: FnMut(&[usize]) -> Result<(), E>,
+{
+    if shape.is_empty() {
+        callback(&[])?;
+        return Ok(());
+    }
+    if shape.contains(&0) {
+        return Ok(());
+    }
+    let mut index = vec![0usize; shape.len()];
+    loop {
+        callback(&index)?;
+
+        let mut axis = shape.len();
+        loop {
+            axis -= 1;
+            index[axis] += 1;
+            if index[axis] < shape[axis] {
+                break;
+            }
+            index[axis] = 0;
+            if axis == 0 {
+                return Ok(());
             }
         }
     }
