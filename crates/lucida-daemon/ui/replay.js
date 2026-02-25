@@ -135,14 +135,32 @@ function extractViewState(event) {
 function renderRunEventRow(frame, active) {
   const row = document.createElement("article");
   row.className = active ? "event-row active" : "event-row";
+  row.setAttribute("role", "button");
+  row.tabIndex = 0;
+  row.setAttribute(
+    "aria-label",
+    `Select frame ${frame.frameIndex + 1}: ${frame.event.endpoint} at ${formatTime(frame.event.occurred_at_utc)}`,
+  );
+
+  const selectFrame = () => {
+    state.currentFrameIndex = frame.frameIndex;
+    renderFrame();
+    renderEventList();
+  };
+  row.addEventListener("click", selectFrame);
+  row.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      selectFrame();
+    }
+  });
 
   const jump = document.createElement("button");
   jump.className = "secondary";
   jump.textContent = `${formatTime(frame.event.occurred_at_utc)} ${frame.event.endpoint}`;
-  jump.addEventListener("click", () => {
-    state.currentFrameIndex = frame.frameIndex;
-    renderFrame();
-    renderEventList();
+  jump.addEventListener("click", (event) => {
+    event.stopPropagation();
+    selectFrame();
   });
   row.appendChild(jump);
 
