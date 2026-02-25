@@ -5,6 +5,7 @@ pub mod omezarr;
 pub mod render_cache;
 pub mod render_cpu;
 pub mod render_image;
+pub mod request_validation;
 pub mod session_create;
 pub mod state;
 pub mod ui_routes;
@@ -77,8 +78,9 @@ pub fn app_with_state(state: SharedAppState) -> Router {
         .with_state(state)
 }
 
-const REQUEST_CAPTURE_LIMIT_BYTES: usize = usize::MAX;
-const RESPONSE_CAPTURE_LIMIT_BYTES: usize = usize::MAX;
+const REQUEST_CAPTURE_LIMIT_BYTES: usize = 512 * 1024;
+const RESPONSE_CAPTURE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_CAPTURE_STRING_CHARS: usize = 4096;
 
 async fn usage_capture_middleware(
     axum::extract::State(state): axum::extract::State<SharedAppState>,
@@ -101,7 +103,7 @@ async fn usage_capture_middleware(
             Default::default()
         }
     };
-    let request_json = decode_json_payload(request_bytes.as_ref());
+    let request_json = sanitize_usage_payload(decode_json_payload(request_bytes.as_ref()));
     let request = Request::from_parts(request_parts, Body::from(request_bytes));
 
     let response = next.run(request).await;
@@ -115,7 +117,7 @@ async fn usage_capture_middleware(
             Default::default()
         }
     };
-    let response_json = decode_json_payload(response_bytes.as_ref());
+    let response_json = sanitize_usage_payload(decode_json_payload(response_bytes.as_ref()));
     let response = Response::from_parts(response_parts, Body::from(response_bytes));
 
     let usage = {
@@ -147,4 +149,45 @@ fn decode_json_payload(bytes: &[u8]) -> Option<Value> {
     Some(serde_json::json!({
         "_raw_text": String::from_utf8_lossy(bytes),
     }))
+}
+
+fn sanitize_usage_payload(payload: Option<Value>) -> Option<Value> {
+    let mut payload = payload?;
+    sanitize_usage_value(&mut payload);
+    Some(payload)
+}
+
+fn sanitize_usage_value(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, item) in map.iter_mut() {
+                if key == "bytes_base64" {
+                    *item = Value::String("<omitted>".to_owned());
+                    continue;
+                }
+                sanitize_usage_value(item);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                sanitize_usage_value(item);
+            }
+        }
+        Value::String(text) => {
+            let char_len = text.chars().count();
+            if char_len > MAX_CAPTURE_STRING_CHARS {
+                let prefix = text
+                    .chars()
+                    .take(MAX_CAPTURE_STRING_CHARS)
+                    .collect::<String>();
+                let truncated = format!(
+                    "{}...[truncated {} chars]",
+                    prefix,
+                    char_len - MAX_CAPTURE_STRING_CHARS,
+                );
+                *value = Value::String(truncated);
+            }
+        }
+        _ => {}
+    }
 }

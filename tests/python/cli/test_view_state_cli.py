@@ -169,6 +169,35 @@ def test_cli_view_flow(
     update_payload = json.loads(update_result.stdout)
     assert update_payload["view_state"]["state_version"] >= 1
 
+    inline_patch_result = runner.invoke(
+        app,
+        [
+            "view",
+            "update",
+            "--view-id",
+            view_id,
+            "--patch-json",
+            json.dumps(
+                [
+                    {
+                        "op": "replace",
+                        "path": "/selectors",
+                        "value": [{"axis": "z", "kind": "index", "index": 2, "clamp": True}],
+                    }
+                ]
+            ),
+            "--expected-state-version",
+            str(update_payload["view_state"]["state_version"]),
+            "--session-id",
+            session_id,
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert inline_patch_result.exit_code == 0
+    inline_patch_payload = json.loads(inline_patch_result.stdout)
+    assert inline_patch_payload["view_state"]["state_version"] == update_payload["view_state"]["state_version"] + 1
+
     get_result = runner.invoke(
         app,
         [

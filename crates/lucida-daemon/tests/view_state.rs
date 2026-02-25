@@ -135,6 +135,83 @@ async fn view_end_to_end_create_update_get() {
 }
 
 #[tokio::test]
+async fn view_update_expected_state_version_conflict() {
+    let router = app();
+    let dataset_path = unique_dataset_path("view-state-conflict");
+    create_sample_omezarr(&dataset_path, SampleDatasetOptions::default());
+
+    let opened = request_json(
+        &router,
+        "POST",
+        "/dataset/open",
+        json!({"schema_version": 1, "uri": dataset_path.to_string_lossy()}),
+    )
+    .await;
+    assert_eq!(opened.status(), StatusCode::OK);
+    let dataset_id = read_json_body(opened).await["dataset_summary"]["dataset_id"]
+        .as_str()
+        .expect("dataset_id")
+        .to_owned();
+
+    let created = request_json(
+        &router,
+        "POST",
+        "/view/create",
+        json!({"schema_version": 1, "dataset_id": dataset_id, "mode": "2d"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let view_id = read_json_body(created).await["view_state"]["view_id"]
+        .as_str()
+        .expect("view_id")
+        .to_owned();
+
+    let first_update = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "expected_state_version": 0,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 1, "clamp": true}],
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(first_update.status(), StatusCode::OK);
+
+    let conflict_update = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "expected_state_version": 0,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 2, "clamp": true}],
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(conflict_update.status(), StatusCode::CONFLICT);
+    let payload = read_json_body(conflict_update).await;
+    assert_eq!(payload["code"], "state_conflict");
+    assert_eq!(payload["details"]["expected_state_version"], 0);
+    assert_eq!(payload["details"]["actual_state_version"], 1);
+}
+
+#[tokio::test]
 async fn view_create_unknown_dataset_error() {
     let router = app();
     let response = request_json(

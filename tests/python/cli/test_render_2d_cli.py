@@ -189,6 +189,26 @@ def test_cli_render_and_navigation(
     assert stateless_payload["state_version"] is None
     assert _decode_size(stateless_payload["images"][0]["bytes_base64"]) == (64, 48)
 
+    stateless_inline_result = runner.invoke(
+        app,
+        [
+            "render",
+            "image",
+            "--view-state-json",
+            json.dumps(view_state_payload),
+            "--width-px",
+            "32",
+            "--height-px",
+            "24",
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert stateless_inline_result.exit_code == 0
+    stateless_inline_payload = json.loads(stateless_inline_result.stdout)
+    assert stateless_inline_payload["status"] == "ok"
+    assert _decode_size(stateless_inline_payload["images"][0]["bytes_base64"]) == (32, 24)
+
     output_root = Path(__file__).resolve().parents[3] / "output"
     output_relative = f"snapshots/test-cli-{uuid.uuid4().hex}.png"
     file_result = runner.invoke(

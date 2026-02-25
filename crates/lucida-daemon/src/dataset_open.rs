@@ -1,13 +1,17 @@
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::dto::api::{DatasetOpenRequest, DatasetOpenResponse};
 use crate::dto::dataset_summary::{DatasetHints, DatasetSummary};
 use crate::error::ApiError;
 use crate::omezarr::read_omezarr;
+use crate::request_validation::{
+    expect_body_object, invalid_request_error, parse_optional_bool,
+    parse_optional_non_empty_string, parse_required_non_empty_string, parse_schema_version,
+    push_extra_forbidden_errors, push_schema_version_literal_error,
+};
 use crate::state::{ensure_dataset_attached, resolve_session_id, DatasetRecord, SharedAppState};
 use crate::uri::{generate_dataset_id, is_remote_uri, normalize_uri};
 
@@ -77,13 +81,7 @@ pub async fn dataset_open(
 }
 
 fn parse_dataset_open_request(payload: Value) -> Result<DatasetOpenRequest, ApiError> {
-    let object = payload.as_object().ok_or_else(|| {
-        invalid_request_error(vec![json!({
-            "loc": ["body"],
-            "msg": "Input should be a valid dictionary.",
-            "type": "dict_type",
-        })])
-    })?;
+    let object = expect_body_object(payload)?;
 
     let mut errors: Vec<Value> = Vec::new();
     let allowed_keys = [
@@ -93,55 +91,18 @@ fn parse_dataset_open_request(payload: Value) -> Result<DatasetOpenRequest, ApiE
         "session_id",
         "include_full_raw_metadata",
     ];
-    for key in object.keys() {
-        if !allowed_keys.contains(&key.as_str()) {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": "Extra inputs are not permitted.",
-                "type": "extra_forbidden",
-            }));
-        }
-    }
+    push_extra_forbidden_errors(&object, &allowed_keys, &mut errors);
 
-    let schema_version = match object.get("schema_version") {
-        None => 1,
-        Some(value) => {
-            if let Some(raw) = value.as_u64() {
-                raw as u8
-            } else if let Some(raw) = value.as_i64() {
-                if raw >= 0 {
-                    raw as u8
-                } else {
-                    errors.push(json!({
-                        "loc": ["body", "schema_version"],
-                        "msg": "Input should be 1.",
-                        "type": "literal_error",
-                    }));
-                    0
-                }
-            } else {
-                errors.push(json!({
-                    "loc": ["body", "schema_version"],
-                    "msg": "Input should be 1.",
-                    "type": "literal_error",
-                }));
-                0
-            }
-        }
-    };
+    let schema_version = parse_schema_version(&object, &mut errors);
     if schema_version != 1 {
-        errors.push(json!({
-            "loc": ["body", "schema_version"],
-            "msg": "Input should be 1.",
-            "type": "literal_error",
-        }));
+        push_schema_version_literal_error(&mut errors);
     }
 
-    let uri = parse_required_non_empty_string(object, "uri", &mut errors);
-    let dataset_id = parse_optional_non_empty_string(object, "dataset_id", &mut errors);
-    let session_id = parse_optional_non_empty_string(object, "session_id", &mut errors);
+    let uri = parse_required_non_empty_string(&object, "uri", &mut errors);
+    let dataset_id = parse_optional_non_empty_string(&object, "dataset_id", &mut errors);
+    let session_id = parse_optional_non_empty_string(&object, "session_id", &mut errors);
     let include_full_raw_metadata =
-        parse_optional_bool(object, "include_full_raw_metadata", &mut errors).unwrap_or(false);
+        parse_optional_bool(&object, "include_full_raw_metadata", &mut errors).unwrap_or(false);
 
     if !errors.is_empty() {
         return Err(invalid_request_error(errors));
@@ -154,103 +115,4 @@ fn parse_dataset_open_request(payload: Value) -> Result<DatasetOpenRequest, ApiE
         session_id,
         include_full_raw_metadata,
     })
-}
-
-fn parse_required_non_empty_string(
-    object: &Map<String, Value>,
-    key: &str,
-    errors: &mut Vec<Value>,
-) -> Option<String> {
-    match object.get(key) {
-        Some(value) => {
-            if let Some(as_str) = value.as_str() {
-                if as_str.is_empty() {
-                    errors.push(json!({
-                        "loc": ["body", key],
-                        "msg": "String should have at least 1 character",
-                        "type": "string_too_short",
-                        "input": as_str,
-                        "ctx": {"min_length": 1},
-                    }));
-                    None
-                } else {
-                    Some(as_str.to_owned())
-                }
-            } else {
-                errors.push(json!({
-                    "loc": ["body", key],
-                    "msg": "Input should be a valid string.",
-                    "type": "string_type",
-                }));
-                None
-            }
-        }
-        None => {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": "Field required.",
-                "type": "missing",
-            }));
-            None
-        }
-    }
-}
-
-fn parse_optional_non_empty_string(
-    object: &Map<String, Value>,
-    key: &str,
-    errors: &mut Vec<Value>,
-) -> Option<String> {
-    let value = object.get(key)?;
-    if value.is_null() {
-        return None;
-    }
-    if let Some(as_str) = value.as_str() {
-        if as_str.is_empty() {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": "String should have at least 1 character",
-                "type": "string_too_short",
-                "input": as_str,
-                "ctx": {"min_length": 1},
-            }));
-            return None;
-        }
-        return Some(as_str.to_owned());
-    }
-    errors.push(json!({
-        "loc": ["body", key],
-        "msg": "Input should be a valid string.",
-        "type": "string_type",
-    }));
-    None
-}
-
-fn parse_optional_bool(
-    object: &Map<String, Value>,
-    key: &str,
-    errors: &mut Vec<Value>,
-) -> Option<bool> {
-    let value = object.get(key)?;
-    if value.is_null() {
-        return None;
-    }
-    if let Some(as_bool) = value.as_bool() {
-        return Some(as_bool);
-    }
-    errors.push(json!({
-        "loc": ["body", key],
-        "msg": "Input should be a valid boolean.",
-        "type": "bool_type",
-    }));
-    None
-}
-
-fn invalid_request_error(errors: Vec<Value>) -> ApiError {
-    ApiError::new(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "invalid_request",
-        "Request validation failed.",
-        Some(json!({ "errors": errors })),
-    )
 }

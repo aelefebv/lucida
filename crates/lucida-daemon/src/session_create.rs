@@ -1,11 +1,14 @@
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value};
 
 use crate::dto::api::SessionCreateResponse;
 use crate::error::ApiError;
+use crate::request_validation::{
+    expect_body_object, invalid_request_error, parse_schema_version,
+    push_schema_version_literal_error,
+};
 use crate::state::{create_session_record, SharedAppState};
 
 pub async fn session_create(
@@ -38,13 +41,7 @@ pub async fn session_create(
 }
 
 fn parse_session_create_request(payload: Value) -> Result<(), ApiError> {
-    let object = payload.as_object().ok_or_else(|| {
-        invalid_request_error(vec![json!({
-            "loc": ["body"],
-            "msg": "Input should be a valid dictionary.",
-            "type": "dict_type",
-        })])
-    })?;
+    let object = expect_body_object(payload)?;
 
     let mut errors: Vec<Value> = Vec::new();
     for key in object.keys() {
@@ -57,16 +54,9 @@ fn parse_session_create_request(payload: Value) -> Result<(), ApiError> {
         }
     }
 
-    let schema_version = match object.get("schema_version") {
-        None => 1,
-        Some(value) => value.as_u64().unwrap_or(0) as u8,
-    };
+    let schema_version = parse_schema_version(&object, &mut errors);
     if schema_version != 1 {
-        errors.push(json!({
-            "loc": ["body", "schema_version"],
-            "msg": "Input should be 1.",
-            "type": "literal_error",
-        }));
+        push_schema_version_literal_error(&mut errors);
     }
 
     if !errors.is_empty() {
@@ -74,13 +64,4 @@ fn parse_session_create_request(payload: Value) -> Result<(), ApiError> {
     }
 
     Ok(())
-}
-
-fn invalid_request_error(errors: Vec<Value>) -> ApiError {
-    ApiError::new(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "invalid_request",
-        "Request validation failed.",
-        Some(json!({ "errors": errors })),
-    )
 }

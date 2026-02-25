@@ -84,7 +84,11 @@ def check_drift(repo_root: Path, skill_root: Path) -> DriftResult:
     actual_cli_commands = _parse_cli_commands(cli_path)
     actual_routes = _parse_routes(lib_rs_path)
 
-    expected_surface_groups = {"dataset", "session", "view", "render"}
+    expected_surface_groups = {
+        command.split(".", 1)[0]
+        for command in matrix_cli_commands
+        if "." in command
+    }
     actual_runtime_commands = {
         command
         for command in actual_cli_commands

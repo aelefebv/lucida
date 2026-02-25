@@ -18,10 +18,12 @@ dataset_app = typer.Typer(no_args_is_help=True)
 session_app = typer.Typer(no_args_is_help=True)
 view_app = typer.Typer(no_args_is_help=True)
 render_app = typer.Typer(no_args_is_help=True)
+usage_app = typer.Typer(no_args_is_help=True)
 app.add_typer(dataset_app, name="dataset")
 app.add_typer(session_app, name="session")
 app.add_typer(view_app, name="view")
 app.add_typer(render_app, name="render")
+app.add_typer(usage_app, name="usage")
 
 @dataset_app.command("open")
 def dataset_open(
@@ -66,17 +68,11 @@ def dataset_open(
         typer.echo(json.dumps(as_api_error_payload(exc), indent=2))
         raise typer.Exit(code=1) from exc
     except LucidaClientError as exc:
-        typer.echo(
-            json.dumps(
-                {
-                    "code": "dataset_open_failed",
-                    "message": str(exc),
-                    "details": {"uri": uri},
-                },
-                indent=2,
-            )
+        _emit_client_error(
+            exc,
+            code="dataset_open_failed",
+            details={"uri": uri},
         )
-        raise typer.Exit(code=1) from exc
 
     payload = response.model_dump(mode="json")
     if output_json:
@@ -116,13 +112,10 @@ def session_create(
         typer.echo(json.dumps(as_api_error_payload(exc), indent=2))
         raise typer.Exit(code=1) from exc
     except LucidaClientError as exc:
-        typer.echo(
-            json.dumps(
-                {"code": "session_not_found", "message": str(exc), "details": {}},
-                indent=2,
-            )
+        _emit_client_error(
+            exc,
+            code="session_create_failed",
         )
-        raise typer.Exit(code=1) from exc
 
     payload = response.model_dump(mode="json")
     if output_json:
@@ -146,8 +139,14 @@ def view_create(
     selectors_file: Path | None = typer.Option(
         None, "--selectors-file", help="Optional JSON file with selector list."
     ),
+    selectors_json: str | None = typer.Option(
+        None, "--selectors-json", help="Optional inline JSON array with selector list."
+    ),
     view_2d_file: Path | None = typer.Option(
         None, "--view2d-file", help="Optional JSON file with view_2d object."
+    ),
+    view_2d_json: str | None = typer.Option(
+        None, "--view2d-json", help="Optional inline JSON object with view_2d payload."
     ),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
     base_url: str | None = typer.Option(
@@ -182,8 +181,8 @@ def view_create(
         Optional HTTP base URL for API mode.
     """
     try:
-        selectors_value = _load_selectors(selectors_file)
-        view_2d_value = _load_view_2d(view_2d_file)
+        selectors_value = _load_selectors(selectors_file, selectors_json)
+        view_2d_value = _load_view_2d(view_2d_file, view_2d_json)
         viewport = Viewport(width_px=width_px, height_px=height_px, pixel_ratio=pixel_ratio)
 
         resolved_base_url = _resolve_cli_base_url(base_url)
@@ -311,10 +310,15 @@ def view_export(
 
 @view_app.command("import")
 def view_import(
-    view_state_file: Path = typer.Option(
-        ...,
+    view_state_file: Path | None = typer.Option(
+        None,
         "--view-state-file",
         help="JSON file containing the serialized ViewState payload to import.",
+    ),
+    view_state_json: str | None = typer.Option(
+        None,
+        "--view-state-json",
+        help="Inline JSON object containing the serialized ViewState payload to import.",
     ),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -336,9 +340,9 @@ def view_import(
         Optional HTTP base URL for API mode.
     """
     try:
-        view_state_value = _load_view_state(view_state_file)
+        view_state_value = _load_view_state(view_state_file, view_state_json)
         if view_state_value is None:
-            raise ValueError("view-state file is required.")
+            raise ValueError("view-state input is required.")
 
         resolved_base_url = _resolve_cli_base_url(base_url)
         with LucidaClient(base_url=resolved_base_url) as client:
@@ -367,7 +371,18 @@ def view_import(
 @view_app.command("update")
 def view_update(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
-    patch_file: Path = typer.Option(..., "--patch-file", help="JSON file containing RFC6902 patch."),
+    patch_file: Path | None = typer.Option(
+        None, "--patch-file", help="JSON file containing RFC6902 patch."
+    ),
+    patch_json: str | None = typer.Option(
+        None, "--patch-json", help="Inline JSON array containing RFC6902 patch."
+    ),
+    expected_state_version: int | None = typer.Option(
+        None,
+        "--expected-state-version",
+        min=0,
+        help="Optional optimistic concurrency guard for current state version.",
+    ),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
     base_url: str | None = typer.Option(
@@ -390,10 +405,15 @@ def view_update(
         Optional HTTP base URL for API mode.
     """
     try:
-        patch = _load_patch(patch_file)
+        patch = _load_patch(patch_file, patch_json)
         resolved_base_url = _resolve_cli_base_url(base_url)
         with LucidaClient(base_url=resolved_base_url) as client:
-            response = client.update_view(view_id=view_id, patch=patch, session_id=session_id)
+            response = client.update_view(
+                view_id=view_id,
+                patch=patch,
+                session_id=session_id,
+                expected_state_version=expected_state_version,
+            )
     except LucidaError as exc:
         _emit_exception(exc)
     except LucidaClientError as exc:
@@ -613,6 +633,11 @@ def render_image(
         "--view-state-file",
         help="Optional JSON file containing a full ViewState object.",
     ),
+    view_state_json: str | None = typer.Option(
+        None,
+        "--view-state-json",
+        help="Optional inline JSON object containing a full ViewState object.",
+    ),
     width_px: int = typer.Option(..., "--width-px", help="Output width in pixels."),
     height_px: int = typer.Option(..., "--height-px", help="Output height in pixels."),
     delivery: str = typer.Option(
@@ -632,6 +657,11 @@ def render_image(
         "--patch-file",
         help="Optional JSON file with render-time RFC6902 overrides.",
     ),
+    patch_json: str | None = typer.Option(
+        None,
+        "--patch-json",
+        help="Optional inline JSON array with render-time RFC6902 overrides.",
+    ),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
     base_url: str | None = typer.Option(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
@@ -639,13 +669,20 @@ def render_image(
 ) -> None:
     """Render a PNG image for a view."""
     try:
-        if (view_id is None) == (view_state_file is None):
-            raise ValueError("Provide exactly one of --view-id or --view-state-file.")
+        has_view_state = view_state_file is not None or view_state_json is not None
+        if (view_id is None) == (not has_view_state):
+            raise ValueError("Provide exactly one of --view-id or one view-state input.")
         if delivery not in {"inline_base64", "file_path"}:
             raise ValueError("delivery must be one of: inline_base64, file_path.")
 
-        view_state_value = _load_view_state(view_state_file) if view_state_file is not None else None
-        overrides = _load_patch(patch_file) if patch_file is not None else None
+        view_state_value = (
+            _load_view_state(view_state_file, view_state_json) if has_view_state else None
+        )
+        overrides = (
+            _load_patch(patch_file, patch_json)
+            if patch_file is not None or patch_json is not None
+            else None
+        )
         file_path_value = str(file_path) if file_path is not None else None
         resolved_base_url = _resolve_cli_base_url(base_url)
         with LucidaClient(base_url=resolved_base_url) as client:
@@ -681,6 +718,137 @@ def render_image(
     typer.echo(f"image_sha256: {payload['images'][0]['sha256']}")
     if "file_path" in payload["images"][0]:
         typer.echo(f"file_path: {payload['images'][0]['file_path']}")
+
+
+@usage_app.command("events")
+def usage_events(
+    limit: int = typer.Option(100, "--limit", min=1, help="Maximum number of events."),
+    before_id: int | None = typer.Option(None, "--before-id", help="Return events before this id."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Filter by agent run id."),
+    endpoint: str | None = typer.Option(None, "--endpoint", help="Filter by endpoint path."),
+    status_code: int | None = typer.Option(None, "--status-code", help="Filter by HTTP status code."),
+    from_ts: str | None = typer.Option(None, "--from-ts", help="RFC3339 lower timestamp bound."),
+    to_ts: str | None = typer.Option(None, "--to-ts", help="RFC3339 upper timestamp bound."),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """List usage telemetry events."""
+    try:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.list_usage_events(
+                limit=limit,
+                before_id=before_id,
+                run_id=run_id,
+                endpoint=endpoint,
+                status_code=status_code,
+                from_ts=from_ts,
+                to_ts=to_ts,
+            )
+    except LucidaError as exc:
+        _emit_exception(exc)
+    except LucidaClientError as exc:
+        _emit_client_error(exc)
+
+    payload = response.model_dump(mode="json")
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    events = payload["events"]
+    typer.echo(f"events: {len(events)}")
+    for event in events:
+        typer.echo(
+            f"{event['id']} {event['occurred_at_utc']} {event['method']} {event['endpoint']} {event['status_code']}"
+        )
+
+
+@usage_app.command("runs")
+def usage_runs(
+    limit: int = typer.Option(50, "--limit", min=1, help="Maximum number of runs."),
+    before_start_ts: str | None = typer.Option(
+        None, "--before-start-ts", help="RFC3339 upper bound for run start timestamp."
+    ),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """List usage run aggregates."""
+    try:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.list_usage_runs(limit=limit, before_start_ts=before_start_ts)
+    except LucidaError as exc:
+        _emit_exception(exc)
+    except LucidaClientError as exc:
+        _emit_client_error(exc)
+
+    payload = response.model_dump(mode="json")
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    runs = payload["runs"]
+    typer.echo(f"runs: {len(runs)}")
+    for run in runs:
+        typer.echo(
+            f"{run['agent_run_id']} events={run['event_count']} errors={run['error_count']} renders={run['render_count']}"
+        )
+
+
+@usage_app.command("run")
+def usage_run(
+    run_id: str = typer.Option(..., "--run-id", help="Agent run id."),
+    event_limit: int = typer.Option(200, "--event-limit", min=1, help="Maximum events in run detail."),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Fetch one usage run summary and recent events."""
+    try:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        with LucidaClient(base_url=resolved_base_url) as client:
+            response = client.get_usage_run(run_id=run_id, event_limit=event_limit)
+    except LucidaError as exc:
+        _emit_exception(exc)
+    except LucidaClientError as exc:
+        _emit_client_error(exc)
+
+    payload = response.model_dump(mode="json")
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    run = payload["run"]
+    typer.echo(f"run_id: {run['agent_run_id']}")
+    typer.echo(f"event_count: {run['event_count']}")
+    typer.echo(f"error_count: {run['error_count']}")
+    typer.echo(f"render_count: {run['render_count']}")
+    typer.echo(f"events_returned: {len(payload['events'])}")
+
+
+@usage_app.command("stream-url")
+def usage_stream_url(
+    run_id: str | None = typer.Option(None, "--run-id", help="Optional run id filter."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Build the usage events SSE stream URL."""
+    try:
+        resolved_base_url = _resolve_cli_base_url(base_url)
+        with LucidaClient(base_url=resolved_base_url) as client:
+            stream_url = client.usage_events_stream_url(run_id=run_id)
+    except LucidaError as exc:
+        _emit_exception(exc)
+    except LucidaClientError as exc:
+        _emit_client_error(exc)
+
+    typer.echo(stream_url)
 
 
 def _run_selector_helper(
@@ -803,68 +971,78 @@ def _emit_view_update_response(response: Any, *, output_json: bool) -> None:
     typer.echo(f"state_version: {view_state['state_version']}")
 
 
-def _load_patch(path: Path) -> list[dict[str, Any]]:
-    """Load an RFC6902 patch from JSON file.
-
-    Parameters
-    ----------
-    path:
-        JSON file path containing patch list.
-    """
-    loaded = json.loads(path.read_text())
+def _load_patch(path: Path | None, raw_json: str | None) -> list[dict[str, Any]]:
+    loaded = _load_json_input(path=path, raw_json=raw_json, option_name="patch")
     if not isinstance(loaded, list):
-        raise ValueError("patch file must contain a JSON array.")
+        raise ValueError("patch input must contain a JSON array.")
     if not all(isinstance(item, dict) for item in loaded):
         raise ValueError("patch array elements must be objects.")
     return loaded
 
 
-def _load_view_state(path: Path | None) -> ViewState | None:
-    """Load a full view state JSON document if provided.
-
-    Parameters
-    ----------
-    path:
-        Optional JSON path containing a serialized view state.
-    """
-    if path is None:
+def _load_view_state(path: Path | None, raw_json: str | None) -> ViewState | None:
+    loaded = _load_json_input(
+        path=path,
+        raw_json=raw_json,
+        option_name="view-state",
+        allow_none=True,
+    )
+    if loaded is None:
         return None
-    loaded = json.loads(path.read_text())
     if not isinstance(loaded, dict):
-        raise ValueError("view-state file must contain a JSON object.")
+        raise ValueError("view-state input must contain a JSON object.")
     return ViewState.model_validate(loaded)
 
 
-def _load_selectors(path: Path | None) -> list[AxisSelector] | None:
-    """Load selectors from JSON if a path is provided.
-
-    Parameters
-    ----------
-    path:
-        Optional JSON file path containing axis selectors.
-    """
-    if path is None:
+def _load_selectors(path: Path | None, raw_json: str | None) -> list[AxisSelector] | None:
+    loaded = _load_json_input(
+        path=path,
+        raw_json=raw_json,
+        option_name="selectors",
+        allow_none=True,
+    )
+    if loaded is None:
         return None
-    loaded = json.loads(path.read_text())
     if not isinstance(loaded, list):
-        raise ValueError("selectors file must contain a JSON array.")
+        raise ValueError("selectors input must contain a JSON array.")
     return [AxisSelector.model_validate(item) for item in loaded]
 
 
-def _load_view_2d(path: Path | None) -> View2D | None:
-    """Load an optional 2D view payload from file.
-
-    Parameters
-    ----------
-    path:
-        Optional JSON file path containing `view_2d`.
-    """
-    if path is None:
+def _load_view_2d(path: Path | None, raw_json: str | None) -> View2D | None:
+    loaded = _load_json_input(
+        path=path,
+        raw_json=raw_json,
+        option_name="view2d",
+        allow_none=True,
+    )
+    if loaded is None:
         return None
-    loaded = json.loads(path.read_text())
     if not isinstance(loaded, dict):
-        raise ValueError("view2d file must contain a JSON object.")
+        raise ValueError("view2d input must contain a JSON object.")
     return View2D.model_validate(loaded)
+
+
+def _load_json_input(
+    *,
+    path: Path | None,
+    raw_json: str | None,
+    option_name: str,
+    allow_none: bool = False,
+) -> Any | None:
+    if path is not None and raw_json is not None:
+        raise ValueError(
+            f"Provide only one {option_name} source (file or inline JSON), not both."
+        )
+    if path is None and raw_json is None:
+        if allow_none:
+            return None
+        raise ValueError(f"{option_name} input is required.")
+    try:
+        if path is not None:
+            return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(raw_json or "")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{option_name} input must be valid JSON: {exc.msg}") from exc
 
 
 def _resolve_cli_base_url(base_url_override: str | None) -> str:
@@ -896,7 +1074,12 @@ def _emit_exception(exc: Exception) -> None:
     raise typer.Exit(code=1) from exc
 
 
-def _emit_client_error(exc: LucidaClientError) -> None:
+def _emit_client_error(
+    exc: LucidaClientError,
+    *,
+    code: str = "client_request_failed",
+    details: dict[str, Any] | None = None,
+) -> None:
     """Emit a generic client transport error and exit.
 
     Parameters
@@ -906,7 +1089,7 @@ def _emit_client_error(exc: LucidaClientError) -> None:
     """
     typer.echo(
         json.dumps(
-            {"code": "dataset_open_failed", "message": str(exc), "details": {}},
+            {"code": code, "message": str(exc), "details": details or {}},
             indent=2,
         )
     )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from lucida.client import LucidaClient
+import pytest
+
+from lucida.client import LucidaClient, LucidaClientError
 
 
 def test_client_session_view_selector_flow(
@@ -56,3 +58,39 @@ def test_client_session_view_selector_flow(
 
         fetched = client.get_view(view_id=created.view_state.view_id, session_id=session.session_id)
         assert fetched.view_state.state_version == 3
+
+
+def test_client_update_view_expected_state_version_conflict(
+    local_omezarr_uri: str,
+    rust_daemon_base_url: str,
+) -> None:
+    with LucidaClient(base_url=rust_daemon_base_url) as client:
+        opened = client.open_dataset(uri=local_omezarr_uri)
+        created = client.create_view(dataset_id=opened.dataset_summary.dataset_id, mode="2d")
+
+        first = client.update_view(
+            view_id=created.view_state.view_id,
+            expected_state_version=0,
+            patch=[
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [{"axis": "z", "kind": "index", "index": 1, "clamp": True}],
+                }
+            ],
+        )
+        assert first.view_state.state_version == 1
+
+        with pytest.raises(LucidaClientError) as excinfo:
+            client.update_view(
+                view_id=created.view_state.view_id,
+                expected_state_version=0,
+                patch=[
+                    {
+                        "op": "replace",
+                        "path": "/selectors",
+                        "value": [{"axis": "z", "kind": "index", "index": 2, "clamp": True}],
+                    }
+                ],
+            )
+        assert "state_conflict" in str(excinfo.value)

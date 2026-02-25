@@ -2,13 +2,17 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::dto::api::{ViewStateExportResponse, ViewStateImportResponse};
 use crate::dto::view_state::{RenderMode, ViewState};
 use crate::error::ApiError;
+use crate::request_validation::{
+    expect_body_object, invalid_request_error, parse_optional_non_empty_string,
+    parse_required_non_empty_string, parse_required_typed, parse_schema_version,
+    push_extra_forbidden_errors, push_schema_version_literal_error,
+};
 use crate::state::{require_session, resolve_session_id, SharedAppState, ViewRecord};
 use crate::view_state_core::{
     normalize_selectors, normalize_view_2d, rebase_imported_view_identity, render_mode_name,
@@ -176,37 +180,19 @@ pub async fn import_viewstate(
 }
 
 fn parse_export_request(payload: Value) -> Result<ParsedViewStateExportRequest, ApiError> {
-    let object = payload.as_object().ok_or_else(|| {
-        invalid_request_error(vec![json!({
-            "loc": ["body"],
-            "msg": "Input should be a valid dictionary.",
-            "type": "dict_type",
-        })])
-    })?;
+    let object = expect_body_object(payload)?;
 
     let mut errors: Vec<Value> = Vec::new();
     let allowed_keys = ["schema_version", "view_id", "session_id"];
-    for key in object.keys() {
-        if !allowed_keys.contains(&key.as_str()) {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": "Extra inputs are not permitted.",
-                "type": "extra_forbidden",
-            }));
-        }
-    }
+    push_extra_forbidden_errors(&object, &allowed_keys, &mut errors);
 
-    let schema_version = parse_schema_version(object, &mut errors);
+    let schema_version = parse_schema_version(&object, &mut errors);
     if schema_version != 1 {
-        errors.push(json!({
-            "loc": ["body", "schema_version"],
-            "msg": "Input should be 1.",
-            "type": "literal_error",
-        }));
+        push_schema_version_literal_error(&mut errors);
     }
 
-    let view_id = parse_required_non_empty_string(object, "view_id", &mut errors);
-    let session_id = parse_optional_non_empty_string(object, "session_id", &mut errors);
+    let view_id = parse_required_non_empty_string(&object, "view_id", &mut errors);
+    let session_id = parse_optional_non_empty_string(&object, "session_id", &mut errors);
 
     if !errors.is_empty() {
         return Err(invalid_request_error(errors));
@@ -219,37 +205,19 @@ fn parse_export_request(payload: Value) -> Result<ParsedViewStateExportRequest, 
 }
 
 fn parse_import_request(payload: Value) -> Result<ParsedViewStateImportRequest, ApiError> {
-    let object = payload.as_object().ok_or_else(|| {
-        invalid_request_error(vec![json!({
-            "loc": ["body"],
-            "msg": "Input should be a valid dictionary.",
-            "type": "dict_type",
-        })])
-    })?;
+    let object = expect_body_object(payload)?;
 
     let mut errors: Vec<Value> = Vec::new();
     let allowed_keys = ["schema_version", "session_id", "view_state"];
-    for key in object.keys() {
-        if !allowed_keys.contains(&key.as_str()) {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": "Extra inputs are not permitted.",
-                "type": "extra_forbidden",
-            }));
-        }
-    }
+    push_extra_forbidden_errors(&object, &allowed_keys, &mut errors);
 
-    let schema_version = parse_schema_version(object, &mut errors);
+    let schema_version = parse_schema_version(&object, &mut errors);
     if schema_version != 1 {
-        errors.push(json!({
-            "loc": ["body", "schema_version"],
-            "msg": "Input should be 1.",
-            "type": "literal_error",
-        }));
+        push_schema_version_literal_error(&mut errors);
     }
 
-    let session_id = parse_optional_non_empty_string(object, "session_id", &mut errors);
-    let view_state = parse_required_typed::<ViewState>(object, "view_state", &mut errors);
+    let session_id = parse_optional_non_empty_string(&object, "session_id", &mut errors);
+    let view_state = parse_required_typed::<ViewState>(&object, "view_state", &mut errors);
 
     if !errors.is_empty() {
         return Err(invalid_request_error(errors));
@@ -259,142 +227,4 @@ fn parse_import_request(payload: Value) -> Result<ParsedViewStateImportRequest, 
         session_id,
         view_state: view_state.expect("view_state validated"),
     })
-}
-
-fn parse_schema_version(object: &serde_json::Map<String, Value>, errors: &mut Vec<Value>) -> u8 {
-    match object.get("schema_version") {
-        None => 1,
-        Some(value) => {
-            if let Some(raw) = value.as_u64() {
-                raw as u8
-            } else if let Some(raw) = value.as_i64() {
-                if raw >= 0 {
-                    raw as u8
-                } else {
-                    errors.push(json!({
-                        "loc": ["body", "schema_version"],
-                        "msg": "Input should be 1.",
-                        "type": "literal_error",
-                    }));
-                    0
-                }
-            } else {
-                errors.push(json!({
-                    "loc": ["body", "schema_version"],
-                    "msg": "Input should be 1.",
-                    "type": "literal_error",
-                }));
-                0
-            }
-        }
-    }
-}
-
-fn parse_required_non_empty_string(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-    errors: &mut Vec<Value>,
-) -> Option<String> {
-    match object.get(key) {
-        Some(value) => {
-            if let Some(as_str) = value.as_str() {
-                if as_str.is_empty() {
-                    errors.push(json!({
-                        "loc": ["body", key],
-                        "msg": "String should have at least 1 character.",
-                        "type": "string_too_short",
-                        "ctx": {"min_length": 1},
-                    }));
-                    None
-                } else {
-                    Some(as_str.to_owned())
-                }
-            } else {
-                errors.push(json!({
-                    "loc": ["body", key],
-                    "msg": "Input should be a valid string.",
-                    "type": "string_type",
-                }));
-                None
-            }
-        }
-        None => {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": "Field required.",
-                "type": "missing",
-            }));
-            None
-        }
-    }
-}
-
-fn parse_optional_non_empty_string(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-    errors: &mut Vec<Value>,
-) -> Option<String> {
-    let value = object.get(key)?;
-    if value.is_null() {
-        return None;
-    }
-    if let Some(as_str) = value.as_str() {
-        if as_str.is_empty() {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": "String should have at least 1 character.",
-                "type": "string_too_short",
-                "ctx": {"min_length": 1},
-            }));
-            return None;
-        }
-        return Some(as_str.to_owned());
-    }
-    errors.push(json!({
-        "loc": ["body", key],
-        "msg": "Input should be a valid string.",
-        "type": "string_type",
-    }));
-    None
-}
-
-fn parse_required_typed<T>(
-    object: &serde_json::Map<String, Value>,
-    key: &str,
-    errors: &mut Vec<Value>,
-) -> Option<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let value = match object.get(key) {
-        Some(value) => value,
-        None => {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": "Field required.",
-                "type": "missing",
-            }));
-            return None;
-        }
-    };
-    match serde_json::from_value::<T>(value.clone()) {
-        Ok(parsed) => Some(parsed),
-        Err(error) => {
-            errors.push(json!({
-                "loc": ["body", key],
-                "msg": error.to_string(),
-                "type": "value_error",
-            }));
-            None
-        }
-    }
-}
-
-fn invalid_request_error(errors: Vec<Value>) -> ApiError {
-    ApiError::new(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "invalid_request",
-        "Request validation failed.",
-        Some(json!({ "errors": errors })),
-    )
 }
