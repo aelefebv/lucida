@@ -116,6 +116,8 @@ pub fn new_shared_usage_telemetry_with_config(
             config.db_path.display()
         )
     })?;
+    conn.busy_timeout(StdDuration::from_secs(5))
+        .map_err(|error| format!("failed to configure sqlite busy timeout: {error}"))?;
     initialize_usage_schema(&mut conn)?;
 
     let (event_tx, _) = broadcast::channel(512);

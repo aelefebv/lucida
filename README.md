@@ -42,6 +42,8 @@ Override with environment variables:
 - `LUCIDA_USAGE_RETENTION_DAYS`
 - `LUCIDA_USAGE_MAX_EVENTS`
 - `LUCIDA_USAGE_MAX_DB_BYTES`
+- `LUCIDA_USAGE_THUMBNAIL_SAMPLE_RATE` (`0.0`-`1.0`, default `1.0`)
+- `LUCIDA_USAGE_THUMBNAIL_MAX_PER_MINUTE` (`0` disables thumbnails, default unlimited)
 
 Agent correlation headers (optional, additive):
 

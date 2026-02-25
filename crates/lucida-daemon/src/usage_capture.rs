@@ -1,4 +1,7 @@
 use std::path::Path;
+use std::sync::mpsc::{Receiver, SendError, Sender};
+use std::sync::Arc;
+use std::thread;
 
 use axum::{
     body::{to_bytes, Body},
@@ -16,14 +19,200 @@ use sha2::{Digest, Sha256};
 
 use crate::state::SharedAppState;
 use crate::usage::{
-    extract_agent_context, normalize_instrumented_endpoint, usage_thumbnail_root, UsageEventInsert,
+    extract_agent_context, normalize_instrumented_endpoint, usage_thumbnail_root, AgentContext,
+    SharedUsageTelemetry, UsageEventInsert,
 };
-use crate::view_events::{ViewEvent, ViewEventThumbnail, ViewEventType};
+use crate::view_events::{SharedViewEventBus, ViewEvent, ViewEventThumbnail, ViewEventType};
 
 const REQUEST_CAPTURE_LIMIT_BYTES: usize = 512 * 1024;
 const RESPONSE_CAPTURE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CAPTURE_STRING_CHARS: usize = 4096;
 const THUMBNAIL_MAX_EDGE_PX: u32 = 320;
+
+pub const ENV_USAGE_THUMBNAIL_SAMPLE_RATE: &str = "LUCIDA_USAGE_THUMBNAIL_SAMPLE_RATE";
+pub const ENV_USAGE_THUMBNAIL_MAX_PER_MINUTE: &str = "LUCIDA_USAGE_THUMBNAIL_MAX_PER_MINUTE";
+
+const DEFAULT_THUMBNAIL_SAMPLE_RATE: f64 = 1.0;
+const DEFAULT_THUMBNAIL_MAX_PER_MINUTE: u32 = u32::MAX;
+
+#[derive(Debug)]
+pub struct UsageCaptureWorker {
+    sender: Sender<UsageCaptureJob>,
+}
+
+pub type SharedUsageCaptureWorker = Arc<UsageCaptureWorker>;
+
+#[derive(Debug, Clone)]
+struct UsageCaptureJob {
+    endpoint: String,
+    path_for_log: String,
+    method: String,
+    status_code: u16,
+    latency_ms: f64,
+    agent_context: AgentContext,
+    request_json_raw: Option<Value>,
+    response_json_raw: Option<Value>,
+}
+
+#[derive(Debug, Clone)]
+struct ThumbnailPolicy {
+    sample_rate: f64,
+    max_per_minute: u32,
+}
+
+impl ThumbnailPolicy {
+    fn from_env() -> Self {
+        let sample_rate = parse_env_f64(
+            ENV_USAGE_THUMBNAIL_SAMPLE_RATE,
+            DEFAULT_THUMBNAIL_SAMPLE_RATE,
+        )
+        .clamp(0.0, 1.0);
+        let max_per_minute = parse_env_u32(
+            ENV_USAGE_THUMBNAIL_MAX_PER_MINUTE,
+            DEFAULT_THUMBNAIL_MAX_PER_MINUTE,
+        );
+        Self {
+            sample_rate,
+            max_per_minute,
+        }
+    }
+
+    fn allows_render(
+        &self,
+        render_id: &str,
+        now_minute_bucket: i64,
+        rate_window: &mut ThumbnailRateWindow,
+    ) -> bool {
+        if self.max_per_minute == 0 {
+            return false;
+        }
+        if !should_sample_render(render_id, self.sample_rate) {
+            return false;
+        }
+        rate_window.try_acquire(now_minute_bucket, self.max_per_minute)
+    }
+}
+
+#[derive(Debug, Default)]
+struct ThumbnailRateWindow {
+    minute_bucket: Option<i64>,
+    generated_count: u32,
+}
+
+impl ThumbnailRateWindow {
+    fn try_acquire(&mut self, minute_bucket: i64, max_per_minute: u32) -> bool {
+        if self.minute_bucket != Some(minute_bucket) {
+            self.minute_bucket = Some(minute_bucket);
+            self.generated_count = 0;
+        }
+        if self.generated_count >= max_per_minute {
+            return false;
+        }
+        self.generated_count = self.generated_count.saturating_add(1);
+        true
+    }
+}
+
+pub fn new_shared_usage_capture_worker(
+    usage: SharedUsageTelemetry,
+    view_events: SharedViewEventBus,
+) -> SharedUsageCaptureWorker {
+    let (sender, receiver) = std::sync::mpsc::channel::<UsageCaptureJob>();
+    spawn_usage_capture_worker(receiver, usage, view_events);
+    Arc::new(UsageCaptureWorker { sender })
+}
+
+impl UsageCaptureWorker {
+    fn enqueue(&self, job: UsageCaptureJob) -> Result<(), SendError<UsageCaptureJob>> {
+        self.sender.send(job)
+    }
+}
+
+fn spawn_usage_capture_worker(
+    receiver: Receiver<UsageCaptureJob>,
+    usage: SharedUsageTelemetry,
+    view_events: SharedViewEventBus,
+) {
+    let spawn_result = thread::Builder::new()
+        .name("lucida-usage-capture".to_owned())
+        .spawn(move || {
+            let policy = ThumbnailPolicy::from_env();
+            let mut rate_window = ThumbnailRateWindow::default();
+            while let Ok(job) = receiver.recv() {
+                let path_for_log = job.path_for_log.clone();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    process_usage_capture_job(job, &usage, &view_events, &policy, &mut rate_window)
+                }));
+                usage.finish_async_insert();
+
+                if result.is_err() {
+                    tracing::warn!(
+                        target: "lucida.usage",
+                        path = %path_for_log,
+                        "usage capture worker panicked while processing telemetry event"
+                    );
+                }
+            }
+        });
+
+    if let Err(error) = spawn_result {
+        tracing::warn!(
+            target: "lucida.usage",
+            error = %error,
+            "failed to spawn usage capture worker thread"
+        );
+    }
+}
+
+fn process_usage_capture_job(
+    job: UsageCaptureJob,
+    usage: &SharedUsageTelemetry,
+    view_events: &SharedViewEventBus,
+    policy: &ThumbnailPolicy,
+    rate_window: &mut ThumbnailRateWindow,
+) {
+    let mut response_json_raw = job.response_json_raw;
+    let thumbnail = maybe_create_thumbnail_from_render_response(
+        &job.endpoint,
+        job.status_code,
+        response_json_raw.as_ref(),
+        policy,
+        rate_window,
+    );
+    if let Some(thumbnail_metadata) = thumbnail.as_ref() {
+        attach_usage_thumbnail(&mut response_json_raw, thumbnail_metadata);
+    }
+
+    if let Some(event) = build_view_event(
+        &job.endpoint,
+        job.status_code,
+        job.request_json_raw.as_ref(),
+        response_json_raw.as_ref(),
+        thumbnail
+            .as_ref()
+            .map(UsageThumbnailMetadata::to_view_event_thumbnail),
+    ) {
+        view_events.publish(event);
+    }
+
+    let usage_event = UsageEventInsert {
+        endpoint: job.endpoint.clone(),
+        method: job.method,
+        status_code: job.status_code,
+        latency_ms: job.latency_ms,
+        agent_context: job.agent_context,
+        request_json: sanitize_usage_payload(job.request_json_raw),
+        response_json: sanitize_usage_payload(response_json_raw),
+    };
+    if let Err(error) = usage.record_http_event(usage_event) {
+        tracing::warn!(
+            target: "lucida.usage",
+            path = %job.path_for_log,
+            error = %error,
+            "failed to record usage telemetry event"
+        );
+    }
+}
 
 pub async fn usage_capture_middleware(
     axum::extract::State(state): axum::extract::State<SharedAppState>,
@@ -60,76 +249,36 @@ pub async fn usage_capture_middleware(
             Default::default()
         }
     };
-    let mut response_json_raw = decode_json_payload(response_bytes.as_ref());
-    let thumbnail = if endpoint == "/render/image" && status_code < 400 {
-        create_thumbnail_from_render_response(response_json_raw.as_ref())
-    } else {
-        None
-    };
-    if let Some(thumbnail_metadata) = thumbnail.as_ref() {
-        attach_usage_thumbnail(&mut response_json_raw, thumbnail_metadata);
-    }
-    let request_json = sanitize_usage_payload(request_json_raw.clone());
-    let response_json = sanitize_usage_payload(response_json_raw.clone());
+    let response_json_raw = decode_json_payload(response_bytes.as_ref());
     let response = Response::from_parts(response_parts, Body::from(response_bytes));
 
-    let (usage, view_events) = {
+    let (usage, usage_capture_worker) = {
         let app_state = state.read().await;
-        (app_state.usage.clone(), app_state.view_events.clone())
+        (
+            app_state.usage.clone(),
+            app_state.usage_capture_worker.clone(),
+        )
     };
-    if let Some(event) = build_view_event(
-        &endpoint,
-        status_code,
-        request_json_raw.as_ref(),
-        response_json_raw.as_ref(),
-        thumbnail
-            .as_ref()
-            .map(UsageThumbnailMetadata::to_view_event_thumbnail),
-    ) {
-        view_events.publish(event);
-    }
-    let usage_event = UsageEventInsert {
-        endpoint: endpoint.clone(),
+    let usage_job = UsageCaptureJob {
+        endpoint,
+        path_for_log: path.clone(),
         method: method.to_string(),
         status_code,
         latency_ms,
         agent_context,
-        request_json,
-        response_json,
+        request_json_raw,
+        response_json_raw,
     };
     usage.begin_async_insert();
-    tokio::spawn({
-        let usage = usage.clone();
-        let path_for_log = path.clone();
-        async move {
-            let insert_result = tokio::task::spawn_blocking({
-                let usage = usage.clone();
-                move || usage.record_http_event(usage_event)
-            })
-            .await;
-            usage.finish_async_insert();
-
-            match insert_result {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        target: "lucida.usage",
-                        path = %path_for_log,
-                        error = %error,
-                        "failed to record usage telemetry event"
-                    );
-                }
-                Err(join_error) => {
-                    tracing::warn!(
-                        target: "lucida.usage",
-                        path = %path_for_log,
-                        error = %join_error,
-                        "usage telemetry task join failed"
-                    );
-                }
-            }
-        }
-    });
+    if let Err(error) = usage_capture_worker.enqueue(usage_job) {
+        usage.finish_async_insert();
+        tracing::warn!(
+            target: "lucida.usage",
+            path = %path,
+            error = %error,
+            "failed to enqueue usage telemetry event"
+        );
+    }
 
     response
 }
@@ -162,17 +311,38 @@ impl UsageThumbnailMetadata {
     }
 }
 
-fn create_thumbnail_from_render_response(
+fn maybe_create_thumbnail_from_render_response(
+    endpoint: &str,
+    status_code: u16,
     response_json: Option<&Value>,
+    policy: &ThumbnailPolicy,
+    rate_window: &mut ThumbnailRateWindow,
 ) -> Option<UsageThumbnailMetadata> {
-    let payload = response_json?;
-    let render_id = value_string(payload, &["render_id"])?;
-    if !render_id
-        .chars()
-        .all(|value| value.is_ascii_alphanumeric() || value == '_' || value == '-')
-    {
+    if endpoint != "/render/image" || status_code >= 400 {
         return None;
     }
+    let payload = response_json?;
+    if !is_inline_base64_delivery(payload) {
+        return None;
+    }
+
+    let render_id = value_string(payload, &["render_id"])?;
+    if !is_safe_render_id(&render_id) {
+        return None;
+    }
+
+    let now = Utc::now();
+    if !policy.allows_render(&render_id, now.timestamp() / 60, rate_window) {
+        return None;
+    }
+    create_thumbnail_from_render_payload(payload, &render_id, now)
+}
+
+fn create_thumbnail_from_render_payload(
+    payload: &Value,
+    render_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Option<UsageThumbnailMetadata> {
     let bytes_base64 = value_string(payload, &["images", "0", "bytes_base64"])?;
     let decoded = BASE64_STANDARD.decode(bytes_base64).ok()?;
     let image = image::load_from_memory(&decoded).ok()?;
@@ -193,7 +363,7 @@ fn create_thumbnail_from_render_response(
     }
     let encoded_png = cursor.into_inner();
 
-    let date_folder = Utc::now().format("%Y-%m-%d").to_string();
+    let date_folder = now.format("%Y-%m-%d").to_string();
     let target_path = usage_thumbnail_root()
         .join(&date_folder)
         .join(format!("{render_id}.png"));
@@ -210,6 +380,35 @@ fn create_thumbnail_from_render_response(
         width_px: u64::from(width_px),
         height_px: u64::from(height_px),
     })
+}
+
+fn should_sample_render(render_id: &str, sample_rate: f64) -> bool {
+    if sample_rate <= 0.0 {
+        return false;
+    }
+    if sample_rate >= 1.0 {
+        return true;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(render_id.as_bytes());
+    let digest = hasher.finalize();
+    let mut head_bytes = [0_u8; 8];
+    head_bytes.copy_from_slice(&digest[..8]);
+    let scaled = u64::from_be_bytes(head_bytes) as f64 / u64::MAX as f64;
+    scaled < sample_rate
+}
+
+fn is_inline_base64_delivery(payload: &Value) -> bool {
+    matches!(
+        value_string(payload, &["images", "0", "delivery"]).as_deref(),
+        Some("inline_base64")
+    )
+}
+
+fn is_safe_render_id(render_id: &str) -> bool {
+    render_id
+        .chars()
+        .all(|value| value.is_ascii_alphanumeric() || value == '_' || value == '-')
 }
 
 fn persist_thumbnail(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
@@ -388,5 +587,64 @@ fn sanitize_usage_value(value: &mut Value) {
             }
         }
         _ => {}
+    }
+}
+
+fn parse_env_f64(name: &str, fallback: f64) -> f64 {
+    match std::env::var(name) {
+        Ok(raw) => raw.parse::<f64>().unwrap_or(fallback),
+        Err(_) => fallback,
+    }
+}
+
+fn parse_env_u32(name: &str, fallback: u32) -> u32 {
+    match std::env::var(name) {
+        Ok(raw) => raw.parse::<u32>().unwrap_or(fallback),
+        Err(_) => fallback,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_inline_base64_delivery, should_sample_render, ThumbnailPolicy, ThumbnailRateWindow,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn thumbnail_policy_rate_limit_applies_per_minute_bucket() {
+        let policy = ThumbnailPolicy {
+            sample_rate: 1.0,
+            max_per_minute: 2,
+        };
+        let mut rate_window = ThumbnailRateWindow::default();
+
+        assert!(policy.allows_render("ren_a", 10, &mut rate_window));
+        assert!(policy.allows_render("ren_b", 10, &mut rate_window));
+        assert!(!policy.allows_render("ren_c", 10, &mut rate_window));
+        assert!(policy.allows_render("ren_d", 11, &mut rate_window));
+    }
+
+    #[test]
+    fn sampling_gate_respects_zero_and_full_rates() {
+        assert!(!should_sample_render("ren_sample", 0.0));
+        assert!(should_sample_render("ren_sample", 1.0));
+    }
+
+    #[test]
+    fn delivery_gate_requires_inline_base64_payloads() {
+        let inline_payload = json!({
+            "images": [{"delivery": "inline_base64"}]
+        });
+        let file_payload = json!({
+            "images": [{"delivery": "file_path"}]
+        });
+        let missing_payload = json!({
+            "images": [{}]
+        });
+
+        assert!(is_inline_base64_delivery(&inline_payload));
+        assert!(!is_inline_base64_delivery(&file_payload));
+        assert!(!is_inline_base64_delivery(&missing_payload));
     }
 }
