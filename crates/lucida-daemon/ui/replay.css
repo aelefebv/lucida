@@ -170,6 +170,40 @@ button.secondary {
   padding: 0.65rem;
 }
 
+.frame-action {
+  margin: 0 0 0.5rem;
+  padding: 0.45rem;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  background: #f8faf8;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.35rem 0.6rem;
+}
+
+.frame-action-item {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+}
+
+.frame-action-label {
+  color: var(--muted);
+  font-size: 0.67rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.frame-action-value {
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .viewport-note {
   margin: 0 0 0.5rem;
   min-height: 1.1rem;
@@ -275,6 +309,9 @@ button.secondary {
   }
   .playback-controls {
     grid-template-columns: auto auto auto;
+  }
+  .frame-action {
+    grid-template-columns: 1fr;
   }
   #frame-slider {
     grid-column: 1 / -1;

@@ -25,6 +25,10 @@ const el = {
   playbackSpeed: document.querySelector("#playback-speed"),
   frameSlider: document.querySelector("#frame-slider"),
   frameIndicator: document.querySelector("#frame-indicator"),
+  frameStep: document.querySelector("#frame-step"),
+  frameEndpoint: document.querySelector("#frame-endpoint"),
+  frameTime: document.querySelector("#frame-time"),
+  frameStatus: document.querySelector("#frame-status"),
   viewportNote: document.querySelector("#viewport-note"),
   viewport: document.querySelector("#viewport"),
   changes: document.querySelector("#changes"),
@@ -245,6 +249,7 @@ async function renderFrame() {
     el.frameIndicator.textContent = "frame 0/0";
     el.frameSlider.max = "0";
     el.frameSlider.value = "0";
+    renderFrameAction(null);
     el.viewportNote.textContent = "";
     el.viewport.innerHTML = "<p>Select a run and frame.</p>";
     el.changes.innerHTML = "";
@@ -258,9 +263,19 @@ async function renderFrame() {
 
   const frame = state.frames[state.currentFrameIndex];
   const previous = state.currentFrameIndex > 0 ? state.frames[state.currentFrameIndex - 1] : null;
+  renderFrameAction(frame);
   renderStateDiff(previous?.viewState ?? null, frame.viewState);
   const renderVersion = (state.renderVersion += 1);
   await renderViewport(frame, renderVersion);
+}
+
+function renderFrameAction(frame) {
+  const event = frame ? frame.event : null;
+  el.frameStep.textContent = event && event.agent_step_id ? event.agent_step_id : "(none)";
+  el.frameEndpoint.textContent = event && event.endpoint ? event.endpoint : "-";
+  el.frameTime.textContent = event ? formatTime(event.occurred_at_utc) : "-";
+  el.frameStatus.textContent =
+    event && event.status_code !== null && event.status_code !== undefined ? String(event.status_code) : "-";
 }
 
 function setViewportNote(text) {
