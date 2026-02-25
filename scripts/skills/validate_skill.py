@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 _ALLOWED_FRONTMATTER_KEYS = {"name", "description"}
+_RESERVED_NAME_TERMS = ("anthropic", "claude")
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,10 @@ def _validate_frontmatter(skill_root: Path, errors: list[str]) -> None:
         errors.append("Missing SKILL.md")
         return
 
+    skill_lines = skill_md.read_text(encoding="utf-8").splitlines()
+    if len(skill_lines) > 500:
+        errors.append("SKILL.md should remain under 500 lines for context efficiency.")
+
     try:
         frontmatter = _read_frontmatter(skill_md)
     except ValueError as exc:
@@ -62,10 +67,16 @@ def _validate_frontmatter(skill_root: Path, errors: list[str]) -> None:
     name = frontmatter.get("name", "")
     if not re.fullmatch(r"[a-z0-9-]{1,64}", name):
         errors.append("Frontmatter name must be hyphen-case and <=64 characters.")
+    if any(term in name for term in _RESERVED_NAME_TERMS):
+        errors.append("Frontmatter name should not include reserved provider terms like 'claude' or 'anthropic'.")
 
     description = frontmatter.get("description", "")
     if len(description) < 40:
         errors.append("Frontmatter description must be informative (>=40 chars).")
+    if "use when" not in description.lower():
+        errors.append("Frontmatter description should include explicit trigger context using 'Use when ...'.")
+    if re.search(r"\b(i|me|my|mine|you|your|yours)\b", description, flags=re.IGNORECASE):
+        errors.append("Frontmatter description should be written in third person.")
 
 
 def _validate_openai_adapter(skill_root: Path, errors: list[str]) -> None:
@@ -223,12 +234,25 @@ def validate_skill(skill_root: Path) -> ValidationResult:
     _validate_operation_matrix(skill_root, errors)
 
     for rel_path in (
+        "references/operation-matrix.md",
         "references/phase1-cli.md",
         "references/phase1-http.md",
         "references/troubleshooting.md",
     ):
         if not (skill_root / rel_path).exists():
             errors.append(f"Missing reference file: {rel_path}")
+
+    reference_root = skill_root / "references"
+    if reference_root.exists():
+        for path in sorted(reference_root.glob("*.md")):
+            lines = path.read_text(encoding="utf-8").splitlines()
+            if len(lines) <= 100:
+                continue
+            header_window = "\n".join(lines[:30]).lower()
+            if "table of contents" not in header_window:
+                errors.append(
+                    f"Reference file {path.name} is longer than 100 lines and should include a table of contents near the top."
+                )
 
     return ValidationResult(ok=not errors, errors=errors)
 

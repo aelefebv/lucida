@@ -1,5 +1,7 @@
 # Phase-1 HTTP Workflow Reference
 
+For operation metadata and required response fields, start with [operation-matrix.md](operation-matrix.md).
+
 Use daemon endpoints from `crates/lucida-daemon/src/lib.rs`.
 Use `schema_version: 1` on all POST payloads.
 

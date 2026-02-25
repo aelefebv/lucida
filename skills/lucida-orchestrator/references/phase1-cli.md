@@ -1,5 +1,7 @@
 # Phase-1 CLI Workflow Reference
 
+For operation metadata and required response fields, start with [operation-matrix.md](operation-matrix.md).
+
 Use `uv run lucida ... --json` for machine-readable responses.
 Set `LUCIDA_BASE_URL` when daemon does not run on `http://127.0.0.1:3000`.
 
