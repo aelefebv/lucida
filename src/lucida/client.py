@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlencode
 
 import httpx
@@ -463,25 +463,13 @@ class LucidaClient:
         agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Set 2D plane while preserving projected world center."""
-        view = self.get_view(
+        return self._update_view_from_current(
             view_id=view_id,
             session_id=session_id,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
-        ).view_state
-        if view.view_2d is None:
-            raise ValueError("view has no 2d state.")
-
-        patch = self._set_plane_patch(view=view.model_dump(mode="json"), plane=plane)
-        return self.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=patch,
-            expected_state_version=view.state_version,
-            agent_run_id=agent_run_id,
-            agent_step_id=agent_step_id,
-            agent_name=agent_name,
+            patch_builder=lambda view: self._set_plane_patch(view=view, plane=plane),
         )
 
     def pan(
@@ -496,39 +484,13 @@ class LucidaClient:
         agent_name: str | None = None,
     ) -> ViewUpdateResponse:
         """Pan camera in screen pixels."""
-        view = self.get_view(
+        return self._update_view_from_current(
             view_id=view_id,
             session_id=session_id,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
-        ).view_state
-        if view.view_2d is None:
-            raise ValueError("view has no 2d state.")
-
-        zoom = float(view.view_2d.camera.zoom)
-        pixel_ratio = float(view.viewport.pixel_ratio)
-        if zoom <= 0:
-            raise ValueError("zoom must be > 0.")
-
-        delta_x = float(dx_px) / (zoom * pixel_ratio)
-        delta_y = float(dy_px) / (zoom * pixel_ratio)
-        center_x, center_y = view.view_2d.camera.center_world
-        patch = [
-            {
-                "op": "replace",
-                "path": "/view_2d/camera/center_world",
-                "value": [float(center_x) + delta_x, float(center_y) + delta_y],
-            }
-        ]
-        return self.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=patch,
-            expected_state_version=view.state_version,
-            agent_run_id=agent_run_id,
-            agent_step_id=agent_step_id,
-            agent_name=agent_name,
+            patch_builder=lambda view: self._pan_patch(view=view, dx_px=dx_px, dy_px=dy_px),
         )
 
     def zoom(
@@ -545,26 +507,13 @@ class LucidaClient:
         if factor <= 0:
             raise ValueError("zoom factor must be > 0.")
 
-        view = self.get_view(
+        return self._update_view_from_current(
             view_id=view_id,
             session_id=session_id,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
-        ).view_state
-        if view.view_2d is None:
-            raise ValueError("view has no 2d state.")
-
-        next_zoom = float(view.view_2d.camera.zoom) * float(factor)
-        patch = [{"op": "replace", "path": "/view_2d/camera/zoom", "value": next_zoom}]
-        return self.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=patch,
-            expected_state_version=view.state_version,
-            agent_run_id=agent_run_id,
-            agent_step_id=agent_step_id,
-            agent_name=agent_name,
+            patch_builder=lambda view: self._zoom_patch(view=view, factor=factor),
         )
 
     def rotate(
@@ -585,31 +534,17 @@ class LucidaClient:
         if (degrees is None) == (delta_degrees is None):
             raise ValueError("provide exactly one of degrees or delta_degrees.")
 
-        view = self.get_view(
+        return self._update_view_from_current(
             view_id=view_id,
             session_id=session_id,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
-        ).view_state
-        if view.view_2d is None:
-            raise ValueError("view has no 2d state.")
-
-        current_rotation = float(view.view_2d.camera.rotation_deg)
-        next_rotation = (
-            float(degrees)
-            if degrees is not None
-            else current_rotation + float(delta_degrees)
-        )
-        patch = [{"op": "replace", "path": "/view_2d/camera/rotation_deg", "value": next_rotation}]
-        return self.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=patch,
-            expected_state_version=view.state_version,
-            agent_run_id=agent_run_id,
-            agent_step_id=agent_step_id,
-            agent_name=agent_name,
+            patch_builder=lambda view: self._rotate_patch(
+                view=view,
+                degrees=degrees,
+                delta_degrees=delta_degrees,
+            ),
         )
 
     def set_dim(
@@ -639,20 +574,11 @@ class LucidaClient:
         clamp:
             Clamp out-of-range values into bounds when true.
         """
-        selectors, expected_state_version = self._selectors_with_replacement(
+        return self._replace_selector(
             view_id=view_id,
             axis=axis,
             replacement={"axis": axis, "kind": "index", "index": index, "clamp": clamp},
             session_id=session_id,
-            agent_run_id=agent_run_id,
-            agent_step_id=agent_step_id,
-            agent_name=agent_name,
-        )
-        return self.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
-            expected_state_version=expected_state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -688,7 +614,7 @@ class LucidaClient:
         clamp:
             Clamp out-of-range values into bounds when true.
         """
-        selectors, expected_state_version = self._selectors_with_replacement(
+        return self._replace_selector(
             view_id=view_id,
             axis=axis,
             replacement={
@@ -699,15 +625,6 @@ class LucidaClient:
                 "clamp": clamp,
             },
             session_id=session_id,
-            agent_run_id=agent_run_id,
-            agent_step_id=agent_step_id,
-            agent_name=agent_name,
-        )
-        return self.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
-            expected_state_version=expected_state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -740,7 +657,7 @@ class LucidaClient:
         clamp:
             Clamp out-of-range values into bounds when true.
         """
-        selectors, expected_state_version = self._selectors_with_replacement(
+        return self._replace_selector(
             view_id=view_id,
             axis=axis,
             replacement={
@@ -750,15 +667,6 @@ class LucidaClient:
                 "clamp": clamp,
             },
             session_id=session_id,
-            agent_run_id=agent_run_id,
-            agent_step_id=agent_step_id,
-            agent_name=agent_name,
-        )
-        return self.update_view(
-            view_id=view_id,
-            session_id=session_id,
-            patch=[{"op": "replace", "path": "/selectors", "value": selectors}],
-            expected_state_version=expected_state_version,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
@@ -823,7 +731,7 @@ class LucidaClient:
             return f"{base_url}/usage/events/stream"
         return f"{base_url}/usage/events/stream?{urlencode({'run_id': run_id})}"
 
-    def _selectors_with_replacement(
+    def _replace_selector(
         self,
         *,
         view_id: str,
@@ -833,8 +741,8 @@ class LucidaClient:
         agent_run_id: str | None,
         agent_step_id: str | None,
         agent_name: str | None,
-    ) -> tuple[list[dict[str, Any]], int]:
-        """Load current selectors and replace one axis entry.
+    ) -> ViewUpdateResponse:
+        """Replace one selector entry by axis and submit a view update.
 
         Parameters
         ----------
@@ -847,45 +755,59 @@ class LucidaClient:
         session_id:
             Optional session scope.
         """
-        view = self.get_view(
+        return self._update_view_from_current(
             view_id=view_id,
             session_id=session_id,
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
-        ).view_state
+            patch_builder=lambda view: [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": self._selectors_with_replacement(
+                        view=view,
+                        axis=axis,
+                        replacement=replacement,
+                    ),
+                }
+            ],
+        )
+
+    def _selectors_with_replacement(
+        self,
+        *,
+        view: ViewState,
+        axis: str,
+        replacement: dict[str, Any],
+    ) -> list[dict[str, Any]]:
         selectors = [selector.model_dump(mode="json") for selector in view.selectors if selector.axis != axis]
         selectors.append(replacement)
-        return selectors, int(view.state_version)
+        return selectors
 
-    def _set_plane_patch(self, *, view: dict[str, Any], plane: str) -> list[dict[str, Any]]:
+    def _set_plane_patch(self, *, view: ViewState, plane: str) -> list[dict[str, Any]]:
         if plane not in _PLANE_ROLES:
             raise ValueError(f"unsupported plane: {plane}")
-
-        view_2d = view.get("view_2d")
-        if not isinstance(view_2d, dict):
+        if view.view_2d is None:
             raise ValueError("view has no 2d state.")
-
-        current_plane = str(view_2d.get("plane", "xy"))
+        view_2d = view.view_2d
+        current_plane = view_2d.plane
         if current_plane not in _PLANE_ROLES:
             current_plane = "xy"
 
         current_u_role, current_v_role, current_orth_role = _PLANE_ROLES[current_plane]
         target_u_role, target_v_role, target_orth_role = _PLANE_ROLES[plane]
 
-        camera = view_2d.get("camera") or {}
-        center_world = camera.get("center_world") or [0.0, 0.0]
+        center_world = list(view_2d.camera.center_world)
         if len(center_world) != 2:
             center_world = [0.0, 0.0]
 
-        slice_payload = view_2d.get("slice") or {}
-        selectors = view.get("selectors") or []
-        if not isinstance(selectors, list):
-            selectors = []
-
-        current_slice_index = slice_payload.get("index")
+        slice_payload = view_2d.slice.model_dump(mode="json") if view_2d.slice is not None else {}
+        selectors = [selector.model_dump(mode="json") for selector in view.selectors]
+        slice_axis = view_2d.slice.axis if view_2d.slice is not None else None
+        current_slice_index = view_2d.slice.index if view_2d.slice is not None else None
         if current_slice_index is None:
-            current_slice_index = self._selector_index(selectors=selectors, axis=slice_payload.get("axis"))
+            current_slice_index = self._selector_index(selectors=selectors, axis=slice_axis)
         if current_slice_index is None:
             current_slice_index = 0
 
@@ -907,6 +829,75 @@ class LucidaClient:
             {"op": "replace", "path": "/view_2d/camera/center_world", "value": new_center},
             {"op": "replace", "path": "/view_2d/slice", "value": next_slice},
         ]
+
+    def _pan_patch(self, *, view: ViewState, dx_px: float, dy_px: float) -> list[dict[str, Any]]:
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+
+        zoom = float(view.view_2d.camera.zoom)
+        pixel_ratio = float(view.viewport.pixel_ratio)
+        if zoom <= 0:
+            raise ValueError("zoom must be > 0.")
+
+        delta_x = float(dx_px) / (zoom * pixel_ratio)
+        delta_y = float(dy_px) / (zoom * pixel_ratio)
+        center_x, center_y = view.view_2d.camera.center_world
+        return [
+            {
+                "op": "replace",
+                "path": "/view_2d/camera/center_world",
+                "value": [float(center_x) + delta_x, float(center_y) + delta_y],
+            }
+        ]
+
+    def _zoom_patch(self, *, view: ViewState, factor: float) -> list[dict[str, Any]]:
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+        next_zoom = float(view.view_2d.camera.zoom) * float(factor)
+        return [{"op": "replace", "path": "/view_2d/camera/zoom", "value": next_zoom}]
+
+    def _rotate_patch(
+        self,
+        *,
+        view: ViewState,
+        degrees: float | None,
+        delta_degrees: float | None,
+    ) -> list[dict[str, Any]]:
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+        current_rotation = float(view.view_2d.camera.rotation_deg)
+        next_rotation = (
+            float(degrees) if degrees is not None else current_rotation + float(delta_degrees)
+        )
+        return [{"op": "replace", "path": "/view_2d/camera/rotation_deg", "value": next_rotation}]
+
+    def _update_view_from_current(
+        self,
+        *,
+        view_id: str,
+        session_id: str | None,
+        patch_builder: Callable[[ViewState], list[dict[str, Any]]],
+        agent_run_id: str | None,
+        agent_step_id: str | None,
+        agent_name: str | None,
+    ) -> ViewUpdateResponse:
+        view = self.get_view(
+            view_id=view_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        ).view_state
+        patch = patch_builder(view)
+        return self.update_view(
+            view_id=view_id,
+            session_id=session_id,
+            patch=patch,
+            expected_state_version=int(view.state_version),
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+        )
 
     def _selector_index(self, *, selectors: list[dict[str, Any]], axis: Any) -> int | None:
         if not isinstance(axis, str):
