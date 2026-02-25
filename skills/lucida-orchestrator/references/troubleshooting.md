@@ -1,4 +1,4 @@
-# Phase-1 Troubleshooting
+# Current Surface Troubleshooting
 
 ## `view_not_found`
 - Cause: view id does not exist or does not belong to provided session.
@@ -7,7 +7,7 @@
   2. Re-run command with matching `--session-id` / `session_id`.
 
 ## `unsupported_mode`
-- Cause: request asks for 3D path in current phase-1 implementation.
+- Cause: request asks for a mode or path not currently implemented by this repository state.
 - Recovery:
   1. Force `mode: "2d"` in `view.create`.
   2. Remove `view_3d` payload in import/render workflows.

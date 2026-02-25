@@ -1,12 +1,12 @@
 ---
 name: lucida-orchestrator
-description: Vendor-neutral Lucida phase-1 orchestration skill for agent workflows. Use when an agent needs to operate the Lucida Rust daemon and Python CLI/client for dataset/session/view/render/export/import tasks, produce reproducible CLI or HTTP templates, validate expected responses, and troubleshoot phase-1 API failures.
+description: Vendor-neutral Lucida orchestration skill for agent workflows. Use when an agent needs to operate the Lucida Rust daemon and Python CLI/client for currently implemented dataset/session/view/render/export/import tasks, produce reproducible CLI or HTTP templates, validate expected responses, and troubleshoot API failures.
 ---
 
 # Lucida Orchestrator
 
 ## Overview
-Run Lucida phase-1 workflows through stable operation templates backed by the live repo contract.
+Run currently implemented Lucida workflows through stable operation templates backed by the live repo contract.
 Use this skill to choose the correct operation, execute it via CLI or HTTP, and verify expected outputs and failure modes.
 
 ## Preflight
@@ -19,7 +19,7 @@ Use this skill to choose the correct operation, execute it via CLI or HTTP, and 
 ## Operation Matrix
 Read [references/operation-matrix.md](references/operation-matrix.md) first.
 Use [references/operation-matrix.json](references/operation-matrix.json) for machine-readable operation metadata.
-Treat operation IDs as stable phase-1 contract identifiers.
+Treat operation IDs as stable identifiers for the currently implemented surface.
 
 ## Workflow
 1. Select operation ID from the matrix.
@@ -35,11 +35,11 @@ Treat operation IDs as stable phase-1 contract identifiers.
 4. If any step fails, fix the skill or templates and repeat from step 1.
 
 ## CLI Guidance
-Use [references/phase1-cli.md](references/phase1-cli.md) and template files in `templates/cli/`.
+Use [references/current-cli.md](references/current-cli.md) and template files in `templates/cli/`.
 Keep generated commands copy/paste safe and JSON-output oriented (`--json`) when downstream parsing is required.
 
 ## HTTP Guidance
-Use [references/phase1-http.md](references/phase1-http.md) and template files in `templates/http/`.
+Use [references/current-http.md](references/current-http.md) and template files in `templates/http/`.
 Keep payloads schema-versioned (`schema_version: 1`) and endpoint-accurate for the current daemon routes.
 
 ## Troubleshooting
@@ -50,6 +50,6 @@ Use [references/troubleshooting.md](references/troubleshooting.md) for expected 
 - `invalid_request`
 
 ## Scope Guard
-Stay in phase-1 only:
-- In scope: dataset/session/view/render image/export/import + selector and camera helpers.
-- Out of scope: render packs, probe/stats APIs, 3D rendering workflows.
+Stay within the currently implemented API surface defined by the operation matrix:
+- In scope: operations listed in [references/operation-matrix.md](references/operation-matrix.md).
+- Out of scope: any operation not listed there.

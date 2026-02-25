@@ -85,14 +85,14 @@ def check_drift(repo_root: Path, skill_root: Path) -> DriftResult:
     actual_routes = _parse_routes(lib_rs_path)
 
     expected_surface_groups = {"dataset", "session", "view", "render"}
-    actual_phase1_commands = {
+    actual_runtime_commands = {
         command
         for command in actual_cli_commands
         if command.split(".", 1)[0] in expected_surface_groups
     }
 
-    missing_from_matrix = sorted(actual_phase1_commands - matrix_cli_commands)
-    stale_in_matrix = sorted(matrix_cli_commands - actual_phase1_commands)
+    missing_from_matrix = sorted(actual_runtime_commands - matrix_cli_commands)
+    stale_in_matrix = sorted(matrix_cli_commands - actual_runtime_commands)
 
     if missing_from_matrix:
         errors.append(

@@ -1,4 +1,4 @@
-# Operation Matrix (Phase 1)
+# Operation Matrix (Current Capabilities)
 
 ## Table of Contents
 - [Bootstrap Sequence](#bootstrap-sequence)

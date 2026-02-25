@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run runtime smoke checks for Lucida phase-1 skill workflows."""
+"""Run runtime smoke checks for currently implemented Lucida skill workflows."""
 
 from __future__ import annotations
 

@@ -1,10 +1,8 @@
 {
   "schema_version": 1,
-  "phase": "phase1",
   "operations": [
     {
       "id": "session.create",
-      "phase": "phase1",
       "title": "Create session",
       "cli_command": "session.create",
       "http_method": "POST",
@@ -12,177 +10,297 @@
       "cli_template": "templates/cli/session-create.md",
       "http_template": "templates/http/session-create.json",
       "required_inputs": [],
-      "expected_outputs": ["session_id", "created_at"],
-      "failure_hints": ["invalid_request"]
+      "expected_outputs": [
+        "session_id",
+        "created_at"
+      ],
+      "failure_hints": [
+        "invalid_request"
+      ]
     },
     {
       "id": "dataset.open",
-      "phase": "phase1",
       "title": "Open dataset",
       "cli_command": "dataset.open",
       "http_method": "POST",
       "http_path": "/dataset/open",
       "cli_template": "templates/cli/dataset-open.md",
       "http_template": "templates/http/dataset-open.json",
-      "required_inputs": ["uri"],
-      "expected_outputs": ["dataset_summary.dataset_id", "dataset_summary.multiscales"],
-      "failure_hints": ["invalid_request", "dataset_not_found"]
+      "required_inputs": [
+        "uri"
+      ],
+      "expected_outputs": [
+        "dataset_summary.dataset_id",
+        "dataset_summary.multiscales"
+      ],
+      "failure_hints": [
+        "invalid_request",
+        "dataset_not_found"
+      ]
     },
     {
       "id": "view.create",
-      "phase": "phase1",
       "title": "Create view",
       "cli_command": "view.create",
       "http_method": "POST",
       "http_path": "/view/create",
       "cli_template": "templates/cli/view-create.md",
       "http_template": "templates/http/view-create.json",
-      "required_inputs": ["dataset_id"],
-      "expected_outputs": ["view_state.view_id", "view_state.state_hash", "view_state.state_version"],
-      "failure_hints": ["dataset_not_found", "unsupported_mode", "invalid_request"]
+      "required_inputs": [
+        "dataset_id"
+      ],
+      "expected_outputs": [
+        "view_state.view_id",
+        "view_state.state_hash",
+        "view_state.state_version"
+      ],
+      "failure_hints": [
+        "dataset_not_found",
+        "unsupported_mode",
+        "invalid_request"
+      ]
     },
     {
       "id": "view.get",
-      "phase": "phase1",
       "title": "Get view",
       "cli_command": "view.get",
       "http_method": "GET",
       "http_path": "/view/{view_id}",
       "cli_template": "templates/cli/view-get.md",
       "http_template": "templates/http/view-get.json",
-      "required_inputs": ["view_id"],
-      "expected_outputs": ["view_state.view_id", "view_state.state_hash", "view_state.state_version"],
-      "failure_hints": ["view_not_found"]
+      "required_inputs": [
+        "view_id"
+      ],
+      "expected_outputs": [
+        "view_state.view_id",
+        "view_state.state_hash",
+        "view_state.state_version"
+      ],
+      "failure_hints": [
+        "view_not_found"
+      ]
     },
     {
       "id": "view.update",
-      "phase": "phase1",
       "title": "Patch view",
       "cli_command": "view.update",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-update.md",
       "http_template": "templates/http/view-update.json",
-      "required_inputs": ["view_id", "patch"],
-      "expected_outputs": ["view_state.state_hash", "view_state.state_version"],
-      "failure_hints": ["invalid_patch", "view_not_found"]
+      "required_inputs": [
+        "view_id",
+        "patch"
+      ],
+      "expected_outputs": [
+        "view_state.state_hash",
+        "view_state.state_version"
+      ],
+      "failure_hints": [
+        "invalid_patch",
+        "view_not_found"
+      ]
     },
     {
       "id": "view.export",
-      "phase": "phase1",
       "title": "Export view state",
       "cli_command": "view.export",
       "http_method": "POST",
       "http_path": "/export/viewstate",
       "cli_template": "templates/cli/view-export.md",
       "http_template": "templates/http/view-export.json",
-      "required_inputs": ["view_id"],
-      "expected_outputs": ["export_id", "view_state"],
-      "failure_hints": ["view_not_found", "invalid_request"]
+      "required_inputs": [
+        "view_id"
+      ],
+      "expected_outputs": [
+        "export_id",
+        "view_state"
+      ],
+      "failure_hints": [
+        "view_not_found",
+        "invalid_request"
+      ]
     },
     {
       "id": "view.import",
-      "phase": "phase1",
       "title": "Import view state",
       "cli_command": "view.import",
       "http_method": "POST",
       "http_path": "/import/viewstate",
       "cli_template": "templates/cli/view-import.md",
       "http_template": "templates/http/view-import.json",
-      "required_inputs": ["view_state"],
-      "expected_outputs": ["import_id", "view_state.view_id", "view_state.state_hash"],
-      "failure_hints": ["invalid_request", "dataset_not_found", "unsupported_mode"]
+      "required_inputs": [
+        "view_state"
+      ],
+      "expected_outputs": [
+        "import_id",
+        "view_state.view_id",
+        "view_state.state_hash"
+      ],
+      "failure_hints": [
+        "invalid_request",
+        "dataset_not_found",
+        "unsupported_mode"
+      ]
     },
     {
       "id": "view.set-dim",
-      "phase": "phase1",
       "title": "Set index selector",
       "cli_command": "view.set-dim",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-set-dim.md",
       "http_template": "templates/http/view-set-dim.json",
-      "required_inputs": ["view_id", "axis", "index"],
-      "expected_outputs": ["view_state.selectors", "view_state.state_hash"],
-      "failure_hints": ["view_not_found", "invalid_patch"]
+      "required_inputs": [
+        "view_id",
+        "axis",
+        "index"
+      ],
+      "expected_outputs": [
+        "view_state.selectors",
+        "view_state.state_hash"
+      ],
+      "failure_hints": [
+        "view_not_found",
+        "invalid_patch"
+      ]
     },
     {
       "id": "view.set-range",
-      "phase": "phase1",
       "title": "Set range selector",
       "cli_command": "view.set-range",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-set-range.md",
       "http_template": "templates/http/view-set-range.json",
-      "required_inputs": ["view_id", "axis", "start", "end_exclusive"],
-      "expected_outputs": ["view_state.selectors", "view_state.state_hash"],
-      "failure_hints": ["view_not_found", "invalid_patch"]
+      "required_inputs": [
+        "view_id",
+        "axis",
+        "start",
+        "end_exclusive"
+      ],
+      "expected_outputs": [
+        "view_state.selectors",
+        "view_state.state_hash"
+      ],
+      "failure_hints": [
+        "view_not_found",
+        "invalid_patch"
+      ]
     },
     {
       "id": "view.set-set",
-      "phase": "phase1",
       "title": "Set explicit selector set",
       "cli_command": "view.set-set",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-set-set.md",
       "http_template": "templates/http/view-set-set.json",
-      "required_inputs": ["view_id", "axis", "indices"],
-      "expected_outputs": ["view_state.selectors", "view_state.state_hash"],
-      "failure_hints": ["view_not_found", "invalid_patch"]
+      "required_inputs": [
+        "view_id",
+        "axis",
+        "indices"
+      ],
+      "expected_outputs": [
+        "view_state.selectors",
+        "view_state.state_hash"
+      ],
+      "failure_hints": [
+        "view_not_found",
+        "invalid_patch"
+      ]
     },
     {
       "id": "view.set-plane",
-      "phase": "phase1",
       "title": "Set active plane",
       "cli_command": "view.set-plane",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-set-plane.md",
       "http_template": "templates/http/view-set-plane.json",
-      "required_inputs": ["view_id", "plane"],
-      "expected_outputs": ["view_state.view_2d.plane", "view_state.state_hash"],
-      "failure_hints": ["view_not_found", "invalid_patch", "unsupported_plane"]
+      "required_inputs": [
+        "view_id",
+        "plane"
+      ],
+      "expected_outputs": [
+        "view_state.view_2d.plane",
+        "view_state.state_hash"
+      ],
+      "failure_hints": [
+        "view_not_found",
+        "invalid_patch",
+        "unsupported_plane"
+      ]
     },
     {
       "id": "view.pan",
-      "phase": "phase1",
       "title": "Pan camera",
       "cli_command": "view.pan",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-pan.md",
       "http_template": "templates/http/view-pan.json",
-      "required_inputs": ["view_id", "dx_px", "dy_px"],
-      "expected_outputs": ["view_state.view_2d.camera.center_world", "view_state.state_hash"],
-      "failure_hints": ["view_not_found", "invalid_patch"]
+      "required_inputs": [
+        "view_id",
+        "dx_px",
+        "dy_px"
+      ],
+      "expected_outputs": [
+        "view_state.view_2d.camera.center_world",
+        "view_state.state_hash"
+      ],
+      "failure_hints": [
+        "view_not_found",
+        "invalid_patch"
+      ]
     },
     {
       "id": "view.zoom",
-      "phase": "phase1",
       "title": "Zoom camera",
       "cli_command": "view.zoom",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-zoom.md",
       "http_template": "templates/http/view-zoom.json",
-      "required_inputs": ["view_id", "factor"],
-      "expected_outputs": ["view_state.view_2d.camera.zoom", "view_state.state_hash"],
-      "failure_hints": ["view_not_found", "invalid_patch"]
+      "required_inputs": [
+        "view_id",
+        "factor"
+      ],
+      "expected_outputs": [
+        "view_state.view_2d.camera.zoom",
+        "view_state.state_hash"
+      ],
+      "failure_hints": [
+        "view_not_found",
+        "invalid_patch"
+      ]
     },
     {
       "id": "render.image",
-      "phase": "phase1",
       "title": "Render image",
       "cli_command": "render.image",
       "http_method": "POST",
       "http_path": "/render/image",
       "cli_template": "templates/cli/render-image.md",
       "http_template": "templates/http/render-image.json",
-      "required_inputs": ["view_id", "output.width_px", "output.height_px"],
-      "expected_outputs": ["status", "state_hash", "images[0].sha256", "meta.pyramid_level_used"],
-      "failure_hints": ["invalid_render_request", "render_output_too_large", "unsupported_mode", "view_not_found"]
+      "required_inputs": [
+        "view_id",
+        "output.width_px",
+        "output.height_px"
+      ],
+      "expected_outputs": [
+        "status",
+        "state_hash",
+        "images[0].sha256",
+        "meta.pyramid_level_used"
+      ],
+      "failure_hints": [
+        "invalid_render_request",
+        "render_output_too_large",
+        "unsupported_mode",
+        "view_not_found"
+      ]
     }
-  ]
+  ],
+  "surface": "current"
 }

@@ -60,7 +60,7 @@ jobs:
             --to notebook \
             --execute \
             --inplace \
-            notebooks/milestones/milestone5-llm-skill-orchestrator-phase1.ipynb
+            notebooks/milestones/milestone5-llm-skill-orchestrator-current-capabilities.ipynb
 
       - name: Upload adapter bundles
         uses: actions/upload-artifact@v4

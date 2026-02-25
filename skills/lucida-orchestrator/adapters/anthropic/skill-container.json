@@ -5,7 +5,7 @@
     "type": "custom",
     "name": "lucida-orchestrator",
     "version": "0.1.0",
-    "description": "Lucida phase-1 orchestration skill package.",
+    "description": "Lucida current-capabilities orchestration skill package.",
     "entrypoint": "SKILL.md",
     "required_root_files": [
       "SKILL.md"

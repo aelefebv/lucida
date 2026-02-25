@@ -148,8 +148,8 @@ def _validate_operation_matrix(skill_root: Path, errors: list[str]) -> None:
 
     if matrix.get("schema_version") != 1:
         errors.append("operation-matrix schema_version must be 1.")
-    if matrix.get("phase") != "phase1":
-        errors.append("operation-matrix phase must be phase1.")
+    if matrix.get("surface") != "current":
+        errors.append("operation-matrix surface must be current.")
 
     operations = matrix.get("operations")
     if not isinstance(operations, list) or not operations:
@@ -159,7 +159,6 @@ def _validate_operation_matrix(skill_root: Path, errors: list[str]) -> None:
     seen_ids: set[str] = set()
     required_op_keys = {
         "id",
-        "phase",
         "cli_command",
         "http_method",
         "http_path",
@@ -184,9 +183,6 @@ def _validate_operation_matrix(skill_root: Path, errors: list[str]) -> None:
         if op_id in seen_ids:
             errors.append(f"Duplicate operation id: {op_id}")
         seen_ids.add(op_id)
-
-        if operation["phase"] != "phase1":
-            errors.append(f"Operation {op_id} must be phase1.")
 
         cli_template_path = skill_root / str(operation["cli_template"])
         http_template_path = skill_root / str(operation["http_template"])
@@ -235,8 +231,8 @@ def validate_skill(skill_root: Path) -> ValidationResult:
 
     for rel_path in (
         "references/operation-matrix.md",
-        "references/phase1-cli.md",
-        "references/phase1-http.md",
+        "references/current-cli.md",
+        "references/current-http.md",
         "references/troubleshooting.md",
     ):
         if not (skill_root / rel_path).exists():

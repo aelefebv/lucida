@@ -1,4 +1,4 @@
-# Phase-1 CLI Workflow Reference
+# Current CLI Workflow Reference
 
 For operation metadata and required response fields, start with [operation-matrix.md](operation-matrix.md).
 
