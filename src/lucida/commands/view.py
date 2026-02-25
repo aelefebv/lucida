@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Literal
 
 import typer
 
@@ -33,6 +33,8 @@ from .context_state import (
 view_app = typer.Typer(no_args_is_help=True)
 
 ViewMutationResponse = ViewCreateResponse | ViewUpdateResponse | ViewStateImportResponse
+SelectorHelper = Literal["index", "range", "set"]
+NavigationHelper = Literal["set-plane", "pan", "zoom", "rotate-set", "rotate-delta"]
 
 
 @view_app.command("create")
@@ -293,27 +295,16 @@ def view_set_dim_group(
     ),
 ) -> None:
     """Set a single-axis index selector value."""
-    context = load_cli_context()
-    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
-        context=context,
-        view_id=view_id,
-        session_id=session_id,
-    )
-    response = _run_selector_helper(
+    _execute_selector_command(
         helper="index",
-        view_id=resolved_view_id,
+        view_id=view_id,
         axis=axis,
-        session_id=resolved_session_id,
+        session_id=session_id,
         clamp=clamp,
         base_url=base_url,
         payload={"index": index},
+        output_json=output_json,
     )
-    _persist_view_scope_context(
-        context=context,
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
-    )
-    _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("range")
@@ -330,27 +321,16 @@ def view_set_range_group(
     ),
 ) -> None:
     """Set an axis selector to an index range."""
-    context = load_cli_context()
-    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
-        context=context,
-        view_id=view_id,
-        session_id=session_id,
-    )
-    response = _run_selector_helper(
+    _execute_selector_command(
         helper="range",
-        view_id=resolved_view_id,
+        view_id=view_id,
         axis=axis,
-        session_id=resolved_session_id,
+        session_id=session_id,
         clamp=clamp,
         base_url=base_url,
         payload={"start": start, "end_exclusive": end_exclusive},
+        output_json=output_json,
     )
-    _persist_view_scope_context(
-        context=context,
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
-    )
-    _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("indices")
@@ -366,27 +346,16 @@ def view_set_indices_group(
     ),
 ) -> None:
     """Set an axis selector to an explicit set of indices."""
-    context = load_cli_context()
-    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
-        context=context,
-        view_id=view_id,
-        session_id=session_id,
-    )
-    response = _run_selector_helper(
+    _execute_selector_command(
         helper="set",
-        view_id=resolved_view_id,
+        view_id=view_id,
         axis=axis,
-        session_id=resolved_session_id,
+        session_id=session_id,
         clamp=clamp,
         base_url=base_url,
         payload={"indices": indices},
+        output_json=output_json,
     )
-    _persist_view_scope_context(
-        context=context,
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
-    )
-    _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("plane")
@@ -400,25 +369,14 @@ def view_set_plane_group(
     ),
 ) -> None:
     """Set view plane while preserving projected center."""
-    context = load_cli_context()
-    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
-        context=context,
+    _execute_navigation_command(
+        helper="set-plane",
         view_id=view_id,
         session_id=session_id,
-    )
-    response = _run_navigation_helper(
-        helper="set-plane",
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
         base_url=base_url,
         payload={"plane": plane},
+        output_json=output_json,
     )
-    _persist_view_scope_context(
-        context=context,
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
-    )
-    _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("rotation")
@@ -432,25 +390,14 @@ def view_set_rotation(
     ),
 ) -> None:
     """Set absolute 2D camera rotation."""
-    context = load_cli_context()
-    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
-        context=context,
+    _execute_navigation_command(
+        helper="rotate-set",
         view_id=view_id,
         session_id=session_id,
-    )
-    response = _run_navigation_helper(
-        helper="rotate-set",
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
         base_url=base_url,
         payload={"rotation_deg": rotation_deg},
+        output_json=output_json,
     )
-    _persist_view_scope_context(
-        context=context,
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
-    )
-    _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("pan")
@@ -465,25 +412,14 @@ def view_pan_group(
     ),
 ) -> None:
     """Pan the 2D camera by pixel deltas."""
-    context = load_cli_context()
-    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
-        context=context,
+    _execute_navigation_command(
+        helper="pan",
         view_id=view_id,
         session_id=session_id,
-    )
-    response = _run_navigation_helper(
-        helper="pan",
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
         base_url=base_url,
         payload={"dx_px": dx_px, "dy_px": dy_px},
+        output_json=output_json,
     )
-    _persist_view_scope_context(
-        context=context,
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
-    )
-    _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("zoom")
@@ -497,25 +433,14 @@ def view_zoom_group(
     ),
 ) -> None:
     """Multiply 2D camera zoom by factor."""
-    context = load_cli_context()
-    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
-        context=context,
+    _execute_navigation_command(
+        helper="zoom",
         view_id=view_id,
         session_id=session_id,
-    )
-    response = _run_navigation_helper(
-        helper="zoom",
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
         base_url=base_url,
         payload={"factor": factor},
+        output_json=output_json,
     )
-    _persist_view_scope_context(
-        context=context,
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
-    )
-    _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("rotate")
@@ -529,25 +454,14 @@ def view_rotate_group(
     ),
 ) -> None:
     """Apply a relative 2D camera rotation delta."""
-    context = load_cli_context()
-    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
-        context=context,
+    _execute_navigation_command(
+        helper="rotate-delta",
         view_id=view_id,
         session_id=session_id,
-    )
-    response = _run_navigation_helper(
-        helper="rotate-delta",
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
         base_url=base_url,
         payload={"delta_deg": delta_deg},
+        output_json=output_json,
     )
-    _persist_view_scope_context(
-        context=context,
-        view_id=resolved_view_id,
-        session_id=resolved_session_id,
-    )
-    _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("state")
@@ -867,7 +781,7 @@ def _emit_view_state(
 
 def _run_selector_helper(
     *,
-    helper: str,
+    helper: SelectorHelper,
     view_id: str,
     axis: str,
     session_id: str | None,
@@ -910,7 +824,7 @@ def _run_selector_helper(
 
 def _run_navigation_helper(
     *,
-    helper: str,
+    helper: NavigationHelper,
     view_id: str,
     session_id: str | None,
     base_url: str | None,
@@ -964,6 +878,81 @@ def _emit_view_update_response(response: ViewMutationResponse, *, output_json: b
     typer.echo(f"view_id: {view_state['view_id']}")
     typer.echo(f"state_hash: {view_state['state_hash']}")
     typer.echo(f"state_version: {view_state['state_version']}")
+
+
+def _execute_selector_command(
+    *,
+    helper: SelectorHelper,
+    view_id: str | None,
+    axis: str,
+    session_id: str | None,
+    clamp: bool,
+    base_url: str | None,
+    payload: dict[str, Any],
+    output_json: bool,
+) -> None:
+    context = load_cli_context()
+    response = _with_view_scope_mutation(
+        context=context,
+        view_id=view_id,
+        session_id=session_id,
+        execute=lambda resolved_view_id, resolved_session_id: _run_selector_helper(
+            helper=helper,
+            view_id=resolved_view_id,
+            axis=axis,
+            session_id=resolved_session_id,
+            clamp=clamp,
+            base_url=base_url,
+            payload=payload,
+        ),
+    )
+    _emit_view_update_response(response, output_json=output_json)
+
+
+def _execute_navigation_command(
+    *,
+    helper: NavigationHelper,
+    view_id: str | None,
+    session_id: str | None,
+    base_url: str | None,
+    payload: dict[str, Any],
+    output_json: bool,
+) -> None:
+    context = load_cli_context()
+    response = _with_view_scope_mutation(
+        context=context,
+        view_id=view_id,
+        session_id=session_id,
+        execute=lambda resolved_view_id, resolved_session_id: _run_navigation_helper(
+            helper=helper,
+            view_id=resolved_view_id,
+            session_id=resolved_session_id,
+            base_url=base_url,
+            payload=payload,
+        ),
+    )
+    _emit_view_update_response(response, output_json=output_json)
+
+
+def _with_view_scope_mutation(
+    *,
+    context: CliContext,
+    view_id: str | None,
+    session_id: str | None,
+    execute: Callable[[str, str | None], ViewMutationResponse],
+) -> ViewMutationResponse:
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
+        view_id=view_id,
+        session_id=session_id,
+    )
+    response = execute(resolved_view_id, resolved_session_id)
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
+    )
+    return response
 
 
 def _build_visible_bounds_payload(view_state: ViewState) -> dict[str, Any]:
