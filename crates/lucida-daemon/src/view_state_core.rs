@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use axum::http::StatusCode;
 use chrono::Utc;
@@ -352,8 +352,21 @@ pub fn normalize_selectors(
 
     let mut normalized: Vec<AxisSelector> = Vec::new();
     let mut warnings: Vec<ApiWarning> = Vec::new();
+    let mut seen_axes: HashSet<String> = HashSet::new();
 
     for selector in selectors {
+        if !seen_axes.insert(selector.axis.clone()) {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "selector_out_of_bounds",
+                "Selector axis appears multiple times.",
+                Some(json!({
+                    "axis": selector.axis,
+                    "operation": operation,
+                })),
+            ));
+        }
+
         let axis_size = axis_sizes.get(&selector.axis).copied().ok_or_else(|| {
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,

@@ -508,6 +508,64 @@ async fn view_update_invalid_patch_error() {
     assert_eq!(payload["code"], "invalid_patch");
 }
 
+#[tokio::test]
+async fn duplicate_selector_axes_are_rejected() {
+    let router = app();
+    let dataset_path = unique_dataset_path("view-duplicate-selectors");
+    create_sample_omezarr(&dataset_path, SampleDatasetOptions::default());
+
+    let opened = request_json(
+        &router,
+        "POST",
+        "/dataset/open",
+        json!({"schema_version": 1, "uri": dataset_path.to_string_lossy()}),
+    )
+    .await;
+    assert_eq!(opened.status(), StatusCode::OK);
+    let dataset_id = read_json_body(opened).await["dataset_summary"]["dataset_id"]
+        .as_str()
+        .expect("dataset_id")
+        .to_owned();
+
+    let created = request_json(
+        &router,
+        "POST",
+        "/view/create",
+        json!({"schema_version": 1, "dataset_id": dataset_id, "mode": "2d"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let view_id = read_json_body(created).await["view_state"]["view_id"]
+        .as_str()
+        .expect("view_id")
+        .to_owned();
+
+    let response = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [
+                        {"axis": "z", "kind": "index", "index": 1, "clamp": true},
+                        {"axis": "z", "kind": "index", "index": 2, "clamp": true}
+                    ],
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let payload = read_json_body(response).await;
+    assert_eq!(payload["code"], "selector_out_of_bounds");
+    assert_eq!(payload["details"]["axis"], "z");
+}
+
 async fn request_json(
     router: &axum::Router,
     method: &str,

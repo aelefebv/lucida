@@ -2,7 +2,7 @@
 
 ## Command
 ```bash
-uv run lucida view create --dataset-id <dataset_id> --session-id <session_id> --mode 2d --json
+lucida view create --dataset-id <dataset_id> --session-id <session_id> --mode 2d --json
 ```
 
 ## Required Inputs

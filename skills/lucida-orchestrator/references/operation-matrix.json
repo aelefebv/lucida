@@ -61,13 +61,13 @@
       ]
     },
     {
-      "id": "view.get.state",
+      "id": "view.state",
       "title": "Get view",
-      "cli_command": "view.get.state",
+      "cli_command": "view.state",
       "http_method": "GET",
       "http_path": "/view/{view_id}",
-      "cli_template": "templates/cli/view-get.md",
-      "http_template": "templates/http/view-get.json",
+      "cli_template": "templates/cli/view-state.md",
+      "http_template": "templates/http/view-state.json",
       "required_inputs": [
         "view_id"
       ],
@@ -144,13 +144,13 @@
       ]
     },
     {
-      "id": "view.set.dim",
+      "id": "view.dim",
       "title": "Set index selector",
-      "cli_command": "view.set.dim",
+      "cli_command": "view.dim",
       "http_method": "POST",
       "http_path": "/view/update",
-      "cli_template": "templates/cli/view-set-dim.md",
-      "http_template": "templates/http/view-set-dim.json",
+      "cli_template": "templates/cli/view-dim.md",
+      "http_template": "templates/http/view-dim.json",
       "required_inputs": [
         "view_id",
         "axis",
@@ -166,13 +166,13 @@
       ]
     },
     {
-      "id": "view.set.range",
+      "id": "view.range",
       "title": "Set range selector",
-      "cli_command": "view.set.range",
+      "cli_command": "view.range",
       "http_method": "POST",
       "http_path": "/view/update",
-      "cli_template": "templates/cli/view-set-range.md",
-      "http_template": "templates/http/view-set-range.json",
+      "cli_template": "templates/cli/view-range.md",
+      "http_template": "templates/http/view-range.json",
       "required_inputs": [
         "view_id",
         "axis",
@@ -189,13 +189,13 @@
       ]
     },
     {
-      "id": "view.set.set",
+      "id": "view.indices",
       "title": "Set explicit selector set",
-      "cli_command": "view.set.set",
+      "cli_command": "view.indices",
       "http_method": "POST",
       "http_path": "/view/update",
-      "cli_template": "templates/cli/view-set-set.md",
-      "http_template": "templates/http/view-set-set.json",
+      "cli_template": "templates/cli/view-indices.md",
+      "http_template": "templates/http/view-indices.json",
       "required_inputs": [
         "view_id",
         "axis",
@@ -211,13 +211,13 @@
       ]
     },
     {
-      "id": "view.set.plane",
+      "id": "view.plane",
       "title": "Set active plane",
-      "cli_command": "view.set.plane",
+      "cli_command": "view.plane",
       "http_method": "POST",
       "http_path": "/view/update",
-      "cli_template": "templates/cli/view-set-plane.md",
-      "http_template": "templates/http/view-set-plane.json",
+      "cli_template": "templates/cli/view-plane.md",
+      "http_template": "templates/http/view-plane.json",
       "required_inputs": [
         "view_id",
         "plane"
@@ -233,9 +233,9 @@
       ]
     },
     {
-      "id": "view.move.pan",
+      "id": "view.pan",
       "title": "Pan camera",
-      "cli_command": "view.move.pan",
+      "cli_command": "view.pan",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-pan.md",
@@ -255,9 +255,9 @@
       ]
     },
     {
-      "id": "view.move.zoom",
+      "id": "view.zoom",
       "title": "Zoom camera",
-      "cli_command": "view.move.zoom",
+      "cli_command": "view.zoom",
       "http_method": "POST",
       "http_path": "/view/update",
       "cli_template": "templates/cli/view-zoom.md",

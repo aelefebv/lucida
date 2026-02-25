@@ -124,7 +124,7 @@ async fn usage_capture_middleware(
         let app_state = state.read().await;
         app_state.usage.clone()
     };
-    if let Err(error) = usage.record_http_event(UsageEventInsert {
+    let usage_event = UsageEventInsert {
         endpoint,
         method: method.to_string(),
         status_code,
@@ -132,9 +132,40 @@ async fn usage_capture_middleware(
         agent_context,
         request_json,
         response_json,
-    }) {
-        tracing::warn!(target: "lucida.usage", path = %path, error = %error, "failed to record usage telemetry event");
-    }
+    };
+    usage.begin_async_insert();
+    tokio::spawn({
+        let usage = usage.clone();
+        let path_for_log = path.clone();
+        async move {
+            let insert_result = tokio::task::spawn_blocking({
+                let usage = usage.clone();
+                move || usage.record_http_event(usage_event)
+            })
+            .await;
+            usage.finish_async_insert();
+
+            match insert_result {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        target: "lucida.usage",
+                        path = %path_for_log,
+                        error = %error,
+                        "failed to record usage telemetry event"
+                    );
+                }
+                Err(join_error) => {
+                    tracing::warn!(
+                        target: "lucida.usage",
+                        path = %path_for_log,
+                        error = %join_error,
+                        "usage telemetry task join failed"
+                    );
+                }
+            }
+        }
+    });
 
     response
 }

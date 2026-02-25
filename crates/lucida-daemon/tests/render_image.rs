@@ -184,6 +184,53 @@ async fn render_image_contract_and_error_paths() {
 }
 
 #[tokio::test]
+async fn render_image_unsupported_codec_fails() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-unsupported-codec");
+    create_render_omezarr(&dataset_path);
+
+    let level0_metadata_path = dataset_path.join("0").join("zarr.json");
+    let mut level0_metadata: Value = serde_json::from_str(
+        &fs::read_to_string(&level0_metadata_path).expect("read level metadata"),
+    )
+    .expect("parse level metadata");
+    level0_metadata["codecs"] = json!([
+        {"name": "bytes", "configuration": {"endian": "little"}},
+        {"name": "unsupported_codec", "configuration": {}},
+    ]);
+    fs::write(
+        &level0_metadata_path,
+        serde_json::to_string_pretty(&level0_metadata).expect("serialize level metadata"),
+    )
+    .expect("write level metadata");
+
+    let view_id = open_view(&router, &dataset_path).await;
+    let rendered = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "png",
+                "delivery": "inline_base64",
+                "width_px": 64,
+                "height_px": 48,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(rendered.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let payload = read_json_body(rendered).await;
+    assert_eq!(payload["code"], "render_failed");
+    let reason = payload["details"]["reason"]
+        .as_str()
+        .expect("failure reason");
+    assert!(reason.contains("unsupported codec"));
+}
+
+#[tokio::test]
 async fn render_image_session_dataset_and_output_path_guards() {
     let router = app();
     let dataset_path = unique_dataset_path("render-scoping");

@@ -335,16 +335,7 @@ pub async fn render_image(
         RenderDelivery::FilePath => {
             let output_path =
                 resolve_snapshot_output_path(request.output.file_path.as_deref(), &render_id)?;
-            if let Some(parent) = output_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|error| {
-                    ApiError::new(
-                        StatusCode::UNPROCESSABLE_ENTITY,
-                        "render_failed",
-                        "Failed to write rendered image artifact.",
-                        Some(json!({ "reason": error.to_string() })),
-                    )
-                })?;
-            }
+            ensure_output_parent_within_root(&output_path)?;
             std::fs::write(&output_path, &render_result.png_bytes).map_err(|error| {
                 ApiError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
@@ -589,12 +580,7 @@ fn resolve_snapshot_output_path(
     requested_path: Option<&str>,
     render_id: &str,
 ) -> Result<PathBuf, ApiError> {
-    let output_root = normalize_path_lexical(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("output"),
-    );
+    let output_root = output_root_dir();
     let target = if let Some(requested_path) = requested_path {
         let requested = PathBuf::from(requested_path).expand_tilde();
         if requested.is_absolute() {
@@ -620,6 +606,73 @@ fn resolve_snapshot_output_path(
         ));
     }
     Ok(resolved_target)
+}
+
+fn ensure_output_parent_within_root(output_path: &Path) -> Result<(), ApiError> {
+    let output_root = output_root_dir();
+    let Some(parent) = output_path.parent() else {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_output_path_invalid",
+            "Requested render output path has no parent directory.",
+            Some(json!({
+                "requested_path": output_path.to_string_lossy(),
+            })),
+        ));
+    };
+
+    std::fs::create_dir_all(parent).map_err(|error| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_failed",
+            "Failed to write rendered image artifact.",
+            Some(json!({ "reason": error.to_string() })),
+        )
+    })?;
+
+    let canonical_output_root = std::fs::canonicalize(&output_root).map_err(|error| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_output_path_invalid",
+            "Failed to resolve output root.",
+            Some(json!({
+                "output_root": output_root.to_string_lossy(),
+                "reason": error.to_string(),
+            })),
+        )
+    })?;
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|error| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_output_path_invalid",
+            "Failed to resolve output parent directory.",
+            Some(json!({
+                "parent": parent.to_string_lossy(),
+                "reason": error.to_string(),
+            })),
+        )
+    })?;
+    if !canonical_parent.starts_with(&canonical_output_root) {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_output_path_invalid",
+            "Requested render output path must be under the output directory.",
+            Some(json!({
+                "requested_path": output_path.to_string_lossy(),
+                "output_root": canonical_output_root.to_string_lossy(),
+            })),
+        ));
+    }
+    Ok(())
+}
+
+fn output_root_dir() -> PathBuf {
+    normalize_path_lexical(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("output"),
+    )
 }
 
 fn normalize_path_lexical(path: &Path) -> PathBuf {

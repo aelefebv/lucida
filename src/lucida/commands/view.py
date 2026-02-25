@@ -1,4 +1,4 @@
-"""View command group with action and information subcommands."""
+"""View command group."""
 
 from __future__ import annotations
 
@@ -24,12 +24,6 @@ from .common import (
 )
 
 view_app = typer.Typer(no_args_is_help=True)
-view_set_app = typer.Typer(no_args_is_help=True)
-view_move_app = typer.Typer(no_args_is_help=True)
-view_get_app = typer.Typer(no_args_is_help=True)
-view_app.add_typer(view_set_app, name="set")
-view_app.add_typer(view_move_app, name="move")
-view_app.add_typer(view_get_app, name="get")
 
 ViewMutationResponse = ViewCreateResponse | ViewUpdateResponse | ViewStateImportResponse
 
@@ -220,7 +214,7 @@ def view_update(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_set_app.command("dim")
+@view_app.command("dim")
 def view_set_dim_group(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     axis: str = typer.Option(..., "--axis", help="Axis name."),
@@ -245,7 +239,7 @@ def view_set_dim_group(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_set_app.command("range")
+@view_app.command("range")
 def view_set_range_group(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     axis: str = typer.Option(..., "--axis", help="Axis name."),
@@ -271,8 +265,8 @@ def view_set_range_group(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_set_app.command("set")
-def view_set_set_group(
+@view_app.command("indices")
+def view_set_indices_group(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     axis: str = typer.Option(..., "--axis", help="Axis name."),
     indices: list[int] = typer.Option(..., "--index", help="Repeat --index for each value."),
@@ -296,7 +290,7 @@ def view_set_set_group(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_set_app.command("plane")
+@view_app.command("plane")
 def view_set_plane_group(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     plane: str = typer.Option(..., "--plane", help="Plane: xy, xz, or yz."),
@@ -317,7 +311,7 @@ def view_set_plane_group(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_set_app.command("rotation")
+@view_app.command("rotation")
 def view_set_rotation(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     rotation_deg: float = typer.Option(..., "--rotation-deg", help="Absolute 2D rotation in degrees."),
@@ -338,7 +332,7 @@ def view_set_rotation(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_move_app.command("pan")
+@view_app.command("pan")
 def view_pan_group(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     dx_px: float = typer.Option(..., "--dx-px", help="Pan delta in screen pixels (x)."),
@@ -360,7 +354,7 @@ def view_pan_group(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_move_app.command("zoom")
+@view_app.command("zoom")
 def view_zoom_group(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     factor: float = typer.Option(..., "--factor", help="Multiplicative zoom factor (>0)."),
@@ -381,7 +375,7 @@ def view_zoom_group(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_move_app.command("rotate")
+@view_app.command("rotate")
 def view_rotate_group(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     delta_deg: float = typer.Option(..., "--delta-deg", help="Relative 2D rotation delta in degrees."),
@@ -402,8 +396,8 @@ def view_rotate_group(
     _emit_view_update_response(response, output_json=output_json)
 
 
-@view_get_app.command("state")
-def view_get_state(
+@view_app.command("state")
+def view_state(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -420,8 +414,8 @@ def view_get_state(
     )
 
 
-@view_get_app.command("selectors")
-def view_get_selectors(
+@view_app.command("selectors")
+def view_selectors(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -458,8 +452,8 @@ def view_get_selectors(
         typer.echo(f"selector: {json.dumps(selector, separators=(',', ':'))}")
 
 
-@view_get_app.command("camera")
-def view_get_camera(
+@view_app.command("camera")
+def view_camera(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -503,8 +497,8 @@ def view_get_camera(
     typer.echo(f"viewport: {payload['viewport']}")
 
 
-@view_get_app.command("bounds")
-def view_get_bounds(
+@view_app.command("bounds")
+def view_bounds(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -541,8 +535,8 @@ def view_get_bounds(
     typer.echo(f"v_max: {bounds['v_max']}")
 
 
-@view_get_app.command("screenshot")
-def view_get_screenshot(
+@view_app.command("screenshot")
+def view_screenshot(
     view_id: str = typer.Option(..., "--view-id", help="View id."),
     width_px: int | None = typer.Option(None, "--width-px", help="Output width in pixels."),
     height_px: int | None = typer.Option(None, "--height-px", help="Output height in pixels."),

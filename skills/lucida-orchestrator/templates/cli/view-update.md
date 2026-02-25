@@ -2,7 +2,7 @@
 
 ## Command
 ```bash
-uv run lucida view update --view-id <view_id> --patch-file <patch_file> --session-id <session_id> --json
+lucida view update --view-id <view_id> --patch-file <patch_file> --session-id <session_id> --json
 ```
 
 ## Required Inputs

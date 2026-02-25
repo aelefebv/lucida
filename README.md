@@ -62,19 +62,28 @@ Start the daemon:
 cargo run -p lucida-daemon
 ```
 
-Use the Python CLI/client against the daemon:
+Install the CLI once (from repo root):
 
 ```bash
-uv run lucida dataset open --uri /path/to/data.zarr --json
-# or
-LUCIDA_BASE_URL=http://127.0.0.1:4000 uv run lucida session create --json
-# action-oriented view updates
-uv run lucida view set dim --view-id <view_id> --axis z --index 3 --json
-uv run lucida view move pan --view-id <view_id> --dx-px 20 --dy-px -10 --json
-# information-oriented retrieval
-uv run lucida view get bounds --view-id <view_id> --json
-uv run lucida view get screenshot --view-id <view_id> --json
+uv tool install --editable .
+uv tool update-shell
 ```
+
+Use the CLI against the daemon:
+
+```bash
+lucida dataset open --uri /path/to/data.zarr --json
+# or
+LUCIDA_BASE_URL=http://127.0.0.1:4000 lucida session create --json
+# action-oriented view updates
+lucida view dim --view-id <view_id> --axis z --index 3 --json
+lucida view pan --view-id <view_id> --dx-px 20 --dy-px -10 --json
+# information-oriented retrieval
+lucida view bounds --view-id <view_id> --json
+lucida view screenshot --view-id <view_id> --json
+```
+
+For a short end-to-end Zarr smoke test, see `docs/cli-zarr-testing.md`.
 
 ## Build Rust Daemon
 
