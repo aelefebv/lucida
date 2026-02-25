@@ -56,7 +56,7 @@ curl -sS -X POST http://127.0.0.1:3000/session/create \
 
 ## Run
 
-Start the daemon:
+Start the daemon manually (optional when using local defaults):
 
 ```bash
 cargo run -p lucida-daemon
@@ -72,15 +72,33 @@ uv tool update-shell
 Use the CLI against the daemon:
 
 ```bash
-lucida dataset open --uri /path/to/data.zarr --json
-# or
 LUCIDA_BASE_URL=http://127.0.0.1:4000 lucida session create --json
-# action-oriented view updates
-lucida view dim --view-id <view_id> --axis z --index 3 --json
-lucida view pan --view-id <view_id> --dx-px 20 --dy-px -10 --json
-# information-oriented retrieval
-lucida view bounds --view-id <view_id> --json
-lucida view screenshot --view-id <view_id> --json
+lucida dataset open --uri /path/to/data.zarr --json
+lucida view create --mode 2d --json
+lucida view dim --axis z --index 3 --json
+lucida view pan --dx-px 20 --dy-px -10 --json
+lucida view bounds --json
+lucida view screenshot --json
+```
+
+`lucida session create` now bootstraps a local daemon automatically when the
+resolved base URL points at localhost and `/healthz` is not available.
+Stop a managed auto-started daemon with:
+
+```bash
+lucida stop
+```
+
+Aliases: `lucida close`, `lucida exit`.
+`lucida stop` also attempts a localhost port-based shutdown when no managed record exists.
+Override managed daemon state file with `LUCIDA_DAEMON_STATE_PATH` if needed.
+
+Defaults are persisted locally after `session create`, `dataset open`, and `view create`.
+Inspect or reset them with:
+
+```bash
+lucida context show
+lucida context clear
 ```
 
 For a short end-to-end Zarr smoke test, see `docs/cli-zarr-testing.md`.

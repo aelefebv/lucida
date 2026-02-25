@@ -935,8 +935,13 @@ class LucidaClient:
         headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """GET JSON payload from the API and return parsed response."""
-        response = self._client.get(path, params=params, headers=headers)
-        return self._validate_response(response)
+        try:
+            response = self._client.get(path, params=params, headers=headers)
+            return self._validate_response(response)
+        except LucidaClientError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LucidaClientError(str(exc)) from exc
 
     def _post(
         self,
@@ -956,8 +961,13 @@ class LucidaClient:
         headers:
             Optional HTTP headers for agent tracing metadata.
         """
-        response = self._client.post(path, json=payload, headers=headers)
-        return self._validate_response(response)
+        try:
+            response = self._client.post(path, json=payload, headers=headers)
+            return self._validate_response(response)
+        except LucidaClientError:
+            raise
+        except httpx.HTTPError as exc:
+            raise LucidaClientError(str(exc)) from exc
 
     def _validate_response(self, response: httpx.Response) -> dict[str, Any]:
         """Raise client-side errors for failed responses and return JSON.

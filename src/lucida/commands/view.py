@@ -22,6 +22,13 @@ from .common import (
     load_view_2d,
     load_view_state,
 )
+from .context_state import (
+    CliContext,
+    load_cli_context,
+    resolve_optional_identifier,
+    resolve_required_identifier,
+    save_cli_context,
+)
 
 view_app = typer.Typer(no_args_is_help=True)
 
@@ -30,7 +37,7 @@ ViewMutationResponse = ViewCreateResponse | ViewUpdateResponse | ViewStateImport
 
 @view_app.command("create")
 def view_create(
-    dataset_id: str = typer.Option(..., "--dataset-id", help="Dataset id."),
+    dataset_id: str | None = typer.Option(None, "--dataset-id", help="Dataset id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     mode: str = typer.Option("2d", "--mode", help="Render mode."),
     multiscale_name: str | None = typer.Option(
@@ -57,15 +64,23 @@ def view_create(
     ),
 ) -> None:
     """Create a new view and emit either JSON or a short text summary."""
+    context = load_cli_context()
     try:
+        resolved_dataset_id = resolve_required_identifier(
+            dataset_id,
+            context.dataset_id,
+            name="dataset_id",
+            hint="run `lucida dataset open` or `lucida dataset use` first",
+        )
+        resolved_session_id = resolve_optional_identifier(session_id, context.session_id)
         selectors_value = load_selectors(selectors_file, selectors_json)
         view_2d_value = load_view_2d(view_2d_file, view_2d_json)
         viewport = Viewport(width_px=width_px, height_px=height_px, pixel_ratio=pixel_ratio)
 
         with create_cli_client(base_url) as client:
             response = client.create_view(
-                dataset_id=dataset_id,
-                session_id=session_id,
+                dataset_id=resolved_dataset_id,
+                session_id=resolved_session_id,
                 mode=mode,
                 multiscale_name=multiscale_name,
                 viewport=viewport.model_dump(mode="json"),
@@ -80,10 +95,18 @@ def view_create(
         emit_client_error(exc)
 
     payload = response.model_dump(mode="json")
+    view_state = payload["view_state"]
+    context.dataset_id = resolved_dataset_id
+    context.view_id = view_state["view_id"]
+    if isinstance(view_state.get("session_id"), str):
+        context.session_id = view_state["session_id"]
+    elif resolved_session_id is not None:
+        context.session_id = resolved_session_id
+    save_cli_context(context)
+
     if output_json:
         typer.echo(json.dumps(payload, indent=2))
         return
-    view_state = payload["view_state"]
     typer.echo(f"view_id: {view_state['view_id']}")
     typer.echo(f"session_id: {view_state['session_id']}")
     typer.echo(f"state_hash: {view_state['state_hash']}")
@@ -92,7 +115,7 @@ def view_create(
 
 @view_app.command("export")
 def view_export(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     out: Path | None = typer.Option(
         None,
@@ -105,15 +128,31 @@ def view_export(
     ),
 ) -> None:
     """Export a full persisted view state."""
+    context = load_cli_context()
     try:
+        resolved_view_id = resolve_required_identifier(
+            view_id,
+            context.view_id,
+            name="view_id",
+            hint="run `lucida view create` or `lucida view use` first",
+        )
+        resolved_session_id = resolve_optional_identifier(session_id, context.session_id)
         with create_cli_client(base_url) as client:
-            response = client.export_viewstate(view_id=view_id, session_id=session_id)
+            response = client.export_viewstate(
+                view_id=resolved_view_id,
+                session_id=resolved_session_id,
+            )
     except LucidaError as exc:
         emit_exception(exc)
     except LucidaClientError as exc:
         emit_client_error(exc)
 
     payload = response.model_dump(mode="json")
+    context.view_id = resolved_view_id
+    if resolved_session_id is not None:
+        context.session_id = resolved_session_id
+    save_cli_context(context)
+
     if out is not None:
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(payload["view_state"], indent=2), encoding="utf-8")
@@ -147,15 +186,17 @@ def view_import(
     ),
 ) -> None:
     """Import a view state as a new persisted view."""
+    context = load_cli_context()
     try:
         view_state_value = load_view_state(view_state_file, view_state_json)
         if view_state_value is None:
             raise ValueError("view-state input is required.")
+        resolved_session_id = resolve_optional_identifier(session_id, context.session_id)
 
         with create_cli_client(base_url) as client:
             response = client.import_viewstate(
                 view_state=view_state_value.model_dump(mode="json"),
-                session_id=session_id,
+                session_id=resolved_session_id,
             )
     except (LucidaError, ValueError) as exc:
         emit_exception(exc)
@@ -163,13 +204,25 @@ def view_import(
         emit_client_error(exc)
 
     payload = response.model_dump(mode="json")
+    view_state = payload["view_state"]
+    context.view_id = view_state["view_id"]
+    if isinstance(view_state.get("session_id"), str):
+        context.session_id = view_state["session_id"]
+    elif resolved_session_id is not None:
+        context.session_id = resolved_session_id
+    datasets_payload = view_state.get("datasets")
+    if isinstance(datasets_payload, list) and datasets_payload:
+        first_dataset = datasets_payload[0]
+        if isinstance(first_dataset, dict) and isinstance(first_dataset.get("dataset_id"), str):
+            context.dataset_id = first_dataset["dataset_id"]
+    save_cli_context(context)
+
     if output_json:
         typer.echo(json.dumps(payload, indent=2))
         return
 
     typer.echo(f"import_id: {payload['import_id']}")
     typer.echo(f"imported_from_view_id: {payload['imported_from_view_id']}")
-    view_state = payload["view_state"]
     typer.echo(f"view_id: {view_state['view_id']}")
     typer.echo(f"state_hash: {view_state['state_hash']}")
     typer.echo(f"state_version: {view_state['state_version']}")
@@ -177,7 +230,7 @@ def view_import(
 
 @view_app.command("update")
 def view_update(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     patch_file: Path | None = typer.Option(
         None, "--patch-file", help="JSON file containing RFC6902 patch."
     ),
@@ -197,13 +250,21 @@ def view_update(
     ),
 ) -> None:
     """Apply an RFC6902 JSON patch to a view."""
+    context = load_cli_context()
     try:
+        resolved_view_id = resolve_required_identifier(
+            view_id,
+            context.view_id,
+            name="view_id",
+            hint="run `lucida view create` or `lucida view use` first",
+        )
+        resolved_session_id = resolve_optional_identifier(session_id, context.session_id)
         patch = load_patch(patch_file, patch_json)
         with create_cli_client(base_url) as client:
             response = client.update_view(
-                view_id=view_id,
+                view_id=resolved_view_id,
                 patch=patch,
-                session_id=session_id,
+                session_id=resolved_session_id,
                 expected_state_version=expected_state_version,
             )
     except LucidaError as exc:
@@ -211,12 +272,17 @@ def view_update(
     except LucidaClientError as exc:
         emit_client_error(exc)
 
+    context.view_id = resolved_view_id
+    if resolved_session_id is not None:
+        context.session_id = resolved_session_id
+    save_cli_context(context)
+
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("dim")
 def view_set_dim_group(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     axis: str = typer.Option(..., "--axis", help="Axis name."),
     index: int = typer.Option(..., "--index", help="Axis index."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
@@ -227,21 +293,32 @@ def view_set_dim_group(
     ),
 ) -> None:
     """Set a single-axis index selector value."""
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
+        view_id=view_id,
+        session_id=session_id,
+    )
     response = _run_selector_helper(
         helper="index",
-        view_id=view_id,
+        view_id=resolved_view_id,
         axis=axis,
-        session_id=session_id,
+        session_id=resolved_session_id,
         clamp=clamp,
         base_url=base_url,
         payload={"index": index},
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("range")
 def view_set_range_group(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     axis: str = typer.Option(..., "--axis", help="Axis name."),
     start: int = typer.Option(..., "--start", help="Range start."),
     end_exclusive: int = typer.Option(..., "--end-exclusive", help="Range end exclusive."),
@@ -253,21 +330,32 @@ def view_set_range_group(
     ),
 ) -> None:
     """Set an axis selector to an index range."""
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
+        view_id=view_id,
+        session_id=session_id,
+    )
     response = _run_selector_helper(
         helper="range",
-        view_id=view_id,
+        view_id=resolved_view_id,
         axis=axis,
-        session_id=session_id,
+        session_id=resolved_session_id,
         clamp=clamp,
         base_url=base_url,
         payload={"start": start, "end_exclusive": end_exclusive},
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("indices")
 def view_set_indices_group(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     axis: str = typer.Option(..., "--axis", help="Axis name."),
     indices: list[int] = typer.Option(..., "--index", help="Repeat --index for each value."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
@@ -278,21 +366,32 @@ def view_set_indices_group(
     ),
 ) -> None:
     """Set an axis selector to an explicit set of indices."""
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
+        view_id=view_id,
+        session_id=session_id,
+    )
     response = _run_selector_helper(
         helper="set",
-        view_id=view_id,
+        view_id=resolved_view_id,
         axis=axis,
-        session_id=session_id,
+        session_id=resolved_session_id,
         clamp=clamp,
         base_url=base_url,
         payload={"indices": indices},
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("plane")
 def view_set_plane_group(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     plane: str = typer.Option(..., "--plane", help="Plane: xy, xz, or yz."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -301,19 +400,30 @@ def view_set_plane_group(
     ),
 ) -> None:
     """Set view plane while preserving projected center."""
-    response = _run_navigation_helper(
-        helper="set-plane",
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
         view_id=view_id,
         session_id=session_id,
+    )
+    response = _run_navigation_helper(
+        helper="set-plane",
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
         base_url=base_url,
         payload={"plane": plane},
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("rotation")
 def view_set_rotation(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     rotation_deg: float = typer.Option(..., "--rotation-deg", help="Absolute 2D rotation in degrees."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -322,19 +432,30 @@ def view_set_rotation(
     ),
 ) -> None:
     """Set absolute 2D camera rotation."""
-    response = _run_navigation_helper(
-        helper="rotate-set",
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
         view_id=view_id,
         session_id=session_id,
+    )
+    response = _run_navigation_helper(
+        helper="rotate-set",
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
         base_url=base_url,
         payload={"rotation_deg": rotation_deg},
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("pan")
 def view_pan_group(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     dx_px: float = typer.Option(..., "--dx-px", help="Pan delta in screen pixels (x)."),
     dy_px: float = typer.Option(..., "--dy-px", help="Pan delta in screen pixels (y)."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
@@ -344,19 +465,30 @@ def view_pan_group(
     ),
 ) -> None:
     """Pan the 2D camera by pixel deltas."""
-    response = _run_navigation_helper(
-        helper="pan",
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
         view_id=view_id,
         session_id=session_id,
+    )
+    response = _run_navigation_helper(
+        helper="pan",
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
         base_url=base_url,
         payload={"dx_px": dx_px, "dy_px": dy_px},
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("zoom")
 def view_zoom_group(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     factor: float = typer.Option(..., "--factor", help="Multiplicative zoom factor (>0)."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -365,19 +497,30 @@ def view_zoom_group(
     ),
 ) -> None:
     """Multiply 2D camera zoom by factor."""
-    response = _run_navigation_helper(
-        helper="zoom",
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
         view_id=view_id,
         session_id=session_id,
+    )
+    response = _run_navigation_helper(
+        helper="zoom",
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
         base_url=base_url,
         payload={"factor": factor},
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("rotate")
 def view_rotate_group(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     delta_deg: float = typer.Option(..., "--delta-deg", help="Relative 2D rotation delta in degrees."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
@@ -386,19 +529,30 @@ def view_rotate_group(
     ),
 ) -> None:
     """Apply a relative 2D camera rotation delta."""
-    response = _run_navigation_helper(
-        helper="rotate-delta",
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
         view_id=view_id,
         session_id=session_id,
+    )
+    response = _run_navigation_helper(
+        helper="rotate-delta",
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
         base_url=base_url,
         payload={"delta_deg": delta_deg},
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
     _emit_view_update_response(response, output_json=output_json)
 
 
 @view_app.command("state")
 def view_state(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
     base_url: str | None = typer.Option(
@@ -406,17 +560,28 @@ def view_state(
     ),
 ) -> None:
     """Fetch and print an existing view state."""
-    _emit_view_state(
+    context = load_cli_context()
+    resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+        context=context,
         view_id=view_id,
         session_id=session_id,
+    )
+    _emit_view_state(
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
         output_json=output_json,
         base_url=base_url,
+    )
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
     )
 
 
 @view_app.command("selectors")
 def view_selectors(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
     base_url: str | None = typer.Option(
@@ -424,10 +589,16 @@ def view_selectors(
     ),
 ) -> None:
     """Fetch just the axis selectors for a view."""
+    context = load_cli_context()
     try:
-        view_state = _get_view_state(
+        resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+            context=context,
             view_id=view_id,
             session_id=session_id,
+        )
+        view_state = _get_view_state(
+            view_id=resolved_view_id,
+            session_id=resolved_session_id,
             base_url=base_url,
         )
     except (LucidaError, ValueError) as exc:
@@ -435,6 +606,11 @@ def view_selectors(
     except LucidaClientError as exc:
         emit_client_error(exc)
 
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
+    )
     payload: dict[str, Any] = {
         "schema_version": 1,
         "view_id": view_state.view_id,
@@ -454,7 +630,7 @@ def view_selectors(
 
 @view_app.command("camera")
 def view_camera(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
     base_url: str | None = typer.Option(
@@ -462,10 +638,16 @@ def view_camera(
     ),
 ) -> None:
     """Fetch 2D camera and viewport settings."""
+    context = load_cli_context()
     try:
-        view_state = _get_view_state(
+        resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+            context=context,
             view_id=view_id,
             session_id=session_id,
+        )
+        view_state = _get_view_state(
+            view_id=resolved_view_id,
+            session_id=resolved_session_id,
             base_url=base_url,
         )
         if view_state.view_2d is None:
@@ -475,6 +657,11 @@ def view_camera(
     except LucidaClientError as exc:
         emit_client_error(exc)
 
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
+    )
     payload: dict[str, Any] = {
         "schema_version": 1,
         "view_id": view_state.view_id,
@@ -499,7 +686,7 @@ def view_camera(
 
 @view_app.command("bounds")
 def view_bounds(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
     output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
     base_url: str | None = typer.Option(
@@ -507,10 +694,16 @@ def view_bounds(
     ),
 ) -> None:
     """Compute visible 2D world bounds from current view camera and viewport."""
+    context = load_cli_context()
     try:
-        view_state = _get_view_state(
+        resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+            context=context,
             view_id=view_id,
             session_id=session_id,
+        )
+        view_state = _get_view_state(
+            view_id=resolved_view_id,
+            session_id=resolved_session_id,
             base_url=base_url,
         )
         payload = _build_visible_bounds_payload(view_state)
@@ -519,6 +712,11 @@ def view_bounds(
     except LucidaClientError as exc:
         emit_client_error(exc)
 
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
+    )
     if output_json:
         typer.echo(json.dumps(payload, indent=2))
         return
@@ -537,7 +735,7 @@ def view_bounds(
 
 @view_app.command("screenshot")
 def view_screenshot(
-    view_id: str = typer.Option(..., "--view-id", help="View id."),
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
     width_px: int | None = typer.Option(None, "--width-px", help="Output width in pixels."),
     height_px: int | None = typer.Option(None, "--height-px", help="Output height in pixels."),
     delivery: str = typer.Option(
@@ -558,20 +756,29 @@ def view_screenshot(
     ),
 ) -> None:
     """Render a screenshot for the active view state."""
+    context = load_cli_context()
     try:
+        resolved_view_id, resolved_session_id = _resolve_view_scope_ids(
+            context=context,
+            view_id=view_id,
+            session_id=session_id,
+        )
         if delivery not in {"inline_base64", "file_path"}:
             raise ValueError("delivery must be one of: inline_base64, file_path.")
         with create_cli_client(base_url) as client:
-            view_state = client.get_view(view_id=view_id, session_id=session_id).view_state
+            view_state = client.get_view(
+                view_id=resolved_view_id,
+                session_id=resolved_session_id,
+            ).view_state
             resolved_width_px = width_px if width_px is not None else view_state.viewport.width_px
             resolved_height_px = height_px if height_px is not None else view_state.viewport.height_px
             response = client.render_image(
-                view_id=view_id,
+                view_id=resolved_view_id,
                 width_px=resolved_width_px,
                 height_px=resolved_height_px,
                 delivery=delivery,
                 file_path=str(file_path) if file_path is not None else None,
-                session_id=session_id,
+                session_id=resolved_session_id,
                 request_id=request_id,
             )
     except (LucidaError, ValueError) as exc:
@@ -579,6 +786,11 @@ def view_screenshot(
     except LucidaClientError as exc:
         emit_client_error(exc)
 
+    _persist_view_scope_context(
+        context=context,
+        view_id=resolved_view_id,
+        session_id=resolved_session_id,
+    )
     payload = response.model_dump(mode="json")
     if output_json:
         typer.echo(json.dumps(payload, indent=2))
@@ -590,6 +802,36 @@ def view_screenshot(
     typer.echo(f"image_sha256: {payload['images'][0]['sha256']}")
     if "file_path" in payload["images"][0]:
         typer.echo(f"file_path: {payload['images'][0]['file_path']}")
+
+
+@view_app.command("use")
+def view_use(
+    view_id: str = typer.Option(..., "--view-id", help="View id to set as default."),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+) -> None:
+    """Set the default view id used by CLI commands."""
+    context = load_cli_context()
+    context.view_id = view_id
+    save_cli_context(context)
+
+    payload = context.to_payload()
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    typer.echo(f"view_id: {view_id}")
+
+
+@view_app.command("current")
+def view_current(
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+) -> None:
+    """Show the default view id used by CLI commands."""
+    context = load_cli_context()
+    payload = context.to_payload()
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+    typer.echo(f"view_id: {context.view_id or '(none)'}")
 
 
 def _get_view_state(*, view_id: str, session_id: str | None, base_url: str | None) -> ViewState:
@@ -766,3 +1008,35 @@ def _plane_axes(plane: str) -> tuple[str, str]:
     if plane == "yz":
         return "y", "z"
     raise ValueError(f"unsupported plane: {plane}")
+
+
+def _resolve_view_scope_ids(
+    *,
+    context: CliContext,
+    view_id: str | None,
+    session_id: str | None,
+) -> tuple[str, str | None]:
+    try:
+        resolved_view_id = resolve_required_identifier(
+            view_id,
+            context.view_id,
+            name="view_id",
+            hint="run `lucida view create` or `lucida view use` first",
+        )
+        resolved_session_id = resolve_optional_identifier(session_id, context.session_id)
+        return resolved_view_id, resolved_session_id
+    except ValueError as exc:
+        emit_exception(exc)
+    raise AssertionError("unreachable")
+
+
+def _persist_view_scope_context(
+    *,
+    context: CliContext,
+    view_id: str,
+    session_id: str | None,
+) -> None:
+    context.view_id = view_id
+    if session_id is not None:
+        context.session_id = session_id
+    save_cli_context(context)

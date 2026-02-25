@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from typer.testing import CliRunner, Result
@@ -20,6 +23,8 @@ class ViewContext:
 def build_cli_env(
     *,
     base_url: str,
+    context_path: str | None = None,
+    daemon_state_path: str | None = None,
     agent_run_id: str | None = None,
     agent_step_id: str | None = None,
     agent_name: str | None = None,
@@ -29,6 +34,16 @@ def build_cli_env(
     env.pop("LUCIDA_AGENT_RUN_ID", None)
     env.pop("LUCIDA_AGENT_STEP_ID", None)
     env.pop("LUCIDA_AGENT_NAME", None)
+    env.pop("LUCIDA_CLI_CONTEXT_PATH", None)
+    env.pop("LUCIDA_DAEMON_STATE_PATH", None)
+    resolved_context_path = context_path or str(
+        Path(tempfile.gettempdir()) / f"lucida-cli-context-{uuid.uuid4().hex}.json"
+    )
+    resolved_daemon_state_path = daemon_state_path or str(
+        Path(tempfile.gettempdir()) / f"lucida-daemon-state-{uuid.uuid4().hex}.json"
+    )
+    env["LUCIDA_CLI_CONTEXT_PATH"] = resolved_context_path
+    env["LUCIDA_DAEMON_STATE_PATH"] = resolved_daemon_state_path
     if agent_run_id:
         env["LUCIDA_AGENT_RUN_ID"] = agent_run_id
     if agent_step_id:
