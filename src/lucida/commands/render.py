@@ -17,6 +17,12 @@ from .common import (
     load_patch,
     load_view_state,
 )
+from .context_state import (
+    load_cli_context,
+    resolve_optional_identifier,
+    resolve_required_identifier,
+    save_cli_context,
+)
 
 render_app = typer.Typer(no_args_is_help=True)
 
@@ -64,10 +70,21 @@ def render_image(
     ),
 ) -> None:
     """Render a PNG image for a view."""
+    context = load_cli_context()
     try:
         has_view_state = view_state_file is not None or view_state_json is not None
-        if (view_id is None) == (not has_view_state):
+        if has_view_state and view_id is not None:
             raise ValueError("Provide exactly one of --view-id or one view-state input.")
+        resolved_view_id: str | None = None
+        if not has_view_state:
+            resolved_view_id = resolve_required_identifier(
+                view_id,
+                context.view_id,
+                name="view_id",
+                hint="run `lucida view create` or `lucida view use` first",
+            )
+
+        resolved_session_id = resolve_optional_identifier(session_id, context.session_id)
         if delivery not in {"inline_base64", "file_path"}:
             raise ValueError("delivery must be one of: inline_base64, file_path.")
 
@@ -82,7 +99,7 @@ def render_image(
         file_path_value = str(file_path) if file_path is not None else None
         with create_cli_client(base_url) as client:
             response = client.render_image(
-                view_id=view_id,
+                view_id=resolved_view_id,
                 view_state=(
                     view_state_value.model_dump(mode="json")
                     if view_state_value is not None
@@ -92,7 +109,7 @@ def render_image(
                 height_px=height_px,
                 delivery=delivery,
                 file_path=file_path_value,
-                session_id=session_id,
+                session_id=resolved_session_id,
                 request_id=request_id,
                 overrides_json_patch=overrides,
             )
@@ -104,6 +121,12 @@ def render_image(
         emit_exception(exc)
 
     payload = response.model_dump(mode="json")
+    if resolved_view_id is not None:
+        context.view_id = resolved_view_id
+    if resolved_session_id is not None:
+        context.session_id = resolved_session_id
+    save_cli_context(context)
+
     if output_json:
         typer.echo(json.dumps(payload, indent=2))
         return

@@ -1,6 +1,6 @@
 # Testing the CLI on a Zarr File
 
-This is a short end-to-end smoke test for the Lucida CLI with an OME-Zarr dataset.
+This is a short manual smoke test for the Lucida CLI using an OME-Zarr dataset.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ This is a short end-to-end smoke test for the Lucida CLI with an OME-Zarr datase
    uv tool install --editable .
    uv tool update-shell
    ```
-3. Start the daemon in a separate terminal:
+3. Start the daemon in a separate terminal (optional if using local default URL; `lucida session create` can auto-start it):
    ```bash
    cargo run -p lucida-daemon
    ```
@@ -22,42 +22,47 @@ This is a short end-to-end smoke test for the Lucida CLI with an OME-Zarr datase
    export ZARR_URI="/absolute/path/to/your-data.zarr"
    ```
 
-## CLI Smoke Test
+If your daemon is not on the default URL (`http://127.0.0.1:3000`), add `--base-url <url>` to each command.
 
-Run this from the repo root in a second terminal:
+## Step-by-Step Smoke Test
+
+1. Create a session (sets default `session_id` for later commands).
+   ```bash
+   lucida session create --json
+   ```
+2. Open the Zarr dataset (sets default `dataset_id`).
+   ```bash
+   lucida dataset open --uri "$ZARR_URI" --json
+   ```
+3. Create a 2D view (sets default `view_id`).
+   ```bash
+   lucida view create --mode 2d --width-px 768 --height-px 768 --json
+   ```
+4. Move to a Z slice and pan (uses default IDs).
+   ```bash
+   lucida view dim --axis z --index 2 --json
+   lucida view pan --dx-px 20 --dy-px -15 --json
+   ```
+5. Save a screenshot.
+   ```bash
+   lucida view screenshot --width-px 512 --height-px 512 --delivery file_path --file-path cli-zarr-screenshot.png --json
+   ```
+6. Save a render output.
+   ```bash
+   lucida render image --width-px 640 --height-px 480 --delivery file_path --file-path cli-zarr-render.png --json
+   ```
+
+To inspect or reset defaults:
 
 ```bash
-set -euo pipefail
+lucida context show
+lucida context clear
+```
 
-SESSION_JSON=$(lucida session create --json)
-SESSION_ID=$(printf '%s' "$SESSION_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')
+When done, stop the managed daemon:
 
-DATASET_JSON=$(lucida dataset open --uri "$ZARR_URI" --session-id "$SESSION_ID" --json)
-DATASET_ID=$(printf '%s' "$DATASET_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)["dataset_summary"]["dataset_id"])')
-
-VIEW_JSON=$(lucida view create --dataset-id "$DATASET_ID" --session-id "$SESSION_ID" --mode 2d --width-px 768 --height-px 768 --json)
-VIEW_ID=$(printf '%s' "$VIEW_JSON" | python -c 'import json,sys; print(json.load(sys.stdin)["view_state"]["view_id"])')
-
-lucida view dim --view-id "$VIEW_ID" --axis z --index 2 --session-id "$SESSION_ID" --json
-lucida view pan --view-id "$VIEW_ID" --dx-px 20 --dy-px -15 --session-id "$SESSION_ID" --json
-
-lucida view screenshot \
-  --view-id "$VIEW_ID" \
-  --session-id "$SESSION_ID" \
-  --width-px 512 \
-  --height-px 512 \
-  --delivery file_path \
-  --file-path cli-zarr-screenshot.png \
-  --json
-
-lucida render image \
-  --view-id "$VIEW_ID" \
-  --session-id "$SESSION_ID" \
-  --width-px 640 \
-  --height-px 480 \
-  --delivery file_path \
-  --file-path cli-zarr-render.png \
-  --json
+```bash
+lucida stop
 ```
 
 ## Expected Results

@@ -174,4 +174,10 @@ cython_debug/
 output/releases/
 output/skills/
 output/usage/
+output/datasets/
+output/output/
+output/*.png
+output/*.jpg
+output/*.jpeg
+output/*.webp
 tmp/
