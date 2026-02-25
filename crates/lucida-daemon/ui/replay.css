@@ -1,0 +1,250 @@
+:root {
+  --bg: #f5f4ef;
+  --surface: #fffef9;
+  --line: #d6ddd7;
+  --ink: #1e2a2f;
+  --muted: #5f6d75;
+  --accent: #0f6c91;
+  --accent-soft: #d8edf6;
+  --mono: "IBM Plex Mono", Menlo, Consolas, monospace;
+  --sans: "Avenir Next", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--ink);
+  background: linear-gradient(160deg, #f8f4eb 0%, #e6edf4 100%);
+}
+
+.page {
+  max-width: 82rem;
+  margin: 0 auto;
+  padding: 1.2rem 0.9rem 2rem;
+  display: grid;
+  gap: 0.9rem;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 1.6rem;
+}
+
+.topbar p {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+}
+
+.link-btn {
+  display: inline-block;
+  border: 1px solid var(--line);
+  border-radius: 0.45rem;
+  padding: 0.5rem 0.65rem;
+  color: var(--ink);
+  text-decoration: none;
+  background: #fff;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: var(--surface);
+  padding: 0.85rem;
+  box-shadow: 0 8px 22px #25303b10;
+}
+
+h2 {
+  margin: 0 0 0.6rem;
+  font-size: 1rem;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+label {
+  display: grid;
+  gap: 0.24rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+input,
+select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 0.4rem;
+  padding: 0.46rem 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  background: #fff;
+  color: var(--ink);
+}
+
+button {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  border-radius: 0.42rem;
+  padding: 0.42rem 0.65rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.secondary {
+  border-color: var(--line);
+  background: #fff;
+  color: var(--ink);
+}
+
+.controls-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.status {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  border: 1px solid var(--line);
+  background: var(--accent-soft);
+  padding: 0.22rem 0.42rem;
+  border-radius: 0.32rem;
+}
+
+.playback {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.playback-controls {
+  display: grid;
+  grid-template-columns: auto auto auto auto 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+#frame-indicator {
+  font-family: var(--mono);
+  font-size: 0.76rem;
+}
+
+.playback-grid {
+  display: grid;
+  grid-template-columns: 1.8fr 1fr;
+  gap: 0.7rem;
+}
+
+.viewport-panel,
+.changes-panel {
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+  background: #fff;
+  padding: 0.65rem;
+}
+
+.viewport {
+  min-height: 20rem;
+  border: 1px dashed var(--line);
+  border-radius: 0.5rem;
+  display: grid;
+  place-items: center;
+  padding: 0.6rem;
+  background: #fbfcfa;
+}
+
+.viewport img {
+  max-width: 100%;
+  border-radius: 0.4rem;
+  border: 1px solid var(--line);
+}
+
+.changes {
+  max-height: 20rem;
+  overflow: auto;
+  display: grid;
+  gap: 0.34rem;
+}
+
+.change-item {
+  border: 1px solid var(--line);
+  border-radius: 0.36rem;
+  padding: 0.28rem 0.42rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  background: #f8faf8;
+}
+
+.event-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.event-row {
+  display: grid;
+  gap: 0.34rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  background: #fff;
+}
+
+.event-row.active {
+  border-color: #93c3de;
+  background: #f4faff;
+}
+
+.event-row button {
+  justify-self: start;
+}
+
+.event-meta {
+  display: flex;
+  gap: 0.38rem;
+  flex-wrap: wrap;
+}
+
+.chip {
+  border: 1px solid var(--line);
+  border-radius: 0.32rem;
+  padding: 0.12rem 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  background: #f8faf8;
+}
+
+@media (max-width: 980px) {
+  .controls {
+    grid-template-columns: 1fr 1fr;
+  }
+  .playback-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 680px) {
+  .controls {
+    grid-template-columns: 1fr;
+  }
+  .playback-controls {
+    grid-template-columns: auto auto auto;
+  }
+  #frame-slider {
+    grid-column: 1 / -1;
+  }
+}

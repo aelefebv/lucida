@@ -292,6 +292,20 @@ async fn ui_assets_are_served() {
     let js = request_get(&router, "/ui/app.js", None).await;
     assert_eq!(js.status(), StatusCode::OK);
     assert!(content_type(&js).contains("application/javascript"));
+
+    let replay = request_get(&router, "/ui/replay", None).await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert!(content_type(&replay).contains("text/html"));
+    let replay_body = read_body(replay).await;
+    assert!(replay_body.contains("Agent Visual Replay"));
+
+    let replay_css = request_get(&router, "/ui/replay.css", None).await;
+    assert_eq!(replay_css.status(), StatusCode::OK);
+    assert!(content_type(&replay_css).contains("text/css"));
+
+    let replay_js = request_get(&router, "/ui/replay.js", None).await;
+    assert_eq!(replay_js.status(), StatusCode::OK);
+    assert!(content_type(&replay_js).contains("application/javascript"));
 }
 
 async fn request_json_with_agent(

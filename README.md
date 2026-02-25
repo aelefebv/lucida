@@ -12,6 +12,7 @@ Repository layout reference: `docs/architecture/repo-layout.md`.
 - `LUCIDA_BACKEND` is removed.
 - `LucidaClient(backend=...)` is removed.
 - Embedded usage UI is served at [`/ui`](http://127.0.0.1:3000/ui).
+- Dedicated visual replay UI is served at [`/ui/replay`](http://127.0.0.1:3000/ui/replay).
 
 ## Usage Telemetry + UI
 
@@ -20,6 +21,7 @@ Lucida now records request/response usage telemetry for core viewer endpoints an
 - Timeline/analytics APIs under `/usage/*`
 - Live SSE stream at `/usage/events/stream`
 - Embedded dashboard UI at `/ui`
+- Decoupled visual playback UI at `/ui/replay` (step-through actions + frame replay)
 
 Telemetry defaults:
 

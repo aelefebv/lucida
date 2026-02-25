@@ -70,6 +70,23 @@ body {
   color: var(--ink-muted);
 }
 
+.masthead {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.nav-link {
+  border: 1px solid var(--border);
+  border-radius: 0.44rem;
+  background: #fff;
+  color: var(--ink);
+  text-decoration: none;
+  padding: 0.45rem 0.62rem;
+  font-size: 0.8rem;
+}
+
 .panel {
   background: var(--surface);
   border: 1px solid var(--border);

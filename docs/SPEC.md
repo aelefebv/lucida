@@ -852,9 +852,11 @@ These headers are additive and must not change endpoint request/response bodies.
 ### 15.4 Embedded UI Routes
 
 - `GET /ui`
+- `GET /ui/replay`
 - `GET /ui/*` static assets
 
 The UI is zero-build static web assets served by the daemon and consumes `/usage/*` APIs plus SSE.
+`/ui` is the timeline/analytics surface. `/ui/replay` is a decoupled visual playback surface for step-through action replay.
 
 ### 15.5 Telemetry Storage + Retention
 
