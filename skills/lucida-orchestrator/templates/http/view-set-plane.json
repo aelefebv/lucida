@@ -1,0 +1,33 @@
+{
+  "operation_id": "view.set-plane",
+  "method": "POST",
+  "path": "/view/update",
+  "request": {
+    "schema_version": 1,
+    "view_id": "<view_id>",
+    "session_id": "<session_id>",
+    "patch": [
+      {
+        "op": "replace",
+        "path": "/view_2d/plane",
+        "value": "xz"
+      }
+    ]
+  },
+  "notes": [
+    "For geometric preservation, compute a three-operation patch (plane + center_world + slice) from the current view state."
+  ],
+  "required_inputs": [
+    "view_id",
+    "plane"
+  ],
+  "expected_output_fields": [
+    "view_state.view_2d.plane",
+    "view_state.state_hash"
+  ],
+  "common_failure_codes": [
+    "view_not_found",
+    "invalid_patch",
+    "unsupported_plane"
+  ]
+}

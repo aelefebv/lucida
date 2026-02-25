@@ -11,6 +11,46 @@ Repository layout reference: `docs/architecture/repo-layout.md`.
 - Override with `LUCIDA_BASE_URL` or `--base-url`.
 - `LUCIDA_BACKEND` is removed.
 - `LucidaClient(backend=...)` is removed.
+- Embedded usage UI is served at [`/ui`](http://127.0.0.1:3000/ui).
+
+## Usage Telemetry + UI
+
+Lucida now records request/response usage telemetry for core viewer endpoints and serves:
+
+- Timeline/analytics APIs under `/usage/*`
+- Live SSE stream at `/usage/events/stream`
+- Embedded dashboard UI at `/ui`
+
+Telemetry defaults:
+
+- DB path: `output/usage/lucida_usage.sqlite`
+- Retention age: `14` days
+- Max events: `50000`
+- Max DB size: `1073741824` bytes
+
+Override with environment variables:
+
+- `LUCIDA_USAGE_DB_PATH`
+- `LUCIDA_USAGE_RETENTION_DAYS`
+- `LUCIDA_USAGE_MAX_EVENTS`
+- `LUCIDA_USAGE_MAX_DB_BYTES`
+
+Agent correlation headers (optional, additive):
+
+- `X-Lucida-Agent-Run-Id`
+- `X-Lucida-Agent-Step-Id`
+- `X-Lucida-Agent-Name`
+
+Example:
+
+```bash
+curl -sS -X POST http://127.0.0.1:3000/session/create \
+  -H 'content-type: application/json' \
+  -H 'X-Lucida-Agent-Run-Id: run_demo_001' \
+  -H 'X-Lucida-Agent-Step-Id: step_session_create' \
+  -H 'X-Lucida-Agent-Name: demo-agent' \
+  -d '{"schema_version":1}'
+```
 
 ## Run
 
@@ -64,4 +104,32 @@ Run the full stabilization gate locally:
 
 ```bash
 ./scripts/ci/milestone5.sh
+```
+
+## Skill Development
+
+Canonical cross-agent skill artifacts live under `skills/lucida-orchestrator/`.
+
+Validate contract and structure:
+
+```bash
+uv run python scripts/skills/validate_skill.py --skill skills/lucida-orchestrator
+```
+
+Check for drift against CLI and daemon routes:
+
+```bash
+uv run python scripts/skills/check_drift.py --skill skills/lucida-orchestrator
+```
+
+Build upload-ready adapter bundles (OpenAI + Anthropic):
+
+```bash
+uv run python scripts/skills/build_adapters.py --skill skills/lucida-orchestrator --out output/skills
+```
+
+Run runtime smoke checks against a running daemon:
+
+```bash
+uv run python scripts/skills/smoke_skill.py --base-url http://127.0.0.1:3000
 ```

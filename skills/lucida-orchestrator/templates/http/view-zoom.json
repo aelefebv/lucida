@@ -1,0 +1,29 @@
+{
+  "operation_id": "view.zoom",
+  "method": "POST",
+  "path": "/view/update",
+  "request": {
+    "schema_version": 1,
+    "view_id": "<view_id>",
+    "session_id": "<session_id>",
+    "patch": [
+      {
+        "op": "replace",
+        "path": "/view_2d/camera/zoom",
+        "value": 1.5
+      }
+    ]
+  },
+  "required_inputs": [
+    "view_id",
+    "factor"
+  ],
+  "expected_output_fields": [
+    "view_state.view_2d.camera.zoom",
+    "view_state.state_hash"
+  ],
+  "common_failure_codes": [
+    "view_not_found",
+    "invalid_patch"
+  ]
+}

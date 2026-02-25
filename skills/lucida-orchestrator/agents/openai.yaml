@@ -1,0 +1,4 @@
+interface:
+  display_name: "Lucida Orchestrator"
+  short_description: "Operate Lucida phase-1 API workflows"
+  default_prompt: "Use $lucida-orchestrator to run Lucida phase-1 workflows via CLI and HTTP templates."

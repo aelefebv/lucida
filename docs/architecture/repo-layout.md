@@ -5,9 +5,11 @@
 - `crates/lucida-daemon/`: Rust daemon implementation (HTTP server, rendering, dataset I/O, daemon tests).
 - `src/lucida/`: Python client/CLI package and typed API contracts.
 - `tests/python/`: Python test suite grouped by responsibility.
+- `skills/`: canonical cross-agent skill packages and adapter metadata.
 - `notebooks/`: runnable notebooks grouped by milestone and phase.
 - `scripts/ci/`: CI/stabilization entrypoints.
 - `scripts/release/`: release packaging scripts.
+- `scripts/skills/`: skill validation, drift checks, bundling, and smoke checks.
 - `docs/`: specifications and architecture documentation.
 - `output/`: generated artifacts (snapshots/releases) only.
 
@@ -17,6 +19,7 @@
 - `tests/python/client/`: client/runtime-config behavior tests.
 - `tests/python/integration/`: direct HTTP integration coverage.
 - `tests/python/parity/`: corpus-driven parity fixtures/harness.
+- `tests/python/skills/`: skill contract and bundling checks.
 
 ## Conventions
 

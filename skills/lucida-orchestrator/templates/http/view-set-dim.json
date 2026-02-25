@@ -1,0 +1,37 @@
+{
+  "operation_id": "view.set-dim",
+  "method": "POST",
+  "path": "/view/update",
+  "request": {
+    "schema_version": 1,
+    "view_id": "<view_id>",
+    "session_id": "<session_id>",
+    "patch": [
+      {
+        "op": "replace",
+        "path": "/selectors",
+        "value": [
+          {
+            "axis": "z",
+            "kind": "index",
+            "index": 1,
+            "clamp": true
+          }
+        ]
+      }
+    ]
+  },
+  "required_inputs": [
+    "view_id",
+    "axis",
+    "index"
+  ],
+  "expected_output_fields": [
+    "view_state.selectors",
+    "view_state.state_hash"
+  ],
+  "common_failure_codes": [
+    "view_not_found",
+    "invalid_patch"
+  ]
+}

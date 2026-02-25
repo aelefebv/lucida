@@ -1,0 +1,23 @@
+{
+  "operation_id": "dataset.open",
+  "method": "POST",
+  "path": "/dataset/open",
+  "request": {
+    "schema_version": 1,
+    "uri": "<dataset_uri>",
+    "dataset_id": "<dataset_id>",
+    "session_id": "<session_id>",
+    "include_full_raw_metadata": false
+  },
+  "required_inputs": [
+    "uri"
+  ],
+  "expected_output_fields": [
+    "dataset_summary.dataset_id",
+    "dataset_summary.multiscales"
+  ],
+  "common_failure_codes": [
+    "invalid_request",
+    "dataset_not_found"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "operation_id": "view.create",
+  "method": "POST",
+  "path": "/view/create",
+  "request": {
+    "schema_version": 1,
+    "dataset_id": "<dataset_id>",
+    "session_id": "<session_id>",
+    "mode": "2d"
+  },
+  "required_inputs": [
+    "dataset_id"
+  ],
+  "expected_output_fields": [
+    "view_state.view_id",
+    "view_state.state_hash",
+    "view_state.state_version"
+  ],
+  "common_failure_codes": [
+    "dataset_not_found",
+    "unsupported_mode",
+    "invalid_request"
+  ]
+}

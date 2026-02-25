@@ -1,0 +1,79 @@
+name: skills-gate
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  skills-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Sync Python dependencies
+        run: uv sync --dev
+
+      - name: Validate skill structure
+        run: uv run python scripts/skills/validate_skill.py --skill skills/lucida-orchestrator
+
+      - name: Check skill drift
+        run: uv run python scripts/skills/check_drift.py --skill skills/lucida-orchestrator
+
+      - name: Build adapter bundles
+        run: |
+          uv run python scripts/skills/build_adapters.py \
+            --skill skills/lucida-orchestrator \
+            --out output/skills
+
+      - name: Start daemon
+        run: |
+          cargo run -p lucida-daemon > /tmp/lucida-daemon.log 2>&1 &
+          echo $! > /tmp/lucida-daemon.pid
+
+      - name: Wait for daemon health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sS http://127.0.0.1:3000/healthz | grep -q '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "daemon failed to start"
+          cat /tmp/lucida-daemon.log
+          exit 1
+
+      - name: Run runtime smoke checks
+        run: uv run python scripts/skills/smoke_skill.py --base-url http://127.0.0.1:3000
+
+      - name: Execute milestone notebook
+        run: |
+          LUCIDA_BASE_URL=http://127.0.0.1:3000 \
+          uv run jupyter nbconvert \
+            --to notebook \
+            --execute \
+            --inplace \
+            notebooks/milestones/milestone5-llm-skill-orchestrator-phase1.ipynb
+
+      - name: Upload adapter bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: lucida-skill-bundles
+          path: |
+            output/skills/lucida-orchestrator-openai-*.tar.gz
+            output/skills/lucida-orchestrator-anthropic-*.tar.gz
+            output/skills/manifest.json
+
+      - name: Stop daemon
+        if: always()
+        run: |
+          if [ -f /tmp/lucida-daemon.pid ]; then
+            kill "$(cat /tmp/lucida-daemon.pid)" || true
+          fi
