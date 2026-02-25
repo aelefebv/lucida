@@ -1,19 +1,19 @@
-# view.set.plane
+# view.indices
 
 ## Command
 ```bash
-uv run lucida view set plane --view-id <view_id> --plane xz --session-id <session_id> --json
+lucida view indices --view-id <view_id> --axis z --index 0 --index 2 --session-id <session_id> --json
 ```
 
 ## Required Inputs
 - `view_id`
-- `plane`
+- `axis`
+- `indices`
 
 ## Expected Output Fields
-- `view_state.view_2d.plane`
+- `view_state.selectors`
 - `view_state.state_hash`
 
 ## Common Failure Codes
 - `view_not_found`
 - `invalid_patch`
-- `unsupported_plane`

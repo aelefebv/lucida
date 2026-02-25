@@ -30,7 +30,6 @@ def test_cli_render_and_navigation(
         runner,
         [
             "view",
-            "set",
             "plane",
             "--view-id",
             view_context.view_id,
@@ -48,7 +47,6 @@ def test_cli_render_and_navigation(
         runner,
         [
             "view",
-            "move",
             "pan",
             "--view-id",
             view_context.view_id,
@@ -67,7 +65,6 @@ def test_cli_render_and_navigation(
         runner,
         [
             "view",
-            "move",
             "zoom",
             "--view-id",
             view_context.view_id,
@@ -84,7 +81,6 @@ def test_cli_render_and_navigation(
         runner,
         [
             "view",
-            "set",
             "rotation",
             "--view-id",
             view_context.view_id,
@@ -102,7 +98,6 @@ def test_cli_render_and_navigation(
         runner,
         [
             "view",
-            "move",
             "rotate",
             "--view-id",
             view_context.view_id,
@@ -120,7 +115,6 @@ def test_cli_render_and_navigation(
         runner,
         [
             "view",
-            "get",
             "bounds",
             "--view-id",
             view_context.view_id,
@@ -138,7 +132,6 @@ def test_cli_render_and_navigation(
         runner,
         [
             "view",
-            "get",
             "screenshot",
             "--view-id",
             view_context.view_id,
@@ -178,11 +171,10 @@ def test_cli_render_and_navigation(
     assert payload["images"][0]["mime"] == "image/png"
     assert _decode_size(payload["images"][0]["bytes_base64"]) == (72, 56)
 
-    view_get_payload = run_cli_json(
+    view_state_payload = run_cli_json(
         runner,
         [
             "view",
-            "get",
             "state",
             "--view-id",
             view_context.view_id,
@@ -192,9 +184,9 @@ def test_cli_render_and_navigation(
         ],
         env=cli_env,
     )
-    view_state_payload = view_get_payload["view_state"]
+    state_payload = view_state_payload["view_state"]
     view_state_file = tmp_path / "view_state.json"
-    view_state_file.write_text(json.dumps(view_state_payload), encoding="utf-8")
+    view_state_file.write_text(json.dumps(state_payload), encoding="utf-8")
 
     stateless_payload = run_cli_json(
         runner,
@@ -222,7 +214,7 @@ def test_cli_render_and_navigation(
             "render",
             "image",
             "--view-state-json",
-            json.dumps(view_state_payload),
+            json.dumps(state_payload),
             "--width-px",
             "32",
             "--height-px",

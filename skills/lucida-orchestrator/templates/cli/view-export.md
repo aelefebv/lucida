@@ -2,7 +2,7 @@
 
 ## Command
 ```bash
-uv run lucida view export --view-id <view_id> --session-id <session_id> --json
+lucida view export --view-id <view_id> --session-id <session_id> --json
 ```
 
 ## Required Inputs

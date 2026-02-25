@@ -1,8 +1,8 @@
-# view.get.state
+# view.state
 
 ## Command
 ```bash
-uv run lucida view get state --view-id <view_id> --session-id <session_id> --json
+lucida view state --view-id <view_id> --session-id <session_id> --json
 ```
 
 ## Required Inputs

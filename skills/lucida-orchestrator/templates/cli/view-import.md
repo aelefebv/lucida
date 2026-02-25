@@ -2,7 +2,7 @@
 
 ## Command
 ```bash
-uv run lucida view import --view-state-file <view_state_file> --session-id <session_id> --json
+lucida view import --view-state-file <view_state_file> --session-id <session_id> --json
 ```
 
 ## Required Inputs

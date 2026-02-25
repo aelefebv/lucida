@@ -1,5 +1,5 @@
 {
-  "operation_id": "view.move.zoom",
+  "operation_id": "view.zoom",
   "method": "POST",
   "path": "/view/update",
   "request": {
