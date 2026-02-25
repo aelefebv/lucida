@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant};
 
 use axum::http::{HeaderMap, Method};
 use chrono::{DateTime, Duration, Utc};
@@ -19,6 +21,7 @@ pub const ENV_USAGE_MAX_DB_BYTES: &str = "LUCIDA_USAGE_MAX_DB_BYTES";
 const DEFAULT_RETENTION_DAYS: i64 = 14;
 const DEFAULT_MAX_EVENTS: i64 = 50_000;
 const DEFAULT_MAX_DB_BYTES: u64 = 1_073_741_824;
+const MAX_PENDING_INSERT_WAIT_MS: u64 = 2_000;
 
 const AGENT_RUN_HEADER: &str = "x-lucida-agent-run-id";
 const AGENT_STEP_HEADER: &str = "x-lucida-agent-step-id";
@@ -86,6 +89,7 @@ pub struct UsageTelemetry {
     max_db_bytes: u64,
     conn: Mutex<Connection>,
     event_tx: broadcast::Sender<UsageEvent>,
+    pending_inserts: AtomicUsize,
 }
 
 pub type SharedUsageTelemetry = Arc<UsageTelemetry>;
@@ -122,6 +126,7 @@ pub fn new_shared_usage_telemetry_with_config(
         max_db_bytes: config.max_db_bytes.max(1),
         conn: Mutex::new(conn),
         event_tx,
+        pending_inserts: AtomicUsize::new(0),
     });
 
     telemetry.prune_retention()?;
@@ -129,6 +134,28 @@ pub fn new_shared_usage_telemetry_with_config(
 }
 
 impl UsageTelemetry {
+    pub fn begin_async_insert(&self) {
+        self.pending_inserts.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn finish_async_insert(&self) {
+        let mut current = self.pending_inserts.load(Ordering::Acquire);
+        loop {
+            if current == 0 {
+                return;
+            }
+            match self.pending_inserts.compare_exchange(
+                current,
+                current - 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<UsageEvent> {
         self.event_tx.subscribe()
     }
@@ -199,6 +226,7 @@ impl UsageTelemetry {
     }
 
     pub fn list_events(&self, filter: UsageEventsFilter) -> Result<Vec<UsageEvent>, String> {
+        self.wait_for_pending_inserts();
         let conn = self
             .conn
             .lock()
@@ -268,6 +296,7 @@ impl UsageTelemetry {
     }
 
     pub fn list_runs(&self, filter: UsageRunsFilter) -> Result<Vec<UsageRunSummary>, String> {
+        self.wait_for_pending_inserts();
         let conn = self
             .conn
             .lock()
@@ -350,6 +379,7 @@ impl UsageTelemetry {
         run_id: &str,
         event_limit: u32,
     ) -> Result<Option<(UsageRunSummary, Vec<UsageEvent>)>, String> {
+        self.wait_for_pending_inserts();
         let conn = self
             .conn
             .lock()
@@ -420,6 +450,7 @@ impl UsageTelemetry {
     }
 
     pub fn prune_retention(&self) -> Result<(), String> {
+        self.wait_for_pending_inserts();
         let conn = self
             .conn
             .lock()
@@ -529,6 +560,17 @@ impl UsageTelemetry {
             latencies.push(value.max(0.0));
         }
         Ok(latencies)
+    }
+
+    fn wait_for_pending_inserts(&self) {
+        if self.pending_inserts.load(Ordering::Acquire) == 0 {
+            return;
+        }
+
+        let deadline = Instant::now() + StdDuration::from_millis(MAX_PENDING_INSERT_WAIT_MS);
+        while self.pending_inserts.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
+            std::thread::sleep(StdDuration::from_millis(1));
+        }
     }
 }
 

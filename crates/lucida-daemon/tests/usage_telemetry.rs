@@ -122,14 +122,7 @@ async fn usage_events_runs_and_error_capture_work_end_to_end() {
     .await;
     assert_eq!(failing.status(), StatusCode::UNPROCESSABLE_ENTITY);
 
-    let events_response = request_get(
-        &router,
-        "/usage/events",
-        Some(&[("run_id", run_id.as_str()), ("limit", "200")]),
-    )
-    .await;
-    assert_eq!(events_response.status(), StatusCode::OK);
-    let events_payload = read_json_body(events_response).await;
+    let events_payload = wait_for_usage_events(&router, &run_id, 5).await;
     let events = events_payload["events"].as_array().expect("events array");
     assert!(events.len() >= 5);
     assert!(events.iter().all(|event| event["agent_run_id"] == run_id));
@@ -331,6 +324,31 @@ async fn request_json_with_agent(
         )
         .await
         .expect("response")
+}
+
+async fn wait_for_usage_events(router: &axum::Router, run_id: &str, min_events: usize) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let events_response = request_get(
+            router,
+            "/usage/events",
+            Some(&[("run_id", run_id), ("limit", "200")]),
+        )
+        .await;
+        assert_eq!(events_response.status(), StatusCode::OK);
+        let payload = read_json_body(events_response).await;
+        let event_count = payload["events"]
+            .as_array()
+            .map(|events| events.len())
+            .unwrap_or(0);
+        if event_count >= min_events {
+            return payload;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return payload;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 async fn request_get(
