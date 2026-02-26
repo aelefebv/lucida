@@ -22,6 +22,10 @@ const DEFAULT_RETENTION_DAYS: i64 = 14;
 const DEFAULT_MAX_EVENTS: i64 = 50_000;
 const DEFAULT_MAX_DB_BYTES: u64 = 1_073_741_824;
 const MAX_PENDING_INSERT_WAIT_MS: u64 = 2_000;
+const PRUNE_INTERVAL_SECONDS: u64 = 30;
+const PRUNE_BATCH_DIVISOR: i64 = 100;
+const PRUNE_BATCH_MAX_INSERTS: usize = 512;
+const PRUNE_HARD_MAX_INSERTS: usize = 4_096;
 
 const AGENT_RUN_HEADER: &str = "x-lucida-agent-run-id";
 const AGENT_STEP_HEADER: &str = "x-lucida-agent-step-id";
@@ -90,6 +94,8 @@ pub struct UsageTelemetry {
     conn: Mutex<Connection>,
     event_tx: broadcast::Sender<UsageEvent>,
     pending_inserts: AtomicUsize,
+    inserts_since_prune: AtomicUsize,
+    last_prune_at: Mutex<Instant>,
 }
 
 pub type SharedUsageTelemetry = Arc<UsageTelemetry>;
@@ -129,6 +135,8 @@ pub fn new_shared_usage_telemetry_with_config(
         conn: Mutex::new(conn),
         event_tx,
         pending_inserts: AtomicUsize::new(0),
+        inserts_since_prune: AtomicUsize::new(0),
+        last_prune_at: Mutex::new(Instant::now()),
     });
 
     telemetry.prune_retention()?;
@@ -217,7 +225,7 @@ impl UsageTelemetry {
             .map_err(|error| format!("failed to insert usage event: {error}"))?;
 
             let id = conn.last_insert_rowid();
-            self.prune_locked(&conn)?;
+            self.maybe_prune_after_insert_locked(&conn)?;
             self.load_event_by_id_locked(&conn, id)?
         };
 
@@ -460,6 +468,35 @@ impl UsageTelemetry {
         self.prune_locked(&conn)
     }
 
+    fn maybe_prune_after_insert_locked(&self, conn: &Connection) -> Result<(), String> {
+        let inserts_since_prune = self.inserts_since_prune.fetch_add(1, Ordering::AcqRel) + 1;
+        if self.should_prune_after_insert(inserts_since_prune)? {
+            self.prune_locked(conn)?;
+        }
+        Ok(())
+    }
+
+    fn should_prune_after_insert(&self, inserts_since_prune: usize) -> Result<bool, String> {
+        if inserts_since_prune >= PRUNE_HARD_MAX_INSERTS {
+            return Ok(true);
+        }
+        if inserts_since_prune >= self.prune_insert_batch_size() {
+            return Ok(true);
+        }
+
+        let last_prune_at = self
+            .last_prune_at
+            .lock()
+            .map_err(|_| "failed to lock usage prune schedule".to_owned())?;
+        Ok(last_prune_at.elapsed() >= StdDuration::from_secs(PRUNE_INTERVAL_SECONDS))
+    }
+
+    fn prune_insert_batch_size(&self) -> usize {
+        let scaled = self.max_events / PRUNE_BATCH_DIVISOR;
+        let clamped = scaled.clamp(1, PRUNE_BATCH_MAX_INSERTS as i64);
+        clamped as usize
+    }
+
     fn prune_locked(&self, conn: &Connection) -> Result<(), String> {
         let cutoff = Utc::now() - Duration::days(self.retention_days.max(1));
         conn.execute(
@@ -500,6 +537,12 @@ impl UsageTelemetry {
                 })?;
         }
         self.prune_thumbnail_files(cutoff.date_naive())?;
+        self.inserts_since_prune.store(0, Ordering::Release);
+        let mut last_prune_at = self
+            .last_prune_at
+            .lock()
+            .map_err(|_| "failed to lock usage prune schedule".to_owned())?;
+        *last_prune_at = Instant::now();
         Ok(())
     }
 
@@ -973,4 +1016,100 @@ pub fn invalid_usage_query_error(field: &str, message: &str) -> crate::error::Ap
             "message": message,
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[test]
+    fn prune_batch_size_scales_with_max_events() {
+        let tiny = new_test_usage(3);
+        assert_eq!(tiny.prune_insert_batch_size(), 1);
+
+        let medium = new_test_usage(10_000);
+        assert_eq!(medium.prune_insert_batch_size(), 100);
+
+        let huge = new_test_usage(1_000_000);
+        assert_eq!(huge.prune_insert_batch_size(), PRUNE_BATCH_MAX_INSERTS);
+    }
+
+    #[test]
+    fn insert_prune_runs_in_batches() {
+        let usage = new_test_usage(1_000);
+        assert_eq!(usage.prune_insert_batch_size(), 10);
+
+        for step in 0..9 {
+            usage
+                .record_http_event(test_event(step))
+                .expect("record usage event");
+            assert_eq!(
+                usage.inserts_since_prune.load(Ordering::Acquire),
+                (step + 1) as usize
+            );
+        }
+
+        usage
+            .record_http_event(test_event(9))
+            .expect("record usage event");
+        assert_eq!(usage.inserts_since_prune.load(Ordering::Acquire), 0);
+        assert_eq!(stored_event_count(&usage), 10);
+    }
+
+    #[test]
+    fn insert_prune_runs_when_interval_elapses() {
+        let usage = new_test_usage(50_000);
+        {
+            let mut last_prune_at = usage.last_prune_at.lock().expect("lock prune schedule");
+            *last_prune_at = Instant::now() - StdDuration::from_secs(PRUNE_INTERVAL_SECONDS + 1);
+        }
+        usage
+            .record_http_event(test_event(0))
+            .expect("record usage event");
+        assert_eq!(usage.inserts_since_prune.load(Ordering::Acquire), 0);
+    }
+
+    fn new_test_usage(max_events: i64) -> SharedUsageTelemetry {
+        let root = std::env::temp_dir()
+            .join("lucida-usage-unit-tests")
+            .join(Uuid::new_v4().simple().to_string());
+        fs::create_dir_all(&root).expect("create test directory");
+        let config = UsageConfig {
+            db_path: root.join("usage.sqlite"),
+            retention_days: 14,
+            max_events,
+            max_db_bytes: DEFAULT_MAX_DB_BYTES,
+        };
+        new_shared_usage_telemetry_with_config(config).expect("initialize usage telemetry")
+    }
+
+    fn test_event(step: usize) -> UsageEventInsert {
+        UsageEventInsert {
+            endpoint: "/session/create".to_owned(),
+            method: "POST".to_owned(),
+            status_code: 200,
+            latency_ms: 10.0 + step as f64,
+            agent_context: AgentContext {
+                agent_run_id: Some(format!("run-{step}")),
+                agent_step_id: Some(format!("step-{step}")),
+                agent_name: Some("unit-test".to_owned()),
+            },
+            request_json: Some(json!({
+                "schema_version": 1,
+                "request_id": format!("request-{step}"),
+            })),
+            response_json: Some(json!({
+                "session_id": format!("session-{step}"),
+            })),
+        }
+    }
+
+    fn stored_event_count(usage: &SharedUsageTelemetry) -> i64 {
+        let conn = usage.conn.lock().expect("lock usage db connection");
+        conn.query_row("SELECT COUNT(*) FROM usage_events", [], |row| row.get(0))
+            .expect("count usage events")
+    }
 }
