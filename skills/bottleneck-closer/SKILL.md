@@ -11,8 +11,7 @@ description: Implement and close a specified performance bottleneck listed in BO
 2. Read `BOTTLENECKS.md` and identify the requested bottleneck number/title.
 3. Implement the bottleneck fix from first principles.
 4. Add or update real tests that validate the change.
-5. Remove the completed bottleneck from `BOTTLENECKS.md` with:
-`uv run python skills/bottleneck-closer/scripts/prune_bottlenecks.py --file BOTTLENECKS.md --remove <number-or-title>`
+5. Edit `BOTTLENECKS.md` directly to remove the completed bottleneck section.
 6. Run validation:
 `cargo test --workspace`
 `uv run pytest`
@@ -27,9 +26,9 @@ If PR is conflicting, fetch/rebase onto `origin/main`, resolve conflicts, rerun 
 
 ## BOTTLENECKS.md Rules
 
-- Always remove the completed bottleneck entry from `BOTTLENECKS.md`.
+- Always remove the completed bottleneck entry from `BOTTLENECKS.md`. Edit the file directly.
+- Remove the corresponding item from `## Suggested implementation order` and renumber that list.
 - After removal, if no bottleneck headings remain, clear `BOTTLENECKS.md` to an empty file so automation can repopulate it.
-- Use the bundled script to preserve numbering and suggested implementation order consistency.
 
 ## PR Body Requirements
 
