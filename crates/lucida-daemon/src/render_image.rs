@@ -13,9 +13,9 @@ use uuid::Uuid;
 
 use crate::dto::api::ApiWarning;
 use crate::dto::render::{
-    RenderArtifactRole, RenderAxisSelector, RenderDelivery, RenderFormat, RenderImageArtifact,
-    RenderImageResponse, RenderMeta, RenderMimeType, RenderOutputSpec, RenderPixelFormat,
-    RenderStatus, RenderTimingMs, RenderTimingStagesMs,
+    RenderArtifactRole, RenderAxisSelector, RenderBackendUsed, RenderDelivery, RenderFormat,
+    RenderImageArtifact, RenderImageResponse, RenderMeta, RenderMimeType, RenderOutputSpec,
+    RenderPixelFormat, RenderStatus, RenderTimingMs, RenderTimingStagesMs,
 };
 use crate::dto::view_state::{RenderMode, ViewState};
 use crate::error::ApiError;
@@ -73,6 +73,13 @@ fn rgba_timing_ms(total_ms: f64, rgba_result: &RenderRgbaResult) -> RenderTiming
             gpu_compute: rgba_result.gpu_compute_ms,
             gpu_readback: rgba_result.gpu_readback_ms,
         }),
+    }
+}
+
+fn backend_used_for(backend: RenderBackend) -> RenderBackendUsed {
+    match backend {
+        RenderBackend::Cpu => RenderBackendUsed::Cpu,
+        RenderBackend::Gpu => RenderBackendUsed::Gpu,
     }
 }
 
@@ -342,22 +349,25 @@ pub async fn render_image(
         "render backend selection"
     );
 
-    let (rendered_artifact, cache_snapshot, cache_budgets, backend_warnings) = {
+    let (rendered_artifact, cache_snapshot, cache_budgets, backend_warnings, actual_backend) = {
         let mut cache_state = cache_registry.write().await;
         let cache_budgets =
             cache_state.resolve_effective_budgets(effective_view.performance.as_ref());
         let mut backend_warnings = backend_selection.warnings;
-        let rendered_artifact = match request.output.format.clone() {
+        let (rendered_artifact, actual_backend) = match request.output.format.clone() {
             RenderFormat::Png => {
-                let render_result = match backend_selection.backend {
-                    RenderBackend::Cpu => render_view_to_png(
-                        &dataset_summary,
-                        &effective_view,
-                        &request.output,
-                        &mut cache_state,
-                        &cache_session_id,
-                        cache_budgets,
-                    )?,
+                let (render_result, actual_backend) = match backend_selection.backend {
+                    RenderBackend::Cpu => (
+                        render_view_to_png(
+                            &dataset_summary,
+                            &effective_view,
+                            &request.output,
+                            &mut cache_state,
+                            &cache_session_id,
+                            cache_budgets,
+                        )?,
+                        RenderBackend::Cpu,
+                    ),
                     RenderBackend::Gpu => match render_view_to_png_gpu(
                         &dataset_summary,
                         &effective_view,
@@ -366,7 +376,7 @@ pub async fn render_image(
                         &cache_session_id,
                         cache_budgets,
                     ) {
-                        Ok(result) => result,
+                        Ok(result) => (result, RenderBackend::Gpu),
                         Err(error) => {
                             tracing::warn!(
                                 error_code = %error.envelope.code,
@@ -384,39 +394,48 @@ pub async fn render_image(
                                     "error_details": error.envelope.details,
                                 })),
                             });
-                            render_view_to_png(
-                                &dataset_summary,
-                                &effective_view,
-                                &request.output,
-                                &mut cache_state,
-                                &cache_session_id,
-                                cache_budgets,
-                            )?
+                            (
+                                render_view_to_png(
+                                    &dataset_summary,
+                                    &effective_view,
+                                    &request.output,
+                                    &mut cache_state,
+                                    &cache_session_id,
+                                    cache_budgets,
+                                )?,
+                                RenderBackend::Cpu,
+                            )
                         }
                     },
                 };
-                EncodedRenderArtifact {
-                    bytes: render_result.png_bytes,
-                    mime: RenderMimeType::Png,
-                    pixel_format: None,
-                    bytes_per_pixel: None,
-                    row_stride_bytes: None,
-                    pyramid_level_used: render_result.pyramid_level_used,
-                    warnings: render_result.warnings,
-                    timing_ms: render_result.timing_ms,
-                }
+                (
+                    EncodedRenderArtifact {
+                        bytes: render_result.png_bytes,
+                        mime: RenderMimeType::Png,
+                        pixel_format: None,
+                        bytes_per_pixel: None,
+                        row_stride_bytes: None,
+                        pyramid_level_used: render_result.pyramid_level_used,
+                        warnings: render_result.warnings,
+                        timing_ms: render_result.timing_ms,
+                    },
+                    actual_backend,
+                )
             }
             RenderFormat::RawRgba => {
                 let render_start = Instant::now();
-                let rgba_result = match backend_selection.backend {
-                    RenderBackend::Cpu => render_view_to_rgba(
-                        &dataset_summary,
-                        &effective_view,
-                        &request.output,
-                        &mut cache_state,
-                        &cache_session_id,
-                        cache_budgets,
-                    )?,
+                let (rgba_result, actual_backend) = match backend_selection.backend {
+                    RenderBackend::Cpu => (
+                        render_view_to_rgba(
+                            &dataset_summary,
+                            &effective_view,
+                            &request.output,
+                            &mut cache_state,
+                            &cache_session_id,
+                            cache_budgets,
+                        )?,
+                        RenderBackend::Cpu,
+                    ),
                     RenderBackend::Gpu => match render_view_to_rgba_gpu(
                         &dataset_summary,
                         &effective_view,
@@ -425,7 +444,7 @@ pub async fn render_image(
                         &cache_session_id,
                         cache_budgets,
                     ) {
-                        Ok(result) => result,
+                        Ok(result) => (result, RenderBackend::Gpu),
                         Err(error) => {
                             tracing::warn!(
                                 error_code = %error.envelope.code,
@@ -443,29 +462,35 @@ pub async fn render_image(
                                     "error_details": error.envelope.details,
                                 })),
                             });
-                            render_view_to_rgba(
-                                &dataset_summary,
-                                &effective_view,
-                                &request.output,
-                                &mut cache_state,
-                                &cache_session_id,
-                                cache_budgets,
-                            )?
+                            (
+                                render_view_to_rgba(
+                                    &dataset_summary,
+                                    &effective_view,
+                                    &request.output,
+                                    &mut cache_state,
+                                    &cache_session_id,
+                                    cache_budgets,
+                                )?,
+                                RenderBackend::Cpu,
+                            )
                         }
                     },
                 };
                 let total_ms = (Instant::now() - render_start).as_secs_f64() * 1000.0;
                 let timing_ms = Some(rgba_timing_ms(total_ms, &rgba_result));
-                EncodedRenderArtifact {
-                    bytes: rgba_result.rgba_bytes,
-                    mime: RenderMimeType::RawRgba,
-                    pixel_format: Some(RenderPixelFormat::Rgba8),
-                    bytes_per_pixel: Some(4),
-                    row_stride_bytes: Some(request.output.width_px.saturating_mul(4)),
-                    pyramid_level_used: rgba_result.pyramid_level_used,
-                    warnings: rgba_result.warnings,
-                    timing_ms,
-                }
+                (
+                    EncodedRenderArtifact {
+                        bytes: rgba_result.rgba_bytes,
+                        mime: RenderMimeType::RawRgba,
+                        pixel_format: Some(RenderPixelFormat::Rgba8),
+                        bytes_per_pixel: Some(4),
+                        row_stride_bytes: Some(request.output.width_px.saturating_mul(4)),
+                        pyramid_level_used: rgba_result.pyramid_level_used,
+                        warnings: rgba_result.warnings,
+                        timing_ms,
+                    },
+                    actual_backend,
+                )
             }
         };
         let cache_snapshot = cache_state.session_snapshot(&cache_session_id);
@@ -474,6 +499,7 @@ pub async fn render_image(
             cache_snapshot,
             cache_budgets,
             backend_warnings,
+            actual_backend,
         )
     };
 
@@ -548,6 +574,7 @@ pub async fn render_image(
             multiscale_name: effective_view.datasets[0].multiscale_name.clone(),
             pyramid_level_used: rendered_artifact.pyramid_level_used,
             selectors_applied: selectors.iter().map(RenderAxisSelector::from).collect(),
+            backend_used: backend_used_for(actual_backend),
             timing_ms: rendered_artifact.timing_ms.unwrap_or(RenderTimingMs {
                 total: 0.0,
                 io: 0.0,
