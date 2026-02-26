@@ -76,6 +76,10 @@ async fn render_cache_is_isolated_per_session() {
         render_inline(&router, &view_b).await.status(),
         StatusCode::OK
     );
+    assert_eq!(
+        render_inline(&router, &view_b).await.status(),
+        StatusCode::OK
+    );
     let snapshot_b = session_cache_snapshot(&state, &session_b)
         .await
         .expect("session b snapshot");

@@ -441,6 +441,7 @@ pub async fn render_image(
                 decode: 0.0,
                 gpu_upload: 0.0,
                 render: 0.0,
+                stages: None,
             }),
         },
         warnings,

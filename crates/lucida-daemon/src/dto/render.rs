@@ -120,6 +120,22 @@ pub struct RenderTimingMs {
     pub decode: f64,
     pub gpu_upload: f64,
     pub render: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stages: Option<RenderTimingStagesMs>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RenderTimingStagesMs {
+    pub chunk_fetch: f64,
+    pub chunk_decode: f64,
+    pub sample: f64,
+    pub compose: f64,
+    pub encode: f64,
+    #[serde(default)]
+    pub gpu_compute: f64,
+    #[serde(default)]
+    pub gpu_readback: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

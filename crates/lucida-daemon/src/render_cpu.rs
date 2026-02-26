@@ -6,15 +6,18 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::http::StatusCode;
-use image::codecs::png::PngEncoder;
+use image::codecs::png::{
+    CompressionType as PngCompressionType, FilterType as PngFilterType, PngEncoder,
+};
 use image::{ColorType, ImageEncoder};
+use rayon::prelude::*;
 use serde_json::{json, Value};
 
 use crate::dto::api::ApiWarning;
 use crate::dto::dataset_summary::{
     AxisRole, DatasetSummary, MultiscaleImageDef, MultiscaleLevelDef,
 };
-use crate::dto::render::{RenderOutputSpec, RenderTimingMs};
+use crate::dto::render::{RenderOutputSpec, RenderTimingMs, RenderTimingStagesMs};
 use crate::dto::view_state::{
     AxisSelector, AxisSelectorKind, Camera2D, ChannelContrast, ChannelContrastPolicy, ChannelMode,
     InterpolationMode, LayerState, LayerType, PerformanceHints, Plane2D, SlabMode, SlabSettings,
@@ -51,8 +54,30 @@ pub struct RenderRgbaResult {
     pub rgba_bytes: Vec<u8>,
     pub pyramid_level_used: u64,
     pub warnings: Vec<ApiWarning>,
-    pub io_ms: f64,
-    pub render_ms: f64,
+    pub chunk_fetch_ms: f64,
+    pub chunk_decode_ms: f64,
+    pub sample_ms: f64,
+    pub compose_ms: f64,
+    pub gpu_upload_ms: f64,
+    pub gpu_compute_ms: f64,
+    pub gpu_readback_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CpuStageTiming {
+    chunk_fetch_ms: f64,
+    chunk_decode_ms: f64,
+    sample_ms: f64,
+    compose_ms: f64,
+    gpu_upload_ms: f64,
+    gpu_compute_ms: f64,
+    gpu_readback_ms: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ChunkIoDecodeTiming {
+    chunk_fetch_ms: f64,
+    chunk_decode_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -90,7 +115,6 @@ struct SampleWindow {
 #[derive(Debug, Clone)]
 struct LevelChunkSource {
     level_path: PathBuf,
-    shape: Vec<usize>,
     storage_meta: ArrayStorageMetadata,
     bytes_per_value: usize,
     chunk_strides: Vec<usize>,
@@ -163,22 +187,14 @@ pub fn render_view_to_png(
         cache_budgets,
     )?;
     let mut png_bytes: Vec<u8> = Vec::new();
-    let encoder = PngEncoder::new(&mut png_bytes);
-    encoder
-        .write_image(
-            &rgba_result.rgba_bytes,
-            output.width_px as u32,
-            output.height_px as u32,
-            ColorType::Rgba8.into(),
-        )
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "render_failed",
-                "Failed to encode PNG image.",
-                Some(json!({ "reason": error.to_string() })),
-            )
-        })?;
+    let encode_start = Instant::now();
+    encode_png_fast(
+        &mut png_bytes,
+        &rgba_result.rgba_bytes,
+        output.width_px as u32,
+        output.height_px as u32,
+    )?;
+    let encode_end = Instant::now();
     let end_total = Instant::now();
 
     Ok(RenderCpuResult {
@@ -187,10 +203,19 @@ pub fn render_view_to_png(
         warnings: rgba_result.warnings,
         timing_ms: Some(RenderTimingMs {
             total: (end_total - start_total).as_secs_f64() * 1000.0,
-            io: rgba_result.io_ms,
-            decode: 0.0,
-            gpu_upload: 0.0,
-            render: rgba_result.render_ms,
+            io: rgba_result.chunk_fetch_ms,
+            decode: rgba_result.chunk_decode_ms,
+            gpu_upload: rgba_result.gpu_upload_ms,
+            render: rgba_result.sample_ms + rgba_result.compose_ms + rgba_result.gpu_compute_ms,
+            stages: Some(RenderTimingStagesMs {
+                chunk_fetch: rgba_result.chunk_fetch_ms,
+                chunk_decode: rgba_result.chunk_decode_ms,
+                sample: rgba_result.sample_ms,
+                compose: rgba_result.compose_ms,
+                encode: (encode_end - encode_start).as_secs_f64() * 1000.0,
+                gpu_compute: rgba_result.gpu_compute_ms,
+                gpu_readback: rgba_result.gpu_readback_ms,
+            }),
         }),
     })
 }
@@ -215,7 +240,8 @@ pub fn render_view_to_rgba(
     };
 
     let mut warnings: Vec<ApiWarning> = Vec::new();
-    let io_start = Instant::now();
+    let mut stage_timing = CpuStageTiming::default();
+    let dataset_resolve_start = Instant::now();
     let dataset_root = resolve_dataset_root(&dataset_summary.uri).map_err(|reason| {
         ApiError::new(
             StatusCode::BAD_REQUEST,
@@ -227,8 +253,7 @@ pub fn render_view_to_rgba(
             })),
         )
     })?;
-    let io_after_open = Instant::now();
-    let render_start = Instant::now();
+    stage_timing.chunk_fetch_ms += (Instant::now() - dataset_resolve_start).as_secs_f64() * 1000.0;
     let output_width = usize::try_from(output.width_px).unwrap_or(0);
     let output_height = usize::try_from(output.height_px).unwrap_or(0);
 
@@ -241,6 +266,7 @@ pub fn render_view_to_rgba(
             output_height,
             cache_registry,
             cache_session_id,
+            &mut stage_timing,
         )? {
             TriptychRenderOutcome::Rendered(result) => {
                 warnings.push(ApiWarning {
@@ -266,6 +292,7 @@ pub fn render_view_to_rgba(
                     output_height,
                     cache_registry,
                     cache_session_id,
+                    &mut stage_timing,
                 )?;
                 warnings.extend(single.warnings);
                 (single.rgba_bytes, single.pyramid_level_used)
@@ -281,20 +308,44 @@ pub fn render_view_to_rgba(
             output_height,
             cache_registry,
             cache_session_id,
+            &mut stage_timing,
         )?;
         warnings.extend(single.warnings);
         (single.rgba_bytes, single.pyramid_level_used)
     };
 
-    let render_end = Instant::now();
-
     Ok(RenderRgbaResult {
         rgba_bytes: rgba_u8,
         pyramid_level_used,
         warnings,
-        io_ms: (io_after_open - io_start).as_secs_f64() * 1000.0,
-        render_ms: (render_end - render_start).as_secs_f64() * 1000.0,
+        chunk_fetch_ms: stage_timing.chunk_fetch_ms,
+        chunk_decode_ms: stage_timing.chunk_decode_ms,
+        sample_ms: stage_timing.sample_ms,
+        compose_ms: stage_timing.compose_ms,
+        gpu_upload_ms: stage_timing.gpu_upload_ms,
+        gpu_compute_ms: stage_timing.gpu_compute_ms,
+        gpu_readback_ms: stage_timing.gpu_readback_ms,
     })
+}
+
+fn encode_png_fast(
+    out: &mut Vec<u8>,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), ApiError> {
+    let encoder =
+        PngEncoder::new_with_quality(out, PngCompressionType::Fast, PngFilterType::NoFilter);
+    encoder
+        .write_image(rgba, width, height, ColorType::Rgba8.into())
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "render_failed",
+                "Failed to encode PNG image.",
+                Some(json!({ "reason": error.to_string() })),
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -307,6 +358,7 @@ fn render_single_plane_to_rgba(
     output_height: usize,
     cache_registry: &mut RenderCacheRegistry,
     cache_session_id: &str,
+    stage_timing: &mut CpuStageTiming,
 ) -> Result<SinglePlaneRgbaResult, ApiError> {
     let role_to_axis = roles_to_axis(dataset_summary);
     let (u_role, v_role, orth_role) = plane_roles(&view_2d.plane);
@@ -346,12 +398,17 @@ fn render_single_plane_to_rgba(
     let pixel_count = output_width.saturating_mul(output_height);
     let mut canvas_rgb = vec![0.0_f32; pixel_count * 3];
     let mut canvas_alpha = vec![0.0_f32; pixel_count];
-    for pixel in 0..pixel_count {
-        canvas_rgb[pixel * 3] = background[0];
-        canvas_rgb[pixel * 3 + 1] = background[1];
-        canvas_rgb[pixel * 3 + 2] = background[2];
-        canvas_alpha[pixel] = background[3];
-    }
+    canvas_rgb
+        .par_chunks_mut(3)
+        .zip(canvas_alpha.par_iter_mut())
+        .for_each(|(rgb, alpha)| {
+            rgb[0] = background[0];
+            rgb[1] = background[1];
+            rgb[2] = background[2];
+            *alpha = background[3];
+        });
+    let mut layer_rgb_scratch = vec![0.0_f32; pixel_count * 3];
+    let mut layer_alpha_scratch = vec![0.0_f32; pixel_count];
 
     let mut warnings: Vec<ApiWarning> = Vec::new();
     let mut rendered_layer_count: usize = 0;
@@ -403,6 +460,7 @@ fn render_single_plane_to_rgba(
         );
         warnings.extend(level_warnings);
 
+        let open_level_start = Instant::now();
         let chunk_source = open_level_chunk_source(
             dataset_root,
             level,
@@ -423,6 +481,7 @@ fn render_single_plane_to_rgba(
                 })),
             )
         })?;
+        stage_timing.chunk_fetch_ms += (Instant::now() - open_level_start).as_secs_f64() * 1000.0;
 
         let slab = view_2d
             .slice
@@ -498,9 +557,11 @@ fn render_single_plane_to_rgba(
             slice_index,
             &slab,
             sample_window,
+            stage_timing,
         )?;
         warnings.extend(layer_warnings);
 
+        let sample_start = Instant::now();
         let (sampled_stack, sample_alpha) = sample_channel_stack(
             &channel_stack,
             view_2d.camera.center_world.0,
@@ -513,18 +574,36 @@ fn render_single_plane_to_rgba(
             output_height,
             interpolation,
         );
+        stage_timing.sample_ms += (Instant::now() - sample_start).as_secs_f64() * 1000.0;
 
-        let (layer_rgb, layer_alpha) = compose_layer(&sampled_stack, &sample_alpha, layer);
-        for index in 0..pixel_count {
-            let src_alpha = layer_alpha[index].clamp(0.0, 1.0);
-            canvas_rgb[index * 3] =
-                layer_rgb[index * 3].clamp(0.0, 1.0) + (canvas_rgb[index * 3] * (1.0 - src_alpha));
-            canvas_rgb[index * 3 + 1] = layer_rgb[index * 3 + 1].clamp(0.0, 1.0)
-                + (canvas_rgb[index * 3 + 1] * (1.0 - src_alpha));
-            canvas_rgb[index * 3 + 2] = layer_rgb[index * 3 + 2].clamp(0.0, 1.0)
-                + (canvas_rgb[index * 3 + 2] * (1.0 - src_alpha));
-            canvas_alpha[index] = src_alpha + (canvas_alpha[index] * (1.0 - src_alpha));
-        }
+        compose_layer_into(
+            &sampled_stack,
+            &sample_alpha,
+            layer,
+            &mut layer_rgb_scratch,
+            &mut layer_alpha_scratch,
+            stage_timing,
+        );
+        canvas_rgb
+            .par_chunks_mut(3)
+            .zip(canvas_alpha.par_iter_mut())
+            .zip(
+                layer_rgb_scratch
+                    .par_chunks(3)
+                    .zip(layer_alpha_scratch.par_iter()),
+            )
+            .for_each(
+                |((canvas_rgb_px, canvas_alpha_px), (layer_rgb_px, layer_alpha_px))| {
+                    let src_alpha = (*layer_alpha_px).clamp(0.0, 1.0);
+                    canvas_rgb_px[0] =
+                        layer_rgb_px[0].clamp(0.0, 1.0) + (canvas_rgb_px[0] * (1.0 - src_alpha));
+                    canvas_rgb_px[1] =
+                        layer_rgb_px[1].clamp(0.0, 1.0) + (canvas_rgb_px[1] * (1.0 - src_alpha));
+                    canvas_rgb_px[2] =
+                        layer_rgb_px[2].clamp(0.0, 1.0) + (canvas_rgb_px[2] * (1.0 - src_alpha));
+                    *canvas_alpha_px = src_alpha + (*canvas_alpha_px * (1.0 - src_alpha));
+                },
+            );
 
         rendered_layer_count += 1;
         if primary_level_used.is_none() {
@@ -542,12 +621,15 @@ fn render_single_plane_to_rgba(
     }
 
     let mut rgba_u8 = vec![0_u8; pixel_count * 4];
-    for index in 0..pixel_count {
-        rgba_u8[index * 4] = (canvas_rgb[index * 3].clamp(0.0, 1.0) * 255.0).round() as u8;
-        rgba_u8[index * 4 + 1] = (canvas_rgb[index * 3 + 1].clamp(0.0, 1.0) * 255.0).round() as u8;
-        rgba_u8[index * 4 + 2] = (canvas_rgb[index * 3 + 2].clamp(0.0, 1.0) * 255.0).round() as u8;
-        rgba_u8[index * 4 + 3] = (canvas_alpha[index].clamp(0.0, 1.0) * 255.0).round() as u8;
-    }
+    rgba_u8
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(index, rgba)| {
+            rgba[0] = (canvas_rgb[index * 3].clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[1] = (canvas_rgb[index * 3 + 1].clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[2] = (canvas_rgb[index * 3 + 2].clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[3] = (canvas_alpha[index].clamp(0.0, 1.0) * 255.0).round() as u8;
+        });
 
     Ok(SinglePlaneRgbaResult {
         rgba_bytes: rgba_u8,
@@ -565,6 +647,7 @@ fn render_triptych_rgba(
     output_height: usize,
     cache_registry: &mut RenderCacheRegistry,
     cache_session_id: &str,
+    stage_timing: &mut CpuStageTiming,
 ) -> Result<TriptychRenderOutcome, ApiError> {
     let Some(base_view_2d) = view_state.view_2d.as_ref() else {
         return Ok(TriptychRenderOutcome::Fallback(
@@ -612,6 +695,7 @@ fn render_triptych_rgba(
         layout.xy.height,
         cache_registry,
         cache_session_id,
+        stage_timing,
     )?;
     let xz_raw = render_single_plane_to_rgba(
         dataset_summary,
@@ -622,6 +706,7 @@ fn render_triptych_rgba(
         layout.xz.height,
         cache_registry,
         cache_session_id,
+        stage_timing,
     )?;
     let yz_raw = render_single_plane_to_rgba(
         dataset_summary,
@@ -632,6 +717,7 @@ fn render_triptych_rgba(
         layout.yz.width,
         cache_registry,
         cache_session_id,
+        stage_timing,
     )?;
 
     let xz_flipped = flip_rgba_vertically(&xz_raw.rgba_bytes, layout.xz.width, layout.xz.height);
@@ -1459,6 +1545,7 @@ fn extract_channel_stack(
     slice_index: i64,
     slab: &SlabSettings,
     sample_window: SampleWindow,
+    stage_timing: &mut CpuStageTiming,
 ) -> Result<(Vec<PlaneData>, Vec<ApiWarning>), ApiError> {
     let mut warnings: Vec<ApiWarning> = Vec::new();
     let axis_index: HashMap<&str, usize> = multiscale
@@ -1663,22 +1750,68 @@ fn extract_channel_stack(
         base_indices[axis_pos] = fixed_indices_level[axis_pos];
     }
 
+    let rank = multiscale.axes_order.len();
+    let mut fixed_chunk_indices = vec![0_usize; rank];
+    let mut fixed_local_indices = vec![0_usize; rank];
+    for axis_pos in 0..rank {
+        let chunk_size = source.storage_meta.chunk_shape[axis_pos].max(1);
+        let axis_value = base_indices[axis_pos];
+        fixed_chunk_indices[axis_pos] = axis_value / chunk_size;
+        fixed_local_indices[axis_pos] = axis_value % chunk_size;
+    }
+
+    let chunk_u = source.storage_meta.chunk_shape[u_idx].max(1);
+    let chunk_v = source.storage_meta.chunk_shape[v_idx].max(1);
+    let chunk_orth = source.storage_meta.chunk_shape[orth_idx].max(1);
+    let chunk_c = if let Some(c_axis_idx) = c_axis_idx {
+        source.storage_meta.chunk_shape[c_axis_idx].max(1)
+    } else {
+        1
+    };
+    let u_stride = source.chunk_strides[u_idx];
+    let v_stride = source.chunk_strides[v_idx];
+
     let mut slab_planes: Vec<Vec<PlaneData>> = Vec::with_capacity(orth_indices_level.len());
     for orth_index in orth_indices_level {
         let mut channels: Vec<PlaneData> = Vec::with_capacity(channel_count);
+        let orth_chunk_index = orth_index / chunk_orth;
+        let orth_local = orth_index % chunk_orth;
         for channel_index in 0..channel_count {
             let mut plane_values = vec![0.0_f32; v_window * u_window];
-            let mut indices = base_indices.clone();
-            indices[orth_idx] = orth_index;
-            if let Some(c_axis_idx) = c_axis_idx {
-                indices[c_axis_idx] = channel_index;
-            }
-            for v in 0..v_window {
-                indices[v_idx] = v_origin.saturating_add(v);
-                for u in 0..u_window {
-                    indices[u_idx] = u_origin.saturating_add(u);
-                    plane_values[v * u_window + u] = source
-                        .value_at(&indices, cache_registry, cache_session_id)
+            let c_chunk_index = if c_axis_idx.is_some() {
+                channel_index / chunk_c
+            } else {
+                0
+            };
+            let c_local = if c_axis_idx.is_some() {
+                channel_index % chunk_c
+            } else {
+                0
+            };
+
+            let u_chunk_start = u_origin / chunk_u;
+            let u_chunk_end = (u_origin + u_window - 1) / chunk_u;
+            let v_chunk_start = v_origin / chunk_v;
+            let v_chunk_end = (v_origin + v_window - 1) / chunk_v;
+
+            for v_chunk_index in v_chunk_start..=v_chunk_end {
+                for u_chunk_index in u_chunk_start..=u_chunk_end {
+                    let mut chunk_index = fixed_chunk_indices.clone();
+                    chunk_index[orth_idx] = orth_chunk_index;
+                    chunk_index[u_idx] = u_chunk_index;
+                    chunk_index[v_idx] = v_chunk_index;
+                    if let Some(c_axis_idx) = c_axis_idx {
+                        chunk_index[c_axis_idx] = c_chunk_index;
+                    }
+
+                    let mut io_timing = ChunkIoDecodeTiming::default();
+                    let decoded_chunk = source
+                        .decoded_chunk(
+                            &chunk_index,
+                            cache_registry,
+                            cache_session_id,
+                            &mut io_timing,
+                        )
                         .map_err(|reason| {
                             ApiError::new(
                                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1691,6 +1824,65 @@ fn extract_channel_stack(
                                 })),
                             )
                         })?;
+                    stage_timing.chunk_fetch_ms += io_timing.chunk_fetch_ms;
+                    stage_timing.chunk_decode_ms += io_timing.chunk_decode_ms;
+
+                    if decoded_chunk.is_empty() {
+                        continue;
+                    }
+
+                    let chunk_u_start = u_chunk_index * chunk_u;
+                    let chunk_u_end_exclusive = (chunk_u_start + chunk_u)
+                        .min(usize::try_from(level.shape[u_idx]).unwrap_or(0));
+                    let chunk_v_start = v_chunk_index * chunk_v;
+                    let chunk_v_end_exclusive = (chunk_v_start + chunk_v)
+                        .min(usize::try_from(level.shape[v_idx]).unwrap_or(0));
+                    let copy_u_start = u_origin.max(chunk_u_start);
+                    let copy_u_end_exclusive = (u_origin + u_window).min(chunk_u_end_exclusive);
+                    let copy_v_start = v_origin.max(chunk_v_start);
+                    let copy_v_end_exclusive = (v_origin + v_window).min(chunk_v_end_exclusive);
+                    if copy_u_start >= copy_u_end_exclusive || copy_v_start >= copy_v_end_exclusive
+                    {
+                        continue;
+                    }
+
+                    let mut linear_base = 0usize;
+                    for axis_pos in 0..rank {
+                        if axis_pos == u_idx || axis_pos == v_idx {
+                            continue;
+                        }
+                        let local_index = if axis_pos == orth_idx {
+                            orth_local
+                        } else if Some(axis_pos) == c_axis_idx {
+                            c_local
+                        } else {
+                            fixed_local_indices[axis_pos]
+                        };
+                        linear_base = linear_base.saturating_add(
+                            local_index.saturating_mul(source.chunk_strides[axis_pos]),
+                        );
+                    }
+
+                    for global_v in copy_v_start..copy_v_end_exclusive {
+                        let local_v = global_v - chunk_v_start;
+                        let row_linear =
+                            linear_base.saturating_add(local_v.saturating_mul(v_stride));
+                        let dst_row = (global_v - v_origin) * u_window;
+                        for global_u in copy_u_start..copy_u_end_exclusive {
+                            let local_u = global_u - chunk_u_start;
+                            let linear =
+                                row_linear.saturating_add(local_u.saturating_mul(u_stride));
+                            let byte_offset = linear.saturating_mul(source.bytes_per_value);
+                            let value = decode_value(
+                                &decoded_chunk,
+                                &source.storage_meta.dtype,
+                                byte_offset,
+                            )
+                            .unwrap_or(0.0);
+                            let dst_index = dst_row + (global_u - u_origin);
+                            plane_values[dst_index] = value;
+                        }
+                    }
                 }
             }
             channels.push(PlaneData {
@@ -2217,9 +2409,12 @@ fn sample_channel_stack(
             output_height,
             interpolation.clone(),
         );
-        for (index, value) in alpha.iter().enumerate() {
-            sample_alpha[index] = sample_alpha[index].max(*value);
-        }
+        sample_alpha
+            .par_iter_mut()
+            .zip(alpha.par_iter())
+            .for_each(|(dst, src)| {
+                *dst = (*dst).max(*src);
+            });
         sampled_channels.push(sampled);
     }
 
@@ -2263,79 +2458,94 @@ fn sample_plane(
 
     match interpolation {
         InterpolationMode::Nearest => {
-            for y in 0..output_height {
-                let v_coord = start_v + ((y as f64) + 0.5) * step_v;
-                let v_idx = v_coord.floor() as i64;
-                let valid_v = v_idx >= 0 && v_idx < src_h;
-                let v_clamped = clamp_index_i64(v_idx, src_h) as usize;
-                for x in 0..output_width {
-                    let u_coord = start_u + ((x as f64) + 0.5) * step_u;
-                    let u_idx = u_coord.floor() as i64;
-                    let valid_u = u_idx >= 0 && u_idx < src_w;
-                    let pixel = y * output_width + x;
-                    if valid_u && valid_v {
-                        let u_clamped = clamp_index_i64(u_idx, src_w) as usize;
-                        sampled[pixel] = plane.data[v_clamped * plane.width + u_clamped];
-                        alpha[pixel] = 1.0;
+            sampled
+                .par_chunks_mut(output_width)
+                .zip(alpha.par_chunks_mut(output_width))
+                .enumerate()
+                .for_each(|(y, (sampled_row, alpha_row))| {
+                    let v_coord = start_v + ((y as f64) + 0.5) * step_v;
+                    let v_idx = v_coord.floor() as i64;
+                    let valid_v = v_idx >= 0 && v_idx < src_h;
+                    let v_clamped = clamp_index_i64(v_idx, src_h) as usize;
+                    for x in 0..output_width {
+                        let u_coord = start_u + ((x as f64) + 0.5) * step_u;
+                        let u_idx = u_coord.floor() as i64;
+                        let valid_u = u_idx >= 0 && u_idx < src_w;
+                        if valid_u && valid_v {
+                            let u_clamped = clamp_index_i64(u_idx, src_w) as usize;
+                            sampled_row[x] = plane.data[v_clamped * plane.width + u_clamped];
+                            alpha_row[x] = 1.0;
+                        }
                     }
-                }
-            }
+                });
         }
         InterpolationMode::Linear => {
-            for y in 0..output_height {
-                let v_coord = start_v + ((y as f64) + 0.5) * step_v;
-                let v0 = v_coord.floor() as i64;
-                let v1 = v0 + 1;
-                let dv = (v_coord - (v0 as f64)) as f32;
-                let valid_v = v_coord >= 0.0 && v_coord <= ((src_h - 1) as f64);
-                let v0c = clamp_index_i64(v0, src_h) as usize;
-                let v1c = clamp_index_i64(v1, src_h) as usize;
+            sampled
+                .par_chunks_mut(output_width)
+                .zip(alpha.par_chunks_mut(output_width))
+                .enumerate()
+                .for_each(|(y, (sampled_row, alpha_row))| {
+                    let v_coord = start_v + ((y as f64) + 0.5) * step_v;
+                    let v0 = v_coord.floor() as i64;
+                    let v1 = v0 + 1;
+                    let dv = (v_coord - (v0 as f64)) as f32;
+                    let valid_v = v_coord >= 0.0 && v_coord <= ((src_h - 1) as f64);
+                    let v0c = clamp_index_i64(v0, src_h) as usize;
+                    let v1c = clamp_index_i64(v1, src_h) as usize;
 
-                for x in 0..output_width {
-                    let u_coord = start_u + ((x as f64) + 0.5) * step_u;
-                    let u0 = u_coord.floor() as i64;
-                    let u1 = u0 + 1;
-                    let du = (u_coord - (u0 as f64)) as f32;
-                    let valid_u = u_coord >= 0.0 && u_coord <= ((src_w - 1) as f64);
-                    if !(valid_u && valid_v) {
-                        continue;
+                    for x in 0..output_width {
+                        let u_coord = start_u + ((x as f64) + 0.5) * step_u;
+                        let u0 = u_coord.floor() as i64;
+                        let u1 = u0 + 1;
+                        let du = (u_coord - (u0 as f64)) as f32;
+                        let valid_u = u_coord >= 0.0 && u_coord <= ((src_w - 1) as f64);
+                        if !(valid_u && valid_v) {
+                            continue;
+                        }
+
+                        let u0c = clamp_index_i64(u0, src_w) as usize;
+                        let u1c = clamp_index_i64(u1, src_w) as usize;
+
+                        let s00 = plane.data[v0c * plane.width + u0c];
+                        let s01 = plane.data[v0c * plane.width + u1c];
+                        let s10 = plane.data[v1c * plane.width + u0c];
+                        let s11 = plane.data[v1c * plane.width + u1c];
+
+                        let w00 = (1.0 - dv) * (1.0 - du);
+                        let w01 = (1.0 - dv) * du;
+                        let w10 = dv * (1.0 - du);
+                        let w11 = dv * du;
+
+                        sampled_row[x] = (s00 * w00) + (s01 * w01) + (s10 * w10) + (s11 * w11);
+                        alpha_row[x] = 1.0;
                     }
-
-                    let u0c = clamp_index_i64(u0, src_w) as usize;
-                    let u1c = clamp_index_i64(u1, src_w) as usize;
-
-                    let s00 = plane.data[v0c * plane.width + u0c];
-                    let s01 = plane.data[v0c * plane.width + u1c];
-                    let s10 = plane.data[v1c * plane.width + u0c];
-                    let s11 = plane.data[v1c * plane.width + u1c];
-
-                    let w00 = (1.0 - dv) * (1.0 - du);
-                    let w01 = (1.0 - dv) * du;
-                    let w10 = dv * (1.0 - du);
-                    let w11 = dv * du;
-
-                    let pixel = y * output_width + x;
-                    sampled[pixel] = (s00 * w00) + (s01 * w01) + (s10 * w10) + (s11 * w11);
-                    alpha[pixel] = 1.0;
-                }
-            }
+                });
         }
     }
 
     (sampled, alpha)
 }
 
-fn compose_layer(
+fn compose_layer_into(
     sampled_stack: &[Vec<f32>],
     sample_alpha: &[f32],
     layer: &LayerState,
-) -> (Vec<f32>, Vec<f32>) {
+    layer_rgb: &mut [f32],
+    layer_alpha: &mut [f32],
+    stage_timing: &mut CpuStageTiming,
+) {
+    let compose_start = Instant::now();
     let pixel_count = sample_alpha.len();
-    let mut layer_rgb = vec![0.0_f32; pixel_count * 3];
-    let mut layer_alpha = vec![0.0_f32; pixel_count];
+    if layer_rgb.len() != pixel_count * 3 || layer_alpha.len() != pixel_count {
+        stage_timing.compose_ms += (Instant::now() - compose_start).as_secs_f64() * 1000.0;
+        return;
+    }
+    layer_rgb.par_iter_mut().for_each(|value| *value = 0.0);
+    layer_alpha.par_iter_mut().for_each(|value| *value = 0.0);
 
     let Some(image_settings) = layer.image.as_ref() else {
-        return (layer_rgb, layer_alpha);
+        stage_timing.compose_ms += (Instant::now() - compose_start).as_secs_f64() * 1000.0;
+        return;
     };
 
     let mut settings_by_index: BTreeMap<usize, crate::dto::view_state::ImageChannelSettings> =
@@ -2396,9 +2606,9 @@ fn compose_layer(
         let mut normalized =
             normalize_channel(&sampled_stack[channel_index], setting.contrast.as_ref());
         if setting.gamma > 0.0 {
-            for value in &mut normalized {
+            normalized.par_iter_mut().for_each(|value| {
                 *value = value.clamp(0.0, 1.0).powf((1.0 / setting.gamma) as f32);
-            }
+            });
         }
 
         let color = rgb_overrides
@@ -2418,24 +2628,31 @@ fn compose_layer(
                 DEFAULT_CHANNEL_COLORS[channel_index % DEFAULT_CHANNEL_COLORS.len()]
             });
 
-        for pixel in 0..pixel_count {
-            let strength =
-                normalized[pixel] * (layer.opacity as f32) * sample_alpha[pixel] * color[3];
-            layer_rgb[pixel * 3] += strength * color[0];
-            layer_rgb[pixel * 3 + 1] += strength * color[1];
-            layer_rgb[pixel * 3 + 2] += strength * color[2];
-            layer_alpha[pixel] += strength;
-        }
+        layer_rgb
+            .par_chunks_mut(3)
+            .zip(layer_alpha.par_iter_mut())
+            .enumerate()
+            .for_each(|(pixel, (rgb, alpha))| {
+                let strength =
+                    normalized[pixel] * (layer.opacity as f32) * sample_alpha[pixel] * color[3];
+                rgb[0] += strength * color[0];
+                rgb[1] += strength * color[1];
+                rgb[2] += strength * color[2];
+                *alpha += strength;
+            });
     }
 
-    for pixel in 0..pixel_count {
-        layer_rgb[pixel * 3] = layer_rgb[pixel * 3].clamp(0.0, 1.0);
-        layer_rgb[pixel * 3 + 1] = layer_rgb[pixel * 3 + 1].clamp(0.0, 1.0);
-        layer_rgb[pixel * 3 + 2] = layer_rgb[pixel * 3 + 2].clamp(0.0, 1.0);
-        layer_alpha[pixel] = layer_alpha[pixel].clamp(0.0, 1.0);
-    }
+    layer_rgb
+        .par_chunks_mut(3)
+        .zip(layer_alpha.par_iter_mut())
+        .for_each(|(rgb, alpha)| {
+            rgb[0] = rgb[0].clamp(0.0, 1.0);
+            rgb[1] = rgb[1].clamp(0.0, 1.0);
+            rgb[2] = rgb[2].clamp(0.0, 1.0);
+            *alpha = (*alpha).clamp(0.0, 1.0);
+        });
 
-    (layer_rgb, layer_alpha)
+    stage_timing.compose_ms += (Instant::now() - compose_start).as_secs_f64() * 1000.0;
 }
 
 fn normalize_channel(channel_data: &[f32], contrast: Option<&ChannelContrast>) -> Vec<f32> {
@@ -2466,7 +2683,7 @@ fn normalize_channel(channel_data: &[f32], contrast: Option<&ChannelContrast>) -
 
     let range = max_value - min_value;
     channel_data
-        .iter()
+        .par_iter()
         .map(|value| ((*value - min_value) / range).clamp(0.0, 1.0))
         .collect()
 }
@@ -2550,7 +2767,6 @@ fn open_level_chunk_source(
 
     Ok(LevelChunkSource {
         level_path,
-        shape,
         storage_meta,
         bytes_per_value,
         chunk_strides,
@@ -2559,39 +2775,12 @@ fn open_level_chunk_source(
 }
 
 impl LevelChunkSource {
-    fn value_at(
-        &self,
-        indices: &[usize],
-        cache_registry: &mut RenderCacheRegistry,
-        cache_session_id: &str,
-    ) -> Result<f32, String> {
-        if indices.len() != self.shape.len() {
-            return Err("index rank mismatch".to_owned());
-        }
-
-        let mut chunk_index: Vec<usize> = Vec::with_capacity(indices.len());
-        let mut local_index: Vec<usize> = Vec::with_capacity(indices.len());
-        for (axis, index) in indices.iter().copied().enumerate() {
-            let axis_size = self.shape[axis];
-            if index >= axis_size {
-                return Ok(0.0);
-            }
-            let chunk_size = self.storage_meta.chunk_shape[axis];
-            chunk_index.push(index / chunk_size);
-            local_index.push(index % chunk_size);
-        }
-
-        let decoded_chunk = self.decoded_chunk(&chunk_index, cache_registry, cache_session_id)?;
-        let chunk_linear = linear_index(&local_index, &self.chunk_strides);
-        let byte_offset = chunk_linear.saturating_mul(self.bytes_per_value);
-        Ok(decode_value(&decoded_chunk, &self.storage_meta.dtype, byte_offset).unwrap_or(0.0))
-    }
-
     fn decoded_chunk(
         &self,
         chunk_index: &[usize],
         cache_registry: &mut RenderCacheRegistry,
         cache_session_id: &str,
+        timing: &mut ChunkIoDecodeTiming,
     ) -> Result<Arc<[u8]>, String> {
         let chunk_path = self
             .level_path
@@ -2609,6 +2798,7 @@ impl LevelChunkSource {
         }
 
         let decoded = if chunk_path.exists() {
+            let read_start = Instant::now();
             let raw_bytes = fs::File::open(&chunk_path)
                 .and_then(|mut file| {
                     let mut bytes = Vec::new();
@@ -2618,12 +2808,17 @@ impl LevelChunkSource {
                 .map_err(|error| {
                     format!("failed to read chunk '{}': {error}", chunk_path.display())
                 })?;
-            decode_chunk(raw_bytes, &self.storage_meta.codecs).map_err(|reason| {
-                format!(
-                    "failed to decode chunk '{}': {reason}",
-                    chunk_path.display()
-                )
-            })?
+            timing.chunk_fetch_ms += (Instant::now() - read_start).as_secs_f64() * 1000.0;
+            let decode_start = Instant::now();
+            let decoded_chunk =
+                decode_chunk(raw_bytes, &self.storage_meta.codecs).map_err(|reason| {
+                    format!(
+                        "failed to decode chunk '{}': {reason}",
+                        chunk_path.display()
+                    )
+                })?;
+            timing.chunk_decode_ms += (Instant::now() - decode_start).as_secs_f64() * 1000.0;
+            decoded_chunk
         } else {
             Vec::new()
         };
@@ -2825,6 +3020,7 @@ fn c_order_strides(shape: &[usize]) -> Vec<usize> {
     strides
 }
 
+#[cfg(test)]
 fn linear_index(indices: &[usize], strides: &[usize]) -> usize {
     indices
         .iter()
