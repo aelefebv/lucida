@@ -1,6 +1,6 @@
 ---
 name: bottleneck-closer
-description: Implement and close a specified performance bottleneck listed in BOTTLENECKS.md, then ship it via GitHub PR. Use when the user asks to tackle a named/numbered bottleneck item, remove the completed item from BOTTLENECKS.md, run project tests, and complete a merge (including conflict resolution if needed).
+description: Address a specified bottleneck listed in BOTTLENECKS.md (bottlenecks.md), then ship and merge it via GitHub. Use when the user asks to fix one numbered bottleneck, yeet it, merge back (resolving conflicts when needed), remove the completed bottleneck and all mentions of it from BOTTLENECKS.md, and clear BOTTLENECKS.md when no numbered bottlenecks remain.
 ---
 
 # Bottleneck Closer
@@ -11,7 +11,11 @@ description: Implement and close a specified performance bottleneck listed in BO
 2. Read `BOTTLENECKS.md` and identify the requested bottleneck number/title.
 3. Implement the bottleneck fix from first principles.
 4. Add or update real tests that validate the change.
-5. Edit `BOTTLENECKS.md` directly to remove the completed bottleneck section.
+5. Edit `BOTTLENECKS.md` directly:
+   - Delete the completed numbered bottleneck section.
+   - Delete any other mention of that same bottleneck elsewhere in the file.
+   - Do not renumber remaining bottlenecks or reorder remaining sections.
+   - If no lines match `^### [0-9]+\\)` after deletion, clear `BOTTLENECKS.md` to an empty file so automation can repopulate it.
 6. Run validation:
 `cargo test --workspace`
 `uv run pytest`
@@ -21,14 +25,8 @@ description: Implement and close a specified performance bottleneck listed in BO
 If on a default branch, create `codex/<description>`.
 Then run `git status -sb`, `git add -A`, `git commit -m "<description>"`, `git push -u origin <branch>`, and create a detailed draft PR with `gh pr create`.
 8. Merge behavior:
-If PR is mergeable, mark ready and merge.
-If PR is conflicting, fetch/rebase onto `origin/main`, resolve conflicts, rerun tests, push with `--force-with-lease`, and merge.
-
-## BOTTLENECKS.md Rules
-
-- Always remove the completed bottleneck entry from `BOTTLENECKS.md`. Edit the file directly.
-- Remove the corresponding item from `## Suggested implementation order` and renumber that list.
-- After removal, if no bottleneck headings remain, clear `BOTTLENECKS.md` to an empty file so automation can repopulate it.
+   - If PR is mergeable without conflicts, mark ready and merge back immediately.
+   - If PR has conflicts, fetch/rebase onto the target base branch, resolve conflicts, rerun tests, push with `--force-with-lease`, and then merge.
 
 ## PR Body Requirements
 
