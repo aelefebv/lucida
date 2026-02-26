@@ -1,11 +1,14 @@
+pub mod capabilities_routes;
 pub mod dataset_open;
 pub mod dto;
 pub mod error;
 pub mod omezarr;
+pub mod render_backend;
 pub mod render_cache;
 pub mod render_cpu;
 pub mod render_image;
 pub mod request_validation;
+pub mod runtime_capabilities;
 pub mod session_create;
 pub mod state;
 pub mod ui_routes;
@@ -26,6 +29,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::capabilities_routes::capabilities;
 use crate::dataset_open::dataset_open;
 use crate::render_image::render_image;
 use crate::session_create::{session_create, session_list};
@@ -57,6 +61,7 @@ pub fn app() -> Router {
 
 pub fn app_with_state(state: SharedAppState) -> Router {
     let instrumented_api = Router::new()
+        .route("/capabilities", get(capabilities))
         .route("/dataset/open", post(dataset_open))
         .route("/session/create", post(session_create))
         .route("/session/list", get(session_list))

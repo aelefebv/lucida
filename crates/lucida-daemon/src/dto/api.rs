@@ -183,3 +183,33 @@ pub struct ViewStateImportResponse {
     pub warnings: Vec<ApiWarning>,
     pub selectors_applied: Vec<AxisSelector>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitiesGpu {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitiesPreset {
+    pub name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CapabilitiesResponse {
+    pub schema_version: u8,
+    pub api_version: String,
+    pub render_modes: Vec<String>,
+    pub output_formats: Vec<String>,
+    pub gpu: CapabilitiesGpu,
+    pub presets: Vec<CapabilitiesPreset>,
+}

@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 default = ["gpu"]
-gpu = []
+gpu = ["dep:wgpu"]
 software = []
 
 [dependencies]
@@ -24,6 +24,7 @@ tokio-stream = { version = "0.1.17", features = ["sync"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 uuid = { version = "1.18.1", features = ["v4"] }
+wgpu = { version = "28.0.0", optional = true }
 zstd = "0.13.2"
 
 [dev-dependencies]
