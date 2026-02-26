@@ -17,6 +17,7 @@ use crate::dto::render::{
 };
 use crate::dto::view_state::{RenderMode, ViewState};
 use crate::error::ApiError;
+use crate::render_backend::{select_render_backend, RenderBackend};
 use crate::render_cache::SessionCacheSnapshot;
 use crate::render_cpu::render_view_to_png;
 use crate::request_validation::{
@@ -110,9 +111,11 @@ pub async fn render_image(
         state_hash,
         cache_registry,
         cache_session_id,
+        runtime_capabilities,
     ) = {
         let mut app_state = state.write().await;
         let cache_registry = app_state.render_caches.clone();
+        let runtime_capabilities = app_state.runtime_capabilities.clone();
 
         let scoped_session_id = if let Some(session_id) = request.session_id.as_deref() {
             require_session(&app_state, session_id)?;
@@ -290,21 +293,43 @@ pub async fn render_image(
             state_hash,
             cache_registry,
             cache_session_id,
+            runtime_capabilities,
         )
     };
+
+    let gpu_capabilities = runtime_capabilities.gpu_capabilities().await;
+    let backend_selection = select_render_backend(
+        effective_view.performance.as_ref(),
+        gpu_capabilities.available,
+    );
+    tracing::debug!(
+        selected_backend = backend_selection.backend.as_str(),
+        gpu_hardware_available = gpu_capabilities.available,
+        "render backend selection"
+    );
 
     let (render_result, cache_snapshot, cache_budgets) = {
         let mut cache_state = cache_registry.write().await;
         let cache_budgets =
             cache_state.resolve_effective_budgets(effective_view.performance.as_ref());
-        let render_result = render_view_to_png(
-            &dataset_summary,
-            &effective_view,
-            &request.output,
-            &mut cache_state,
-            &cache_session_id,
-            cache_budgets,
-        )?;
+        let render_result = match backend_selection.backend {
+            RenderBackend::Cpu => render_view_to_png(
+                &dataset_summary,
+                &effective_view,
+                &request.output,
+                &mut cache_state,
+                &cache_session_id,
+                cache_budgets,
+            )?,
+            RenderBackend::Gpu => render_view_to_png(
+                &dataset_summary,
+                &effective_view,
+                &request.output,
+                &mut cache_state,
+                &cache_session_id,
+                cache_budgets,
+            )?,
+        };
         let cache_snapshot = cache_state.session_snapshot(&cache_session_id);
         (render_result, cache_snapshot, cache_budgets)
     };
@@ -319,6 +344,7 @@ pub async fn render_image(
 
     let mut warnings = selector_warnings;
     warnings.extend(view_warnings);
+    warnings.extend(backend_selection.warnings);
     warnings.extend(render_result.warnings);
 
     let artifact = match request.output.delivery {

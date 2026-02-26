@@ -546,6 +546,63 @@ async fn render_image_slab_and_lod_warnings() {
 }
 
 #[tokio::test]
+async fn render_image_explicit_gpu_preference_emits_backend_fallback_warning() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-backend-fallback");
+    create_render_omezarr(&dataset_path);
+    let view_id = open_view(&router, &dataset_path).await;
+
+    let update = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/performance",
+                    "value": {"prefer_gpu": true},
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let rendered = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "png",
+                "delivery": "inline_base64",
+                "width_px": 64,
+                "height_px": 48,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(rendered.status(), StatusCode::OK);
+
+    let payload = read_json_body(rendered).await;
+    let warning_codes: Vec<&str> = payload["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|item| item.get("code").and_then(Value::as_str))
+        .collect();
+    assert!(
+        warning_codes.contains(&"gpu_unavailable_fallback_cpu")
+            || warning_codes.contains(&"gpu_renderer_unavailable_fallback_cpu")
+    );
+}
+
+#[tokio::test]
 async fn render_image_orthogonal_triptych_default_on_and_toggle_off() {
     let router = app();
     let dataset_path = unique_dataset_path("render-triptych-toggle");

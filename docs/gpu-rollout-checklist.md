@@ -8,17 +8,17 @@
 
 ## Phase 1: Backend Selection Plumbing
 
-- [ ] Add a render backend selector module (`auto|gpu|cpu`) with env override support.
-- [ ] Respect `performance.prefer_gpu` when selecting backend in `/render/image`.
-- [ ] Emit warning metadata when GPU is requested but unavailable and CPU fallback is used.
-- [ ] Keep render API contract stable for existing clients.
+- [x] Add a render backend selector module (`auto|gpu|cpu`) with env override support.
+- [x] Respect `performance.prefer_gpu` when selecting backend in `/render/image`.
+- [x] Emit warning metadata when GPU is requested but unavailable and CPU fallback is used.
+- [x] Keep render API contract stable for existing clients.
 
 ## Phase 2: Capabilities Endpoint
 
-- [ ] Add runtime GPU detection service in daemon state.
-- [ ] Add `GET /capabilities` endpoint.
-- [ ] Return GPU availability, adapter/backend details, and declared render modes/presets.
-- [ ] Add route-level tests for capabilities payload shape.
+- [x] Add runtime GPU detection service in daemon state.
+- [x] Add `GET /capabilities` endpoint.
+- [x] Return GPU availability, adapter/backend details, and declared render modes/presets.
+- [x] Add route-level tests for capabilities payload shape.
 
 ## Phase 3: Client/Model Surface
 
