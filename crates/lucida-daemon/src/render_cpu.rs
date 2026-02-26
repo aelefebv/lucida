@@ -47,6 +47,15 @@ pub struct RenderCpuResult {
 }
 
 #[derive(Debug, Clone)]
+pub struct RenderRgbaResult {
+    pub rgba_bytes: Vec<u8>,
+    pub pyramid_level_used: u64,
+    pub warnings: Vec<ApiWarning>,
+    pub io_ms: f64,
+    pub render_ms: f64,
+}
+
+#[derive(Debug, Clone)]
 struct PlaneData {
     width: usize,
     height: usize,
@@ -144,6 +153,56 @@ pub fn render_view_to_png(
     cache_session_id: &str,
     cache_budgets: EffectiveCacheBudgets,
 ) -> Result<RenderCpuResult, ApiError> {
+    let start_total = Instant::now();
+    let rgba_result = render_view_to_rgba(
+        dataset_summary,
+        view_state,
+        output,
+        cache_registry,
+        cache_session_id,
+        cache_budgets,
+    )?;
+    let mut png_bytes: Vec<u8> = Vec::new();
+    let encoder = PngEncoder::new(&mut png_bytes);
+    encoder
+        .write_image(
+            &rgba_result.rgba_bytes,
+            output.width_px as u32,
+            output.height_px as u32,
+            ColorType::Rgba8.into(),
+        )
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "render_failed",
+                "Failed to encode PNG image.",
+                Some(json!({ "reason": error.to_string() })),
+            )
+        })?;
+    let end_total = Instant::now();
+
+    Ok(RenderCpuResult {
+        png_bytes,
+        pyramid_level_used: rgba_result.pyramid_level_used,
+        warnings: rgba_result.warnings,
+        timing_ms: Some(RenderTimingMs {
+            total: (end_total - start_total).as_secs_f64() * 1000.0,
+            io: rgba_result.io_ms,
+            decode: 0.0,
+            gpu_upload: 0.0,
+            render: rgba_result.render_ms,
+        }),
+    })
+}
+
+pub fn render_view_to_rgba(
+    dataset_summary: &DatasetSummary,
+    view_state: &ViewState,
+    output: &RenderOutputSpec,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+    cache_budgets: EffectiveCacheBudgets,
+) -> Result<RenderRgbaResult, ApiError> {
     cache_registry.ensure_session_budgets(cache_session_id, cache_budgets);
 
     let Some(view_2d) = view_state.view_2d.as_ref() else {
@@ -155,9 +214,7 @@ pub fn render_view_to_png(
         ));
     };
 
-    let start_total = Instant::now();
     let mut warnings: Vec<ApiWarning> = Vec::new();
-
     let io_start = Instant::now();
     let dataset_root = resolve_dataset_root(&dataset_summary.uri).map_err(|reason| {
         ApiError::new(
@@ -230,36 +287,13 @@ pub fn render_view_to_png(
     };
 
     let render_end = Instant::now();
-    let mut png_bytes: Vec<u8> = Vec::new();
-    let encoder = PngEncoder::new(&mut png_bytes);
-    encoder
-        .write_image(
-            &rgba_u8,
-            output.width_px as u32,
-            output.height_px as u32,
-            ColorType::Rgba8.into(),
-        )
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "render_failed",
-                "Failed to encode PNG image.",
-                Some(json!({ "reason": error.to_string() })),
-            )
-        })?;
-    let end_total = Instant::now();
 
-    Ok(RenderCpuResult {
-        png_bytes,
+    Ok(RenderRgbaResult {
+        rgba_bytes: rgba_u8,
         pyramid_level_used,
         warnings,
-        timing_ms: Some(RenderTimingMs {
-            total: (end_total - start_total).as_secs_f64() * 1000.0,
-            io: (io_after_open - io_start).as_secs_f64() * 1000.0,
-            decode: 0.0,
-            gpu_upload: 0.0,
-            render: (render_end - render_start).as_secs_f64() * 1000.0,
-        }),
+        io_ms: (io_after_open - io_start).as_secs_f64() * 1000.0,
+        render_ms: (render_end - render_start).as_secs_f64() * 1000.0,
     })
 }
 
