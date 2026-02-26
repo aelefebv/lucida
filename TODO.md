@@ -1,0 +1,5 @@
+- Add a zoomed out overview image (think qupath) that shows the agent where in the dataset it's looking
+    - ideally in all 3 axes, but idk what that would look like
+- Add colormap changing
+- Add image pack showing different contrast limits so it can pick a nice one
+- Add max, sum, mean, etc, intensity projections
