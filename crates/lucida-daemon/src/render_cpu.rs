@@ -55,13 +55,6 @@ struct LoadedArray {
     strides: Vec<usize>,
 }
 
-impl LoadedArray {
-    fn value_at(&self, indices: &[usize]) -> f32 {
-        let linear = linear_index(indices, &self.strides);
-        self.data[linear]
-    }
-}
-
 #[derive(Debug, Clone)]
 struct ArrayStorageMetadata {
     chunk_shape: Vec<usize>,
@@ -618,7 +611,7 @@ fn extract_channel_stack(
         });
     }
 
-    let mut fixed_indices_level: HashMap<&str, usize> = HashMap::new();
+    let mut fixed_indices_level: Vec<usize> = vec![0; multiscale.axes_order.len()];
     for axis_name in &multiscale.axes_order {
         if axis_name == u_axis || axis_name == v_axis || axis_name == orth_axis {
             continue;
@@ -689,7 +682,7 @@ fn extract_channel_stack(
             to_level_index(base_index, factors[axis_idx]),
             level.shape[axis_idx],
         );
-        fixed_indices_level.insert(axis_name, level_index);
+        fixed_indices_level[axis_idx] = level_index;
     }
 
     let u_idx = *axis_index.get(u_axis).ok_or_else(|| {
@@ -729,29 +722,41 @@ fn extract_channel_stack(
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(1);
 
-    let mut slab_planes: Vec<Vec<PlaneData>> = Vec::new();
+    let u_stride = array.strides[u_idx];
+    let v_stride = array.strides[v_idx];
+    let orth_stride = array.strides[orth_idx];
+    let c_stride = c_axis_idx.map(|index| array.strides[index]);
+
+    let fixed_offset = fixed_indices_level
+        .iter()
+        .enumerate()
+        .filter(|(axis_pos, _)| {
+            *axis_pos != u_idx
+                && *axis_pos != v_idx
+                && *axis_pos != orth_idx
+                && Some(*axis_pos) != c_axis_idx
+        })
+        .fold(0usize, |acc, (axis_pos, fixed_index)| {
+            acc.saturating_add(fixed_index.saturating_mul(array.strides[axis_pos]))
+        });
+
+    let mut slab_planes: Vec<Vec<PlaneData>> = Vec::with_capacity(orth_indices_level.len());
     for orth_index in orth_indices_level {
-        let mut channels: Vec<PlaneData> = Vec::new();
+        let orth_offset = orth_index.saturating_mul(orth_stride);
+        let mut channels: Vec<PlaneData> = Vec::with_capacity(channel_count);
         for channel_index in 0..channel_count {
+            let channel_offset = c_stride
+                .map(|stride| channel_index.saturating_mul(stride))
+                .unwrap_or(0);
+            let base_offset = fixed_offset
+                .saturating_add(orth_offset)
+                .saturating_add(channel_offset);
             let mut plane_values = vec![0.0_f32; v_size * u_size];
             for v in 0..v_size {
+                let row_offset = base_offset.saturating_add(v.saturating_mul(v_stride));
                 for u in 0..u_size {
-                    let mut indices = vec![0_usize; multiscale.axes_order.len()];
-                    for (axis_pos, axis_name) in multiscale.axes_order.iter().enumerate() {
-                        if axis_name == u_axis {
-                            indices[axis_pos] = u;
-                        } else if axis_name == v_axis {
-                            indices[axis_pos] = v;
-                        } else if axis_name == orth_axis {
-                            indices[axis_pos] = orth_index;
-                        } else if c_axis_name.as_ref() == Some(axis_name) {
-                            indices[axis_pos] = channel_index;
-                        } else {
-                            indices[axis_pos] =
-                                *fixed_indices_level.get(axis_name.as_str()).unwrap_or(&0);
-                        }
-                    }
-                    plane_values[v * u_size + u] = array.value_at(&indices);
+                    let linear = row_offset.saturating_add(u.saturating_mul(u_stride));
+                    plane_values[v * u_size + u] = array.data[linear];
                 }
             }
             channels.push(PlaneData {
@@ -1597,4 +1602,235 @@ fn linear_index(indices: &[usize], strides: &[usize]) -> usize {
         .fold(0usize, |acc, (index, stride)| {
             acc.saturating_add(index.saturating_mul(*stride))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_axis(name: &str, role: AxisRole, size: u64) -> crate::dto::dataset_summary::AxisDef {
+        crate::dto::dataset_summary::AxisDef {
+            name: name.to_owned(),
+            role,
+            size,
+            unit: None,
+            scale: None,
+            translation: None,
+            direction: None,
+        }
+    }
+
+    fn make_dataset_summary(
+        axes: Vec<crate::dto::dataset_summary::AxisDef>,
+        shape: Vec<u64>,
+    ) -> DatasetSummary {
+        DatasetSummary {
+            schema_version: 1,
+            dataset_id: "ds_test".to_owned(),
+            uri: "file:///tmp/ds_test".to_owned(),
+            opened_at: None,
+            axes,
+            shape,
+            dtype: "float32".to_owned(),
+            world_units: None,
+            channels: None,
+            multiscales: Vec::new(),
+            hints: None,
+            raw_metadata: None,
+        }
+    }
+
+    fn make_loaded_array(shape: &[usize], encode: impl Fn(&[usize]) -> f32) -> LoadedArray {
+        let strides = c_order_strides(shape);
+        let total_values = shape.iter().product();
+        let mut data = vec![0.0; total_values];
+        for_each_index(shape, |index| {
+            let linear = linear_index(index, &strides);
+            data[linear] = encode(index);
+        });
+        LoadedArray { data, strides }
+    }
+
+    #[test]
+    fn extract_channel_stack_uses_stride_offsets_for_non_contiguous_axes() {
+        let shape_usize = vec![3usize, 2, 4, 2, 2];
+        let shape_u64 = shape_usize
+            .iter()
+            .map(|value| *value as u64)
+            .collect::<Vec<u64>>();
+        let dataset_summary = make_dataset_summary(
+            vec![
+                make_axis("z", AxisRole::Z, shape_u64[0]),
+                make_axis("y", AxisRole::Y, shape_u64[1]),
+                make_axis("x", AxisRole::X, shape_u64[2]),
+                make_axis("c", AxisRole::C, shape_u64[3]),
+                make_axis("t", AxisRole::T, shape_u64[4]),
+            ],
+            shape_u64.clone(),
+        );
+
+        let level = MultiscaleLevelDef {
+            level: 0,
+            path: "0".to_owned(),
+            shape: shape_u64.clone(),
+            chunks: vec![1, 1, 1, 1, 1],
+            downsample_factors: Some(vec![1.0; 5]),
+            dtype: Some("float32".to_owned()),
+        };
+        let multiscale = MultiscaleImageDef {
+            name: "primary".to_owned(),
+            axes_order: vec![
+                "z".to_owned(),
+                "y".to_owned(),
+                "x".to_owned(),
+                "c".to_owned(),
+                "t".to_owned(),
+            ],
+            levels: vec![level.clone()],
+        };
+
+        let array = make_loaded_array(&shape_usize, |index| {
+            ((index[0] * 10_000)
+                + (index[1] * 1_000)
+                + (index[2] * 100)
+                + (index[3] * 10)
+                + index[4]) as f32
+        });
+
+        let t_selector = AxisSelector {
+            axis: "t".to_owned(),
+            kind: AxisSelectorKind::Index,
+            index: Some(1),
+            start: None,
+            end_exclusive: None,
+            indices: None,
+            clamp: true,
+        };
+        let selectors = HashMap::from([("t".to_owned(), &t_selector)]);
+
+        let slab = SlabSettings {
+            thickness_vox: 1,
+            mode: SlabMode::Single,
+        };
+        let (planes, warnings) = extract_channel_stack(
+            &array,
+            &dataset_summary,
+            &multiscale,
+            &level,
+            "x",
+            "y",
+            "z",
+            &selectors,
+            1,
+            &slab,
+        )
+        .expect("extract channel stack");
+
+        assert!(warnings.is_empty());
+        assert_eq!(planes.len(), 2);
+        assert_eq!(planes[0].width, 4);
+        assert_eq!(planes[0].height, 2);
+        assert_eq!(planes[0].data[0], 10_001.0);
+        assert_eq!(planes[0].data[3], 10_301.0);
+        assert_eq!(planes[0].data[4], 11_001.0);
+        assert_eq!(planes[1].data[5], 11_111.0);
+        assert_eq!(planes[1].data[7], 11_311.0);
+    }
+
+    #[test]
+    fn extract_channel_stack_reduces_non_display_selector_and_respects_explicit_slab_span() {
+        let shape_usize = vec![2usize, 2, 3, 2, 4];
+        let shape_u64 = shape_usize
+            .iter()
+            .map(|value| *value as u64)
+            .collect::<Vec<u64>>();
+        let dataset_summary = make_dataset_summary(
+            vec![
+                make_axis("t", AxisRole::T, shape_u64[0]),
+                make_axis("c", AxisRole::C, shape_u64[1]),
+                make_axis("z", AxisRole::Z, shape_u64[2]),
+                make_axis("y", AxisRole::Y, shape_u64[3]),
+                make_axis("x", AxisRole::X, shape_u64[4]),
+            ],
+            shape_u64.clone(),
+        );
+
+        let level = MultiscaleLevelDef {
+            level: 0,
+            path: "0".to_owned(),
+            shape: shape_u64.clone(),
+            chunks: vec![1, 1, 1, 1, 1],
+            downsample_factors: Some(vec![1.0; 5]),
+            dtype: Some("float32".to_owned()),
+        };
+        let multiscale = MultiscaleImageDef {
+            name: "primary".to_owned(),
+            axes_order: vec![
+                "t".to_owned(),
+                "c".to_owned(),
+                "z".to_owned(),
+                "y".to_owned(),
+                "x".to_owned(),
+            ],
+            levels: vec![level.clone()],
+        };
+        let array = make_loaded_array(&shape_usize, |index| {
+            ((index[0] * 10_000)
+                + (index[1] * 1_000)
+                + (index[2] * 100)
+                + (index[3] * 10)
+                + index[4]) as f32
+        });
+
+        let z_selector = AxisSelector {
+            axis: "z".to_owned(),
+            kind: AxisSelectorKind::Range,
+            index: None,
+            start: Some(0),
+            end_exclusive: Some(2),
+            indices: None,
+            clamp: true,
+        };
+        let t_selector = AxisSelector {
+            axis: "t".to_owned(),
+            kind: AxisSelectorKind::Range,
+            index: None,
+            start: Some(1),
+            end_exclusive: Some(2),
+            indices: None,
+            clamp: true,
+        };
+        let selectors =
+            HashMap::from([("z".to_owned(), &z_selector), ("t".to_owned(), &t_selector)]);
+        let slab = SlabSettings {
+            thickness_vox: 5,
+            mode: SlabMode::Single,
+        };
+
+        let (planes, warnings) = extract_channel_stack(
+            &array,
+            &dataset_summary,
+            &multiscale,
+            &level,
+            "x",
+            "y",
+            "z",
+            &selectors,
+            0,
+            &slab,
+        )
+        .expect("extract channel stack");
+
+        assert_eq!(planes.len(), 2);
+        assert_eq!(planes[0].width, 4);
+        assert_eq!(planes[0].height, 2);
+        assert_eq!(planes[0].data[0], 10_000.0);
+        assert_eq!(planes[0].data[7], 10_013.0);
+        assert_eq!(planes[1].data[0], 11_000.0);
+        assert_eq!(planes[1].data[7], 11_013.0);
+
+        let warning_codes: Vec<&str> = warnings.iter().map(|item| item.code.as_str()).collect();
+        assert!(warning_codes.contains(&"slab_thickness_ignored"));
+        assert!(warning_codes.contains(&"selector_reduced_to_index"));
+    }
 }
