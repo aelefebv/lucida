@@ -12,6 +12,7 @@ use crate::dto::view_state::ViewState;
 use crate::error::ApiError;
 use crate::render_cache::{new_shared_render_cache_registry, SharedRenderCacheRegistry};
 use crate::usage::{new_shared_usage_telemetry, SharedUsageTelemetry};
+use crate::usage_capture::{new_shared_usage_capture_worker, SharedUsageCaptureWorker};
 use crate::view_events::{new_shared_view_event_bus, SharedViewEventBus};
 
 #[derive(Debug, Clone)]
@@ -43,6 +44,7 @@ pub struct AppState {
     pub render_caches: SharedRenderCacheRegistry,
     pub usage: SharedUsageTelemetry,
     pub view_events: SharedViewEventBus,
+    pub usage_capture_worker: SharedUsageCaptureWorker,
 }
 
 impl Default for AppState {
@@ -54,6 +56,9 @@ impl Default for AppState {
 
 impl AppState {
     pub fn with_usage(usage: SharedUsageTelemetry) -> Self {
+        let view_events = new_shared_view_event_bus();
+        let usage_capture_worker =
+            new_shared_usage_capture_worker(usage.clone(), view_events.clone());
         Self {
             sessions_by_id: HashMap::new(),
             datasets_by_id: HashMap::new(),
@@ -61,7 +66,8 @@ impl AppState {
             compat_session_id: None,
             render_caches: new_shared_render_cache_registry(),
             usage,
-            view_events: new_shared_view_event_bus(),
+            view_events,
+            usage_capture_worker,
         }
     }
 }

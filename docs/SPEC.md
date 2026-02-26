@@ -894,6 +894,8 @@ Environment overrides:
 - `LUCIDA_USAGE_RETENTION_DAYS`
 - `LUCIDA_USAGE_MAX_EVENTS`
 - `LUCIDA_USAGE_MAX_DB_BYTES`
+- `LUCIDA_USAGE_THUMBNAIL_SAMPLE_RATE`
+- `LUCIDA_USAGE_THUMBNAIL_MAX_PER_MINUTE`
 
 ### 15.6 SSE Semantics
 
@@ -916,7 +918,9 @@ Environment overrides:
 
 ### 15.7 Thumbnail Persistence
 
-- Render thumbnails are generated from successful `/render/image` inline payloads.
+- Render thumbnails are generated asynchronously from successful `/render/image` inline payloads.
+- Thumbnail generation is skipped for non-`inline_base64` deliveries.
+- Sampling/rate limiting can be tuned via `LUCIDA_USAGE_THUMBNAIL_SAMPLE_RATE` and `LUCIDA_USAGE_THUMBNAIL_MAX_PER_MINUTE`.
 - Thumbnails are resized to fit within a 320px max edge and encoded as PNG.
 - Files are stored under `output/usage/thumbs/YYYY-MM-DD/<render_id>.png`.
 - Usage telemetry stores thumbnail metadata under `response_json.usage_thumbnail`; full render bytes remain omitted.
