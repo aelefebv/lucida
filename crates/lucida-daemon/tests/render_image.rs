@@ -8,7 +8,7 @@ use axum::http::{Request, StatusCode};
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
 use http_body_util::BodyExt;
-use image::ImageReader;
+use image::{ImageReader, RgbaImage};
 use lucida_daemon::app;
 use serde_json::{json, Value};
 use support::create_render_omezarr;
@@ -545,6 +545,263 @@ async fn render_image_slab_and_lod_warnings() {
     assert!(warning_codes.contains(&"selector_reduced_to_index"));
 }
 
+#[tokio::test]
+async fn render_image_orthogonal_triptych_default_on_and_toggle_off() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-triptych-toggle");
+    create_render_omezarr(&dataset_path);
+    let view_id = open_view(&router, &dataset_path).await;
+
+    let created_state =
+        read_json_body(request_get(&router, &format!("/view/{view_id}"), None).await).await;
+    assert_eq!(
+        created_state["view_state"]["view_2d"]["orthogonal_views_enabled"],
+        json!(true)
+    );
+
+    let enabled_render = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "png",
+                "delivery": "inline_base64",
+                "width_px": 180,
+                "height_px": 180,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(enabled_render.status(), StatusCode::OK);
+    let enabled_payload = read_json_body(enabled_render).await;
+    let enabled_codes: Vec<&str> = enabled_payload["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|item| item.get("code").and_then(Value::as_str))
+        .collect();
+    assert!(enabled_codes.contains(&"orthogonal_triptych_enabled"));
+
+    let update = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/view_2d/orthogonal_views_enabled",
+                    "value": false,
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let disabled_render = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "png",
+                "delivery": "inline_base64",
+                "width_px": 180,
+                "height_px": 180,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(disabled_render.status(), StatusCode::OK);
+    let disabled_payload = read_json_body(disabled_render).await;
+    let disabled_codes: Vec<&str> = disabled_payload["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|item| item.get("code").and_then(Value::as_str))
+        .collect();
+    assert!(!disabled_codes.contains(&"orthogonal_triptych_enabled"));
+    assert_ne!(
+        enabled_payload["images"][0]["sha256"],
+        disabled_payload["images"][0]["sha256"]
+    );
+}
+
+#[tokio::test]
+async fn render_image_orthogonal_triptych_small_output_falls_back() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-triptych-fallback");
+    create_render_omezarr(&dataset_path);
+    let view_id = open_view(&router, &dataset_path).await;
+
+    let rendered = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "png",
+                "delivery": "inline_base64",
+                "width_px": 40,
+                "height_px": 40,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(rendered.status(), StatusCode::OK);
+    let payload = read_json_body(rendered).await;
+    let warning_codes: Vec<&str> = payload["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|item| item.get("code").and_then(Value::as_str))
+        .collect();
+    assert!(warning_codes.contains(&"orthogonal_triptych_fallback_single_plane"));
+    assert!(!warning_codes.contains(&"orthogonal_triptych_enabled"));
+}
+
+#[tokio::test]
+async fn render_image_orthogonal_triptych_orientation_maps_z_outward() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-triptych-orientation");
+    create_render_omezarr(&dataset_path);
+    let view_id = open_view(&router, &dataset_path).await;
+
+    let update = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/selectors",
+                    "value": [
+                        {"axis": "z", "kind": "index", "index": 1, "clamp": true},
+                        {"axis": "c", "kind": "index", "index": 0, "clamp": true},
+                        {"axis": "t", "kind": "index", "index": 0, "clamp": true}
+                    ],
+                },
+                {
+                    "op": "replace",
+                    "path": "/view_2d/camera",
+                    "value": {"center_world": [2.5, 2.0], "zoom": 24.0, "rotation_deg": 0.0},
+                },
+                {
+                    "op": "replace",
+                    "path": "/view_2d/slice",
+                    "value": {"axis": "z", "index": 1, "slab": {"thickness_vox": 1, "mode": "single"}},
+                },
+                {
+                    "op": "replace",
+                    "path": "/view_2d/orthogonal_views_enabled",
+                    "value": true,
+                },
+                {
+                    "op": "replace",
+                    "path": "/layers/0/image/interpolation",
+                    "value": "nearest",
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let rendered = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "png",
+                "delivery": "inline_base64",
+                "width_px": 200,
+                "height_px": 200,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(rendered.status(), StatusCode::OK);
+    let payload = read_json_body(rendered).await;
+    let warning_codes: Vec<&str> = payload["warnings"]
+        .as_array()
+        .expect("warnings array")
+        .iter()
+        .filter_map(|item| item.get("code").and_then(Value::as_str))
+        .collect();
+    assert!(warning_codes.contains(&"orthogonal_triptych_enabled"));
+
+    let image = decode_png_rgba(
+        payload["images"][0]["bytes_base64"]
+            .as_str()
+            .expect("base64 payload"),
+    );
+    let layout = test_triptych_layout(200, 200).expect("triptych layout");
+    assert!(layout.xy.w > 0 && layout.xy.h > 0);
+    let xy_border_luma = pixel_luma(&image, layout.xy.x, layout.xy.y);
+    assert!(
+        xy_border_luma > 0,
+        "expected panel border/axis overlay to be visible at xy panel corner"
+    );
+
+    let xz_center_x = layout.xz.x + (layout.xz.w / 2);
+    let xz_margin_y = (layout.xz.h / 6).max(2);
+    let xz_top_luma = pixel_luma(&image, xz_center_x, layout.xz.y + xz_margin_y);
+    let xz_bottom_luma = pixel_luma(
+        &image,
+        xz_center_x,
+        layout.xz.y + layout.xz.h - xz_margin_y - 1,
+    );
+    assert!(
+        xz_top_luma > xz_bottom_luma,
+        "expected +z to map upward in xz panel: top={xz_top_luma} bottom={xz_bottom_luma}"
+    );
+
+    let yz_center_y = layout.yz.y + (layout.yz.h / 2);
+    let yz_margin_x = (layout.yz.w / 6).max(2);
+    let yz_left_luma = pixel_luma(&image, layout.yz.x + yz_margin_x, yz_center_y);
+    let yz_right_luma = pixel_luma(
+        &image,
+        layout.yz.x + layout.yz.w - yz_margin_x - 1,
+        yz_center_y,
+    );
+    assert!(
+        yz_right_luma > yz_left_luma,
+        "expected +z to map rightward in yz panel: left={yz_left_luma} right={yz_right_luma}"
+    );
+
+    let (xy_origin_x, xy_origin_y, xy_axis_len) = test_overlay_origin_and_len(layout.xy);
+    let green_up = pixel_green_dominance(
+        &image,
+        xy_origin_x,
+        xy_origin_y.saturating_sub(xy_axis_len / 2),
+    );
+    let green_down = pixel_green_dominance(
+        &image,
+        xy_origin_x,
+        (xy_origin_y + (xy_axis_len / 2)).min(layout.xy.y + layout.xy.h - 2),
+    );
+    assert!(
+        green_up > green_down,
+        "expected +y overlay arrow to point upward in xy panel: up={green_up} down={green_down}"
+    );
+}
+
 async fn open_view(router: &axum::Router, dataset_path: &Path) -> String {
     let opened = request_json(
         router,
@@ -582,6 +839,86 @@ fn decode_png_size(bytes_base64: &str) -> (u32, u32) {
         .expect("decode png")
         .to_rgba8();
     image.dimensions()
+}
+
+fn decode_png_rgba(bytes_base64: &str) -> RgbaImage {
+    let decoded = BASE64_STANDARD.decode(bytes_base64).expect("decode base64");
+    ImageReader::new(std::io::Cursor::new(decoded))
+        .with_guessed_format()
+        .expect("guess image format")
+        .decode()
+        .expect("decode png")
+        .to_rgba8()
+}
+
+fn pixel_luma(image: &RgbaImage, x: u32, y: u32) -> u32 {
+    let pixel = image.get_pixel(x, y);
+    u32::from(pixel[0]) + u32::from(pixel[1]) + u32::from(pixel[2])
+}
+
+fn pixel_green_dominance(image: &RgbaImage, x: u32, y: u32) -> i16 {
+    let pixel = image.get_pixel(x, y);
+    let g = i16::from(pixel[1]);
+    let r = i16::from(pixel[0]);
+    let b = i16::from(pixel[2]);
+    g - r.max(b)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TestRect {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TestTriptychLayout {
+    xy: TestRect,
+    yz: TestRect,
+    xz: TestRect,
+}
+
+fn test_triptych_layout(width: u32, height: u32) -> Option<TestTriptychLayout> {
+    let side_w = width / 5;
+    let side_h = height / 5;
+    if side_w < 16 || side_h < 16 {
+        return None;
+    }
+    let xy_w = width.checked_sub(side_w.checked_mul(2)?)?;
+    let xy_h = height.checked_sub(side_h.checked_mul(2)?)?;
+    if xy_w < 16 || xy_h < 16 {
+        return None;
+    }
+
+    Some(TestTriptychLayout {
+        xy: TestRect {
+            x: side_w,
+            y: side_h,
+            w: xy_w,
+            h: xy_h,
+        },
+        yz: TestRect {
+            x: side_w + xy_w,
+            y: side_h,
+            w: side_w,
+            h: xy_h,
+        },
+        xz: TestRect {
+            x: side_w,
+            y: 0,
+            w: xy_w,
+            h: side_h,
+        },
+    })
+}
+
+fn test_overlay_origin_and_len(panel: TestRect) -> (u32, u32, u32) {
+    let min_dim = panel.w.min(panel.h);
+    let axis_len = ((min_dim / 4).max(12)).min(36);
+    let origin_x = (panel.x + 10).min(panel.x + panel.w - 2);
+    let origin_y = (panel.y + panel.h - 10).max(panel.y + 1);
+    (origin_x, origin_y, axis_len)
 }
 
 async fn request_json(

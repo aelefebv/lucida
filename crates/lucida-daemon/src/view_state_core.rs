@@ -206,6 +206,7 @@ pub fn default_view_2d(
             zoom: 1.0,
             rotation_deg: 0.0,
         },
+        orthogonal_views_enabled: true,
     })
 }
 
@@ -315,6 +316,7 @@ pub fn normalize_view_2d(
         View2D {
             plane: view_2d.plane,
             camera: view_2d.camera,
+            orthogonal_views_enabled: view_2d.orthogonal_views_enabled,
             slice: Some(SliceSettings {
                 axis: Some(slice_axis),
                 index: Some(clamped_slice_index),

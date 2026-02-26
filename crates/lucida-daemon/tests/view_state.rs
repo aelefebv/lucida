@@ -266,6 +266,68 @@ async fn view_create_unsupported_mode_error() {
 }
 
 #[tokio::test]
+async fn view_2d_orthogonal_views_defaults_true_and_round_trips() {
+    let router = app();
+    let dataset_path = unique_dataset_path("view-orthogonal-default");
+    create_sample_omezarr(&dataset_path, SampleDatasetOptions::default());
+
+    let opened = request_json(
+        &router,
+        "POST",
+        "/dataset/open",
+        json!({"schema_version": 1, "uri": dataset_path.to_string_lossy()}),
+    )
+    .await;
+    assert_eq!(opened.status(), StatusCode::OK);
+    let dataset_id = read_json_body(opened).await["dataset_summary"]["dataset_id"]
+        .as_str()
+        .expect("dataset_id")
+        .to_owned();
+
+    let created = request_json(
+        &router,
+        "POST",
+        "/view/create",
+        json!({"schema_version": 1, "dataset_id": dataset_id, "mode": "2d"}),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let create_payload = read_json_body(created).await;
+    let view_id = create_payload["view_state"]["view_id"]
+        .as_str()
+        .expect("view_id")
+        .to_owned();
+    assert_eq!(
+        create_payload["view_state"]["view_2d"]["orthogonal_views_enabled"],
+        json!(true)
+    );
+
+    let updated = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/view_2d/orthogonal_views_enabled",
+                    "value": false,
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let update_payload = read_json_body(updated).await;
+    assert_eq!(
+        update_payload["view_state"]["view_2d"]["orthogonal_views_enabled"],
+        json!(false)
+    );
+}
+
+#[tokio::test]
 async fn selector_clamp_and_strict_modes() {
     let router = app();
     let dataset_path = unique_dataset_path("selector-clamp");

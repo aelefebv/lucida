@@ -16,8 +16,9 @@ use crate::dto::dataset_summary::{
 };
 use crate::dto::render::{RenderOutputSpec, RenderTimingMs};
 use crate::dto::view_state::{
-    AxisSelector, AxisSelectorKind, ChannelContrast, ChannelContrastPolicy, ChannelMode,
-    InterpolationMode, LayerState, LayerType, SlabMode, SlabSettings, ViewState,
+    AxisSelector, AxisSelectorKind, Camera2D, ChannelContrast, ChannelContrastPolicy, ChannelMode,
+    InterpolationMode, LayerState, LayerType, PerformanceHints, Plane2D, SlabMode, SlabSettings,
+    SliceSettings, View2D, ViewState,
 };
 use crate::error::ApiError;
 use crate::render_cache::{EffectiveCacheBudgets, RenderCacheRegistry};
@@ -33,6 +34,9 @@ const DEFAULT_CHANNEL_COLORS: [[f32; 4]; 6] = [
     [1.0, 0.0, 1.0, 1.0],
     [0.0, 1.0, 1.0, 1.0],
 ];
+const TRIPTYCH_SIDE_RATIO_DIVISOR: usize = 5;
+const TRIPTYCH_MIN_PANEL_PX: usize = 16;
+const OVERLAY_TEXT_SCALE: usize = 2;
 
 #[derive(Debug, Clone)]
 pub struct RenderCpuResult {
@@ -84,6 +88,54 @@ struct LevelChunkSource {
     cache_scope: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PanelRect {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TriptychLayout {
+    xy: PanelRect,
+    yz: PanelRect,
+    xz: PanelRect,
+}
+
+#[derive(Debug, Clone)]
+struct SinglePlaneRgbaResult {
+    rgba_bytes: Vec<u8>,
+    pyramid_level_used: u64,
+    warnings: Vec<ApiWarning>,
+}
+
+#[derive(Debug, Clone)]
+struct TriptychRenderResult {
+    rgba_bytes: Vec<u8>,
+    pyramid_level_used: u64,
+    warnings: Vec<ApiWarning>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FocalPoint3D {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+#[derive(Debug, Clone)]
+enum TriptychRenderOutcome {
+    Rendered(TriptychRenderResult),
+    Fallback(TriptychFallbackReason),
+}
+
+#[derive(Debug, Clone)]
+enum TriptychFallbackReason {
+    MissingRoles(Vec<&'static str>),
+    OutputTooSmall { width_px: usize, height_px: usize },
+}
+
 pub fn render_view_to_png(
     dataset_summary: &DatasetSummary,
     view_state: &ViewState,
@@ -120,7 +172,108 @@ pub fn render_view_to_png(
     })?;
     let io_after_open = Instant::now();
     let render_start = Instant::now();
+    let output_width = usize::try_from(output.width_px).unwrap_or(0);
+    let output_height = usize::try_from(output.height_px).unwrap_or(0);
 
+    let (rgba_u8, pyramid_level_used) = if view_2d.orthogonal_views_enabled {
+        match render_triptych_rgba(
+            dataset_summary,
+            view_state,
+            &dataset_root,
+            output_width,
+            output_height,
+            cache_registry,
+            cache_session_id,
+        )? {
+            TriptychRenderOutcome::Rendered(result) => {
+                warnings.push(ApiWarning {
+                    code: "orthogonal_triptych_enabled".to_owned(),
+                    message:
+                        "Orthogonal tri-planar projections were rendered with fixed xy/yz/xz layout."
+                            .to_owned(),
+                    details: Some(json!({
+                        "layout": "xy_center_yz_right_xz_top",
+                    })),
+                });
+                warnings.extend(result.warnings);
+                (result.rgba_bytes, result.pyramid_level_used)
+            }
+            TriptychRenderOutcome::Fallback(reason) => {
+                warnings.push(triptych_fallback_warning(&reason));
+                let single = render_single_plane_to_rgba(
+                    dataset_summary,
+                    view_state,
+                    view_2d,
+                    &dataset_root,
+                    output_width,
+                    output_height,
+                    cache_registry,
+                    cache_session_id,
+                )?;
+                warnings.extend(single.warnings);
+                (single.rgba_bytes, single.pyramid_level_used)
+            }
+        }
+    } else {
+        let single = render_single_plane_to_rgba(
+            dataset_summary,
+            view_state,
+            view_2d,
+            &dataset_root,
+            output_width,
+            output_height,
+            cache_registry,
+            cache_session_id,
+        )?;
+        warnings.extend(single.warnings);
+        (single.rgba_bytes, single.pyramid_level_used)
+    };
+
+    let render_end = Instant::now();
+    let mut png_bytes: Vec<u8> = Vec::new();
+    let encoder = PngEncoder::new(&mut png_bytes);
+    encoder
+        .write_image(
+            &rgba_u8,
+            output.width_px as u32,
+            output.height_px as u32,
+            ColorType::Rgba8.into(),
+        )
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "render_failed",
+                "Failed to encode PNG image.",
+                Some(json!({ "reason": error.to_string() })),
+            )
+        })?;
+    let end_total = Instant::now();
+
+    Ok(RenderCpuResult {
+        png_bytes,
+        pyramid_level_used,
+        warnings,
+        timing_ms: Some(RenderTimingMs {
+            total: (end_total - start_total).as_secs_f64() * 1000.0,
+            io: (io_after_open - io_start).as_secs_f64() * 1000.0,
+            decode: 0.0,
+            gpu_upload: 0.0,
+            render: (render_end - render_start).as_secs_f64() * 1000.0,
+        }),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_single_plane_to_rgba(
+    dataset_summary: &DatasetSummary,
+    view_state: &ViewState,
+    view_2d: &View2D,
+    dataset_root: &Path,
+    output_width: usize,
+    output_height: usize,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+) -> Result<SinglePlaneRgbaResult, ApiError> {
     let role_to_axis = roles_to_axis(dataset_summary);
     let (u_role, v_role, orth_role) = plane_roles(&view_2d.plane);
     let missing_roles: Vec<&str> = [u_role, v_role, orth_role]
@@ -149,17 +302,14 @@ pub fn render_view_to_png(
         .map(|selector| (selector.axis.clone(), selector))
         .collect();
 
-    let mut slice_index: i64 = 0;
-    if let Some(slice) = view_2d.slice.as_ref() {
-        if let Some(index) = slice.index {
-            slice_index = index;
-        }
-    }
+    let slice_index = view_2d
+        .slice
+        .as_ref()
+        .and_then(|slice| slice.index)
+        .unwrap_or(0);
 
     let background = resolve_background_rgba(view_state);
-    let pixel_count = usize::try_from(output.width_px)
-        .unwrap_or(0)
-        .saturating_mul(usize::try_from(output.height_px).unwrap_or(0));
+    let pixel_count = output_width.saturating_mul(output_height);
     let mut canvas_rgb = vec![0.0_f32; pixel_count * 3];
     let mut canvas_alpha = vec![0.0_f32; pixel_count];
     for pixel in 0..pixel_count {
@@ -169,6 +319,7 @@ pub fn render_view_to_png(
         canvas_alpha[pixel] = background[3];
     }
 
+    let mut warnings: Vec<ApiWarning> = Vec::new();
     let mut rendered_layer_count: usize = 0;
     let mut primary_level_used: Option<u64> = None;
 
@@ -208,11 +359,18 @@ pub fn render_view_to_png(
 
         let multiscale_name = resolve_layer_multiscale_name(view_state, layer);
         let multiscale = find_multiscale(dataset_summary, &multiscale_name)?;
-        let (level, level_warnings) = choose_level(multiscale, view_state, u_axis, v_axis);
+        let (level, level_warnings) = choose_level(
+            multiscale,
+            view_state.performance.as_ref(),
+            view_2d.camera.zoom,
+            view_state.viewport.pixel_ratio,
+            u_axis,
+            v_axis,
+        );
         warnings.extend(level_warnings);
 
         let chunk_source = open_level_chunk_source(
-            &dataset_root,
+            dataset_root,
             level,
             &format!(
                 "{}|{}|{}",
@@ -275,8 +433,6 @@ pub fn render_view_to_png(
         })?;
         let f_u = level_factors[u_idx];
         let f_v = level_factors[v_idx];
-        let output_width = usize::try_from(output.width_px).unwrap_or(0);
-        let output_height = usize::try_from(output.height_px).unwrap_or(0);
         let interpolation = layer
             .image
             .as_ref()
@@ -359,38 +515,731 @@ pub fn render_view_to_png(
         rgba_u8[index * 4 + 3] = (canvas_alpha[index].clamp(0.0, 1.0) * 255.0).round() as u8;
     }
 
-    let render_end = Instant::now();
-    let mut png_bytes: Vec<u8> = Vec::new();
-    let encoder = PngEncoder::new(&mut png_bytes);
-    encoder
-        .write_image(
-            &rgba_u8,
-            output.width_px as u32,
-            output.height_px as u32,
-            ColorType::Rgba8.into(),
-        )
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "render_failed",
-                "Failed to encode PNG image.",
-                Some(json!({ "reason": error.to_string() })),
-            )
-        })?;
-    let end_total = Instant::now();
-
-    Ok(RenderCpuResult {
-        png_bytes,
+    Ok(SinglePlaneRgbaResult {
+        rgba_bytes: rgba_u8,
         pyramid_level_used: primary_level_used.unwrap_or(0),
         warnings,
-        timing_ms: Some(RenderTimingMs {
-            total: (end_total - start_total).as_secs_f64() * 1000.0,
-            io: (io_after_open - io_start).as_secs_f64() * 1000.0,
-            decode: 0.0,
-            gpu_upload: 0.0,
-            render: (render_end - render_start).as_secs_f64() * 1000.0,
-        }),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_triptych_rgba(
+    dataset_summary: &DatasetSummary,
+    view_state: &ViewState,
+    dataset_root: &Path,
+    output_width: usize,
+    output_height: usize,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+) -> Result<TriptychRenderOutcome, ApiError> {
+    let Some(base_view_2d) = view_state.view_2d.as_ref() else {
+        return Ok(TriptychRenderOutcome::Fallback(
+            TriptychFallbackReason::MissingRoles(vec!["x", "y", "z"]),
+        ));
+    };
+
+    let role_to_axis = roles_to_axis(dataset_summary);
+    let missing_roles: Vec<&'static str> = ["x", "y", "z"]
+        .into_iter()
+        .filter(|role| !role_to_axis.contains_key(*role))
+        .collect();
+    if !missing_roles.is_empty() {
+        return Ok(TriptychRenderOutcome::Fallback(
+            TriptychFallbackReason::MissingRoles(missing_roles),
+        ));
+    }
+
+    let Some(layout) = compute_triptych_layout(output_width, output_height) else {
+        return Ok(TriptychRenderOutcome::Fallback(
+            TriptychFallbackReason::OutputTooSmall {
+                width_px: output_width,
+                height_px: output_height,
+            },
+        ));
+    };
+
+    let selectors_by_axis: HashMap<String, &AxisSelector> = view_state
+        .selectors
+        .iter()
+        .map(|selector| (selector.axis.clone(), selector))
+        .collect();
+    let focus = focal_point_from_view(base_view_2d, &role_to_axis, &selectors_by_axis);
+
+    let xy_view = view_for_plane(base_view_2d, Plane2D::Xy, focus);
+    let xz_view = view_for_plane(base_view_2d, Plane2D::Xz, focus);
+    let yz_view = view_for_plane(base_view_2d, Plane2D::Yz, focus);
+
+    let xy = render_single_plane_to_rgba(
+        dataset_summary,
+        view_state,
+        &xy_view,
+        dataset_root,
+        layout.xy.width,
+        layout.xy.height,
+        cache_registry,
+        cache_session_id,
+    )?;
+    let xz_raw = render_single_plane_to_rgba(
+        dataset_summary,
+        view_state,
+        &xz_view,
+        dataset_root,
+        layout.xz.width,
+        layout.xz.height,
+        cache_registry,
+        cache_session_id,
+    )?;
+    let yz_raw = render_single_plane_to_rgba(
+        dataset_summary,
+        view_state,
+        &yz_view,
+        dataset_root,
+        layout.yz.height,
+        layout.yz.width,
+        cache_registry,
+        cache_session_id,
+    )?;
+
+    let xz_flipped = flip_rgba_vertically(&xz_raw.rgba_bytes, layout.xz.width, layout.xz.height);
+    let yz_oriented = orient_yz_panel_right(&yz_raw.rgba_bytes, layout.yz.height, layout.yz.width);
+
+    let background = resolve_background_rgba(view_state);
+    let mut canvas = rgba_canvas_with_background(output_width, output_height, background);
+    blit_rgba_panel(
+        &mut canvas,
+        output_width,
+        output_height,
+        layout.xy,
+        &xy.rgba_bytes,
+    );
+    blit_rgba_panel(
+        &mut canvas,
+        output_width,
+        output_height,
+        layout.xz,
+        &xz_flipped,
+    );
+    blit_rgba_panel(
+        &mut canvas,
+        output_width,
+        output_height,
+        layout.yz,
+        &yz_oriented,
+    );
+    draw_triptych_overlays(&mut canvas, output_width, output_height, layout);
+
+    let mut warnings = xy.warnings;
+    warnings.extend(xz_raw.warnings);
+    warnings.extend(yz_raw.warnings);
+
+    Ok(TriptychRenderOutcome::Rendered(TriptychRenderResult {
+        rgba_bytes: canvas,
+        pyramid_level_used: xy.pyramid_level_used,
+        warnings,
+    }))
+}
+
+fn triptych_fallback_warning(reason: &TriptychFallbackReason) -> ApiWarning {
+    match reason {
+        TriptychFallbackReason::MissingRoles(missing_roles) => ApiWarning {
+            code: "orthogonal_triptych_fallback_single_plane".to_owned(),
+            message:
+                "Orthogonal tri-planar rendering was requested but required dataset roles are missing."
+                    .to_owned(),
+            details: Some(json!({
+                "reason": "missing_roles",
+                "missing_roles": missing_roles,
+            })),
+        },
+        TriptychFallbackReason::OutputTooSmall {
+            width_px,
+            height_px,
+        } => ApiWarning {
+            code: "orthogonal_triptych_fallback_single_plane".to_owned(),
+            message:
+                "Orthogonal tri-planar rendering was requested but output dimensions are too small."
+                    .to_owned(),
+            details: Some(json!({
+                "reason": "output_too_small",
+                "width_px": width_px,
+                "height_px": height_px,
+                "minimum_panel_px": TRIPTYCH_MIN_PANEL_PX,
+            })),
+        },
+    }
+}
+
+fn compute_triptych_layout(width: usize, height: usize) -> Option<TriptychLayout> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let side_w = width / TRIPTYCH_SIDE_RATIO_DIVISOR;
+    let side_h = height / TRIPTYCH_SIDE_RATIO_DIVISOR;
+    if side_w < TRIPTYCH_MIN_PANEL_PX || side_h < TRIPTYCH_MIN_PANEL_PX {
+        return None;
+    }
+    let xy_width = width.saturating_sub(side_w.saturating_mul(2));
+    let xy_height = height.saturating_sub(side_h.saturating_mul(2));
+    if xy_width < TRIPTYCH_MIN_PANEL_PX || xy_height < TRIPTYCH_MIN_PANEL_PX {
+        return None;
+    }
+
+    let xy = PanelRect {
+        x: side_w,
+        y: side_h,
+        width: xy_width,
+        height: xy_height,
+    };
+    let yz = PanelRect {
+        x: side_w + xy_width,
+        y: side_h,
+        width: side_w,
+        height: xy_height,
+    };
+    let xz = PanelRect {
+        x: side_w,
+        y: 0,
+        width: xy_width,
+        height: side_h,
+    };
+    Some(TriptychLayout { xy, yz, xz })
+}
+
+fn focal_point_from_view(
+    view_2d: &View2D,
+    role_to_axis: &BTreeMap<&'static str, String>,
+    selectors_by_axis: &HashMap<String, &AxisSelector>,
+) -> FocalPoint3D {
+    let (u_role, v_role, orth_role) = plane_roles(&view_2d.plane);
+    let mut values: HashMap<&'static str, f64> = HashMap::new();
+    values.insert(u_role, view_2d.camera.center_world.0);
+    values.insert(v_role, view_2d.camera.center_world.1);
+
+    let slice_value = view_2d
+        .slice
+        .as_ref()
+        .and_then(|slice| slice.index)
+        .map(|value| value as f64)
+        .or_else(|| {
+            role_to_axis
+                .get(orth_role)
+                .map(|axis| selector_index_for_axis(selectors_by_axis, axis) as f64)
+        })
+        .unwrap_or(0.0);
+    values.insert(orth_role, slice_value);
+
+    let x = values.get("x").copied().unwrap_or_else(|| {
+        role_to_axis
+            .get("x")
+            .map(|axis| selector_index_for_axis(selectors_by_axis, axis) as f64)
+            .unwrap_or(0.0)
+    });
+    let y = values.get("y").copied().unwrap_or_else(|| {
+        role_to_axis
+            .get("y")
+            .map(|axis| selector_index_for_axis(selectors_by_axis, axis) as f64)
+            .unwrap_or(0.0)
+    });
+    let z = values.get("z").copied().unwrap_or_else(|| {
+        role_to_axis
+            .get("z")
+            .map(|axis| selector_index_for_axis(selectors_by_axis, axis) as f64)
+            .unwrap_or(0.0)
+    });
+
+    FocalPoint3D { x, y, z }
+}
+
+fn selector_index_for_axis(
+    selectors_by_axis: &HashMap<String, &AxisSelector>,
+    axis_name: &str,
+) -> i64 {
+    let Some(selector) = selectors_by_axis.get(axis_name).copied() else {
+        return 0;
+    };
+    match selector.kind {
+        AxisSelectorKind::Index => selector.index.unwrap_or(0),
+        AxisSelectorKind::Range => selector.start.unwrap_or(0),
+        AxisSelectorKind::Set => selector
+            .indices
+            .as_ref()
+            .and_then(|indices| indices.first().copied())
+            .unwrap_or(0),
+    }
+}
+
+fn view_for_plane(base: &View2D, plane: Plane2D, focus: FocalPoint3D) -> View2D {
+    let (u_role, v_role, orth_role) = plane_roles(&plane);
+    let slab = base.slice.as_ref().and_then(|slice| slice.slab.clone());
+    View2D {
+        plane,
+        slice: Some(SliceSettings {
+            axis: None,
+            index: Some(role_value(focus, orth_role).round() as i64),
+            slab,
+        }),
+        camera: Camera2D {
+            center_world: (role_value(focus, u_role), role_value(focus, v_role)),
+            zoom: base.camera.zoom,
+            rotation_deg: 0.0,
+        },
+        orthogonal_views_enabled: base.orthogonal_views_enabled,
+    }
+}
+
+fn role_value(focus: FocalPoint3D, role: &'static str) -> f64 {
+    match role {
+        "x" => focus.x,
+        "y" => focus.y,
+        "z" => focus.z,
+        _ => 0.0,
+    }
+}
+
+fn rgba_canvas_with_background(width: usize, height: usize, background: [f32; 4]) -> Vec<u8> {
+    let pixel_count = width.saturating_mul(height);
+    let mut rgba = vec![0_u8; pixel_count * 4];
+    for index in 0..pixel_count {
+        rgba[index * 4] = (background[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+        rgba[index * 4 + 1] = (background[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+        rgba[index * 4 + 2] = (background[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+        rgba[index * 4 + 3] = (background[3].clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    rgba
+}
+
+fn blit_rgba_panel(
+    target: &mut [u8],
+    target_width: usize,
+    target_height: usize,
+    rect: PanelRect,
+    source: &[u8],
+) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    for row in 0..rect.height {
+        if rect.y + row >= target_height {
+            continue;
+        }
+        for col in 0..rect.width {
+            if rect.x + col >= target_width {
+                continue;
+            }
+            let src_pixel = row * rect.width + col;
+            let dst_pixel = (rect.y + row) * target_width + (rect.x + col);
+            let src_offset = src_pixel * 4;
+            let dst_offset = dst_pixel * 4;
+            target[dst_offset..dst_offset + 4].copy_from_slice(&source[src_offset..src_offset + 4]);
+        }
+    }
+}
+
+fn flip_rgba_vertically(source: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut output = vec![0_u8; source.len()];
+    for row in 0..height {
+        for col in 0..width {
+            let src_pixel = row * width + col;
+            let dst_pixel = (height - 1 - row) * width + col;
+            let src_offset = src_pixel * 4;
+            let dst_offset = dst_pixel * 4;
+            output[dst_offset..dst_offset + 4].copy_from_slice(&source[src_offset..src_offset + 4]);
+        }
+    }
+    output
+}
+
+fn orient_yz_panel_right(source: &[u8], raw_width: usize, raw_height: usize) -> Vec<u8> {
+    // Raw yz is rendered as (u=y, v=z). Re-orient to (horizontal=z rightward, vertical=y downward).
+    let output_width = raw_height;
+    let output_height = raw_width;
+    let mut output = vec![0_u8; output_width.saturating_mul(output_height).saturating_mul(4)];
+
+    for y_raw in 0..raw_height {
+        for x_raw in 0..raw_width {
+            let out_x = y_raw;
+            let out_y = x_raw;
+            let src_pixel = y_raw * raw_width + x_raw;
+            let dst_pixel = out_y * output_width + out_x;
+            let src_offset = src_pixel * 4;
+            let dst_offset = dst_pixel * 4;
+            output[dst_offset..dst_offset + 4].copy_from_slice(&source[src_offset..src_offset + 4]);
+        }
+    }
+
+    output
+}
+
+fn draw_triptych_overlays(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    layout: TriptychLayout,
+) {
+    draw_panel_overlay(
+        canvas,
+        canvas_width,
+        canvas_height,
+        layout.xy,
+        "XY",
+        [('X', 1, 0), ('Y', 0, -1)],
+    );
+    draw_panel_overlay(
+        canvas,
+        canvas_width,
+        canvas_height,
+        layout.xz,
+        "XZ",
+        [('X', 1, 0), ('Z', 0, -1)],
+    );
+    draw_panel_overlay(
+        canvas,
+        canvas_width,
+        canvas_height,
+        layout.yz,
+        "YZ",
+        [('Z', 1, 0), ('Y', 0, -1)],
+    );
+}
+
+fn draw_panel_overlay(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    panel: PanelRect,
+    panel_label: &str,
+    axes: [(char, i32, i32); 2],
+) {
+    let border_color = [232, 232, 232, 255];
+    draw_rect_outline(canvas, canvas_width, canvas_height, panel, border_color);
+
+    let label_x = panel.x.saturating_add(4);
+    let label_y = panel.y.saturating_add(4);
+    draw_text(
+        canvas,
+        canvas_width,
+        canvas_height,
+        label_x,
+        label_y,
+        panel_label,
+        border_color,
+    );
+
+    let min_dim = panel.width.min(panel.height);
+    let axis_len = ((min_dim / 4).max(12)).min(36) as i32;
+    let origin_x = panel.x.saturating_add(10).min(panel.x + panel.width - 2) as i32;
+    let origin_y = panel
+        .y
+        .saturating_add(panel.height.saturating_sub(10))
+        .max(panel.y + 1) as i32;
+
+    for (axis_name, dx, dy) in axes {
+        let axis_color = axis_color(axis_name);
+        let tip_x = origin_x + (axis_len * dx);
+        let tip_y = origin_y + (axis_len * dy);
+        draw_line(
+            canvas,
+            canvas_width,
+            canvas_height,
+            origin_x,
+            origin_y,
+            tip_x,
+            tip_y,
+            axis_color,
+        );
+        draw_arrow_head(
+            canvas,
+            canvas_width,
+            canvas_height,
+            tip_x,
+            tip_y,
+            dx,
+            dy,
+            axis_color,
+        );
+
+        let label_w = (3 * OVERLAY_TEXT_SCALE) as i32;
+        let label_h = (5 * OVERLAY_TEXT_SCALE) as i32;
+        let label_x = tip_x
+            + if dx > 0 {
+                2
+            } else if dx < 0 {
+                -(label_w + 2)
+            } else {
+                2
+            };
+        let label_y = if dy < 0 {
+            tip_y - (label_h + 2)
+        } else if dy > 0 {
+            tip_y + 2
+        } else {
+            // Keep horizontal-axis labels above the axis line to avoid border overlap.
+            tip_y - (label_h + 1)
+        };
+        let pad = 3_i32;
+        let min_x = panel.x as i32 + pad;
+        let min_y = panel.y as i32 + pad;
+        let max_x = (panel.x + panel.width) as i32 - label_w - pad;
+        let max_y = (panel.y + panel.height) as i32 - label_h - pad;
+        let text_x = label_x.clamp(min_x, max_x.max(min_x)) as usize;
+        let text_y = label_y.clamp(min_y, max_y.max(min_y)) as usize;
+        let label = match axis_name {
+            'X' => "X",
+            'Y' => "Y",
+            'Z' => "Z",
+            _ => "",
+        };
+        draw_text(
+            canvas,
+            canvas_width,
+            canvas_height,
+            text_x,
+            text_y,
+            label,
+            axis_color,
+        );
+    }
+}
+
+fn draw_rect_outline(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    rect: PanelRect,
+    color: [u8; 4],
+) {
+    if rect.width < 2 || rect.height < 2 {
+        return;
+    }
+    let x0 = rect.x;
+    let y0 = rect.y;
+    let x1 = rect.x + rect.width - 1;
+    let y1 = rect.y + rect.height - 1;
+    for x in x0..=x1 {
+        set_rgba_pixel(
+            canvas,
+            canvas_width,
+            canvas_height,
+            x as i32,
+            y0 as i32,
+            color,
+        );
+        set_rgba_pixel(
+            canvas,
+            canvas_width,
+            canvas_height,
+            x as i32,
+            y1 as i32,
+            color,
+        );
+    }
+    for y in y0..=y1 {
+        set_rgba_pixel(
+            canvas,
+            canvas_width,
+            canvas_height,
+            x0 as i32,
+            y as i32,
+            color,
+        );
+        set_rgba_pixel(
+            canvas,
+            canvas_width,
+            canvas_height,
+            x1 as i32,
+            y as i32,
+            color,
+        );
+    }
+}
+
+fn axis_color(axis_name: char) -> [u8; 4] {
+    match axis_name {
+        'X' => [250, 90, 90, 255],
+        'Y' => [90, 250, 110, 255],
+        'Z' => [110, 160, 255, 255],
+        _ => [232, 232, 232, 255],
+    }
+}
+
+fn draw_arrow_head(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    tip_x: i32,
+    tip_y: i32,
+    dx: i32,
+    dy: i32,
+    color: [u8; 4],
+) {
+    let head = 4;
+    if dx != 0 {
+        let back_x = tip_x - (dx * head);
+        draw_line(
+            canvas,
+            canvas_width,
+            canvas_height,
+            tip_x,
+            tip_y,
+            back_x,
+            tip_y - head,
+            color,
+        );
+        draw_line(
+            canvas,
+            canvas_width,
+            canvas_height,
+            tip_x,
+            tip_y,
+            back_x,
+            tip_y + head,
+            color,
+        );
+        return;
+    }
+
+    let back_y = tip_y - (dy * head);
+    draw_line(
+        canvas,
+        canvas_width,
+        canvas_height,
+        tip_x,
+        tip_y,
+        tip_x - head,
+        back_y,
+        color,
+    );
+    draw_line(
+        canvas,
+        canvas_width,
+        canvas_height,
+        tip_x,
+        tip_y,
+        tip_x + head,
+        back_y,
+        color,
+    );
+}
+
+fn draw_line(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    mut x0: i32,
+    mut y0: i32,
+    x1: i32,
+    y1: i32,
+    color: [u8; 4],
+) {
+    let dx = (x1 - x0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let dy = -(y1 - y0).abs();
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+
+    loop {
+        set_rgba_pixel(canvas, canvas_width, canvas_height, x0, y0, color);
+        if x0 == x1 && y0 == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x0 += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y0 += sy;
+        }
+    }
+}
+
+fn draw_text(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    x: usize,
+    y: usize,
+    text: &str,
+    color: [u8; 4],
+) {
+    let mut cursor_x = x;
+    for ch in text.chars() {
+        draw_glyph(
+            canvas,
+            canvas_width,
+            canvas_height,
+            cursor_x,
+            y,
+            ch.to_ascii_uppercase(),
+            color,
+        );
+        cursor_x += (4 * OVERLAY_TEXT_SCALE) + 1;
+    }
+}
+
+fn draw_glyph(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    x: usize,
+    y: usize,
+    ch: char,
+    color: [u8; 4],
+) {
+    let Some(rows) = glyph_rows(ch) else {
+        return;
+    };
+    for (row_index, row_bits) in rows.iter().enumerate() {
+        for col in 0..3 {
+            if (row_bits & (1 << (2 - col))) == 0 {
+                continue;
+            }
+            for sy in 0..OVERLAY_TEXT_SCALE {
+                for sx in 0..OVERLAY_TEXT_SCALE {
+                    let px = x + (col * OVERLAY_TEXT_SCALE) + sx;
+                    let py = y + (row_index * OVERLAY_TEXT_SCALE) + sy;
+                    set_rgba_pixel(
+                        canvas,
+                        canvas_width,
+                        canvas_height,
+                        px as i32,
+                        py as i32,
+                        color,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn glyph_rows(ch: char) -> Option<[u8; 5]> {
+    match ch {
+        'X' => Some([0b101, 0b101, 0b010, 0b101, 0b101]),
+        'Y' => Some([0b101, 0b101, 0b010, 0b010, 0b010]),
+        'Z' => Some([0b111, 0b001, 0b010, 0b100, 0b111]),
+        _ => None,
+    }
+}
+
+fn set_rgba_pixel(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    x: i32,
+    y: i32,
+    color: [u8; 4],
+) {
+    if x < 0 || y < 0 {
+        return;
+    }
+    let x = x as usize;
+    let y = y as usize;
+    if x >= canvas_width || y >= canvas_height {
+        return;
+    }
+    let offset = (y * canvas_width + x) * 4;
+    canvas[offset..offset + 4].copy_from_slice(&color);
 }
 
 fn resolve_dataset_root(uri: &str) -> Result<PathBuf, String> {
@@ -474,7 +1323,9 @@ fn find_multiscale<'a>(
 
 fn choose_level<'a>(
     multiscale: &'a MultiscaleImageDef,
-    view_state: &ViewState,
+    performance: Option<&PerformanceHints>,
+    zoom: f64,
+    pixel_ratio: f64,
     u_axis: &str,
     v_axis: &str,
 ) -> (&'a MultiscaleLevelDef, Vec<ApiWarning>) {
@@ -486,7 +1337,6 @@ fn choose_level<'a>(
         .map(|(index, axis_name)| (axis_name.as_str(), index))
         .collect();
 
-    let performance = view_state.performance.as_ref();
     let lod_mode = performance.map(|item| item.lod_mode.clone());
     let fixed_level = performance.and_then(|item| item.fixed_level);
 
@@ -512,13 +1362,6 @@ fn choose_level<'a>(
             });
         }
     }
-
-    let zoom = view_state
-        .view_2d
-        .as_ref()
-        .map(|item| item.camera.zoom)
-        .unwrap_or(1.0);
-    let pixel_ratio = view_state.viewport.pixel_ratio;
 
     let mut best_level = &multiscale.levels[0];
     let mut best_metric = f64::INFINITY;

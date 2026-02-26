@@ -472,6 +472,29 @@ class LucidaClient:
             patch_builder=lambda view: self._set_plane_patch(view=view, plane=plane),
         )
 
+    def set_orthogonal_views(
+        self,
+        *,
+        view_id: str,
+        enabled: bool,
+        session_id: str | None = None,
+        agent_run_id: str | None = None,
+        agent_step_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> ViewUpdateResponse:
+        """Enable or disable fixed orthogonal tri-planar rendering in 2D mode."""
+        return self._update_view_from_current(
+            view_id=view_id,
+            session_id=session_id,
+            agent_run_id=agent_run_id,
+            agent_step_id=agent_step_id,
+            agent_name=agent_name,
+            patch_builder=lambda view: self._orthogonal_views_patch(
+                view=view,
+                enabled=enabled,
+            ),
+        )
+
     def pan(
         self,
         *,
@@ -847,6 +870,22 @@ class LucidaClient:
                 "op": "replace",
                 "path": "/view_2d/camera/center_world",
                 "value": [float(center_x) + delta_x, float(center_y) + delta_y],
+            }
+        ]
+
+    def _orthogonal_views_patch(
+        self,
+        *,
+        view: ViewState,
+        enabled: bool,
+    ) -> list[dict[str, Any]]:
+        if view.view_2d is None:
+            raise ValueError("view has no 2d state.")
+        return [
+            {
+                "op": "replace",
+                "path": "/view_2d/orthogonal_views_enabled",
+                "value": bool(enabled),
             }
         ]
 
