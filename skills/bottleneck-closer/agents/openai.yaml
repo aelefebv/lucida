@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bottleneck Closer"
+  short_description: "Implement and close BOTTLENECKS.md items"
+  default_prompt: "Use $bottleneck-closer to implement a specified bottleneck from BOTTLENECKS.md, remove it from the file, run tests, and complete PR merge with conflict handling."
