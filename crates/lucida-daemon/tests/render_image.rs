@@ -546,11 +546,15 @@ async fn render_image_slab_and_lod_warnings() {
 }
 
 #[tokio::test]
-async fn render_image_explicit_gpu_preference_emits_backend_fallback_warning() {
+async fn render_image_explicit_gpu_preference_routes_to_gpu_or_emits_fallback_warning() {
     let router = app();
     let dataset_path = unique_dataset_path("render-backend-fallback");
     create_render_omezarr(&dataset_path);
     let view_id = open_view(&router, &dataset_path).await;
+    let capabilities = read_json_body(request_get(&router, "/capabilities", None).await).await;
+    let gpu_available = capabilities["gpu"]["available"]
+        .as_bool()
+        .expect("gpu.available bool");
 
     let update = request_json(
         &router,
@@ -596,10 +600,18 @@ async fn render_image_explicit_gpu_preference_emits_backend_fallback_warning() {
         .iter()
         .filter_map(|item| item.get("code").and_then(Value::as_str))
         .collect();
-    assert!(
-        warning_codes.contains(&"gpu_unavailable_fallback_cpu")
-            || warning_codes.contains(&"gpu_renderer_unavailable_fallback_cpu")
-    );
+    if gpu_available {
+        assert!(!warning_codes.contains(&"gpu_unavailable_fallback_cpu"));
+        assert!(!warning_codes.contains(&"gpu_render_failed_fallback_cpu"));
+        assert!(
+            payload["meta"]["timing_ms"]["gpu_upload"]
+                .as_f64()
+                .expect("gpu_upload timing")
+                > 0.0
+        );
+    } else {
+        assert!(warning_codes.contains(&"gpu_unavailable_fallback_cpu"));
+    }
 }
 
 #[tokio::test]

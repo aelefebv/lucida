@@ -6,6 +6,7 @@ pub mod omezarr;
 pub mod render_backend;
 pub mod render_cache;
 pub mod render_cpu;
+pub mod render_gpu;
 pub mod render_image;
 pub mod request_validation;
 pub mod runtime_capabilities;

@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::dto::api::ApiWarning;
 use crate::dto::render::{
     RenderArtifactRole, RenderAxisSelector, RenderDelivery, RenderImageArtifact,
     RenderImageResponse, RenderMeta, RenderMimeType, RenderOutputSpec, RenderStatus,
@@ -20,6 +21,7 @@ use crate::error::ApiError;
 use crate::render_backend::{select_render_backend, RenderBackend};
 use crate::render_cache::SessionCacheSnapshot;
 use crate::render_cpu::render_view_to_png;
+use crate::render_gpu::render_view_to_png_gpu;
 use crate::request_validation::{
     expect_body_object, invalid_request_error, parse_optional_non_empty_string,
     parse_optional_patch_list, parse_optional_typed, parse_required_positive_u64,
@@ -308,10 +310,11 @@ pub async fn render_image(
         "render backend selection"
     );
 
-    let (render_result, cache_snapshot, cache_budgets) = {
+    let (render_result, cache_snapshot, cache_budgets, backend_warnings) = {
         let mut cache_state = cache_registry.write().await;
         let cache_budgets =
             cache_state.resolve_effective_budgets(effective_view.performance.as_ref());
+        let mut backend_warnings = backend_selection.warnings;
         let render_result = match backend_selection.backend {
             RenderBackend::Cpu => render_view_to_png(
                 &dataset_summary,
@@ -321,17 +324,50 @@ pub async fn render_image(
                 &cache_session_id,
                 cache_budgets,
             )?,
-            RenderBackend::Gpu => render_view_to_png(
+            RenderBackend::Gpu => match render_view_to_png_gpu(
                 &dataset_summary,
                 &effective_view,
                 &request.output,
                 &mut cache_state,
                 &cache_session_id,
                 cache_budgets,
-            )?,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(
+                        error_code = %error.envelope.code,
+                        error_message = %error.envelope.message,
+                        "gpu render failed; falling back to cpu renderer"
+                    );
+                    backend_warnings.push(ApiWarning {
+                        code: "gpu_render_failed_fallback_cpu".to_owned(),
+                        message:
+                            "GPU rendering failed at runtime; CPU renderer was used for this request."
+                                .to_owned(),
+                        details: Some(json!({
+                            "error_code": error.envelope.code,
+                            "error_message": error.envelope.message,
+                            "error_details": error.envelope.details,
+                        })),
+                    });
+                    render_view_to_png(
+                        &dataset_summary,
+                        &effective_view,
+                        &request.output,
+                        &mut cache_state,
+                        &cache_session_id,
+                        cache_budgets,
+                    )?
+                }
+            },
         };
         let cache_snapshot = cache_state.session_snapshot(&cache_session_id);
-        (render_result, cache_snapshot, cache_budgets)
+        (
+            render_result,
+            cache_snapshot,
+            cache_budgets,
+            backend_warnings,
+        )
     };
 
     log_cache_snapshot(&cache_session_id, cache_snapshot.as_ref(), cache_budgets);
@@ -344,7 +380,7 @@ pub async fn render_image(
 
     let mut warnings = selector_warnings;
     warnings.extend(view_warnings);
-    warnings.extend(backend_selection.warnings);
+    warnings.extend(backend_warnings);
     warnings.extend(render_result.warnings);
 
     let artifact = match request.output.delivery {

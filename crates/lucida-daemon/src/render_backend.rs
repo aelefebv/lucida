@@ -7,8 +7,6 @@ use crate::dto::view_state::PerformanceHints;
 
 pub const ENV_RENDER_BACKEND: &str = "LUCIDA_RENDER_BACKEND";
 
-const GPU_RENDERER_IMPLEMENTED: bool = false;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderBackend {
     Cpu,
@@ -88,31 +86,19 @@ fn choose_gpu_or_cpu_fallback(
     gpu_hardware_available: bool,
     fallback_reason: Option<&str>,
 ) -> (RenderBackend, Option<ApiWarning>) {
-    if gpu_hardware_available && GPU_RENDERER_IMPLEMENTED {
+    if gpu_hardware_available {
         return (RenderBackend::Gpu, None);
     }
 
-    let warning = fallback_reason.map(|reason| {
-        if !gpu_hardware_available {
-            ApiWarning {
-                code: "gpu_unavailable_fallback_cpu".to_owned(),
-                message: "GPU rendering was requested but no GPU adapter is available; CPU renderer was used.".to_owned(),
-                details: Some(json!({
-                    "requested_by": reason,
-                    "gpu_hardware_available": false,
-                })),
-            }
-        } else {
-            ApiWarning {
-                code: "gpu_renderer_unavailable_fallback_cpu".to_owned(),
-                message: "GPU rendering was requested but GPU rendering is not implemented for this slice; CPU renderer was used.".to_owned(),
-                details: Some(json!({
-                    "requested_by": reason,
-                    "gpu_hardware_available": true,
-                    "gpu_renderer_implemented": GPU_RENDERER_IMPLEMENTED,
-                })),
-            }
-        }
+    let warning = fallback_reason.map(|reason| ApiWarning {
+        code: "gpu_unavailable_fallback_cpu".to_owned(),
+        message:
+            "GPU rendering was requested but no GPU adapter is available; CPU renderer was used."
+                .to_owned(),
+        details: Some(json!({
+            "requested_by": reason,
+            "gpu_hardware_available": false,
+        })),
     });
     (RenderBackend::Cpu, warning)
 }
@@ -186,13 +172,20 @@ mod tests {
     }
 
     #[test]
-    fn env_override_gpu_falls_back_when_renderer_missing() {
+    fn env_override_gpu_selects_gpu_when_hardware_available() {
         let selection = select_render_backend_with_override(Some("gpu"), None, true);
+        assert_eq!(selection.backend, RenderBackend::Gpu);
+        assert!(selection.warnings.is_empty());
+    }
+
+    #[test]
+    fn env_override_gpu_falls_back_when_hardware_unavailable() {
+        let selection = select_render_backend_with_override(Some("gpu"), None, false);
         assert_eq!(selection.backend, RenderBackend::Cpu);
         assert!(selection
             .warnings
             .iter()
-            .any(|warning| warning.code == "gpu_renderer_unavailable_fallback_cpu"));
+            .any(|warning| warning.code == "gpu_unavailable_fallback_cpu"));
     }
 
     #[test]

@@ -40,3 +40,12 @@ Status note: `uv run pytest -q` currently has 3 pre-existing failures in `tests/
 - [x] Commit checkpoint: Python client/models + test updates.
 - [x] Push branch and open draft PR with detailed body.
 - [x] Merge PR into `main` once checks pass.
+
+## Phase 6: Actual GPU Renderer Activation
+
+- [x] Add a real `RenderBackend::Gpu` execution path that runs GPU work via `wgpu`.
+- [x] Refactor CPU renderer to expose reusable RGBA frame output for dual CPU/GPU pipeline composition.
+- [x] Populate non-zero GPU timing (`timing_ms.gpu_upload`) for successful GPU path requests.
+- [x] Add runtime GPU failure fallback (`gpu_render_failed_fallback_cpu`) to preserve request reliability.
+- [x] Update integration tests to validate GPU-route behavior in both GPU-available and GPU-unavailable environments.
+- [x] Validate CLI smoke run confirms active GPU path without fallback warning on GPU-capable hosts.
