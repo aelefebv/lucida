@@ -600,6 +600,26 @@ async fn render_image_explicit_gpu_preference_routes_to_gpu_or_emits_fallback_wa
         .iter()
         .filter_map(|item| item.get("code").and_then(Value::as_str))
         .collect();
+    let stages = payload["meta"]["timing_ms"]["stages"]
+        .as_object()
+        .expect("timing stages object");
+    for key in [
+        "chunk_fetch",
+        "chunk_decode",
+        "sample",
+        "compose",
+        "encode",
+        "gpu_compute",
+        "gpu_readback",
+    ] {
+        assert!(
+            stages
+                .get(key)
+                .and_then(Value::as_f64)
+                .is_some_and(|value| value >= 0.0),
+            "missing or invalid stage timing: {key}"
+        );
+    }
     if gpu_available {
         assert!(!warning_codes.contains(&"gpu_unavailable_fallback_cpu"));
         assert!(!warning_codes.contains(&"gpu_render_failed_fallback_cpu"));

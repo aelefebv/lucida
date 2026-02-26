@@ -28,6 +28,7 @@ from .render import (
     RenderMeta,
     RenderOutputSpec,
     RenderTimingMs,
+    RenderTimingStagesMs,
 )
 from .usage import (
     UsageEvent,
@@ -63,6 +64,7 @@ __all__ = [
     "RenderImageArtifact",
     "RenderMeta",
     "RenderTimingMs",
+    "RenderTimingStagesMs",
     "UsageEvent",
     "UsageEventsResponse",
     "UsageRunSummary",

@@ -59,12 +59,23 @@ class RenderImageArtifact(ModelBase):
         return self
 
 
+class RenderTimingStagesMs(ModelBase):
+    chunk_fetch: float = Field(default=0, ge=0)
+    chunk_decode: float = Field(default=0, ge=0)
+    sample: float = Field(default=0, ge=0)
+    compose: float = Field(default=0, ge=0)
+    encode: float = Field(default=0, ge=0)
+    gpu_compute: float = Field(default=0, ge=0)
+    gpu_readback: float = Field(default=0, ge=0)
+
+
 class RenderTimingMs(ModelBase):
     total: float = Field(ge=0)
     io: float = Field(default=0, ge=0)
     decode: float = Field(default=0, ge=0)
     gpu_upload: float = Field(default=0, ge=0)
     render: float = Field(default=0, ge=0)
+    stages: RenderTimingStagesMs | None = None
 
 
 class RenderMeta(ModelBase):
