@@ -4,11 +4,11 @@ This plan migrates 2D render sampling/compositing from CPU to GPU while preservi
 
 ## Success Criteria
 
-- [ ] GPU path executes sampling and compositing (not post-copy only).
+- [x] GPU path executes sampling and compositing (not post-copy only).
 - [ ] CPU fallback remains correct and automatic on GPU failure.
 - [ ] Default `auto` backend shows lower end-to-end render latency on representative scenes.
 - [ ] CPU/GPU output parity passes for interpolation, slab modes, channel modes, and layer stacking.
-- [ ] Cache budgets are enforced for both CPU and GPU resources.
+- [x] Cache budgets are enforced for both CPU and GPU resources.
 
 ## Cross-Cutting Guardrails
 
@@ -53,14 +53,14 @@ Goal: Replace copy-only WGSL with compute kernels that perform sampling and comp
 
 Checklist:
 
-- [ ] Introduce persistent GPU renderer runtime (pipelines, bind group layouts, reusable buffers).
-- [ ] Implement WGSL sampling kernels for nearest and linear interpolation.
-- [ ] Implement WGSL compose kernels for channel normalization/gamma/color + alpha compositing.
-- [ ] Keep runtime fallback to CPU on GPU errors.
+- [x] Introduce persistent GPU renderer runtime (pipelines, bind group layouts, reusable buffers).
+- [x] Implement WGSL sampling kernels for nearest and linear interpolation.
+- [x] Implement WGSL compose kernels for channel normalization/gamma/color + alpha compositing.
+- [x] Keep runtime fallback to CPU on GPU errors.
 
 Exit criteria:
 
-- [ ] GPU backend can render end-to-end without using CPU sampling/compositing.
+- [x] GPU backend can render end-to-end without using CPU sampling/compositing.
 
 ### Slice 4: GPU Resource Caching and Budget Enforcement
 
@@ -68,13 +68,13 @@ Goal: Use cache budgets for uploaded GPU resources and reduce per-frame upload o
 
 Checklist:
 
-- [ ] Extend GPU cache entries to hold reusable uploaded resources keyed by chunk/layer characteristics.
-- [ ] Enforce `max_gpu_cache_bytes` with measurable evictions.
-- [ ] Include cache behavior in render telemetry/debug logs.
+- [x] Extend GPU cache entries to hold reusable uploaded resources keyed by chunk/layer characteristics.
+- [x] Enforce `max_gpu_cache_bytes` with measurable evictions.
+- [x] Include cache behavior in render telemetry/debug logs.
 
 Exit criteria:
 
-- [ ] Repeated renders show reduced GPU upload time in timing stages.
+- [x] Repeated renders show reduced GPU upload time in timing stages.
 
 ### Slice 5: GPU/CPU Parity Test Matrix
 

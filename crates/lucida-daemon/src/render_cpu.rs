@@ -81,12 +81,12 @@ struct ChunkIoDecodeTiming {
 }
 
 #[derive(Debug, Clone)]
-struct PlaneData {
-    width: usize,
-    height: usize,
-    origin_u: i64,
-    origin_v: i64,
-    data: Vec<f32>,
+pub(crate) struct PlaneData {
+    pub width: usize,
+    pub height: usize,
+    pub origin_u: i64,
+    pub origin_v: i64,
+    pub data: Vec<f32>,
 }
 
 #[cfg(test)]
@@ -144,19 +144,32 @@ struct SinglePlaneRgbaResult {
 }
 
 #[derive(Debug, Clone)]
-struct PreparedLayerSamplingInput {
-    layer: LayerState,
-    channel_stack: Vec<PlaneData>,
-    interpolation: InterpolationMode,
-    f_u: f64,
-    f_v: f64,
+pub(crate) struct PreparedLayerSamplingInput {
+    pub layer: LayerState,
+    pub channel_stack: Vec<PlaneData>,
+    pub interpolation: InterpolationMode,
+    pub f_u: f64,
+    pub f_v: f64,
 }
 
 #[derive(Debug, Clone)]
-struct PreparedSinglePlaneLayerBatch {
-    layers: Vec<PreparedLayerSamplingInput>,
-    primary_level_used: Option<u64>,
-    warnings: Vec<ApiWarning>,
+pub(crate) struct PreparedSinglePlaneLayerBatch {
+    pub layers: Vec<PreparedLayerSamplingInput>,
+    pub primary_level_used: Option<u64>,
+    pub warnings: Vec<ApiWarning>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedSinglePlaneForExternalRenderer {
+    pub background: [f32; 4],
+    pub center_world: (f64, f64),
+    pub zoom: f64,
+    pub pixel_ratio: f64,
+    pub layers: Vec<PreparedLayerSamplingInput>,
+    pub primary_level_used: u64,
+    pub warnings: Vec<ApiWarning>,
+    pub chunk_fetch_ms: f64,
+    pub chunk_decode_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -505,6 +518,90 @@ fn render_single_plane_to_rgba(
         rgba_bytes: rgba_u8,
         pyramid_level_used: prepared_batch.primary_level_used.unwrap_or(0),
         warnings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_single_plane_for_external_renderer(
+    dataset_summary: &DatasetSummary,
+    view_state: &ViewState,
+    view_2d: &View2D,
+    output_width: usize,
+    output_height: usize,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+) -> Result<PreparedSinglePlaneForExternalRenderer, ApiError> {
+    let role_to_axis = roles_to_axis(dataset_summary);
+    let (u_role, v_role, orth_role) = plane_roles(&view_2d.plane);
+    let missing_roles: Vec<&str> = [u_role, v_role, orth_role]
+        .into_iter()
+        .filter(|role| !role_to_axis.contains_key(*role))
+        .collect();
+    if !missing_roles.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_plane",
+            "Requested plane is unsupported for dataset axes.",
+            Some(json!({
+                "plane": plane_name(&view_2d.plane),
+                "missing_roles": missing_roles,
+            })),
+        ));
+    }
+
+    let u_axis = role_to_axis.get(u_role).expect("u axis present");
+    let v_axis = role_to_axis.get(v_role).expect("v axis present");
+    let orth_axis = role_to_axis.get(orth_role).expect("orth axis present");
+
+    let selectors_by_axis: HashMap<String, &AxisSelector> = view_state
+        .selectors
+        .iter()
+        .map(|selector| (selector.axis.clone(), selector))
+        .collect();
+
+    let slice_index = view_2d
+        .slice
+        .as_ref()
+        .and_then(|slice| slice.index)
+        .unwrap_or(0);
+    let mut stage_timing = CpuStageTiming::default();
+    let dataset_root = resolve_dataset_root(&dataset_summary.uri).map_err(|reason| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "render_failed",
+            "Failed to open dataset for rendering.",
+            Some(json!({
+                "dataset_id": dataset_summary.dataset_id,
+                "reason": reason,
+            })),
+        )
+    })?;
+    let prepared_batch = prepare_single_plane_layer_batch(
+        dataset_summary,
+        view_state,
+        view_2d,
+        &dataset_root,
+        output_width,
+        output_height,
+        u_axis,
+        v_axis,
+        orth_axis,
+        slice_index,
+        &selectors_by_axis,
+        cache_registry,
+        cache_session_id,
+        &mut stage_timing,
+    )?;
+    Ok(PreparedSinglePlaneForExternalRenderer {
+        background: resolve_background_rgba(view_state),
+        center_world: view_2d.camera.center_world,
+        zoom: view_2d.camera.zoom,
+        pixel_ratio: view_state.viewport.pixel_ratio,
+        layers: prepared_batch.layers,
+        primary_level_used: prepared_batch.primary_level_used.unwrap_or(0),
+        warnings: prepared_batch.warnings,
+        chunk_fetch_ms: stage_timing.chunk_fetch_ms,
+        chunk_decode_ms: stage_timing.chunk_decode_ms,
     })
 }
 
