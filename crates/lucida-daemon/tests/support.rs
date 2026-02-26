@@ -239,6 +239,107 @@ pub fn create_render_omezarr(path: &Path) {
     write_u16_chunks(&path.join("1"), &shape_level1, &chunk_level1, &data_level1);
 }
 
+pub fn create_large_render_omezarr(path: &Path) {
+    fs::create_dir_all(path).expect("create dataset root");
+    fs::create_dir_all(path.join("0")).expect("create level 0");
+    fs::create_dir_all(path.join("1")).expect("create level 1");
+
+    let shape_level0 = vec![1_usize, 3, 1, 1024, 1024];
+    let shape_level1 = vec![1_usize, 3, 1, 512, 512];
+    let chunk_level0 = vec![1_usize, 1, 1, 256, 256];
+    let chunk_level1 = vec![1_usize, 1, 1, 256, 256];
+
+    let strides_level0 = c_order_strides(&shape_level0);
+    let strides_level1 = c_order_strides(&shape_level1);
+    let mut data_level0 = vec![0_u16; shape_level0.iter().product()];
+    for c in 0..shape_level0[1] {
+        for y in 0..shape_level0[3] {
+            for x in 0..shape_level0[4] {
+                let linear = linear_index(&[0, c, 0, y, x], &strides_level0);
+                data_level0[linear] = ((c * 12000) + ((y * shape_level0[4] + x) % 10000)) as u16;
+            }
+        }
+    }
+
+    let mut data_level1 = vec![0_u16; shape_level1.iter().product()];
+    for c in 0..shape_level1[1] {
+        for y in 0..shape_level1[3] {
+            for x in 0..shape_level1[4] {
+                let src_linear = linear_index(&[0, c, 0, y * 2, x * 2], &strides_level0);
+                let dst_linear = linear_index(&[0, c, 0, y, x], &strides_level1);
+                data_level1[dst_linear] = data_level0[src_linear];
+            }
+        }
+    }
+
+    let root_metadata = json!({
+        "zarr_format": 3,
+        "node_type": "group",
+        "attributes": {
+            "multiscales": [
+                {
+                    "name": "primary",
+                    "axes": [
+                        {"name": "t", "type": "t"},
+                        {"name": "c", "type": "c"},
+                        {"name": "z", "type": "z"},
+                        {"name": "y", "type": "y"},
+                        {"name": "x", "type": "x"},
+                    ],
+                    "datasets": [
+                        {"path": "0", "coordinateTransformations": [{"type": "scale", "scale": [1, 1, 1, 1, 1]}]},
+                        {"path": "1", "coordinateTransformations": [{"type": "scale", "scale": [1, 1, 1, 2, 2]}]},
+                    ],
+                }
+            ],
+            "omero": {
+                "channels": [
+                    {"index": 0, "label": "c0", "color": "ffffff", "window": {"start": 0, "end": 10000}},
+                    {"index": 1, "label": "c1", "color": "ff0000", "window": {"start": 0, "end": 22000}},
+                    {"index": 2, "label": "c2", "color": "00ff00", "window": {"start": 0, "end": 34000}},
+                ]
+            }
+        }
+    });
+    let level0_metadata = json!({
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": shape_level0,
+        "data_type": "uint16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": chunk_level0}},
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+        "fill_value": 0,
+        "codecs": [
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "zstd", "configuration": {"level": 0, "checksum": false}},
+        ],
+        "attributes": {},
+        "storage_transformers": [],
+    });
+    let level1_metadata = json!({
+        "zarr_format": 3,
+        "node_type": "array",
+        "shape": shape_level1,
+        "data_type": "uint16",
+        "chunk_grid": {"name": "regular", "configuration": {"chunk_shape": chunk_level1}},
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "/"}},
+        "fill_value": 0,
+        "codecs": [
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "zstd", "configuration": {"level": 0, "checksum": false}},
+        ],
+        "attributes": {},
+        "storage_transformers": [],
+    });
+
+    write_json(path.join("zarr.json"), &root_metadata);
+    write_json(path.join("0").join("zarr.json"), &level0_metadata);
+    write_json(path.join("1").join("zarr.json"), &level1_metadata);
+
+    write_u16_chunks(&path.join("0"), &shape_level0, &chunk_level0, &data_level0);
+    write_u16_chunks(&path.join("1"), &shape_level1, &chunk_level1, &data_level1);
+}
+
 fn write_json(path: impl AsRef<Path>, payload: &Value) {
     let path = path.as_ref();
     let serialized = serde_json::to_string_pretty(payload).expect("serialize json");

@@ -11,7 +11,7 @@ use http_body_util::BodyExt;
 use image::{ImageReader, RgbaImage};
 use lucida_daemon::app;
 use serde_json::{json, Value};
-use support::create_render_omezarr;
+use support::{create_large_render_omezarr, create_render_omezarr};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -737,6 +737,108 @@ async fn render_image_explicit_gpu_preference_routes_to_gpu_or_emits_fallback_wa
         assert!(warning_codes.contains(&"gpu_unavailable_fallback_cpu"));
         assert_eq!(backend_used, "cpu");
     }
+}
+
+#[tokio::test]
+async fn render_image_gpu_layer_cache_reduces_repeated_upload_time() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-gpu-cache-upload");
+    create_large_render_omezarr(&dataset_path);
+    let view_id = open_view(&router, &dataset_path).await;
+    let capabilities = read_json_body(request_get(&router, "/capabilities", None).await).await;
+    let gpu_available = capabilities["gpu"]["available"]
+        .as_bool()
+        .expect("gpu.available bool");
+    if !gpu_available {
+        return;
+    }
+
+    let update = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/performance",
+                    "value": {"prefer_gpu": true, "lod_mode": "fixed", "fixed_level": 0},
+                },
+                {
+                    "op": "replace",
+                    "path": "/view_2d/orthogonal_views_enabled",
+                    "value": false,
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let first = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "raw_rgba",
+                "delivery": "inline_base64",
+                "width_px": 96,
+                "height_px": 72,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_payload = read_json_body(first).await;
+    assert_eq!(first_payload["meta"]["backend_used"], "gpu");
+    let first_upload = first_payload["meta"]["timing_ms"]["gpu_upload"]
+        .as_f64()
+        .expect("first gpu_upload");
+
+    let mut cached_uploads: Vec<f64> = Vec::new();
+    for _ in 0..4 {
+        let cached = request_json(
+            &router,
+            "POST",
+            "/render/image",
+            json!({
+                "schema_version": 1,
+                "view_id": view_id,
+                "output": {
+                    "format": "raw_rgba",
+                    "delivery": "inline_base64",
+                    "width_px": 96,
+                    "height_px": 72,
+                },
+            }),
+        )
+        .await;
+        assert_eq!(cached.status(), StatusCode::OK);
+        let cached_payload = read_json_body(cached).await;
+        assert_eq!(cached_payload["meta"]["backend_used"], "gpu");
+        cached_uploads.push(
+            cached_payload["meta"]["timing_ms"]["gpu_upload"]
+                .as_f64()
+                .expect("cached gpu_upload"),
+        );
+    }
+    let cached_average = cached_uploads.iter().sum::<f64>() / (cached_uploads.len() as f64);
+    let cached_min = cached_uploads.iter().copied().fold(f64::INFINITY, f64::min);
+
+    assert!(first_upload > 0.0);
+    assert!(
+        cached_average < first_upload,
+        "expected average cached upload below first upload: first={first_upload:.3} cached_avg={cached_average:.3} cached={cached_uploads:?}"
+    );
+    assert!(
+        cached_min <= (first_upload * 0.95),
+        "expected cached minimum upload reduction from cache: first={first_upload:.3} cached_min={cached_min:.3} cached={cached_uploads:?}"
+    );
 }
 
 #[tokio::test]
