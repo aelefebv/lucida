@@ -7,7 +7,7 @@ This plan migrates 2D render sampling/compositing from CPU to GPU while preservi
 - [x] GPU path executes sampling and compositing (not post-copy only).
 - [ ] CPU fallback remains correct and automatic on GPU failure.
 - [ ] Default `auto` backend shows lower end-to-end render latency on representative scenes.
-- [ ] CPU/GPU output parity passes for interpolation, slab modes, channel modes, and layer stacking.
+- [x] CPU/GPU output parity passes for interpolation, slab modes, channel modes, and layer stacking.
 - [x] Cache budgets are enforced for both CPU and GPU resources.
 
 ## Cross-Cutting Guardrails
@@ -82,14 +82,14 @@ Goal: Protect correctness while enabling performance improvements.
 
 Checklist:
 
-- [ ] Add parity tests for nearest vs linear interpolation.
-- [ ] Add parity tests for slab modes (`single`, `mip`, `mean`).
-- [ ] Add parity tests for channel modes (`single`, `rgb`, `composite`) and gamma/contrast.
-- [ ] Add parity tests for multi-layer alpha compositing.
+- [x] Add parity tests for nearest vs linear interpolation.
+- [x] Add parity tests for slab modes (`single`, `mip`, `mean`).
+- [x] Add parity tests for channel modes (`single`, `rgb`, `composite`) and gamma/contrast.
+- [x] Add parity tests for multi-layer alpha compositing.
 
 Exit criteria:
 
-- [ ] Parity suite passes in both GPU-enabled and software-only builds.
+- [x] Parity suite passes in both GPU-enabled and software-only builds.
 
 ### Slice 6: Performance Baseline + Regression Gates
 
