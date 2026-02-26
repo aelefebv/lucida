@@ -4,3 +4,4 @@
 - Add image pack showing different contrast limits so it can pick a nice one
 - Add max, sum, mean, etc, intensity projections
 - Some text spills out of bounds for live view
+- Have the rendering be the shape of the 3 orthog view.
