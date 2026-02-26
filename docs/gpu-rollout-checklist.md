@@ -22,20 +22,21 @@
 
 ## Phase 3: Client/Model Surface
 
-- [ ] Add typed capabilities models in Python and Rust DTOs.
-- [ ] Add `LucidaClient.get_capabilities()` method.
-- [ ] Keep strict schema behavior (`extra="forbid"` / `deny_unknown_fields`) intact.
+- [x] Add typed capabilities models in Python and Rust DTOs.
+- [x] Add `LucidaClient.get_capabilities()` method.
+- [x] Keep strict schema behavior (`extra="forbid"` / `deny_unknown_fields`) intact.
 
 ## Phase 4: Validation
 
-- [ ] Add backend selection tests (`prefer_gpu`, env override, fallback warning path).
-- [ ] Run Rust test suite for daemon crate.
-- [ ] Run Python test suite.
+- [x] Add backend selection tests (`prefer_gpu`, env override, fallback warning path).
+- [x] Run Rust test suite for daemon crate.
+- [x] Run Python test suite.
+Status note: `uv run pytest -q` currently has 3 pre-existing failures in `tests/python/skills/test_skill_tooling.py` because `skills/lucida-orchestrator` is absent in this repo checkout.
 
 ## Phase 5: Delivery
 
-- [ ] Commit checkpoint: checklist + backend selector plumbing.
-- [ ] Commit checkpoint: capabilities endpoint + runtime GPU detection.
-- [ ] Commit checkpoint: Python client/models + test updates.
+- [x] Commit checkpoint: checklist + backend selector plumbing.
+- [x] Commit checkpoint: capabilities endpoint + runtime GPU detection.
+- [x] Commit checkpoint: Python client/models + test updates.
 - [ ] Push branch and open draft PR with detailed body.
 - [ ] Merge PR into `main` once checks pass.

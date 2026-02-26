@@ -124,6 +124,61 @@ class SessionCreateResponse(ModelBase):
     created_at: datetime
 
 
+class CapabilitiesGpu(ModelBase):
+    """GPU capability details reported by the daemon.
+
+    Attributes
+    ----------
+    available:
+        Whether a GPU adapter is available to the daemon runtime.
+    backend:
+        Backend name when available.
+    adapter_name:
+        Adapter name when available.
+    limits:
+        Optional backend limit metadata.
+    """
+
+    available: bool
+    backend: str | None = None
+    adapter_name: str | None = None
+    limits: dict[str, Any] | None = None
+
+
+class CapabilitiesPreset(ModelBase):
+    """One named render preset advertised by daemon capabilities."""
+
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
+class CapabilitiesResponse(ModelBase):
+    """Daemon capability summary.
+
+    Attributes
+    ----------
+    schema_version:
+        API schema version.
+    api_version:
+        Daemon API version string.
+    render_modes:
+        Supported render modes.
+    output_formats:
+        Supported output formats.
+    gpu:
+        Runtime GPU capability payload.
+    presets:
+        Supported named render presets.
+    """
+
+    schema_version: Literal[1] = 1
+    api_version: str = Field(min_length=1)
+    render_modes: list[str] = Field(min_length=1)
+    output_formats: list[str] = Field(min_length=1)
+    gpu: CapabilitiesGpu
+    presets: list[CapabilitiesPreset]
+
+
 class ViewCreateRequest(ModelBase):
     """Request body for creating a view from a dataset.
 

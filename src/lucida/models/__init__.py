@@ -3,6 +3,9 @@
 from .api import (
     ApiError,
     ApiWarning,
+    CapabilitiesGpu,
+    CapabilitiesPreset,
+    CapabilitiesResponse,
     DatasetOpenRequest,
     DatasetOpenResponse,
     SessionCreateRequest,
@@ -38,6 +41,9 @@ from .view_state import AxisSelector, ViewState
 __all__ = [
     "ApiError",
     "ApiWarning",
+    "CapabilitiesGpu",
+    "CapabilitiesPreset",
+    "CapabilitiesResponse",
     "DatasetOpenRequest",
     "DatasetOpenResponse",
     "SessionCreateRequest",

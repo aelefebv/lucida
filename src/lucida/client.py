@@ -9,6 +9,7 @@ import httpx
 
 from lucida.models.api import (
     ApiError,
+    CapabilitiesResponse,
     DatasetOpenRequest,
     DatasetOpenResponse,
     SessionCreateRequest,
@@ -195,6 +196,11 @@ class LucidaClient:
             ),
         )
         return SessionCreateResponse.model_validate(payload)
+
+    def get_capabilities(self) -> CapabilitiesResponse:
+        """Fetch runtime daemon capabilities."""
+        payload = self._get("/capabilities")
+        return CapabilitiesResponse.model_validate(payload)
 
     def create_view(
         self,
