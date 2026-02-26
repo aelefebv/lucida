@@ -3,3 +3,4 @@
 - Add colormap changing
 - Add image pack showing different contrast limits so it can pick a nice one
 - Add max, sum, mean, etc, intensity projections
+- Some text spills out of bounds for live view
