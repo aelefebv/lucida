@@ -231,6 +231,59 @@ async fn render_image_unsupported_codec_fails() {
 }
 
 #[tokio::test]
+async fn render_image_decodes_only_required_chunks() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-required-chunks");
+    create_render_omezarr(&dataset_path);
+
+    let unused_chunk = dataset_path.join("0/c/0/0/1/1/1");
+    fs::write(&unused_chunk, b"not-a-valid-zstd-payload").expect("corrupt off-viewport chunk");
+
+    let view_id = open_view(&router, &dataset_path).await;
+    let update = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/performance",
+                    "value": {"lod_mode": "fixed", "fixed_level": 0},
+                },
+                {
+                    "op": "replace",
+                    "path": "/view_2d/camera",
+                    "value": {"center_world": [0.0, 0.0], "zoom": 64.0, "rotation_deg": 0.0},
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let rendered = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "png",
+                "delivery": "inline_base64",
+                "width_px": 64,
+                "height_px": 48,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(rendered.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn render_image_session_dataset_and_output_path_guards() {
     let router = app();
     let dataset_path = unique_dataset_path("render-scoping");

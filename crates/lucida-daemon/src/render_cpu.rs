@@ -46,9 +46,12 @@ pub struct RenderCpuResult {
 struct PlaneData {
     width: usize,
     height: usize,
+    origin_u: i64,
+    origin_v: i64,
     data: Vec<f32>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 struct LoadedArray {
     data: Vec<f32>,
@@ -61,6 +64,24 @@ struct ArrayStorageMetadata {
     dtype: String,
     separator: String,
     codecs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SampleWindow {
+    u_start: usize,
+    v_start: usize,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Debug, Clone)]
+struct LevelChunkSource {
+    level_path: PathBuf,
+    shape: Vec<usize>,
+    storage_meta: ArrayStorageMetadata,
+    bytes_per_value: usize,
+    chunk_strides: Vec<usize>,
+    cache_scope: String,
 }
 
 pub fn render_view_to_png(
@@ -190,11 +211,9 @@ pub fn render_view_to_png(
         let (level, level_warnings) = choose_level(multiscale, view_state, u_axis, v_axis);
         warnings.extend(level_warnings);
 
-        let loaded_array = load_level_array(
+        let chunk_source = open_level_chunk_source(
             &dataset_root,
             level,
-            cache_registry,
-            cache_session_id,
             &format!(
                 "{}|{}|{}",
                 dataset_summary.dataset_id, multiscale.name, level.path
@@ -204,7 +223,7 @@ pub fn render_view_to_png(
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "render_failed",
-                "Failed to open multiscale level array.",
+                "Failed to open multiscale level source.",
                 Some(json!({
                     "multiscale_name": multiscale.name,
                     "path": level.path,
@@ -221,8 +240,64 @@ pub fn render_view_to_png(
                 thickness_vox: 1,
                 mode: SlabMode::Single,
             });
+        let axis_index: HashMap<&str, usize> = multiscale
+            .axes_order
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (name.as_str(), index))
+            .collect();
+        let level_factors = level_factors(multiscale, level);
+        let u_idx = *axis_index.get(u_axis.as_str()).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "render_failed",
+                "Display axes are missing from multiscale axes order.",
+                Some(json!({
+                    "multiscale_name": multiscale.name,
+                    "axes_order": multiscale.axes_order,
+                    "u_axis": u_axis,
+                    "v_axis": v_axis,
+                })),
+            )
+        })?;
+        let v_idx = *axis_index.get(v_axis.as_str()).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "render_failed",
+                "Display axes are missing from multiscale axes order.",
+                Some(json!({
+                    "multiscale_name": multiscale.name,
+                    "axes_order": multiscale.axes_order,
+                    "u_axis": u_axis,
+                    "v_axis": v_axis,
+                })),
+            )
+        })?;
+        let f_u = level_factors[u_idx];
+        let f_v = level_factors[v_idx];
+        let output_width = usize::try_from(output.width_px).unwrap_or(0);
+        let output_height = usize::try_from(output.height_px).unwrap_or(0);
+        let interpolation = layer
+            .image
+            .as_ref()
+            .map(|settings| settings.interpolation.clone())
+            .unwrap_or(InterpolationMode::Linear);
+        let sample_window = compute_sample_window(
+            view_2d.camera.center_world.0,
+            view_2d.camera.center_world.1,
+            view_2d.camera.zoom,
+            view_state.viewport.pixel_ratio,
+            f_u,
+            f_v,
+            output_width,
+            output_height,
+            usize::try_from(level.shape[u_idx]).unwrap_or(0),
+            usize::try_from(level.shape[v_idx]).unwrap_or(0),
+        );
         let (channel_stack, layer_warnings) = extract_channel_stack(
-            &loaded_array,
+            &chunk_source,
+            cache_registry,
+            cache_session_id,
             dataset_summary,
             multiscale,
             level,
@@ -232,42 +307,9 @@ pub fn render_view_to_png(
             &selectors_by_axis,
             slice_index,
             &slab,
+            sample_window,
         )?;
         warnings.extend(layer_warnings);
-
-        let axis_index: HashMap<&str, usize> = multiscale
-            .axes_order
-            .iter()
-            .enumerate()
-            .map(|(index, name)| (name.as_str(), index))
-            .collect();
-        let level_factors = level_factors(multiscale, level);
-        let f_u = level_factors[*axis_index.get(u_axis.as_str()).ok_or_else(|| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "render_failed",
-                "Display axes are missing from multiscale axes order.",
-                Some(json!({
-                    "multiscale_name": multiscale.name,
-                    "axes_order": multiscale.axes_order,
-                    "u_axis": u_axis,
-                    "v_axis": v_axis,
-                })),
-            )
-        })?];
-        let f_v = level_factors[*axis_index.get(v_axis.as_str()).ok_or_else(|| {
-            ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "render_failed",
-                "Display axes are missing from multiscale axes order.",
-                Some(json!({
-                    "multiscale_name": multiscale.name,
-                    "axes_order": multiscale.axes_order,
-                    "u_axis": u_axis,
-                    "v_axis": v_axis,
-                })),
-            )
-        })?];
 
         let (sampled_stack, sample_alpha) = sample_channel_stack(
             &channel_stack,
@@ -277,13 +319,9 @@ pub fn render_view_to_png(
             view_state.viewport.pixel_ratio,
             f_u,
             f_v,
-            usize::try_from(output.width_px).unwrap_or(0),
-            usize::try_from(output.height_px).unwrap_or(0),
-            layer
-                .image
-                .as_ref()
-                .map(|settings| settings.interpolation.clone())
-                .unwrap_or(InterpolationMode::Linear),
+            output_width,
+            output_height,
+            interpolation,
         );
 
         let (layer_rgb, layer_alpha) = compose_layer(&sampled_stack, &sample_alpha, layer);
@@ -531,6 +569,286 @@ fn level_factors(multiscale: &MultiscaleImageDef, level: &MultiscaleLevelDef) ->
 
 #[allow(clippy::too_many_arguments)]
 fn extract_channel_stack(
+    source: &LevelChunkSource,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+    dataset_summary: &DatasetSummary,
+    multiscale: &MultiscaleImageDef,
+    level: &MultiscaleLevelDef,
+    u_axis: &str,
+    v_axis: &str,
+    orth_axis: &str,
+    selectors_by_axis: &HashMap<String, &AxisSelector>,
+    slice_index: i64,
+    slab: &SlabSettings,
+    sample_window: SampleWindow,
+) -> Result<(Vec<PlaneData>, Vec<ApiWarning>), ApiError> {
+    let mut warnings: Vec<ApiWarning> = Vec::new();
+    let axis_index: HashMap<&str, usize> = multiscale
+        .axes_order
+        .iter()
+        .enumerate()
+        .map(|(index, axis_name)| (axis_name.as_str(), index))
+        .collect();
+    let axes_by_name: HashMap<&str, u64> = dataset_summary
+        .axes
+        .iter()
+        .map(|axis| (axis.name.as_str(), axis.size))
+        .collect();
+    let c_axis_name = dataset_summary
+        .axes
+        .iter()
+        .find(|axis| matches!(axis.role, AxisRole::C))
+        .map(|axis| axis.name.clone());
+
+    let orth_size = *axes_by_name.get(orth_axis).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_failed",
+            "Orthogonal axis is missing from dataset summary.",
+            Some(json!({ "axis": orth_axis })),
+        )
+    })?;
+    let orth_selector = selectors_by_axis.get(orth_axis).copied();
+    let (orth_indices_base, explicit_span, orth_warnings) =
+        orthogonal_indices(orth_axis, orth_size, orth_selector, slice_index, slab);
+    warnings.extend(orth_warnings);
+
+    let orth_idx = *axis_index.get(orth_axis).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_failed",
+            "Display axes are missing from multiscale axes order.",
+            Some(json!({
+                "multiscale_name": multiscale.name,
+                "axes_order": multiscale.axes_order,
+                "u_axis": u_axis,
+                "v_axis": v_axis,
+            })),
+        )
+    })?;
+    let factors = level_factors(multiscale, level);
+    let orth_factor = factors[orth_idx];
+    let mut orth_indices_level: Vec<usize> = orth_indices_base
+        .into_iter()
+        .map(|value| clamp_index_usize(to_level_index(value, orth_factor), level.shape[orth_idx]))
+        .collect();
+    orth_indices_level.sort_unstable();
+    orth_indices_level.dedup();
+    if orth_indices_level.is_empty() {
+        orth_indices_level.push(0);
+    }
+
+    if explicit_span {
+        warnings.push(ApiWarning {
+            code: "slab_thickness_ignored".to_owned(),
+            message:
+                "Slab thickness was ignored because orthogonal selector explicitly defines span."
+                    .to_owned(),
+            details: Some(json!({
+                "axis": orth_axis,
+                "thickness_vox": slab.thickness_vox,
+            })),
+        });
+    }
+
+    let mut fixed_indices_level: Vec<usize> = vec![0; multiscale.axes_order.len()];
+    for axis_name in &multiscale.axes_order {
+        if axis_name == u_axis || axis_name == v_axis || axis_name == orth_axis {
+            continue;
+        }
+        if let Some(c_axis_name) = c_axis_name.as_ref() {
+            if axis_name == c_axis_name {
+                continue;
+            }
+        }
+
+        let selector = selectors_by_axis.get(axis_name).copied();
+        let base_index = if let Some(selector) = selector {
+            match selector.kind {
+                AxisSelectorKind::Index => selector.index.unwrap_or(0),
+                AxisSelectorKind::Range => {
+                    let index = selector.start.unwrap_or(0);
+                    warnings.push(ApiWarning {
+                        code: "selector_reduced_to_index".to_owned(),
+                        message:
+                            "Range selector was reduced to its first index for non-display axis."
+                                .to_owned(),
+                        details: Some(json!({
+                            "axis": axis_name,
+                            "kind": "range",
+                            "index": index,
+                        })),
+                    });
+                    index
+                }
+                AxisSelectorKind::Set => {
+                    let index = selector
+                        .indices
+                        .as_ref()
+                        .and_then(|indices| indices.first().copied())
+                        .unwrap_or(0);
+                    warnings.push(ApiWarning {
+                        code: "selector_reduced_to_index".to_owned(),
+                        message:
+                            "Set selector was reduced to its first index for non-display axis."
+                                .to_owned(),
+                        details: Some(json!({
+                            "axis": axis_name,
+                            "kind": "set",
+                            "index": index,
+                        })),
+                    });
+                    index
+                }
+            }
+        } else {
+            0
+        };
+
+        let axis_idx = *axis_index.get(axis_name.as_str()).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "render_failed",
+                "Display axes are missing from multiscale axes order.",
+                Some(json!({
+                    "multiscale_name": multiscale.name,
+                    "axes_order": multiscale.axes_order,
+                    "u_axis": u_axis,
+                    "v_axis": v_axis,
+                })),
+            )
+        })?;
+        let level_index = clamp_index_usize(
+            to_level_index(base_index, factors[axis_idx]),
+            level.shape[axis_idx],
+        );
+        fixed_indices_level[axis_idx] = level_index;
+    }
+
+    let u_idx = *axis_index.get(u_axis).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_failed",
+            "Display axes are missing from multiscale axes order.",
+            Some(json!({
+                "multiscale_name": multiscale.name,
+                "axes_order": multiscale.axes_order,
+                "u_axis": u_axis,
+                "v_axis": v_axis,
+            })),
+        )
+    })?;
+    let v_idx = *axis_index.get(v_axis).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_failed",
+            "Display axes are missing from multiscale axes order.",
+            Some(json!({
+                "multiscale_name": multiscale.name,
+                "axes_order": multiscale.axes_order,
+                "u_axis": u_axis,
+                "v_axis": v_axis,
+            })),
+        )
+    })?;
+    let u_size = usize::try_from(level.shape[u_idx]).unwrap_or(0);
+    let v_size = usize::try_from(level.shape[v_idx]).unwrap_or(0);
+    let u_origin = sample_window.u_start.min(u_size.saturating_sub(1));
+    let v_origin = sample_window.v_start.min(v_size.saturating_sub(1));
+    let u_window = sample_window
+        .width
+        .max(1)
+        .min(u_size.saturating_sub(u_origin));
+    let v_window = sample_window
+        .height
+        .max(1)
+        .min(v_size.saturating_sub(v_origin));
+    let origin_u_i64 = i64::try_from(u_origin).unwrap_or(i64::MAX);
+    let origin_v_i64 = i64::try_from(v_origin).unwrap_or(i64::MAX);
+
+    let c_axis_idx = c_axis_name
+        .as_ref()
+        .and_then(|axis_name| axis_index.get(axis_name.as_str()).copied());
+    let channel_count = c_axis_idx
+        .and_then(|index| level.shape.get(index).copied())
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(1);
+
+    let mut base_indices = vec![0_usize; multiscale.axes_order.len()];
+    for (axis_pos, axis_name) in multiscale.axes_order.iter().enumerate() {
+        if axis_name == u_axis || axis_name == v_axis || axis_name == orth_axis {
+            continue;
+        }
+        if c_axis_name.as_ref() == Some(axis_name) {
+            continue;
+        }
+        base_indices[axis_pos] = fixed_indices_level[axis_pos];
+    }
+
+    let mut slab_planes: Vec<Vec<PlaneData>> = Vec::with_capacity(orth_indices_level.len());
+    for orth_index in orth_indices_level {
+        let mut channels: Vec<PlaneData> = Vec::with_capacity(channel_count);
+        for channel_index in 0..channel_count {
+            let mut plane_values = vec![0.0_f32; v_window * u_window];
+            let mut indices = base_indices.clone();
+            indices[orth_idx] = orth_index;
+            if let Some(c_axis_idx) = c_axis_idx {
+                indices[c_axis_idx] = channel_index;
+            }
+            for v in 0..v_window {
+                indices[v_idx] = v_origin.saturating_add(v);
+                for u in 0..u_window {
+                    indices[u_idx] = u_origin.saturating_add(u);
+                    plane_values[v * u_window + u] = source
+                        .value_at(&indices, cache_registry, cache_session_id)
+                        .map_err(|reason| {
+                            ApiError::new(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                "render_failed",
+                                "Failed to decode required chunk data.",
+                                Some(json!({
+                                    "multiscale_name": multiscale.name,
+                                    "path": level.path,
+                                    "reason": reason,
+                                })),
+                            )
+                        })?;
+                }
+            }
+            channels.push(PlaneData {
+                width: u_window,
+                height: v_window,
+                origin_u: origin_u_i64,
+                origin_v: origin_v_i64,
+                data: plane_values,
+            });
+        }
+        slab_planes.push(channels);
+    }
+
+    if slab_planes.is_empty() {
+        slab_planes.push(vec![PlaneData {
+            width: u_window,
+            height: v_window,
+            origin_u: origin_u_i64,
+            origin_v: origin_v_i64,
+            data: vec![0.0; u_window * v_window],
+        }]);
+    }
+
+    let combined = match slab.mode {
+        SlabMode::Single => slab_planes[0].clone(),
+        SlabMode::Mip => reduce_slab_max(&slab_planes),
+        SlabMode::Mean => reduce_slab_mean(&slab_planes),
+    };
+
+    Ok((combined, warnings))
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn extract_channel_stack_loaded_array(
     array: &LoadedArray,
     dataset_summary: &DatasetSummary,
     multiscale: &MultiscaleImageDef,
@@ -762,6 +1080,8 @@ fn extract_channel_stack(
             channels.push(PlaneData {
                 width: u_size,
                 height: v_size,
+                origin_u: 0,
+                origin_v: 0,
                 data: plane_values,
             });
         }
@@ -772,6 +1092,8 @@ fn extract_channel_stack(
         slab_planes.push(vec![PlaneData {
             width: u_size,
             height: v_size,
+            origin_u: 0,
+            origin_v: 0,
             data: vec![0.0; u_size * v_size],
         }]);
     }
@@ -934,6 +1256,62 @@ fn to_level_index(index: i64, factor: f64) -> i64 {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn compute_sample_window(
+    center_u: f64,
+    center_v: f64,
+    zoom: f64,
+    pixel_ratio: f64,
+    f_u: f64,
+    f_v: f64,
+    output_width: usize,
+    output_height: usize,
+    level_u_size: usize,
+    level_v_size: usize,
+) -> SampleWindow {
+    if level_u_size == 0 || level_v_size == 0 {
+        return SampleWindow {
+            u_start: 0,
+            v_start: 0,
+            width: 0,
+            height: 0,
+        };
+    }
+
+    let zoom_safe = zoom.max(1e-6);
+    let pixel_ratio_safe = pixel_ratio.max(0.5);
+    let f_u_safe = f_u.max(1e-6);
+    let f_v_safe = f_v.max(1e-6);
+
+    let span_u = (output_width as f64) / (zoom_safe * pixel_ratio_safe * f_u_safe);
+    let span_v = (output_height as f64) / (zoom_safe * pixel_ratio_safe * f_v_safe);
+    let center_u_level = center_u / f_u_safe;
+    let center_v_level = center_v / f_v_safe;
+    let start_u = center_u_level - (span_u / 2.0);
+    let start_v = center_v_level - (span_v / 2.0);
+    let end_u = start_u + span_u;
+    let end_v = start_v + span_v;
+
+    let min_u = (start_u.floor() as i64).saturating_sub(1);
+    let min_v = (start_v.floor() as i64).saturating_sub(1);
+    let max_u = (end_u.ceil() as i64).saturating_add(1);
+    let max_v = (end_v.ceil() as i64).saturating_add(1);
+
+    let u_axis_size_i64 = i64::try_from(level_u_size).unwrap_or(i64::MAX);
+    let v_axis_size_i64 = i64::try_from(level_v_size).unwrap_or(i64::MAX);
+    let u_start = usize::try_from(clamp_index_i64(min_u, u_axis_size_i64)).unwrap_or(0);
+    let v_start = usize::try_from(clamp_index_i64(min_v, v_axis_size_i64)).unwrap_or(0);
+    let u_end = usize::try_from(clamp_index_i64(max_u, u_axis_size_i64)).unwrap_or(u_start);
+    let v_end = usize::try_from(clamp_index_i64(max_v, v_axis_size_i64)).unwrap_or(v_start);
+
+    SampleWindow {
+        u_start,
+        v_start,
+        width: u_end.saturating_sub(u_start).saturating_add(1),
+        height: v_end.saturating_sub(v_start).saturating_add(1),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn sample_channel_stack(
     stack: &[PlaneData],
     center_u: f64,
@@ -997,8 +1375,8 @@ fn sample_plane(
     let span_u = (output_width as f64) / (zoom_safe * pixel_ratio_safe * f_u_safe);
     let span_v = (output_height as f64) / (zoom_safe * pixel_ratio_safe * f_v_safe);
 
-    let center_u_level = center_u / f_u_safe;
-    let center_v_level = center_v / f_v_safe;
+    let center_u_level = (center_u / f_u_safe) - (plane.origin_u as f64);
+    let center_v_level = (center_v / f_v_safe) - (plane.origin_v as f64);
 
     let start_u = center_u_level - (span_u / 2.0);
     let start_v = center_v_level - (span_v / 2.0);
@@ -1263,19 +1641,22 @@ fn resolve_background_rgba(view_state: &ViewState) -> [f32; 4] {
     [0.0, 0.0, 0.0, 1.0]
 }
 
-fn load_level_array(
+fn open_level_chunk_source(
     root_path: &Path,
     level: &MultiscaleLevelDef,
-    cache_registry: &mut RenderCacheRegistry,
-    cache_session_id: &str,
     cache_scope: &str,
-) -> Result<LoadedArray, String> {
+) -> Result<LevelChunkSource, String> {
     let level_path = root_path.join(&level.path);
     let metadata_path = level_path.join("zarr.json");
     let metadata_raw = fs::read_to_string(&metadata_path).map_err(|error| error.to_string())?;
     let metadata_json: Value =
         serde_json::from_str(&metadata_raw).map_err(|error| error.to_string())?;
-    let storage_meta = parse_array_storage_metadata(&metadata_json)?;
+    let mut storage_meta = parse_array_storage_metadata(&metadata_json)?;
+    for chunk_size in &mut storage_meta.chunk_shape {
+        if *chunk_size == 0 {
+            *chunk_size = 1;
+        }
+    }
 
     let shape: Vec<usize> = level
         .shape
@@ -1288,91 +1669,92 @@ fn load_level_array(
     }
 
     let bytes_per_value = dtype_bytes(&storage_meta.dtype)?;
-    let total_values = shape
-        .iter()
-        .fold(1usize, |acc, item| acc.saturating_mul(*item));
-    let mut full = vec![0.0_f32; total_values];
-    let full_strides = c_order_strides(&shape);
     let chunk_strides = c_order_strides(&storage_meta.chunk_shape);
 
-    let chunk_counts: Vec<usize> = shape
-        .iter()
-        .zip(storage_meta.chunk_shape.iter())
-        .map(|(axis_size, chunk_size)| {
-            if *chunk_size == 0 {
-                1
-            } else {
-                (*axis_size + *chunk_size - 1) / *chunk_size
-            }
-        })
-        .collect();
+    Ok(LevelChunkSource {
+        level_path,
+        shape,
+        storage_meta,
+        bytes_per_value,
+        chunk_strides,
+        cache_scope: cache_scope.to_owned(),
+    })
+}
 
-    for_each_index_result(&chunk_counts, |chunk_index| {
-        let chunk_path = level_path.join(chunk_key(chunk_index, &storage_meta.separator));
+impl LevelChunkSource {
+    fn value_at(
+        &self,
+        indices: &[usize],
+        cache_registry: &mut RenderCacheRegistry,
+        cache_session_id: &str,
+    ) -> Result<f32, String> {
+        if indices.len() != self.shape.len() {
+            return Err("index rank mismatch".to_owned());
+        }
+
+        let mut chunk_index: Vec<usize> = Vec::with_capacity(indices.len());
+        let mut local_index: Vec<usize> = Vec::with_capacity(indices.len());
+        for (axis, index) in indices.iter().copied().enumerate() {
+            let axis_size = self.shape[axis];
+            if index >= axis_size {
+                return Ok(0.0);
+            }
+            let chunk_size = self.storage_meta.chunk_shape[axis];
+            chunk_index.push(index / chunk_size);
+            local_index.push(index % chunk_size);
+        }
+
+        let decoded_chunk = self.decoded_chunk(&chunk_index, cache_registry, cache_session_id)?;
+        let chunk_linear = linear_index(&local_index, &self.chunk_strides);
+        let byte_offset = chunk_linear.saturating_mul(self.bytes_per_value);
+        Ok(decode_value(&decoded_chunk, &self.storage_meta.dtype, byte_offset).unwrap_or(0.0))
+    }
+
+    fn decoded_chunk(
+        &self,
+        chunk_index: &[usize],
+        cache_registry: &mut RenderCacheRegistry,
+        cache_session_id: &str,
+    ) -> Result<Arc<[u8]>, String> {
+        let chunk_path = self
+            .level_path
+            .join(chunk_key(chunk_index, &self.storage_meta.separator));
         let cache_key = format!(
-            "{cache_scope}|{}|{}|{}",
-            storage_meta.dtype,
-            storage_meta.codecs.join(","),
+            "{}|{}|{}|{}",
+            self.cache_scope,
+            self.storage_meta.dtype,
+            self.storage_meta.codecs.join(","),
             chunk_path.to_string_lossy(),
         );
 
-        let decoded_chunk: Arc<[u8]> =
-            if let Some(hit) = cache_registry.get_cpu_chunk(cache_session_id, &cache_key) {
-                hit
-            } else {
-                let decoded = if chunk_path.exists() {
-                    let raw_bytes = fs::File::open(&chunk_path)
-                        .and_then(|mut file| {
-                            let mut bytes = Vec::new();
-                            file.read_to_end(&mut bytes)?;
-                            Ok(bytes)
-                        })
-                        .map_err(|error| {
-                            format!("failed to read chunk '{}': {error}", chunk_path.display())
-                        })?;
-                    decode_chunk(raw_bytes, &storage_meta.codecs).map_err(|reason| {
-                        format!(
-                            "failed to decode chunk '{}': {reason}",
-                            chunk_path.display()
-                        )
-                    })?
-                } else {
-                    Vec::new()
-                };
-
-                let payload = Arc::<[u8]>::from(decoded.into_boxed_slice());
-                cache_registry.put_cpu_chunk(cache_session_id, cache_key, payload.clone());
-                payload
-            };
-
-        let mut actual_shape: Vec<usize> = Vec::with_capacity(shape.len());
-        let mut start: Vec<usize> = Vec::with_capacity(shape.len());
-        for axis in 0..shape.len() {
-            let axis_start = chunk_index[axis] * storage_meta.chunk_shape[axis];
-            start.push(axis_start);
-            actual_shape
-                .push(storage_meta.chunk_shape[axis].min(shape[axis].saturating_sub(axis_start)));
+        if let Some(hit) = cache_registry.get_cpu_chunk(cache_session_id, &cache_key) {
+            return Ok(hit);
         }
 
-        for_each_index(&actual_shape, |local_index| {
-            let mut global_index = vec![0usize; shape.len()];
-            for axis in 0..shape.len() {
-                global_index[axis] = start[axis] + local_index[axis];
-            }
-            let global_linear = linear_index(&global_index, &full_strides);
-            let chunk_linear = linear_index(local_index, &chunk_strides);
-            let byte_offset = chunk_linear.saturating_mul(bytes_per_value);
-            let value =
-                decode_value(&decoded_chunk, &storage_meta.dtype, byte_offset).unwrap_or(0.0);
-            full[global_linear] = value;
-        });
-        Ok::<(), String>(())
-    })?;
+        let decoded = if chunk_path.exists() {
+            let raw_bytes = fs::File::open(&chunk_path)
+                .and_then(|mut file| {
+                    let mut bytes = Vec::new();
+                    file.read_to_end(&mut bytes)?;
+                    Ok(bytes)
+                })
+                .map_err(|error| {
+                    format!("failed to read chunk '{}': {error}", chunk_path.display())
+                })?;
+            decode_chunk(raw_bytes, &self.storage_meta.codecs).map_err(|reason| {
+                format!(
+                    "failed to decode chunk '{}': {reason}",
+                    chunk_path.display()
+                )
+            })?
+        } else {
+            Vec::new()
+        };
 
-    Ok(LoadedArray {
-        data: full,
-        strides: full_strides,
-    })
+        let payload = Arc::<[u8]>::from(decoded.into_boxed_slice());
+        cache_registry.put_cpu_chunk(cache_session_id, cache_key, payload.clone());
+        Ok(payload)
+    }
 }
 
 fn parse_array_storage_metadata(metadata_json: &Value) -> Result<ArrayStorageMetadata, String> {
@@ -1524,6 +1906,7 @@ fn chunk_key(indices: &[usize], separator: &str) -> PathBuf {
     PathBuf::from(key)
 }
 
+#[cfg(test)]
 fn for_each_index<F>(shape: &[usize], mut callback: F)
 where
     F: FnMut(&[usize]),
@@ -1549,36 +1932,6 @@ where
             index[axis] = 0;
             if axis == 0 {
                 return;
-            }
-        }
-    }
-}
-
-fn for_each_index_result<F, E>(shape: &[usize], mut callback: F) -> Result<(), E>
-where
-    F: FnMut(&[usize]) -> Result<(), E>,
-{
-    if shape.is_empty() {
-        callback(&[])?;
-        return Ok(());
-    }
-    if shape.contains(&0) {
-        return Ok(());
-    }
-    let mut index = vec![0usize; shape.len()];
-    loop {
-        callback(&index)?;
-
-        let mut axis = shape.len();
-        loop {
-            axis -= 1;
-            index[axis] += 1;
-            if index[axis] < shape[axis] {
-                break;
-            }
-            index[axis] = 0;
-            if axis == 0 {
-                return Ok(());
             }
         }
     }
@@ -1712,7 +2065,7 @@ mod tests {
             thickness_vox: 1,
             mode: SlabMode::Single,
         };
-        let (planes, warnings) = extract_channel_stack(
+        let (planes, warnings) = extract_channel_stack_loaded_array(
             &array,
             &dataset_summary,
             &multiscale,
@@ -1807,7 +2160,7 @@ mod tests {
             mode: SlabMode::Single,
         };
 
-        let (planes, warnings) = extract_channel_stack(
+        let (planes, warnings) = extract_channel_stack_loaded_array(
             &array,
             &dataset_summary,
             &multiscale,
