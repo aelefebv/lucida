@@ -107,6 +107,14 @@ pub enum RenderPixelFormat {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum RenderBackendUsed {
+    #[serde(rename = "cpu")]
+    Cpu,
+    #[serde(rename = "gpu")]
+    Gpu,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RenderImageArtifact {
     pub role: RenderArtifactRole,
@@ -160,6 +168,7 @@ pub struct RenderMeta {
     pub multiscale_name: String,
     pub pyramid_level_used: u64,
     pub selectors_applied: Vec<RenderAxisSelector>,
+    pub backend_used: RenderBackendUsed,
     pub timing_ms: RenderTimingMs,
 }
 

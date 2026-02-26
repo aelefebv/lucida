@@ -104,6 +104,7 @@ class RenderMeta(ModelBase):
     multiscale_name: str = Field(min_length=1)
     pyramid_level_used: int = Field(ge=0)
     selectors_applied: list[AxisSelector] = Field(default_factory=list)
+    backend_used: Literal["cpu", "gpu"]
     timing_ms: RenderTimingMs
 
 

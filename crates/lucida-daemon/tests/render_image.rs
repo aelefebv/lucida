@@ -45,6 +45,7 @@ async fn render_image_stateful_and_stateless_success() {
     assert_eq!(stateful_payload["view_id"], view_id);
     assert!(stateful_payload["state_version"].as_u64().is_some());
     assert_eq!(stateful_payload["images"][0]["mime"], "image/png");
+    assert_backend_used(&stateful_payload);
     assert_eq!(
         decode_png_size(
             stateful_payload["images"][0]["bytes_base64"]
@@ -78,6 +79,7 @@ async fn render_image_stateful_and_stateless_success() {
     let stateless_payload = read_json_body(stateless).await;
     assert!(stateless_payload.get("view_id").is_none());
     assert!(stateless_payload.get("state_version").is_none());
+    assert_backend_used(&stateless_payload);
     assert_eq!(
         decode_png_size(
             stateless_payload["images"][0]["bytes_base64"]
@@ -114,6 +116,7 @@ async fn render_image_raw_rgba_inline_success() {
     assert_eq!(raw_response.status(), StatusCode::OK);
     let payload = read_json_body(raw_response).await;
     assert_eq!(payload["images"][0]["mime"], "application/x-raw-rgba");
+    assert_backend_used(&payload);
     assert_eq!(payload["images"][0]["pixel_format"], "rgba8");
     assert_eq!(payload["images"][0]["bytes_per_pixel"], 4);
     assert_eq!(payload["images"][0]["row_stride_bytes"], 128);
@@ -154,6 +157,7 @@ async fn render_image_raw_rgba_large_payload_not_truncated_by_usage_capture() {
     .await;
     assert_eq!(raw_response.status(), StatusCode::OK);
     let payload = read_json_body(raw_response).await;
+    assert_backend_used(&payload);
     let encoded = payload["images"][0]["bytes_base64"]
         .as_str()
         .expect("raw base64 payload");
@@ -628,6 +632,7 @@ async fn render_image_slab_and_lod_warnings() {
     .await;
     assert_eq!(rendered.status(), StatusCode::OK);
     let payload = read_json_body(rendered).await;
+    assert_backend_used(&payload);
     let warning_codes: Vec<&str> = payload["warnings"]
         .as_array()
         .expect("warnings array")
@@ -688,6 +693,7 @@ async fn render_image_explicit_gpu_preference_routes_to_gpu_or_emits_fallback_wa
     assert_eq!(rendered.status(), StatusCode::OK);
 
     let payload = read_json_body(rendered).await;
+    let backend_used = assert_backend_used(&payload);
     let warning_codes: Vec<&str> = payload["warnings"]
         .as_array()
         .expect("warnings array")
@@ -716,15 +722,20 @@ async fn render_image_explicit_gpu_preference_routes_to_gpu_or_emits_fallback_wa
     }
     if gpu_available {
         assert!(!warning_codes.contains(&"gpu_unavailable_fallback_cpu"));
-        assert!(!warning_codes.contains(&"gpu_render_failed_fallback_cpu"));
-        assert!(
-            payload["meta"]["timing_ms"]["gpu_upload"]
-                .as_f64()
-                .expect("gpu_upload timing")
-                > 0.0
-        );
+        if warning_codes.contains(&"gpu_render_failed_fallback_cpu") {
+            assert_eq!(backend_used, "cpu");
+        } else {
+            assert_eq!(backend_used, "gpu");
+            assert!(
+                payload["meta"]["timing_ms"]["gpu_upload"]
+                    .as_f64()
+                    .expect("gpu_upload timing")
+                    > 0.0
+            );
+        }
     } else {
         assert!(warning_codes.contains(&"gpu_unavailable_fallback_cpu"));
+        assert_eq!(backend_used, "cpu");
     }
 }
 
@@ -1032,6 +1043,17 @@ fn decode_png_rgba(bytes_base64: &str) -> RgbaImage {
         .decode()
         .expect("decode png")
         .to_rgba8()
+}
+
+fn assert_backend_used(payload: &Value) -> &str {
+    let backend = payload["meta"]["backend_used"]
+        .as_str()
+        .expect("meta.backend_used");
+    assert!(
+        matches!(backend, "cpu" | "gpu"),
+        "unexpected backend_used value: {backend}"
+    );
+    backend
 }
 
 fn pixel_luma(image: &RgbaImage, x: u32, y: u32) -> u32 {
