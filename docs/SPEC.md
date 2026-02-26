@@ -1,4 +1,4 @@
-# LLM‑First N‑Dimensional Image Viewer (Lightweight Napari‑style) — Technical Specification
+# LLM‑First N‑Dimensional Image Viewer — Technical Specification
 
 Primary goal: a small, fast, agent‑driven N‑D viewer that can open large microscopy datasets (OME‑Zarr), navigate in 2D and 3D, and produce reproducible “snapshots” plus machine‑readable manifests.
 
@@ -6,7 +6,7 @@ Primary goal: a small, fast, agent‑driven N‑D viewer that can open large mic
 
 ## 1. Summary
 
-This project delivers a **headless “viewer server”** with a **JSON‑first control surface** designed for LLM agents. The agent can:
+This project delivers a **headless “viewer server”** with a **CLI control surface** designed for LLM agents. The agent can:
 
 - Open large multiscale OME‑Zarr datasets (local or remote).
 - Navigate orthogonal 2D planes with pan/zoom and slicing (XY/XZ/YZ; slab / MIP / mean).
@@ -925,6 +925,20 @@ Environment overrides:
 - Files are stored under `output/usage/thumbs/YYYY-MM-DD/<render_id>.png`.
 - Usage telemetry stores thumbnail metadata under `response_json.usage_thumbnail`; full render bytes remain omitted.
 - Thumbnail folders are pruned by retention age during telemetry prune cycles.
+
+### 16. Inspiration / quotes / sources
+
+Karpathy on building for agents (https://x.com/karpathy/status/2026360908398862478):
+"""
+If you have any kind of product or service think: can agents access and use them?
+
+- are your legacy docs (for humans) at least exportable in markdown?
+- have you written Skills for your product?
+- can your product/service be usable via CLI? Or MCP?
+- ...
+
+It's 2026. Build. For. Agents.
+"""
 
 ---
 

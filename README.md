@@ -110,6 +110,7 @@ lucida context clear
 ```
 
 For a short end-to-end Zarr smoke test, see `docs/cli-zarr-testing.md`.
+For a full command reference, see `docs/cli-reference.md`.
 
 ## Convert OME-TIFF to OME-Zarr
 
