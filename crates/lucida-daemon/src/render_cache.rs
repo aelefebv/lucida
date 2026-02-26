@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -49,14 +49,17 @@ pub struct SessionCacheSnapshot {
 
 #[derive(Debug, Clone)]
 struct ByteLruEntry {
+    prev: Option<Arc<str>>,
+    next: Option<Arc<str>>,
     bytes: Arc<[u8]>,
     size_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
 struct ByteLruCache {
-    entries: HashMap<String, ByteLruEntry>,
-    access_order: VecDeque<String>,
+    entries: HashMap<Arc<str>, ByteLruEntry>,
+    oldest_key: Option<Arc<str>>,
+    newest_key: Option<Arc<str>>,
     stats: CacheStats,
 }
 
@@ -64,7 +67,8 @@ impl ByteLruCache {
     fn new(max_bytes: u64) -> Self {
         Self {
             entries: HashMap::new(),
-            access_order: VecDeque::new(),
+            oldest_key: None,
+            newest_key: None,
             stats: CacheStats {
                 max_bytes,
                 ..CacheStats::default()
@@ -103,37 +107,46 @@ impl ByteLruCache {
             return;
         }
 
-        if let Some(previous) = self.entries.remove(&key) {
+        let key = Arc::<str>::from(key);
+        if let Some(previous) = self.remove_entry(key.as_ref()) {
             self.stats.current_bytes = self.stats.current_bytes.saturating_sub(previous.size_bytes);
-            self.remove_from_access_order(&key);
         }
 
-        self.access_order.push_back(key.clone());
+        let previous_newest = self.newest_key.clone();
+        let entry = ByteLruEntry {
+            prev: previous_newest.clone(),
+            next: None,
+            bytes: payload,
+            size_bytes,
+        };
+        self.entries.insert(key.clone(), entry);
+        if let Some(previous_newest) = previous_newest {
+            if let Some(previous_entry) = self.entries.get_mut(previous_newest.as_ref()) {
+                previous_entry.next = Some(key.clone());
+            }
+        } else {
+            self.oldest_key = Some(key.clone());
+        }
+        self.newest_key = Some(key);
         self.stats.current_bytes = self.stats.current_bytes.saturating_add(size_bytes);
         self.stats.inserts = self.stats.inserts.saturating_add(1);
-        self.entries.insert(
-            key,
-            ByteLruEntry {
-                bytes: payload,
-                size_bytes,
-            },
-        );
         self.evict_to_fit_budget();
     }
 
     fn clear(&mut self) {
         self.entries.clear();
-        self.access_order.clear();
+        self.oldest_key = None;
+        self.newest_key = None;
         self.stats.current_bytes = 0;
     }
 
     fn evict_to_fit_budget(&mut self) {
         while self.stats.current_bytes > self.stats.max_bytes {
-            let Some(oldest_key) = self.access_order.pop_front() else {
+            let Some(oldest_key) = self.oldest_key.clone() else {
                 self.stats.current_bytes = 0;
                 break;
             };
-            if let Some(removed) = self.entries.remove(&oldest_key) {
+            if let Some(removed) = self.remove_entry(oldest_key.as_ref()) {
                 self.stats.current_bytes =
                     self.stats.current_bytes.saturating_sub(removed.size_bytes);
                 self.stats.evictions = self.stats.evictions.saturating_add(1);
@@ -142,13 +155,69 @@ impl ByteLruCache {
     }
 
     fn touch_key(&mut self, key: &str) {
-        self.remove_from_access_order(key);
-        self.access_order.push_back(key.to_owned());
+        if self.newest_key.as_deref() == Some(key) {
+            return;
+        }
+        if !self.entries.contains_key(key) {
+            return;
+        }
+
+        self.detach_entry(key);
+        let Some(current_key) = self
+            .entries
+            .get_key_value(key)
+            .map(|(stored_key, _)| stored_key.clone())
+        else {
+            return;
+        };
+        let previous_newest = self.newest_key.clone();
+        if let Some(previous_newest) = previous_newest.as_ref() {
+            if let Some(previous_entry) = self.entries.get_mut(previous_newest.as_ref()) {
+                previous_entry.next = Some(current_key.clone());
+            }
+        } else {
+            self.oldest_key = Some(current_key.clone());
+        }
+        if let Some(current_entry) = self.entries.get_mut(key) {
+            current_entry.prev = previous_newest;
+            current_entry.next = None;
+        }
+        self.newest_key = Some(current_key);
     }
 
-    fn remove_from_access_order(&mut self, key: &str) {
-        if let Some(position) = self.access_order.iter().position(|item| item == key) {
-            self.access_order.remove(position);
+    fn remove_entry(&mut self, key: &str) -> Option<ByteLruEntry> {
+        if !self.entries.contains_key(key) {
+            return None;
+        }
+        self.detach_entry(key);
+        self.entries.remove(key)
+    }
+
+    fn detach_entry(&mut self, key: &str) {
+        let (previous_key, next_key) = match self.entries.get(key) {
+            Some(entry) => (entry.prev.clone(), entry.next.clone()),
+            None => return,
+        };
+
+        if let Some(previous_key) = previous_key.as_ref() {
+            if let Some(previous_entry) = self.entries.get_mut(previous_key.as_ref()) {
+                previous_entry.next = next_key.clone();
+            }
+        } else {
+            self.oldest_key = next_key.clone();
+        }
+
+        if let Some(next_key) = next_key.as_ref() {
+            if let Some(next_entry) = self.entries.get_mut(next_key.as_ref()) {
+                next_entry.prev = previous_key.clone();
+            }
+        } else {
+            self.newest_key = previous_key.clone();
+        }
+
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.prev = None;
+            entry.next = None;
         }
     }
 }
@@ -255,5 +324,80 @@ fn parse_u64_env(name: &str, fallback: u64) -> u64 {
     match std::env::var(name) {
         Ok(value) => value.parse::<u64>().unwrap_or(fallback),
         Err(_) => fallback,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ByteLruCache;
+    use std::sync::Arc;
+
+    fn payload(byte_count: usize, value: u8) -> Arc<[u8]> {
+        vec![value; byte_count].into()
+    }
+
+    fn lru_order(cache: &ByteLruCache) -> Vec<String> {
+        let mut order = Vec::new();
+        let mut cursor = cache.oldest_key.clone();
+        let mut visited = 0_usize;
+        while let Some(key) = cursor {
+            visited = visited.saturating_add(1);
+            assert!(visited <= cache.entries.len().saturating_add(1));
+            order.push(key.to_string());
+            cursor = cache
+                .entries
+                .get(key.as_ref())
+                .and_then(|entry| entry.next.clone());
+        }
+        order
+    }
+
+    #[test]
+    fn hit_promotes_entry_to_mru_for_eviction_order() {
+        let mut cache = ByteLruCache::new(6);
+        cache.insert("a".to_owned(), payload(2, 1));
+        cache.insert("b".to_owned(), payload(2, 2));
+        cache.insert("c".to_owned(), payload(2, 3));
+        assert_eq!(lru_order(&cache), vec!["a", "b", "c"]);
+
+        assert!(cache.get("a").is_some());
+        assert_eq!(lru_order(&cache), vec!["b", "c", "a"]);
+
+        cache.insert("d".to_owned(), payload(2, 4));
+        assert_eq!(lru_order(&cache), vec!["c", "a", "d"]);
+        assert!(cache.get("b").is_none());
+        assert_eq!(cache.stats.evictions, 1);
+    }
+
+    #[test]
+    fn replacing_entry_keeps_single_lru_node_and_updates_size() {
+        let mut cache = ByteLruCache::new(6);
+        cache.insert("a".to_owned(), payload(2, 1));
+        cache.insert("b".to_owned(), payload(2, 2));
+        cache.insert("a".to_owned(), payload(3, 3));
+        assert_eq!(cache.stats.current_bytes, 5);
+        assert_eq!(lru_order(&cache), vec!["b", "a"]);
+
+        cache.insert("c".to_owned(), payload(2, 4));
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("a").is_some());
+        assert!(cache.get("c").is_some());
+        assert_eq!(cache.stats.current_bytes, 5);
+        assert_eq!(cache.stats.evictions, 1);
+    }
+
+    #[test]
+    fn oversize_insert_clears_existing_entries() {
+        let mut cache = ByteLruCache::new(4);
+        cache.insert("a".to_owned(), payload(2, 1));
+        cache.insert("b".to_owned(), payload(2, 2));
+        assert_eq!(cache.stats.current_bytes, 4);
+
+        cache.insert("c".to_owned(), payload(5, 3));
+        assert_eq!(cache.stats.current_bytes, 0);
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_none());
+        assert!(cache.get("c").is_none());
+        assert!(lru_order(&cache).is_empty());
     }
 }
