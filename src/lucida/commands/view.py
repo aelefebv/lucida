@@ -34,7 +34,14 @@ view_app = typer.Typer(no_args_is_help=True)
 
 ViewMutationResponse = ViewCreateResponse | ViewUpdateResponse | ViewStateImportResponse
 SelectorHelper = Literal["index", "range", "set"]
-NavigationHelper = Literal["set-plane", "pan", "zoom", "rotate-set", "rotate-delta"]
+NavigationHelper = Literal[
+    "set-plane",
+    "toggle-orthogonal-views",
+    "pan",
+    "zoom",
+    "rotate-set",
+    "rotate-delta",
+]
 
 
 @view_app.command("create")
@@ -375,6 +382,31 @@ def view_set_plane_group(
         session_id=session_id,
         base_url=base_url,
         payload={"plane": plane},
+        output_json=output_json,
+    )
+
+
+@view_app.command("orthogonal")
+def view_set_orthogonal_group(
+    view_id: str | None = typer.Option(None, "--view-id", help="View id."),
+    enabled: bool = typer.Option(
+        True,
+        "--enabled/--disabled",
+        help="Enable or disable fixed orthogonal tri-planar rendering.",
+    ),
+    session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
+    output_json: bool = typer.Option(False, "--json", help="Emit JSON response."),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Optional API server base URL to use HTTP mode."
+    ),
+) -> None:
+    """Toggle persistent orthogonal tri-planar rendering in 2D mode."""
+    _execute_navigation_command(
+        helper="toggle-orthogonal-views",
+        view_id=view_id,
+        session_id=session_id,
+        base_url=base_url,
+        payload={"enabled": enabled},
         output_json=output_json,
     )
 
@@ -836,6 +868,12 @@ def _run_navigation_helper(
                 return client.set_plane(
                     view_id=view_id,
                     plane=payload["plane"],
+                    session_id=session_id,
+                )
+            if helper == "toggle-orthogonal-views":
+                return client.set_orthogonal_views(
+                    view_id=view_id,
+                    enabled=bool(payload["enabled"]),
                     session_id=session_id,
                 )
             if helper == "pan":

@@ -42,6 +42,39 @@ def test_cli_render_and_navigation(
         env=cli_env,
     )
     assert set_plane_payload["view_state"]["view_2d"]["plane"] == "xz"
+    assert set_plane_payload["view_state"]["view_2d"]["orthogonal_views_enabled"] is True
+
+    orthogonal_off_payload = run_cli_json(
+        runner,
+        [
+            "view",
+            "orthogonal",
+            "--view-id",
+            view_context.view_id,
+            "--disabled",
+            "--session-id",
+            view_context.session_id,
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert orthogonal_off_payload["view_state"]["view_2d"]["orthogonal_views_enabled"] is False
+
+    orthogonal_on_payload = run_cli_json(
+        runner,
+        [
+            "view",
+            "orthogonal",
+            "--view-id",
+            view_context.view_id,
+            "--enabled",
+            "--session-id",
+            view_context.session_id,
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert orthogonal_on_payload["view_state"]["view_2d"]["orthogonal_views_enabled"] is True
 
     run_cli_json(
         runner,

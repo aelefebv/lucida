@@ -165,10 +165,13 @@ class View2D(ModelBase):
         Slice settings.
     camera:
         Camera state.
+    orthogonal_views_enabled:
+        Enable fixed tri-planar orthogonal panel rendering.
     """
     plane: Literal["xy", "xz", "yz"] = "xy"
     slice: SliceSettings | None = None
     camera: Camera2D
+    orthogonal_views_enabled: bool = True
 
 
 class LayerSource(ModelBase):

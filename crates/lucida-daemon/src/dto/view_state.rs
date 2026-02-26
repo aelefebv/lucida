@@ -139,6 +139,8 @@ pub struct View2D {
     pub plane: Plane2D,
     pub slice: Option<SliceSettings>,
     pub camera: Camera2D,
+    #[serde(default = "default_true")]
+    pub orthogonal_views_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
