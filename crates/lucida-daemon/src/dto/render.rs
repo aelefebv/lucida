@@ -8,6 +8,7 @@ use crate::dto::view_state::{AxisSelector, AxisSelectorKind, ViewState};
 #[serde(rename_all = "snake_case")]
 pub enum RenderFormat {
     Png,
+    RawRgba,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -95,6 +96,14 @@ pub enum RenderArtifactRole {
 pub enum RenderMimeType {
     #[serde(rename = "image/png")]
     Png,
+    #[serde(rename = "application/x-raw-rgba")]
+    RawRgba,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum RenderPixelFormat {
+    #[serde(rename = "rgba8")]
+    Rgba8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -102,6 +111,12 @@ pub enum RenderMimeType {
 pub struct RenderImageArtifact {
     pub role: RenderArtifactRole,
     pub mime: RenderMimeType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pixel_format: Option<RenderPixelFormat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_per_pixel: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_stride_bytes: Option<u64>,
     pub width_px: u64,
     pub height_px: u64,
     pub delivery: RenderDelivery,

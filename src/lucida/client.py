@@ -24,8 +24,16 @@ from lucida.models.api import (
     ViewUpdateRequest,
     ViewUpdateResponse,
 )
-from lucida.models.render import RenderImageRequest, RenderImageResponse, RenderOutputSpec
-from lucida.models.usage import UsageEventsResponse, UsageRunDetailResponse, UsageRunsResponse
+from lucida.models.render import (
+    RenderImageRequest,
+    RenderImageResponse,
+    RenderOutputSpec,
+)
+from lucida.models.usage import (
+    UsageEventsResponse,
+    UsageRunDetailResponse,
+    UsageRunsResponse,
+)
 from lucida.models.view_state import ViewState
 from lucida.runtime_config import RuntimeConfig, resolve_runtime_config
 
@@ -43,6 +51,7 @@ _PLANE_ROLES: dict[str, tuple[str, str, str]] = {
 
 class LucidaClientError(Exception):
     """Raised for request failures returned by the Lucida API."""
+
     pass
 
 
@@ -93,7 +102,9 @@ class LucidaClient:
             self._runtime_config = runtime_config or resolve_runtime_config(
                 base_url_override=base_url,
             )
-            self._client = httpx.Client(base_url=self._runtime_config.base_url, timeout=timeout)
+            self._client = httpx.Client(
+                base_url=self._runtime_config.base_url, timeout=timeout
+            )
             self._owns_client = True
         else:
             self._runtime_config = runtime_config
@@ -123,9 +134,15 @@ class LucidaClient:
         agent_step_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, str] | None:
-        run_id = agent_run_id if agent_run_id is not None else self._default_agent_run_id
-        step_id = agent_step_id if agent_step_id is not None else self._default_agent_step_id
-        resolved_name = agent_name if agent_name is not None else self._default_agent_name
+        run_id = (
+            agent_run_id if agent_run_id is not None else self._default_agent_run_id
+        )
+        step_id = (
+            agent_step_id if agent_step_id is not None else self._default_agent_step_id
+        )
+        resolved_name = (
+            agent_name if agent_name is not None else self._default_agent_name
+        )
 
         headers: dict[str, str] = {}
         if run_id:
@@ -375,7 +392,9 @@ class LucidaClient:
             Optional target session id.
         """
         normalized_view_state = (
-            view_state.model_dump(mode="json") if isinstance(view_state, ViewState) else view_state
+            view_state.model_dump(mode="json")
+            if isinstance(view_state, ViewState)
+            else view_state
         )
         request = ViewStateImportRequest(
             session_id=session_id,
@@ -399,6 +418,7 @@ class LucidaClient:
         view_state: ViewState | dict[str, Any] | None = None,
         width_px: int,
         height_px: int,
+        format: str = "png",
         delivery: str = "inline_base64",
         file_path: str | None = None,
         session_id: str | None = None,
@@ -420,6 +440,8 @@ class LucidaClient:
             Output image width.
         height_px:
             Output image height.
+        format:
+            Output format: ``png`` or ``raw_rgba``.
         delivery:
             Output delivery mode: ``inline_base64`` or ``file_path``.
         file_path:
@@ -432,7 +454,9 @@ class LucidaClient:
             Optional RFC6902 patch applied ephemerally at render time.
         """
         normalized_view_state = (
-            view_state.model_dump(mode="json") if isinstance(view_state, ViewState) else view_state
+            view_state.model_dump(mode="json")
+            if isinstance(view_state, ViewState)
+            else view_state
         )
         request = RenderImageRequest(
             view_id=view_id,
@@ -443,6 +467,7 @@ class LucidaClient:
             output=RenderOutputSpec(
                 width_px=width_px,
                 height_px=height_px,
+                format=format,
                 delivery=delivery,
                 file_path=file_path,
             ),
@@ -519,7 +544,9 @@ class LucidaClient:
             agent_run_id=agent_run_id,
             agent_step_id=agent_step_id,
             agent_name=agent_name,
-            patch_builder=lambda view: self._pan_patch(view=view, dx_px=dx_px, dy_px=dy_px),
+            patch_builder=lambda view: self._pan_patch(
+                view=view, dx_px=dx_px, dy_px=dy_px
+            ),
         )
 
     def zoom(
@@ -810,7 +837,11 @@ class LucidaClient:
         axis: str,
         replacement: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        selectors = [selector.model_dump(mode="json") for selector in view.selectors if selector.axis != axis]
+        selectors = [
+            selector.model_dump(mode="json")
+            for selector in view.selectors
+            if selector.axis != axis
+        ]
         selectors.append(replacement)
         return selectors
 
@@ -831,12 +862,16 @@ class LucidaClient:
         if len(center_world) != 2:
             center_world = [0.0, 0.0]
 
-        slice_payload = view_2d.slice.model_dump(mode="json") if view_2d.slice is not None else {}
+        slice_payload = (
+            view_2d.slice.model_dump(mode="json") if view_2d.slice is not None else {}
+        )
         selectors = [selector.model_dump(mode="json") for selector in view.selectors]
         slice_axis = view_2d.slice.axis if view_2d.slice is not None else None
         current_slice_index = view_2d.slice.index if view_2d.slice is not None else None
         if current_slice_index is None:
-            current_slice_index = self._selector_index(selectors=selectors, axis=slice_axis)
+            current_slice_index = self._selector_index(
+                selectors=selectors, axis=slice_axis
+            )
         if current_slice_index is None:
             current_slice_index = 0
 
@@ -855,11 +890,17 @@ class LucidaClient:
 
         return [
             {"op": "replace", "path": "/view_2d/plane", "value": plane},
-            {"op": "replace", "path": "/view_2d/camera/center_world", "value": new_center},
+            {
+                "op": "replace",
+                "path": "/view_2d/camera/center_world",
+                "value": new_center,
+            },
             {"op": "replace", "path": "/view_2d/slice", "value": next_slice},
         ]
 
-    def _pan_patch(self, *, view: ViewState, dx_px: float, dy_px: float) -> list[dict[str, Any]]:
+    def _pan_patch(
+        self, *, view: ViewState, dx_px: float, dy_px: float
+    ) -> list[dict[str, Any]]:
         if view.view_2d is None:
             raise ValueError("view has no 2d state.")
 
@@ -912,9 +953,17 @@ class LucidaClient:
             raise ValueError("view has no 2d state.")
         current_rotation = float(view.view_2d.camera.rotation_deg)
         next_rotation = (
-            float(degrees) if degrees is not None else current_rotation + float(delta_degrees)
+            float(degrees)
+            if degrees is not None
+            else current_rotation + float(delta_degrees)
         )
-        return [{"op": "replace", "path": "/view_2d/camera/rotation_deg", "value": next_rotation}]
+        return [
+            {
+                "op": "replace",
+                "path": "/view_2d/camera/rotation_deg",
+                "value": next_rotation,
+            }
+        ]
 
     def _update_view_from_current(
         self,
@@ -944,7 +993,9 @@ class LucidaClient:
             agent_name=agent_name,
         )
 
-    def _selector_index(self, *, selectors: list[dict[str, Any]], axis: Any) -> int | None:
+    def _selector_index(
+        self, *, selectors: list[dict[str, Any]], axis: Any
+    ) -> int | None:
         if not isinstance(axis, str):
             return None
         for selector in selectors:
@@ -957,7 +1008,11 @@ class LucidaClient:
                 return int(selector["index"])
             if kind == "range" and isinstance(selector.get("start"), int):
                 return int(selector["start"])
-            if kind == "set" and isinstance(selector.get("indices"), list) and selector["indices"]:
+            if (
+                kind == "set"
+                and isinstance(selector.get("indices"), list)
+                and selector["indices"]
+            ):
                 first = selector["indices"][0]
                 if isinstance(first, int):
                     return int(first)

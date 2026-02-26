@@ -20,6 +20,7 @@ const el = {
   refreshTargets: document.querySelector("#refresh-targets"),
   renderWidth: document.querySelector("#render-width"),
   renderHeight: document.querySelector("#render-height"),
+  renderMode: document.querySelector("#render-mode"),
   connect: document.querySelector("#connect"),
   disconnect: document.querySelector("#disconnect"),
   renderNow: document.querySelector("#render-now"),
@@ -89,6 +90,11 @@ function selectedSessionId() {
 function selectedViewId() {
   const value = String(el.viewId.value || "").trim();
   return value || null;
+}
+
+function selectedRenderMode() {
+  const value = String(el.renderMode.value || "").trim();
+  return value === "raw_rgba" ? "raw_rgba" : "png";
 }
 
 function currentScope() {
@@ -187,6 +193,30 @@ function showImage(src) {
   img.alt = "live view frame";
   el.viewport.innerHTML = "";
   el.viewport.appendChild(img);
+}
+
+function decodeBase64ToBytes(encoded) {
+  const binary = atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function showRgbaCanvas(bytes, width, height) {
+  const rgba = new Uint8ClampedArray(bytes.buffer.slice(0));
+  const imageData = new ImageData(rgba, width, height);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("2D canvas context is unavailable.");
+  }
+  context.putImageData(imageData, 0, 0);
+  el.viewport.innerHTML = "";
+  el.viewport.appendChild(canvas);
 }
 
 function setSessionOptions(sessions, selectedId) {
@@ -305,6 +335,7 @@ async function renderFrame(reason) {
   const seq = (state.renderSeq += 1);
   const width = clampRenderSize(el.renderWidth.value, 1024);
   const height = clampRenderSize(el.renderHeight.value, 1024);
+  const format = selectedRenderMode();
   el.renderWidth.value = String(width);
   el.renderHeight.value = String(height);
 
@@ -314,7 +345,7 @@ async function renderFrame(reason) {
       schema_version: 1,
       view_id: scope.viewId,
       output: {
-        format: "png",
+        format,
         delivery: "inline_base64",
         width_px: width,
         height_px: height,
@@ -343,8 +374,27 @@ async function renderFrame(reason) {
       setViewportNote("Render response has no inline image.", true);
       return;
     }
-    const src = `data:${image.mime || "image/png"};base64,${image.bytes_base64}`;
-    showImage(src);
+    if (format === "raw_rgba") {
+      if (image.mime !== "application/x-raw-rgba") {
+        setViewportNote(`Unexpected raw mime: ${String(image.mime || "(missing)")}.`, true);
+        return;
+      }
+      const artifactWidth = clampRenderSize(image.width_px, width);
+      const artifactHeight = clampRenderSize(image.height_px, height);
+      const bytes = decodeBase64ToBytes(image.bytes_base64);
+      const expectedLength = artifactWidth * artifactHeight * 4;
+      if (bytes.length !== expectedLength) {
+        setViewportNote(
+          `Raw frame size mismatch. expected=${expectedLength} actual=${bytes.length}.`,
+          true,
+        );
+        return;
+      }
+      showRgbaCanvas(bytes, artifactWidth, artifactHeight);
+    } else {
+      const src = `data:${image.mime || "image/png"};base64,${image.bytes_base64}`;
+      showImage(src);
+    }
 
     state.lastRenderAtMs = Date.now();
     state.lastRenderId = payload.render_id ? String(payload.render_id) : null;
@@ -400,6 +450,10 @@ function connectStream(scope) {
       if (event.event_type === "render_completed") {
         const eventRenderId = event.render_id ? String(event.render_id) : null;
         if (eventRenderId && state.lastRenderId && eventRenderId === state.lastRenderId) {
+          return;
+        }
+        if (selectedRenderMode() === "raw_rgba") {
+          scheduleRender("render_completed");
           return;
         }
         const thumbnailUrl =
@@ -474,6 +528,13 @@ el.renderNow.addEventListener("click", () => {
   state.viewId = scope.viewId;
   state.sessionId = scope.sessionId;
   renderFrame("manual");
+});
+
+el.renderMode.addEventListener("change", () => {
+  if (!state.connected || !state.viewId) {
+    return;
+  }
+  renderFrame("mode_change");
 });
 
 window.addEventListener("beforeunload", () => {

@@ -17,6 +17,10 @@ def _decode_size(payload_b64: str) -> tuple[int, int]:
     return image.size
 
 
+def _decode_len(payload_b64: str) -> int:
+    return len(base64.b64decode(payload_b64))
+
+
 def test_cli_render_and_navigation(
     render_omezarr_uri: str,
     rust_daemon_base_url: str,
@@ -24,7 +28,9 @@ def test_cli_render_and_navigation(
 ) -> None:
     runner = CliRunner()
     cli_env = build_cli_env(base_url=rust_daemon_base_url)
-    view_context = create_view_context(runner, env=cli_env, dataset_uri=render_omezarr_uri)
+    view_context = create_view_context(
+        runner, env=cli_env, dataset_uri=render_omezarr_uri
+    )
 
     set_plane_payload = run_cli_json(
         runner,
@@ -42,7 +48,9 @@ def test_cli_render_and_navigation(
         env=cli_env,
     )
     assert set_plane_payload["view_state"]["view_2d"]["plane"] == "xz"
-    assert set_plane_payload["view_state"]["view_2d"]["orthogonal_views_enabled"] is True
+    assert (
+        set_plane_payload["view_state"]["view_2d"]["orthogonal_views_enabled"] is True
+    )
 
     orthogonal_off_payload = run_cli_json(
         runner,
@@ -58,7 +66,10 @@ def test_cli_render_and_navigation(
         ],
         env=cli_env,
     )
-    assert orthogonal_off_payload["view_state"]["view_2d"]["orthogonal_views_enabled"] is False
+    assert (
+        orthogonal_off_payload["view_state"]["view_2d"]["orthogonal_views_enabled"]
+        is False
+    )
 
     orthogonal_on_payload = run_cli_json(
         runner,
@@ -74,7 +85,10 @@ def test_cli_render_and_navigation(
         ],
         env=cli_env,
     )
-    assert orthogonal_on_payload["view_state"]["view_2d"]["orthogonal_views_enabled"] is True
+    assert (
+        orthogonal_on_payload["view_state"]["view_2d"]["orthogonal_views_enabled"]
+        is True
+    )
 
     run_cli_json(
         runner,
@@ -125,7 +139,9 @@ def test_cli_render_and_navigation(
         ],
         env=cli_env,
     )
-    assert set_rotation_payload["view_state"]["view_2d"]["camera"]["rotation_deg"] == 15.0
+    assert (
+        set_rotation_payload["view_state"]["view_2d"]["camera"]["rotation_deg"] == 15.0
+    )
 
     move_rotate_payload = run_cli_json(
         runner,
@@ -142,7 +158,9 @@ def test_cli_render_and_navigation(
         ],
         env=cli_env,
     )
-    assert move_rotate_payload["view_state"]["view_2d"]["camera"]["rotation_deg"] == 10.0
+    assert (
+        move_rotate_payload["view_state"]["view_2d"]["camera"]["rotation_deg"] == 10.0
+    )
 
     bounds_payload = run_cli_json(
         runner,
@@ -158,8 +176,14 @@ def test_cli_render_and_navigation(
         env=cli_env,
     )
     assert bounds_payload["axes"] == {"u": "x", "v": "z"}
-    assert bounds_payload["visible_bounds_world"]["u_min"] < bounds_payload["visible_bounds_world"]["u_max"]
-    assert bounds_payload["visible_bounds_world"]["v_min"] < bounds_payload["visible_bounds_world"]["v_max"]
+    assert (
+        bounds_payload["visible_bounds_world"]["u_min"]
+        < bounds_payload["visible_bounds_world"]["u_max"]
+    )
+    assert (
+        bounds_payload["visible_bounds_world"]["v_min"]
+        < bounds_payload["visible_bounds_world"]["v_max"]
+    )
 
     screenshot_payload = run_cli_json(
         runner,
@@ -203,6 +227,32 @@ def test_cli_render_and_navigation(
     assert payload["status"] == "ok"
     assert payload["images"][0]["mime"] == "image/png"
     assert _decode_size(payload["images"][0]["bytes_base64"]) == (72, 56)
+
+    raw_payload = run_cli_json(
+        runner,
+        [
+            "render",
+            "image",
+            "--view-id",
+            view_context.view_id,
+            "--width-px",
+            "40",
+            "--height-px",
+            "30",
+            "--format",
+            "raw_rgba",
+            "--session-id",
+            view_context.session_id,
+            "--json",
+        ],
+        env=cli_env,
+    )
+    assert raw_payload["status"] == "ok"
+    assert raw_payload["images"][0]["mime"] == "application/x-raw-rgba"
+    assert raw_payload["images"][0]["pixel_format"] == "rgba8"
+    assert raw_payload["images"][0]["bytes_per_pixel"] == 4
+    assert raw_payload["images"][0]["row_stride_bytes"] == 160
+    assert _decode_len(raw_payload["images"][0]["bytes_base64"]) == (40 * 30 * 4)
 
     view_state_payload = run_cli_json(
         runner,
@@ -257,7 +307,10 @@ def test_cli_render_and_navigation(
         env=cli_env,
     )
     assert stateless_inline_payload["status"] == "ok"
-    assert _decode_size(stateless_inline_payload["images"][0]["bytes_base64"]) == (32, 24)
+    assert _decode_size(stateless_inline_payload["images"][0]["bytes_base64"]) == (
+        32,
+        24,
+    )
 
     output_root = Path(__file__).resolve().parents[3] / "output"
     output_relative = f"snapshots/test-cli-{uuid.uuid4().hex}.png"

@@ -13,11 +13,17 @@ class ModelBase(BaseModel):
 
 
 class RenderOutputSpec(ModelBase):
-    format: Literal["png"] = "png"
+    format: Literal["png", "raw_rgba"] = "png"
     delivery: Literal["inline_base64", "file_path"] = "inline_base64"
     file_path: str | None = None
     width_px: int = Field(ge=1)
     height_px: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def validate_format_delivery(self) -> "RenderOutputSpec":
+        if self.format == "raw_rgba" and self.delivery != "inline_base64":
+            raise ValueError("raw_rgba format supports only inline_base64 delivery.")
+        return self
 
 
 class RenderImageRequest(ModelBase):
@@ -40,7 +46,10 @@ class RenderImageRequest(ModelBase):
 
 class RenderImageArtifact(ModelBase):
     role: Literal["main"] = "main"
-    mime: Literal["image/png"] = "image/png"
+    mime: Literal["image/png", "application/x-raw-rgba"] = "image/png"
+    pixel_format: Literal["rgba8"] | None = None
+    bytes_per_pixel: int | None = Field(default=None, ge=1)
+    row_stride_bytes: int | None = Field(default=None, ge=1)
     width_px: int = Field(ge=1)
     height_px: int = Field(ge=1)
     delivery: Literal["inline_base64", "file_path"] = "inline_base64"
@@ -52,10 +61,22 @@ class RenderImageArtifact(ModelBase):
     def validate_delivery_payload(self) -> "RenderImageArtifact":
         if self.delivery == "inline_base64":
             if self.bytes_base64 is None or self.file_path is not None:
-                raise ValueError("inline_base64 delivery requires bytes_base64 and forbids file_path.")
-            return self
-        if self.file_path is None or self.bytes_base64 is not None:
-            raise ValueError("file_path delivery requires file_path and forbids bytes_base64.")
+                raise ValueError(
+                    "inline_base64 delivery requires bytes_base64 and forbids file_path."
+                )
+        elif self.file_path is None or self.bytes_base64 is not None:
+            raise ValueError(
+                "file_path delivery requires file_path and forbids bytes_base64."
+            )
+        if self.mime == "application/x-raw-rgba":
+            if self.pixel_format != "rgba8" or self.bytes_per_pixel != 4:
+                raise ValueError(
+                    "application/x-raw-rgba artifacts require pixel_format=rgba8 and bytes_per_pixel=4."
+                )
+            if self.row_stride_bytes is None:
+                raise ValueError(
+                    "application/x-raw-rgba artifacts require row_stride_bytes.",
+                )
         return self
 
 

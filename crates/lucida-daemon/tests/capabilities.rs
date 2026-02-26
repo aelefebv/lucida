@@ -29,7 +29,10 @@ async fn capabilities_returns_required_payload_shape() {
     assert_eq!(payload["schema_version"], 1);
     assert!(payload["api_version"].as_str().is_some());
     assert_eq!(payload["render_modes"], serde_json::json!(["2d"]));
-    assert_eq!(payload["output_formats"], serde_json::json!(["png"]));
+    assert_eq!(
+        payload["output_formats"],
+        serde_json::json!(["png", "raw_rgba"])
+    );
     assert!(payload["gpu"]["available"].is_boolean());
     assert!(payload["presets"].is_array());
 }

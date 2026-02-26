@@ -92,7 +92,7 @@ button:hover,
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(4, minmax(160px, 1fr));
+  grid-template-columns: repeat(5, minmax(150px, 1fr));
   gap: 0.85rem;
   align-items: end;
 }
@@ -175,6 +175,12 @@ select {
 }
 
 .viewport img {
+  max-width: 100%;
+  max-height: 70vh;
+  display: block;
+}
+
+.viewport canvas {
   max-width: 100%;
   max-height: 70vh;
   display: block;

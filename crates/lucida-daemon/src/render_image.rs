@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::time::Instant;
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
@@ -12,16 +13,16 @@ use uuid::Uuid;
 
 use crate::dto::api::ApiWarning;
 use crate::dto::render::{
-    RenderArtifactRole, RenderAxisSelector, RenderDelivery, RenderImageArtifact,
-    RenderImageResponse, RenderMeta, RenderMimeType, RenderOutputSpec, RenderStatus,
-    RenderTimingMs,
+    RenderArtifactRole, RenderAxisSelector, RenderDelivery, RenderFormat, RenderImageArtifact,
+    RenderImageResponse, RenderMeta, RenderMimeType, RenderOutputSpec, RenderPixelFormat,
+    RenderStatus, RenderTimingMs, RenderTimingStagesMs,
 };
 use crate::dto::view_state::{RenderMode, ViewState};
 use crate::error::ApiError;
 use crate::render_backend::{select_render_backend, RenderBackend};
 use crate::render_cache::SessionCacheSnapshot;
-use crate::render_cpu::render_view_to_png;
-use crate::render_gpu::render_view_to_png_gpu;
+use crate::render_cpu::{render_view_to_png, render_view_to_rgba, RenderRgbaResult};
+use crate::render_gpu::{render_view_to_png_gpu, render_view_to_rgba_gpu};
 use crate::request_validation::{
     expect_body_object, invalid_request_error, parse_optional_non_empty_string,
     parse_optional_patch_list, parse_optional_typed, parse_required_positive_u64,
@@ -42,6 +43,37 @@ struct ParsedRenderImageRequest {
     request_id: Option<String>,
     overrides_json_patch: Option<Vec<Value>>,
     output: RenderOutputSpec,
+}
+
+#[derive(Debug, Clone)]
+struct EncodedRenderArtifact {
+    bytes: Vec<u8>,
+    mime: RenderMimeType,
+    pixel_format: Option<RenderPixelFormat>,
+    bytes_per_pixel: Option<u8>,
+    row_stride_bytes: Option<u64>,
+    pyramid_level_used: u64,
+    warnings: Vec<ApiWarning>,
+    timing_ms: Option<RenderTimingMs>,
+}
+
+fn rgba_timing_ms(total_ms: f64, rgba_result: &RenderRgbaResult) -> RenderTimingMs {
+    RenderTimingMs {
+        total: total_ms,
+        io: rgba_result.chunk_fetch_ms,
+        decode: rgba_result.chunk_decode_ms,
+        gpu_upload: rgba_result.gpu_upload_ms,
+        render: rgba_result.sample_ms + rgba_result.compose_ms + rgba_result.gpu_compute_ms,
+        stages: Some(RenderTimingStagesMs {
+            chunk_fetch: rgba_result.chunk_fetch_ms,
+            chunk_decode: rgba_result.chunk_decode_ms,
+            sample: rgba_result.sample_ms,
+            compose: rgba_result.compose_ms,
+            encode: 0.0,
+            gpu_compute: rgba_result.gpu_compute_ms,
+            gpu_readback: rgba_result.gpu_readback_ms,
+        }),
+    }
 }
 
 pub async fn render_image(
@@ -310,60 +342,135 @@ pub async fn render_image(
         "render backend selection"
     );
 
-    let (render_result, cache_snapshot, cache_budgets, backend_warnings) = {
+    let (rendered_artifact, cache_snapshot, cache_budgets, backend_warnings) = {
         let mut cache_state = cache_registry.write().await;
         let cache_budgets =
             cache_state.resolve_effective_budgets(effective_view.performance.as_ref());
         let mut backend_warnings = backend_selection.warnings;
-        let render_result = match backend_selection.backend {
-            RenderBackend::Cpu => render_view_to_png(
-                &dataset_summary,
-                &effective_view,
-                &request.output,
-                &mut cache_state,
-                &cache_session_id,
-                cache_budgets,
-            )?,
-            RenderBackend::Gpu => match render_view_to_png_gpu(
-                &dataset_summary,
-                &effective_view,
-                &request.output,
-                &mut cache_state,
-                &cache_session_id,
-                cache_budgets,
-            ) {
-                Ok(result) => result,
-                Err(error) => {
-                    tracing::warn!(
-                        error_code = %error.envelope.code,
-                        error_message = %error.envelope.message,
-                        "gpu render failed; falling back to cpu renderer"
-                    );
-                    backend_warnings.push(ApiWarning {
-                        code: "gpu_render_failed_fallback_cpu".to_owned(),
-                        message:
-                            "GPU rendering failed at runtime; CPU renderer was used for this request."
-                                .to_owned(),
-                        details: Some(json!({
-                            "error_code": error.envelope.code,
-                            "error_message": error.envelope.message,
-                            "error_details": error.envelope.details,
-                        })),
-                    });
-                    render_view_to_png(
+        let rendered_artifact = match request.output.format.clone() {
+            RenderFormat::Png => {
+                let render_result = match backend_selection.backend {
+                    RenderBackend::Cpu => render_view_to_png(
                         &dataset_summary,
                         &effective_view,
                         &request.output,
                         &mut cache_state,
                         &cache_session_id,
                         cache_budgets,
-                    )?
+                    )?,
+                    RenderBackend::Gpu => match render_view_to_png_gpu(
+                        &dataset_summary,
+                        &effective_view,
+                        &request.output,
+                        &mut cache_state,
+                        &cache_session_id,
+                        cache_budgets,
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            tracing::warn!(
+                                error_code = %error.envelope.code,
+                                error_message = %error.envelope.message,
+                                "gpu render failed; falling back to cpu renderer"
+                            );
+                            backend_warnings.push(ApiWarning {
+                                code: "gpu_render_failed_fallback_cpu".to_owned(),
+                                message:
+                                    "GPU rendering failed at runtime; CPU renderer was used for this request."
+                                        .to_owned(),
+                                details: Some(json!({
+                                    "error_code": error.envelope.code,
+                                    "error_message": error.envelope.message,
+                                    "error_details": error.envelope.details,
+                                })),
+                            });
+                            render_view_to_png(
+                                &dataset_summary,
+                                &effective_view,
+                                &request.output,
+                                &mut cache_state,
+                                &cache_session_id,
+                                cache_budgets,
+                            )?
+                        }
+                    },
+                };
+                EncodedRenderArtifact {
+                    bytes: render_result.png_bytes,
+                    mime: RenderMimeType::Png,
+                    pixel_format: None,
+                    bytes_per_pixel: None,
+                    row_stride_bytes: None,
+                    pyramid_level_used: render_result.pyramid_level_used,
+                    warnings: render_result.warnings,
+                    timing_ms: render_result.timing_ms,
                 }
-            },
+            }
+            RenderFormat::RawRgba => {
+                let render_start = Instant::now();
+                let rgba_result = match backend_selection.backend {
+                    RenderBackend::Cpu => render_view_to_rgba(
+                        &dataset_summary,
+                        &effective_view,
+                        &request.output,
+                        &mut cache_state,
+                        &cache_session_id,
+                        cache_budgets,
+                    )?,
+                    RenderBackend::Gpu => match render_view_to_rgba_gpu(
+                        &dataset_summary,
+                        &effective_view,
+                        &request.output,
+                        &mut cache_state,
+                        &cache_session_id,
+                        cache_budgets,
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            tracing::warn!(
+                                error_code = %error.envelope.code,
+                                error_message = %error.envelope.message,
+                                "gpu render failed; falling back to cpu renderer"
+                            );
+                            backend_warnings.push(ApiWarning {
+                                code: "gpu_render_failed_fallback_cpu".to_owned(),
+                                message:
+                                    "GPU rendering failed at runtime; CPU renderer was used for this request."
+                                        .to_owned(),
+                                details: Some(json!({
+                                    "error_code": error.envelope.code,
+                                    "error_message": error.envelope.message,
+                                    "error_details": error.envelope.details,
+                                })),
+                            });
+                            render_view_to_rgba(
+                                &dataset_summary,
+                                &effective_view,
+                                &request.output,
+                                &mut cache_state,
+                                &cache_session_id,
+                                cache_budgets,
+                            )?
+                        }
+                    },
+                };
+                let total_ms = (Instant::now() - render_start).as_secs_f64() * 1000.0;
+                let timing_ms = Some(rgba_timing_ms(total_ms, &rgba_result));
+                EncodedRenderArtifact {
+                    bytes: rgba_result.rgba_bytes,
+                    mime: RenderMimeType::RawRgba,
+                    pixel_format: Some(RenderPixelFormat::Rgba8),
+                    bytes_per_pixel: Some(4),
+                    row_stride_bytes: Some(request.output.width_px.saturating_mul(4)),
+                    pyramid_level_used: rgba_result.pyramid_level_used,
+                    warnings: rgba_result.warnings,
+                    timing_ms,
+                }
+            }
         };
         let cache_snapshot = cache_state.session_snapshot(&cache_session_id);
         (
-            render_result,
+            rendered_artifact,
             cache_snapshot,
             cache_budgets,
             backend_warnings,
@@ -374,23 +481,26 @@ pub async fn render_image(
 
     let payload_sha256 = {
         let mut hasher = Sha256::new();
-        hasher.update(&render_result.png_bytes);
+        hasher.update(&rendered_artifact.bytes);
         format!("{:x}", hasher.finalize())
     };
 
     let mut warnings = selector_warnings;
     warnings.extend(view_warnings);
     warnings.extend(backend_warnings);
-    warnings.extend(render_result.warnings);
+    warnings.extend(rendered_artifact.warnings.clone());
 
     let artifact = match request.output.delivery {
         RenderDelivery::InlineBase64 => RenderImageArtifact {
             role: RenderArtifactRole::Main,
-            mime: RenderMimeType::Png,
+            mime: rendered_artifact.mime.clone(),
+            pixel_format: rendered_artifact.pixel_format.clone(),
+            bytes_per_pixel: rendered_artifact.bytes_per_pixel,
+            row_stride_bytes: rendered_artifact.row_stride_bytes,
             width_px: request.output.width_px,
             height_px: request.output.height_px,
             delivery: RenderDelivery::InlineBase64,
-            bytes_base64: Some(BASE64_STANDARD.encode(&render_result.png_bytes)),
+            bytes_base64: Some(BASE64_STANDARD.encode(&rendered_artifact.bytes)),
             file_path: None,
             sha256: payload_sha256,
         },
@@ -398,7 +508,7 @@ pub async fn render_image(
             let output_path =
                 resolve_snapshot_output_path(request.output.file_path.as_deref(), &render_id)?;
             ensure_output_parent_within_root(&output_path)?;
-            std::fs::write(&output_path, &render_result.png_bytes).map_err(|error| {
+            std::fs::write(&output_path, &rendered_artifact.bytes).map_err(|error| {
                 ApiError::new(
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "render_failed",
@@ -409,7 +519,10 @@ pub async fn render_image(
 
             RenderImageArtifact {
                 role: RenderArtifactRole::Main,
-                mime: RenderMimeType::Png,
+                mime: rendered_artifact.mime.clone(),
+                pixel_format: rendered_artifact.pixel_format.clone(),
+                bytes_per_pixel: rendered_artifact.bytes_per_pixel,
+                row_stride_bytes: rendered_artifact.row_stride_bytes,
                 width_px: request.output.width_px,
                 height_px: request.output.height_px,
                 delivery: RenderDelivery::FilePath,
@@ -433,9 +546,9 @@ pub async fn render_image(
         meta: RenderMeta {
             dataset_id: dataset_summary.dataset_id.clone(),
             multiscale_name: effective_view.datasets[0].multiscale_name.clone(),
-            pyramid_level_used: render_result.pyramid_level_used,
+            pyramid_level_used: rendered_artifact.pyramid_level_used,
             selectors_applied: selectors.iter().map(RenderAxisSelector::from).collect(),
-            timing_ms: render_result.timing_ms.unwrap_or(RenderTimingMs {
+            timing_ms: rendered_artifact.timing_ms.unwrap_or(RenderTimingMs {
                 total: 0.0,
                 io: 0.0,
                 decode: 0.0,
@@ -555,31 +668,32 @@ fn parse_required_output(
     }
 
     let format = match output_obj.get("format") {
-        None => "png",
+        None => RenderFormat::Png,
         Some(value) => match value.as_str() {
-            Some("png") => "png",
+            Some("png") => RenderFormat::Png,
+            Some("raw_rgba") => RenderFormat::RawRgba,
             _ => {
                 errors.push(json!({
                     "loc": ["body", "output", "format"],
-                    "msg": "Input should be 'png'.",
+                    "msg": "Input should be 'png' or 'raw_rgba'.",
                     "type": "literal_error",
                 }));
-                "png"
+                RenderFormat::Png
             }
         },
     };
     let delivery = match output_obj.get("delivery") {
-        None => "inline_base64",
+        None => RenderDelivery::InlineBase64,
         Some(value) => match value.as_str() {
-            Some("inline_base64") => "inline_base64",
-            Some("file_path") => "file_path",
+            Some("inline_base64") => RenderDelivery::InlineBase64,
+            Some("file_path") => RenderDelivery::FilePath,
             _ => {
                 errors.push(json!({
                     "loc": ["body", "output", "delivery"],
                     "msg": "Input should be 'inline_base64' or 'file_path'.",
                     "type": "literal_error",
                 }));
-                "inline_base64"
+                RenderDelivery::InlineBase64
             }
         },
     };
@@ -589,21 +703,21 @@ fn parse_required_output(
         parse_required_positive_u64(output_obj, "height_px", errors, &["body", "output"]);
     let file_path = parse_optional_non_empty_string_nested(output_obj, "file_path", errors);
 
+    if format == RenderFormat::RawRgba && delivery == RenderDelivery::FilePath {
+        errors.push(json!({
+            "loc": ["body", "output", "delivery"],
+            "msg": "raw_rgba format supports only inline_base64 delivery.",
+            "type": "literal_error",
+        }));
+    }
+
     if width_px.is_none() || height_px.is_none() {
         return None;
     }
 
     Some(RenderOutputSpec {
-        format: if format == "png" {
-            crate::dto::render::RenderFormat::Png
-        } else {
-            crate::dto::render::RenderFormat::Png
-        },
-        delivery: if delivery == "file_path" {
-            RenderDelivery::FilePath
-        } else {
-            RenderDelivery::InlineBase64
-        },
+        format,
+        delivery,
         file_path,
         width_px: width_px.unwrap_or(1),
         height_px: height_px.unwrap_or(1),

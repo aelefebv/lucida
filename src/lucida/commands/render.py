@@ -42,6 +42,11 @@ def render_image(
     ),
     width_px: int = typer.Option(..., "--width-px", help="Output width in pixels."),
     height_px: int = typer.Option(..., "--height-px", help="Output height in pixels."),
+    format: str = typer.Option(
+        "png",
+        "--format",
+        help="Output format: png or raw_rgba.",
+    ),
     delivery: str = typer.Option(
         "inline_base64",
         "--delivery",
@@ -52,8 +57,12 @@ def render_image(
         "--file-path",
         help="Optional file output path when --delivery file_path.",
     ),
-    session_id: str | None = typer.Option(None, "--session-id", help="Optional session id."),
-    request_id: str | None = typer.Option(None, "--request-id", help="Optional request id."),
+    session_id: str | None = typer.Option(
+        None, "--session-id", help="Optional session id."
+    ),
+    request_id: str | None = typer.Option(
+        None, "--request-id", help="Optional request id."
+    ),
     patch_file: Path | None = typer.Option(
         None,
         "--patch-file",
@@ -69,12 +78,14 @@ def render_image(
         None, "--base-url", help="Optional API server base URL to use HTTP mode."
     ),
 ) -> None:
-    """Render a PNG image for a view."""
+    """Render an image for a view."""
     context = load_cli_context()
     try:
         has_view_state = view_state_file is not None or view_state_json is not None
         if has_view_state and view_id is not None:
-            raise ValueError("Provide exactly one of --view-id or one view-state input.")
+            raise ValueError(
+                "Provide exactly one of --view-id or one view-state input."
+            )
         resolved_view_id: str | None = None
         if not has_view_state:
             resolved_view_id = resolve_required_identifier(
@@ -84,12 +95,20 @@ def render_image(
                 hint="run `lucida view create` or `lucida view use` first",
             )
 
-        resolved_session_id = resolve_optional_identifier(session_id, context.session_id)
+        resolved_session_id = resolve_optional_identifier(
+            session_id, context.session_id
+        )
+        if format not in {"png", "raw_rgba"}:
+            raise ValueError("format must be one of: png, raw_rgba.")
         if delivery not in {"inline_base64", "file_path"}:
             raise ValueError("delivery must be one of: inline_base64, file_path.")
+        if format == "raw_rgba" and delivery == "file_path":
+            raise ValueError("raw_rgba format supports only inline_base64 delivery.")
 
         view_state_value = (
-            load_view_state(view_state_file, view_state_json) if has_view_state else None
+            load_view_state(view_state_file, view_state_json)
+            if has_view_state
+            else None
         )
         overrides = (
             load_patch(patch_file, patch_json)
@@ -107,6 +126,7 @@ def render_image(
                 ),
                 width_px=width_px,
                 height_px=height_px,
+                format=format,
                 delivery=delivery,
                 file_path=file_path_value,
                 session_id=resolved_session_id,

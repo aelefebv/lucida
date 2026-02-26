@@ -25,6 +25,7 @@ use crate::usage::{
 use crate::view_events::{SharedViewEventBus, ViewEvent, ViewEventThumbnail, ViewEventType};
 
 const REQUEST_CAPTURE_LIMIT_BYTES: usize = 512 * 1024;
+const RESPONSE_FORWARD_LIMIT_BYTES: usize = 96 * 1024 * 1024;
 const RESPONSE_CAPTURE_LIMIT_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CAPTURE_STRING_CHARS: usize = 4096;
 const THUMBNAIL_MAX_EDGE_PX: u32 = 320;
@@ -242,14 +243,25 @@ pub async fn usage_capture_middleware(
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
     let status_code = response.status().as_u16();
     let (response_parts, response_body) = response.into_parts();
-    let response_bytes = match to_bytes(response_body, RESPONSE_CAPTURE_LIMIT_BYTES).await {
+    let response_bytes = match to_bytes(response_body, RESPONSE_FORWARD_LIMIT_BYTES).await {
         Ok(bytes) => bytes,
         Err(error) => {
             tracing::warn!(target: "lucida.usage", path = %path, error = %error, "failed to capture response body");
             Default::default()
         }
     };
-    let response_json_raw = decode_json_payload(response_bytes.as_ref());
+    let response_json_raw = if response_bytes.len() > RESPONSE_CAPTURE_LIMIT_BYTES {
+        tracing::debug!(
+            target: "lucida.usage",
+            path = %path,
+            response_bytes = response_bytes.len(),
+            capture_limit_bytes = RESPONSE_CAPTURE_LIMIT_BYTES,
+            "response body exceeded usage-capture JSON limit; skipping response payload capture"
+        );
+        None
+    } else {
+        decode_json_payload(response_bytes.as_ref())
+    };
     let response = Response::from_parts(response_parts, Body::from(response_bytes));
 
     let (usage, usage_capture_worker) = {
@@ -323,6 +335,9 @@ fn maybe_create_thumbnail_from_render_response(
     }
     let payload = response_json?;
     if !is_inline_base64_delivery(payload) {
+        return None;
+    }
+    if !is_png_inline_artifact(payload) {
         return None;
     }
 
@@ -402,6 +417,13 @@ fn is_inline_base64_delivery(payload: &Value) -> bool {
     matches!(
         value_string(payload, &["images", "0", "delivery"]).as_deref(),
         Some("inline_base64")
+    )
+}
+
+fn is_png_inline_artifact(payload: &Value) -> bool {
+    matches!(
+        value_string(payload, &["images", "0", "mime"]).as_deref(),
+        Some("image/png")
     )
 }
 
@@ -607,7 +629,8 @@ fn parse_env_u32(name: &str, fallback: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_inline_base64_delivery, should_sample_render, ThumbnailPolicy, ThumbnailRateWindow,
+        is_inline_base64_delivery, is_png_inline_artifact, should_sample_render, ThumbnailPolicy,
+        ThumbnailRateWindow,
     };
     use serde_json::json;
 
@@ -646,5 +669,18 @@ mod tests {
         assert!(is_inline_base64_delivery(&inline_payload));
         assert!(!is_inline_base64_delivery(&file_payload));
         assert!(!is_inline_base64_delivery(&missing_payload));
+    }
+
+    #[test]
+    fn thumbnail_gate_requires_png_mime() {
+        let png_payload = json!({
+            "images": [{"mime": "image/png"}]
+        });
+        let raw_payload = json!({
+            "images": [{"mime": "application/x-raw-rgba"}]
+        });
+
+        assert!(is_png_inline_artifact(&png_payload));
+        assert!(!is_png_inline_artifact(&raw_payload));
     }
 }

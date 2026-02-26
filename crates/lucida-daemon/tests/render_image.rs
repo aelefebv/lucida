@@ -89,6 +89,78 @@ async fn render_image_stateful_and_stateless_success() {
 }
 
 #[tokio::test]
+async fn render_image_raw_rgba_inline_success() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-raw-rgba");
+    create_render_omezarr(&dataset_path);
+    let view_id = open_view(&router, &dataset_path).await;
+
+    let raw_response = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "raw_rgba",
+                "delivery": "inline_base64",
+                "width_px": 32,
+                "height_px": 20,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(raw_response.status(), StatusCode::OK);
+    let payload = read_json_body(raw_response).await;
+    assert_eq!(payload["images"][0]["mime"], "application/x-raw-rgba");
+    assert_eq!(payload["images"][0]["pixel_format"], "rgba8");
+    assert_eq!(payload["images"][0]["bytes_per_pixel"], 4);
+    assert_eq!(payload["images"][0]["row_stride_bytes"], 128);
+    assert_eq!(payload["images"][0]["width_px"], 32);
+    assert_eq!(payload["images"][0]["height_px"], 20);
+    let bytes = BASE64_STANDARD
+        .decode(
+            payload["images"][0]["bytes_base64"]
+                .as_str()
+                .expect("base64 payload"),
+        )
+        .expect("decode raw bytes");
+    assert_eq!(bytes.len(), 32 * 20 * 4);
+}
+
+#[tokio::test]
+async fn render_image_raw_rgba_large_payload_not_truncated_by_usage_capture() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-raw-rgba-large");
+    create_render_omezarr(&dataset_path);
+    let view_id = open_view(&router, &dataset_path).await;
+
+    let raw_response = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "raw_rgba",
+                "delivery": "inline_base64",
+                "width_px": 1024,
+                "height_px": 1024,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(raw_response.status(), StatusCode::OK);
+    let payload = read_json_body(raw_response).await;
+    let encoded = payload["images"][0]["bytes_base64"]
+        .as_str()
+        .expect("raw base64 payload");
+    assert!(encoded.len() > 2_500_000);
+}
+
+#[tokio::test]
 async fn render_image_contract_and_error_paths() {
     let router = app();
     let dataset_path = unique_dataset_path("render-errors");
@@ -180,6 +252,28 @@ async fn render_image_contract_and_error_paths() {
     assert_eq!(
         read_json_body(too_large).await["code"],
         "render_output_too_large"
+    );
+
+    let raw_file_delivery = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "raw_rgba",
+                "delivery": "file_path",
+                "width_px": 64,
+                "height_px": 48,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(raw_file_delivery.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        read_json_body(raw_file_delivery).await["code"],
+        "invalid_request"
     );
 }
 

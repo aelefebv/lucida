@@ -17,7 +17,7 @@ pub async fn capabilities(State(state): State<SharedAppState>) -> Json<Capabilit
         schema_version: 1,
         api_version: API_VERSION.to_owned(),
         render_modes: vec!["2d".to_owned()],
-        output_formats: vec!["png".to_owned()],
+        output_formats: vec!["png".to_owned(), "raw_rgba".to_owned()],
         gpu,
         presets: vec![
             CapabilitiesPreset {

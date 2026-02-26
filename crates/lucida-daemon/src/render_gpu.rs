@@ -15,7 +15,7 @@ use crate::dto::render::{RenderOutputSpec, RenderTimingMs, RenderTimingStagesMs}
 use crate::dto::view_state::ViewState;
 use crate::error::ApiError;
 use crate::render_cache::{EffectiveCacheBudgets, RenderCacheRegistry};
-use crate::render_cpu::{render_view_to_rgba, RenderCpuResult};
+use crate::render_cpu::{render_view_to_rgba, RenderCpuResult, RenderRgbaResult};
 
 #[cfg(feature = "gpu")]
 const GPU_COPY_SHADER_WGSL: &str = r#"
@@ -78,7 +78,7 @@ pub fn render_view_to_png_gpu(
     cache_budgets: EffectiveCacheBudgets,
 ) -> Result<RenderCpuResult, ApiError> {
     let start_total = Instant::now();
-    let rgba_result = render_view_to_rgba(
+    let rgba_result = render_view_to_rgba_gpu(
         dataset_summary,
         view_state,
         output,
@@ -87,13 +87,11 @@ pub fn render_view_to_png_gpu(
         cache_budgets,
     )?;
 
-    let (gpu_processed_rgba, gpu_timing_ms) = run_gpu_copy_pipeline(&rgba_result.rgba_bytes)?;
-
     let mut png_bytes: Vec<u8> = Vec::new();
     let encode_start = Instant::now();
     encode_png_fast(
         &mut png_bytes,
-        &gpu_processed_rgba,
+        &rgba_result.rgba_bytes,
         output.width_px as u32,
         output.height_px as u32,
     )?;
@@ -108,21 +106,50 @@ pub fn render_view_to_png_gpu(
             total: (end_total - start_total).as_secs_f64() * 1000.0,
             io: rgba_result.chunk_fetch_ms,
             decode: rgba_result.chunk_decode_ms,
-            gpu_upload: gpu_timing_ms.upload + rgba_result.gpu_upload_ms,
-            render: rgba_result.sample_ms
-                + rgba_result.compose_ms
-                + gpu_timing_ms.compute
-                + rgba_result.gpu_compute_ms,
+            gpu_upload: rgba_result.gpu_upload_ms,
+            render: rgba_result.sample_ms + rgba_result.compose_ms + rgba_result.gpu_compute_ms,
             stages: Some(RenderTimingStagesMs {
                 chunk_fetch: rgba_result.chunk_fetch_ms,
                 chunk_decode: rgba_result.chunk_decode_ms,
                 sample: rgba_result.sample_ms,
                 compose: rgba_result.compose_ms,
                 encode: (encode_end - encode_start).as_secs_f64() * 1000.0,
-                gpu_compute: gpu_timing_ms.compute + rgba_result.gpu_compute_ms,
-                gpu_readback: gpu_timing_ms.readback + rgba_result.gpu_readback_ms,
+                gpu_compute: rgba_result.gpu_compute_ms,
+                gpu_readback: rgba_result.gpu_readback_ms,
             }),
         }),
+    })
+}
+
+#[cfg(feature = "gpu")]
+pub fn render_view_to_rgba_gpu(
+    dataset_summary: &DatasetSummary,
+    view_state: &ViewState,
+    output: &RenderOutputSpec,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+    cache_budgets: EffectiveCacheBudgets,
+) -> Result<RenderRgbaResult, ApiError> {
+    let rgba_result = render_view_to_rgba(
+        dataset_summary,
+        view_state,
+        output,
+        cache_registry,
+        cache_session_id,
+        cache_budgets,
+    )?;
+    let (gpu_processed_rgba, gpu_timing_ms) = run_gpu_copy_pipeline(&rgba_result.rgba_bytes)?;
+    Ok(RenderRgbaResult {
+        rgba_bytes: gpu_processed_rgba,
+        pyramid_level_used: rgba_result.pyramid_level_used,
+        warnings: rgba_result.warnings,
+        chunk_fetch_ms: rgba_result.chunk_fetch_ms,
+        chunk_decode_ms: rgba_result.chunk_decode_ms,
+        sample_ms: rgba_result.sample_ms,
+        compose_ms: rgba_result.compose_ms,
+        gpu_upload_ms: rgba_result.gpu_upload_ms + gpu_timing_ms.upload,
+        gpu_compute_ms: rgba_result.gpu_compute_ms + gpu_timing_ms.compute,
+        gpu_readback_ms: rgba_result.gpu_readback_ms + gpu_timing_ms.readback,
     })
 }
 
@@ -423,6 +450,23 @@ pub fn render_view_to_png_gpu(
     _cache_session_id: &str,
     _cache_budgets: EffectiveCacheBudgets,
 ) -> Result<RenderCpuResult, ApiError> {
+    Err(ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "gpu_render_failed",
+        "GPU rendering is unavailable because the daemon was built without the gpu feature.",
+        None,
+    ))
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn render_view_to_rgba_gpu(
+    _dataset_summary: &DatasetSummary,
+    _view_state: &ViewState,
+    _output: &RenderOutputSpec,
+    _cache_registry: &mut RenderCacheRegistry,
+    _cache_session_id: &str,
+    _cache_budgets: EffectiveCacheBudgets,
+) -> Result<RenderRgbaResult, ApiError> {
     Err(ApiError::new(
         StatusCode::UNPROCESSABLE_ENTITY,
         "gpu_render_failed",
