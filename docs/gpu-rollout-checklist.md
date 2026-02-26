@@ -38,5 +38,5 @@ Status note: `uv run pytest -q` currently has 3 pre-existing failures in `tests/
 - [x] Commit checkpoint: checklist + backend selector plumbing.
 - [x] Commit checkpoint: capabilities endpoint + runtime GPU detection.
 - [x] Commit checkpoint: Python client/models + test updates.
-- [ ] Push branch and open draft PR with detailed body.
-- [ ] Merge PR into `main` once checks pass.
+- [x] Push branch and open draft PR with detailed body.
+- [x] Merge PR into `main` once checks pass.
