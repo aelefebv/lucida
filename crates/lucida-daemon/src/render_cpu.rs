@@ -144,6 +144,22 @@ struct SinglePlaneRgbaResult {
 }
 
 #[derive(Debug, Clone)]
+struct PreparedLayerSamplingInput {
+    layer: LayerState,
+    channel_stack: Vec<PlaneData>,
+    interpolation: InterpolationMode,
+    f_u: f64,
+    f_v: f64,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSinglePlaneLayerBatch {
+    layers: Vec<PreparedLayerSamplingInput>,
+    primary_level_used: Option<u64>,
+    warnings: Vec<ApiWarning>,
+}
+
+#[derive(Debug, Clone)]
 struct TriptychRenderResult {
     rgba_bytes: Vec<u8>,
     pyramid_level_used: u64,
@@ -410,8 +426,107 @@ fn render_single_plane_to_rgba(
     let mut layer_rgb_scratch = vec![0.0_f32; pixel_count * 3];
     let mut layer_alpha_scratch = vec![0.0_f32; pixel_count];
 
+    let prepared_batch = prepare_single_plane_layer_batch(
+        dataset_summary,
+        view_state,
+        view_2d,
+        dataset_root,
+        output_width,
+        output_height,
+        u_axis,
+        v_axis,
+        orth_axis,
+        slice_index,
+        &selectors_by_axis,
+        cache_registry,
+        cache_session_id,
+        stage_timing,
+    )?;
+    let warnings = prepared_batch.warnings;
+
+    for prepared_layer in &prepared_batch.layers {
+        let sample_start = Instant::now();
+        let (sampled_stack, sample_alpha) = sample_channel_stack(
+            &prepared_layer.channel_stack,
+            view_2d.camera.center_world.0,
+            view_2d.camera.center_world.1,
+            view_2d.camera.zoom,
+            view_state.viewport.pixel_ratio,
+            prepared_layer.f_u,
+            prepared_layer.f_v,
+            output_width,
+            output_height,
+            prepared_layer.interpolation.clone(),
+        );
+        stage_timing.sample_ms += (Instant::now() - sample_start).as_secs_f64() * 1000.0;
+
+        compose_layer_into(
+            &sampled_stack,
+            &sample_alpha,
+            &prepared_layer.layer,
+            &mut layer_rgb_scratch,
+            &mut layer_alpha_scratch,
+            stage_timing,
+        );
+        canvas_rgb
+            .par_chunks_mut(3)
+            .zip(canvas_alpha.par_iter_mut())
+            .zip(
+                layer_rgb_scratch
+                    .par_chunks(3)
+                    .zip(layer_alpha_scratch.par_iter()),
+            )
+            .for_each(
+                |((canvas_rgb_px, canvas_alpha_px), (layer_rgb_px, layer_alpha_px))| {
+                    let src_alpha = (*layer_alpha_px).clamp(0.0, 1.0);
+                    canvas_rgb_px[0] =
+                        layer_rgb_px[0].clamp(0.0, 1.0) + (canvas_rgb_px[0] * (1.0 - src_alpha));
+                    canvas_rgb_px[1] =
+                        layer_rgb_px[1].clamp(0.0, 1.0) + (canvas_rgb_px[1] * (1.0 - src_alpha));
+                    canvas_rgb_px[2] =
+                        layer_rgb_px[2].clamp(0.0, 1.0) + (canvas_rgb_px[2] * (1.0 - src_alpha));
+                    *canvas_alpha_px = src_alpha + (*canvas_alpha_px * (1.0 - src_alpha));
+                },
+            );
+    }
+
+    let mut rgba_u8 = vec![0_u8; pixel_count * 4];
+    rgba_u8
+        .par_chunks_mut(4)
+        .enumerate()
+        .for_each(|(index, rgba)| {
+            rgba[0] = (canvas_rgb[index * 3].clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[1] = (canvas_rgb[index * 3 + 1].clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[2] = (canvas_rgb[index * 3 + 2].clamp(0.0, 1.0) * 255.0).round() as u8;
+            rgba[3] = (canvas_alpha[index].clamp(0.0, 1.0) * 255.0).round() as u8;
+        });
+
+    Ok(SinglePlaneRgbaResult {
+        rgba_bytes: rgba_u8,
+        pyramid_level_used: prepared_batch.primary_level_used.unwrap_or(0),
+        warnings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_single_plane_layer_batch(
+    dataset_summary: &DatasetSummary,
+    view_state: &ViewState,
+    view_2d: &View2D,
+    dataset_root: &Path,
+    output_width: usize,
+    output_height: usize,
+    u_axis: &str,
+    v_axis: &str,
+    orth_axis: &str,
+    slice_index: i64,
+    selectors_by_axis: &HashMap<String, &AxisSelector>,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+    stage_timing: &mut CpuStageTiming,
+) -> Result<PreparedSinglePlaneLayerBatch, ApiError> {
     let mut warnings: Vec<ApiWarning> = Vec::new();
-    let mut rendered_layer_count: usize = 0;
+    let mut prepared_layers: Vec<PreparedLayerSamplingInput> = Vec::new();
     let mut primary_level_used: Option<u64> = None;
 
     for layer in &view_state.layers {
@@ -498,7 +613,7 @@ fn render_single_plane_to_rgba(
             .map(|(index, name)| (name.as_str(), index))
             .collect();
         let level_factors = level_factors(multiscale, level);
-        let u_idx = *axis_index.get(u_axis.as_str()).ok_or_else(|| {
+        let u_idx = *axis_index.get(u_axis).ok_or_else(|| {
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "render_failed",
@@ -511,7 +626,7 @@ fn render_single_plane_to_rgba(
                 })),
             )
         })?;
-        let v_idx = *axis_index.get(v_axis.as_str()).ok_or_else(|| {
+        let v_idx = *axis_index.get(v_axis).ok_or_else(|| {
             ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "render_failed",
@@ -553,7 +668,7 @@ fn render_single_plane_to_rgba(
             u_axis,
             v_axis,
             orth_axis,
-            &selectors_by_axis,
+            selectors_by_axis,
             slice_index,
             &slab,
             sample_window,
@@ -561,57 +676,19 @@ fn render_single_plane_to_rgba(
         )?;
         warnings.extend(layer_warnings);
 
-        let sample_start = Instant::now();
-        let (sampled_stack, sample_alpha) = sample_channel_stack(
-            &channel_stack,
-            view_2d.camera.center_world.0,
-            view_2d.camera.center_world.1,
-            view_2d.camera.zoom,
-            view_state.viewport.pixel_ratio,
+        prepared_layers.push(PreparedLayerSamplingInput {
+            layer: layer.clone(),
+            channel_stack,
+            interpolation,
             f_u,
             f_v,
-            output_width,
-            output_height,
-            interpolation,
-        );
-        stage_timing.sample_ms += (Instant::now() - sample_start).as_secs_f64() * 1000.0;
-
-        compose_layer_into(
-            &sampled_stack,
-            &sample_alpha,
-            layer,
-            &mut layer_rgb_scratch,
-            &mut layer_alpha_scratch,
-            stage_timing,
-        );
-        canvas_rgb
-            .par_chunks_mut(3)
-            .zip(canvas_alpha.par_iter_mut())
-            .zip(
-                layer_rgb_scratch
-                    .par_chunks(3)
-                    .zip(layer_alpha_scratch.par_iter()),
-            )
-            .for_each(
-                |((canvas_rgb_px, canvas_alpha_px), (layer_rgb_px, layer_alpha_px))| {
-                    let src_alpha = (*layer_alpha_px).clamp(0.0, 1.0);
-                    canvas_rgb_px[0] =
-                        layer_rgb_px[0].clamp(0.0, 1.0) + (canvas_rgb_px[0] * (1.0 - src_alpha));
-                    canvas_rgb_px[1] =
-                        layer_rgb_px[1].clamp(0.0, 1.0) + (canvas_rgb_px[1] * (1.0 - src_alpha));
-                    canvas_rgb_px[2] =
-                        layer_rgb_px[2].clamp(0.0, 1.0) + (canvas_rgb_px[2] * (1.0 - src_alpha));
-                    *canvas_alpha_px = src_alpha + (*canvas_alpha_px * (1.0 - src_alpha));
-                },
-            );
-
-        rendered_layer_count += 1;
+        });
         if primary_level_used.is_none() {
             primary_level_used = Some(level.level);
         }
     }
 
-    if rendered_layer_count == 0 {
+    if prepared_layers.is_empty() {
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "render_failed",
@@ -620,20 +697,9 @@ fn render_single_plane_to_rgba(
         ));
     }
 
-    let mut rgba_u8 = vec![0_u8; pixel_count * 4];
-    rgba_u8
-        .par_chunks_mut(4)
-        .enumerate()
-        .for_each(|(index, rgba)| {
-            rgba[0] = (canvas_rgb[index * 3].clamp(0.0, 1.0) * 255.0).round() as u8;
-            rgba[1] = (canvas_rgb[index * 3 + 1].clamp(0.0, 1.0) * 255.0).round() as u8;
-            rgba[2] = (canvas_rgb[index * 3 + 2].clamp(0.0, 1.0) * 255.0).round() as u8;
-            rgba[3] = (canvas_alpha[index].clamp(0.0, 1.0) * 255.0).round() as u8;
-        });
-
-    Ok(SinglePlaneRgbaResult {
-        rgba_bytes: rgba_u8,
-        pyramid_level_used: primary_level_used.unwrap_or(0),
+    Ok(PreparedSinglePlaneLayerBatch {
+        layers: prepared_layers,
+        primary_level_used,
         warnings,
     })
 }

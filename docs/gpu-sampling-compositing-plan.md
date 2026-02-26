@@ -39,13 +39,13 @@ Goal: Separate render flow into `data prep` and `pixel pipeline` so CPU and GPU 
 
 Checklist:
 
-- [ ] Extract chunk fetch/decode/slab extraction into reusable typed prep structs.
-- [ ] Keep current CPU sampling/compositing as a pixel pipeline implementation.
-- [ ] Keep rendered pixels and timing behavior equivalent to current baseline.
+- [x] Extract chunk fetch/decode/slab extraction into reusable typed prep structs.
+- [x] Keep current CPU sampling/compositing as a pixel pipeline implementation.
+- [x] Keep rendered pixels and timing behavior equivalent to current baseline.
 
 Exit criteria:
 
-- [ ] Full render test suite passes with parity to baseline outputs.
+- [x] Full render test suite passes with parity to baseline outputs.
 
 ### Slice 3: GPU Runtime for Real Sampling/Compositing
 
