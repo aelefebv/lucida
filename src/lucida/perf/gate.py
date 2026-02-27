@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+@dataclass(frozen=True, slots=True)
+class GateThresholds:
+    min_cpu_to_gpu_speedup: float = 1.10
+    max_gpu_mean_roundtrip_ms: float | None = None
+    require_gpu_backend: bool = True
+
+
+def _scenario_lookup(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    scenarios = report.get("scenarios", [])
+    if not isinstance(scenarios, list):
+        return {}
+    lookup: dict[str, dict[str, Any]] = {}
+    for scenario in scenarios:
+        if not isinstance(scenario, dict):
+            continue
+        name = scenario.get("name")
+        if isinstance(name, str):
+            lookup[name] = scenario
+    return lookup
+
+
+def evaluate_gate(report: dict[str, Any], thresholds: GateThresholds) -> list[str]:
+    failures: list[str] = []
+    lookup = _scenario_lookup(report)
+    cpu = lookup.get("cpu_preferred")
+    gpu = lookup.get("gpu_preferred")
+    if cpu is None or gpu is None:
+        return ["benchmark report is missing cpu_preferred or gpu_preferred scenarios"]
+
+    cpu_mean = float(cpu.get("stats", {}).get("mean_roundtrip_ms", 0.0))
+    gpu_mean = float(gpu.get("stats", {}).get("mean_roundtrip_ms", 0.0))
+    speedup = float(report.get("cpu_to_gpu_speedup") or 0.0)
+
+    if thresholds.require_gpu_backend:
+        backend_counts = gpu.get("stats", {}).get("backend_counts", {})
+        gpu_backend_count = 0
+        if isinstance(backend_counts, dict):
+            gpu_backend_count = int(backend_counts.get("gpu", 0))
+        if gpu_backend_count <= 0:
+            failures.append("gpu_preferred scenario did not execute on GPU backend")
+
+    if speedup < thresholds.min_cpu_to_gpu_speedup:
+        failures.append(
+            "cpu_to_gpu_speedup below threshold: "
+            f"actual={speedup:.3f} expected>={thresholds.min_cpu_to_gpu_speedup:.3f} "
+            f"(cpu_mean={cpu_mean:.3f}ms gpu_mean={gpu_mean:.3f}ms)"
+        )
+
+    if thresholds.max_gpu_mean_roundtrip_ms is not None and gpu_mean > thresholds.max_gpu_mean_roundtrip_ms:
+        failures.append(
+            "gpu mean roundtrip above threshold: "
+            f"actual={gpu_mean:.3f}ms expected<={thresholds.max_gpu_mean_roundtrip_ms:.3f}ms"
+        )
+
+    return failures
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate render benchmark report against perf thresholds.")
+    parser.add_argument(
+        "--report",
+        type=Path,
+        required=True,
+        help="Path to benchmark report JSON produced by benchmark_render_pipeline.py",
+    )
+    parser.add_argument(
+        "--min-cpu-to-gpu-speedup",
+        type=float,
+        default=1.10,
+        help="Minimum required CPU/GPU roundtrip speedup ratio.",
+    )
+    parser.add_argument(
+        "--max-gpu-mean-roundtrip-ms",
+        type=float,
+        default=None,
+        help="Optional upper bound for GPU mean roundtrip latency.",
+    )
+    parser.add_argument(
+        "--allow-cpu-fallback",
+        action="store_true",
+        help="Allow passing when GPU backend is unavailable in gpu_preferred scenario.",
+    )
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = _parse_args()
+    report_path = args.report.expanduser().resolve()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise SystemExit("benchmark report root must be a JSON object")
+
+    thresholds = GateThresholds(
+        min_cpu_to_gpu_speedup=float(args.min_cpu_to_gpu_speedup),
+        max_gpu_mean_roundtrip_ms=(
+            float(args.max_gpu_mean_roundtrip_ms)
+            if args.max_gpu_mean_roundtrip_ms is not None
+            else None
+        ),
+        require_gpu_backend=not bool(args.allow_cpu_fallback),
+    )
+    failures = evaluate_gate(report, thresholds)
+    if failures:
+        for failure in failures:
+            print(f"FAIL: {failure}")
+        return 1
+
+    print("PASS: render perf gate satisfied")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
