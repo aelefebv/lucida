@@ -1,9 +1,12 @@
 #[cfg(feature = "gpu")]
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+#[cfg(feature = "gpu")]
 use std::sync::mpsc;
 #[cfg(feature = "gpu")]
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+#[cfg(feature = "gpu")]
+use std::time::Duration;
+use std::time::Instant;
 
 use axum::http::StatusCode;
 use image::codecs::png::{
@@ -58,34 +61,12 @@ fn meta_value(channel: u32, slot: u32) -> f32 {
     return channel_meta.data[channel * META_STRIDE + slot];
 }
 
-fn sample_channel(channel: u32, px_x: u32, px_y: u32) -> vec2<f32> {
+fn sample_channel(channel: u32, u_coord: f32, v_coord: f32) -> vec2<f32> {
     let width = u32(max(meta_value(channel, 1u), 0.0));
     let height = u32(max(meta_value(channel, 2u), 0.0));
     if (width == 0u || height == 0u) {
         return vec2<f32>(0.0, 0.0);
     }
-
-    let origin_u = meta_value(channel, 3u);
-    let origin_v = meta_value(channel, 4u);
-
-    let zoom_safe = max(params.sampling_a.z, 1e-6);
-    let pixel_ratio_safe = max(params.sampling_a.w, 0.5);
-    let f_u_safe = max(params.sampling_b.x, 1e-6);
-    let f_v_safe = max(params.sampling_b.y, 1e-6);
-
-    let span_u = f32(params.dims.x) / (zoom_safe * pixel_ratio_safe * f_u_safe);
-    let span_v = f32(params.dims.y) / (zoom_safe * pixel_ratio_safe * f_v_safe);
-
-    let center_u_level = (params.sampling_a.x / f_u_safe) - origin_u;
-    let center_v_level = (params.sampling_a.y / f_v_safe) - origin_v;
-
-    let start_u = center_u_level - (span_u / 2.0);
-    let start_v = center_v_level - (span_v / 2.0);
-    let step_u = span_u / max(f32(params.dims.x), 1.0);
-    let step_v = span_v / max(f32(params.dims.y), 1.0);
-
-    let u_coord = start_u + (f32(px_x) + 0.5) * step_u;
-    let v_coord = start_v + (f32(px_y) + 0.5) * step_v;
 
     let offset = u32(max(meta_value(channel, 0u), 0.0));
     let src_w = i32(width);
@@ -137,11 +118,24 @@ fn sample_channel(channel: u32, px_x: u32, px_y: u32) -> vec2<f32> {
     return vec2<f32>((s00 * w00) + (s01 * w01) + (s10 * w10) + (s11 * w11), 1.0);
 }
 
-@compute @workgroup_size(8, 8, 1)
+@compute @workgroup_size(16, 16, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (gid.x >= params.dims.x || gid.y >= params.dims.y) {
         return;
     }
+
+    let zoom_safe = max(params.sampling_a.z, 1e-6);
+    let pixel_ratio_safe = max(params.sampling_a.w, 0.5);
+    let f_u_safe = max(params.sampling_b.x, 1e-6);
+    let f_v_safe = max(params.sampling_b.y, 1e-6);
+    let inv_scale_u = 1.0 / (zoom_safe * pixel_ratio_safe * f_u_safe);
+    let inv_scale_v = 1.0 / (zoom_safe * pixel_ratio_safe * f_v_safe);
+    let center_u_level = params.sampling_a.x / f_u_safe;
+    let center_v_level = params.sampling_a.y / f_v_safe;
+    let start_u = center_u_level - (f32(params.dims.x) * 0.5 * inv_scale_u);
+    let start_v = center_v_level - (f32(params.dims.y) * 0.5 * inv_scale_v);
+    let u_coord_world = start_u + (f32(gid.x) + 0.5) * inv_scale_u;
+    let v_coord_world = start_v + (f32(gid.y) + 0.5) * inv_scale_v;
 
     let pixel_index = gid.y * params.dims.x + gid.x;
 
@@ -150,10 +144,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var sample_alpha = 0.0;
 
     for (var channel = 0u; channel < params.dims.z; channel = channel + 1u) {
-        let sampled = sample_channel(channel, gid.x, gid.y);
+        let origin_u = meta_value(channel, 3u);
+        let origin_v = meta_value(channel, 4u);
+        let sampled = sample_channel(channel, u_coord_world - origin_u, v_coord_world - origin_v);
         sample_alpha = max(sample_alpha, sampled.y);
 
         if (meta_value(channel, 5u) < 0.5) {
+            continue;
+        }
+        if (sampled.y < 0.5) {
             continue;
         }
 
@@ -167,7 +166,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
 
         let gamma = meta_value(channel, 8u);
-        if (gamma > 0.0) {
+        if (gamma > 0.0 && abs(gamma - 1.0) > 1e-4) {
             normalized = pow(clamp(normalized, 0.0, 1.0), 1.0 / gamma);
         }
 
@@ -199,9 +198,73 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 "#;
 
 #[cfg(feature = "gpu")]
+const GPU_CANVAS_CLEAR_SHADER_WGSL: &str = r#"
+struct Canvas {
+    data: array<vec4<f32>>,
+};
+
+struct ClearParams {
+    dims: vec4<u32>,
+    background: vec4<f32>,
+};
+
+@group(0) @binding(0) var<storage, read_write> canvas: Canvas;
+@group(0) @binding(1) var<uniform> params: ClearParams;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let pixel_count = params.dims.x * params.dims.y;
+    let pixel_index = gid.x;
+    if (pixel_index >= pixel_count) {
+        return;
+    }
+    canvas.data[pixel_index] = params.background;
+}
+"#;
+
+#[cfg(feature = "gpu")]
+const GPU_CANVAS_PACK_SHADER_WGSL: &str = r#"
+struct Canvas {
+    data: array<vec4<f32>>,
+};
+
+struct PackedRgba {
+    data: array<u32>,
+};
+
+struct PackParams {
+    dims: vec4<u32>,
+};
+
+@group(0) @binding(0) var<storage, read> canvas: Canvas;
+@group(0) @binding(1) var<storage, read_write> packed_rgba: PackedRgba;
+@group(0) @binding(2) var<uniform> params: PackParams;
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let pixel_count = params.dims.x * params.dims.y;
+    let pixel_index = gid.x;
+    if (pixel_index >= pixel_count) {
+        return;
+    }
+
+    let sampled = clamp(canvas.data[pixel_index], vec4<f32>(0.0), vec4<f32>(1.0));
+    let r = u32(round(sampled.r * 255.0));
+    let g = u32(round(sampled.g * 255.0));
+    let b = u32(round(sampled.b * 255.0));
+    let a = u32(round(sampled.a * 255.0));
+    packed_rgba.data[pixel_index] = r | (g << 8u) | (b << 16u) | (a << 24u);
+}
+"#;
+
+#[cfg(feature = "gpu")]
 const LAYER_META_STRIDE_FLOATS: usize = 16;
 #[cfg(feature = "gpu")]
 const PARAM_BYTES_LEN: usize = 48;
+#[cfg(feature = "gpu")]
+const CLEAR_PARAM_BYTES_LEN: usize = 32;
+#[cfg(feature = "gpu")]
+const PACK_PARAM_BYTES_LEN: usize = 16;
 #[cfg(feature = "gpu")]
 const DEFAULT_CHANNEL_COLORS: [[f32; 4]; 6] = [
     [1.0, 0.0, 0.0, 1.0],
@@ -335,6 +398,10 @@ struct GpuLayerCompositeRuntime {
     queue: wgpu::Queue,
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline: wgpu::ComputePipeline,
+    clear_bind_group_layout: wgpu::BindGroupLayout,
+    clear_pipeline: wgpu::ComputePipeline,
+    pack_bind_group_layout: wgpu::BindGroupLayout,
+    pack_pipeline: wgpu::ComputePipeline,
     layer_cache: Mutex<GpuBufferCache>,
 }
 
@@ -506,6 +573,17 @@ fn run_gpu_layer_pipeline(
         )
     })?;
 
+    let rgba_byte_len = u64::try_from(pixel_count.saturating_mul(4)).map_err(|_| {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "render_failed",
+            "Rendered image buffer exceeds GPU pipeline limits.",
+            Some(json!({
+                "pixel_count": pixel_count,
+            })),
+        )
+    })?;
+
     {
         let mut cache = runtime.layer_cache.lock().map_err(|_| {
             ApiError::new(
@@ -526,23 +604,80 @@ fn run_gpu_layer_pipeline(
             | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     });
+    let packed_rgba_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("lucida-gpu-packed-rgba"),
+        size: rgba_byte_len,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
     let readback_buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("lucida-gpu-readback"),
-        size: canvas_byte_len,
+        size: rgba_byte_len,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
 
-    let mut upload_ms = 0.0;
-    let upload_start = Instant::now();
-    let canvas_init = initial_canvas_f32_bytes(background, pixel_count);
-    queue.write_buffer(&canvas_buffer, 0, &canvas_init);
-    upload_ms += (Instant::now() - upload_start).as_secs_f64() * 1000.0;
+    let clear_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("lucida-gpu-clear-params"),
+        size: u64::try_from(CLEAR_PARAM_BYTES_LEN).unwrap_or(32),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("lucida-gpu-layer-params"),
+        size: u64::try_from(PARAM_BYTES_LEN).unwrap_or(48),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let pack_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("lucida-gpu-pack-params"),
+        size: u64::try_from(PACK_PARAM_BYTES_LEN).unwrap_or(16),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
-    let compute_start = Instant::now();
+    let mut upload_ms = 0.0;
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("lucida-gpu-layer-composite-encoder"),
     });
+    let compute_start = Instant::now();
+
+    let clear_params_bytes = encode_clear_params_bytes(
+        u32::try_from(output_width).unwrap_or(u32::MAX),
+        u32::try_from(output_height).unwrap_or(u32::MAX),
+        background,
+    );
+    let clear_upload_start = Instant::now();
+    queue.write_buffer(&clear_params_buffer, 0, &clear_params_bytes);
+    upload_ms += (Instant::now() - clear_upload_start).as_secs_f64() * 1000.0;
+
+    let clear_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("lucida-gpu-clear-bind-group"),
+        layout: &runtime.clear_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: canvas_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: clear_params_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    {
+        let mut clear_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("lucida-gpu-canvas-clear-pass"),
+            timestamp_writes: None,
+        });
+        clear_pass.set_pipeline(&runtime.clear_pipeline);
+        clear_pass.set_bind_group(0, &clear_bind_group, &[]);
+        let dispatch = u32::try_from(pixel_count)
+            .unwrap_or(u32::MAX)
+            .div_ceil(64)
+            .max(1);
+        clear_pass.dispatch_workgroups(dispatch, 1, 1);
+    }
 
     for layer in layers {
         let payload = layer_payload(layer);
@@ -568,13 +703,6 @@ fn run_gpu_layer_pipeline(
             layer.f_v as f32,
             layer.layer.opacity as f32,
         );
-
-        let params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("lucida-gpu-layer-params"),
-            size: u64::try_from(PARAM_BYTES_LEN).unwrap_or(48),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let params_upload_start = Instant::now();
         queue.write_buffer(&params_buffer, 0, &params_bytes);
         upload_ms += (Instant::now() - params_upload_start).as_secs_f64() * 1000.0;
@@ -611,17 +739,57 @@ fn run_gpu_layer_pipeline(
             compute_pass.set_bind_group(0, &bind_group, &[]);
             let wg_x = u32::try_from(output_width)
                 .unwrap_or(u32::MAX)
-                .div_ceil(8)
+                .div_ceil(16)
                 .max(1);
             let wg_y = u32::try_from(output_height)
                 .unwrap_or(u32::MAX)
-                .div_ceil(8)
+                .div_ceil(16)
                 .max(1);
             compute_pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
     }
 
-    encoder.copy_buffer_to_buffer(&canvas_buffer, 0, &readback_buffer, 0, canvas_byte_len);
+    let pack_params_bytes = encode_pack_params_bytes(
+        u32::try_from(output_width).unwrap_or(u32::MAX),
+        u32::try_from(output_height).unwrap_or(u32::MAX),
+    );
+    let pack_upload_start = Instant::now();
+    queue.write_buffer(&pack_params_buffer, 0, &pack_params_bytes);
+    upload_ms += (Instant::now() - pack_upload_start).as_secs_f64() * 1000.0;
+
+    let pack_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("lucida-gpu-pack-bind-group"),
+        layout: &runtime.pack_bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: canvas_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: packed_rgba_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: pack_params_buffer.as_entire_binding(),
+            },
+        ],
+    });
+    {
+        let mut pack_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("lucida-gpu-pack-pass"),
+            timestamp_writes: None,
+        });
+        pack_pass.set_pipeline(&runtime.pack_pipeline);
+        pack_pass.set_bind_group(0, &pack_bind_group, &[]);
+        let dispatch = u32::try_from(pixel_count)
+            .unwrap_or(u32::MAX)
+            .div_ceil(64)
+            .max(1);
+        pack_pass.dispatch_workgroups(dispatch, 1, 1);
+    }
+
+    encoder.copy_buffer_to_buffer(&packed_rgba_buffer, 0, &readback_buffer, 0, rgba_byte_len);
     queue.submit(Some(encoder.finish()));
     let readback_start = Instant::now();
 
@@ -662,7 +830,19 @@ fn run_gpu_layer_pipeline(
     }
 
     let mapped = slice.get_mapped_range();
-    let rgba_out = rgba_u8_from_canvas_f32_bytes(&mapped, pixel_count)?;
+    let expected_size = usize::try_from(rgba_byte_len).unwrap_or(0);
+    if mapped.len() < expected_size {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "gpu_render_failed",
+            "GPU readback payload was smaller than expected.",
+            Some(json!({
+                "expected_bytes": expected_size,
+                "actual_bytes": mapped.len(),
+            })),
+        ));
+    }
+    let rgba_out = mapped[..expected_size].to_vec();
     drop(mapped);
     readback_buffer.unmap();
     let readback_end = Instant::now();
@@ -692,69 +872,31 @@ fn run_gpu_layer_pipeline(
 }
 
 #[cfg(feature = "gpu")]
-fn initial_canvas_f32_bytes(background: &[f32; 4], pixel_count: usize) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(pixel_count.saturating_mul(16));
-    for _ in 0..pixel_count {
-        bytes.extend_from_slice(&background[0].to_le_bytes());
-        bytes.extend_from_slice(&background[1].to_le_bytes());
-        bytes.extend_from_slice(&background[2].to_le_bytes());
-        bytes.extend_from_slice(&background[3].to_le_bytes());
-    }
+fn encode_clear_params_bytes(
+    output_width: u32,
+    output_height: u32,
+    background: &[f32; 4],
+) -> [u8; CLEAR_PARAM_BYTES_LEN] {
+    let mut bytes = [0_u8; CLEAR_PARAM_BYTES_LEN];
+    bytes[0..4].copy_from_slice(&output_width.to_le_bytes());
+    bytes[4..8].copy_from_slice(&output_height.to_le_bytes());
+    bytes[8..12].copy_from_slice(&0_u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&0_u32.to_le_bytes());
+    bytes[16..20].copy_from_slice(&background[0].to_le_bytes());
+    bytes[20..24].copy_from_slice(&background[1].to_le_bytes());
+    bytes[24..28].copy_from_slice(&background[2].to_le_bytes());
+    bytes[28..32].copy_from_slice(&background[3].to_le_bytes());
     bytes
 }
 
 #[cfg(feature = "gpu")]
-fn rgba_u8_from_canvas_f32_bytes(
-    canvas_bytes: &[u8],
-    pixel_count: usize,
-) -> Result<Vec<u8>, ApiError> {
-    if canvas_bytes.len() < pixel_count.saturating_mul(16) {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "gpu_render_failed",
-            "GPU readback payload was smaller than expected.",
-            Some(json!({
-                "expected_bytes": pixel_count.saturating_mul(16),
-                "actual_bytes": canvas_bytes.len(),
-            })),
-        ));
-    }
-
-    let mut rgba_u8 = vec![0_u8; pixel_count.saturating_mul(4)];
-    for pixel in 0..pixel_count {
-        let base = pixel * 16;
-        let r = f32::from_le_bytes([
-            canvas_bytes[base],
-            canvas_bytes[base + 1],
-            canvas_bytes[base + 2],
-            canvas_bytes[base + 3],
-        ]);
-        let g = f32::from_le_bytes([
-            canvas_bytes[base + 4],
-            canvas_bytes[base + 5],
-            canvas_bytes[base + 6],
-            canvas_bytes[base + 7],
-        ]);
-        let b = f32::from_le_bytes([
-            canvas_bytes[base + 8],
-            canvas_bytes[base + 9],
-            canvas_bytes[base + 10],
-            canvas_bytes[base + 11],
-        ]);
-        let a = f32::from_le_bytes([
-            canvas_bytes[base + 12],
-            canvas_bytes[base + 13],
-            canvas_bytes[base + 14],
-            canvas_bytes[base + 15],
-        ]);
-
-        let out = pixel * 4;
-        rgba_u8[out] = (r.clamp(0.0, 1.0) * 255.0).round() as u8;
-        rgba_u8[out + 1] = (g.clamp(0.0, 1.0) * 255.0).round() as u8;
-        rgba_u8[out + 2] = (b.clamp(0.0, 1.0) * 255.0).round() as u8;
-        rgba_u8[out + 3] = (a.clamp(0.0, 1.0) * 255.0).round() as u8;
-    }
-    Ok(rgba_u8)
+fn encode_pack_params_bytes(output_width: u32, output_height: u32) -> [u8; PACK_PARAM_BYTES_LEN] {
+    let mut bytes = [0_u8; PACK_PARAM_BYTES_LEN];
+    bytes[0..4].copy_from_slice(&output_width.to_le_bytes());
+    bytes[4..8].copy_from_slice(&output_height.to_le_bytes());
+    bytes[8..12].copy_from_slice(&0_u32.to_le_bytes());
+    bytes[12..16].copy_from_slice(&0_u32.to_le_bytes());
+    bytes
 }
 
 #[cfg(feature = "gpu")]
@@ -1176,6 +1318,14 @@ fn initialize_gpu_layer_runtime() -> Result<GpuLayerCompositeRuntime, GpuRuntime
         label: Some("lucida-gpu-layer-composite-shader"),
         source: wgpu::ShaderSource::Wgsl(GPU_LAYER_COMPOSITE_SHADER_WGSL.into()),
     });
+    let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("lucida-gpu-canvas-clear-shader"),
+        source: wgpu::ShaderSource::Wgsl(GPU_CANVAS_CLEAR_SHADER_WGSL.into()),
+    });
+    let pack_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("lucida-gpu-canvas-pack-shader"),
+        source: wgpu::ShaderSource::Wgsl(GPU_CANVAS_PACK_SHADER_WGSL.into()),
+    });
 
     let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("lucida-gpu-layer-bind-group-layout"),
@@ -1238,11 +1388,105 @@ fn initialize_gpu_layer_runtime() -> Result<GpuLayerCompositeRuntime, GpuRuntime
         cache: None,
     });
 
+    let clear_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lucida-gpu-clear-bind-group-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+    let clear_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("lucida-gpu-clear-pipeline-layout"),
+        bind_group_layouts: &[&clear_bind_group_layout],
+        immediate_size: 0,
+    });
+    let clear_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("lucida-gpu-clear-pipeline"),
+        layout: Some(&clear_pipeline_layout),
+        module: &clear_shader,
+        entry_point: Some("main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
+    let pack_bind_group_layout =
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("lucida-gpu-pack-bind-group-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+    let pack_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("lucida-gpu-pack-pipeline-layout"),
+        bind_group_layouts: &[&pack_bind_group_layout],
+        immediate_size: 0,
+    });
+    let pack_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("lucida-gpu-pack-pipeline"),
+        layout: Some(&pack_pipeline_layout),
+        module: &pack_shader,
+        entry_point: Some("main"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+
     Ok(GpuLayerCompositeRuntime {
         device,
         queue,
         bind_group_layout,
         pipeline,
+        clear_bind_group_layout,
+        clear_pipeline,
+        pack_bind_group_layout,
+        pack_pipeline,
         layer_cache: Mutex::new(GpuBufferCache::default()),
     })
 }
