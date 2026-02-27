@@ -14,8 +14,6 @@ use image::codecs::png::{
 };
 use image::{ColorType, ImageEncoder};
 use serde_json::json;
-#[cfg(feature = "gpu")]
-use sha2::{Digest, Sha256};
 
 use crate::dto::dataset_summary::DatasetSummary;
 use crate::dto::render::{RenderOutputSpec, RenderTimingMs, RenderTimingStagesMs};
@@ -266,6 +264,10 @@ const CLEAR_PARAM_BYTES_LEN: usize = 32;
 #[cfg(feature = "gpu")]
 const PACK_PARAM_BYTES_LEN: usize = 16;
 #[cfg(feature = "gpu")]
+const FNV1A_64_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+#[cfg(feature = "gpu")]
+const FNV1A_64_PRIME: u64 = 0x0000_0100_0000_01b3;
+#[cfg(feature = "gpu")]
 const DEFAULT_CHANNEL_COLORS: [[f32; 4]; 6] = [
     [1.0, 0.0, 0.0, 1.0],
     [0.0, 1.0, 0.0, 1.0],
@@ -422,6 +424,39 @@ struct GpuLayerChannelConfig {
     max_value: f32,
     gamma: f32,
     color: [f32; 4],
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg(feature = "gpu")]
+struct GpuPayloadDigest {
+    value: u64,
+}
+
+#[cfg(feature = "gpu")]
+impl Default for GpuPayloadDigest {
+    fn default() -> Self {
+        Self {
+            value: FNV1A_64_OFFSET_BASIS,
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl GpuPayloadDigest {
+    fn update_bytes(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.value ^= u64::from(*byte);
+            self.value = self.value.wrapping_mul(FNV1A_64_PRIME);
+        }
+    }
+
+    fn update_u64(&mut self, value: u64) {
+        self.update_bytes(&value.to_le_bytes());
+    }
+
+    fn finish(self) -> u64 {
+        self.value
+    }
 }
 
 #[cfg(feature = "gpu")]
@@ -937,13 +972,27 @@ fn layer_payload(prepared_layer: &PreparedLayerSamplingInput) -> GpuLayerPayload
     let channel_configs =
         build_channel_configs(&prepared_layer.layer, &prepared_layer.channel_stack);
 
-    let mut values_f32: Vec<f32> = Vec::new();
-    let mut meta_f32: Vec<f32> =
-        Vec::with_capacity(channel_count.saturating_mul(LAYER_META_STRIDE_FLOATS));
+    let value_count = prepared_layer
+        .channel_stack
+        .iter()
+        .map(|plane| plane.data.len())
+        .sum::<usize>();
+    let mut values_bytes = Vec::with_capacity(value_count.saturating_mul(4));
+    let mut meta_bytes = Vec::with_capacity(
+        channel_count
+            .saturating_mul(LAYER_META_STRIDE_FLOATS)
+            .saturating_mul(4),
+    );
+    let mut digest = GpuPayloadDigest::default();
+    digest.update_u64(u64::try_from(channel_count).unwrap_or(u64::MAX));
 
     for (channel_index, plane) in prepared_layer.channel_stack.iter().enumerate() {
-        let value_offset = values_f32.len();
-        values_f32.extend_from_slice(&plane.data);
+        let value_offset = values_bytes.len() / 4;
+        for value in &plane.data {
+            let encoded = value.to_le_bytes();
+            values_bytes.extend_from_slice(&encoded);
+            digest.update_bytes(&encoded);
+        }
 
         let config = channel_configs
             .get(channel_index)
@@ -956,38 +1005,33 @@ fn layer_payload(prepared_layer: &PreparedLayerSamplingInput) -> GpuLayerPayload
                 color: [0.0, 0.0, 0.0, 0.0],
             });
 
-        meta_f32.push(value_offset as f32);
-        meta_f32.push(plane.width as f32);
-        meta_f32.push(plane.height as f32);
-        meta_f32.push(plane.origin_u as f32);
-        meta_f32.push(plane.origin_v as f32);
-        meta_f32.push(if config.active { 1.0 } else { 0.0 });
-        meta_f32.push(config.min_value);
-        meta_f32.push(config.max_value);
-        meta_f32.push(config.gamma);
-        meta_f32.push(config.color[0]);
-        meta_f32.push(config.color[1]);
-        meta_f32.push(config.color[2]);
-        meta_f32.push(config.color[3]);
-        meta_f32.push(0.0);
-        meta_f32.push(0.0);
-        meta_f32.push(0.0);
+        for meta_value in [
+            value_offset as f32,
+            plane.width as f32,
+            plane.height as f32,
+            plane.origin_u as f32,
+            plane.origin_v as f32,
+            if config.active { 1.0 } else { 0.0 },
+            config.min_value,
+            config.max_value,
+            config.gamma,
+            config.color[0],
+            config.color[1],
+            config.color[2],
+            config.color[3],
+            0.0,
+            0.0,
+            0.0,
+        ] {
+            let encoded = meta_value.to_le_bytes();
+            meta_bytes.extend_from_slice(&encoded);
+            digest.update_bytes(&encoded);
+        }
     }
 
-    let mut values_bytes = Vec::with_capacity(values_f32.len().saturating_mul(4));
-    for value in values_f32 {
-        values_bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    let mut meta_bytes = Vec::with_capacity(meta_f32.len().saturating_mul(4));
-    for value in meta_f32 {
-        meta_bytes.extend_from_slice(&value.to_le_bytes());
-    }
-
-    let mut hasher = Sha256::new();
-    hasher.update(&values_bytes);
-    hasher.update(&meta_bytes);
-    let key = format!("{:x}", hasher.finalize());
+    digest.update_u64(u64::try_from(values_bytes.len()).unwrap_or(u64::MAX));
+    digest.update_u64(u64::try_from(meta_bytes.len()).unwrap_or(u64::MAX));
+    let key = format!("{:016x}", digest.finish());
 
     GpuLayerPayload {
         key,
