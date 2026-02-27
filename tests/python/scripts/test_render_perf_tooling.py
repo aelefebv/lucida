@@ -49,6 +49,7 @@ def test_create_render_perf_fixture_requires_overwrite(tmp_path: Path) -> None:
 def test_evaluate_gate_passes_when_thresholds_are_met() -> None:
     report = {
         "cpu_to_gpu_speedup": 1.25,
+        "cpu_to_auto_speedup": 1.03,
         "scenarios": [
             {
                 "name": "cpu_preferred",
@@ -64,16 +65,27 @@ def test_evaluate_gate_passes_when_thresholds_are_met() -> None:
                     "backend_counts": {"gpu": 8},
                 },
             },
+            {
+                "name": "auto_default",
+                "stats": {
+                    "mean_roundtrip_ms": 38.8,
+                    "backend_counts": {"cpu": 8},
+                },
+            },
         ],
     }
 
-    failures = evaluate_gate(report, GateThresholds(min_cpu_to_gpu_speedup=1.2))
+    failures = evaluate_gate(
+        report,
+        GateThresholds(min_cpu_to_auto_speedup=1.0, min_cpu_to_gpu_speedup=1.2),
+    )
     assert failures == []
 
 
 def test_evaluate_gate_fails_for_speedup_and_gpu_backend() -> None:
     report = {
         "cpu_to_gpu_speedup": 1.01,
+        "cpu_to_auto_speedup": 0.89,
         "scenarios": [
             {
                 "name": "cpu_preferred",
@@ -89,9 +101,22 @@ def test_evaluate_gate_fails_for_speedup_and_gpu_backend() -> None:
                     "backend_counts": {"cpu": 8},
                 },
             },
+            {
+                "name": "auto_default",
+                "stats": {
+                    "mean_roundtrip_ms": 33.6,
+                    "backend_counts": {"cpu": 8},
+                },
+            },
         ],
     }
 
-    failures = evaluate_gate(report, GateThresholds(min_cpu_to_gpu_speedup=1.1))
-    assert len(failures) == 2
-    assert "gpu_preferred scenario did not execute on GPU backend" in failures[0]
+    failures = evaluate_gate(
+        report,
+        GateThresholds(min_cpu_to_auto_speedup=0.95, min_cpu_to_gpu_speedup=1.1),
+    )
+    assert len(failures) == 3
+    assert any(
+        failure == "gpu_preferred scenario did not execute on GPU backend"
+        for failure in failures
+    )

@@ -1,4 +1,5 @@
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use axum::extract::rejection::JsonRejection;
@@ -19,7 +20,7 @@ use crate::dto::render::{
 };
 use crate::dto::view_state::{RenderMode, ViewState};
 use crate::error::ApiError;
-use crate::render_backend::{select_render_backend, RenderBackend};
+use crate::render_backend::{select_render_backend, BackendPerfSnapshot, RenderBackend};
 use crate::render_cache::SessionCacheSnapshot;
 use crate::render_cpu::{render_view_to_png, render_view_to_rgba, RenderRgbaResult};
 use crate::render_gpu::{render_view_to_png_gpu, render_view_to_rgba_gpu};
@@ -55,6 +56,72 @@ struct EncodedRenderArtifact {
     pyramid_level_used: u64,
     warnings: Vec<ApiWarning>,
     timing_ms: Option<RenderTimingMs>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BackendLatencyAccumulator {
+    cpu_samples: u64,
+    cpu_total_ms: f64,
+    gpu_samples: u64,
+    gpu_total_ms: f64,
+}
+
+impl BackendLatencyAccumulator {
+    fn record(&mut self, backend: RenderBackend, total_ms: f64) {
+        if !total_ms.is_finite() || total_ms <= 0.0 {
+            return;
+        }
+        match backend {
+            RenderBackend::Cpu => {
+                self.cpu_samples = self.cpu_samples.saturating_add(1);
+                self.cpu_total_ms += total_ms;
+            }
+            RenderBackend::Gpu => {
+                self.gpu_samples = self.gpu_samples.saturating_add(1);
+                self.gpu_total_ms += total_ms;
+            }
+        }
+    }
+
+    fn snapshot(self) -> Option<BackendPerfSnapshot> {
+        if self.cpu_samples == 0 && self.gpu_samples == 0 {
+            return None;
+        }
+        let cpu_mean_ms = if self.cpu_samples > 0 {
+            self.cpu_total_ms / (self.cpu_samples as f64)
+        } else {
+            0.0
+        };
+        let gpu_mean_ms = if self.gpu_samples > 0 {
+            self.gpu_total_ms / (self.gpu_samples as f64)
+        } else {
+            0.0
+        };
+        Some(BackendPerfSnapshot {
+            cpu_samples: self.cpu_samples,
+            cpu_mean_ms,
+            gpu_samples: self.gpu_samples,
+            gpu_mean_ms,
+        })
+    }
+}
+
+fn backend_latency_store() -> &'static Mutex<BackendLatencyAccumulator> {
+    static BACKEND_LATENCY: OnceLock<Mutex<BackendLatencyAccumulator>> = OnceLock::new();
+    BACKEND_LATENCY.get_or_init(|| Mutex::new(BackendLatencyAccumulator::default()))
+}
+
+fn backend_latency_snapshot() -> Option<BackendPerfSnapshot> {
+    backend_latency_store()
+        .lock()
+        .ok()
+        .and_then(|stats| stats.snapshot())
+}
+
+fn record_backend_latency(backend: RenderBackend, total_ms: f64) {
+    if let Ok(mut stats) = backend_latency_store().lock() {
+        stats.record(backend, total_ms);
+    }
 }
 
 fn rgba_timing_ms(total_ms: f64, rgba_result: &RenderRgbaResult) -> RenderTimingMs {
@@ -339,10 +406,12 @@ pub async fn render_image(
     };
 
     let gpu_capabilities = runtime_capabilities.gpu_capabilities().await;
+    let backend_perf_snapshot = backend_latency_snapshot();
     let backend_selection = select_render_backend(
         effective_view.performance.as_ref(),
         gpu_capabilities.available,
         gpu_capabilities.adapter_name.as_deref(),
+        backend_perf_snapshot,
     );
     tracing::debug!(
         selected_backend = backend_selection.backend.as_str(),
@@ -515,6 +584,10 @@ pub async fn render_image(
             actual_backend,
         )
     };
+
+    if let Some(timing) = rendered_artifact.timing_ms.as_ref() {
+        record_backend_latency(actual_backend, timing.total);
+    }
 
     log_cache_snapshot(&cache_session_id, cache_snapshot.as_ref(), cache_budgets);
 

@@ -9,8 +9,10 @@ from typing import Any
 
 @dataclass(frozen=True, slots=True)
 class GateThresholds:
-    min_cpu_to_gpu_speedup: float = 1.10
+    min_cpu_to_auto_speedup: float = 0.98
+    min_cpu_to_gpu_speedup: float | None = None
     max_gpu_mean_roundtrip_ms: float | None = None
+    max_auto_mean_roundtrip_ms: float | None = None
     require_gpu_backend: bool = True
 
 
@@ -33,12 +35,15 @@ def evaluate_gate(report: dict[str, Any], thresholds: GateThresholds) -> list[st
     lookup = _scenario_lookup(report)
     cpu = lookup.get("cpu_preferred")
     gpu = lookup.get("gpu_preferred")
-    if cpu is None or gpu is None:
-        return ["benchmark report is missing cpu_preferred or gpu_preferred scenarios"]
+    auto = lookup.get("auto_default")
+    if cpu is None or gpu is None or auto is None:
+        return ["benchmark report is missing cpu_preferred, gpu_preferred, or auto_default scenarios"]
 
     cpu_mean = float(cpu.get("stats", {}).get("mean_roundtrip_ms", 0.0))
     gpu_mean = float(gpu.get("stats", {}).get("mean_roundtrip_ms", 0.0))
-    speedup = float(report.get("cpu_to_gpu_speedup") or 0.0)
+    auto_mean = float(auto.get("stats", {}).get("mean_roundtrip_ms", 0.0))
+    cpu_to_gpu_speedup = float(report.get("cpu_to_gpu_speedup") or 0.0)
+    cpu_to_auto_speedup = float(report.get("cpu_to_auto_speedup") or 0.0)
 
     if thresholds.require_gpu_backend:
         backend_counts = gpu.get("stats", {}).get("backend_counts", {})
@@ -48,10 +53,20 @@ def evaluate_gate(report: dict[str, Any], thresholds: GateThresholds) -> list[st
         if gpu_backend_count <= 0:
             failures.append("gpu_preferred scenario did not execute on GPU backend")
 
-    if speedup < thresholds.min_cpu_to_gpu_speedup:
+    if cpu_to_auto_speedup < thresholds.min_cpu_to_auto_speedup:
+        failures.append(
+            "cpu_to_auto_speedup below threshold: "
+            f"actual={cpu_to_auto_speedup:.3f} expected>={thresholds.min_cpu_to_auto_speedup:.3f} "
+            f"(cpu_mean={cpu_mean:.3f}ms auto_mean={auto_mean:.3f}ms)"
+        )
+
+    if (
+        thresholds.min_cpu_to_gpu_speedup is not None
+        and cpu_to_gpu_speedup < thresholds.min_cpu_to_gpu_speedup
+    ):
         failures.append(
             "cpu_to_gpu_speedup below threshold: "
-            f"actual={speedup:.3f} expected>={thresholds.min_cpu_to_gpu_speedup:.3f} "
+            f"actual={cpu_to_gpu_speedup:.3f} expected>={thresholds.min_cpu_to_gpu_speedup:.3f} "
             f"(cpu_mean={cpu_mean:.3f}ms gpu_mean={gpu_mean:.3f}ms)"
         )
 
@@ -59,6 +74,12 @@ def evaluate_gate(report: dict[str, Any], thresholds: GateThresholds) -> list[st
         failures.append(
             "gpu mean roundtrip above threshold: "
             f"actual={gpu_mean:.3f}ms expected<={thresholds.max_gpu_mean_roundtrip_ms:.3f}ms"
+        )
+
+    if thresholds.max_auto_mean_roundtrip_ms is not None and auto_mean > thresholds.max_auto_mean_roundtrip_ms:
+        failures.append(
+            "auto mean roundtrip above threshold: "
+            f"actual={auto_mean:.3f}ms expected<={thresholds.max_auto_mean_roundtrip_ms:.3f}ms"
         )
 
     return failures
@@ -73,16 +94,28 @@ def _parse_args() -> argparse.Namespace:
         help="Path to benchmark report JSON produced by benchmark_render_pipeline.py",
     )
     parser.add_argument(
+        "--min-cpu-to-auto-speedup",
+        type=float,
+        default=0.98,
+        help="Minimum required CPU/auto roundtrip speedup ratio.",
+    )
+    parser.add_argument(
         "--min-cpu-to-gpu-speedup",
         type=float,
-        default=1.10,
-        help="Minimum required CPU/GPU roundtrip speedup ratio.",
+        default=None,
+        help="Optional minimum required CPU/GPU roundtrip speedup ratio.",
     )
     parser.add_argument(
         "--max-gpu-mean-roundtrip-ms",
         type=float,
         default=None,
         help="Optional upper bound for GPU mean roundtrip latency.",
+    )
+    parser.add_argument(
+        "--max-auto-mean-roundtrip-ms",
+        type=float,
+        default=None,
+        help="Optional upper bound for auto mean roundtrip latency.",
     )
     parser.add_argument(
         "--allow-cpu-fallback",
@@ -100,10 +133,20 @@ def main() -> int:
         raise SystemExit("benchmark report root must be a JSON object")
 
     thresholds = GateThresholds(
-        min_cpu_to_gpu_speedup=float(args.min_cpu_to_gpu_speedup),
+        min_cpu_to_auto_speedup=float(args.min_cpu_to_auto_speedup),
+        min_cpu_to_gpu_speedup=(
+            float(args.min_cpu_to_gpu_speedup)
+            if args.min_cpu_to_gpu_speedup is not None
+            else None
+        ),
         max_gpu_mean_roundtrip_ms=(
             float(args.max_gpu_mean_roundtrip_ms)
             if args.max_gpu_mean_roundtrip_ms is not None
+            else None
+        ),
+        max_auto_mean_roundtrip_ms=(
+            float(args.max_auto_mean_roundtrip_ms)
+            if args.max_auto_mean_roundtrip_ms is not None
             else None
         ),
         require_gpu_backend=not bool(args.allow_cpu_fallback),

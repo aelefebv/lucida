@@ -58,7 +58,7 @@ class ScenarioStats:
 @dataclass(frozen=True, slots=True)
 class ScenarioResult:
     name: str
-    prefer_gpu: bool
+    prefer_gpu: bool | None
     samples: list[RenderSample]
     stats: ScenarioStats
 
@@ -75,6 +75,7 @@ class BenchmarkReport:
     view_id: str
     scenarios: list[ScenarioResult]
     cpu_to_gpu_speedup: float | None
+    cpu_to_auto_speedup: float | None
 
 
 def _repo_root() -> Path:
@@ -152,7 +153,8 @@ def _run_scenario(
     *,
     base_url: str,
     view_id: str,
-    prefer_gpu: bool,
+    name: str,
+    prefer_gpu: bool | None,
     warmup_runs: int,
     measured_runs: int,
     width_px: int,
@@ -165,11 +167,15 @@ def _run_scenario(
             {
                 "op": "replace",
                 "path": "/performance",
-                "value": {
-                    "prefer_gpu": prefer_gpu,
-                    "lod_mode": "fixed",
-                    "fixed_level": 0,
-                },
+                "value": (
+                    {
+                        "prefer_gpu": prefer_gpu,
+                        "lod_mode": "fixed",
+                        "fixed_level": 0,
+                    }
+                    if prefer_gpu is not None
+                    else None
+                ),
             },
             {
                 "op": "replace",
@@ -194,9 +200,8 @@ def _run_scenario(
     for sample in samples:
         backend_counts[sample.backend_used] = backend_counts.get(sample.backend_used, 0) + 1
 
-    scenario_name = "gpu_preferred" if prefer_gpu else "cpu_preferred"
     return ScenarioResult(
-        name=scenario_name,
+        name=name,
         prefer_gpu=prefer_gpu,
         samples=samples,
         stats=ScenarioStats(
@@ -262,6 +267,7 @@ def run_benchmark(args: BenchmarkArgs) -> BenchmarkReport:
             client,
             base_url=args.base_url,
             view_id=view_id,
+            name="cpu_preferred",
             prefer_gpu=False,
             warmup_runs=args.warmup_runs,
             measured_runs=args.measured_runs,
@@ -272,7 +278,19 @@ def run_benchmark(args: BenchmarkArgs) -> BenchmarkReport:
             client,
             base_url=args.base_url,
             view_id=view_id,
+            name="gpu_preferred",
             prefer_gpu=True,
+            warmup_runs=args.warmup_runs,
+            measured_runs=args.measured_runs,
+            width_px=args.width_px,
+            height_px=args.height_px,
+        )
+        auto_result = _run_scenario(
+            client,
+            base_url=args.base_url,
+            view_id=view_id,
+            name="auto_default",
+            prefer_gpu=None,
             warmup_runs=args.warmup_runs,
             measured_runs=args.measured_runs,
             width_px=args.width_px,
@@ -281,7 +299,9 @@ def run_benchmark(args: BenchmarkArgs) -> BenchmarkReport:
 
     gpu_mean = gpu_result.stats.mean_roundtrip_ms
     cpu_mean = cpu_result.stats.mean_roundtrip_ms
+    auto_mean = auto_result.stats.mean_roundtrip_ms
     cpu_to_gpu_speedup = (cpu_mean / gpu_mean) if gpu_mean > 0 else None
+    cpu_to_auto_speedup = (cpu_mean / auto_mean) if auto_mean > 0 else None
 
     return BenchmarkReport(
         schema_version=1,
@@ -292,8 +312,9 @@ def run_benchmark(args: BenchmarkArgs) -> BenchmarkReport:
         session_id=session_id,
         dataset_id=dataset_id,
         view_id=view_id,
-        scenarios=[cpu_result, gpu_result],
+        scenarios=[cpu_result, gpu_result, auto_result],
         cpu_to_gpu_speedup=cpu_to_gpu_speedup,
+        cpu_to_auto_speedup=cpu_to_auto_speedup,
     )
 
 

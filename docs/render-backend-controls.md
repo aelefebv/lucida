@@ -27,6 +27,12 @@ When a fallback occurs, warnings include structured details:
 - `gpu_render_failed_fallback_cpu`
   - Trigger: GPU render failed at runtime and request was rerouted to CPU.
   - Details include upstream GPU error fields and explicit `requested_backend`/`fallback_backend`.
+- `gpu_adaptive_cpu_probe`
+  - Trigger: auto policy needs additional CPU latency samples to build an in-process baseline and routes the request to CPU.
+  - Details include current sample counts and minimum CPU samples needed.
+- `gpu_slower_than_cpu_fallback`
+  - Trigger: auto policy has enough in-process latency samples and detects GPU is slower than CPU by threshold.
+  - Details include sample counts, means, and threshold factor used for the fallback decision.
 
 Every render response includes `meta.backend_used` so the final backend is unambiguous.
 
