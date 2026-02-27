@@ -234,6 +234,8 @@ select {
   max-width: 100%;
   max-height: 72vh;
   display: block;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .danger {

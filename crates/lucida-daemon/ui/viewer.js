@@ -304,6 +304,7 @@ function showImage(src) {
   const img = document.createElement("img");
   img.src = src;
   img.alt = "viewer frame";
+  img.draggable = false;
   el.viewport.innerHTML = "";
   el.viewport.appendChild(img);
 }
@@ -857,6 +858,7 @@ el.viewport.addEventListener("pointerdown", (event) => {
   if (!state.connected || !state.viewState || event.button !== 0) {
     return;
   }
+  event.preventDefault();
   state.drag.active = true;
   state.drag.pointerId = event.pointerId;
   state.drag.lastClientX = event.clientX;
@@ -892,6 +894,10 @@ el.viewport.addEventListener("pointercancel", (event) => {
   }
   stopDragging();
   scheduleSettleRender("pan_cancel");
+});
+
+el.viewport.addEventListener("dragstart", (event) => {
+  event.preventDefault();
 });
 
 el.viewport.addEventListener(
