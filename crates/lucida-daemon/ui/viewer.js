@@ -594,7 +594,7 @@ function queuePanDelta(dxPx, dyPx) {
         pixelRatio,
         rotationDeg,
       );
-      const nextCenter = [Number(centerWorld[0]) + deltaU, Number(centerWorld[1]) + deltaV];
+      const nextCenter = [Number(centerWorld[0]) - deltaU, Number(centerWorld[1]) - deltaV];
       await updateViewStateWithPatch(
         [
           {
