@@ -54,6 +54,8 @@ Gate:
 
 ### Slice B: GPU Pipeline Dataflow Optimization
 
+Status: ✅ Implemented
+
 Changes:
 
 - Replace CPU-side float canvas initialization upload with GPU clear pass.
@@ -72,6 +74,8 @@ Gate:
 
 ### Slice C: Shader Compute Optimization
 
+Status: ✅ Implemented
+
 Changes:
 
 - Hoist invariant coordinate/scaling math out of per-channel sampling path.
@@ -86,6 +90,12 @@ Gate:
 
 - Render/parity tests pass.
 - Benchmark shows further reduction in `gpu_compute` and total GPU latency.
+
+Observed after slices B/C (release benchmark, 512x512):
+
+- `gpu_upload`: reduced from ~`1.0 ms` to ~`0.09 ms`
+- `gpu_readback`: reduced from ~`4.0 ms` to ~`1.6-1.9 ms`
+- `gpu_compute`: still dominant at ~`10.3 ms` (remaining bottleneck)
 
 ### Slice D: CPU Payload Prep/Cache-Key Optimization
 
