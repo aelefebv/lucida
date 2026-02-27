@@ -3,19 +3,19 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Lucida Live View</title>
-    <link rel="stylesheet" href="/ui/live.css" />
+    <title>Lucida Viewer</title>
+    <link rel="stylesheet" href="/ui/viewer.css" />
   </head>
   <body>
     <main class="page">
       <header class="topbar">
         <div>
-          <h1>Live View Mirror</h1>
-          <p>Read-only browser mirror for one explicit view id.</p>
+          <h1>Lucida Interactive Viewer</h1>
+          <p>Lightweight browser viewer for one active 2D Lucida view.</p>
         </div>
         <div class="links">
           <a class="link-btn" href="/ui">Usage Timeline</a>
-          <a class="link-btn" href="/ui/viewer">Interactive Viewer</a>
+          <a class="link-btn" href="/ui/live">Live Mirror</a>
           <a class="link-btn" href="/ui/replay">Visual Replay</a>
         </div>
       </header>
@@ -42,10 +42,10 @@
           <input id="render-height" type="number" min="64" max="2048" value="1024" />
         </label>
         <label>
-          Render Mode
-          <select id="render-mode">
-            <option value="png">PNG Image</option>
-            <option value="raw_rgba">Raw RGBA Canvas</option>
+          Format
+          <select id="render-format">
+            <option value="png">PNG</option>
+            <option value="raw_rgba">Raw RGBA</option>
           </select>
         </label>
         <div class="actions">
@@ -74,26 +74,19 @@
           <span id="state-version" class="status-value">-</span>
         </div>
         <div class="status-item">
-          <span class="status-label">Updated</span>
-          <span id="updated-at" class="status-value">-</span>
+          <span class="status-label">Backend</span>
+          <span id="backend-used" class="status-value">-</span>
         </div>
       </section>
 
       <section class="panel viewport-panel">
-        <h2>Live Viewport</h2>
-        <p id="viewport-note" class="note">Connect to start streaming events.</p>
+        <h2>Viewport</h2>
+        <p id="viewport-note" class="note">Connect and render to display frames.</p>
         <div id="viewport" class="viewport">
           <p>No frame rendered yet.</p>
         </div>
       </section>
-
-      <section class="panel thumbs-panel">
-        <h2>Recent Render Thumbnails</h2>
-        <div id="thumbs" class="thumbs">
-          <p>No thumbnails captured yet.</p>
-        </div>
-      </section>
     </main>
-    <script src="/ui/live.js"></script>
+    <script src="/ui/viewer.js"></script>
   </body>
 </html>

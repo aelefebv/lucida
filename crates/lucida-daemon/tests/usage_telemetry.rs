@@ -706,6 +706,20 @@ async fn ui_assets_are_served() {
     assert_eq!(live_js.status(), StatusCode::OK);
     assert!(content_type(&live_js).contains("application/javascript"));
 
+    let viewer = request_get(&router, "/ui/viewer", None).await;
+    assert_eq!(viewer.status(), StatusCode::OK);
+    assert!(content_type(&viewer).contains("text/html"));
+    let viewer_body = read_body(viewer).await;
+    assert!(viewer_body.contains("Lucida Interactive Viewer"));
+
+    let viewer_css = request_get(&router, "/ui/viewer.css", None).await;
+    assert_eq!(viewer_css.status(), StatusCode::OK);
+    assert!(content_type(&viewer_css).contains("text/css"));
+
+    let viewer_js = request_get(&router, "/ui/viewer.js", None).await;
+    assert_eq!(viewer_js.status(), StatusCode::OK);
+    assert!(content_type(&viewer_js).contains("application/javascript"));
+
     let traversal = request_get(&router, "/usage/thumbs/../escape.png", None).await;
     assert_eq!(traversal.status(), StatusCode::NOT_FOUND);
 }

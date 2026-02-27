@@ -13,6 +13,9 @@ const REPLAY_JS: &str = include_str!("../ui/replay.js");
 const LIVE_HTML: &str = include_str!("../ui/live.html");
 const LIVE_CSS: &str = include_str!("../ui/live.css");
 const LIVE_JS: &str = include_str!("../ui/live.js");
+const VIEWER_HTML: &str = include_str!("../ui/viewer.html");
+const VIEWER_CSS: &str = include_str!("../ui/viewer.css");
+const VIEWER_JS: &str = include_str!("../ui/viewer.js");
 
 pub async fn ui_index() -> Html<&'static str> {
     Html(INDEX_HTML)
@@ -24,6 +27,10 @@ pub async fn ui_replay() -> Html<&'static str> {
 
 pub async fn ui_live() -> Html<&'static str> {
     Html(LIVE_HTML)
+}
+
+pub async fn ui_viewer() -> Html<&'static str> {
+    Html(VIEWER_HTML)
 }
 
 pub async fn ui_asset(Path(path): Path<String>) -> Result<(HeaderMap, &'static str), ApiError> {
@@ -38,6 +45,9 @@ pub async fn ui_asset(Path(path): Path<String>) -> Result<(HeaderMap, &'static s
         "live" | "live.html" => Ok((html_headers(), LIVE_HTML)),
         "live.css" => Ok((css_headers(), LIVE_CSS)),
         "live.js" => Ok((js_headers(), LIVE_JS)),
+        "viewer" | "viewer.html" => Ok((html_headers(), VIEWER_HTML)),
+        "viewer.css" => Ok((css_headers(), VIEWER_CSS)),
+        "viewer.js" => Ok((js_headers(), VIEWER_JS)),
         _ => Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "ui_asset_not_found",

@@ -35,7 +35,7 @@ use crate::dataset_open::dataset_open;
 use crate::render_image::render_image;
 use crate::session_create::{session_create, session_list};
 use crate::state::{new_shared_state, SharedAppState};
-use crate::ui_routes::{ui_asset, ui_index, ui_live, ui_replay};
+use crate::ui_routes::{ui_asset, ui_index, ui_live, ui_replay, ui_viewer};
 use crate::usage_capture::usage_capture_middleware;
 use crate::usage_routes::{
     usage_events, usage_events_stream, usage_run_detail, usage_runs, usage_thumbnail_asset,
@@ -87,6 +87,7 @@ pub fn app_with_state(state: SharedAppState) -> Router {
         .route("/ui", get(ui_index))
         .route("/ui/live", get(ui_live))
         .route("/ui/replay", get(ui_replay))
+        .route("/ui/viewer", get(ui_viewer))
         .route("/ui/{*path}", get(ui_asset))
         .with_state(state)
 }
