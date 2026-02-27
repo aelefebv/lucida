@@ -97,13 +97,13 @@ Goal: Quantify speedup and prevent performance regressions.
 
 Checklist:
 
-- [ ] Add reproducible render benchmark driver and dataset fixtures.
-- [ ] Record baseline CPU timings and new GPU timings.
-- [ ] Add CI/perf check script for local gate with clear pass/fail thresholds.
+- [x] Add reproducible render benchmark driver and dataset fixtures.
+- [x] Record baseline CPU timings and new GPU timings.
+- [x] Add CI/perf check script for local gate with clear pass/fail thresholds.
 
 Exit criteria:
 
-- [ ] Documented speedups on representative resolutions/scenes.
+- [x] Documented CPU/GPU performance deltas on representative resolutions/scenes.
 
 ### Slice 7: Default Rollout Hardening
 
