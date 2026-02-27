@@ -686,7 +686,7 @@ async function zoomAtPointer(event) {
   const centerWorld = Array.isArray(camera?.center_world) ? [...camera.center_world] : [0.0, 0.0];
 
   const wheelDelta = Number(event.deltaY || 0);
-  const factor = Math.exp(-wheelDelta * 0.0015);
+  const factor = Math.exp(wheelDelta * 0.0015);
   const nextZoom = helpers.clampZoom(zoom * factor);
 
   const rect = el.viewport.getBoundingClientRect();
