@@ -15,17 +15,19 @@ use image::codecs::png::{
 use image::{ColorType, ImageEncoder};
 use serde_json::json;
 
-use crate::dto::dataset_summary::DatasetSummary;
+use crate::dto::api::ApiWarning;
+use crate::dto::dataset_summary::{AxisRole, DatasetSummary};
 use crate::dto::render::{RenderOutputSpec, RenderTimingMs, RenderTimingStagesMs};
 use crate::dto::view_state::{
-    ChannelContrast, ChannelContrastPolicy, ChannelMode, ImageChannelSettings, InterpolationMode,
-    LayerState, ViewState,
+    AxisSelector, AxisSelectorKind, Camera2D, ChannelContrast, ChannelContrastPolicy, ChannelMode,
+    ImageChannelSettings, InterpolationMode, LayerState, Plane2D, SliceSettings, View2D, ViewState,
 };
 use crate::error::ApiError;
 use crate::render_cache::{EffectiveCacheBudgets, RenderCacheRegistry};
 use crate::render_cpu::{
-    prepare_single_plane_for_external_renderer, PlaneData, PreparedLayerSamplingInput,
-    RenderCpuResult, RenderRgbaResult,
+    compute_triptych_layout_descriptor, draw_triptych_overlays_rgba,
+    prepare_single_plane_for_external_renderer, triptych_min_panel_px, PlaneData,
+    PreparedLayerSamplingInput, RenderCpuResult, RenderRgbaResult,
 };
 
 #[cfg(feature = "gpu")]
@@ -459,6 +461,53 @@ impl GpuPayloadDigest {
     }
 }
 
+#[derive(Debug, Clone)]
+#[cfg(feature = "gpu")]
+struct GpuSinglePlaneRenderResult {
+    rgba_bytes: Vec<u8>,
+    pyramid_level_used: u64,
+    warnings: Vec<ApiWarning>,
+    chunk_fetch_ms: f64,
+    chunk_decode_ms: f64,
+    timing: GpuProcessTimingMs,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "gpu")]
+struct GpuTriptychRenderResult {
+    rgba_bytes: Vec<u8>,
+    pyramid_level_used: u64,
+    warnings: Vec<ApiWarning>,
+    chunk_fetch_ms: f64,
+    chunk_decode_ms: f64,
+    gpu_upload_ms: f64,
+    gpu_compute_ms: f64,
+    gpu_readback_ms: f64,
+    compose_ms: f64,
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "gpu")]
+enum GpuTriptychRenderOutcome {
+    Rendered(GpuTriptychRenderResult),
+    Fallback(GpuTriptychFallbackReason),
+}
+
+#[derive(Debug, Clone)]
+#[cfg(feature = "gpu")]
+enum GpuTriptychFallbackReason {
+    MissingRoles(Vec<&'static str>),
+    OutputTooSmall { width_px: usize, height_px: usize },
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg(feature = "gpu")]
+struct FocalPoint3D {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
 #[cfg(feature = "gpu")]
 pub fn render_view_to_png_gpu(
     dataset_summary: &DatasetSummary,
@@ -530,19 +579,109 @@ pub fn render_view_to_rgba_gpu(
         ));
     };
 
-    if view_2d.orthogonal_views_enabled {
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "gpu_render_failed",
-            "GPU sampling/compositing does not yet support orthogonal triptych rendering.",
-            Some(json!({
-                "orthogonal_views_enabled": true,
-            })),
-        ));
-    }
-
     let output_width = usize::try_from(output.width_px).unwrap_or(0);
     let output_height = usize::try_from(output.height_px).unwrap_or(0);
+    if view_2d.orthogonal_views_enabled {
+        match render_triptych_rgba_gpu(
+            dataset_summary,
+            view_state,
+            view_2d,
+            output_width,
+            output_height,
+            cache_registry,
+            cache_session_id,
+            cache_budgets.max_gpu_cache_bytes,
+        )? {
+            GpuTriptychRenderOutcome::Rendered(result) => {
+                let mut warnings = vec![ApiWarning {
+                    code: "orthogonal_triptych_enabled".to_owned(),
+                    message:
+                        "Orthogonal tri-planar projections were rendered with fixed xy/yz/xz layout."
+                            .to_owned(),
+                    details: Some(json!({
+                        "layout": "xy_center_yz_right_xz_top",
+                    })),
+                }];
+                warnings.extend(result.warnings);
+                Ok(RenderRgbaResult {
+                    rgba_bytes: result.rgba_bytes,
+                    pyramid_level_used: result.pyramid_level_used,
+                    warnings,
+                    chunk_fetch_ms: result.chunk_fetch_ms,
+                    chunk_decode_ms: result.chunk_decode_ms,
+                    sample_ms: 0.0,
+                    compose_ms: result.compose_ms,
+                    gpu_upload_ms: result.gpu_upload_ms,
+                    gpu_compute_ms: result.gpu_compute_ms,
+                    gpu_readback_ms: result.gpu_readback_ms,
+                })
+            }
+            GpuTriptychRenderOutcome::Fallback(reason) => {
+                let single = render_single_plane_to_rgba_gpu(
+                    dataset_summary,
+                    view_state,
+                    view_2d,
+                    output_width,
+                    output_height,
+                    cache_registry,
+                    cache_session_id,
+                    cache_budgets.max_gpu_cache_bytes,
+                )?;
+                let mut warnings = vec![triptych_fallback_warning(&reason)];
+                warnings.extend(single.warnings);
+                Ok(RenderRgbaResult {
+                    rgba_bytes: single.rgba_bytes,
+                    pyramid_level_used: single.pyramid_level_used,
+                    warnings,
+                    chunk_fetch_ms: single.chunk_fetch_ms,
+                    chunk_decode_ms: single.chunk_decode_ms,
+                    sample_ms: 0.0,
+                    compose_ms: 0.0,
+                    gpu_upload_ms: single.timing.upload,
+                    gpu_compute_ms: single.timing.compute,
+                    gpu_readback_ms: single.timing.readback,
+                })
+            }
+        }
+    } else {
+        let single = render_single_plane_to_rgba_gpu(
+            dataset_summary,
+            view_state,
+            view_2d,
+            output_width,
+            output_height,
+            cache_registry,
+            cache_session_id,
+            cache_budgets.max_gpu_cache_bytes,
+        )?;
+
+        Ok(RenderRgbaResult {
+            rgba_bytes: single.rgba_bytes,
+            pyramid_level_used: single.pyramid_level_used,
+            warnings: single.warnings,
+            chunk_fetch_ms: single.chunk_fetch_ms,
+            chunk_decode_ms: single.chunk_decode_ms,
+            sample_ms: 0.0,
+            compose_ms: 0.0,
+            gpu_upload_ms: single.timing.upload,
+            gpu_compute_ms: single.timing.compute,
+            gpu_readback_ms: single.timing.readback,
+        })
+    }
+}
+
+#[cfg(feature = "gpu")]
+#[allow(clippy::too_many_arguments)]
+fn render_single_plane_to_rgba_gpu(
+    dataset_summary: &DatasetSummary,
+    view_state: &ViewState,
+    view_2d: &View2D,
+    output_width: usize,
+    output_height: usize,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+    max_gpu_cache_bytes: u64,
+) -> Result<GpuSinglePlaneRenderResult, ApiError> {
     let prepared = prepare_single_plane_for_external_renderer(
         dataset_summary,
         view_state,
@@ -553,7 +692,7 @@ pub fn render_view_to_rgba_gpu(
         cache_session_id,
     )?;
 
-    let (rgba_bytes, gpu_timing_ms) = run_gpu_layer_pipeline(
+    let (rgba_bytes, timing) = run_gpu_layer_pipeline(
         &prepared.background,
         prepared.center_world,
         prepared.zoom,
@@ -561,22 +700,401 @@ pub fn render_view_to_rgba_gpu(
         &prepared.layers,
         output_width,
         output_height,
-        cache_budgets.max_gpu_cache_bytes,
+        max_gpu_cache_bytes,
         cache_session_id,
     )?;
 
-    Ok(RenderRgbaResult {
+    Ok(GpuSinglePlaneRenderResult {
         rgba_bytes,
         pyramid_level_used: prepared.primary_level_used,
         warnings: prepared.warnings,
         chunk_fetch_ms: prepared.chunk_fetch_ms,
         chunk_decode_ms: prepared.chunk_decode_ms,
-        sample_ms: 0.0,
-        compose_ms: 0.0,
-        gpu_upload_ms: gpu_timing_ms.upload,
-        gpu_compute_ms: gpu_timing_ms.compute,
-        gpu_readback_ms: gpu_timing_ms.readback,
+        timing,
     })
+}
+
+#[cfg(feature = "gpu")]
+#[allow(clippy::too_many_arguments)]
+fn render_triptych_rgba_gpu(
+    dataset_summary: &DatasetSummary,
+    view_state: &ViewState,
+    base_view_2d: &View2D,
+    output_width: usize,
+    output_height: usize,
+    cache_registry: &mut RenderCacheRegistry,
+    cache_session_id: &str,
+    max_gpu_cache_bytes: u64,
+) -> Result<GpuTriptychRenderOutcome, ApiError> {
+    let role_to_axis = roles_to_axis(dataset_summary);
+    let missing_roles: Vec<&'static str> = ["x", "y", "z"]
+        .into_iter()
+        .filter(|role| !role_to_axis.contains_key(*role))
+        .collect();
+    if !missing_roles.is_empty() {
+        return Ok(GpuTriptychRenderOutcome::Fallback(
+            GpuTriptychFallbackReason::MissingRoles(missing_roles),
+        ));
+    }
+
+    let Some(layout) = compute_triptych_layout_descriptor(output_width, output_height) else {
+        return Ok(GpuTriptychRenderOutcome::Fallback(
+            GpuTriptychFallbackReason::OutputTooSmall {
+                width_px: output_width,
+                height_px: output_height,
+            },
+        ));
+    };
+
+    let selectors_by_axis: HashMap<String, &AxisSelector> = view_state
+        .selectors
+        .iter()
+        .map(|selector| (selector.axis.clone(), selector))
+        .collect();
+    let focus = focal_point_from_view(base_view_2d, &role_to_axis, &selectors_by_axis);
+
+    let xy_view = view_for_plane(base_view_2d, Plane2D::Xy, focus);
+    let xz_view = view_for_plane(base_view_2d, Plane2D::Xz, focus);
+    let yz_view = view_for_plane(base_view_2d, Plane2D::Yz, focus);
+
+    let xy = render_single_plane_to_rgba_gpu(
+        dataset_summary,
+        view_state,
+        &xy_view,
+        layout.xy.width,
+        layout.xy.height,
+        cache_registry,
+        cache_session_id,
+        max_gpu_cache_bytes,
+    )?;
+    let xz_raw = render_single_plane_to_rgba_gpu(
+        dataset_summary,
+        view_state,
+        &xz_view,
+        layout.xz.width,
+        layout.xz.height,
+        cache_registry,
+        cache_session_id,
+        max_gpu_cache_bytes,
+    )?;
+    let yz_raw = render_single_plane_to_rgba_gpu(
+        dataset_summary,
+        view_state,
+        &yz_view,
+        layout.yz.height,
+        layout.yz.width,
+        cache_registry,
+        cache_session_id,
+        max_gpu_cache_bytes,
+    )?;
+
+    let compose_start = Instant::now();
+    let xz_flipped = flip_rgba_vertically(&xz_raw.rgba_bytes, layout.xz.width, layout.xz.height);
+    let yz_oriented = orient_yz_panel_right(&yz_raw.rgba_bytes, layout.yz.height, layout.yz.width);
+    let mut canvas = rgba_canvas_with_background(
+        output_width,
+        output_height,
+        resolve_background_rgba(view_state),
+    );
+    blit_rgba_panel(
+        &mut canvas,
+        output_width,
+        output_height,
+        layout.xy,
+        &xy.rgba_bytes,
+    );
+    blit_rgba_panel(
+        &mut canvas,
+        output_width,
+        output_height,
+        layout.xz,
+        &xz_flipped,
+    );
+    blit_rgba_panel(
+        &mut canvas,
+        output_width,
+        output_height,
+        layout.yz,
+        &yz_oriented,
+    );
+    draw_triptych_overlays_rgba(&mut canvas, output_width, output_height, layout);
+    let compose_ms = (Instant::now() - compose_start).as_secs_f64() * 1000.0;
+
+    let mut warnings = xy.warnings;
+    warnings.extend(xz_raw.warnings);
+    warnings.extend(yz_raw.warnings);
+
+    Ok(GpuTriptychRenderOutcome::Rendered(
+        GpuTriptychRenderResult {
+            rgba_bytes: canvas,
+            pyramid_level_used: xy.pyramid_level_used,
+            warnings,
+            chunk_fetch_ms: xy.chunk_fetch_ms + xz_raw.chunk_fetch_ms + yz_raw.chunk_fetch_ms,
+            chunk_decode_ms: xy.chunk_decode_ms + xz_raw.chunk_decode_ms + yz_raw.chunk_decode_ms,
+            gpu_upload_ms: xy.timing.upload + xz_raw.timing.upload + yz_raw.timing.upload,
+            gpu_compute_ms: xy.timing.compute + xz_raw.timing.compute + yz_raw.timing.compute,
+            gpu_readback_ms: xy.timing.readback + xz_raw.timing.readback + yz_raw.timing.readback,
+            compose_ms,
+        },
+    ))
+}
+
+#[cfg(feature = "gpu")]
+fn triptych_fallback_warning(reason: &GpuTriptychFallbackReason) -> ApiWarning {
+    match reason {
+        GpuTriptychFallbackReason::MissingRoles(missing_roles) => ApiWarning {
+            code: "orthogonal_triptych_fallback_single_plane".to_owned(),
+            message:
+                "Orthogonal tri-planar rendering was requested but required dataset roles are missing."
+                    .to_owned(),
+            details: Some(json!({
+                "reason": "missing_roles",
+                "missing_roles": missing_roles,
+            })),
+        },
+        GpuTriptychFallbackReason::OutputTooSmall {
+            width_px,
+            height_px,
+        } => ApiWarning {
+            code: "orthogonal_triptych_fallback_single_plane".to_owned(),
+            message:
+                "Orthogonal tri-planar rendering was requested but output dimensions are too small."
+                    .to_owned(),
+            details: Some(json!({
+                "reason": "output_too_small",
+                "width_px": width_px,
+                "height_px": height_px,
+                "minimum_panel_px": triptych_min_panel_px(),
+            })),
+        },
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn roles_to_axis(dataset_summary: &DatasetSummary) -> BTreeMap<&'static str, String> {
+    let mut mapping: BTreeMap<&'static str, String> = BTreeMap::new();
+    for axis in &dataset_summary.axes {
+        let role = axis_role(axis.role.clone());
+        mapping.entry(role).or_insert_with(|| axis.name.clone());
+    }
+    mapping
+}
+
+#[cfg(feature = "gpu")]
+fn axis_role(role: AxisRole) -> &'static str {
+    match role {
+        AxisRole::X => "x",
+        AxisRole::Y => "y",
+        AxisRole::Z => "z",
+        AxisRole::C => "c",
+        AxisRole::T => "t",
+        AxisRole::Other => "other",
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn plane_roles(plane: &Plane2D) -> (&'static str, &'static str, &'static str) {
+    match plane {
+        Plane2D::Xy => ("x", "y", "z"),
+        Plane2D::Xz => ("x", "z", "y"),
+        Plane2D::Yz => ("y", "z", "x"),
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn focal_point_from_view(
+    view_2d: &View2D,
+    role_to_axis: &BTreeMap<&'static str, String>,
+    selectors_by_axis: &HashMap<String, &AxisSelector>,
+) -> FocalPoint3D {
+    let (u_role, v_role, orth_role) = plane_roles(&view_2d.plane);
+    let mut values: HashMap<&'static str, f64> = HashMap::new();
+    values.insert(u_role, view_2d.camera.center_world.0);
+    values.insert(v_role, view_2d.camera.center_world.1);
+
+    let slice_value = view_2d
+        .slice
+        .as_ref()
+        .and_then(|slice| slice.index)
+        .map(|value| value as f64)
+        .or_else(|| {
+            role_to_axis
+                .get(orth_role)
+                .map(|axis| selector_index_for_axis(selectors_by_axis, axis) as f64)
+        })
+        .unwrap_or(0.0);
+    values.insert(orth_role, slice_value);
+
+    let x = values.get("x").copied().unwrap_or_else(|| {
+        role_to_axis
+            .get("x")
+            .map(|axis| selector_index_for_axis(selectors_by_axis, axis) as f64)
+            .unwrap_or(0.0)
+    });
+    let y = values.get("y").copied().unwrap_or_else(|| {
+        role_to_axis
+            .get("y")
+            .map(|axis| selector_index_for_axis(selectors_by_axis, axis) as f64)
+            .unwrap_or(0.0)
+    });
+    let z = values.get("z").copied().unwrap_or_else(|| {
+        role_to_axis
+            .get("z")
+            .map(|axis| selector_index_for_axis(selectors_by_axis, axis) as f64)
+            .unwrap_or(0.0)
+    });
+
+    FocalPoint3D { x, y, z }
+}
+
+#[cfg(feature = "gpu")]
+fn selector_index_for_axis(
+    selectors_by_axis: &HashMap<String, &AxisSelector>,
+    axis_name: &str,
+) -> i64 {
+    let Some(selector) = selectors_by_axis.get(axis_name).copied() else {
+        return 0;
+    };
+    match selector.kind {
+        AxisSelectorKind::Index => selector.index.unwrap_or(0),
+        AxisSelectorKind::Range => selector.start.unwrap_or(0),
+        AxisSelectorKind::Set => selector
+            .indices
+            .as_ref()
+            .and_then(|indices| indices.first().copied())
+            .unwrap_or(0),
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn view_for_plane(base: &View2D, plane: Plane2D, focus: FocalPoint3D) -> View2D {
+    let (u_role, v_role, orth_role) = plane_roles(&plane);
+    let slab = base.slice.as_ref().and_then(|slice| slice.slab.clone());
+    View2D {
+        plane,
+        slice: Some(SliceSettings {
+            axis: None,
+            index: Some(role_value(focus, orth_role).round() as i64),
+            slab,
+        }),
+        camera: Camera2D {
+            center_world: (role_value(focus, u_role), role_value(focus, v_role)),
+            zoom: base.camera.zoom,
+            rotation_deg: 0.0,
+        },
+        orthogonal_views_enabled: base.orthogonal_views_enabled,
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn role_value(focus: FocalPoint3D, role: &'static str) -> f64 {
+    match role {
+        "x" => focus.x,
+        "y" => focus.y,
+        "z" => focus.z,
+        _ => 0.0,
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn resolve_background_rgba(view_state: &ViewState) -> [f32; 4] {
+    if let Some(render_settings) = view_state.render_settings.as_ref() {
+        if let Some(background) = render_settings.background_rgba {
+            return [
+                background[0] as f32,
+                background[1] as f32,
+                background[2] as f32,
+                background[3] as f32,
+            ];
+        }
+    }
+    [0.0, 0.0, 0.0, 1.0]
+}
+
+#[cfg(feature = "gpu")]
+fn rgba_canvas_with_background(width: usize, height: usize, background: [f32; 4]) -> Vec<u8> {
+    let pixel_count = width.saturating_mul(height);
+    let mut rgba = vec![0_u8; pixel_count.saturating_mul(4)];
+    for index in 0..pixel_count {
+        rgba[index * 4] = (background[0].clamp(0.0, 1.0) * 255.0).round() as u8;
+        rgba[index * 4 + 1] = (background[1].clamp(0.0, 1.0) * 255.0).round() as u8;
+        rgba[index * 4 + 2] = (background[2].clamp(0.0, 1.0) * 255.0).round() as u8;
+        rgba[index * 4 + 3] = (background[3].clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+    rgba
+}
+
+#[cfg(feature = "gpu")]
+fn blit_rgba_panel(
+    target: &mut [u8],
+    target_width: usize,
+    target_height: usize,
+    panel: crate::render_cpu::TriptychPanelLayout,
+    source: &[u8],
+) {
+    if panel.width == 0 || panel.height == 0 {
+        return;
+    }
+    for row in 0..panel.height {
+        if panel.y + row >= target_height {
+            continue;
+        }
+        for col in 0..panel.width {
+            if panel.x + col >= target_width {
+                continue;
+            }
+            let src_pixel = row * panel.width + col;
+            let dst_pixel = (panel.y + row) * target_width + (panel.x + col);
+            let src_offset = src_pixel * 4;
+            let dst_offset = dst_pixel * 4;
+            if src_offset + 4 <= source.len() && dst_offset + 4 <= target.len() {
+                target[dst_offset..dst_offset + 4]
+                    .copy_from_slice(&source[src_offset..src_offset + 4]);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+fn flip_rgba_vertically(source: &[u8], width: usize, height: usize) -> Vec<u8> {
+    let mut output = vec![0_u8; source.len()];
+    for row in 0..height {
+        for col in 0..width {
+            let src_pixel = row * width + col;
+            let dst_pixel = (height - 1 - row) * width + col;
+            let src_offset = src_pixel * 4;
+            let dst_offset = dst_pixel * 4;
+            if src_offset + 4 <= source.len() && dst_offset + 4 <= output.len() {
+                output[dst_offset..dst_offset + 4]
+                    .copy_from_slice(&source[src_offset..src_offset + 4]);
+            }
+        }
+    }
+    output
+}
+
+#[cfg(feature = "gpu")]
+fn orient_yz_panel_right(source: &[u8], raw_width: usize, raw_height: usize) -> Vec<u8> {
+    let output_width = raw_height;
+    let output_height = raw_width;
+    let mut output = vec![0_u8; output_width.saturating_mul(output_height).saturating_mul(4)];
+
+    for y_raw in 0..raw_height {
+        for x_raw in 0..raw_width {
+            let out_x = y_raw;
+            let out_y = x_raw;
+            let src_pixel = y_raw * raw_width + x_raw;
+            let dst_pixel = out_y * output_width + out_x;
+            let src_offset = src_pixel * 4;
+            let dst_offset = dst_pixel * 4;
+            if src_offset + 4 <= source.len() && dst_offset + 4 <= output.len() {
+                output[dst_offset..dst_offset + 4]
+                    .copy_from_slice(&source[src_offset..src_offset + 4]);
+            }
+        }
+    }
+
+    output
 }
 
 #[cfg(feature = "gpu")]

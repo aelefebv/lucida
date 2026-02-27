@@ -136,6 +136,63 @@ struct TriptychLayout {
     xz: PanelRect,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TriptychPanelLayout {
+    pub x: usize,
+    pub y: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TriptychLayoutDescriptor {
+    pub xy: TriptychPanelLayout,
+    pub yz: TriptychPanelLayout,
+    pub xz: TriptychPanelLayout,
+}
+
+impl From<PanelRect> for TriptychPanelLayout {
+    fn from(value: PanelRect) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+impl From<TriptychPanelLayout> for PanelRect {
+    fn from(value: TriptychPanelLayout) -> Self {
+        Self {
+            x: value.x,
+            y: value.y,
+            width: value.width,
+            height: value.height,
+        }
+    }
+}
+
+impl From<TriptychLayout> for TriptychLayoutDescriptor {
+    fn from(value: TriptychLayout) -> Self {
+        Self {
+            xy: value.xy.into(),
+            yz: value.yz.into(),
+            xz: value.xz.into(),
+        }
+    }
+}
+
+impl From<TriptychLayoutDescriptor> for TriptychLayout {
+    fn from(value: TriptychLayoutDescriptor) -> Self {
+        Self {
+            xy: value.xy.into(),
+            yz: value.yz.into(),
+            xz: value.xz.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SinglePlaneRgbaResult {
     rgba_bytes: Vec<u8>,
@@ -988,6 +1045,17 @@ fn compute_triptych_layout(width: usize, height: usize) -> Option<TriptychLayout
     Some(TriptychLayout { xy, yz, xz })
 }
 
+pub(crate) fn compute_triptych_layout_descriptor(
+    width: usize,
+    height: usize,
+) -> Option<TriptychLayoutDescriptor> {
+    compute_triptych_layout(width, height).map(Into::into)
+}
+
+pub(crate) fn triptych_min_panel_px() -> usize {
+    TRIPTYCH_MIN_PANEL_PX
+}
+
 fn focal_point_from_view(
     view_2d: &View2D,
     role_to_axis: &BTreeMap<&'static str, String>,
@@ -1183,6 +1251,15 @@ fn draw_triptych_overlays(
         "YZ",
         [('Z', 1, 0), ('Y', 0, -1)],
     );
+}
+
+pub(crate) fn draw_triptych_overlays_rgba(
+    canvas: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    layout: TriptychLayoutDescriptor,
+) {
+    draw_triptych_overlays(canvas, canvas_width, canvas_height, layout.into());
 }
 
 fn draw_panel_overlay(
