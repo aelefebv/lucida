@@ -12,6 +12,7 @@ Repository layout reference: `docs/architecture/repo-layout.md`.
 - `LUCIDA_BACKEND` is removed.
 - `LucidaClient(backend=...)` is removed.
 - Embedded usage UI is served at [`/ui`](http://127.0.0.1:3000/ui).
+- Interactive viewer UI is served at [`/ui/viewer`](http://127.0.0.1:3000/ui/viewer).
 - Read-only live view UI is served at [`/ui/live`](http://127.0.0.1:3000/ui/live).
 - Dedicated visual replay UI is served at [`/ui/replay`](http://127.0.0.1:3000/ui/replay).
 
@@ -26,8 +27,17 @@ Lucida now records request/response usage telemetry for core viewer endpoints an
 - Active view discovery at `/view/list` (optional `session_id` filter)
 - Thumbnail assets at `/usage/thumbs/*`
 - Embedded dashboard UI at `/ui`
+- Interactive viewer UI at `/ui/viewer`
 - Read-only live mirror UI at `/ui/live`
 - Decoupled visual playback UI at `/ui/replay` (step-through actions + frame replay)
+
+Viewer controls:
+
+- Drag in viewport: pan
+- Mouse wheel: zoom
+- `Shift` + wheel: slice step on orthogonal axis
+- `[` and `]`: slice step shortcuts
+- `1`, `2`, `3`: set plane to `xy`, `xz`, `yz`
 
 Telemetry defaults:
 

@@ -4,6 +4,11 @@ const PLANE_ROLES = {
   yz: ["y", "z", "x"],
 };
 
+const helpers = globalThis.LucidaViewerHelpers;
+if (!helpers) {
+  throw new Error("viewer helpers are unavailable; /ui/viewer_helpers.js must load first.");
+}
+
 const state = {
   connected: false,
   stream: null,
@@ -90,13 +95,6 @@ function clampRenderSize(value, fallback) {
   return Math.max(64, Math.min(2048, Math.round(parsed)));
 }
 
-function clampZoom(value) {
-  if (!Number.isFinite(value)) {
-    return 1.0;
-  }
-  return Math.max(0.02, Math.min(4096, value));
-}
-
 function buildQuery(params) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
@@ -106,10 +104,6 @@ function buildQuery(params) {
     query.set(key, String(value));
   });
   return query.toString();
-}
-
-function deepClone(value) {
-  return JSON.parse(JSON.stringify(value));
 }
 
 async function fetchJSON(url) {
@@ -215,48 +209,12 @@ function updateTimingPanel(payload) {
   }
 }
 
-function selectorIndex(selectors, axis) {
-  if (!Array.isArray(selectors) || typeof axis !== "string") {
-    return null;
-  }
-  for (const selector of selectors) {
-    if (!selector || selector.axis !== axis) {
-      continue;
-    }
-    if (selector.kind === "index" && Number.isInteger(selector.index)) {
-      return Number(selector.index);
-    }
-    if (selector.kind === "range" && Number.isInteger(selector.start)) {
-      return Number(selector.start);
-    }
-    if (selector.kind === "set" && Array.isArray(selector.indices) && selector.indices.length > 0) {
-      const first = selector.indices[0];
-      if (Number.isInteger(first)) {
-        return Number(first);
-      }
-    }
-  }
-  return null;
-}
-
-function selectorsWithReplacement(axis, nextIndex) {
-  const currentSelectors = Array.isArray(state.viewState?.selectors) ? state.viewState.selectors : [];
-  const selectors = currentSelectors.filter((selector) => selector && selector.axis !== axis);
-  selectors.push({
-    axis,
-    kind: "index",
-    index: nextIndex,
-    clamp: true,
-  });
-  return selectors;
-}
-
 async function applySelectorIndex(axis, nextIndex) {
   const patch = [
     {
       op: "replace",
       path: "/selectors",
-      value: selectorsWithReplacement(axis, nextIndex),
+      value: helpers.selectorsWithReplacement(state.viewState?.selectors, axis, nextIndex),
     },
   ];
   const sliceAxis = state.viewState?.view_2d?.slice?.axis;
@@ -565,16 +523,6 @@ async function updateViewStateWithPatch(patch, reason, retryConflict = true) {
   return payload.view_state;
 }
 
-function screenDeltaToWorld(dxPx, dyPx, zoom, pixelRatio, rotationDeg) {
-  const scale = 1.0 / (zoom * pixelRatio);
-  const theta = (rotationDeg * Math.PI) / 180;
-  const cosTheta = Math.cos(theta);
-  const sinTheta = Math.sin(theta);
-  const worldU = (dxPx * cosTheta + dyPx * sinTheta) * scale;
-  const worldV = (-dxPx * sinTheta + dyPx * cosTheta) * scale;
-  return [worldU, worldV];
-}
-
 function requestDraftRender(trigger) {
   if (!state.connected) {
     return;
@@ -638,7 +586,13 @@ function queuePanDelta(dxPx, dyPx) {
       const centerWorld = Array.isArray(view2d.camera?.center_world)
         ? [...view2d.camera.center_world]
         : [0.0, 0.0];
-      const [deltaU, deltaV] = screenDeltaToWorld(dx, dy, zoom, pixelRatio, rotationDeg);
+      const [deltaU, deltaV] = helpers.screenDeltaToWorld(
+        dx,
+        dy,
+        zoom,
+        pixelRatio,
+        rotationDeg,
+      );
       const nextCenter = [Number(centerWorld[0]) + deltaU, Number(centerWorld[1]) + deltaV];
       await updateViewStateWithPatch(
         [
@@ -669,7 +623,7 @@ function sliceInfo() {
     return null;
   }
   const directIndex = slice && Number.isInteger(slice.index) ? Number(slice.index) : null;
-  const fallbackIndex = selectorIndex(state.viewState?.selectors, axis);
+  const fallbackIndex = helpers.selectorIndex(state.viewState?.selectors, axis);
   const index = directIndex ?? fallbackIndex ?? 0;
   return { axis, index };
 }
@@ -685,7 +639,7 @@ async function stepSlice(delta) {
     {
       op: "replace",
       path: "/selectors",
-      value: selectorsWithReplacement(info.axis, nextIndex),
+      value: helpers.selectorsWithReplacement(state.viewState?.selectors, info.axis, nextIndex),
     },
   ];
   if (state.viewState?.view_2d?.slice) {
@@ -704,62 +658,12 @@ async function stepSlice(delta) {
   }
 }
 
-function setPlanePatch(nextPlane) {
-  const view2d = state.viewState?.view_2d;
-  if (!view2d) {
-    throw new Error("view has no 2d state");
-  }
-  if (!Object.prototype.hasOwnProperty.call(PLANE_ROLES, nextPlane)) {
-    throw new Error(`unsupported plane: ${nextPlane}`);
-  }
-  const currentPlane = Object.prototype.hasOwnProperty.call(PLANE_ROLES, view2d.plane)
-    ? view2d.plane
-    : "xy";
-
-  const [currentURole, currentVRole, currentOrthRole] = PLANE_ROLES[currentPlane];
-  const [targetURole, targetVRole, targetOrthRole] = PLANE_ROLES[nextPlane];
-
-  const centerWorld = Array.isArray(view2d.camera?.center_world) ? [...view2d.camera.center_world] : [0, 0];
-  if (centerWorld.length !== 2) {
-    centerWorld.splice(0, centerWorld.length, 0, 0);
-  }
-
-  const slicePayload = view2d.slice ? deepClone(view2d.slice) : {};
-  const sliceAxis = view2d.slice && typeof view2d.slice.axis === "string" ? view2d.slice.axis : null;
-  const currentSliceIndex =
-    Number.isInteger(view2d.slice?.index)
-      ? Number(view2d.slice.index)
-      : selectorIndex(state.viewState?.selectors, sliceAxis) ?? 0;
-
-  const roleValues = {
-    [currentURole]: Number(centerWorld[0]),
-    [currentVRole]: Number(centerWorld[1]),
-    [currentOrthRole]: Number(currentSliceIndex),
-  };
-
-  const newCenter = [
-    Number(roleValues[targetURole] ?? centerWorld[0]),
-    Number(roleValues[targetVRole] ?? centerWorld[1]),
-  ];
-
-  const nextSlice = {
-    ...slicePayload,
-    index: Math.round(Number(roleValues[targetOrthRole] ?? 0)),
-  };
-
-  return [
-    { op: "replace", path: "/view_2d/plane", value: nextPlane },
-    { op: "replace", path: "/view_2d/camera/center_world", value: newCenter },
-    { op: "replace", path: "/view_2d/slice", value: nextSlice },
-  ];
-}
-
 async function switchPlane(nextPlane) {
   if (!state.connected || !state.viewState) {
     return;
   }
   try {
-    const patch = setPlanePatch(nextPlane);
+    const patch = helpers.computePlanePatch(state.viewState, nextPlane, PLANE_ROLES);
     await updateViewStateWithPatch(patch, `plane ${nextPlane}`);
     requestDraftRender("plane_change");
     scheduleSettleRender("plane_change");
@@ -782,20 +686,20 @@ async function zoomAtPointer(event) {
 
   const wheelDelta = Number(event.deltaY || 0);
   const factor = Math.exp(-wheelDelta * 0.0015);
-  const nextZoom = clampZoom(zoom * factor);
+  const nextZoom = helpers.clampZoom(zoom * factor);
 
   const rect = el.viewport.getBoundingClientRect();
   const offsetX = event.clientX - rect.left - rect.width / 2;
   const offsetY = event.clientY - rect.top - rect.height / 2;
 
-  const [currentOffsetU, currentOffsetV] = screenDeltaToWorld(
+  const [currentOffsetU, currentOffsetV] = helpers.screenDeltaToWorld(
     offsetX,
     offsetY,
     zoom,
     pixelRatio,
     rotationDeg,
   );
-  const [nextOffsetU, nextOffsetV] = screenDeltaToWorld(
+  const [nextOffsetU, nextOffsetV] = helpers.screenDeltaToWorld(
     offsetX,
     offsetY,
     nextZoom,

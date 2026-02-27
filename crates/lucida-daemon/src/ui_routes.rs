@@ -16,6 +16,7 @@ const LIVE_JS: &str = include_str!("../ui/live.js");
 const VIEWER_HTML: &str = include_str!("../ui/viewer.html");
 const VIEWER_CSS: &str = include_str!("../ui/viewer.css");
 const VIEWER_JS: &str = include_str!("../ui/viewer.js");
+const VIEWER_HELPERS_JS: &str = include_str!("../ui/viewer_helpers.js");
 
 pub async fn ui_index() -> Html<&'static str> {
     Html(INDEX_HTML)
@@ -48,6 +49,7 @@ pub async fn ui_asset(Path(path): Path<String>) -> Result<(HeaderMap, &'static s
         "viewer" | "viewer.html" => Ok((html_headers(), VIEWER_HTML)),
         "viewer.css" => Ok((css_headers(), VIEWER_CSS)),
         "viewer.js" => Ok((js_headers(), VIEWER_JS)),
+        "viewer_helpers.js" => Ok((js_headers(), VIEWER_HELPERS_JS)),
         _ => Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "ui_asset_not_found",

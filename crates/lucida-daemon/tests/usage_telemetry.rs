@@ -720,6 +720,10 @@ async fn ui_assets_are_served() {
     assert_eq!(viewer_js.status(), StatusCode::OK);
     assert!(content_type(&viewer_js).contains("application/javascript"));
 
+    let viewer_helpers_js = request_get(&router, "/ui/viewer_helpers.js", None).await;
+    assert_eq!(viewer_helpers_js.status(), StatusCode::OK);
+    assert!(content_type(&viewer_helpers_js).contains("application/javascript"));
+
     let traversal = request_get(&router, "/usage/thumbs/../escape.png", None).await;
     assert_eq!(traversal.status(), StatusCode::NOT_FOUND);
 }
