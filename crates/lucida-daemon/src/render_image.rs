@@ -342,10 +342,13 @@ pub async fn render_image(
     let backend_selection = select_render_backend(
         effective_view.performance.as_ref(),
         gpu_capabilities.available,
+        gpu_capabilities.adapter_name.as_deref(),
     );
     tracing::debug!(
         selected_backend = backend_selection.backend.as_str(),
         gpu_hardware_available = gpu_capabilities.available,
+        gpu_adapter_name = gpu_capabilities.adapter_name.as_deref().unwrap_or(""),
+        gpu_backend = gpu_capabilities.backend.as_deref().unwrap_or(""),
         "render backend selection"
     );
 
@@ -392,6 +395,11 @@ pub async fn render_image(
                                     "error_code": error.envelope.code,
                                     "error_message": error.envelope.message,
                                     "error_details": error.envelope.details,
+                                    "requested_backend": "gpu",
+                                    "fallback_backend": "cpu",
+                                    "gpu_hardware_available": gpu_capabilities.available,
+                                    "gpu_adapter_name": gpu_capabilities.adapter_name.as_deref(),
+                                    "gpu_backend": gpu_capabilities.backend.as_deref(),
                                 })),
                             });
                             (
@@ -460,6 +468,11 @@ pub async fn render_image(
                                     "error_code": error.envelope.code,
                                     "error_message": error.envelope.message,
                                     "error_details": error.envelope.details,
+                                    "requested_backend": "gpu",
+                                    "fallback_backend": "cpu",
+                                    "gpu_hardware_available": gpu_capabilities.available,
+                                    "gpu_adapter_name": gpu_capabilities.adapter_name.as_deref(),
+                                    "gpu_backend": gpu_capabilities.backend.as_deref(),
                                 })),
                             });
                             (

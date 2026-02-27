@@ -694,9 +694,8 @@ async fn render_image_explicit_gpu_preference_routes_to_gpu_or_emits_fallback_wa
 
     let payload = read_json_body(rendered).await;
     let backend_used = assert_backend_used(&payload);
-    let warning_codes: Vec<&str> = payload["warnings"]
-        .as_array()
-        .expect("warnings array")
+    let warnings = payload["warnings"].as_array().expect("warnings array");
+    let warning_codes: Vec<&str> = warnings
         .iter()
         .filter_map(|item| item.get("code").and_then(Value::as_str))
         .collect();
@@ -722,8 +721,20 @@ async fn render_image_explicit_gpu_preference_routes_to_gpu_or_emits_fallback_wa
     }
     if gpu_available {
         assert!(!warning_codes.contains(&"gpu_unavailable_fallback_cpu"));
-        if warning_codes.contains(&"gpu_render_failed_fallback_cpu") {
+        if warning_codes.contains(&"gpu_software_adapter_fallback_cpu") {
             assert_eq!(backend_used, "cpu");
+            let details = warning_details_by_code(warnings, "gpu_software_adapter_fallback_cpu")
+                .expect("software adapter fallback details");
+            assert_eq!(details["requested_by"], "view_state");
+            assert_eq!(details["gpu_hardware_available"], json!(true));
+            assert!(details["gpu_adapter_name"].as_str().is_some());
+        } else if warning_codes.contains(&"gpu_render_failed_fallback_cpu") {
+            assert_eq!(backend_used, "cpu");
+            let details = warning_details_by_code(warnings, "gpu_render_failed_fallback_cpu")
+                .expect("gpu_render_failed details");
+            assert_eq!(details["requested_backend"], "gpu");
+            assert_eq!(details["fallback_backend"], "cpu");
+            assert_eq!(details["gpu_hardware_available"], json!(true));
         } else {
             assert_eq!(backend_used, "gpu");
             assert!(
@@ -736,6 +747,10 @@ async fn render_image_explicit_gpu_preference_routes_to_gpu_or_emits_fallback_wa
     } else {
         assert!(warning_codes.contains(&"gpu_unavailable_fallback_cpu"));
         assert_eq!(backend_used, "cpu");
+        let details = warning_details_by_code(warnings, "gpu_unavailable_fallback_cpu")
+            .expect("gpu_unavailable fallback details");
+        assert_eq!(details["requested_by"], "view_state");
+        assert_eq!(details["gpu_hardware_available"], json!(false));
     }
 }
 
@@ -1156,6 +1171,16 @@ fn assert_backend_used(payload: &Value) -> &str {
         "unexpected backend_used value: {backend}"
     );
     backend
+}
+
+fn warning_details_by_code<'a>(warnings: &'a [Value], code: &str) -> Option<&'a Value> {
+    warnings.iter().find_map(|warning| {
+        if warning.get("code").and_then(Value::as_str) == Some(code) {
+            warning.get("details")
+        } else {
+            None
+        }
+    })
 }
 
 fn pixel_luma(image: &RgbaImage, x: u32, y: u32) -> u32 {

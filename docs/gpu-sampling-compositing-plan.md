@@ -5,17 +5,17 @@ This plan migrates 2D render sampling/compositing from CPU to GPU while preservi
 ## Success Criteria
 
 - [x] GPU path executes sampling and compositing (not post-copy only).
-- [ ] CPU fallback remains correct and automatic on GPU failure.
-- [ ] Default `auto` backend shows lower end-to-end render latency on representative scenes.
+- [x] CPU fallback remains correct and automatic on GPU failure.
+- [x] Default `auto` backend shows lower end-to-end render latency on representative scenes.
 - [x] CPU/GPU output parity passes for interpolation, slab modes, channel modes, and layer stacking.
 - [x] Cache budgets are enforced for both CPU and GPU resources.
 
 ## Cross-Cutting Guardrails
 
-- [ ] Keep request/response contracts backward compatible unless explicitly versioned.
-- [ ] Preserve warning semantics for runtime GPU fallback.
-- [ ] Keep timings stage-accurate (`chunk_fetch`, `chunk_decode`, `sample`, `compose`, `gpu_upload`, `gpu_compute`, `gpu_readback`, `encode`).
-- [ ] Ensure all new behavior is covered by real integration/unit tests (no mocks).
+- [x] Keep request/response contracts backward compatible unless explicitly versioned.
+- [x] Preserve warning semantics for runtime GPU fallback.
+- [x] Keep timings stage-accurate (`chunk_fetch`, `chunk_decode`, `sample`, `compose`, `gpu_upload`, `gpu_compute`, `gpu_readback`, `encode`).
+- [x] Ensure all new behavior is covered by real integration/unit tests (no mocks).
 
 ## PR Slices
 
@@ -111,13 +111,13 @@ Goal: Make GPU sampling/compositing safe as the default path.
 
 Checklist:
 
-- [ ] Verify `auto` backend policy behavior with feature flags and env overrides.
-- [ ] Harden fallback warnings and error details for production debugging.
-- [ ] Update docs for backend controls, cache tuning, and expected timings.
+- [x] Verify `auto` backend policy behavior with feature flags and env overrides.
+- [x] Harden fallback warnings and error details for production debugging.
+- [x] Update docs for backend controls, cache tuning, and expected timings.
 
 Exit criteria:
 
-- [ ] End-to-end tests and docs are complete; rollout-ready default behavior.
+- [x] End-to-end tests and docs are complete; rollout-ready default behavior.
 
 ## Operational Sequence
 
