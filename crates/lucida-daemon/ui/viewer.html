@@ -48,6 +48,14 @@
             <option value="raw_rgba">Raw RGBA</option>
           </select>
         </label>
+        <label>
+          Plane
+          <select id="plane-select">
+            <option value="xy">XY</option>
+            <option value="xz">XZ</option>
+            <option value="yz">YZ</option>
+          </select>
+        </label>
         <div class="actions">
           <button id="refresh-targets" class="secondary">Refresh Targets</button>
           <button id="connect">Connect</button>
@@ -82,6 +90,7 @@
       <section class="panel viewport-panel">
         <h2>Viewport</h2>
         <p id="viewport-note" class="note">Connect and render to display frames.</p>
+        <p class="hint">Drag: pan. Wheel: zoom. Shift+wheel or [ / ]: slice. 1/2/3: XY/XZ/YZ.</p>
         <div id="viewport" class="viewport">
           <p>No frame rendered yet.</p>
         </div>

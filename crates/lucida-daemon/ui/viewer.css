@@ -92,7 +92,7 @@ button:hover,
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(5, minmax(150px, 1fr));
+  grid-template-columns: repeat(6, minmax(140px, 1fr));
   gap: 0.85rem;
   align-items: end;
 }
@@ -163,6 +163,12 @@ select {
   font-size: 0.9rem;
 }
 
+.hint {
+  margin: 0 0 0.75rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
 .viewport {
   min-height: 460px;
   border-radius: 0.8rem;
@@ -171,6 +177,13 @@ select {
   display: grid;
   place-items: center;
   overflow: hidden;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.viewport.dragging {
+  cursor: grabbing;
 }
 
 .viewport img,

@@ -42,53 +42,53 @@ Build a lightweight, napari-like interactive viewer under `/ui/viewer` that oper
 ## Phase 1: Viewer Surface + Routing
 
 ### Tasks
-- [ ] Add `viewer.html`, `viewer.css`, `viewer.js` under `crates/lucida-daemon/ui/`.
-- [ ] Add route handlers:
-  - [ ] `/ui/viewer`
-  - [ ] `/ui/viewer.css`
-  - [ ] `/ui/viewer.js`
-- [ ] Wire navigation links from existing UI pages to `/ui/viewer`.
-- [ ] Implement basic viewer shell:
-  - [ ] session/view target selectors
-  - [ ] connect/disconnect
-  - [ ] manual render button
-  - [ ] viewport output panel
-  - [ ] status/state hash/version panel
-- [ ] Implement first render flow (`/render/image`, inline delivery) with error handling.
+- [x] Add `viewer.html`, `viewer.css`, `viewer.js` under `crates/lucida-daemon/ui/`.
+- [x] Add route handlers:
+  - [x] `/ui/viewer`
+  - [x] `/ui/viewer.css`
+  - [x] `/ui/viewer.js`
+- [x] Wire navigation links from existing UI pages to `/ui/viewer`.
+- [x] Implement basic viewer shell:
+  - [x] session/view target selectors
+  - [x] connect/disconnect
+  - [x] manual render button
+  - [x] viewport output panel
+  - [x] status/state hash/version panel
+- [x] Implement first render flow (`/render/image`, inline delivery) with error handling.
 
 ### Phase 1 Gate (PR Gate A)
-- [ ] `cargo test -p lucida-daemon --test usage_telemetry`
-- [ ] viewer route/asset tests pass
-- [ ] branch committed atomically for phase 1
-- [ ] pushed to origin
-- [ ] draft PR created/updated with phase summary + test evidence
+- [x] `cargo test -p lucida-daemon --test usage_telemetry`
+- [x] viewer route/asset tests pass
+- [x] branch committed atomically for phase 1
+- [x] pushed to origin
+- [x] draft PR created/updated with phase summary + test evidence
 
 ## Phase 2: Interactive Camera + Slicing
 
 ### Tasks
-- [ ] Implement view-state bootstrap (`GET /view/{id}`) on connect.
-- [ ] Add optimistic update helper for `/view/update`:
-  - [ ] sends `expected_state_version`
-  - [ ] handles conflict by refetch + single retry
-- [ ] Implement pan interaction:
-  - [ ] pointer drag on viewport
-  - [ ] world-delta math from camera zoom/pixel ratio/rotation
-- [ ] Implement zoom interaction:
-  - [ ] wheel zoom
-  - [ ] cursor-anchored zoom center preservation
-- [ ] Implement slice stepping:
-  - [ ] Shift+wheel
-  - [ ] `[` / `]` keyboard
-  - [ ] clamps via backend normalization
-- [ ] Plane switching controls:
-  - [ ] UI select + keyboard `1/2/3`
+- [x] Implement view-state bootstrap (`GET /view/{id}`) on connect.
+- [x] Add optimistic update helper for `/view/update`:
+  - [x] sends `expected_state_version`
+  - [x] handles conflict by refetch + single retry
+- [x] Implement pan interaction:
+  - [x] pointer drag on viewport
+  - [x] world-delta math from camera zoom/pixel ratio/rotation
+- [x] Implement zoom interaction:
+  - [x] wheel zoom
+  - [x] cursor-anchored zoom center preservation
+- [x] Implement slice stepping:
+  - [x] Shift+wheel
+  - [x] `[` / `]` keyboard
+  - [x] clamps via backend normalization
+- [x] Plane switching controls:
+  - [x] UI select + keyboard `1/2/3`
 
 ### Phase 2 Gate (PR Gate B)
-- [ ] `cargo test -p lucida-daemon --test usage_telemetry`
-- [ ] interaction logic tests pass
-- [ ] branch committed atomically for phase 2
-- [ ] pushed to origin
-- [ ] draft PR updated with phase summary + test evidence
+- [x] `cargo test -p lucida-daemon --test usage_telemetry`
+- [x] interaction logic tests pass
+- [x] branch committed atomically for phase 2
+- [x] pushed to origin
+- [x] draft PR updated with phase summary + test evidence
 
 ## Phase 3: Axis Controls + Draft/Final Render Loop
 
@@ -139,4 +139,3 @@ Implementation is complete when all phase gates are checked and the branch inclu
 - deterministic view-state mutation flow with concurrency handling,
 - validated test coverage for new behavior,
 - updated docs for discoverability and usage.
-
