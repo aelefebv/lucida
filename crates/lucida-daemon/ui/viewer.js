@@ -15,6 +15,13 @@ const state = {
   viewId: null,
   sessionId: null,
   viewState: null,
+  localViewState: null,
+  pendingPatchByPath: new Map(),
+  commit: {
+    timer: null,
+    inFlight: false,
+    debounceMs: 140,
+  },
   renderController: null,
   drag: {
     active: false,
@@ -29,11 +36,14 @@ const state = {
   },
   render: {
     lastDraftAtMs: 0,
-    minDraftIntervalMs: 90,
+    minDraftIntervalMs: 55,
     draftTimer: null,
     pendingDraftTrigger: null,
     settleTimer: null,
-    settleDebounceMs: 180,
+    settleDebounceMs: 130,
+    draftScale: 0.62,
+    maxDraftEdgePx: 768,
+    minDraftEdgePx: 320,
   },
 };
 
@@ -58,6 +68,21 @@ const el = {
   viewportNote: document.querySelector("#viewport-note"),
   viewport: document.querySelector("#viewport"),
 };
+
+function deepClone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function hasPendingLocalChanges() {
+  return state.pendingPatchByPath.size > 0;
+}
+
+function getActiveViewState() {
+  if (state.localViewState) {
+    return state.localViewState;
+  }
+  return state.viewState;
+}
 
 function isFormField(target) {
   if (!(target instanceof HTMLElement)) {
@@ -159,6 +184,13 @@ function clearRenderTimers() {
   }
 }
 
+function clearCommitTimer() {
+  if (state.commit.timer) {
+    clearTimeout(state.commit.timer);
+    state.commit.timer = null;
+  }
+}
+
 function stopDragging() {
   state.drag.active = false;
   state.drag.pointerId = null;
@@ -181,10 +213,16 @@ function disconnect() {
   cancelInFlightRender();
   clearRenderTimers();
   clearPanQueue();
+  clearCommitTimer();
   stopDragging();
+
   state.viewId = null;
   state.sessionId = null;
   state.viewState = null;
+  state.localViewState = null;
+  state.pendingPatchByPath.clear();
+  state.commit.inFlight = false;
+
   setStreamStatus("disconnected");
   setViewportNote("Connect and render to display frames.");
   resetPanelsOnDisconnect();
@@ -194,10 +232,15 @@ function updateStatePanel(payload, endpoint) {
   if (endpoint) {
     el.lastEndpoint.textContent = endpoint;
   }
-  el.stateHash.textContent = payload.state_hash || payload.view_state?.state_hash || "-";
+  const stateHash = payload.state_hash ?? payload.view_state?.state_hash;
+  if (stateHash !== null && stateHash !== undefined) {
+    el.stateHash.textContent = String(stateHash);
+  }
+
   const stateVersion = payload.state_version ?? payload.view_state?.state_version;
-  el.stateVersion.textContent =
-    stateVersion === null || stateVersion === undefined ? "-" : String(stateVersion);
+  if (stateVersion !== null && stateVersion !== undefined) {
+    el.stateVersion.textContent = String(stateVersion);
+  }
 }
 
 function updateTimingPanel(payload) {
@@ -207,88 +250,6 @@ function updateTimingPanel(payload) {
   } else {
     el.renderTotalMs.textContent = "-";
   }
-}
-
-async function applySelectorIndex(axis, nextIndex) {
-  const patch = [
-    {
-      op: "replace",
-      path: "/selectors",
-      value: helpers.selectorsWithReplacement(state.viewState?.selectors, axis, nextIndex),
-    },
-  ];
-  const sliceAxis = state.viewState?.view_2d?.slice?.axis;
-  if (sliceAxis === axis && state.viewState?.view_2d?.slice) {
-    patch.push({ op: "replace", path: "/view_2d/slice/index", value: nextIndex });
-  }
-  try {
-    await updateViewStateWithPatch(patch, `axis ${axis}`);
-    requestDraftRender(`axis_${axis}`);
-    scheduleSettleRender(`axis_${axis}`);
-  } catch (error) {
-    setViewportNote(String(error), true);
-  }
-}
-
-function renderSelectorControls() {
-  const selectors = Array.isArray(state.viewState?.selectors) ? state.viewState.selectors : [];
-  el.selectorControls.innerHTML = "";
-  if (selectors.length === 0) {
-    el.selectorControls.innerHTML = "<p>No selectors available for the connected view.</p>";
-    return;
-  }
-
-  const sorted = [...selectors].sort((left, right) => String(left.axis).localeCompare(String(right.axis)));
-
-  sorted.forEach((selector) => {
-    const row = document.createElement("article");
-    row.className = "selector-row";
-
-    const title = document.createElement("strong");
-    title.textContent = String(selector.axis || "(axis)");
-    row.appendChild(title);
-
-    if (selector.kind !== "index") {
-      const meta = document.createElement("div");
-      meta.className = "selector-meta";
-      meta.textContent = `kind=${String(selector.kind || "unknown")} (read-only in viewer)`;
-      row.appendChild(meta);
-      el.selectorControls.appendChild(row);
-      return;
-    }
-
-    const input = document.createElement("input");
-    input.type = "number";
-    input.step = "1";
-    input.value = String(Number(selector.index || 0));
-    input.addEventListener("change", () => {
-      const next = Number.parseInt(input.value, 10);
-      if (!Number.isFinite(next)) {
-        input.value = String(Number(selector.index || 0));
-        return;
-      }
-      applySelectorIndex(String(selector.axis), Math.round(next));
-    });
-    row.appendChild(input);
-
-    const meta = document.createElement("div");
-    meta.className = "selector-meta";
-    meta.textContent = "index selector";
-    row.appendChild(meta);
-
-    el.selectorControls.appendChild(row);
-  });
-}
-
-function setViewState(viewState, endpoint = "/view/{view_id}") {
-  state.viewState = viewState;
-  state.viewId = viewState.view_id || state.viewId;
-  state.sessionId = viewState.session_id || state.sessionId;
-  updateStatePanel(viewState, endpoint);
-  if (viewState.view_2d && viewState.view_2d.plane && PLANE_ROLES[viewState.view_2d.plane]) {
-    el.planeSelect.value = viewState.view_2d.plane;
-  }
-  renderSelectorControls();
 }
 
 function decodeBase64ToBytes(encoded) {
@@ -405,9 +366,235 @@ async function fetchViewState(scope) {
   return payload.view_state;
 }
 
+function renderSelectorControls() {
+  const activeView = getActiveViewState();
+  const selectors = Array.isArray(activeView?.selectors) ? activeView.selectors : [];
+  el.selectorControls.innerHTML = "";
+
+  if (selectors.length === 0) {
+    el.selectorControls.innerHTML = "<p>No selectors available for the connected view.</p>";
+    return;
+  }
+
+  const sorted = [...selectors].sort((left, right) =>
+    String(left.axis).localeCompare(String(right.axis)),
+  );
+
+  sorted.forEach((selector) => {
+    const row = document.createElement("article");
+    row.className = "selector-row";
+
+    const title = document.createElement("strong");
+    title.textContent = String(selector.axis || "(axis)");
+    row.appendChild(title);
+
+    if (selector.kind !== "index") {
+      const meta = document.createElement("div");
+      meta.className = "selector-meta";
+      meta.textContent = `kind=${String(selector.kind || "unknown")} (read-only in viewer)`;
+      row.appendChild(meta);
+      el.selectorControls.appendChild(row);
+      return;
+    }
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "1";
+    input.value = String(Number(selector.index || 0));
+    input.addEventListener("change", () => {
+      const next = Number.parseInt(input.value, 10);
+      if (!Number.isFinite(next)) {
+        input.value = String(Number(selector.index || 0));
+        return;
+      }
+      applySelectorIndex(String(selector.axis), Math.round(next));
+    });
+    row.appendChild(input);
+
+    const meta = document.createElement("div");
+    meta.className = "selector-meta";
+    meta.textContent = "index selector";
+    row.appendChild(meta);
+
+    el.selectorControls.appendChild(row);
+  });
+}
+
+function syncControlsFromActiveView() {
+  const activeView = getActiveViewState();
+  const plane = activeView?.view_2d?.plane;
+  if (plane && Object.prototype.hasOwnProperty.call(PLANE_ROLES, plane)) {
+    el.planeSelect.value = plane;
+  }
+  renderSelectorControls();
+}
+
+function setCommittedViewState(viewState, endpoint = "/view/{view_id}", syncLocal = true) {
+  state.viewState = viewState;
+  state.viewId = viewState.view_id || state.viewId;
+  state.sessionId = viewState.session_id || state.sessionId;
+  updateStatePanel(viewState, endpoint);
+
+  if (syncLocal || !state.localViewState) {
+    state.localViewState = deepClone(viewState);
+  }
+
+  syncControlsFromActiveView();
+}
+
+function decodeJsonPointerToken(token) {
+  return token.replace(/~1/g, "/").replace(/~0/g, "~");
+}
+
+function setByJsonPointer(root, pointer, value) {
+  if (pointer === "") {
+    throw new Error("root replacement is unsupported in viewer patch application");
+  }
+  if (!pointer.startsWith("/")) {
+    throw new Error(`invalid json pointer: ${pointer}`);
+  }
+
+  const segments = pointer
+    .split("/")
+    .slice(1)
+    .map(decodeJsonPointerToken);
+
+  let current = root;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const key = segments[i];
+    const next = current[key];
+    if (next === null || next === undefined) {
+      const nextKey = segments[i + 1];
+      const container = /^\d+$/.test(nextKey) ? [] : {};
+      current[key] = container;
+      current = container;
+    } else {
+      current = next;
+    }
+  }
+
+  const leaf = segments[segments.length - 1];
+  current[leaf] = deepClone(value);
+}
+
+function applyLocalPatch(patch, reason) {
+  const activeView = getActiveViewState();
+  if (!activeView) {
+    throw new Error("viewer has no active view state");
+  }
+
+  for (const op of patch) {
+    if (!op || op.op !== "replace" || typeof op.path !== "string") {
+      throw new Error("viewer only supports replace operations in local patch application");
+    }
+    setByJsonPointer(state.localViewState, op.path, op.value);
+    state.pendingPatchByPath.set(op.path, {
+      op: "replace",
+      path: op.path,
+      value: deepClone(op.value),
+    });
+  }
+
+  syncControlsFromActiveView();
+  setViewportNote(`Applied ${reason}.`);
+}
+
+function scheduleCommit(reason, delayMs = state.commit.debounceMs) {
+  if (!state.connected) {
+    return;
+  }
+  clearCommitTimer();
+  state.commit.timer = setTimeout(() => {
+    state.commit.timer = null;
+    flushLocalCommit(reason);
+  }, Math.max(0, delayMs));
+}
+
+async function flushLocalCommit(reason, attempt = 0) {
+  if (!state.connected || state.commit.inFlight || !hasPendingLocalChanges()) {
+    return;
+  }
+  if (!state.viewState) {
+    return;
+  }
+
+  state.commit.inFlight = true;
+  setRenderStatus("syncing state");
+
+  const commitEntries = Array.from(state.pendingPatchByPath.entries()).sort((left, right) =>
+    left[0].localeCompare(right[0]),
+  );
+  const patch = commitEntries.map((entry) => deepClone(entry[1]));
+  const commitSignatures = new Map(commitEntries.map(([path, op]) => [path, JSON.stringify(op)]));
+
+  const request = {
+    schema_version: 1,
+    view_id: state.viewId,
+    expected_state_version: Number(state.viewState.state_version || 0),
+    patch,
+  };
+  if (state.sessionId) {
+    request.session_id = state.sessionId;
+  }
+
+  try {
+    const response = await fetch("/view/update", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+    });
+
+    if (response.status === 409 && attempt < 1) {
+      const refreshed = await fetchViewState({
+        viewId: state.viewId,
+        sessionId: state.sessionId,
+      });
+      setCommittedViewState(refreshed, "/view/{view_id}", false);
+      state.commit.inFlight = false;
+      return flushLocalCommit(`${reason}_retry`, attempt + 1);
+    }
+
+    if (!response.ok) {
+      setRenderStatus(`sync error (${response.status})`, true);
+      setViewportNote(`State sync failed (${response.status}).`, true);
+      state.commit.inFlight = false;
+      return;
+    }
+
+    const payload = await response.json();
+    if (!payload.view_state) {
+      setRenderStatus("sync error", true);
+      setViewportNote("State sync response missing view_state.", true);
+      state.commit.inFlight = false;
+      return;
+    }
+
+    for (const [path, signature] of commitSignatures.entries()) {
+      const current = state.pendingPatchByPath.get(path);
+      if (current && JSON.stringify(current) === signature) {
+        state.pendingPatchByPath.delete(path);
+      }
+    }
+
+    const shouldSyncLocal = !hasPendingLocalChanges();
+    setCommittedViewState(payload.view_state, "/view/update", shouldSyncLocal);
+    if (shouldSyncLocal) {
+      setRenderStatus("synced");
+    } else {
+      setRenderStatus("syncing state");
+      scheduleCommit("followup_sync", 40);
+    }
+  } catch (error) {
+    setRenderStatus("sync error", true);
+    setViewportNote(String(error), true);
+  } finally {
+    state.commit.inFlight = false;
+  }
+}
+
 async function bootstrapViewState(scope) {
   const viewState = await fetchViewState(scope);
-  setViewState(viewState, "/view/{view_id}");
+  setCommittedViewState(viewState, "/view/{view_id}", true);
 }
 
 function connectStream(scope) {
@@ -418,18 +605,21 @@ function connectStream(scope) {
   });
   const stream = new EventSource(`/view/events/stream?${query}`);
   state.stream = stream;
+
   stream.addEventListener("open", () => {
     if (!state.connected) {
       return;
     }
     setStreamStatus("connected");
   });
+
   stream.addEventListener("error", () => {
     if (!state.connected) {
       return;
     }
     setStreamStatus("reconnecting", true);
   });
+
   stream.addEventListener("view_event", async (rawEvent) => {
     if (!state.connected) {
       return;
@@ -437,17 +627,19 @@ function connectStream(scope) {
     try {
       const event = JSON.parse(rawEvent.data);
       updateStatePanel(event, event.endpoint || "/view/events/stream");
-      if (event.event_type === "view_state_committed") {
-        const eventVersion = Number(event.state_version ?? -1);
-        const localVersion = Number(state.viewState?.state_version ?? -1);
-        if (eventVersion > localVersion) {
-          try {
-            await bootstrapViewState({ viewId: state.viewId, sessionId: state.sessionId });
-            scheduleSettleRender("stream_update");
-          } catch (_) {
-            setViewportNote("Failed to refresh view state from stream event.", true);
-          }
-        }
+
+      if (event.event_type !== "view_state_committed") {
+        return;
+      }
+      if (hasPendingLocalChanges() || state.drag.active || state.commit.inFlight) {
+        return;
+      }
+
+      const eventVersion = Number(event.state_version ?? -1);
+      const localVersion = Number(state.viewState?.state_version ?? -1);
+      if (eventVersion > localVersion) {
+        await bootstrapViewState({ viewId: state.viewId, sessionId: state.sessionId });
+        scheduleSettleRender("stream_update");
       }
     } catch (_) {
       setStreamStatus("stream parse error", true);
@@ -464,10 +656,14 @@ async function connect() {
     setStreamStatus("select a view_id first", true);
     return;
   }
+
   disconnect();
+
   state.connected = true;
   state.viewId = scope.viewId;
   state.sessionId = scope.sessionId;
+  state.pendingPatchByPath.clear();
+
   setStreamStatus("connecting");
   try {
     await bootstrapViewState(scope);
@@ -476,58 +672,17 @@ async function connect() {
     disconnect();
     return;
   }
+
   connectStream(scope);
   setViewportNote("Connected. Drag or wheel in viewport to navigate.");
   await renderFrame({ reason: "connect", format: "png", stage: "final" });
-}
-
-async function updateViewStateWithPatch(patch, reason, retryConflict = true) {
-  if (!state.connected || !state.viewId || !state.viewState) {
-    throw new Error("viewer is not connected to an active view");
-  }
-
-  const request = {
-    schema_version: 1,
-    view_id: state.viewId,
-    expected_state_version: Number(state.viewState.state_version || 0),
-    patch,
-  };
-  if (state.sessionId) {
-    request.session_id = state.sessionId;
-  }
-
-  const response = await fetch("/view/update", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(request),
-  });
-
-  if (response.status === 409 && retryConflict) {
-    const refreshed = await fetchViewState({
-      viewId: state.viewId,
-      sessionId: state.sessionId,
-    });
-    setViewState(refreshed, "/view/{view_id}");
-    return updateViewStateWithPatch(patch, reason, false);
-  }
-
-  if (!response.ok) {
-    throw new Error(`view update failed (${response.status})`);
-  }
-
-  const payload = await response.json();
-  if (!payload.view_state) {
-    throw new Error("view update response missing view_state");
-  }
-  setViewState(payload.view_state, "/view/update");
-  setViewportNote(`Applied ${reason}.`);
-  return payload.view_state;
 }
 
 function requestDraftRender(trigger) {
   if (!state.connected) {
     return;
   }
+
   const now = Date.now();
   const elapsed = now - state.render.lastDraftAtMs;
   if (elapsed < state.render.minDraftIntervalMs) {
@@ -544,6 +699,7 @@ function requestDraftRender(trigger) {
     }, waitMs);
     return;
   }
+
   state.render.lastDraftAtMs = now;
   renderFrame({ reason: trigger, format: "raw_rgba", stage: "draft" });
 }
@@ -561,41 +717,199 @@ function scheduleSettleRender(trigger) {
   }, state.render.settleDebounceMs);
 }
 
+function resolveRenderDimensions(stage) {
+  const fullWidth = clampRenderSize(el.renderWidth.value, 1024);
+  const fullHeight = clampRenderSize(el.renderHeight.value, 1024);
+
+  if (stage !== "draft") {
+    return { width: fullWidth, height: fullHeight };
+  }
+
+  const longest = Math.max(fullWidth, fullHeight);
+  const scaledLongest = Math.round(longest * state.render.draftScale);
+  const targetLongest = Math.max(
+    state.render.minDraftEdgePx,
+    Math.min(state.render.maxDraftEdgePx, scaledLongest),
+  );
+  if (targetLongest >= longest) {
+    return { width: fullWidth, height: fullHeight };
+  }
+
+  const scale = targetLongest / longest;
+  const width = clampRenderSize(Math.round(fullWidth * scale), fullWidth);
+  const height = clampRenderSize(Math.round(fullHeight * scale), fullHeight);
+  return { width, height };
+}
+
+function viewStateForRender(stage) {
+  const active = getActiveViewState();
+  if (!active) {
+    return null;
+  }
+  const copy = deepClone(active);
+
+  const quality = stage === "draft" ? "draft" : "final";
+  copy.performance = {
+    ...(copy.performance || {}),
+    quality,
+    progressive: true,
+    lod_mode: "auto",
+    fixed_level: null,
+    prefer_gpu: true,
+    target_frame_ms: stage === "draft" ? 55 : 180,
+    max_cpu_cache_bytes:
+      copy.performance && copy.performance.max_cpu_cache_bytes !== undefined
+        ? copy.performance.max_cpu_cache_bytes
+        : null,
+    max_gpu_cache_bytes:
+      copy.performance && copy.performance.max_gpu_cache_bytes !== undefined
+        ? copy.performance.max_gpu_cache_bytes
+        : null,
+  };
+
+  return copy;
+}
+
+async function renderFrame({ reason, format, stage }) {
+  if (!state.connected) {
+    return;
+  }
+
+  const renderViewState = viewStateForRender(stage);
+  if (!renderViewState) {
+    setStreamStatus("no active view state", true);
+    return;
+  }
+
+  cancelInFlightRender();
+  const controller = new AbortController();
+  state.renderController = controller;
+
+  const dimensions = resolveRenderDimensions(stage);
+  el.renderWidth.value = String(clampRenderSize(el.renderWidth.value, 1024));
+  el.renderHeight.value = String(clampRenderSize(el.renderHeight.value, 1024));
+
+  setRenderStatus(`rendering ${stage}`);
+  setViewportNote(`Rendering ${stage} (${reason})...`);
+
+  try {
+    const request = {
+      schema_version: 1,
+      view_state: renderViewState,
+      output: {
+        format,
+        delivery: "inline_base64",
+        width_px: dimensions.width,
+        height_px: dimensions.height,
+      },
+    };
+    if (state.sessionId) {
+      request.session_id = state.sessionId;
+    }
+
+    const response = await fetch("/render/image", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(request),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      setRenderStatus(`error (${response.status})`, true);
+      setViewportNote(`Render failed (${response.status}).`, true);
+      return;
+    }
+
+    const payload = await response.json();
+    const image = Array.isArray(payload.images) ? payload.images[0] : null;
+    if (!image || !image.bytes_base64) {
+      setRenderStatus("error (artifact)", true);
+      setViewportNote("Render response has no inline image.", true);
+      return;
+    }
+
+    if (format === "raw_rgba") {
+      if (image.mime !== "application/x-raw-rgba") {
+        setRenderStatus("error (mime)", true);
+        setViewportNote(`Unexpected raw mime: ${String(image.mime || "(missing)")}.`, true);
+        return;
+      }
+
+      const artifactWidth = clampRenderSize(image.width_px, dimensions.width);
+      const artifactHeight = clampRenderSize(image.height_px, dimensions.height);
+      const bytes = decodeBase64ToBytes(image.bytes_base64);
+      const expectedLength = artifactWidth * artifactHeight * 4;
+      if (bytes.length !== expectedLength) {
+        setRenderStatus("error (size)", true);
+        setViewportNote(
+          `Raw frame size mismatch. expected=${expectedLength} actual=${bytes.length}.`,
+          true,
+        );
+        return;
+      }
+      showRgbaCanvas(bytes, artifactWidth, artifactHeight);
+    } else {
+      const src = `data:${image.mime || "image/png"};base64,${image.bytes_base64}`;
+      showImage(src);
+    }
+
+    el.backendUsed.textContent = payload.meta?.backend_used || "-";
+    updateTimingPanel(payload);
+    updateStatePanel(payload, "/render/image");
+    setRenderStatus(`${stage} complete`);
+    setViewportNote(`Frame updated (${stage}).`);
+  } catch (error) {
+    if (controller.signal.aborted) {
+      return;
+    }
+    setRenderStatus("error", true);
+    setViewportNote(String(error), true);
+  }
+}
+
 function queuePanDelta(dxPx, dyPx) {
   state.panPending.dxPx += dxPx;
   state.panPending.dyPx += dyPx;
   if (state.panPending.timer) {
     return;
   }
-  state.panPending.timer = setTimeout(async () => {
+
+  state.panPending.timer = setTimeout(() => {
     state.panPending.timer = null;
     const dx = state.panPending.dxPx;
     const dy = state.panPending.dyPx;
     state.panPending.dxPx = 0;
     state.panPending.dyPx = 0;
+
     if (Math.abs(dx) < 0.001 && Math.abs(dy) < 0.001) {
       return;
     }
+
+    const activeView = getActiveViewState();
+    const view2d = activeView?.view_2d;
+    if (!view2d) {
+      return;
+    }
+
+    const zoom = Number(view2d.camera?.zoom || 1.0);
+    const pixelRatio = Number(activeView.viewport?.pixel_ratio || 1.0);
+    const rotationDeg = Number(view2d.camera?.rotation_deg || 0.0);
+    const centerWorld = Array.isArray(view2d.camera?.center_world)
+      ? [...view2d.camera.center_world]
+      : [0.0, 0.0];
+
+    const [deltaU, deltaV] = helpers.screenDeltaToWorld(
+      dx,
+      dy,
+      zoom,
+      pixelRatio,
+      rotationDeg,
+    );
+
+    const nextCenter = [Number(centerWorld[0]) - deltaU, Number(centerWorld[1]) - deltaV];
+
     try {
-      const view2d = state.viewState?.view_2d;
-      if (!view2d) {
-        return;
-      }
-      const zoom = Number(view2d.camera?.zoom || 1.0);
-      const pixelRatio = Number(state.viewState.viewport?.pixel_ratio || 1.0);
-      const rotationDeg = Number(view2d.camera?.rotation_deg || 0.0);
-      const centerWorld = Array.isArray(view2d.camera?.center_world)
-        ? [...view2d.camera.center_world]
-        : [0.0, 0.0];
-      const [deltaU, deltaV] = helpers.screenDeltaToWorld(
-        dx,
-        dy,
-        zoom,
-        pixelRatio,
-        rotationDeg,
-      );
-      const nextCenter = [Number(centerWorld[0]) - deltaU, Number(centerWorld[1]) - deltaV];
-      await updateViewStateWithPatch(
+      applyLocalPatch(
         [
           {
             op: "replace",
@@ -607,79 +921,119 @@ function queuePanDelta(dxPx, dyPx) {
       );
       requestDraftRender("pan");
       scheduleSettleRender("pan");
+      scheduleCommit("pan");
     } catch (error) {
       setViewportNote(String(error), true);
     }
-  }, 45);
+  }, 12);
 }
 
 function sliceInfo() {
-  const view2d = state.viewState?.view_2d;
+  const view2d = getActiveViewState()?.view_2d;
   if (!view2d) {
     return null;
   }
+
   const slice = view2d.slice || null;
   const axis = slice && typeof slice.axis === "string" ? slice.axis : null;
   if (!axis) {
     return null;
   }
+
   const directIndex = slice && Number.isInteger(slice.index) ? Number(slice.index) : null;
-  const fallbackIndex = helpers.selectorIndex(state.viewState?.selectors, axis);
+  const fallbackIndex = helpers.selectorIndex(getActiveViewState()?.selectors, axis);
   const index = directIndex ?? fallbackIndex ?? 0;
   return { axis, index };
 }
 
-async function stepSlice(delta) {
+function applySelectorIndex(axis, nextIndex) {
+  const activeView = getActiveViewState();
+  if (!activeView) {
+    return;
+  }
+
+  const patch = [
+    {
+      op: "replace",
+      path: "/selectors",
+      value: helpers.selectorsWithReplacement(activeView.selectors, axis, nextIndex),
+    },
+  ];
+
+  const sliceAxis = activeView?.view_2d?.slice?.axis;
+  if (sliceAxis === axis && activeView?.view_2d?.slice) {
+    patch.push({ op: "replace", path: "/view_2d/slice/index", value: nextIndex });
+  }
+
+  try {
+    applyLocalPatch(patch, `axis ${axis}`);
+    requestDraftRender(`axis_${axis}`);
+    scheduleSettleRender(`axis_${axis}`);
+    scheduleCommit(`axis_${axis}`);
+  } catch (error) {
+    setViewportNote(String(error), true);
+  }
+}
+
+function stepSlice(delta) {
   const info = sliceInfo();
   if (!info) {
     setViewportNote("Current view has no slice axis to step.", true);
     return;
   }
+
+  const activeView = getActiveViewState();
   const nextIndex = Math.round(info.index + delta);
   const patch = [
     {
       op: "replace",
       path: "/selectors",
-      value: helpers.selectorsWithReplacement(state.viewState?.selectors, info.axis, nextIndex),
+      value: helpers.selectorsWithReplacement(activeView?.selectors, info.axis, nextIndex),
     },
   ];
-  if (state.viewState?.view_2d?.slice) {
+  if (activeView?.view_2d?.slice) {
     patch.push({
       op: "replace",
       path: "/view_2d/slice/index",
       value: nextIndex,
     });
   }
+
   try {
-    await updateViewStateWithPatch(patch, "slice step");
+    applyLocalPatch(patch, "slice step");
     requestDraftRender("slice_step");
     scheduleSettleRender("slice_step");
+    scheduleCommit("slice_step");
   } catch (error) {
     setViewportNote(String(error), true);
   }
 }
 
-async function switchPlane(nextPlane) {
-  if (!state.connected || !state.viewState) {
+function switchPlane(nextPlane) {
+  const activeView = getActiveViewState();
+  if (!state.connected || !activeView) {
     return;
   }
+
   try {
-    const patch = helpers.computePlanePatch(state.viewState, nextPlane, PLANE_ROLES);
-    await updateViewStateWithPatch(patch, `plane ${nextPlane}`);
+    const patch = helpers.computePlanePatch(activeView, nextPlane, PLANE_ROLES);
+    applyLocalPatch(patch, `plane ${nextPlane}`);
     requestDraftRender("plane_change");
     scheduleSettleRender("plane_change");
+    scheduleCommit("plane_change");
   } catch (error) {
     setViewportNote(String(error), true);
   }
 }
 
-async function zoomAtPointer(event) {
-  if (!state.connected || !state.viewState?.view_2d) {
+function zoomAtPointer(event) {
+  const activeView = getActiveViewState();
+  if (!state.connected || !activeView?.view_2d) {
     return;
   }
-  const view2d = state.viewState.view_2d;
-  const camera = view2d.camera;
-  const viewport = state.viewState.viewport;
+
+  const camera = activeView.view_2d.camera;
+  const viewport = activeView.viewport;
   const zoom = Number(camera?.zoom || 1.0);
   const pixelRatio = Number(viewport?.pixel_ratio || 1.0);
   const rotationDeg = Number(camera?.rotation_deg || 0.0);
@@ -714,7 +1068,7 @@ async function zoomAtPointer(event) {
   ];
 
   try {
-    await updateViewStateWithPatch(
+    applyLocalPatch(
       [
         { op: "replace", path: "/view_2d/camera/zoom", value: nextZoom },
         { op: "replace", path: "/view_2d/camera/center_world", value: nextCenter },
@@ -723,99 +1077,8 @@ async function zoomAtPointer(event) {
     );
     requestDraftRender("zoom");
     scheduleSettleRender("zoom");
+    scheduleCommit("zoom");
   } catch (error) {
-    setViewportNote(String(error), true);
-  }
-}
-
-async function renderFrame({ reason, format, stage }) {
-  const scope = {
-    viewId: state.viewId || selectedViewId(),
-    sessionId: state.sessionId || selectedSessionId(),
-  };
-  if (!scope.viewId) {
-    setStreamStatus("select a view_id first", true);
-    return;
-  }
-
-  cancelInFlightRender();
-  const controller = new AbortController();
-  state.renderController = controller;
-
-  const width = clampRenderSize(el.renderWidth.value, 1024);
-  const height = clampRenderSize(el.renderHeight.value, 1024);
-  el.renderWidth.value = String(width);
-  el.renderHeight.value = String(height);
-
-  setRenderStatus(`rendering ${stage}`);
-  setViewportNote(`Rendering ${stage} (${reason})...`);
-  try {
-    const request = {
-      schema_version: 1,
-      view_id: scope.viewId,
-      output: {
-        format,
-        delivery: "inline_base64",
-        width_px: width,
-        height_px: height,
-      },
-    };
-    if (scope.sessionId) {
-      request.session_id = scope.sessionId;
-    }
-    const response = await fetch("/render/image", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      setRenderStatus(`error (${response.status})`, true);
-      setViewportNote(`Render failed (${response.status}).`, true);
-      return;
-    }
-    const payload = await response.json();
-    const image = Array.isArray(payload.images) ? payload.images[0] : null;
-    if (!image || !image.bytes_base64) {
-      setRenderStatus("error (artifact)", true);
-      setViewportNote("Render response has no inline image.", true);
-      return;
-    }
-
-    if (format === "raw_rgba") {
-      if (image.mime !== "application/x-raw-rgba") {
-        setRenderStatus("error (mime)", true);
-        setViewportNote(`Unexpected raw mime: ${String(image.mime || "(missing)")}.`, true);
-        return;
-      }
-      const artifactWidth = clampRenderSize(image.width_px, width);
-      const artifactHeight = clampRenderSize(image.height_px, height);
-      const bytes = decodeBase64ToBytes(image.bytes_base64);
-      const expectedLength = artifactWidth * artifactHeight * 4;
-      if (bytes.length !== expectedLength) {
-        setRenderStatus("error (size)", true);
-        setViewportNote(
-          `Raw frame size mismatch. expected=${expectedLength} actual=${bytes.length}.`,
-          true,
-        );
-        return;
-      }
-      showRgbaCanvas(bytes, artifactWidth, artifactHeight);
-    } else {
-      const src = `data:${image.mime || "image/png"};base64,${image.bytes_base64}`;
-      showImage(src);
-    }
-
-    el.backendUsed.textContent = payload.meta?.backend_used || "-";
-    updateTimingPanel(payload);
-    updateStatePanel(payload, "/render/image");
-    setRenderStatus(`${stage} complete`);
-    setViewportNote(`Frame updated (${stage}).`);
-  } catch (error) {
-    if (controller.signal.aborted) {
-      return;
-    }
-    setRenderStatus("error", true);
     setViewportNote(String(error), true);
   }
 }
@@ -848,6 +1111,7 @@ el.disconnect.addEventListener("click", () => {
 el.renderNow.addEventListener("click", () => {
   clearRenderTimers();
   renderFrame({ reason: "manual", format: "png", stage: "final" });
+  flushLocalCommit("manual_sync");
 });
 
 el.planeSelect.addEventListener("change", () => {
@@ -855,7 +1119,7 @@ el.planeSelect.addEventListener("change", () => {
 });
 
 el.viewport.addEventListener("pointerdown", (event) => {
-  if (!state.connected || !state.viewState || event.button !== 0) {
+  if (!state.connected || !getActiveViewState() || event.button !== 0) {
     return;
   }
   event.preventDefault();
@@ -886,6 +1150,7 @@ el.viewport.addEventListener("pointerup", (event) => {
   }
   stopDragging();
   scheduleSettleRender("pan_end");
+  scheduleCommit("pan_end", 0);
 });
 
 el.viewport.addEventListener("pointercancel", (event) => {
@@ -894,6 +1159,7 @@ el.viewport.addEventListener("pointercancel", (event) => {
   }
   stopDragging();
   scheduleSettleRender("pan_cancel");
+  scheduleCommit("pan_cancel", 0);
 });
 
 el.viewport.addEventListener("dragstart", (event) => {
@@ -903,7 +1169,7 @@ el.viewport.addEventListener("dragstart", (event) => {
 el.viewport.addEventListener(
   "wheel",
   (event) => {
-    if (!state.connected || !state.viewState) {
+    if (!state.connected || !getActiveViewState()) {
       return;
     }
     event.preventDefault();
@@ -918,7 +1184,7 @@ el.viewport.addEventListener(
 );
 
 window.addEventListener("keydown", (event) => {
-  if (!state.connected || !state.viewState || isFormField(event.target)) {
+  if (!state.connected || !getActiveViewState() || isFormField(event.target)) {
     return;
   }
   if (event.key === "1") {
