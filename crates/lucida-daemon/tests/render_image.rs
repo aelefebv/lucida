@@ -857,6 +857,95 @@ async fn render_image_gpu_layer_cache_reduces_repeated_upload_time() {
 }
 
 #[tokio::test]
+async fn render_image_gpu_triptych_supported_with_explicit_gpu_preference() {
+    let router = app();
+    let dataset_path = unique_dataset_path("render-gpu-triptych");
+    create_render_omezarr(&dataset_path);
+    let view_id = open_view(&router, &dataset_path).await;
+
+    let capabilities = read_json_body(request_get(&router, "/capabilities", None).await).await;
+    let gpu_available = capabilities["gpu"]["available"]
+        .as_bool()
+        .expect("gpu.available bool");
+    if !gpu_available {
+        return;
+    }
+
+    let update = request_json(
+        &router,
+        "POST",
+        "/view/update",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "patch": [
+                {
+                    "op": "replace",
+                    "path": "/performance",
+                    "value": {"prefer_gpu": true, "lod_mode": "fixed", "fixed_level": 0},
+                },
+                {
+                    "op": "replace",
+                    "path": "/view_2d/orthogonal_views_enabled",
+                    "value": true,
+                },
+                {
+                    "op": "replace",
+                    "path": "/layers/0/image/interpolation",
+                    "value": "nearest",
+                }
+            ],
+        }),
+    )
+    .await;
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let rendered = request_json(
+        &router,
+        "POST",
+        "/render/image",
+        json!({
+            "schema_version": 1,
+            "view_id": view_id,
+            "output": {
+                "format": "raw_rgba",
+                "delivery": "inline_base64",
+                "width_px": 200,
+                "height_px": 200,
+            },
+        }),
+    )
+    .await;
+    assert_eq!(rendered.status(), StatusCode::OK);
+    let payload = read_json_body(rendered).await;
+    let backend_used = assert_backend_used(&payload);
+    let warnings = payload["warnings"].as_array().expect("warnings array");
+    let warning_codes: Vec<&str> = warnings
+        .iter()
+        .filter_map(|item| item.get("code").and_then(Value::as_str))
+        .collect();
+
+    assert!(
+        !warning_codes.contains(&"gpu_render_failed_fallback_cpu"),
+        "gpu triptych path should not fail at runtime: {warning_codes:?}"
+    );
+    if warning_codes.contains(&"gpu_software_adapter_fallback_cpu") {
+        assert_eq!(backend_used, "cpu");
+        return;
+    }
+
+    assert_eq!(backend_used, "gpu");
+    assert!(warning_codes.contains(&"orthogonal_triptych_enabled"));
+    assert!(!warning_codes.contains(&"orthogonal_triptych_fallback_single_plane"));
+    assert!(
+        payload["meta"]["timing_ms"]["stages"]["gpu_compute"]
+            .as_f64()
+            .is_some_and(|value| value > 0.0),
+        "expected gpu compute timing for triptych render"
+    );
+}
+
+#[tokio::test]
 async fn render_image_orthogonal_triptych_default_on_and_toggle_off() {
     let router = app();
     let dataset_path = unique_dataset_path("render-triptych-toggle");
