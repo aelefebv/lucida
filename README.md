@@ -111,6 +111,7 @@ lucida context clear
 
 For a short end-to-end Zarr smoke test, see `docs/cli-zarr-testing.md`.
 For a full command reference, see `docs/cli-reference.md`.
+For backend policy and cache/timing controls, see `docs/render-backend-controls.md`.
 
 ## Convert OME-TIFF to OME-Zarr
 
@@ -164,6 +165,18 @@ Run the full stabilization gate locally:
 ```bash
 ./scripts/ci/milestone5.sh
 ```
+
+## Render Perf Gate
+
+Run the render benchmark + perf threshold gate (daemon must already be running):
+
+```bash
+./scripts/ci/render_perf_gate.sh
+```
+
+Baseline commands and reference timings are documented in:
+
+- `docs/perf/render-benchmark-baseline.md`
 
 ## Skill Development
 
