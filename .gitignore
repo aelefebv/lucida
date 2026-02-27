@@ -171,6 +171,7 @@ cython_debug/
 .pypirc
 
 .DS_Store
+output/
 output/releases/
 output/skills/
 output/usage/
