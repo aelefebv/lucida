@@ -22,6 +22,14 @@ const state = {
     dyPx: 0,
     timer: null,
   },
+  render: {
+    lastDraftAtMs: 0,
+    minDraftIntervalMs: 90,
+    draftTimer: null,
+    pendingDraftTrigger: null,
+    settleTimer: null,
+    settleDebounceMs: 180,
+  },
 };
 
 const el = {
@@ -30,7 +38,6 @@ const el = {
   refreshTargets: document.querySelector("#refresh-targets"),
   renderWidth: document.querySelector("#render-width"),
   renderHeight: document.querySelector("#render-height"),
-  renderFormat: document.querySelector("#render-format"),
   planeSelect: document.querySelector("#plane-select"),
   connect: document.querySelector("#connect"),
   disconnect: document.querySelector("#disconnect"),
@@ -40,6 +47,9 @@ const el = {
   stateHash: document.querySelector("#state-hash"),
   stateVersion: document.querySelector("#state-version"),
   backendUsed: document.querySelector("#backend-used"),
+  renderStatus: document.querySelector("#render-status"),
+  renderTotalMs: document.querySelector("#render-total-ms"),
+  selectorControls: document.querySelector("#selector-controls"),
   viewportNote: document.querySelector("#viewport-note"),
   viewport: document.querySelector("#viewport"),
 };
@@ -60,6 +70,11 @@ function isFormField(target) {
 function setStreamStatus(text, isError = false) {
   el.streamStatus.textContent = text;
   el.streamStatus.className = isError ? "status-value danger" : "status-value";
+}
+
+function setRenderStatus(text, isError = false) {
+  el.renderStatus.textContent = text;
+  el.renderStatus.className = isError ? "status-value danger" : "status-value";
 }
 
 function setViewportNote(text, isError = false) {
@@ -115,11 +130,6 @@ function selectedViewId() {
   return value || null;
 }
 
-function selectedRenderFormat() {
-  const value = String(el.renderFormat.value || "").trim();
-  return value === "raw_rgba" ? "raw_rgba" : "png";
-}
-
 function closeStream() {
   if (state.stream) {
     state.stream.close();
@@ -143,22 +153,47 @@ function clearPanQueue() {
   state.panPending.dyPx = 0;
 }
 
+function clearRenderTimers() {
+  if (state.render.draftTimer) {
+    clearTimeout(state.render.draftTimer);
+    state.render.draftTimer = null;
+  }
+  state.render.pendingDraftTrigger = null;
+  if (state.render.settleTimer) {
+    clearTimeout(state.render.settleTimer);
+    state.render.settleTimer = null;
+  }
+}
+
 function stopDragging() {
   state.drag.active = false;
   state.drag.pointerId = null;
   el.viewport.classList.remove("dragging");
 }
 
+function resetPanelsOnDisconnect() {
+  el.lastEndpoint.textContent = "-";
+  el.stateHash.textContent = "-";
+  el.stateVersion.textContent = "-";
+  el.backendUsed.textContent = "-";
+  el.renderTotalMs.textContent = "-";
+  setRenderStatus("idle");
+  el.selectorControls.innerHTML = "<p>Connect to load axis controls.</p>";
+}
+
 function disconnect() {
   state.connected = false;
   closeStream();
   cancelInFlightRender();
+  clearRenderTimers();
   clearPanQueue();
   stopDragging();
   state.viewId = null;
   state.sessionId = null;
   state.viewState = null;
   setStreamStatus("disconnected");
+  setViewportNote("Connect and render to display frames.");
+  resetPanelsOnDisconnect();
 }
 
 function updateStatePanel(payload, endpoint) {
@@ -171,6 +206,122 @@ function updateStatePanel(payload, endpoint) {
     stateVersion === null || stateVersion === undefined ? "-" : String(stateVersion);
 }
 
+function updateTimingPanel(payload) {
+  const totalMs = payload?.meta?.timing_ms?.total;
+  if (Number.isFinite(totalMs)) {
+    el.renderTotalMs.textContent = `${Number(totalMs).toFixed(1)} ms`;
+  } else {
+    el.renderTotalMs.textContent = "-";
+  }
+}
+
+function selectorIndex(selectors, axis) {
+  if (!Array.isArray(selectors) || typeof axis !== "string") {
+    return null;
+  }
+  for (const selector of selectors) {
+    if (!selector || selector.axis !== axis) {
+      continue;
+    }
+    if (selector.kind === "index" && Number.isInteger(selector.index)) {
+      return Number(selector.index);
+    }
+    if (selector.kind === "range" && Number.isInteger(selector.start)) {
+      return Number(selector.start);
+    }
+    if (selector.kind === "set" && Array.isArray(selector.indices) && selector.indices.length > 0) {
+      const first = selector.indices[0];
+      if (Number.isInteger(first)) {
+        return Number(first);
+      }
+    }
+  }
+  return null;
+}
+
+function selectorsWithReplacement(axis, nextIndex) {
+  const currentSelectors = Array.isArray(state.viewState?.selectors) ? state.viewState.selectors : [];
+  const selectors = currentSelectors.filter((selector) => selector && selector.axis !== axis);
+  selectors.push({
+    axis,
+    kind: "index",
+    index: nextIndex,
+    clamp: true,
+  });
+  return selectors;
+}
+
+async function applySelectorIndex(axis, nextIndex) {
+  const patch = [
+    {
+      op: "replace",
+      path: "/selectors",
+      value: selectorsWithReplacement(axis, nextIndex),
+    },
+  ];
+  const sliceAxis = state.viewState?.view_2d?.slice?.axis;
+  if (sliceAxis === axis && state.viewState?.view_2d?.slice) {
+    patch.push({ op: "replace", path: "/view_2d/slice/index", value: nextIndex });
+  }
+  try {
+    await updateViewStateWithPatch(patch, `axis ${axis}`);
+    requestDraftRender(`axis_${axis}`);
+    scheduleSettleRender(`axis_${axis}`);
+  } catch (error) {
+    setViewportNote(String(error), true);
+  }
+}
+
+function renderSelectorControls() {
+  const selectors = Array.isArray(state.viewState?.selectors) ? state.viewState.selectors : [];
+  el.selectorControls.innerHTML = "";
+  if (selectors.length === 0) {
+    el.selectorControls.innerHTML = "<p>No selectors available for the connected view.</p>";
+    return;
+  }
+
+  const sorted = [...selectors].sort((left, right) => String(left.axis).localeCompare(String(right.axis)));
+
+  sorted.forEach((selector) => {
+    const row = document.createElement("article");
+    row.className = "selector-row";
+
+    const title = document.createElement("strong");
+    title.textContent = String(selector.axis || "(axis)");
+    row.appendChild(title);
+
+    if (selector.kind !== "index") {
+      const meta = document.createElement("div");
+      meta.className = "selector-meta";
+      meta.textContent = `kind=${String(selector.kind || "unknown")} (read-only in viewer)`;
+      row.appendChild(meta);
+      el.selectorControls.appendChild(row);
+      return;
+    }
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = "1";
+    input.value = String(Number(selector.index || 0));
+    input.addEventListener("change", () => {
+      const next = Number.parseInt(input.value, 10);
+      if (!Number.isFinite(next)) {
+        input.value = String(Number(selector.index || 0));
+        return;
+      }
+      applySelectorIndex(String(selector.axis), Math.round(next));
+    });
+    row.appendChild(input);
+
+    const meta = document.createElement("div");
+    meta.className = "selector-meta";
+    meta.textContent = "index selector";
+    row.appendChild(meta);
+
+    el.selectorControls.appendChild(row);
+  });
+}
+
 function setViewState(viewState, endpoint = "/view/{view_id}") {
   state.viewState = viewState;
   state.viewId = viewState.view_id || state.viewId;
@@ -179,6 +330,7 @@ function setViewState(viewState, endpoint = "/view/{view_id}") {
   if (viewState.view_2d && viewState.view_2d.plane && PLANE_ROLES[viewState.view_2d.plane]) {
     el.planeSelect.value = viewState.view_2d.plane;
   }
+  renderSelectorControls();
 }
 
 function decodeBase64ToBytes(encoded) {
@@ -332,6 +484,7 @@ function connectStream(scope) {
         if (eventVersion > localVersion) {
           try {
             await bootstrapViewState({ viewId: state.viewId, sessionId: state.sessionId });
+            scheduleSettleRender("stream_update");
           } catch (_) {
             setViewportNote("Failed to refresh view state from stream event.", true);
           }
@@ -366,7 +519,7 @@ async function connect() {
   }
   connectStream(scope);
   setViewportNote("Connected. Drag or wheel in viewport to navigate.");
-  await renderFrame("connect");
+  await renderFrame({ reason: "connect", format: "png", stage: "final" });
 }
 
 async function updateViewStateWithPatch(patch, reason, retryConflict = true) {
@@ -422,6 +575,43 @@ function screenDeltaToWorld(dxPx, dyPx, zoom, pixelRatio, rotationDeg) {
   return [worldU, worldV];
 }
 
+function requestDraftRender(trigger) {
+  if (!state.connected) {
+    return;
+  }
+  const now = Date.now();
+  const elapsed = now - state.render.lastDraftAtMs;
+  if (elapsed < state.render.minDraftIntervalMs) {
+    state.render.pendingDraftTrigger = trigger;
+    if (state.render.draftTimer) {
+      return;
+    }
+    const waitMs = state.render.minDraftIntervalMs - elapsed;
+    state.render.draftTimer = setTimeout(() => {
+      state.render.draftTimer = null;
+      const deferredTrigger = state.render.pendingDraftTrigger || "draft";
+      state.render.pendingDraftTrigger = null;
+      requestDraftRender(deferredTrigger);
+    }, waitMs);
+    return;
+  }
+  state.render.lastDraftAtMs = now;
+  renderFrame({ reason: trigger, format: "raw_rgba", stage: "draft" });
+}
+
+function scheduleSettleRender(trigger) {
+  if (!state.connected) {
+    return;
+  }
+  if (state.render.settleTimer) {
+    clearTimeout(state.render.settleTimer);
+  }
+  state.render.settleTimer = setTimeout(() => {
+    state.render.settleTimer = null;
+    renderFrame({ reason: trigger, format: "png", stage: "final" });
+  }, state.render.settleDebounceMs);
+}
+
 function queuePanDelta(dxPx, dyPx) {
   state.panPending.dxPx += dxPx;
   state.panPending.dyPx += dyPx;
@@ -460,35 +650,12 @@ function queuePanDelta(dxPx, dyPx) {
         ],
         "pan",
       );
-      await renderFrame("pan");
+      requestDraftRender("pan");
+      scheduleSettleRender("pan");
     } catch (error) {
       setViewportNote(String(error), true);
     }
   }, 45);
-}
-
-function selectorIndex(selectors, axis) {
-  if (!Array.isArray(selectors) || typeof axis !== "string") {
-    return null;
-  }
-  for (const selector of selectors) {
-    if (!selector || selector.axis !== axis) {
-      continue;
-    }
-    if (selector.kind === "index" && Number.isInteger(selector.index)) {
-      return Number(selector.index);
-    }
-    if (selector.kind === "range" && Number.isInteger(selector.start)) {
-      return Number(selector.start);
-    }
-    if (selector.kind === "set" && Array.isArray(selector.indices) && selector.indices.length > 0) {
-      const first = selector.indices[0];
-      if (Number.isInteger(first)) {
-        return Number(first);
-      }
-    }
-  }
-  return null;
 }
 
 function sliceInfo() {
@@ -505,18 +672,6 @@ function sliceInfo() {
   const fallbackIndex = selectorIndex(state.viewState?.selectors, axis);
   const index = directIndex ?? fallbackIndex ?? 0;
   return { axis, index };
-}
-
-function selectorsWithReplacement(axis, nextIndex) {
-  const currentSelectors = Array.isArray(state.viewState?.selectors) ? state.viewState.selectors : [];
-  const selectors = currentSelectors.filter((selector) => selector && selector.axis !== axis);
-  selectors.push({
-    axis,
-    kind: "index",
-    index: nextIndex,
-    clamp: true,
-  });
-  return selectors;
 }
 
 async function stepSlice(delta) {
@@ -542,7 +697,8 @@ async function stepSlice(delta) {
   }
   try {
     await updateViewStateWithPatch(patch, "slice step");
-    await renderFrame("slice_step");
+    requestDraftRender("slice_step");
+    scheduleSettleRender("slice_step");
   } catch (error) {
     setViewportNote(String(error), true);
   }
@@ -605,7 +761,8 @@ async function switchPlane(nextPlane) {
   try {
     const patch = setPlanePatch(nextPlane);
     await updateViewStateWithPatch(patch, `plane ${nextPlane}`);
-    await renderFrame("plane_change");
+    requestDraftRender("plane_change");
+    scheduleSettleRender("plane_change");
   } catch (error) {
     setViewportNote(String(error), true);
   }
@@ -659,13 +816,14 @@ async function zoomAtPointer(event) {
       ],
       "zoom",
     );
-    await renderFrame("zoom");
+    requestDraftRender("zoom");
+    scheduleSettleRender("zoom");
   } catch (error) {
     setViewportNote(String(error), true);
   }
 }
 
-async function renderFrame(reason) {
+async function renderFrame({ reason, format, stage }) {
   const scope = {
     viewId: state.viewId || selectedViewId(),
     sessionId: state.sessionId || selectedSessionId(),
@@ -681,11 +839,11 @@ async function renderFrame(reason) {
 
   const width = clampRenderSize(el.renderWidth.value, 1024);
   const height = clampRenderSize(el.renderHeight.value, 1024);
-  const format = selectedRenderFormat();
   el.renderWidth.value = String(width);
   el.renderHeight.value = String(height);
 
-  setViewportNote(`Rendering (${reason})...`);
+  setRenderStatus(`rendering ${stage}`);
+  setViewportNote(`Rendering ${stage} (${reason})...`);
   try {
     const request = {
       schema_version: 1,
@@ -707,18 +865,21 @@ async function renderFrame(reason) {
       signal: controller.signal,
     });
     if (!response.ok) {
+      setRenderStatus(`error (${response.status})`, true);
       setViewportNote(`Render failed (${response.status}).`, true);
       return;
     }
     const payload = await response.json();
     const image = Array.isArray(payload.images) ? payload.images[0] : null;
     if (!image || !image.bytes_base64) {
+      setRenderStatus("error (artifact)", true);
       setViewportNote("Render response has no inline image.", true);
       return;
     }
 
     if (format === "raw_rgba") {
       if (image.mime !== "application/x-raw-rgba") {
+        setRenderStatus("error (mime)", true);
         setViewportNote(`Unexpected raw mime: ${String(image.mime || "(missing)")}.`, true);
         return;
       }
@@ -727,6 +888,7 @@ async function renderFrame(reason) {
       const bytes = decodeBase64ToBytes(image.bytes_base64);
       const expectedLength = artifactWidth * artifactHeight * 4;
       if (bytes.length !== expectedLength) {
+        setRenderStatus("error (size)", true);
         setViewportNote(
           `Raw frame size mismatch. expected=${expectedLength} actual=${bytes.length}.`,
           true,
@@ -740,12 +902,15 @@ async function renderFrame(reason) {
     }
 
     el.backendUsed.textContent = payload.meta?.backend_used || "-";
+    updateTimingPanel(payload);
     updateStatePanel(payload, "/render/image");
-    setViewportNote("Frame updated.");
+    setRenderStatus(`${stage} complete`);
+    setViewportNote(`Frame updated (${stage}).`);
   } catch (error) {
     if (controller.signal.aborted) {
       return;
     }
+    setRenderStatus("error", true);
     setViewportNote(String(error), true);
   }
 }
@@ -776,7 +941,8 @@ el.disconnect.addEventListener("click", () => {
 });
 
 el.renderNow.addEventListener("click", () => {
-  renderFrame("manual");
+  clearRenderTimers();
+  renderFrame({ reason: "manual", format: "png", stage: "final" });
 });
 
 el.planeSelect.addEventListener("change", () => {
@@ -813,6 +979,7 @@ el.viewport.addEventListener("pointerup", (event) => {
     return;
   }
   stopDragging();
+  scheduleSettleRender("pan_end");
 });
 
 el.viewport.addEventListener("pointercancel", (event) => {
@@ -820,6 +987,7 @@ el.viewport.addEventListener("pointercancel", (event) => {
     return;
   }
   stopDragging();
+  scheduleSettleRender("pan_cancel");
 });
 
 el.viewport.addEventListener(
@@ -877,6 +1045,7 @@ async function init() {
   try {
     await refreshTargets();
     setStreamStatus("ready");
+    resetPanelsOnDisconnect();
   } catch (error) {
     setStreamStatus(String(error), true);
   }

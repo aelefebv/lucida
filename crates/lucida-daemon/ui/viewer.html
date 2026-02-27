@@ -42,13 +42,6 @@
           <input id="render-height" type="number" min="64" max="2048" value="1024" />
         </label>
         <label>
-          Format
-          <select id="render-format">
-            <option value="png">PNG</option>
-            <option value="raw_rgba">Raw RGBA</option>
-          </select>
-        </label>
-        <label>
           Plane
           <select id="plane-select">
             <option value="xy">XY</option>
@@ -56,6 +49,7 @@
             <option value="yz">YZ</option>
           </select>
         </label>
+        <div class="mode-banner">Render mode: draft raw RGBA while interacting, PNG on settle.</div>
         <div class="actions">
           <button id="refresh-targets" class="secondary">Refresh Targets</button>
           <button id="connect">Connect</button>
@@ -84,6 +78,21 @@
         <div class="status-item">
           <span class="status-label">Backend</span>
           <span id="backend-used" class="status-value">-</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Render</span>
+          <span id="render-status" class="status-value">idle</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Render ms</span>
+          <span id="render-total-ms" class="status-value">-</span>
+        </div>
+      </section>
+
+      <section class="panel selector-panel">
+        <h2>Axis Selectors</h2>
+        <div id="selector-controls" class="selector-controls">
+          <p>Connect to load axis controls.</p>
         </div>
       </section>
 

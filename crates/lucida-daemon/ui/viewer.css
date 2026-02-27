@@ -92,7 +92,7 @@ button:hover,
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(6, minmax(140px, 1fr));
+  grid-template-columns: repeat(7, minmax(120px, 1fr));
   gap: 0.85rem;
   align-items: end;
 }
@@ -121,9 +121,18 @@ select {
   flex-wrap: wrap;
 }
 
+.mode-banner {
+  border: 1px solid rgba(143, 171, 219, 0.28);
+  border-radius: 0.75rem;
+  padding: 0.55rem 0.7rem;
+  background: rgba(7, 12, 24, 0.66);
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
 .status-row {
   display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  grid-template-columns: repeat(7, minmax(110px, 1fr));
   gap: 0.75rem;
 }
 
@@ -169,6 +178,40 @@ select {
   color: var(--muted);
 }
 
+.selector-panel h2 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+.selector-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.65rem;
+}
+
+.selector-row {
+  border: 1px solid rgba(143, 171, 219, 0.28);
+  border-radius: 0.75rem;
+  padding: 0.6rem 0.7rem;
+  background: rgba(7, 12, 24, 0.66);
+  display: grid;
+  gap: 0.4rem;
+}
+
+.selector-row strong {
+  color: var(--text);
+  font-size: 0.95rem;
+}
+
+.selector-row input[type="number"] {
+  font-family: var(--mono);
+}
+
+.selector-meta {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
 .viewport {
   min-height: 460px;
   border-radius: 0.8rem;
@@ -199,11 +242,11 @@ select {
 
 @media (max-width: 960px) {
   .controls {
-    grid-template-columns: repeat(2, minmax(140px, 1fr));
+    grid-template-columns: repeat(2, minmax(160px, 1fr));
   }
 
   .status-row {
-    grid-template-columns: repeat(2, minmax(140px, 1fr));
+    grid-template-columns: repeat(3, minmax(140px, 1fr));
   }
 
   .viewport {

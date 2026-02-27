@@ -93,27 +93,27 @@ Build a lightweight, napari-like interactive viewer under `/ui/viewer` that oper
 ## Phase 3: Axis Controls + Draft/Final Render Loop
 
 ### Tasks
-- [ ] Add selector controls for index selectors:
-  - [ ] auto-build controls from `view_state.selectors`
-  - [ ] update selector index via `/view/update`
-- [ ] Add render strategy:
-  - [ ] draft `raw_rgba` while interacting
-  - [ ] debounce settle render in `png`
-  - [ ] cancel in-flight renders on superseding requests
-- [ ] Subscribe to `/view/events/stream`:
-  - [ ] refresh state metadata
-  - [ ] rerender/refresh on external commits
-- [ ] Improve UI feedback:
-  - [ ] in-progress indicator
-  - [ ] clear error states
-  - [ ] render timing/backend metadata display
+- [x] Add selector controls for index selectors:
+  - [x] auto-build controls from `view_state.selectors`
+  - [x] update selector index via `/view/update`
+- [x] Add render strategy:
+  - [x] draft `raw_rgba` while interacting
+  - [x] debounce settle render in `png`
+  - [x] cancel in-flight renders on superseding requests
+- [x] Subscribe to `/view/events/stream`:
+  - [x] refresh state metadata
+  - [x] rerender/refresh on external commits
+- [x] Improve UI feedback:
+  - [x] in-progress indicator
+  - [x] clear error states
+  - [x] render timing/backend metadata display
 
 ### Phase 3 Gate (PR Gate C)
-- [ ] `cargo test -p lucida-daemon --test usage_telemetry`
-- [ ] interaction/render tests pass
-- [ ] branch committed atomically for phase 3
-- [ ] pushed to origin
-- [ ] draft PR updated with phase summary + test evidence
+- [x] `cargo test -p lucida-daemon --test usage_telemetry`
+- [x] interaction/render tests pass
+- [x] branch committed atomically for phase 3
+- [x] pushed to origin
+- [x] draft PR updated with phase summary + test evidence
 
 ## Phase 4: Hardening + Docs
 
