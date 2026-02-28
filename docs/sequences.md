@@ -2,7 +2,7 @@
 
 Version: 0.1 draft  
 Date: 2026-02-28  
-Status: First-pass workflow and sequence specification aligned to `lucida_spec.md` and `lucida_protocol_and_schemas.md`
+Status: First-pass workflow and sequence specification aligned to `spec.md` and `protocol_and_schemas.md`
 
 ## 1. Purpose
 

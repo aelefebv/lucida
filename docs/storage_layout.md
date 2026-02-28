@@ -2,7 +2,7 @@
 
 Version: 0.1 draft  
 Date: 2026-02-28  
-Status: First-pass storage and on-disk layout specification aligned to `lucida_spec.md`, `lucida_protocol_and_schemas.md`, and `lucida_sequences.md`
+Status: First-pass storage and on-disk layout specification aligned to `spec.md`, `protocol_and_schemas.md`, and `sequences.md`
 
 ## 1. Purpose
 

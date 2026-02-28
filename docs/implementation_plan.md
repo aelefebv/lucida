@@ -2,7 +2,7 @@
 
 Version: 0.1 draft  
 Date: 2026-02-28  
-Status: First-pass implementation plan derived from `lucida_spec.md`, `lucida_protocol_and_schemas.md`, and `lucida_sequences.md`
+Status: First-pass implementation plan derived from `spec.md`, `protocol_and_schemas.md`, and `sequences.md`
 
 ## 1. Purpose
 
@@ -13,7 +13,6 @@ It is intended to be used for:
 - milestone definition
 - dependency tracking
 - acceptance planning
-- team staffing and workstream decomposition
 
 This is not a calendar schedule. It is a structured build plan with ticket-sized work items, dependencies, and exit criteria.
 
@@ -163,14 +162,6 @@ Exit when:
 - **Goal:** Turn spec invariants and workflow expectations into a traceable acceptance matrix.
 - **Deliverables:** matrix mapping features to acceptance tests and milestone gates.
 - **Acceptance:** each milestone has explicit exit criteria linked to tests.
-
-### LUC-004 - Ticket taxonomy and dependency graph
-- **Lane:** ARCH
-- **Size:** S
-- **Depends on:** this document
-- **Goal:** Convert this markdown backlog into tracker-ready tickets with dependencies and milestone labels.
-- **Deliverables:** issue tracker import or manually created epics/stories.
-- **Acceptance:** backlog exists in tracker with dependency links.
 
 ---
 
@@ -840,7 +831,7 @@ For labels and 3D, the critical chains are relatively independent and can be par
 
 ### Phase A - Foundation and contracts
 Start with:
-- LUC-000 to LUC-004
+- LUC-000 to LUC-003
 - LUC-100 to LUC-105
 - LUC-200, LUC-202, LUC-300
 
@@ -917,14 +908,3 @@ Lucida core should be considered implementation-complete for this spec when all 
 - collaboration permissions, lease semantics, and audit logging are operational
 - the acceptance harness passes for all milestone exits
 - performance and observability tooling are in place well enough to catch regressions before release
-
-## 10. Suggested next docs after this plan
-
-1. `lucida_storage_layout.md`  
-   Formalize OME-Zarr + `/lucida/` layout, metadata fields, generation metadata, sidecar placement, and validator rules.
-
-2. `lucida_http_and_transport.md`  
-   Formalize control-plane transport choices, message framing, endpoint paths, auth headers, and object/static URL compatibility.
-
-3. `lucida_acceptance.md`  
-   Convert milestone exits and sequence invariants into explicit pass/fail tests and performance budgets.

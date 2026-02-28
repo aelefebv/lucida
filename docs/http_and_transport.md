@@ -2,7 +2,7 @@
 
 Version: 0.1 draft  
 Date: 2026-02-28  
-Status: First-pass transport and wire-level specification aligned to `lucida_spec.md`, `lucida_protocol_and_schemas.md`, `lucida_sequences.md`, and `lucida_storage_layout.md`
+Status: First-pass transport and wire-level specification aligned to `spec.md`, `protocol_and_schemas.md`, `sequences.md`, and `storage_layout.md`
 
 ## 1. Purpose
 
