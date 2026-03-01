@@ -1044,3 +1044,22 @@ The following choices are intentionally left open, provided the logical layout a
 - whether object projection is eager, lazy, or purely engine-translated
 - exact shard index format for sharded object projection
 - whether `artifacts/` is engine-managed by default or only created on demand
+
+---
+
+## 19. S1 Validator Tool
+
+S1 includes a mechanical layout validator CLI that checks generated cache output
+for core required paths (`canonical.ome.zarr`, `tile2d`, `preview2d`) and
+optional lazy 3D brick paths.
+
+Run:
+
+```bash
+cd engine
+cargo run --bin storage_layout_validate -- <cache_root> <source_id> <generation_seq>
+```
+
+The command prints a JSON validation report and returns:
+- exit code `0` when valid
+- exit code `1` when required paths are missing or invalid

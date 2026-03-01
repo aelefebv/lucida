@@ -1,5 +1,11 @@
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
+use crate::brick3d_builder::{Brick3dBuilder, BrickBuildError, BrickBuildRequest};
+use crate::cache_layout::{RetentionPolicy, decide_retention, remove_generation_artifacts};
+use crate::canonical_cache::{
+    CanonicalCacheBuildRequest, CanonicalCacheBuilder, CanonicalCacheError,
+};
 use crate::clock::rfc3339_now;
 use crate::constants::{
     ENGINE_VERSION, HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE,
@@ -9,13 +15,18 @@ use crate::id_allocator::{IdAllocator, IdKind};
 use crate::model::{
     AddSourceRequest, AddedSource, AttachRequest, AuditEventKind, AuditLogEntry, AxisName,
     ClientRosterEntry, ClientViewMode, CreatedSession, DatasetBinding, DatasetKind, ExposureMode,
-    ExposureViewMode, GenerationRef, GenerationRefMode, HeartbeatEnvelope, LayerState,
-    LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
-    ReconnectRequest, SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState,
-    SharedSceneState, SourceRecord, SourceStatus, SourceWatchMode, StabilityWindow, WarningEntry,
+    ExposureViewMode, GenerationAvailability, GenerationRecord, GenerationRef, GenerationRefMode,
+    GenerationStage, HeartbeatEnvelope, LayerState, LeaseChangeKind, LeaseState,
+    PerClientViewState, PermissionClass, Permissions, ReconnectRequest, SceneMode,
+    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord,
+    SourceStatus, SourceWatchMode, StabilityWindow, WarningEntry,
 };
 use crate::revision_allocator::RevisionAllocator;
 use crate::source_inspector::{SourceInspectionError, inspect_source};
+use crate::source_watch::{SourceWatchController, WatchError};
+use crate::tile_preview_builder::{
+    TilePreviewBuildError, TilePreviewBuildRequest, TilePreviewBuilder,
+};
 use crate::warning_service::aggregate_warnings;
 
 #[derive(Debug)]
@@ -32,6 +43,7 @@ struct SessionRecord {
     lease_state: LeaseState,
     clients: BTreeMap<String, ClientRecord>,
     audit_log: Vec<AuditLogEntry>,
+    source_watch_states: BTreeMap<String, SourceWatchController>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,11 +68,7 @@ pub struct SessionManager {
 
 impl Default for SessionManager {
     fn default() -> Self {
-        Self {
-            id_allocator: IdAllocator::new(),
-            heartbeat_tick: 0,
-            sessions: BTreeMap::new(),
-        }
+        Self::with_id_allocator(IdAllocator::new())
     }
 }
 
@@ -68,6 +76,15 @@ impl SessionManager {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_id_allocator(id_allocator: IdAllocator) -> Self {
+        Self {
+            id_allocator,
+            heartbeat_tick: 0,
+            sessions: BTreeMap::new(),
+        }
     }
 
     pub fn create_session(&mut self, name: impl Into<String>) -> CreatedSession {
@@ -110,6 +127,7 @@ impl SessionManager {
             lease_state: LeaseState::default(),
             clients: BTreeMap::new(),
             audit_log: Vec::new(),
+            source_watch_states: BTreeMap::new(),
         };
 
         self.sessions.insert(session_id.clone(), record);
@@ -153,6 +171,12 @@ impl SessionManager {
             view_rev: 0,
             view_mode: ClientViewMode::TwoD,
             active_layer_id: None,
+            center_x: 0.0,
+            center_y: 0.0,
+            zoom: 1.0,
+            z_index: 0,
+            t_index: 0,
+            selected_channels: vec![0],
             warnings: Vec::new(),
         };
 
@@ -263,6 +287,7 @@ impl SessionManager {
                 single_file_verify_ms: 200,
             },
             source_metadata: inspected.source_metadata.clone(),
+            generations: BTreeMap::new(),
             warnings: Vec::new(),
         };
         let dataset = DatasetBinding {
@@ -297,6 +322,21 @@ impl SessionManager {
             channel_table: inspected.source_metadata.channel_table,
             warnings: Vec::new(),
         };
+        let watch_controller =
+            SourceWatchController::from_uri(&source.uri).map_err(|error| match error {
+                WatchError::InvalidSourceUri { uri, message } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                },
+                WatchError::SourceNotFound { uri } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: "source path does not exist".to_owned(),
+                },
+                WatchError::ReadFailed { uri, message } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                },
+            })?;
 
         let session = self.session_mut(session_id)?;
         session
@@ -307,11 +347,761 @@ impl SessionManager {
             .shared_scene
             .datasets
             .insert(dataset.dataset_id.clone(), dataset.clone());
+        session
+            .source_watch_states
+            .insert(source.source_id.clone(), watch_controller);
         bump_session_rev(session);
         bump_scene_rev(session);
         refresh_warnings(session);
 
         Ok(AddedSource { source, dataset })
+    }
+
+    pub fn poll_source_watch(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        now_ms: u64,
+    ) -> Result<Option<u64>, SessionError> {
+        let prospective_generation_id = self.id_allocator.allocate(IdKind::Generation);
+        let session = self.session_mut(session_id)?;
+        let (source_uri, stability_window) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            (source.uri.clone(), source.stability_window.clone())
+        };
+        let decision = session
+            .source_watch_states
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?
+            .poll_and_evaluate(&source_uri, now_ms, &stability_window)
+            .map_err(|error| match error {
+                WatchError::InvalidSourceUri { uri, message } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                },
+                WatchError::SourceNotFound { uri } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: "source path does not exist".to_owned(),
+                },
+                WatchError::ReadFailed { uri, message } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                },
+            })?;
+
+        if decision.changed {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+            source.status = SourceStatus::Building;
+            bump_session_rev(session);
+            refresh_warnings(session);
+        }
+
+        if !decision.stable_for_ingest {
+            return Ok(None);
+        }
+
+        let ready_at = rfc3339_now();
+        let (generation_seq, source_id_owned) = {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+            let seq = next_generation_seq(source);
+            source.generations.insert(
+                seq,
+                GenerationRecord {
+                    generation_id: prospective_generation_id.clone(),
+                    source_id: source.source_id.clone(),
+                    generation_seq: seq,
+                    stage: GenerationStage::Ready,
+                    progress_percent: 100,
+                    availability: GenerationAvailability {
+                        preview_ready: true,
+                        tile2d_ready_lods: vec![],
+                        brick3d_ready_lods: vec![],
+                    },
+                    canonical_cache_path: None,
+                    preview_path: None,
+                    tile_manifest_path: None,
+                    brick_manifest_path: None,
+                    detected_at: ready_at.clone(),
+                    updated_at: ready_at.clone(),
+                },
+            );
+            source.latest_working_generation_id = Some(prospective_generation_id.clone());
+            source.latest_working_generation_seq = seq;
+            source.status = SourceStatus::Watching;
+            (seq, source.source_id.clone())
+        };
+        sync_working_dataset_generation(
+            session,
+            &source_id_owned,
+            &prospective_generation_id,
+            generation_seq,
+        );
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(Some(generation_seq))
+    }
+
+    pub fn detect_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<GenerationRecord, SessionError> {
+        let generation_id = self.id_allocator.allocate(IdKind::Generation);
+        let detected_at = rfc3339_now();
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+
+        let generation_seq = next_generation_seq(source);
+        let generation = GenerationRecord {
+            generation_id,
+            source_id: source.source_id.clone(),
+            generation_seq,
+            stage: GenerationStage::Detected,
+            progress_percent: 0,
+            availability: GenerationAvailability {
+                preview_ready: false,
+                tile2d_ready_lods: vec![],
+                brick3d_ready_lods: vec![],
+            },
+            canonical_cache_path: None,
+            preview_path: None,
+            tile_manifest_path: None,
+            brick_manifest_path: None,
+            detected_at: detected_at.clone(),
+            updated_at: detected_at,
+        };
+        source
+            .generations
+            .insert(generation_seq, generation.clone());
+        source.status = SourceStatus::Building;
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(generation)
+    }
+
+    pub fn start_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+
+        ensure_generation_transition(
+            source_id,
+            generation_seq,
+            generation.stage,
+            GenerationStage::Started,
+            &[GenerationStage::Detected],
+        )?;
+        generation.stage = GenerationStage::Started;
+        generation.updated_at = rfc3339_now();
+        source.status = SourceStatus::Building;
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn report_generation_partial(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        progress_percent: u8,
+        availability: GenerationAvailability,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+
+        ensure_generation_transition(
+            source_id,
+            generation_seq,
+            generation.stage,
+            GenerationStage::Partial,
+            &[GenerationStage::Started, GenerationStage::Partial],
+        )?;
+        generation.stage = GenerationStage::Partial;
+        generation.progress_percent = progress_percent.min(99);
+        generation.availability = availability;
+        generation.updated_at = rfc3339_now();
+        source.status = SourceStatus::Building;
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn mark_generation_ready(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let (generation_id, snapshot) = {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+            let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+                SessionError::GenerationNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                }
+            })?;
+
+            ensure_generation_transition(
+                source_id,
+                generation_seq,
+                generation.stage,
+                GenerationStage::Ready,
+                &[GenerationStage::Started, GenerationStage::Partial],
+            )?;
+            generation.stage = GenerationStage::Ready;
+            generation.progress_percent = 100;
+            generation.updated_at = rfc3339_now();
+            source.latest_working_generation_id = Some(generation.generation_id.clone());
+            source.latest_working_generation_seq = generation_seq;
+            source.status = SourceStatus::Watching;
+            (generation.generation_id.clone(), generation.clone())
+        };
+        sync_working_dataset_generation(session, source_id, &generation_id, generation_seq);
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn build_canonical_cache_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        cache_root: impl Into<PathBuf>,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let (source_uri, source_kind, source_metadata, generation_id) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            let generation = source.generations.get(&generation_seq).ok_or_else(|| {
+                SessionError::GenerationNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                }
+            })?;
+            (
+                source.uri.clone(),
+                source.source_kind,
+                source.source_metadata.clone(),
+                generation.generation_id.clone(),
+            )
+        };
+
+        let builder = CanonicalCacheBuilder::new(cache_root);
+        let build_result = builder
+            .build(&CanonicalCacheBuildRequest {
+                source_id: source_id.to_owned(),
+                generation_id,
+                generation_seq,
+                source_uri,
+                source_kind,
+                source_metadata,
+            })
+            .map_err(|error| match error {
+                CanonicalCacheError::InvalidSourceUri { uri, message } => {
+                    SessionError::CanonicalCacheBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("invalid source URI `{uri}`: {message}"),
+                    }
+                }
+                CanonicalCacheError::IoError { path, message } => {
+                    SessionError::CanonicalCacheBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("io error at `{path}`: {message}"),
+                    }
+                }
+                CanonicalCacheError::SerializationError { message } => {
+                    SessionError::CanonicalCacheBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("serialization error: {message}"),
+                    }
+                }
+            })?;
+
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        generation.canonical_cache_path = Some(build_result.canonical_root.display().to_string());
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn build_tile_preview_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let (
+            source_shape,
+            source_axis_order,
+            source_uri,
+            source_kind,
+            source_dtype,
+            generation_root,
+        ) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            let generation = source.generations.get(&generation_seq).ok_or_else(|| {
+                SessionError::GenerationNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                }
+            })?;
+            let canonical_path = generation.canonical_cache_path.clone().ok_or_else(|| {
+                SessionError::TilePreviewBuildFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                    reason: "canonical cache must exist before tile/preview build".to_owned(),
+                }
+            })?;
+            let canonical_root = PathBuf::from(canonical_path);
+            let generation_root =
+                canonical_root
+                    .parent()
+                    .ok_or_else(|| SessionError::TilePreviewBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: "canonical cache path has no parent generation directory"
+                            .to_owned(),
+                    })?;
+            (
+                source.source_metadata.shape.clone(),
+                source.source_metadata.original_axis_order.clone(),
+                source.uri.clone(),
+                source.source_kind,
+                source.source_metadata.dtype.clone(),
+                generation_root.to_path_buf(),
+            )
+        };
+
+        let builder = TilePreviewBuilder::new();
+        let build_result = builder
+            .build(&TilePreviewBuildRequest {
+                source_id: source_id.to_owned(),
+                source_uri,
+                source_kind,
+                source_dtype,
+                generation_seq,
+                generation_root,
+                shape: source_shape,
+                axis_order: source_axis_order,
+            })
+            .map_err(|error| match error {
+                TilePreviewBuildError::IoError { path, message } => {
+                    SessionError::TilePreviewBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("io error at `{path}`: {message}"),
+                    }
+                }
+                TilePreviewBuildError::SerializationError { message } => {
+                    SessionError::TilePreviewBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("serialization error: {message}"),
+                    }
+                }
+                TilePreviewBuildError::DecodeError { message } => {
+                    SessionError::TilePreviewBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("decode error: {message}"),
+                    }
+                }
+            })?;
+
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        generation.availability.preview_ready = true;
+        generation.availability.tile2d_ready_lods = build_result.available_lods;
+        if matches!(generation.stage, GenerationStage::Started) {
+            generation.stage = GenerationStage::Partial;
+        }
+        generation.preview_path = Some(build_result.preview_path.display().to_string());
+        generation.tile_manifest_path = Some(build_result.tile_manifest_path.display().to_string());
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn build_bricks_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        lod: u8,
+        max_new_bricks: u32,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let (source_shape, generation_root) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            let generation = source.generations.get(&generation_seq).ok_or_else(|| {
+                SessionError::GenerationNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                }
+            })?;
+            let canonical_path = generation.canonical_cache_path.clone().ok_or_else(|| {
+                SessionError::BrickBuildFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                    reason: "canonical cache must exist before brick build".to_owned(),
+                }
+            })?;
+            let canonical_root = PathBuf::from(canonical_path);
+            let generation_root =
+                canonical_root
+                    .parent()
+                    .ok_or_else(|| SessionError::BrickBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: "canonical cache path has no parent generation directory"
+                            .to_owned(),
+                    })?;
+            (
+                source.source_metadata.shape.clone(),
+                generation_root.to_path_buf(),
+            )
+        };
+
+        let builder = Brick3dBuilder::new();
+        let build_result = builder
+            .build_lazy(&BrickBuildRequest {
+                source_id: source_id.to_owned(),
+                generation_seq,
+                generation_root,
+                shape: source_shape,
+                lod,
+                max_new_bricks,
+            })
+            .map_err(|error| match error {
+                BrickBuildError::IoError { path, message } => SessionError::BrickBuildFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                    reason: format!("io error at `{path}`: {message}"),
+                },
+                BrickBuildError::SerializationError { message } => SessionError::BrickBuildFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                    reason: format!("serialization error: {message}"),
+                },
+            })?;
+
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        if matches!(generation.stage, GenerationStage::Started) {
+            generation.stage = GenerationStage::Partial;
+        }
+        generation.brick_manifest_path =
+            Some(build_result.brick_manifest_path.display().to_string());
+        if build_result.completed_lod
+            && !generation
+                .availability
+                .brick3d_ready_lods
+                .contains(&build_result.lod)
+        {
+            generation
+                .availability
+                .brick3d_ready_lods
+                .push(build_result.lod);
+            generation.availability.brick3d_ready_lods.sort_unstable();
+        }
+        generation.progress_percent = generation.progress_percent.clamp(20, 99);
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn pin_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        ensure_generation_transition(
+            source_id,
+            generation_seq,
+            generation.stage,
+            GenerationStage::Pinned,
+            &[GenerationStage::Ready],
+        )?;
+        generation.stage = GenerationStage::Pinned;
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn garbage_collect_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        ensure_generation_transition(
+            source_id,
+            generation_seq,
+            generation.stage,
+            GenerationStage::GarbageCollected,
+            &[GenerationStage::Ready],
+        )?;
+        generation.stage = GenerationStage::GarbageCollected;
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn garbage_collect_source_cache(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        cache_root: impl AsRef<Path>,
+        now_unix_seconds: i64,
+        previous_working_ttl_secs: u64,
+    ) -> Result<Vec<u64>, SessionError> {
+        let cache_root = cache_root.as_ref().to_path_buf();
+        let session = self.session_mut(session_id)?;
+        let (latest_working_generation_seq, retention_decision) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            let retention_decision = decide_retention(
+                &source.generations,
+                source.latest_working_generation_seq,
+                now_unix_seconds,
+                RetentionPolicy {
+                    previous_working_ttl_secs,
+                },
+            );
+            (source.latest_working_generation_seq, retention_decision)
+        };
+
+        if retention_decision.gc_generation_seqs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        for generation_seq in &retention_decision.gc_generation_seqs {
+            remove_generation_artifacts(&cache_root, source_id, *generation_seq).map_err(
+                |error| SessionError::CacheGcFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq: *generation_seq,
+                    path: cache_root
+                        .join(source_id)
+                        .join(format!("gen_{generation_seq:08}"))
+                        .display()
+                        .to_string(),
+                    reason: error.to_string(),
+                },
+            )?;
+        }
+
+        let removed = {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+            for generation_seq in &retention_decision.gc_generation_seqs {
+                if let Some(generation) = source.generations.get_mut(generation_seq) {
+                    generation.stage = GenerationStage::GarbageCollected;
+                    generation.updated_at = rfc3339_now();
+                }
+            }
+            if latest_working_generation_seq > 0
+                && !source
+                    .generations
+                    .contains_key(&latest_working_generation_seq)
+            {
+                source.latest_working_generation_id = None;
+                source.latest_working_generation_seq = 0;
+            }
+            retention_decision.gc_generation_seqs
+        };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(removed)
     }
 
     pub fn bump_source_generation_seq(
@@ -490,6 +1280,133 @@ impl SessionManager {
                     }
                 })?;
                 client.view_state.active_layer_id = active_layer_id;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_pan(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        dx: f64,
+        dy: f64,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.center_x += dx;
+                client.view_state.center_y += dy;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_zoom(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        zoom: f64,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.zoom = zoom.max(0.01);
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_z_index(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        z_index: u32,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.z_index = z_index;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_t_index(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        t_index: u32,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.t_index = t_index;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_channels(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        channels: Vec<u32>,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.selected_channels = channels;
                 RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
             };
 
@@ -835,6 +1752,41 @@ impl SessionManager {
         Ok(collect_snapshot_warnings(session, client_id))
     }
 
+    pub fn source_state(
+        &self,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<SourceRecord, SessionError> {
+        let session = self.session_ref(session_id)?;
+        session
+            .shared_scene
+            .sources
+            .get(source_id)
+            .cloned()
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })
+    }
+
+    pub fn dataset_for_source(
+        &self,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<DatasetBinding, SessionError> {
+        let session = self.session_ref(session_id)?;
+        session
+            .shared_scene
+            .datasets
+            .values()
+            .find(|dataset| dataset.source_id.as_deref() == Some(source_id))
+            .cloned()
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })
+    }
+
     fn next_heartbeat_tick(&mut self) -> u64 {
         self.heartbeat_tick = self.heartbeat_tick.saturating_add(1);
         self.heartbeat_tick
@@ -865,6 +1817,54 @@ fn bump_scene_rev(session: &mut SessionRecord) -> u64 {
     let scene_rev = RevisionAllocator::next_scene_rev(&mut session.session_state.scene_rev);
     session.shared_scene.scene_rev = scene_rev;
     scene_rev
+}
+
+fn next_generation_seq(source: &SourceRecord) -> u64 {
+    source
+        .generations
+        .keys()
+        .next_back()
+        .copied()
+        .unwrap_or(source.latest_working_generation_seq)
+        .saturating_add(1)
+}
+
+fn ensure_generation_transition(
+    source_id: &str,
+    generation_seq: u64,
+    current_stage: GenerationStage,
+    requested_stage: GenerationStage,
+    allowed_from: &[GenerationStage],
+) -> Result<(), SessionError> {
+    if allowed_from.contains(&current_stage) {
+        return Ok(());
+    }
+
+    Err(SessionError::InvalidGenerationTransition {
+        source_id: source_id.to_owned(),
+        generation_seq,
+        current_stage,
+        requested_stage,
+    })
+}
+
+fn sync_working_dataset_generation(
+    session: &mut SessionRecord,
+    source_id: &str,
+    generation_id: &str,
+    generation_seq: u64,
+) {
+    for dataset in session.shared_scene.datasets.values_mut() {
+        if dataset.source_id.as_deref() != Some(source_id) {
+            continue;
+        }
+        if !matches!(dataset.generation_ref.mode, GenerationRefMode::Working) {
+            continue;
+        }
+
+        dataset.resolved_generation_id = Some(generation_id.to_owned());
+        dataset.resolved_generation_seq = generation_seq;
+    }
 }
 
 fn sync_lease_state(session: &mut SessionRecord) {
@@ -950,36 +1950,31 @@ mod tests {
     use crate::constants::{HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
     use crate::errors::SessionError;
     use crate::model::{
-        AddSourceRequest, AttachRequest, AuditEventKind, ClientViewMode, LeaseChangeKind,
-        PermissionClass, ReconnectRequest,
+        AddSourceRequest, AttachRequest, AuditEventKind, ClientViewMode, GenerationAvailability,
+        GenerationStage, LeaseChangeKind, PermissionClass, ReconnectRequest, SourceStatus,
     };
 
     use super::SessionManager;
 
     fn write_minimal_rgb_tiff(path: &Path) {
-        const TIFF_BYTES: [u8; 62] = [
-            0x49, 0x49, 0x2A, 0x00, // II + classic TIFF marker
-            0x08, 0x00, 0x00, 0x00, // first IFD offset
-            0x04, 0x00, // entry count
-            0x00, 0x01, // tag 256 image width
-            0x04, 0x00, // type LONG
-            0x01, 0x00, 0x00, 0x00, // count
-            0x20, 0x00, 0x00, 0x00, // width 32
-            0x01, 0x01, // tag 257 image length
-            0x04, 0x00, // type LONG
-            0x01, 0x00, 0x00, 0x00, // count
-            0x10, 0x00, 0x00, 0x00, // height 16
-            0x15, 0x01, // tag 277 samples per pixel
-            0x03, 0x00, // type SHORT
-            0x01, 0x00, 0x00, 0x00, // count
-            0x03, 0x00, 0x00, 0x00, // 3 channels
-            0x02, 0x01, // tag 258 bits per sample
-            0x03, 0x00, // type SHORT
-            0x01, 0x00, 0x00, 0x00, // count
-            0x08, 0x00, 0x00, 0x00, // 8 bits
-            0x00, 0x00, 0x00, 0x00, // next IFD offset
-        ];
-        fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
+        let file = fs::File::create(path).expect("tiff fixture file should be created");
+        let mut encoder =
+            tiff::encoder::TiffEncoder::new(file).expect("tiff fixture encoder should be created");
+        let width = 32_u32;
+        let height = 16_u32;
+        let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
+        for y in 0..height {
+            for x in 0..width {
+                pixels.push((x as u8).wrapping_mul(7));
+                pixels.push((y as u8).wrapping_mul(9));
+                pixels.push((x as u8).wrapping_add(y as u8));
+            }
+        }
+        encoder
+            .new_image::<tiff::encoder::colortype::RGB8>(width, height)
+            .expect("tiff fixture image should be created")
+            .write_data(&pixels)
+            .expect("tiff fixture pixels should be written");
     }
 
     fn fixture_tiff_path(suffix: &str) -> PathBuf {
@@ -992,6 +1987,10 @@ mod tests {
         let path = fixture_dir.join("source.tiff");
         write_minimal_rgb_tiff(&path);
         path
+    }
+
+    fn overwrite_file(path: &Path, data: &[u8]) {
+        fs::write(path, data).expect("fixture overwrite should succeed");
     }
 
     #[test]
@@ -1170,6 +2169,447 @@ mod tests {
             .expect("fixture parent should exist")
             .to_path_buf();
         fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn source_watch_polling_bumps_generation_only_after_stability_window() {
+        let source_path = fixture_tiff_path("watch_polling");
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("watch-session");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("attach should succeed");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "watch-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+
+        let first_poll = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 0)
+            .expect("first watch poll should succeed");
+        assert_eq!(first_poll, None);
+
+        overwrite_file(&source_path, b"changed-on-disk");
+        let changed_poll = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 1000)
+            .expect("changed poll should succeed");
+        assert_eq!(changed_poll, None);
+
+        let before_debounce = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 2500)
+            .expect("before debounce poll should succeed");
+        assert_eq!(before_debounce, None);
+
+        let start_verify = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 3000)
+            .expect("verify start poll should succeed");
+        assert_eq!(start_verify, None);
+
+        let ready = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 3200)
+            .expect("ready poll should succeed");
+        assert_eq!(ready, Some(1));
+
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id,
+                client_label: "observer".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("observer attach should succeed");
+        let source = snapshot
+            .snapshot
+            .shared_scene
+            .sources
+            .get(&added.source.source_id)
+            .expect("source should remain present");
+        assert_eq!(source.latest_working_generation_seq, 1);
+        assert_eq!(source.status, SourceStatus::Watching);
+        assert_ne!(
+            attached.snapshot.client_view.client_id,
+            snapshot.snapshot.client_view.client_id
+        );
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn generation_state_machine_transitions_and_updates_working_dataset() {
+        let source_path = fixture_tiff_path("generation_state_machine");
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("generation-session");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "generation-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+
+        let detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("detected generation should be created");
+        assert_eq!(detected.stage, GenerationStage::Detected);
+        assert_eq!(detected.progress_percent, 0);
+
+        let invalid_ready = manager.mark_generation_ready(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        );
+        assert!(matches!(
+            invalid_ready,
+            Err(SessionError::InvalidGenerationTransition { .. })
+        ));
+
+        let started = manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("start transition should succeed");
+        assert_eq!(started.stage, GenerationStage::Started);
+
+        let partial = manager
+            .report_generation_partial(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                60,
+                GenerationAvailability {
+                    preview_ready: true,
+                    tile2d_ready_lods: vec![4, 3],
+                    brick3d_ready_lods: vec![2],
+                },
+            )
+            .expect("partial progress should succeed");
+        assert_eq!(partial.stage, GenerationStage::Partial);
+        assert_eq!(partial.progress_percent, 60);
+
+        let ready = manager
+            .mark_generation_ready(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("ready transition should succeed");
+        assert_eq!(ready.stage, GenerationStage::Ready);
+        assert_eq!(ready.progress_percent, 100);
+
+        let pinned = manager
+            .pin_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("pin transition should succeed");
+        assert_eq!(pinned.stage, GenerationStage::Pinned);
+
+        let second_detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("second generation detection should succeed");
+        manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                second_detected.generation_seq,
+            )
+            .expect("second generation start should succeed");
+        let second_ready = manager
+            .mark_generation_ready(
+                &created.session_id,
+                &added.source.source_id,
+                second_detected.generation_seq,
+            )
+            .expect("second generation ready should succeed");
+        let garbage_collected = manager
+            .garbage_collect_generation(
+                &created.session_id,
+                &added.source.source_id,
+                second_detected.generation_seq,
+            )
+            .expect("garbage collect transition should succeed");
+        assert_eq!(garbage_collected.stage, GenerationStage::GarbageCollected);
+
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "observer".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("observer attach should succeed");
+        let source = snapshot
+            .snapshot
+            .shared_scene
+            .sources
+            .get(&added.source.source_id)
+            .expect("source should exist");
+        assert_eq!(
+            source.latest_working_generation_seq,
+            second_detected.generation_seq
+        );
+        assert_eq!(
+            source.latest_working_generation_id.as_deref(),
+            Some(second_ready.generation_id.as_str())
+        );
+        let dataset = snapshot
+            .snapshot
+            .shared_scene
+            .datasets
+            .values()
+            .find(|dataset| dataset.source_id.as_deref() == Some(added.source.source_id.as_str()))
+            .expect("dataset should exist for source");
+        assert_eq!(
+            dataset.resolved_generation_seq,
+            second_detected.generation_seq
+        );
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn canonical_cache_builder_writes_generation_cache_path() {
+        let source_path = fixture_tiff_path("canonical_cache");
+        let cache_root = std::env::temp_dir().join(format!(
+            "lucida_luc203_cache_root_{}_{}",
+            std::process::id(),
+            "unit"
+        ));
+        fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("canonical-cache-session");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "canonical-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+        let detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("generation detection should succeed");
+        manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation start should succeed");
+        let ready = manager
+            .mark_generation_ready(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation ready should succeed");
+
+        let built = manager
+            .build_canonical_cache_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                &cache_root,
+            )
+            .expect("canonical cache build should succeed");
+        assert_eq!(built.generation_id, ready.generation_id);
+        let canonical_path = built
+            .canonical_cache_path
+            .clone()
+            .expect("canonical cache path should be recorded");
+        let canonical_root = PathBuf::from(canonical_path);
+        assert!(canonical_root.join(".zattrs").exists());
+        assert!(canonical_root.join("0").join(".zarray").exists());
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+        fs::remove_dir_all(cache_root).expect("cache cleanup should succeed");
+    }
+
+    #[test]
+    fn tile_preview_builder_updates_generation_availability_and_paths() {
+        let source_path = fixture_tiff_path("tile_preview");
+        let cache_root = std::env::temp_dir().join(format!(
+            "lucida_luc204_cache_root_{}_{}",
+            std::process::id(),
+            "unit"
+        ));
+        fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("tile-preview-session");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "tile-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+        let detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("generation detection should succeed");
+        manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation start should succeed");
+        manager
+            .build_canonical_cache_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                &cache_root,
+            )
+            .expect("canonical cache build should succeed");
+        let built = manager
+            .build_tile_preview_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("tile/preview build should succeed");
+
+        assert!(matches!(built.stage, GenerationStage::Partial));
+        assert!(built.availability.preview_ready);
+        assert!(!built.availability.tile2d_ready_lods.is_empty());
+        assert!(
+            PathBuf::from(
+                built
+                    .preview_path
+                    .clone()
+                    .expect("preview path should be present")
+            )
+            .exists()
+        );
+        assert!(
+            PathBuf::from(
+                built
+                    .tile_manifest_path
+                    .clone()
+                    .expect("tile manifest path should be present")
+            )
+            .exists()
+        );
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+        fs::remove_dir_all(cache_root).expect("cache cleanup should succeed");
+    }
+
+    #[test]
+    fn brick_builder_is_lazy_and_marks_lod_ready_when_complete() {
+        let source_path = fixture_tiff_path("brick_builder");
+        let cache_root = std::env::temp_dir().join(format!(
+            "lucida_luc205_cache_root_{}_{}",
+            std::process::id(),
+            "unit"
+        ));
+        fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("brick-builder-session");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "brick-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+        let detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("generation detection should succeed");
+        manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation start should succeed");
+        manager
+            .build_canonical_cache_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                &cache_root,
+            )
+            .expect("canonical cache build should succeed");
+
+        let first = manager
+            .build_bricks_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                0,
+                1,
+            )
+            .expect("first lazy brick build should succeed");
+        assert!(first.brick_manifest_path.is_some());
+        assert!(
+            first.availability.brick3d_ready_lods.is_empty()
+                || first.availability.brick3d_ready_lods.contains(&0)
+        );
+        assert!(matches!(first.stage, GenerationStage::Partial));
+
+        let second = manager
+            .build_bricks_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                0,
+                10_000,
+            )
+            .expect("second lazy brick build should succeed");
+        assert!(second.availability.brick3d_ready_lods.contains(&0));
+        assert!(
+            PathBuf::from(
+                second
+                    .brick_manifest_path
+                    .clone()
+                    .expect("brick manifest path should be present")
+            )
+            .exists()
+        );
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+        fs::remove_dir_all(cache_root).expect("cache cleanup should succeed");
     }
 
     #[test]

@@ -1,16 +1,43 @@
+mod brick3d_builder;
+mod cache_layout;
+mod canonical_cache;
+mod channel_block;
+mod chunk_key;
 mod clock;
 mod command_router;
 mod constants;
+mod data_plane;
 mod error_model;
 mod errors;
 mod event_stream;
 mod id_allocator;
+mod metadata_sidecar;
 mod model;
+mod object_url;
+mod raster_plane;
 mod revision_allocator;
+mod runtime;
 mod session_manager;
 mod source_inspector;
+mod source_watch;
+mod storage_layout_validator;
+mod tile_preview_builder;
 mod warning_service;
 
+pub use brick3d_builder::{Brick3dBuilder, BrickBuildError, BrickBuildRequest, BrickBuildResult};
+pub use cache_layout::{
+    GenerationArtifactLayout, RetentionDecision, RetentionPolicy, decide_retention,
+    remove_generation_artifacts,
+};
+pub use canonical_cache::{
+    CanonicalCacheBuildRequest, CanonicalCacheBuildResult, CanonicalCacheBuilder,
+    CanonicalCacheError,
+};
+pub use channel_block::{
+    ChannelBlockError, ChannelBlockPackaging, ChannelBlockReadResult, ChannelBlockWriteRequest,
+    PayloadCodec, PayloadKind, codec_from_packaged_payload,
+};
+pub use chunk_key::{ChunkAssetKind, ChunkKey, ChunkKeyError};
 pub use command_router::{
     CommandAck, CommandArgs, CommandEnvelope, CommandError, CommandErrorCode, CommandOutcome,
     CommandRouter, CommandScope, command_error_to_envelope,
@@ -19,6 +46,7 @@ pub use constants::{
     COMMAND_ACK_MESSAGE_TYPE, COMMAND_MESSAGE_TYPE, ENGINE_VERSION, ERROR_MESSAGE_TYPE,
     HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE,
 };
+pub use data_plane::{DataPlaneError, DataPlaneService, HttpDataPlaneResponse};
 pub use error_model::{
     ErrorCode, ErrorDetails, ErrorEnvelope, ErrorMessageSerializer, ErrorScope,
     GenerationUnavailableDetail, LeaseErrorReason, LeaseRequiredDetail, MetadataMismatchDetail,
@@ -30,20 +58,44 @@ pub use event_stream::{
     AuditEventKindPayload, ClientJoinedPayload, DatasetUpsertPayload, EventBus, EventEnvelope,
     EventMessageSerializer, EventPayload, EventStreamError, EventType, LayerUpsertPayload,
     LeaseChangedKindPayload, LeaseChangedPayload, LeaseStatePayload, ProjectionState,
-    SourceUpsertPayload, ViewUpdatedPayload, WarningPayloadEntry, WarningsUpdatedPayload,
+    SourceGenerationPayload, SourceUpsertPayload, ViewUpdatedPayload, WarningPayloadEntry,
+    WarningsUpdatedPayload,
 };
 pub use id_allocator::{IdAllocator, IdKind};
+pub use metadata_sidecar::{
+    FilterCompression, FilterQueryResult, MetadataEndpointResponse, MetadataEntry,
+    MetadataSidecarDocument, MetadataSidecarError, MetadataSidecarService,
+};
 pub use model::{
     AddSourceRequest, AddedSource, AttachRequest, AuditEventKind, AuditLogEntry, AxisName,
     AxisShape, AxisSpacing, CalibrationMetadata, CalibrationStatus, ChannelDescription,
     ChannelTable, ClientRosterEntry, ClientViewMode, CreatedSession, DatasetBinding, DatasetKind,
-    ExposureMode, ExposureViewMode, GenerationRef, GenerationRefMode, HeartbeatEnvelope,
-    LayerState, LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
-    ReconnectRequest, SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState,
-    SharedSceneState, SourceKind, SourceMetadata, SourceRecord, SourceStatus, SourceWatchMode,
-    StabilityWindow, TargetState, WarningCode, WarningEntry, WarningSeverity,
+    ExposureMode, ExposureViewMode, GenerationAvailability, GenerationRecord, GenerationRef,
+    GenerationRefMode, GenerationStage, HeartbeatEnvelope, LayerState, LeaseChangeKind, LeaseState,
+    PerClientViewState, PermissionClass, Permissions, ReconnectRequest, SceneMode,
+    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceKind,
+    SourceMetadata, SourceRecord, SourceStatus, SourceWatchMode, StabilityWindow, TargetState,
+    WarningCode, WarningEntry, WarningSeverity,
+};
+pub use object_url::{
+    EngineDataPlaneResolver, ObjectUrlError, ObjectUrlResolver, StaticObjectResolver,
+};
+pub use raster_plane::{
+    RasterPlane, RasterPlaneLoadError, RasterPlaneLoadRequest, load_raster_plane,
 };
 pub use revision_allocator::RevisionAllocator;
+pub use runtime::{EngineRuntimeConfig, run_runtime_server};
 pub use session_manager::{LeaseTransition, SessionManager};
 pub use source_inspector::{InspectedSource, SourceInspectionError, inspect_source};
+pub use source_watch::{
+    DirectoryWatcher, FileWatcher, SourceWatchController, SourceWatcher, SourceWatcherKind,
+    StabilityWindowGate, WatchDecision, WatchError, WatchPoll, WatchSignature,
+};
+pub use storage_layout_validator::{
+    LayoutValidationError, LayoutValidationIssue, LayoutValidationReport,
+    validate_generation_layout,
+};
+pub use tile_preview_builder::{
+    TilePreviewBuildError, TilePreviewBuildRequest, TilePreviewBuildResult, TilePreviewBuilder,
+};
 pub use warning_service::{WarningAggregation, aggregate_warnings};

@@ -182,6 +182,7 @@ output/*.jpg
 output/*.jpeg
 output/*.webp
 tmp/
+.tmp/
 
 # Node / frontend
 node_modules/

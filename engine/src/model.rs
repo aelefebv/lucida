@@ -213,6 +213,40 @@ pub struct SourceMetadata {
     pub channel_table: ChannelTable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationStage {
+    Detected,
+    Started,
+    Partial,
+    Ready,
+    Pinned,
+    GarbageCollected,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationAvailability {
+    pub preview_ready: bool,
+    pub tile2d_ready_lods: Vec<u8>,
+    pub brick3d_ready_lods: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationRecord {
+    pub generation_id: String,
+    pub source_id: String,
+    pub generation_seq: u64,
+    pub stage: GenerationStage,
+    pub progress_percent: u8,
+    pub availability: GenerationAvailability,
+    pub canonical_cache_path: Option<String>,
+    pub preview_path: Option<String>,
+    pub tile_manifest_path: Option<String>,
+    pub brick_manifest_path: Option<String>,
+    pub detected_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRecord {
     pub source_id: String,
@@ -226,6 +260,7 @@ pub struct SourceRecord {
     pub latest_working_generation_seq: u64,
     pub stability_window: StabilityWindow,
     pub source_metadata: SourceMetadata,
+    pub generations: BTreeMap<u64, GenerationRecord>,
     pub warnings: Vec<WarningEntry>,
 }
 
@@ -294,12 +329,18 @@ pub struct SharedSceneState {
     pub warnings: Vec<WarningEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PerClientViewState {
     pub client_id: String,
     pub view_rev: u64,
     pub view_mode: ClientViewMode,
     pub active_layer_id: Option<String>,
+    pub center_x: f64,
+    pub center_y: f64,
+    pub zoom: f64,
+    pub z_index: u32,
+    pub t_index: u32,
+    pub selected_channels: Vec<u32>,
     pub warnings: Vec<WarningEntry>,
 }
 
@@ -335,7 +376,7 @@ impl Permissions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionSnapshotPayload {
     pub session: SessionState,
     pub shared_scene: SharedSceneState,
@@ -346,7 +387,7 @@ pub struct SessionSnapshotPayload {
     pub warnings: Vec<WarningEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionSnapshotEnvelope {
     pub message_type: String,
     pub schema_version: String,

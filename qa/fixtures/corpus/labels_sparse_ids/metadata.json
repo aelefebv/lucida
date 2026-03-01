@@ -1,0 +1,26 @@
+{
+  "channels": [
+    "labels"
+  ],
+  "dtype": "uint32",
+  "name": "labels_sparse_ids",
+  "shape": {
+    "c": 1,
+    "t": 1,
+    "x": 64,
+    "y": 64,
+    "z": 1
+  },
+  "spacing": {
+    "x": 1.0,
+    "y": 1.0,
+    "z": 1.0
+  },
+  "sparse_ids": [
+    1,
+    7,
+    42,
+    128,
+    4096
+  ]
+}

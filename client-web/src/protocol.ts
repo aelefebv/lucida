@@ -4,6 +4,7 @@ export type CommandEnvelope<TArgs> = {
   message_type: "command";
   schema_version: "lucida-proto-0.1";
   session_id: string;
+  request_id: string;
   client_id: string;
   client_seq: number;
   op: string;
@@ -33,6 +34,7 @@ export function createCommandEnvelope<TArgs>(
     message_type: "command",
     schema_version: "lucida-proto-0.1",
     session_id: input.sessionId,
+    request_id: buildRequestId(input.clientId, input.clientSeq),
     client_id: input.clientId,
     client_seq: input.clientSeq,
     op: input.op,
@@ -40,6 +42,10 @@ export function createCommandEnvelope<TArgs>(
     requires_lease: input.requiresLease,
     args: input.args,
   };
+}
+
+function buildRequestId(clientId: string, clientSeq: number): string {
+  return `req_${clientId}_${clientSeq.toString()}`;
 }
 
 export type ErrorCode =

@@ -1,0 +1,37 @@
+{
+  "name": "source_churn_sequence",
+  "revisions": [
+    {
+      "path": "qa/fixtures/corpus/source_churn_sequence/revision_01.bin",
+      "revision": 1,
+      "sha256": "29101d41fcf763086de45a21e3ee0ddd9963b3eebd6134a9b1249f7ea7d97d1b"
+    },
+    {
+      "path": "qa/fixtures/corpus/source_churn_sequence/revision_02.bin",
+      "revision": 2,
+      "sha256": "5dae42f0913b0a9c71098cb7d6cc2af8f984a6820b4b5f25546d4d808cc7dcb4"
+    },
+    {
+      "path": "qa/fixtures/corpus/source_churn_sequence/revision_03.bin",
+      "revision": 3,
+      "sha256": "9ea6fba830324084eb4fa2570e9a63ba9a6cee026932d460b58ffb6f7c2d2bcb"
+    },
+    {
+      "path": "qa/fixtures/corpus/source_churn_sequence/revision_04.bin",
+      "revision": 4,
+      "sha256": "71a817ef1c2b2ddb3dd29d56aa530332ae9fa2ba8f09c108dabdef14189a264b"
+    },
+    {
+      "path": "qa/fixtures/corpus/source_churn_sequence/revision_05.bin",
+      "revision": 5,
+      "sha256": "d0339a39b1494d38629099a3edb78e1f5e2e6e0e640340e6c06ad3340b34fc18"
+    }
+  ],
+  "shape": {
+    "c": 1,
+    "t": 1,
+    "x": 32,
+    "y": 32,
+    "z": 1
+  }
+}

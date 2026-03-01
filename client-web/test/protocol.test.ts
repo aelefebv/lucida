@@ -22,6 +22,7 @@ describe("createCommandEnvelope", () => {
       message_type: "command",
       schema_version: "lucida-proto-0.1",
       session_id: "sess_00000001",
+      request_id: "req_cli_00000001_7",
       client_id: "cli_00000001",
       client_seq: 7,
       op: "view.pan",

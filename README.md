@@ -46,3 +46,37 @@ Run the end-to-end S0 demo script to exercise:
 ```bash
 ./scripts/s0_demo.sh
 ```
+
+## Canonical S1 demo
+
+Run the S1 acceptance-backed demo script to validate:
+- attach + snapshot + live event flow
+- preview-first paint + same-generation refinement
+- interactive pan/zoom/z/t/channel loop
+- reconnect recovery
+- no mixed-generation 2D frame behavior
+
+```bash
+./scripts/s1_demo.sh
+```
+
+Expected success markers include:
+- `S1_DEMO_PASS`
+- `T-M1-01: passed` through `T-M1-05: passed`
+
+See [docs/s1_demo_runbook.md](docs/s1_demo_runbook.md) for the full runbook.
+See [docs/s1_2d_viewing_workflow.md](docs/s1_2d_viewing_workflow.md) for stage-by-stage S1 2D workflow details.
+
+## Clear dev sessions (port conflicts)
+
+If you see `address already in use` for local runtime bring-up, close active dev sessions with:
+
+```bash
+./scripts/close_sessions.sh
+```
+
+Default ports cleared are `8787` (engine) and `5173` (web client). You can override:
+
+```bash
+./scripts/close_sessions.sh --ports 8787,5173,4173
+```

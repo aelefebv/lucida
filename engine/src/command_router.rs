@@ -24,16 +24,43 @@ pub enum CommandScope {
     Admin,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CommandArgs {
-    ViewSetActiveLayer { active_layer_id: Option<String> },
-    SceneAddSource { name: String, uri: String },
-    SceneLayerAdd { name: String },
+    ViewSetActiveLayer {
+        active_layer_id: Option<String>,
+    },
+    ViewPan {
+        dx: f64,
+        dy: f64,
+        gesture_id: String,
+    },
+    ViewZoom {
+        zoom: f64,
+        anchor_x: f64,
+        anchor_y: f64,
+        gesture_id: String,
+    },
+    ViewSetZ {
+        z_index: u32,
+    },
+    ViewSetT {
+        t_index: u32,
+    },
+    ViewSetChannels {
+        channels: Vec<u32>,
+    },
+    SceneAddSource {
+        name: String,
+        uri: String,
+    },
+    SceneLayerAdd {
+        name: String,
+    },
     LeaseRequest,
     LeaseSteal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommandEnvelope {
     pub message_type: String,
     pub schema_version: String,
@@ -62,7 +89,7 @@ pub struct CommandAck {
     pub created_object_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommandOutcome {
     pub ack: CommandAck,
     pub events: Vec<EventEnvelope>,
@@ -92,6 +119,11 @@ pub struct CommandError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Operation {
     ViewSetActiveLayer,
+    ViewPan,
+    ViewZoom,
+    ViewSetZ,
+    ViewSetT,
+    ViewSetChannels,
     SceneAddSource,
     SceneLayerAdd,
     LeaseRequest,
@@ -102,6 +134,11 @@ impl Operation {
     fn parse(op: &str) -> Result<Self, CommandError> {
         match op {
             "view.set_active_layer" => Ok(Self::ViewSetActiveLayer),
+            "view.pan" => Ok(Self::ViewPan),
+            "view.zoom" => Ok(Self::ViewZoom),
+            "view.set_z" => Ok(Self::ViewSetZ),
+            "view.set_t" => Ok(Self::ViewSetT),
+            "view.set_channels" => Ok(Self::ViewSetChannels),
             "scene.add_source" => Ok(Self::SceneAddSource),
             "scene.layer_add" => Ok(Self::SceneLayerAdd),
             "lease.request" => Ok(Self::LeaseRequest),
@@ -116,6 +153,11 @@ impl Operation {
     const fn expected_scope(self) -> CommandScope {
         match self {
             Operation::ViewSetActiveLayer => CommandScope::ClientView,
+            Operation::ViewPan => CommandScope::ClientView,
+            Operation::ViewZoom => CommandScope::ClientView,
+            Operation::ViewSetZ => CommandScope::ClientView,
+            Operation::ViewSetT => CommandScope::ClientView,
+            Operation::ViewSetChannels => CommandScope::ClientView,
             Operation::SceneAddSource => CommandScope::SceneShared,
             Operation::SceneLayerAdd => CommandScope::SceneShared,
             Operation::LeaseRequest => CommandScope::SceneShared,
@@ -126,6 +168,11 @@ impl Operation {
     const fn expected_requires_lease(self) -> bool {
         match self {
             Operation::ViewSetActiveLayer => false,
+            Operation::ViewPan => false,
+            Operation::ViewZoom => false,
+            Operation::ViewSetZ => false,
+            Operation::ViewSetT => false,
+            Operation::ViewSetChannels => false,
             Operation::SceneAddSource => true,
             Operation::SceneLayerAdd => true,
             Operation::LeaseRequest => false,
@@ -331,6 +378,11 @@ fn validate_envelope(envelope: &CommandEnvelope) -> Result<Operation, CommandErr
 
     match (operation, &envelope.args) {
         (Operation::ViewSetActiveLayer, CommandArgs::ViewSetActiveLayer { .. })
+        | (Operation::ViewPan, CommandArgs::ViewPan { .. })
+        | (Operation::ViewZoom, CommandArgs::ViewZoom { .. })
+        | (Operation::ViewSetZ, CommandArgs::ViewSetZ { .. })
+        | (Operation::ViewSetT, CommandArgs::ViewSetT { .. })
+        | (Operation::ViewSetChannels, CommandArgs::ViewSetChannels { .. })
         | (Operation::SceneAddSource, CommandArgs::SceneAddSource { .. })
         | (Operation::SceneLayerAdd, CommandArgs::SceneLayerAdd { .. })
         | (Operation::LeaseRequest, CommandArgs::LeaseRequest)
@@ -401,6 +453,116 @@ fn dispatch(
                     &envelope.client_id,
                     active_layer_id,
                 )
+                .map_err(CommandError::from)?;
+            resulting_view_rev = Some(view_rev);
+
+            let view_state = session_manager
+                .client_view_state(&envelope.session_id, &envelope.client_id)
+                .map_err(CommandError::from)?;
+            let (session_rev, _) = session_manager
+                .session_and_scene_revisions(&envelope.session_id)
+                .map_err(CommandError::from)?;
+            events.push(EventEnvelope::view_updated(
+                envelope.session_id.clone(),
+                session_rev,
+                ViewUpdatedPayload::from(&view_state),
+                rfc3339_now(),
+            ));
+        }
+        (
+            Operation::ViewPan,
+            CommandArgs::ViewPan {
+                dx,
+                dy,
+                gesture_id: _,
+            },
+        ) => {
+            let view_rev = session_manager
+                .update_client_pan(&envelope.session_id, &envelope.client_id, dx, dy)
+                .map_err(CommandError::from)?;
+            resulting_view_rev = Some(view_rev);
+
+            let view_state = session_manager
+                .client_view_state(&envelope.session_id, &envelope.client_id)
+                .map_err(CommandError::from)?;
+            let (session_rev, _) = session_manager
+                .session_and_scene_revisions(&envelope.session_id)
+                .map_err(CommandError::from)?;
+            events.push(EventEnvelope::view_updated(
+                envelope.session_id.clone(),
+                session_rev,
+                ViewUpdatedPayload::from(&view_state),
+                rfc3339_now(),
+            ));
+        }
+        (
+            Operation::ViewZoom,
+            CommandArgs::ViewZoom {
+                zoom,
+                anchor_x: _,
+                anchor_y: _,
+                gesture_id: _,
+            },
+        ) => {
+            let view_rev = session_manager
+                .update_client_zoom(&envelope.session_id, &envelope.client_id, zoom)
+                .map_err(CommandError::from)?;
+            resulting_view_rev = Some(view_rev);
+
+            let view_state = session_manager
+                .client_view_state(&envelope.session_id, &envelope.client_id)
+                .map_err(CommandError::from)?;
+            let (session_rev, _) = session_manager
+                .session_and_scene_revisions(&envelope.session_id)
+                .map_err(CommandError::from)?;
+            events.push(EventEnvelope::view_updated(
+                envelope.session_id.clone(),
+                session_rev,
+                ViewUpdatedPayload::from(&view_state),
+                rfc3339_now(),
+            ));
+        }
+        (Operation::ViewSetZ, CommandArgs::ViewSetZ { z_index }) => {
+            let view_rev = session_manager
+                .update_client_z_index(&envelope.session_id, &envelope.client_id, z_index)
+                .map_err(CommandError::from)?;
+            resulting_view_rev = Some(view_rev);
+
+            let view_state = session_manager
+                .client_view_state(&envelope.session_id, &envelope.client_id)
+                .map_err(CommandError::from)?;
+            let (session_rev, _) = session_manager
+                .session_and_scene_revisions(&envelope.session_id)
+                .map_err(CommandError::from)?;
+            events.push(EventEnvelope::view_updated(
+                envelope.session_id.clone(),
+                session_rev,
+                ViewUpdatedPayload::from(&view_state),
+                rfc3339_now(),
+            ));
+        }
+        (Operation::ViewSetT, CommandArgs::ViewSetT { t_index }) => {
+            let view_rev = session_manager
+                .update_client_t_index(&envelope.session_id, &envelope.client_id, t_index)
+                .map_err(CommandError::from)?;
+            resulting_view_rev = Some(view_rev);
+
+            let view_state = session_manager
+                .client_view_state(&envelope.session_id, &envelope.client_id)
+                .map_err(CommandError::from)?;
+            let (session_rev, _) = session_manager
+                .session_and_scene_revisions(&envelope.session_id)
+                .map_err(CommandError::from)?;
+            events.push(EventEnvelope::view_updated(
+                envelope.session_id.clone(),
+                session_rev,
+                ViewUpdatedPayload::from(&view_state),
+                rfc3339_now(),
+            ));
+        }
+        (Operation::ViewSetChannels, CommandArgs::ViewSetChannels { channels }) => {
+            let view_rev = session_manager
+                .update_client_channels(&envelope.session_id, &envelope.client_id, channels)
                 .map_err(CommandError::from)?;
             resulting_view_rev = Some(view_rev);
 
@@ -557,6 +719,69 @@ impl From<SessionError> for CommandError {
             SessionError::SourceUnavailable { uri, reason } => Self {
                 code: CommandErrorCode::SourceUnavailable,
                 message: format!("source `{uri}` is unavailable: {reason}"),
+            },
+            SessionError::GenerationNotFound {
+                session_id,
+                source_id,
+                generation_seq,
+            } => Self {
+                code: CommandErrorCode::SourceNotFound,
+                message: format!(
+                    "generation `{generation_seq}` for source `{source_id}` was not found in session `{session_id}`"
+                ),
+            },
+            SessionError::InvalidGenerationTransition {
+                source_id,
+                generation_seq,
+                current_stage,
+                requested_stage,
+            } => Self {
+                code: CommandErrorCode::ValidationError,
+                message: format!(
+                    "invalid generation transition for source `{source_id}` generation `{generation_seq}`: {:?} -> {:?}",
+                    current_stage, requested_stage
+                ),
+            },
+            SessionError::CanonicalCacheBuildFailed {
+                source_id,
+                generation_seq,
+                reason,
+            } => Self {
+                code: CommandErrorCode::SourceUnavailable,
+                message: format!(
+                    "canonical cache build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
+                ),
+            },
+            SessionError::TilePreviewBuildFailed {
+                source_id,
+                generation_seq,
+                reason,
+            } => Self {
+                code: CommandErrorCode::SourceUnavailable,
+                message: format!(
+                    "tile/preview build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
+                ),
+            },
+            SessionError::BrickBuildFailed {
+                source_id,
+                generation_seq,
+                reason,
+            } => Self {
+                code: CommandErrorCode::SourceUnavailable,
+                message: format!(
+                    "brick build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
+                ),
+            },
+            SessionError::CacheGcFailed {
+                source_id,
+                generation_seq,
+                path,
+                reason,
+            } => Self {
+                code: CommandErrorCode::SourceUnavailable,
+                message: format!(
+                    "cache GC failed for source `{source_id}` generation `{generation_seq}` at `{path}`: {reason}"
+                ),
             },
             SessionError::LayerNotFound {
                 session_id,
