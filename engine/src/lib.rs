@@ -8,6 +8,7 @@ mod id_allocator;
 mod model;
 mod revision_allocator;
 mod session_manager;
+mod source_inspector;
 mod warning_service;
 
 pub use command_router::{
@@ -26,19 +27,23 @@ pub use error_model::{
 };
 pub use errors::SessionError;
 pub use event_stream::{
-    AuditEventKindPayload, ClientJoinedPayload, EventBus, EventEnvelope, EventMessageSerializer,
-    EventPayload, EventStreamError, EventType, LayerUpsertPayload, LeaseChangedKindPayload,
-    LeaseChangedPayload, LeaseStatePayload, ProjectionState, SourceUpsertPayload,
-    ViewUpdatedPayload, WarningPayloadEntry, WarningsUpdatedPayload,
+    AuditEventKindPayload, ClientJoinedPayload, DatasetUpsertPayload, EventBus, EventEnvelope,
+    EventMessageSerializer, EventPayload, EventStreamError, EventType, LayerUpsertPayload,
+    LeaseChangedKindPayload, LeaseChangedPayload, LeaseStatePayload, ProjectionState,
+    SourceUpsertPayload, ViewUpdatedPayload, WarningPayloadEntry, WarningsUpdatedPayload,
 };
 pub use id_allocator::{IdAllocator, IdKind};
 pub use model::{
-    AttachRequest, AuditEventKind, AuditLogEntry, ClientRosterEntry, ClientViewMode,
-    CreatedSession, DatasetBinding, ExposureMode, ExposureViewMode, HeartbeatEnvelope, LayerState,
-    LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
+    AddSourceRequest, AddedSource, AttachRequest, AuditEventKind, AuditLogEntry, AxisName,
+    AxisShape, AxisSpacing, CalibrationMetadata, CalibrationStatus, ChannelDescription,
+    ChannelTable, ClientRosterEntry, ClientViewMode, CreatedSession, DatasetBinding, DatasetKind,
+    ExposureMode, ExposureViewMode, GenerationRef, GenerationRefMode, HeartbeatEnvelope,
+    LayerState, LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
     ReconnectRequest, SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState,
-    SharedSceneState, SourceRecord, TargetState, WarningCode, WarningEntry, WarningSeverity,
+    SharedSceneState, SourceKind, SourceMetadata, SourceRecord, SourceStatus, SourceWatchMode,
+    StabilityWindow, TargetState, WarningCode, WarningEntry, WarningSeverity,
 };
 pub use revision_allocator::RevisionAllocator;
 pub use session_manager::{LeaseTransition, SessionManager};
+pub use source_inspector::{InspectedSource, SourceInspectionError, inspect_source};
 pub use warning_service::{WarningAggregation, aggregate_warnings};

@@ -3,8 +3,9 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    AuditEventKind, ClientRosterEntry, ClientViewMode, LayerState, LeaseChangeKind, LeaseState,
-    PerClientViewState, PermissionClass, SessionSnapshotEnvelope, SourceRecord, WarningCode,
+    AuditEventKind, AxisName, ClientRosterEntry, ClientViewMode, DatasetBinding, DatasetKind,
+    GenerationRefMode, LayerState, LeaseChangeKind, LeaseState, PerClientViewState,
+    PermissionClass, SessionSnapshotEnvelope, SourceKind, SourceRecord, SourceStatus, WarningCode,
     WarningEntry, WarningSeverity,
 };
 
@@ -16,6 +17,7 @@ pub enum EventType {
     WarningsUpdated,
     ViewUpdated,
     SceneSourceUpsert,
+    SceneDatasetUpsert,
     SceneLayerUpsert,
 }
 
@@ -89,7 +91,23 @@ pub struct WarningsUpdatedPayload {
 pub struct SourceUpsertPayload {
     pub source_id: String,
     pub name: String,
+    pub uri: String,
+    pub source_kind: String,
+    pub status: String,
     pub latest_working_generation_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetUpsertPayload {
+    pub dataset_id: String,
+    pub name: String,
+    pub dataset_kind: String,
+    pub generation_ref_mode: String,
+    pub source_id: Option<String>,
+    pub resolved_generation_seq: u64,
+    pub canonical_axes: Vec<String>,
+    pub dtype: String,
+    pub channel_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +127,7 @@ pub enum EventPayload {
     WarningsUpdated(WarningsUpdatedPayload),
     ViewUpdated(ViewUpdatedPayload),
     SceneSourceUpsert(SourceUpsertPayload),
+    SceneDatasetUpsert(DatasetUpsertPayload),
     SceneLayerUpsert(LayerUpsertPayload),
 }
 
@@ -215,6 +234,24 @@ impl EventEnvelope {
     }
 
     #[must_use]
+    pub fn scene_dataset_upsert(
+        session_id: String,
+        session_rev: u64,
+        payload: DatasetUpsertPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SceneDatasetUpsert,
+            payload: EventPayload::SceneDatasetUpsert(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
     pub fn scene_layer_upsert(
         session_id: String,
         session_rev: u64,
@@ -285,6 +322,7 @@ pub struct ProjectionState {
     pub client_roster: BTreeMap<String, ClientJoinedPayload>,
     pub client_views: BTreeMap<String, ViewUpdatedPayload>,
     pub sources: BTreeMap<String, SourceUpsertPayload>,
+    pub datasets: BTreeMap<String, DatasetUpsertPayload>,
     pub layers: BTreeMap<String, LayerUpsertPayload>,
 }
 
@@ -326,6 +364,16 @@ impl ProjectionState {
                 (payload.layer_id.clone(), payload)
             })
             .collect::<BTreeMap<_, _>>();
+        let datasets = snapshot
+            .snapshot
+            .shared_scene
+            .datasets
+            .values()
+            .map(|dataset| {
+                let payload = DatasetUpsertPayload::from(dataset);
+                (payload.dataset_id.clone(), payload)
+            })
+            .collect::<BTreeMap<_, _>>();
         let client_warnings = BTreeMap::from([(
             snapshot.snapshot.client_view.client_id.clone(),
             warning_payloads(&snapshot.snapshot.warnings),
@@ -339,6 +387,7 @@ impl ProjectionState {
             client_roster,
             client_views,
             sources,
+            datasets,
             layers,
         }
     }
@@ -377,6 +426,10 @@ impl ProjectionState {
             EventPayload::SceneSourceUpsert(payload) => {
                 self.sources
                     .insert(payload.source_id.clone(), payload.clone());
+            }
+            EventPayload::SceneDatasetUpsert(payload) => {
+                self.datasets
+                    .insert(payload.dataset_id.clone(), payload.clone());
             }
             EventPayload::SceneLayerUpsert(payload) => {
                 self.layers
@@ -442,7 +495,31 @@ impl From<&SourceRecord> for SourceUpsertPayload {
         Self {
             source_id: value.source_id.clone(),
             name: value.name.clone(),
+            uri: value.uri.clone(),
+            source_kind: source_kind_name(value.source_kind).to_owned(),
+            status: source_status_name(value.status).to_owned(),
             latest_working_generation_seq: value.latest_working_generation_seq,
+        }
+    }
+}
+
+impl From<&DatasetBinding> for DatasetUpsertPayload {
+    fn from(value: &DatasetBinding) -> Self {
+        Self {
+            dataset_id: value.dataset_id.clone(),
+            name: value.name.clone(),
+            dataset_kind: dataset_kind_name(value.dataset_kind).to_owned(),
+            generation_ref_mode: generation_ref_mode_name(value.generation_ref.mode).to_owned(),
+            source_id: value.source_id.clone(),
+            resolved_generation_seq: value.resolved_generation_seq,
+            canonical_axes: value
+                .canonical_axes
+                .iter()
+                .map(axis_name)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>(),
+            dtype: value.dtype.clone(),
+            channel_count: value.channel_table.channel_count,
         }
     }
 }
@@ -508,6 +585,50 @@ const fn view_mode_name(view_mode: ClientViewMode) -> &'static str {
     }
 }
 
+const fn source_kind_name(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Tiff => "tiff",
+        SourceKind::BigTiff => "bigtiff",
+        SourceKind::Zarr => "zarr",
+        SourceKind::OmeZarr => "ome_zarr",
+        SourceKind::Other => "other",
+    }
+}
+
+const fn source_status_name(status: SourceStatus) -> &'static str {
+    match status {
+        SourceStatus::Idle => "idle",
+        SourceStatus::Watching => "watching",
+        SourceStatus::Building => "building",
+        SourceStatus::Error => "error",
+    }
+}
+
+const fn dataset_kind_name(kind: DatasetKind) -> &'static str {
+    match kind {
+        DatasetKind::Source => "source",
+        DatasetKind::Derived => "derived",
+    }
+}
+
+const fn generation_ref_mode_name(mode: GenerationRefMode) -> &'static str {
+    match mode {
+        GenerationRefMode::Working => "working",
+        GenerationRefMode::Pinned => "pinned",
+    }
+}
+
+fn axis_name(axis: &AxisName) -> &str {
+    match axis {
+        AxisName::T => "t",
+        AxisName::C => "c",
+        AxisName::Z => "z",
+        AxisName::Y => "y",
+        AxisName::X => "x",
+        AxisName::Extra(name) => name.as_str(),
+    }
+}
+
 const fn warning_code_name(code: WarningCode) -> &'static str {
     match code {
         WarningCode::UncalibratedOverlay => "uncalibrated_overlay",
@@ -548,6 +669,9 @@ mod tests {
             SourceUpsertPayload {
                 source_id: "src_00000001".to_owned(),
                 name: "source-a".to_owned(),
+                uri: "/tmp/source-a.tiff".to_owned(),
+                source_kind: "tiff".to_owned(),
+                status: "watching".to_owned(),
                 latest_working_generation_seq: 0,
             },
             "2026-03-01T01:00:00Z".to_owned(),
@@ -558,6 +682,9 @@ mod tests {
             SourceUpsertPayload {
                 source_id: "src_00000002".to_owned(),
                 name: "source-b".to_owned(),
+                uri: "/tmp/source-b.tiff".to_owned(),
+                source_kind: "tiff".to_owned(),
+                status: "watching".to_owned(),
                 latest_working_generation_seq: 0,
             },
             "2026-03-01T01:00:01Z".to_owned(),
@@ -598,6 +725,9 @@ mod tests {
             SourceUpsertPayload {
                 source_id: "src_90000001".to_owned(),
                 name: "projection-source".to_owned(),
+                uri: "/tmp/projection-source.tiff".to_owned(),
+                source_kind: "tiff".to_owned(),
+                status: "watching".to_owned(),
                 latest_working_generation_seq: 3,
             },
             "2026-03-01T01:00:10Z".to_owned(),

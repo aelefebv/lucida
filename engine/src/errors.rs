@@ -18,6 +18,10 @@ pub enum SessionError {
         session_id: String,
         layer_id: String,
     },
+    SourceUnavailable {
+        uri: String,
+        reason: String,
+    },
     LeaseUnavailable {
         session_id: String,
         lease_holder_client_id: String,
@@ -54,6 +58,9 @@ impl Display for SessionError {
                 f,
                 "layer `{layer_id}` was not found in session `{session_id}`"
             ),
+            SessionError::SourceUnavailable { uri, reason } => {
+                write!(f, "source `{uri}` is unavailable: {reason}")
+            }
             SessionError::LeaseUnavailable {
                 session_id,
                 lease_holder_client_id,

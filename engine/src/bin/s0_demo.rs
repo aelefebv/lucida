@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use lucida_engine::{
     AttachRequest, CommandArgs, CommandEnvelope, CommandOutcome, CommandRouter, CommandScope,
@@ -6,6 +8,41 @@ use lucida_engine::{
     EventMessageSerializer, PermissionClass, ProjectionState, ReconnectRequest, SessionManager,
     command_error_to_envelope,
 };
+
+fn write_minimal_rgb_tiff(path: &Path) {
+    const TIFF_BYTES: [u8; 62] = [
+        0x49, 0x49, 0x2A, 0x00, // II + classic TIFF marker
+        0x08, 0x00, 0x00, 0x00, // first IFD offset
+        0x04, 0x00, // entry count
+        0x00, 0x01, // tag 256 image width
+        0x04, 0x00, // type LONG
+        0x01, 0x00, 0x00, 0x00, // count
+        0x20, 0x00, 0x00, 0x00, // width 32
+        0x01, 0x01, // tag 257 image length
+        0x04, 0x00, // type LONG
+        0x01, 0x00, 0x00, 0x00, // count
+        0x10, 0x00, 0x00, 0x00, // height 16
+        0x15, 0x01, // tag 277 samples per pixel
+        0x03, 0x00, // type SHORT
+        0x01, 0x00, 0x00, 0x00, // count
+        0x03, 0x00, 0x00, 0x00, // 3 channels
+        0x02, 0x01, // tag 258 bits per sample
+        0x03, 0x00, // type SHORT
+        0x01, 0x00, 0x00, 0x00, // count
+        0x08, 0x00, 0x00, 0x00, // 8 bits
+        0x00, 0x00, 0x00, 0x00, // next IFD offset
+    ];
+    fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
+}
+
+fn fixture_tiff_path() -> PathBuf {
+    let fixture_dir =
+        std::env::temp_dir().join(format!("lucida_s0_demo_{}_source", std::process::id()));
+    fs::create_dir_all(&fixture_dir).expect("fixture directory creation should succeed");
+    let path = fixture_dir.join("source.tiff");
+    write_minimal_rgb_tiff(&path);
+    path
+}
 
 #[derive(Debug)]
 struct DemoContext {
@@ -167,6 +204,7 @@ fn main() {
 
     let control_client_id = control_snapshot.snapshot.client_view.client_id.clone();
     let mut viewer_client_id = viewer_snapshot.snapshot.client_view.client_id.clone();
+    let source_uri = fixture_tiff_path().display().to_string();
 
     let mut demo = DemoContext::new(
         session_manager,
@@ -184,6 +222,7 @@ fn main() {
             true,
             CommandArgs::SceneAddSource {
                 name: "source-before-lease".to_owned(),
+                uri: source_uri.clone(),
             },
         )
         .expect_err("scene mutation without lease should fail");
@@ -221,6 +260,7 @@ fn main() {
             true,
             CommandArgs::SceneAddSource {
                 name: "demo-source".to_owned(),
+                uri: source_uri,
             },
         )
         .expect("source add should succeed");
@@ -326,6 +366,10 @@ fn main() {
         "  projection sources={} layers={}",
         demo.projection.sources.len(),
         demo.projection.layers.len()
+    );
+
+    let _ = fs::remove_dir_all(
+        std::env::temp_dir().join(format!("lucida_s0_demo_{}_source", std::process::id())),
     );
 
     println!();

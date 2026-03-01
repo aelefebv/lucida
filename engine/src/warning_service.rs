@@ -104,8 +104,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::model::{
-        ClientViewMode, LayerState, PerClientViewState, SceneMode, SharedSceneState, SourceRecord,
-        WarningCode,
+        AxisName, AxisShape, AxisSpacing, CalibrationMetadata, CalibrationStatus, ChannelTable,
+        ClientViewMode, LayerState, PerClientViewState, SceneMode, SharedSceneState, SourceKind,
+        SourceMetadata, SourceRecord, SourceStatus, SourceWatchMode, StabilityWindow, WarningCode,
     };
 
     use super::aggregate_warnings;
@@ -122,7 +123,50 @@ mod tests {
                 SourceRecord {
                     source_id: "src_00000001".to_owned(),
                     name: "source-a".to_owned(),
+                    uri: "/tmp/source-a.tiff".to_owned(),
+                    source_kind: SourceKind::Tiff,
+                    watch_enabled: true,
+                    watch_mode: SourceWatchMode::WatcherOnly,
+                    status: SourceStatus::Watching,
+                    latest_working_generation_id: None,
                     latest_working_generation_seq: 0,
+                    stability_window: StabilityWindow {
+                        debounce_seconds: 2,
+                        single_file_verify_ms: 200,
+                    },
+                    source_metadata: SourceMetadata {
+                        original_axis_order: vec![AxisName::Y, AxisName::X],
+                        canonical_axis_order: vec![
+                            AxisName::T,
+                            AxisName::C,
+                            AxisName::Z,
+                            AxisName::Y,
+                            AxisName::X,
+                        ],
+                        shape: AxisShape {
+                            t: 1,
+                            c: 1,
+                            z: 1,
+                            y: 32,
+                            x: 32,
+                            extra_axes: BTreeMap::new(),
+                        },
+                        dtype: "uint16".to_owned(),
+                        calibration: CalibrationMetadata {
+                            status: CalibrationStatus::Uncalibrated,
+                            spacing: AxisSpacing {
+                                x: None,
+                                y: None,
+                                z: None,
+                            },
+                            units: None,
+                        },
+                        channel_table: ChannelTable {
+                            channel_count: 1,
+                            channels: vec![],
+                        },
+                    },
+                    warnings: Vec::new(),
                 },
             )]),
             datasets: BTreeMap::new(),

@@ -4,15 +4,16 @@ use crate::constants::{
 };
 use crate::error_model::{
     ErrorCode, ErrorDetails, ErrorEnvelope, ErrorScope, LeaseErrorReason, LeaseRequiredDetail,
-    NotFoundDetail, NotFoundResource, PermissionDeniedDetail, ValidationErrorDetail,
-    ValidationErrorKind,
+    NotFoundDetail, NotFoundResource, PermissionDeniedDetail, SourceUnavailableDetail,
+    ValidationErrorDetail, ValidationErrorKind,
 };
 use crate::errors::SessionError;
 use crate::event_stream::{
-    EventEnvelope, LayerUpsertPayload, LeaseChangedPayload, LeaseStatePayload, SourceUpsertPayload,
-    ViewUpdatedPayload, WarningsUpdatedPayload, audit_event_kind_payload,
-    lease_change_kind_payload, warning_payloads,
+    DatasetUpsertPayload, EventEnvelope, LayerUpsertPayload, LeaseChangedPayload,
+    LeaseStatePayload, SourceUpsertPayload, ViewUpdatedPayload, WarningsUpdatedPayload,
+    audit_event_kind_payload, lease_change_kind_payload, warning_payloads,
 };
+use crate::model::AddSourceRequest;
 use crate::model::PermissionClass;
 use crate::session_manager::{LeaseTransition, SessionManager};
 
@@ -26,7 +27,7 @@ pub enum CommandScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandArgs {
     ViewSetActiveLayer { active_layer_id: Option<String> },
-    SceneAddSource { name: String },
+    SceneAddSource { name: String, uri: String },
     SceneLayerAdd { name: String },
     LeaseRequest,
     LeaseSteal,
@@ -78,6 +79,7 @@ pub enum CommandErrorCode {
     SessionNotFound,
     ClientNotFound,
     SourceNotFound,
+    SourceUnavailable,
     LayerNotFound,
 }
 
@@ -200,6 +202,7 @@ const fn error_code(code: CommandErrorCode) -> ErrorCode {
         | CommandErrorCode::ClientNotFound
         | CommandErrorCode::SourceNotFound
         | CommandErrorCode::LayerNotFound => ErrorCode::NotFound,
+        CommandErrorCode::SourceUnavailable => ErrorCode::SourceUnavailable,
     }
 }
 
@@ -213,7 +216,8 @@ const fn is_retryable(code: CommandErrorCode) -> bool {
         | CommandErrorCode::SessionNotFound
         | CommandErrorCode::ClientNotFound
         | CommandErrorCode::SourceNotFound
-        | CommandErrorCode::LayerNotFound => false,
+        | CommandErrorCode::LayerNotFound
+        | CommandErrorCode::SourceUnavailable => false,
     }
 }
 
@@ -263,6 +267,11 @@ fn error_details(command: &CommandEnvelope, error: &CommandError) -> ErrorDetail
             resource: NotFoundResource::Layer,
             resource_id: None,
         }),
+        CommandErrorCode::SourceUnavailable => {
+            ErrorDetails::SourceUnavailable(SourceUnavailableDetail {
+                source_id: "unknown".to_owned(),
+            })
+        }
     }
 }
 
@@ -408,11 +417,11 @@ fn dispatch(
                 rfc3339_now(),
             ));
         }
-        (Operation::SceneAddSource, CommandArgs::SceneAddSource { name }) => {
-            let source = session_manager
-                .add_source(&envelope.session_id, name)
+        (Operation::SceneAddSource, CommandArgs::SceneAddSource { name, uri }) => {
+            let added_source = session_manager
+                .add_source(&envelope.session_id, AddSourceRequest { name, uri })
                 .map_err(CommandError::from)?;
-            created_object_id = Some(source.source_id.clone());
+            created_object_id = Some(added_source.source.source_id.clone());
             let (session_rev, scene_rev) = session_manager
                 .session_and_scene_revisions(&envelope.session_id)
                 .map_err(CommandError::from)?;
@@ -420,7 +429,13 @@ fn dispatch(
             events.push(EventEnvelope::scene_source_upsert(
                 envelope.session_id.clone(),
                 session_rev,
-                SourceUpsertPayload::from(&source),
+                SourceUpsertPayload::from(&added_source.source),
+                rfc3339_now(),
+            ));
+            events.push(EventEnvelope::scene_dataset_upsert(
+                envelope.session_id.clone(),
+                session_rev,
+                DatasetUpsertPayload::from(&added_source.dataset),
                 rfc3339_now(),
             ));
         }
@@ -539,6 +554,10 @@ impl From<SessionError> for CommandError {
                 code: CommandErrorCode::SourceNotFound,
                 message: format!("source `{source_id}` was not found in session `{session_id}`"),
             },
+            SessionError::SourceUnavailable { uri, reason } => Self {
+                code: CommandErrorCode::SourceUnavailable,
+                message: format!("source `{uri}` is unavailable: {reason}"),
+            },
             SessionError::LayerNotFound {
                 session_id,
                 layer_id,
@@ -565,6 +584,9 @@ impl From<SessionError> for CommandError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
     use crate::constants::{COMMAND_MESSAGE_TYPE, SCHEMA_VERSION};
     use crate::error_model::{
         ErrorCode, ErrorDetails, ErrorScope, LeaseErrorReason, NotFoundResource,
@@ -577,6 +599,44 @@ mod tests {
         CommandArgs, CommandEnvelope, CommandErrorCode, CommandRouter, CommandScope,
         command_error_to_envelope,
     };
+
+    fn write_minimal_rgb_tiff(path: &Path) {
+        const TIFF_BYTES: [u8; 62] = [
+            0x49, 0x49, 0x2A, 0x00, // II + classic TIFF marker
+            0x08, 0x00, 0x00, 0x00, // first IFD offset
+            0x04, 0x00, // entry count
+            0x00, 0x01, // tag 256 image width
+            0x04, 0x00, // type LONG
+            0x01, 0x00, 0x00, 0x00, // count
+            0x20, 0x00, 0x00, 0x00, // width 32
+            0x01, 0x01, // tag 257 image length
+            0x04, 0x00, // type LONG
+            0x01, 0x00, 0x00, 0x00, // count
+            0x10, 0x00, 0x00, 0x00, // height 16
+            0x15, 0x01, // tag 277 samples per pixel
+            0x03, 0x00, // type SHORT
+            0x01, 0x00, 0x00, 0x00, // count
+            0x03, 0x00, 0x00, 0x00, // 3 channels
+            0x02, 0x01, // tag 258 bits per sample
+            0x03, 0x00, // type SHORT
+            0x01, 0x00, 0x00, 0x00, // count
+            0x08, 0x00, 0x00, 0x00, // 8 bits
+            0x00, 0x00, 0x00, 0x00, // next IFD offset
+        ];
+        fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
+    }
+
+    fn fixture_tiff_path(suffix: &str) -> PathBuf {
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "lucida_luc200_router_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+        let path = fixture_dir.join("source.tiff");
+        write_minimal_rgb_tiff(&path);
+        path
+    }
 
     #[test]
     fn rejects_malformed_command_envelope() {
@@ -726,6 +786,7 @@ mod tests {
                 requires_lease: false,
                 args: CommandArgs::SceneAddSource {
                     name: "source-a".to_owned(),
+                    uri: "/tmp/unused.tiff".to_owned(),
                 },
             },
         );
@@ -809,6 +870,7 @@ mod tests {
                 requires_lease: true,
                 args: CommandArgs::SceneAddSource {
                     name: "source-a".to_owned(),
+                    uri: "/tmp/unused.tiff".to_owned(),
                 },
             },
         );
@@ -846,6 +908,7 @@ mod tests {
                 requires_lease: true,
                 args: CommandArgs::SceneAddSource {
                     name: "source-a".to_owned(),
+                    uri: "/tmp/unused.tiff".to_owned(),
                 },
             },
         );
@@ -858,6 +921,7 @@ mod tests {
 
     #[test]
     fn routes_valid_commands_and_returns_typed_ack_and_events() {
+        let source_path = fixture_tiff_path("routes_valid_commands");
         let mut manager = SessionManager::new();
         let created = manager.create_session("cmd-session");
         let attached = manager
@@ -911,6 +975,7 @@ mod tests {
                     requires_lease: true,
                     args: CommandArgs::SceneAddSource {
                         name: "source-a".to_owned(),
+                        uri: source_path.display().to_string(),
                     },
                 },
             )
@@ -953,8 +1018,20 @@ mod tests {
             scene_outcome
                 .events
                 .iter()
+                .any(|event| event.event_type == EventType::SceneDatasetUpsert)
+        );
+        assert!(
+            scene_outcome
+                .events
+                .iter()
                 .any(|event| event.event_type == EventType::WarningsUpdated)
         );
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
     }
 
     #[test]
@@ -1119,6 +1196,7 @@ mod tests {
             requires_lease: true,
             args: CommandArgs::SceneAddSource {
                 name: "source-a".to_owned(),
+                uri: "/tmp/unused.tiff".to_owned(),
             },
         };
 

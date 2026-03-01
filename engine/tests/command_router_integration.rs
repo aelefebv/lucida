@@ -2,9 +2,47 @@ use lucida_engine::{
     AttachRequest, COMMAND_MESSAGE_TYPE, CommandArgs, CommandEnvelope, CommandRouter, CommandScope,
     EventType, PermissionClass, SCHEMA_VERSION, SessionManager,
 };
+use std::fs;
+use std::path::Path;
+
+fn write_minimal_rgb_tiff(path: &Path) {
+    const TIFF_BYTES: [u8; 62] = [
+        0x49, 0x49, 0x2A, 0x00, // II + classic TIFF marker
+        0x08, 0x00, 0x00, 0x00, // first IFD offset
+        0x04, 0x00, // entry count
+        0x00, 0x01, // tag 256 image width
+        0x04, 0x00, // type LONG
+        0x01, 0x00, 0x00, 0x00, // count
+        0x20, 0x00, 0x00, 0x00, // width 32
+        0x01, 0x01, // tag 257 image length
+        0x04, 0x00, // type LONG
+        0x01, 0x00, 0x00, 0x00, // count
+        0x10, 0x00, 0x00, 0x00, // height 16
+        0x15, 0x01, // tag 277 samples per pixel
+        0x03, 0x00, // type SHORT
+        0x01, 0x00, 0x00, 0x00, // count
+        0x03, 0x00, 0x00, 0x00, // 3 channels
+        0x02, 0x01, // tag 258 bits per sample
+        0x03, 0x00, // type SHORT
+        0x01, 0x00, 0x00, 0x00, // count
+        0x08, 0x00, 0x00, 0x00, // 8 bits
+        0x00, 0x00, 0x00, 0x00, // next IFD offset
+    ];
+
+    fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
+}
 
 #[test]
 fn command_router_routes_scene_command_with_authorization_and_lease() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "lucida_luc200_router_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+    let source_path = fixture_dir.join("integration-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
     let mut manager = SessionManager::new();
     let created = manager.create_session("router-integration");
 
@@ -39,6 +77,7 @@ fn command_router_routes_scene_command_with_authorization_and_lease() {
                 requires_lease: true,
                 args: CommandArgs::SceneAddSource {
                     name: "integration-source".to_owned(),
+                    uri: source_path.display().to_string(),
                 },
             },
         )
@@ -56,6 +95,12 @@ fn command_router_routes_scene_command_with_authorization_and_lease() {
         outcome
             .events
             .iter()
+            .any(|event| event.event_type == EventType::SceneDatasetUpsert)
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
             .any(|event| event.event_type == EventType::WarningsUpdated)
     );
     assert!(
@@ -65,6 +110,8 @@ fn command_router_routes_scene_command_with_authorization_and_lease() {
             .expect("source id should be included")
             .starts_with("src_")
     );
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
 }
 
 #[test]

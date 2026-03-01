@@ -7,13 +7,15 @@ use crate::constants::{
 use crate::errors::SessionError;
 use crate::id_allocator::{IdAllocator, IdKind};
 use crate::model::{
-    AttachRequest, AuditEventKind, AuditLogEntry, ClientRosterEntry, ClientViewMode,
-    CreatedSession, ExposureMode, ExposureViewMode, HeartbeatEnvelope, LayerState, LeaseChangeKind,
-    LeaseState, PerClientViewState, PermissionClass, Permissions, ReconnectRequest, SceneMode,
-    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord,
-    WarningEntry,
+    AddSourceRequest, AddedSource, AttachRequest, AuditEventKind, AuditLogEntry, AxisName,
+    ClientRosterEntry, ClientViewMode, CreatedSession, DatasetBinding, DatasetKind, ExposureMode,
+    ExposureViewMode, GenerationRef, GenerationRefMode, HeartbeatEnvelope, LayerState,
+    LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
+    ReconnectRequest, SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState,
+    SharedSceneState, SourceRecord, SourceStatus, SourceWatchMode, StabilityWindow, WarningEntry,
 };
 use crate::revision_allocator::RevisionAllocator;
+use crate::source_inspector::{SourceInspectionError, inspect_source};
 use crate::warning_service::aggregate_warnings;
 
 #[derive(Debug)]
@@ -219,18 +221,81 @@ impl SessionManager {
     pub fn add_source(
         &mut self,
         session_id: &str,
-        name: impl Into<String>,
-    ) -> Result<SourceRecord, SessionError> {
+        request: AddSourceRequest,
+    ) -> Result<AddedSource, SessionError> {
         if !self.sessions.contains_key(session_id) {
             return Err(SessionError::SessionNotFound {
                 session_id: session_id.to_owned(),
             });
         }
 
+        let inspected = inspect_source(&request.uri).map_err(|error| match error {
+            SourceInspectionError::InvalidSourceUri { uri, message } => {
+                SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                }
+            }
+            SourceInspectionError::SourceNotFound { uri } => SessionError::SourceUnavailable {
+                uri,
+                reason: "source path does not exist".to_owned(),
+            },
+            SourceInspectionError::ReadFailed { uri, message } => SessionError::SourceUnavailable {
+                uri,
+                reason: message,
+            },
+        })?;
+
+        let source_id = self.id_allocator.allocate(IdKind::Source);
+        let dataset_id = self.id_allocator.allocate(IdKind::Dataset);
         let source = SourceRecord {
-            source_id: self.id_allocator.allocate(IdKind::Source),
-            name: name.into(),
+            source_id: source_id.clone(),
+            name: request.name.clone(),
+            uri: request.uri,
+            source_kind: inspected.source_kind,
+            watch_enabled: true,
+            watch_mode: SourceWatchMode::WatcherOnly,
+            status: SourceStatus::Watching,
+            latest_working_generation_id: None,
             latest_working_generation_seq: 0,
+            stability_window: StabilityWindow {
+                debounce_seconds: 2,
+                single_file_verify_ms: 200,
+            },
+            source_metadata: inspected.source_metadata.clone(),
+            warnings: Vec::new(),
+        };
+        let dataset = DatasetBinding {
+            dataset_id: dataset_id.clone(),
+            name: format!("{}-working", request.name),
+            dataset_kind: DatasetKind::Source,
+            generation_ref: GenerationRef {
+                mode: GenerationRefMode::Working,
+                generation_id: None,
+            },
+            resolved_generation_id: None,
+            resolved_generation_seq: 0,
+            source_id: Some(source_id),
+            canonical_axes: vec![
+                AxisName::T,
+                AxisName::C,
+                AxisName::Z,
+                AxisName::Y,
+                AxisName::X,
+            ],
+            extra_axes: inspected
+                .source_metadata
+                .shape
+                .extra_axes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            shape: inspected.source_metadata.shape,
+            dtype: inspected.source_metadata.dtype,
+            channel_block_size: 4,
+            calibration: inspected.source_metadata.calibration,
+            channel_table: inspected.source_metadata.channel_table,
+            warnings: Vec::new(),
         };
 
         let session = self.session_mut(session_id)?;
@@ -238,11 +303,15 @@ impl SessionManager {
             .shared_scene
             .sources
             .insert(source.source_id.clone(), source.clone());
+        session
+            .shared_scene
+            .datasets
+            .insert(dataset.dataset_id.clone(), dataset.clone());
         bump_session_rev(session);
         bump_scene_rev(session);
         refresh_warnings(session);
 
-        Ok(source)
+        Ok(AddedSource { source, dataset })
     }
 
     pub fn bump_source_generation_seq(
@@ -875,14 +944,55 @@ fn collect_snapshot_warnings(session: &SessionRecord, client_id: &str) -> Vec<Wa
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
     use crate::constants::{HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
     use crate::errors::SessionError;
     use crate::model::{
-        AttachRequest, AuditEventKind, ClientViewMode, LeaseChangeKind, PermissionClass,
-        ReconnectRequest,
+        AddSourceRequest, AttachRequest, AuditEventKind, ClientViewMode, LeaseChangeKind,
+        PermissionClass, ReconnectRequest,
     };
 
     use super::SessionManager;
+
+    fn write_minimal_rgb_tiff(path: &Path) {
+        const TIFF_BYTES: [u8; 62] = [
+            0x49, 0x49, 0x2A, 0x00, // II + classic TIFF marker
+            0x08, 0x00, 0x00, 0x00, // first IFD offset
+            0x04, 0x00, // entry count
+            0x00, 0x01, // tag 256 image width
+            0x04, 0x00, // type LONG
+            0x01, 0x00, 0x00, 0x00, // count
+            0x20, 0x00, 0x00, 0x00, // width 32
+            0x01, 0x01, // tag 257 image length
+            0x04, 0x00, // type LONG
+            0x01, 0x00, 0x00, 0x00, // count
+            0x10, 0x00, 0x00, 0x00, // height 16
+            0x15, 0x01, // tag 277 samples per pixel
+            0x03, 0x00, // type SHORT
+            0x01, 0x00, 0x00, 0x00, // count
+            0x03, 0x00, 0x00, 0x00, // 3 channels
+            0x02, 0x01, // tag 258 bits per sample
+            0x03, 0x00, // type SHORT
+            0x01, 0x00, 0x00, 0x00, // count
+            0x08, 0x00, 0x00, 0x00, // 8 bits
+            0x00, 0x00, 0x00, 0x00, // next IFD offset
+        ];
+        fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
+    }
+
+    fn fixture_tiff_path(suffix: &str) -> PathBuf {
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "lucida_luc200_session_manager_{}_{}",
+            std::process::id(),
+            suffix
+        ));
+        fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+        let path = fixture_dir.join("source.tiff");
+        write_minimal_rgb_tiff(&path);
+        path
+    }
 
     #[test]
     fn create_session_and_attach_returns_full_snapshot() {
@@ -998,6 +1108,7 @@ mod tests {
 
     #[test]
     fn handles_revision_families_for_source_layer_and_view() {
+        let source_path = fixture_tiff_path("revision_families");
         let mut manager = SessionManager::new();
         let created = manager.create_session("revision-session");
 
@@ -1010,13 +1121,19 @@ mod tests {
             .expect("attach should succeed");
 
         let source = manager
-            .add_source(&created.session_id, "source-a")
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "source-a".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
             .expect("source add should succeed");
         let gen_1 = manager
-            .bump_source_generation_seq(&created.session_id, &source.source_id)
+            .bump_source_generation_seq(&created.session_id, &source.source.source_id)
             .expect("generation bump 1 should succeed");
         let gen_2 = manager
-            .bump_source_generation_seq(&created.session_id, &source.source_id)
+            .bump_source_generation_seq(&created.session_id, &source.source.source_id)
             .expect("generation bump 2 should succeed");
 
         let layer = manager
@@ -1039,7 +1156,7 @@ mod tests {
             )
             .expect("view rev bump should succeed");
 
-        assert!(source.source_id.starts_with("src_"));
+        assert!(source.source.source_id.starts_with("src_"));
         assert!(layer.layer_id.starts_with("lay_"));
         assert_eq!(gen_1, 1);
         assert_eq!(gen_2, 2);
@@ -1047,6 +1164,12 @@ mod tests {
         assert_eq!(metadata_rev, 1);
         assert_eq!(write_rev, 1);
         assert_eq!(view_rev, 1);
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
     }
 
     #[test]
@@ -1317,6 +1440,7 @@ mod tests {
 
     #[test]
     fn reconnect_client_replaces_old_client_and_preserves_shared_state() {
+        let source_path = fixture_tiff_path("reconnect_client");
         let mut manager = SessionManager::new();
         let created = manager.create_session("reconnect-session");
         let first = manager
@@ -1327,7 +1451,13 @@ mod tests {
             })
             .expect("first attach should succeed");
         let source = manager
-            .add_source(&created.session_id, "source-a")
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "source-a".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
             .expect("source add should succeed");
         let layer = manager
             .add_layer(&created.session_id, "layer-a")
@@ -1355,7 +1485,7 @@ mod tests {
                 .snapshot
                 .shared_scene
                 .sources
-                .contains_key(&source.source_id)
+                .contains_key(&source.source.source_id)
         );
         assert!(
             reconnected
@@ -1373,5 +1503,11 @@ mod tests {
             reconnected.snapshot.lease_state.lease_holder_client_id,
             None
         );
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
     }
 }

@@ -122,17 +122,148 @@ pub struct ClientRosterEntry {
     pub is_lease_holder: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Tiff,
+    BigTiff,
+    Zarr,
+    OmeZarr,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceWatchMode {
+    WatcherOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceStatus {
+    Idle,
+    Watching,
+    Building,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StabilityWindow {
+    pub debounce_seconds: u16,
+    pub single_file_verify_ms: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AxisName {
+    T,
+    C,
+    Z,
+    Y,
+    X,
+    Extra(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxisShape {
+    pub t: u64,
+    pub c: u64,
+    pub z: u64,
+    pub y: u64,
+    pub x: u64,
+    pub extra_axes: BTreeMap<String, u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalibrationStatus {
+    Calibrated,
+    Uncalibrated,
+    UserOverridden,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AxisSpacing {
+    pub x: Option<u64>,
+    pub y: Option<u64>,
+    pub z: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalibrationMetadata {
+    pub status: CalibrationStatus,
+    pub spacing: AxisSpacing,
+    pub units: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelDescription {
+    pub index: u32,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelTable {
+    pub channel_count: u32,
+    pub channels: Vec<ChannelDescription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMetadata {
+    pub original_axis_order: Vec<AxisName>,
+    pub canonical_axis_order: Vec<AxisName>,
+    pub shape: AxisShape,
+    pub dtype: String,
+    pub calibration: CalibrationMetadata,
+    pub channel_table: ChannelTable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRecord {
     pub source_id: String,
     pub name: String,
+    pub uri: String,
+    pub source_kind: SourceKind,
+    pub watch_enabled: bool,
+    pub watch_mode: SourceWatchMode,
+    pub status: SourceStatus,
+    pub latest_working_generation_id: Option<String>,
     pub latest_working_generation_seq: u64,
+    pub stability_window: StabilityWindow,
+    pub source_metadata: SourceMetadata,
+    pub warnings: Vec<WarningEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatasetKind {
+    Source,
+    Derived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationRefMode {
+    Working,
+    Pinned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationRef {
+    pub mode: GenerationRefMode,
+    pub generation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatasetBinding {
     pub dataset_id: String,
-    pub source_id: String,
+    pub name: String,
+    pub dataset_kind: DatasetKind,
+    pub generation_ref: GenerationRef,
+    pub resolved_generation_id: Option<String>,
+    pub resolved_generation_seq: u64,
+    pub source_id: Option<String>,
+    pub canonical_axes: Vec<AxisName>,
+    pub extra_axes: Vec<String>,
+    pub shape: AxisShape,
+    pub dtype: String,
+    pub channel_block_size: u16,
+    pub calibration: CalibrationMetadata,
+    pub channel_table: ChannelTable,
+    pub warnings: Vec<WarningEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +366,18 @@ pub struct AttachRequest {
     pub session_id: String,
     pub client_label: String,
     pub requested_permission: PermissionClass,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddSourceRequest {
+    pub name: String,
+    pub uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddedSource {
+    pub source: SourceRecord,
+    pub dataset: DatasetBinding,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
