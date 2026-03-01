@@ -1,8 +1,8 @@
 import { formatChunkKeyPath, type ChunkKey } from "./chunk-key";
 
-export interface ObjectUrlResolver {
+export type ObjectUrlResolver = {
   resolveChunkUrl(key: ChunkKey): string;
-}
+};
 
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, "");
