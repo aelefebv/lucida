@@ -502,16 +502,24 @@ async fn handle_socket(state: RuntimeState, session_id: String, socket: WebSocke
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
+struct HandshakeAuth {
+    mode: String,
+    token: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "message_type", rename_all = "snake_case")]
 enum HandshakeMessage {
     Attach {
         client_label: String,
         requested_permission: String,
+        auth: Option<HandshakeAuth>,
     },
     Reconnect {
         client_label: String,
         requested_permission: String,
         previous_client_id: Option<String>,
+        auth: Option<HandshakeAuth>,
     },
 }
 
@@ -536,7 +544,9 @@ async fn attach_or_reconnect(
         HandshakeMessage::Attach {
             client_label,
             requested_permission,
+            auth,
         } => {
+            validate_auth_payload(&requested_permission, auth.as_ref())?;
             let permission = permission_from_wire(&requested_permission).ok_or_else(|| {
                 RuntimeWsErrorMessage {
                     code: "validation_error",
@@ -566,7 +576,9 @@ async fn attach_or_reconnect(
             client_label,
             requested_permission,
             previous_client_id,
+            auth,
         } => {
+            validate_auth_payload(&requested_permission, auth.as_ref())?;
             let permission = permission_from_wire(&requested_permission).ok_or_else(|| {
                 RuntimeWsErrorMessage {
                     code: "validation_error",
@@ -594,6 +606,85 @@ async fn attach_or_reconnect(
             })
         }
     }
+}
+
+fn validate_auth_payload(
+    requested_permission: &str,
+    auth: Option<&HandshakeAuth>,
+) -> Result<(), RuntimeWsErrorMessage> {
+    let Some(auth) = auth else {
+        return Ok(());
+    };
+
+    let mode = auth.mode.as_str();
+    match mode {
+        "open_view" => {
+            if requested_permission != "view" {
+                return Err(RuntimeWsErrorMessage {
+                    code: "validation_error",
+                    message: "requested_permission must be `view` when auth.mode is `open_view`"
+                        .to_owned(),
+                });
+            }
+            if auth
+                .token
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                return Err(RuntimeWsErrorMessage {
+                    code: "validation_error",
+                    message: "auth.token must be empty when auth.mode is `open_view`".to_owned(),
+                });
+            }
+        }
+        "token_view" => {
+            if requested_permission != "view" {
+                return Err(RuntimeWsErrorMessage {
+                    code: "validation_error",
+                    message: "requested_permission must be `view` when auth.mode is `token_view`"
+                        .to_owned(),
+                });
+            }
+            if auth
+                .token
+                .as_deref()
+                .map_or(true, |value| value.trim().is_empty())
+            {
+                return Err(RuntimeWsErrorMessage {
+                    code: "validation_error",
+                    message: "auth.token is required when auth.mode is `token_view`".to_owned(),
+                });
+            }
+        }
+        "control" => {
+            if requested_permission != "control" && requested_permission != "admin" {
+                return Err(RuntimeWsErrorMessage {
+                    code: "validation_error",
+                    message:
+                        "requested_permission must be `control` or `admin` when auth.mode is `control`"
+                            .to_owned(),
+                });
+            }
+            if auth
+                .token
+                .as_deref()
+                .map_or(true, |value| value.trim().is_empty())
+            {
+                return Err(RuntimeWsErrorMessage {
+                    code: "validation_error",
+                    message: "auth.token is required when auth.mode is `control`".to_owned(),
+                });
+            }
+        }
+        _ => {
+            return Err(RuntimeWsErrorMessage {
+                code: "validation_error",
+                message: "auth.mode must be one of open_view, token_view, or control".to_owned(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn runtime_ws_error(code: &'static str, message: &str) -> String {

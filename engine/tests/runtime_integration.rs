@@ -161,7 +161,11 @@ async fn runtime_supports_attach_command_events_and_reconnect() {
             json!({
                 "message_type": "attach",
                 "client_label": "browser-a",
-                "requested_permission": "control"
+                "requested_permission": "control",
+                "auth": {
+                    "mode": "control",
+                    "token": "control-token"
+                }
             })
             .to_string()
             .into(),
@@ -272,7 +276,11 @@ async fn runtime_supports_attach_command_events_and_reconnect() {
                 "message_type": "reconnect",
                 "client_label": "browser-a",
                 "requested_permission": "control",
-                "previous_client_id": client_id
+                "previous_client_id": client_id,
+                "auth": {
+                    "mode": "control",
+                    "token": "control-token"
+                }
             })
             .to_string()
             .into(),
@@ -405,7 +413,11 @@ async fn runtime_open_source_bootstraps_generation_and_emits_progress_events() {
             json!({
                 "message_type": "attach",
                 "client_label": "browser-open-source",
-                "requested_permission": "view"
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
             })
             .to_string()
             .into(),
@@ -534,4 +546,65 @@ async fn runtime_open_source_bootstraps_generation_and_emits_progress_events() {
     runtime.stop().await;
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
     fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_rejects_attach_when_auth_mode_requires_token() {
+    let cache_root = unique_path("invalid_auth");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let runtime = RuntimeFixture::start(&cache_root).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-invalid-auth" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-invalid-auth",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "token_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let error_frame = recv_text_frame(&mut socket).await;
+    assert_eq!(error_frame["message_type"], "error");
+    assert_eq!(error_frame["code"], "validation_error");
+    assert!(
+        error_frame["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("auth.token is required"),
+    );
+
+    socket
+        .close(None)
+        .await
+        .expect("closing websocket should succeed");
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
 }
