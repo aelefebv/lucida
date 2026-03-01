@@ -136,6 +136,7 @@ pub struct SourceGenerationPayload {
     pub canonical_cache_path: Option<String>,
     pub preview_path: Option<String>,
     pub tile_manifest_path: Option<String>,
+    pub brick_manifest_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -686,6 +687,7 @@ impl From<&GenerationRecord> for SourceGenerationPayload {
             canonical_cache_path: value.canonical_cache_path.clone(),
             preview_path: value.preview_path.clone(),
             tile_manifest_path: value.tile_manifest_path.clone(),
+            brick_manifest_path: value.brick_manifest_path.clone(),
         }
     }
 }
@@ -951,6 +953,7 @@ mod tests {
                 canonical_cache_path: None,
                 preview_path: None,
                 tile_manifest_path: None,
+                brick_manifest_path: None,
             },
             "2026-03-01T02:00:00Z".to_owned(),
         );
@@ -973,6 +976,7 @@ mod tests {
                 canonical_cache_path: None,
                 preview_path: None,
                 tile_manifest_path: None,
+                brick_manifest_path: None,
             },
             "2026-03-01T02:00:01Z".to_owned(),
         );
@@ -998,6 +1002,9 @@ mod tests {
                 ),
                 tile_manifest_path: Some(
                     "/tmp/cache/src_00000001/gen_00000001/tile2d/manifest.json".to_owned(),
+                ),
+                brick_manifest_path: Some(
+                    "/tmp/cache/src_00000001/gen_00000001/brick3d/manifest.json".to_owned(),
                 ),
             },
             "2026-03-01T02:00:02Z".to_owned(),
@@ -1025,6 +1032,9 @@ mod tests {
                 tile_manifest_path: Some(
                     "/tmp/cache/src_00000001/gen_00000001/tile2d/manifest.json".to_owned(),
                 ),
+                brick_manifest_path: Some(
+                    "/tmp/cache/src_00000001/gen_00000001/brick3d/manifest.json".to_owned(),
+                ),
             },
             "2026-03-01T02:00:03Z".to_owned(),
         );
@@ -1050,6 +1060,10 @@ mod tests {
         assert_eq!(
             generation.tile_manifest_path.as_deref(),
             Some("/tmp/cache/src_00000001/gen_00000001/tile2d/manifest.json")
+        );
+        assert_eq!(
+            generation.brick_manifest_path.as_deref(),
+            Some("/tmp/cache/src_00000001/gen_00000001/brick3d/manifest.json")
         );
         assert_eq!(projection.session_rev, snapshot.session_rev + 4);
     }

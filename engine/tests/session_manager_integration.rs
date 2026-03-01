@@ -446,3 +446,82 @@ fn session_manager_builds_preview_and_tile_manifest_for_generation() {
     fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
     fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");
 }
+
+#[test]
+fn session_manager_builds_lazy_bricks_for_generation_and_marks_completed_lod() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "lucida_luc205_generation_bricks_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    let cache_root = std::env::temp_dir().join(format!(
+        "lucida_luc205_generation_bricks_root_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+    fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+    let source_path = fixture_dir.join("brick-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-generation-bricks");
+    let added = manager
+        .add_source(
+            &created.session_id,
+            AddSourceRequest {
+                name: "brick-source".to_owned(),
+                uri: source_path.display().to_string(),
+            },
+        )
+        .expect("source add should succeed");
+    let detected = manager
+        .detect_generation(&created.session_id, &added.source.source_id)
+        .expect("generation detection should succeed");
+    manager
+        .start_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        )
+        .expect("generation start should succeed");
+    manager
+        .build_canonical_cache_for_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+            &cache_root,
+        )
+        .expect("canonical cache build should succeed");
+    manager
+        .build_bricks_for_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+            0,
+            1,
+        )
+        .expect("initial lazy brick build should succeed");
+    let completed = manager
+        .build_bricks_for_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+            0,
+            10_000,
+        )
+        .expect("completion lazy brick build should succeed");
+
+    assert!(completed.availability.brick3d_ready_lods.contains(&0));
+    assert!(
+        Path::new(
+            &completed
+                .brick_manifest_path
+                .expect("brick manifest path should be present")
+        )
+        .exists()
+    );
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
+    fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");
+}

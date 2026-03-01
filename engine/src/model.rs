@@ -242,6 +242,7 @@ pub struct GenerationRecord {
     pub canonical_cache_path: Option<String>,
     pub preview_path: Option<String>,
     pub tile_manifest_path: Option<String>,
+    pub brick_manifest_path: Option<String>,
     pub detected_at: String,
     pub updated_at: String,
 }

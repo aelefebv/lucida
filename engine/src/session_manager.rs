@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::brick3d_builder::{Brick3dBuilder, BrickBuildError, BrickBuildRequest};
 use crate::canonical_cache::{
     CanonicalCacheBuildRequest, CanonicalCacheBuilder, CanonicalCacheError,
 };
@@ -429,6 +430,7 @@ impl SessionManager {
                     canonical_cache_path: None,
                     preview_path: None,
                     tile_manifest_path: None,
+                    brick_manifest_path: None,
                     detected_at: ready_at.clone(),
                     updated_at: ready_at.clone(),
                 },
@@ -482,6 +484,7 @@ impl SessionManager {
             canonical_cache_path: None,
             preview_path: None,
             tile_manifest_path: None,
+            brick_manifest_path: None,
             detected_at: detected_at.clone(),
             updated_at: detected_at,
         };
@@ -799,6 +802,115 @@ impl SessionManager {
         }
         generation.preview_path = Some(build_result.preview_path.display().to_string());
         generation.tile_manifest_path = Some(build_result.tile_manifest_path.display().to_string());
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn build_bricks_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        lod: u8,
+        max_new_bricks: u32,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let (source_shape, generation_root) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            let generation = source.generations.get(&generation_seq).ok_or_else(|| {
+                SessionError::GenerationNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                }
+            })?;
+            let canonical_path = generation.canonical_cache_path.clone().ok_or_else(|| {
+                SessionError::BrickBuildFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                    reason: "canonical cache must exist before brick build".to_owned(),
+                }
+            })?;
+            let canonical_root = PathBuf::from(canonical_path);
+            let generation_root =
+                canonical_root
+                    .parent()
+                    .ok_or_else(|| SessionError::BrickBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: "canonical cache path has no parent generation directory"
+                            .to_owned(),
+                    })?;
+            (
+                source.source_metadata.shape.clone(),
+                generation_root.to_path_buf(),
+            )
+        };
+
+        let builder = Brick3dBuilder::new();
+        let build_result = builder
+            .build_lazy(&BrickBuildRequest {
+                source_id: source_id.to_owned(),
+                generation_seq,
+                generation_root,
+                shape: source_shape,
+                lod,
+                max_new_bricks,
+            })
+            .map_err(|error| match error {
+                BrickBuildError::IoError { path, message } => SessionError::BrickBuildFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                    reason: format!("io error at `{path}`: {message}"),
+                },
+                BrickBuildError::SerializationError { message } => SessionError::BrickBuildFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                    reason: format!("serialization error: {message}"),
+                },
+            })?;
+
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        if matches!(generation.stage, GenerationStage::Started) {
+            generation.stage = GenerationStage::Partial;
+        }
+        generation.brick_manifest_path =
+            Some(build_result.brick_manifest_path.display().to_string());
+        if build_result.completed_lod
+            && !generation
+                .availability
+                .brick3d_ready_lods
+                .contains(&build_result.lod)
+        {
+            generation
+                .availability
+                .brick3d_ready_lods
+                .push(build_result.lod);
+            generation.availability.brick3d_ready_lods.sort_unstable();
+        }
+        generation.progress_percent = generation.progress_percent.clamp(20, 99);
         generation.updated_at = rfc3339_now();
         let snapshot = generation.clone();
         bump_session_rev(session);
@@ -2135,6 +2247,90 @@ mod tests {
                     .tile_manifest_path
                     .clone()
                     .expect("tile manifest path should be present")
+            )
+            .exists()
+        );
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+        fs::remove_dir_all(cache_root).expect("cache cleanup should succeed");
+    }
+
+    #[test]
+    fn brick_builder_is_lazy_and_marks_lod_ready_when_complete() {
+        let source_path = fixture_tiff_path("brick_builder");
+        let cache_root = std::env::temp_dir().join(format!(
+            "lucida_luc205_cache_root_{}_{}",
+            std::process::id(),
+            "unit"
+        ));
+        fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("brick-builder-session");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "brick-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+        let detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("generation detection should succeed");
+        manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation start should succeed");
+        manager
+            .build_canonical_cache_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                &cache_root,
+            )
+            .expect("canonical cache build should succeed");
+
+        let first = manager
+            .build_bricks_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                0,
+                1,
+            )
+            .expect("first lazy brick build should succeed");
+        assert!(first.brick_manifest_path.is_some());
+        assert!(
+            first.availability.brick3d_ready_lods.is_empty()
+                || first.availability.brick3d_ready_lods.contains(&0)
+        );
+        assert!(matches!(first.stage, GenerationStage::Partial));
+
+        let second = manager
+            .build_bricks_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                0,
+                10_000,
+            )
+            .expect("second lazy brick build should succeed");
+        assert!(second.availability.brick3d_ready_lods.contains(&0));
+        assert!(
+            PathBuf::from(
+                second
+                    .brick_manifest_path
+                    .clone()
+                    .expect("brick manifest path should be present")
             )
             .exists()
         );

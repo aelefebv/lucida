@@ -1,3 +1,4 @@
+mod brick3d_builder;
 mod canonical_cache;
 mod clock;
 mod command_router;
@@ -14,6 +15,7 @@ mod source_watch;
 mod tile_preview_builder;
 mod warning_service;
 
+pub use brick3d_builder::{Brick3dBuilder, BrickBuildError, BrickBuildRequest, BrickBuildResult};
 pub use canonical_cache::{
     CanonicalCacheBuildRequest, CanonicalCacheBuildResult, CanonicalCacheBuilder,
     CanonicalCacheError,
