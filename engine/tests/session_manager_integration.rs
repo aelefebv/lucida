@@ -1,6 +1,7 @@
 use lucida_engine::{
-    AddSourceRequest, AttachRequest, AxisName, ClientViewMode, GenerationAvailability,
-    GenerationStage, PermissionClass, ReconnectRequest, SessionManager, SourceKind,
+    AddSourceRequest, AttachRequest, AxisName, ChunkAssetKind, ChunkKey, ClientViewMode,
+    DataPlaneService, GenerationAvailability, GenerationStage, PermissionClass, ReconnectRequest,
+    SessionManager, SourceKind,
 };
 use std::fs;
 use std::path::Path;
@@ -607,6 +608,113 @@ fn session_manager_garbage_collect_source_cache_keeps_latest_and_pinned_generati
     assert!(source_cache_root.join("gen_00000001").exists());
     assert!(!source_cache_root.join("gen_00000002").exists());
     assert!(source_cache_root.join("gen_00000003").exists());
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
+    fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");
+}
+
+#[test]
+fn source_churn_generations_do_not_mix_data_plane_payloads_across_generation_paths() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "lucida_luc1102_source_churn_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    let cache_root = std::env::temp_dir().join(format!(
+        "lucida_luc1102_source_churn_cache_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+    fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+    let source_path = fixture_dir.join("churn-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-source-churn");
+    let source = manager
+        .add_source(
+            &created.session_id,
+            AddSourceRequest {
+                name: "churn-source".to_owned(),
+                uri: source_path.display().to_string(),
+            },
+        )
+        .expect("source add should succeed");
+    assert_eq!(
+        manager
+            .poll_source_watch(&created.session_id, &source.source.source_id, 0)
+            .expect("initial poll should succeed"),
+        None
+    );
+
+    let mut generation_seqs = Vec::new();
+    for revision in 1_u64..=3 {
+        overwrite_file(&source_path, format!("revision-{revision}").as_bytes());
+        let base = revision * 10_000;
+        assert_eq!(
+            manager
+                .poll_source_watch(&created.session_id, &source.source.source_id, base + 1_000)
+                .expect("churn poll should succeed"),
+            None
+        );
+        assert_eq!(
+            manager
+                .poll_source_watch(&created.session_id, &source.source.source_id, base + 3_000)
+                .expect("verify start poll should succeed"),
+            None
+        );
+        let generation_seq = manager
+            .poll_source_watch(&created.session_id, &source.source.source_id, base + 3_200)
+            .expect("stable poll should succeed")
+            .expect("stable poll should produce generation");
+        generation_seqs.push(generation_seq);
+        manager
+            .build_canonical_cache_for_generation(
+                &created.session_id,
+                &source.source.source_id,
+                generation_seq,
+                &cache_root,
+            )
+            .expect("canonical cache build should succeed");
+        manager
+            .build_tile_preview_for_generation(
+                &created.session_id,
+                &source.source.source_id,
+                generation_seq,
+            )
+            .expect("tile/preview build should succeed");
+    }
+
+    let data_plane = DataPlaneService::new(&cache_root);
+    let mut payloads = Vec::new();
+    for generation_seq in &generation_seqs {
+        let response = data_plane
+            .serve_get(
+                &ChunkKey {
+                    source_id: source.source.source_id.clone(),
+                    generation_seq: *generation_seq,
+                    asset_kind: ChunkAssetKind::Tile2d,
+                    lod: 0,
+                    t: 0,
+                    z: 0,
+                    channel_block: 0,
+                    y: 0,
+                    x: 0,
+                }
+                .format_path(),
+            )
+            .expect("tile payload should be served");
+        assert_eq!(
+            response.headers.get("x-lucida-generation-seq"),
+            Some(&generation_seq.to_string())
+        );
+        payloads.push(response.body);
+    }
+
+    assert_eq!(generation_seqs, vec![1, 2, 3]);
+    assert_ne!(payloads[0], payloads[1]);
+    assert_ne!(payloads[1], payloads[2]);
 
     fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
     fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");

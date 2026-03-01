@@ -86,6 +86,7 @@ impl TilePreviewBuilder {
         write_placeholder_tiles(
             &tile_root,
             &lod_descriptors,
+            request.generation_seq,
             request.shape.c.min(u64::from(u16::MAX)) as u16,
             self.payload_codec,
             &self.channel_packaging,
@@ -190,6 +191,7 @@ fn write_manifest(
 fn write_placeholder_tiles(
     tile_root: &Path,
     lods: &[LodDescriptor],
+    generation_seq: u64,
     channel_count: u16,
     codec: PayloadCodec,
     packaging: &ChannelBlockPackaging,
@@ -202,8 +204,8 @@ fn write_placeholder_tiles(
         })?;
         let tile_path = lod_dir.join("t0_z0_cb0_r0_c0.tileblk");
         let tile_payload = format!(
-            "placeholder tile source for lod={} {}x{}",
-            descriptor.lod, descriptor.width, descriptor.height
+            "placeholder tile generation={} lod={} {}x{}",
+            generation_seq, descriptor.lod, descriptor.width, descriptor.height
         )
         .into_bytes();
         let encoded_payload = packaging
