@@ -748,7 +748,7 @@ fn parse_dimension_order_axes(value: &str) -> Option<Vec<AxisName>> {
     if normalized.len() != 5 {
         return None;
     }
-    let mut axes = Vec::with_capacity(5);
+    let mut axes_fast_to_slow = Vec::with_capacity(5);
     for ch in normalized.chars() {
         let axis = match ch {
             'T' => AxisName::T,
@@ -758,9 +758,12 @@ fn parse_dimension_order_axes(value: &str) -> Option<Vec<AxisName>> {
             'X' => AxisName::X,
             _ => return None,
         };
-        axes.push(axis);
+        axes_fast_to_slow.push(axis);
     }
-    Some(axes)
+    // OME-TIFF DimensionOrder is fastest-to-slowest. The engine uses
+    // slowest-to-fastest axis order for flattened page indexing.
+    axes_fast_to_slow.reverse();
+    Some(axes_fast_to_slow)
 }
 
 fn xml_attr_u64(text: &str, name: &str) -> Option<u64> {
@@ -928,7 +931,7 @@ mod tests {
                 r#"<?xml version="1.0" encoding="UTF-8"?>
 <OME>
   <Image ID="Image:0">
-    <Pixels DimensionOrder="TCZYX" SizeT="30" SizeC="2" SizeZ="17" SizeY="2" SizeX="2" Type="uint16"/>
+    <Pixels DimensionOrder="XYZCT" SizeT="30" SizeC="2" SizeZ="17" SizeY="2" SizeX="2" Type="uint16"/>
   </Image>
 </OME>"#,
             )

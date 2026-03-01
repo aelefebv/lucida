@@ -255,7 +255,7 @@ fn write_tczyx_ome_tiff(
                         r#"<?xml version="1.0" encoding="UTF-8"?>
 <OME>
   <Image ID="Image:0">
-    <Pixels DimensionOrder="TCZYX" SizeT="{size_t}" SizeC="{size_c}" SizeZ="{size_z}" SizeY="{height}" SizeX="{width}" Type="uint16"/>
+    <Pixels DimensionOrder="XYZCT" SizeT="{size_t}" SizeC="{size_c}" SizeZ="{size_z}" SizeY="{height}" SizeX="{width}" Type="uint16"/>
   </Image>
 </OME>"#
                     );
