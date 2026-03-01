@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::channel_block::{
     ChannelBlockPackaging, ChannelBlockWriteRequest, PayloadCodec, PayloadKind,
 };
-use crate::model::{AxisShape, SourceKind};
+use crate::model::{AxisName, AxisShape, SourceKind};
 use crate::raster_plane::{RasterPlane, RasterPlaneLoadRequest, load_raster_plane};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,7 @@ pub struct TilePreviewBuildRequest {
     pub generation_seq: u64,
     pub generation_root: PathBuf,
     pub shape: AxisShape,
+    pub axis_order: Vec<AxisName>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,15 +82,7 @@ impl TilePreviewBuilder {
             .copied()
             .map(|lod| lod_descriptor(lod, &request.shape, self.tile_width, self.tile_height))
             .collect::<Vec<_>>();
-        let base_plane = load_raster_plane(&RasterPlaneLoadRequest {
-            source_uri: request.source_uri.clone(),
-            source_kind: request.source_kind,
-            dtype: request.source_dtype.clone(),
-        })
-        .map_err(|error| TilePreviewBuildError::DecodeError {
-            message: format!("{error:?}"),
-        })?;
-        let lod_planes = build_lod_planes(&base_plane, &lods);
+        let selections = plane_selections(&request.shape);
         write_manifest(
             &tile_root,
             &request.source_id,
@@ -97,27 +90,49 @@ impl TilePreviewBuilder {
             &lod_descriptors,
             self.channel_packaging.default_block_size(),
         )?;
-        write_tiles(
-            &tile_root,
-            &lod_descriptors,
-            &lod_planes,
-            request.shape.c.max(1).min(u64::from(u16::MAX)) as u16,
-            self.payload_codec,
-            &self.channel_packaging,
-        )?;
+        for selection in &selections {
+            let base_plane = load_raster_plane(&RasterPlaneLoadRequest {
+                source_uri: request.source_uri.clone(),
+                source_kind: request.source_kind,
+                dtype: request.source_dtype.clone(),
+                axis_order: request.axis_order.clone(),
+                shape: request.shape.clone(),
+                t_index: selection.t,
+                z_index: selection.z,
+                channel_index: selection.channel_index,
+            })
+            .map_err(|error| TilePreviewBuildError::DecodeError {
+                message: format!("{error:?}"),
+            })?;
+            let lod_planes = build_lod_planes(&base_plane, &lods);
+            write_tiles_for_selection(
+                &tile_root,
+                &lod_descriptors,
+                &lod_planes,
+                request.shape.c.max(1).min(u64::from(u16::MAX)) as u16,
+                self.payload_codec,
+                &self.channel_packaging,
+                selection.t,
+                selection.z,
+                selection.channel_block,
+            )?;
+            write_preview_images_for_selection(
+                &preview_root,
+                &lod_descriptors,
+                &lod_planes,
+                selection.t,
+                selection.z,
+                selection.channel_block,
+            )?;
+            if selection.t == 0 && selection.z == 0 && selection.channel_block == 0 {
+                write_legacy_preview_images(&preview_root, &lod_descriptors, &lod_planes)?;
+            }
+        }
 
         let coarsest_lod = *lods
             .iter()
             .max()
             .expect("lod list should always contain at least one value");
-        for descriptor in &lod_descriptors {
-            let lod = descriptor.lod;
-            let preview_path = preview_root.join(format!("lod_{lod}.pgm"));
-            let plane = lod_planes
-                .get(&lod)
-                .expect("lod plane should be available for every descriptor");
-            write_preview_image(&preview_path, plane)?;
-        }
         let preview_path = preview_root.join(format!("lod_{coarsest_lod}.pgm"));
 
         Ok(TilePreviewBuildResult {
@@ -204,13 +219,16 @@ fn write_manifest(
     Ok(())
 }
 
-fn write_tiles(
+fn write_tiles_for_selection(
     tile_root: &Path,
     lods: &[LodDescriptor],
     lod_planes: &std::collections::BTreeMap<u8, RasterPlane>,
     channel_count: u16,
     codec: PayloadCodec,
     packaging: &ChannelBlockPackaging,
+    t_index: u64,
+    z_index: u64,
+    channel_block: u64,
 ) -> Result<(), TilePreviewBuildError> {
     for descriptor in lods {
         let lod_dir = tile_root.join(format!("lod{}", descriptor.lod));
@@ -218,7 +236,9 @@ fn write_tiles(
             path: lod_dir.display().to_string(),
             message: error.to_string(),
         })?;
-        let tile_path = lod_dir.join("t0_z0_cb0_r0_c0.tileblk");
+        let tile_path = lod_dir.join(format!(
+            "t{t_index}_z{z_index}_cb{channel_block}_r0_c0.tileblk"
+        ));
         let plane = lod_planes
             .get(&descriptor.lod)
             .expect("every lod descriptor should have raster pixels");
@@ -240,6 +260,69 @@ fn write_tiles(
         })?;
     }
     Ok(())
+}
+
+fn write_preview_images_for_selection(
+    preview_root: &Path,
+    lods: &[LodDescriptor],
+    lod_planes: &std::collections::BTreeMap<u8, RasterPlane>,
+    t_index: u64,
+    z_index: u64,
+    channel_block: u64,
+) -> Result<(), TilePreviewBuildError> {
+    for descriptor in lods {
+        let lod_dir = preview_root.join(format!("lod{}", descriptor.lod));
+        fs::create_dir_all(&lod_dir).map_err(|error| TilePreviewBuildError::IoError {
+            path: lod_dir.display().to_string(),
+            message: error.to_string(),
+        })?;
+        let preview_path = lod_dir.join(format!("t{t_index}_z{z_index}_cb{channel_block}.pgm"));
+        let plane = lod_planes
+            .get(&descriptor.lod)
+            .expect("lod plane should be available for every descriptor");
+        write_preview_image(&preview_path, plane)?;
+    }
+    Ok(())
+}
+
+fn write_legacy_preview_images(
+    preview_root: &Path,
+    lods: &[LodDescriptor],
+    lod_planes: &std::collections::BTreeMap<u8, RasterPlane>,
+) -> Result<(), TilePreviewBuildError> {
+    for descriptor in lods {
+        let preview_path = preview_root.join(format!("lod_{}.pgm", descriptor.lod));
+        let plane = lod_planes
+            .get(&descriptor.lod)
+            .expect("lod plane should be available for every descriptor");
+        write_preview_image(&preview_path, plane)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PlaneSelection {
+    t: u64,
+    z: u64,
+    channel_index: u64,
+    channel_block: u64,
+}
+
+fn plane_selections(shape: &AxisShape) -> Vec<PlaneSelection> {
+    let mut selections = Vec::new();
+    for t in 0..shape.t.max(1) {
+        for z in 0..shape.z.max(1) {
+            for channel_index in 0..shape.c.max(1) {
+                selections.push(PlaneSelection {
+                    t,
+                    z,
+                    channel_index,
+                    channel_block: channel_index,
+                });
+            }
+        }
+    }
+    selections
 }
 
 fn write_preview_image(
@@ -360,7 +443,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::channel_block::ChannelBlockPackaging;
-    use crate::model::{AxisShape, SourceKind};
+    use crate::model::{AxisName, AxisShape, SourceKind};
 
     use super::{TilePreviewBuildRequest, TilePreviewBuilder};
 
@@ -499,6 +582,13 @@ mod tests {
                     x: 4,
                     extra_axes: BTreeMap::new(),
                 },
+                axis_order: vec![
+                    AxisName::T,
+                    AxisName::C,
+                    AxisName::Z,
+                    AxisName::Y,
+                    AxisName::X,
+                ],
             })
             .expect("tile/preview build should succeed");
 
@@ -556,6 +646,13 @@ mod tests {
                     x: 3,
                     extra_axes: BTreeMap::new(),
                 },
+                axis_order: vec![
+                    AxisName::T,
+                    AxisName::C,
+                    AxisName::Z,
+                    AxisName::Y,
+                    AxisName::X,
+                ],
             })
             .expect("tile/preview build should succeed");
 
@@ -596,6 +693,13 @@ mod tests {
                     x: 2,
                     extra_axes: BTreeMap::new(),
                 },
+                axis_order: vec![
+                    AxisName::T,
+                    AxisName::C,
+                    AxisName::Z,
+                    AxisName::Y,
+                    AxisName::X,
+                ],
             })
             .expect("tile/preview build should succeed");
 

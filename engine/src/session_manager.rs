@@ -730,7 +730,14 @@ impl SessionManager {
         generation_seq: u64,
     ) -> Result<GenerationRecord, SessionError> {
         let session = self.session_mut(session_id)?;
-        let (source_shape, source_uri, source_kind, source_dtype, generation_root) = {
+        let (
+            source_shape,
+            source_axis_order,
+            source_uri,
+            source_kind,
+            source_dtype,
+            generation_root,
+        ) = {
             let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
                 SessionError::SourceNotFound {
                     session_id: session_id.to_owned(),
@@ -763,6 +770,7 @@ impl SessionManager {
                     })?;
             (
                 source.source_metadata.shape.clone(),
+                source.source_metadata.original_axis_order.clone(),
                 source.uri.clone(),
                 source.source_kind,
                 source.source_metadata.dtype.clone(),
@@ -780,6 +788,7 @@ impl SessionManager {
                 generation_seq,
                 generation_root,
                 shape: source_shape,
+                axis_order: source_axis_order,
             })
             .map_err(|error| match error {
                 TilePreviewBuildError::IoError { path, message } => {

@@ -12,12 +12,18 @@ use zarrs::filesystem::FilesystemStore;
 use zarrs::storage::ReadableWritableListableStorage;
 
 use crate::model::SourceKind;
+use crate::model::{AxisName, AxisShape};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RasterPlaneLoadRequest {
     pub source_uri: String,
     pub source_kind: SourceKind,
     pub dtype: String,
+    pub axis_order: Vec<AxisName>,
+    pub shape: AxisShape,
+    pub t_index: u64,
+    pub z_index: u64,
+    pub channel_index: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,18 +47,23 @@ pub fn load_raster_plane(
     request: &RasterPlaneLoadRequest,
 ) -> Result<RasterPlane, RasterPlaneLoadError> {
     match request.source_kind {
-        SourceKind::Tiff | SourceKind::BigTiff => load_tiff_plane(&request.source_uri),
-        SourceKind::OmeZarr | SourceKind::Zarr => {
-            load_zarr_plane(&request.source_uri, &request.dtype)
-        }
+        SourceKind::Tiff | SourceKind::BigTiff => load_tiff_plane(request),
+        SourceKind::OmeZarr | SourceKind::Zarr => load_zarr_plane(
+            &request.source_uri,
+            &request.dtype,
+            &request.axis_order,
+            request.t_index,
+            request.z_index,
+            request.channel_index,
+        ),
         SourceKind::Other => Err(RasterPlaneLoadError::UnsupportedSourceKind {
             source_kind: request.source_kind,
         }),
     }
 }
 
-fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
-    let path = source_path_from_uri(uri)?;
+fn load_tiff_plane(request: &RasterPlaneLoadRequest) -> Result<RasterPlane, RasterPlaneLoadError> {
+    let path = source_path_from_uri(&request.source_uri)?;
     let file = File::open(&path).map_err(|error| RasterPlaneLoadError::ReadFailed {
         path: path.display().to_string(),
         message: error.to_string(),
@@ -63,6 +74,29 @@ fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
             message: error.to_string(),
         }
     })?;
+
+    let target_page = tiff_page_index(
+        &request.shape,
+        &request.axis_order,
+        request.t_index,
+        request.z_index,
+        request.channel_index,
+    );
+    let mut current_page = 0_u64;
+    while current_page < target_page {
+        let has_more = decoder.more_images();
+        if !has_more {
+            break;
+        }
+        decoder
+            .next_image()
+            .map_err(|error| RasterPlaneLoadError::DecodeFailed {
+                path: path.display().to_string(),
+                message: error.to_string(),
+            })?;
+        current_page += 1;
+    }
+
     let (width_u32, height_u32) =
         decoder
             .dimensions()
@@ -79,6 +113,12 @@ fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
             message: error.to_string(),
         })?;
     let channel_count = channels_for_color_type(color_type);
+    let selected_channel = if channel_count == 0 {
+        0
+    } else {
+        let requested = usize::try_from(request.channel_index).unwrap_or(0);
+        requested.min(channel_count.saturating_sub(1))
+    };
     let expected_pixels = (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| RasterPlaneLoadError::DecodeFailed {
@@ -94,8 +134,13 @@ fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
         })?;
     let (pixels, max_value) = match image {
         TiffDecodingResult::U8(samples) => {
-            let first_channel =
-                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            let first_channel = interleaved_channel(
+                &samples,
+                channel_count,
+                selected_channel,
+                expected_pixels,
+                &path,
+            )?;
             (
                 first_channel
                     .iter()
@@ -106,53 +151,88 @@ fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
             )
         }
         TiffDecodingResult::U16(samples) => {
-            let first_channel =
-                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            let first_channel = interleaved_channel(
+                &samples,
+                channel_count,
+                selected_channel,
+                expected_pixels,
+                &path,
+            )?;
             (first_channel, u16::MAX)
         }
         TiffDecodingResult::I8(samples) => {
-            let first_channel =
-                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            let first_channel = interleaved_channel(
+                &samples,
+                channel_count,
+                selected_channel,
+                expected_pixels,
+                &path,
+            )?;
             (
                 normalize_dynamic_range_to_u16(&first_channel, |value| f64::from(value)),
                 u16::MAX,
             )
         }
         TiffDecodingResult::I16(samples) => {
-            let first_channel =
-                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            let first_channel = interleaved_channel(
+                &samples,
+                channel_count,
+                selected_channel,
+                expected_pixels,
+                &path,
+            )?;
             (
                 normalize_dynamic_range_to_u16(&first_channel, |value| f64::from(value)),
                 u16::MAX,
             )
         }
         TiffDecodingResult::U32(samples) => {
-            let first_channel =
-                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            let first_channel = interleaved_channel(
+                &samples,
+                channel_count,
+                selected_channel,
+                expected_pixels,
+                &path,
+            )?;
             (
                 normalize_dynamic_range_to_u16(&first_channel, |value| value as f64),
                 u16::MAX,
             )
         }
         TiffDecodingResult::I32(samples) => {
-            let first_channel =
-                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            let first_channel = interleaved_channel(
+                &samples,
+                channel_count,
+                selected_channel,
+                expected_pixels,
+                &path,
+            )?;
             (
                 normalize_dynamic_range_to_u16(&first_channel, |value| value as f64),
                 u16::MAX,
             )
         }
         TiffDecodingResult::F32(samples) => {
-            let first_channel =
-                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            let first_channel = interleaved_channel(
+                &samples,
+                channel_count,
+                selected_channel,
+                expected_pixels,
+                &path,
+            )?;
             (
                 normalize_dynamic_range_to_u16(&first_channel, |value| value as f64),
                 u16::MAX,
             )
         }
         TiffDecodingResult::F64(samples) => {
-            let first_channel =
-                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            let first_channel = interleaved_channel(
+                &samples,
+                channel_count,
+                selected_channel,
+                expected_pixels,
+                &path,
+            )?;
             (
                 normalize_dynamic_range_to_u16(&first_channel, |value| value),
                 u16::MAX,
@@ -174,7 +254,14 @@ fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
     })
 }
 
-fn load_zarr_plane(uri: &str, dtype: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
+fn load_zarr_plane(
+    uri: &str,
+    dtype: &str,
+    axis_order: &[AxisName],
+    t_index: u64,
+    z_index: u64,
+    channel_index: u64,
+) -> Result<RasterPlane, RasterPlaneLoadError> {
     let path = source_path_from_uri(uri)?;
     let store: ReadableWritableListableStorage =
         Arc::new(FilesystemStore::new(&path).map_err(|error| {
@@ -201,7 +288,7 @@ fn load_zarr_plane(uri: &str, dtype: &str) -> Result<RasterPlane, RasterPlaneLoa
 
     let width = *shape.last().unwrap_or(&1);
     let height = *shape.get(shape.len().saturating_sub(2)).unwrap_or(&1);
-    let ranges = plane_ranges(&shape);
+    let ranges = plane_ranges(&shape, axis_order, t_index, z_index, channel_index);
     let subset = ArraySubset::new_with_ranges(&ranges);
 
     let (pixels, max_value) = match dtype {
@@ -326,7 +413,41 @@ fn channels_for_color_type(color_type: ColorType) -> usize {
     }
 }
 
-fn plane_ranges(shape: &[u64]) -> Vec<Range<u64>> {
+fn plane_ranges(
+    shape: &[u64],
+    axis_order: &[AxisName],
+    t_index: u64,
+    z_index: u64,
+    channel_index: u64,
+) -> Vec<Range<u64>> {
+    if axis_order.len() == shape.len() {
+        return axis_order
+            .iter()
+            .zip(shape.iter().copied())
+            .map(|(axis, dimension)| {
+                if dimension == 0 {
+                    return 0..0;
+                }
+                match axis {
+                    AxisName::Y | AxisName::X => 0..dimension,
+                    AxisName::T => {
+                        let start = t_index.min(dimension - 1);
+                        start..(start + 1)
+                    }
+                    AxisName::Z => {
+                        let start = z_index.min(dimension - 1);
+                        start..(start + 1)
+                    }
+                    AxisName::C => {
+                        let start = channel_index.min(dimension - 1);
+                        start..(start + 1)
+                    }
+                    AxisName::Extra(_) => 0..1,
+                }
+            })
+            .collect();
+    }
+
     let mut ranges = Vec::with_capacity(shape.len());
     for (index, dimension) in shape.iter().copied().enumerate() {
         if index >= shape.len().saturating_sub(2) {
@@ -338,9 +459,10 @@ fn plane_ranges(shape: &[u64]) -> Vec<Range<u64>> {
     ranges
 }
 
-fn interleaved_first_channel<T: Copy>(
+fn interleaved_channel<T: Copy>(
     samples: &[T],
     channel_count: usize,
+    channel_index: usize,
     expected_pixels: usize,
     path: &Path,
 ) -> Result<Vec<T>, RasterPlaneLoadError> {
@@ -368,11 +490,47 @@ fn interleaved_first_channel<T: Copy>(
         });
     }
     for pixel_index in 0..expected_pixels {
-        let sample_index = pixel_index * channel_count;
+        let sample_index = pixel_index * channel_count + channel_index;
         let sample = samples[sample_index];
         pixels.push(sample);
     }
     Ok(pixels)
+}
+
+fn tiff_page_index(
+    shape: &AxisShape,
+    axis_order: &[AxisName],
+    t_index: u64,
+    z_index: u64,
+    channel_index: u64,
+) -> u64 {
+    let mut plane_axes = axis_order
+        .iter()
+        .filter(|axis| !matches!(axis, AxisName::Y | AxisName::X))
+        .collect::<Vec<_>>();
+    if plane_axes.is_empty() {
+        return 0;
+    }
+
+    let mut index = 0_u64;
+    let mut stride = 1_u64;
+    plane_axes.reverse();
+    for axis in plane_axes {
+        let (dimension, coordinate) = match axis {
+            AxisName::T => (shape.t.max(1), t_index),
+            AxisName::C => (shape.c.max(1), channel_index),
+            AxisName::Z => (shape.z.max(1), z_index),
+            AxisName::Extra(name) => {
+                let dimension = shape.extra_axes.get(name).copied().unwrap_or(1).max(1);
+                (dimension, 0)
+            }
+            AxisName::Y | AxisName::X => continue,
+        };
+        let clamped = coordinate.min(dimension.saturating_sub(1));
+        index = index.saturating_add(clamped.saturating_mul(stride));
+        stride = stride.saturating_mul(dimension);
+    }
+    index
 }
 
 fn array_values<T, TStorage>(
@@ -434,11 +592,12 @@ fn normalize_dynamic_range_to_u16<T: Copy>(values: &[T], to_f64: fn(T) -> f64) -
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs::File;
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use crate::model::SourceKind;
+    use crate::model::{AxisName, AxisShape, SourceKind};
 
     use super::{RasterPlaneLoadRequest, load_raster_plane, normalize_dynamic_range_to_u16};
 
@@ -486,6 +645,24 @@ mod tests {
             source_uri: source_path.display().to_string(),
             source_kind: SourceKind::Tiff,
             dtype: "uint16".to_owned(),
+            axis_order: vec![
+                AxisName::T,
+                AxisName::C,
+                AxisName::Z,
+                AxisName::Y,
+                AxisName::X,
+            ],
+            shape: AxisShape {
+                t: 1,
+                c: 1,
+                z: 1,
+                y: 2,
+                x: 2,
+                extra_axes: BTreeMap::new(),
+            },
+            t_index: 0,
+            z_index: 0,
+            channel_index: 0,
         })
         .expect("uint16 tiff raster load should succeed");
 

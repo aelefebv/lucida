@@ -195,6 +195,7 @@ fn infer_classic_tiff_metadata(bytes: &[u8]) -> Option<SourceMetadata> {
     let mut samples_per_pixel = None;
     let mut bits_per_sample = None;
     let mut sample_format = None;
+    let mut image_description = None;
 
     for index in 0..entry_count {
         let entry_offset = first_ifd_offset + 2 + index * 12;
@@ -215,8 +216,18 @@ fn infer_classic_tiff_metadata(bytes: &[u8]) -> Option<SourceMetadata> {
             258 => bits_per_sample = Some(value as u16),
             277 => samples_per_pixel = Some(value as u16),
             339 => sample_format = Some(value as u16),
+            270 => {
+                image_description =
+                    first_tiff_ascii(bytes, value_type, count, value_or_offset, endianness)
+            }
             _ => {}
         }
+    }
+
+    if let Some(description) = image_description.as_deref()
+        && let Some(ome_metadata) = infer_ome_tiff_metadata(description)
+    {
+        return Some(ome_metadata);
     }
 
     let resolved_width = width.unwrap_or(1);
@@ -257,6 +268,7 @@ fn infer_bigtiff_metadata(bytes: &[u8]) -> Option<SourceMetadata> {
     let mut samples_per_pixel = None;
     let mut bits_per_sample = None;
     let mut sample_format = None;
+    let mut image_description = None;
 
     for index in 0..entry_count {
         let entry_offset = first_ifd_offset + 8 + index * 20;
@@ -277,8 +289,18 @@ fn infer_bigtiff_metadata(bytes: &[u8]) -> Option<SourceMetadata> {
             258 => bits_per_sample = Some(value as u16),
             277 => samples_per_pixel = Some(value as u16),
             339 => sample_format = Some(value as u16),
+            270 => {
+                image_description =
+                    first_bigtiff_ascii(bytes, value_type, count, value_or_offset, endianness)
+            }
             _ => {}
         }
+    }
+
+    if let Some(description) = image_description.as_deref()
+        && let Some(ome_metadata) = infer_ome_tiff_metadata(description)
+    {
+        return Some(ome_metadata);
     }
 
     let resolved_width = width.unwrap_or(1);
@@ -582,6 +604,24 @@ fn first_tiff_value(
     read_value_at(bytes, offset, value_type, endianness)
 }
 
+fn first_tiff_ascii(
+    bytes: &[u8],
+    value_type: u16,
+    count: u32,
+    value_or_offset: u32,
+    _endianness: Endianness,
+) -> Option<String> {
+    if value_type != 2 || count == 0 {
+        return None;
+    }
+    let byte_count = count as usize;
+    if byte_count <= 4 {
+        return None;
+    }
+    let offset = value_or_offset as usize;
+    read_ascii_at(bytes, offset, byte_count)
+}
+
 fn first_bigtiff_value(
     bytes: &[u8],
     value_type: u16,
@@ -609,6 +649,24 @@ fn first_bigtiff_value(
     read_value_at(bytes, offset, value_type, endianness)
 }
 
+fn first_bigtiff_ascii(
+    bytes: &[u8],
+    value_type: u16,
+    count: u64,
+    value_or_offset: u64,
+    _endianness: Endianness,
+) -> Option<String> {
+    if value_type != 2 || count == 0 {
+        return None;
+    }
+    let byte_count = usize::try_from(count).ok()?;
+    if byte_count <= 8 {
+        return None;
+    }
+    let offset = usize::try_from(value_or_offset).ok()?;
+    read_ascii_at(bytes, offset, byte_count)
+}
+
 fn read_value_at(
     bytes: &[u8],
     offset: usize,
@@ -620,6 +678,124 @@ fn read_value_at(
         4 => read_u32(bytes, offset, endianness).map(u64::from),
         16 => read_u64(bytes, offset, endianness),
         _ => None,
+    }
+}
+
+fn read_ascii_at(bytes: &[u8], offset: usize, byte_count: usize) -> Option<String> {
+    let raw = bytes.get(offset..offset.saturating_add(byte_count))?;
+    let end = raw
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(raw.len());
+    if end == 0 {
+        return None;
+    }
+    let text = std::str::from_utf8(&raw[..end]).ok()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text.to_owned())
+}
+
+fn infer_ome_tiff_metadata(image_description: &str) -> Option<SourceMetadata> {
+    let size_t = xml_attr_u64(image_description, "SizeT").unwrap_or(1);
+    let size_c = xml_attr_u64(image_description, "SizeC").unwrap_or(1);
+    let size_z = xml_attr_u64(image_description, "SizeZ").unwrap_or(1);
+    let size_y = xml_attr_u64(image_description, "SizeY")?;
+    let size_x = xml_attr_u64(image_description, "SizeX")?;
+    let dimension_order = xml_attr_value(image_description, "DimensionOrder")?;
+    let dtype = normalize_ome_type(&xml_attr_value(image_description, "Type")?);
+
+    let original_axis_order = parse_dimension_order_axes(&dimension_order)?;
+    let shape = shape_from_axis_order(
+        &original_axis_order,
+        &dims_for_axis_order(&original_axis_order, size_t, size_c, size_z, size_y, size_x),
+    );
+
+    Some(SourceMetadata {
+        original_axis_order,
+        canonical_axis_order: canonical_axes(),
+        shape,
+        dtype,
+        calibration: default_calibration(),
+        channel_table: channel_table(size_c as u32),
+    })
+}
+
+fn dims_for_axis_order(
+    axis_order: &[AxisName],
+    size_t: u64,
+    size_c: u64,
+    size_z: u64,
+    size_y: u64,
+    size_x: u64,
+) -> Vec<u64> {
+    axis_order
+        .iter()
+        .map(|axis| match axis {
+            AxisName::T => size_t,
+            AxisName::C => size_c,
+            AxisName::Z => size_z,
+            AxisName::Y => size_y,
+            AxisName::X => size_x,
+            AxisName::Extra(_) => 1,
+        })
+        .collect()
+}
+
+fn parse_dimension_order_axes(value: &str) -> Option<Vec<AxisName>> {
+    let normalized = value.trim().to_ascii_uppercase();
+    if normalized.len() != 5 {
+        return None;
+    }
+    let mut axes = Vec::with_capacity(5);
+    for ch in normalized.chars() {
+        let axis = match ch {
+            'T' => AxisName::T,
+            'C' => AxisName::C,
+            'Z' => AxisName::Z,
+            'Y' => AxisName::Y,
+            'X' => AxisName::X,
+            _ => return None,
+        };
+        axes.push(axis);
+    }
+    Some(axes)
+}
+
+fn xml_attr_u64(text: &str, name: &str) -> Option<u64> {
+    xml_attr_value(text, name)?.parse::<u64>().ok()
+}
+
+fn xml_attr_value(text: &str, name: &str) -> Option<String> {
+    let needle_double = format!("{name}=\"");
+    if let Some(start) = text.find(&needle_double) {
+        let value_start = start + needle_double.len();
+        let value_end = text[value_start..].find('"')?;
+        return Some(text[value_start..(value_start + value_end)].to_owned());
+    }
+    let needle_single = format!("{name}='");
+    if let Some(start) = text.find(&needle_single) {
+        let value_start = start + needle_single.len();
+        let value_end = text[value_start..].find('\'')?;
+        return Some(text[value_start..(value_start + value_end)].to_owned());
+    }
+    None
+}
+
+fn normalize_ome_type(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "uint8" => "uint8".to_owned(),
+        "uint16" => "uint16".to_owned(),
+        "uint32" => "uint32".to_owned(),
+        "uint64" => "uint64".to_owned(),
+        "int8" => "int8".to_owned(),
+        "int16" => "int16".to_owned(),
+        "int32" => "int32".to_owned(),
+        "int64" => "int64".to_owned(),
+        "float" | "float32" => "float32".to_owned(),
+        "double" | "float64" => "float64".to_owned(),
+        other => other.to_owned(),
     }
 }
 
@@ -698,6 +874,7 @@ mod tests {
 
     use super::inspect_source;
     use crate::model::{AxisName, SourceKind};
+    use tiff::tags::Tag;
 
     fn unique_path(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -735,6 +912,30 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, // next IFD offset
         ];
         std::fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
+    }
+
+    fn write_ome_tiff_with_description(path: &std::path::Path) {
+        let file = std::fs::File::create(path).expect("OME-TIFF fixture should be created");
+        let mut encoder =
+            tiff::encoder::TiffEncoder::new(file).expect("tiff encoder creation should succeed");
+        let mut image = encoder
+            .new_image::<tiff::encoder::colortype::Gray16>(2, 2)
+            .expect("tiff image creation should succeed");
+        image
+            .encoder()
+            .write_tag(
+                Tag::ImageDescription,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<OME>
+  <Image ID="Image:0">
+    <Pixels DimensionOrder="TCZYX" SizeT="30" SizeC="2" SizeZ="17" SizeY="2" SizeX="2" Type="uint16"/>
+  </Image>
+</OME>"#,
+            )
+            .expect("image description write should succeed");
+        image
+            .write_data(&[100_u16, 110_u16, 120_u16, 130_u16])
+            .expect("pixel payload write should succeed");
     }
 
     #[test]
@@ -815,5 +1016,34 @@ mod tests {
         assert_eq!(inspected.source_metadata.dtype, "uint16");
 
         std::fs::remove_dir_all(root).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn inspects_ome_tiff_and_reads_axis_and_shape_metadata() {
+        let file_path = unique_path("ome_tiff").with_extension("ome.tif");
+        write_ome_tiff_with_description(&file_path);
+
+        let inspected = inspect_source(&file_path.display().to_string())
+            .expect("OME-TIFF source inspection should succeed");
+
+        assert_eq!(inspected.source_kind, SourceKind::Tiff);
+        assert_eq!(
+            inspected.source_metadata.original_axis_order,
+            vec![
+                AxisName::T,
+                AxisName::C,
+                AxisName::Z,
+                AxisName::Y,
+                AxisName::X
+            ]
+        );
+        assert_eq!(inspected.source_metadata.shape.t, 30);
+        assert_eq!(inspected.source_metadata.shape.c, 2);
+        assert_eq!(inspected.source_metadata.shape.z, 17);
+        assert_eq!(inspected.source_metadata.shape.y, 2);
+        assert_eq!(inspected.source_metadata.shape.x, 2);
+        assert_eq!(inspected.source_metadata.dtype, "uint16");
+
+        std::fs::remove_file(file_path).expect("fixture cleanup should succeed");
     }
 }

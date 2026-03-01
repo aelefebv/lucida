@@ -597,16 +597,15 @@ function selectedChannelBlock(channels: readonly number[]): number {
   if (!Number.isFinite(primary) || primary < 0) {
     return 0;
   }
-  return Math.floor(primary / 4);
+  return Math.floor(primary);
 }
 
 function effectiveTileSelection(
-  _tIndex: number,
-  _zIndex: number,
-  _channelBlock: number,
+  tIndex: number,
+  zIndex: number,
+  channelBlock: number,
 ): { t: number; z: number; channelBlock: number } {
-  // S1 engine currently packages tile payloads only for base-plane keys.
-  return { t: 0, z: 0, channelBlock: 0 };
+  return { t: tIndex, z: zIndex, channelBlock };
 }
 
 function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {

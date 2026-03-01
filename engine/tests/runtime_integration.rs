@@ -9,6 +9,7 @@ use lucida_engine::{
 };
 use reqwest::StatusCode;
 use serde_json::json;
+use tiff::tags::Tag;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
@@ -228,6 +229,71 @@ fn write_gray16_tiff(path: &Path, width: u32, height: u32, pixels: &[u16]) {
         .expect("tiff fixture image should be created")
         .write_data(pixels)
         .expect("tiff fixture pixels should be written");
+}
+
+fn write_tczyx_ome_tiff(
+    path: &Path,
+    size_t: u64,
+    size_c: u64,
+    size_z: u64,
+    width: u32,
+    height: u32,
+) {
+    let file = fs::File::create(path).expect("OME-TIFF fixture file should be created");
+    let mut encoder =
+        tiff::encoder::TiffEncoder::new(file).expect("OME-TIFF fixture encoder should be created");
+
+    let mut wrote_description = false;
+    for t in 0..size_t {
+        for c in 0..size_c {
+            for z in 0..size_z {
+                let mut image = encoder
+                    .new_image::<tiff::encoder::colortype::Gray16>(width, height)
+                    .expect("OME-TIFF image should be created");
+                if !wrote_description {
+                    let image_description = format!(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<OME>
+  <Image ID="Image:0">
+    <Pixels DimensionOrder="TCZYX" SizeT="{size_t}" SizeC="{size_c}" SizeZ="{size_z}" SizeY="{height}" SizeX="{width}" Type="uint16"/>
+  </Image>
+</OME>"#
+                    );
+                    image
+                        .encoder()
+                        .write_tag(Tag::ImageDescription, image_description.as_str())
+                        .expect("OME metadata should be written");
+                    wrote_description = true;
+                }
+
+                let mut pixels = Vec::with_capacity((width as usize) * (height as usize));
+                for y in 0..height as u64 {
+                    for x in 0..width as u64 {
+                        let value = (t * 1000) + (c * 100) + (z * 10) + (y * width as u64) + x;
+                        pixels.push(
+                            u16::try_from(value)
+                                .expect("fixture pixel values should fit in uint16"),
+                        );
+                    }
+                }
+
+                image
+                    .write_data(&pixels)
+                    .expect("OME-TIFF image pixels should be written");
+            }
+        }
+    }
+}
+
+fn expected_tczyx_pixels(t: u64, c: u64, z: u64, width: u32, height: u32) -> Vec<u16> {
+    let mut pixels = Vec::with_capacity((width as usize) * (height as usize));
+    for y in 0..height as u64 {
+        for x in 0..width as u64 {
+            let value = (t * 1000) + (c * 100) + (z * 10) + (y * width as u64) + x;
+            pixels.push(u16::try_from(value).expect("fixture pixel values should fit in uint16"));
+        }
+    }
+    pixels
 }
 
 #[tokio::test]
@@ -954,6 +1020,149 @@ async fn runtime_open_uint16_source_serves_16bit_preview_and_tile_payloads() {
     assert_eq!(tile_height, 2);
     assert_eq!(tile_max, u16::MAX);
     assert_eq!(tile_pixels, source_pixels);
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_open_ome_tiff_serves_selected_t_z_c_planes() {
+    let cache_root = unique_path("open_source_tczyx_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("open_source_tczyx_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-open-source-tczyx.ome.tif");
+    let width = 2_u32;
+    let height = 1_u32;
+    write_tczyx_ome_tiff(&source_path, 2, 2, 2, width, height);
+
+    let runtime = RuntimeFixture::start(&cache_root).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-open-source-tczyx" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-source-tczyx",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned");
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+    assert_eq!(generation_seq, 1);
+
+    let selections = [
+        (0_u64, 0_u64, 0_u64),
+        (1_u64, 0_u64, 0_u64),
+        (0_u64, 1_u64, 0_u64),
+        (1_u64, 1_u64, 1_u64),
+    ];
+    let channel_packaging = ChannelBlockPackaging::default();
+    for (t, z, channel) in selections {
+        let tile_url = data_plane_url(
+            &runtime,
+            ChunkKey {
+                source_id: source_id.to_owned(),
+                generation_seq,
+                asset_kind: ChunkAssetKind::Tile2d,
+                lod: 0,
+                t: u32::try_from(t).expect("fixture t index should fit u32"),
+                z: u32::try_from(z).expect("fixture z index should fit u32"),
+                channel_block: u16::try_from(channel)
+                    .expect("fixture channel index should fit u16"),
+                y: 0,
+                x: 0,
+            },
+        );
+
+        let tile_response = client
+            .get(&tile_url)
+            .send()
+            .await
+            .expect("tile request should succeed");
+        assert_eq!(tile_response.status(), StatusCode::OK);
+        let tile_payload = tile_response
+            .bytes()
+            .await
+            .expect("tile payload should be readable");
+        let decoded_tile = channel_packaging
+            .decode(tile_payload.as_ref())
+            .expect("tile payload should decode as channel block");
+        let (tile_width, tile_height, tile_max, tile_pixels) = parse_pgm(&decoded_tile.payload);
+        assert_eq!(tile_width, u64::from(width));
+        assert_eq!(tile_height, u64::from(height));
+        assert_eq!(tile_max, u16::MAX);
+        assert_eq!(
+            tile_pixels,
+            expected_tczyx_pixels(t, channel, z, width, height)
+        );
+
+        let preview_url = data_plane_url(
+            &runtime,
+            ChunkKey {
+                source_id: source_id.to_owned(),
+                generation_seq,
+                asset_kind: ChunkAssetKind::Preview2d,
+                lod: 0,
+                t: u32::try_from(t).expect("fixture t index should fit u32"),
+                z: u32::try_from(z).expect("fixture z index should fit u32"),
+                channel_block: u16::try_from(channel)
+                    .expect("fixture channel index should fit u16"),
+                y: 0,
+                x: 0,
+            },
+        );
+
+        let preview_response = client
+            .get(&preview_url)
+            .send()
+            .await
+            .expect("preview request should succeed");
+        assert_eq!(preview_response.status(), StatusCode::OK);
+        let preview_payload = preview_response
+            .bytes()
+            .await
+            .expect("preview payload should be readable");
+        let (preview_width, preview_height, preview_max, preview_pixels) =
+            parse_pgm(preview_payload.as_ref());
+        assert_eq!(preview_width, u64::from(width));
+        assert_eq!(preview_height, u64::from(height));
+        assert_eq!(preview_max, u16::MAX);
+        assert_eq!(
+            preview_pixels,
+            expected_tczyx_pixels(t, channel, z, width, height)
+        );
+    }
 
     runtime.stop().await;
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");

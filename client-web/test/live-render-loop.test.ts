@@ -109,7 +109,7 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
-  it("uses active t/z selection for preview and base tile keys for S1 cache layout", async () => {
+  it("uses active t/z selection when requesting preview and tile payloads", async () => {
     const requestedUrls: string[] = [];
     const frames: RenderFrameState[] = [];
     const loop = new LiveRenderLoop(
@@ -153,7 +153,7 @@ describe("LiveRenderLoop", () => {
       requestedUrls.some((url) => url.includes("/v1/preview2d/") && url.includes("/t/2/z/3/")),
     ).toBe(true);
     expect(
-      requestedUrls.some((url) => url.includes("/v1/tile2d/") && url.includes("/t/0/z/0/cb/0/")),
+      requestedUrls.some((url) => url.includes("/v1/tile2d/") && url.includes("/t/2/z/3/cb/0/")),
     ).toBe(true);
     loop.dispose();
   });
@@ -554,7 +554,7 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
-  it("avoids non-base tile requests for non-zero t/z/channel selections", async () => {
+  it("falls back to base t/z/channel-block tile when selected plane is unavailable", async () => {
     const requestedUrls: string[] = [];
     const frames: RenderFrameState[] = [];
     const loop = new LiveRenderLoop(
@@ -575,6 +575,9 @@ describe("LiveRenderLoop", () => {
           });
         }
         if (url.includes("/v1/tile2d/")) {
+          if (url.includes("/t/1/") || url.includes("/z/1/") || url.includes("/cb/4/")) {
+            return new Response("", { status: 404 });
+          }
           return new Response(
             new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [90, 180])))]),
             {
@@ -602,8 +605,8 @@ describe("LiveRenderLoop", () => {
       requestedUrls.some((url) => url.includes("/v1/tile2d/src_fixture/gen/1/lod/0/t/0/z/0/cb/0/")),
     ).toBe(true);
     expect(
-      requestedUrls.some((url) => url.includes("/v1/tile2d/src_fixture/gen/1/lod/0/t/1/z/1/cb/1/")),
-    ).toBe(false);
+      requestedUrls.some((url) => url.includes("/v1/tile2d/src_fixture/gen/1/lod/0/t/1/z/1/cb/4/")),
+    ).toBe(true);
     const latest = frames.at(-1);
     expect(latest?.frameKind).toBe("tile");
     expect(latest?.pixelStats.max).toBe(180);

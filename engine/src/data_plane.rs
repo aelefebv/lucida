@@ -37,7 +37,7 @@ impl DataPlaneService {
         let key = ChunkKey::parse_path(path).map_err(|error| DataPlaneError::InvalidPath {
             message: error.to_string(),
         })?;
-        let payload_path = resolve_payload_path(&self.cache_root, &key);
+        let payload_path = resolve_existing_payload_path(&self.cache_root, &key);
         if !payload_path.exists() {
             return Err(DataPlaneError::NotFound {
                 path: payload_path.display().to_string(),
@@ -101,8 +101,56 @@ fn resolve_payload_path(cache_root: &Path, key: &ChunkKey) -> PathBuf {
             .join(format!("brick_{:08}.blkpkg", key.y)),
         ChunkAssetKind::Preview2d => generation_root
             .join("preview2d")
-            .join(format!("lod_{}.pgm", key.lod)),
+            .join(format!("lod{}", key.lod))
+            .join(format!("t{}_z{}_cb{}.pgm", key.t, key.z, key.channel_block)),
     }
+}
+
+fn resolve_existing_payload_path(cache_root: &Path, key: &ChunkKey) -> PathBuf {
+    let primary = resolve_payload_path(cache_root, key);
+    if primary.exists() {
+        return primary;
+    }
+
+    match key.asset_kind {
+        ChunkAssetKind::Preview2d => {
+            let legacy = cache_root
+                .join(&key.source_id)
+                .join(format!("gen_{:08}", key.generation_seq))
+                .join("preview2d")
+                .join(format!("lod_{}.pgm", key.lod));
+            if legacy.exists() {
+                return legacy;
+            }
+            if key.t != 0 || key.z != 0 || key.channel_block != 0 {
+                let base = cache_root
+                    .join(&key.source_id)
+                    .join(format!("gen_{:08}", key.generation_seq))
+                    .join("preview2d")
+                    .join(format!("lod{}", key.lod))
+                    .join("t0_z0_cb0.pgm");
+                if base.exists() {
+                    return base;
+                }
+            }
+        }
+        ChunkAssetKind::Tile2d => {
+            if key.t != 0 || key.z != 0 || key.channel_block != 0 {
+                let base = cache_root
+                    .join(&key.source_id)
+                    .join(format!("gen_{:08}", key.generation_seq))
+                    .join("tile2d")
+                    .join(format!("lod{}", key.lod))
+                    .join(format!("t0_z0_cb0_r{}_c{}.tileblk", key.y, key.x));
+                if base.exists() {
+                    return base;
+                }
+            }
+        }
+        ChunkAssetKind::Brick3d => {}
+    }
+
+    primary
 }
 
 fn content_type_for_path(path: &Path) -> String {
