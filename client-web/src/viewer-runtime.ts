@@ -41,6 +41,14 @@ type RuntimeErrorMessage = {
   message: string;
 };
 
+type OpenSourceResult = {
+  ok: boolean;
+  message: string;
+};
+
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+const defaultFetchImpl: FetchLike = (input, init) => globalThis.fetch(input, init);
+
 type ConnectMode = "attach" | "reconnect";
 
 const CLIENT_EVENT_TYPES = new Set<EventEnvelope["event_type"]>([
@@ -60,6 +68,7 @@ export class ViewerRuntime {
   private readonly onUpdate: (state: ViewerRuntimeState) => void;
   private readonly bootstrap: ConnectionBootstrap;
   private readonly renderLoop: LiveRenderLoop;
+  private readonly fetchImpl: FetchLike;
   private stateValue: ViewerRuntimeState;
   private socketValue: WebSocket | null;
   private interactionModel: InteractionModel | null;
@@ -72,6 +81,7 @@ export class ViewerRuntime {
   public constructor(
     route: ViewerRoute,
     onUpdate: (state: ViewerRuntimeState) => void,
+    fetchImpl: FetchLike = defaultFetchImpl,
   ) {
     this.route = route;
     this.onUpdate = onUpdate;
@@ -83,6 +93,7 @@ export class ViewerRuntime {
       };
       this.onUpdate(this.stateValue);
     });
+    this.fetchImpl = fetchImpl;
     this.stateValue = {
       routeKind: route.kind,
       connection: this.bootstrap.state(),
@@ -148,6 +159,71 @@ export class ViewerRuntime {
     }
     this.interactionModel.setChannels(channels);
     this.flushInteractionCommands();
+  }
+
+  public async openSource(name: string, uri: string): Promise<OpenSourceResult> {
+    const trimmedName = name.trim();
+    if (trimmedName.length === 0) {
+      return { ok: false, message: "Source name is required." };
+    }
+    const trimmedUri = uri.trim();
+    if (trimmedUri.length === 0) {
+      return { ok: false, message: "Source URI is required." };
+    }
+    if (this.bootstrap.state().phase !== "attached") {
+      return { ok: false, message: "Attach to the session before opening a source." };
+    }
+
+    const endpoint = `${runtimeHttpBase(this.route)}/v1/sessions/${encodeURIComponent(this.route.sessionId)}/sources`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          name: trimmedName,
+          uri: trimmedUri,
+        }),
+      });
+    } catch (error) {
+      return {
+        ok: false,
+        message: `Source open request failed: ${errorMessage(error)}`,
+      };
+    }
+
+    if (!response.ok) {
+      const detail = await parseErrorDetail(response);
+      return {
+        ok: false,
+        message: `Source open failed (${response.status.toString()}): ${detail}`,
+      };
+    }
+
+    const body = (await parseJsonObject(response)) as {
+      source_id?: unknown;
+      generation_seq?: unknown;
+    } | null;
+    const sourceId =
+      body !== null && typeof body.source_id === "string"
+        ? body.source_id
+        : "unknown";
+    const generationSeq =
+      body !== null && typeof body.generation_seq === "number"
+        ? body.generation_seq
+        : null;
+    if (generationSeq === null) {
+      return {
+        ok: true,
+        message: `Opened source ${sourceId}.`,
+      };
+    }
+    return {
+      ok: true,
+      message: `Opened source ${sourceId} (generation ${generationSeq.toString()}).`,
+    };
   }
 
   public dispose(): void {
@@ -415,4 +491,53 @@ function viewportFromClientState(clientState: ClientState): ViewportState {
     tIndex: clientState.tIndex,
     selectedChannels: [...clientState.selectedChannels],
   };
+}
+
+function runtimeHttpBase(route: ViewerRoute): string {
+  const dataBase = normalizeUrlBase(route.dataBase);
+  if (dataBase.endsWith("/v1/data")) {
+    return dataBase.slice(0, -"/v1/data".length);
+  }
+  if (dataBase.startsWith("http://") || dataBase.startsWith("https://")) {
+    return dataBase;
+  }
+  const wsBase = normalizeUrlBase(route.wsBase);
+  if (wsBase.startsWith("wss://")) {
+    return `https://${wsBase.slice("wss://".length)}`;
+  }
+  if (wsBase.startsWith("ws://")) {
+    return `http://${wsBase.slice("ws://".length)}`;
+  }
+  return wsBase;
+}
+
+function normalizeUrlBase(value: string): string {
+  return value.replace(/\/+$/, "");
+}
+
+async function parseErrorDetail(response: Response): Promise<string> {
+  const parsed = await parseJsonObject(response);
+  if (parsed !== null && typeof parsed.message === "string") {
+    return parsed.message;
+  }
+  return response.statusText || "request failed";
+}
+
+async function parseJsonObject(response: Response): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed = (await response.json()) as unknown;
+    if (isRecord(parsed)) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.length > 0) {
+    return error.message;
+  }
+  return "unknown transport error";
 }

@@ -62,6 +62,18 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
     <canvas data-testid="minimap-canvas" width="1" height="1"></canvas>
     <div>Warnings target</div>
   </section>
+  <section data-testid="open-source-controls">
+    <label>
+      Source Name
+      <input data-testid="input-source-name" type="text" value="source" />
+    </label>
+    <label>
+      Source URI
+      <input data-testid="input-source-uri" type="text" placeholder="/absolute/path/data.ome.zarr" />
+    </label>
+    <button type="button" data-testid="btn-open-source">Open Source</button>
+  </section>
+  <section data-testid="open-source-status">Source action: idle</section>
   <section data-testid="interaction-controls">
     <button type="button" data-testid="btn-pan-left">Pan Left</button>
     <button type="button" data-testid="btn-pan-right">Pan Right</button>
@@ -181,6 +193,18 @@ function attachInteractionHandlers(
   registerClick("btn-pan-right", () => runtime.pan(12, 0));
   registerClick("btn-zoom-in", () => runtime.zoom(1.2, 0, 0));
   registerClick("btn-zoom-out", () => runtime.zoom(0.8, 0, 0));
+  registerClick("btn-open-source", () => {
+    const nameInput = mount.querySelector('[data-testid="input-source-name"]');
+    const uriInput = mount.querySelector('[data-testid="input-source-uri"]');
+    if (!(nameInput instanceof HTMLInputElement) || !(uriInput instanceof HTMLInputElement)) {
+      setOpenSourceStatus(mount, "Source action unavailable.");
+      return;
+    }
+    setOpenSourceStatus(mount, "Opening source...");
+    void runtime.openSource(nameInput.value, uriInput.value).then((result) => {
+      setOpenSourceStatus(mount, result.message);
+    });
+  });
 
   return () => {
     document.removeEventListener("keydown", onKeyDown);
@@ -247,4 +271,12 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function setOpenSourceStatus(mount: HTMLElement, message: string): void {
+  const statusNode = mount.querySelector('[data-testid="open-source-status"]');
+  if (!(statusNode instanceof HTMLElement)) {
+    return;
+  }
+  statusNode.textContent = message;
 }

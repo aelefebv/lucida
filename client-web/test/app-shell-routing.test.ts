@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 
 import { afterEach, describe, expect, it } from "vitest";
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 
 import { bootstrapApp, type AppController } from "../src/app-shell";
 
@@ -14,6 +14,7 @@ type SocketFixture = {
   url: string;
   dataBaseUrl: string | null;
   received: unknown[];
+  openSourceRequests: Array<{ name: string; uri: string }>;
   close: () => Promise<void>;
 };
 
@@ -117,6 +118,39 @@ describe("app shell routing", () => {
     expect(viewportCanvas.width).toBe(2);
     expect(viewportCanvas.height).toBe(1);
   });
+
+  it("opens a source from the viewer shell and drives first render", async () => {
+    const fixture = await startSourceOpenActionFixture();
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_open_ui&client=browser-open-ui&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}&dataBase=${encodeURIComponent(fixture.dataBaseUrl ?? "")}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => {
+      const status = queryText("attach-status");
+      return status.includes("Attached");
+    });
+
+    queryInput("input-source-name").value = "my-ome-source";
+    queryInput("input-source-uri").value = "/tmp/demo.ome.zarr";
+    queryButton("btn-open-source").click();
+
+    await waitFor(() => {
+      return queryText("open-source-status").includes("Opened source");
+    }, 3000);
+
+    expect(fixture.openSourceRequests).toEqual([
+      { name: "my-ome-source", uri: "/tmp/demo.ome.zarr" },
+    ]);
+
+    await waitFor(() => queryText("frame-state").includes("(preview)"), 3000);
+    await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+  });
 });
 
 async function startFixtureServer(config: {
@@ -182,6 +216,7 @@ async function startFixtureServer(config: {
     url,
     dataBaseUrl: null,
     received,
+    openSourceRequests: [],
     close: async () => {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -306,6 +341,177 @@ async function startIntegratedRenderFixture(): Promise<SocketFixture> {
     url: wsUrl,
     dataBaseUrl,
     received,
+    openSourceRequests: [],
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      await new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+async function startSourceOpenActionFixture(): Promise<SocketFixture> {
+  const received: unknown[] = [];
+  const openSourceRequests: Array<{ name: string; uri: string }> = [];
+  const previewBody = pgmBody(2, 1, [12, 34]);
+  const tileBody = channelBlockRawPayload(pgmBody(2, 1, [200, 210]));
+  let sessionRev = 1;
+  const connectedSockets = new Set<WebSocket>();
+  const sessionId = "sess_open_ui";
+
+  const httpServer = createServer((request, response) => {
+    if (request.method === "POST" && request.url === `/v1/sessions/${sessionId}/sources`) {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => {
+        chunks.push(Buffer.from(chunk));
+      });
+      request.on("end", () => {
+        const bodyText = Buffer.concat(chunks).toString("utf-8");
+        const parsed = JSON.parse(bodyText) as { name?: unknown; uri?: unknown };
+        const name = typeof parsed.name === "string" ? parsed.name : "";
+        const uri = typeof parsed.uri === "string" ? parsed.uri : "";
+        openSourceRequests.push({ name, uri });
+
+        response.statusCode = 201;
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({
+            source_id: "src_open",
+            dataset_id: "ds_open",
+            generation_id: "gen_open_1",
+            generation_seq: 1,
+            source_status: "watching",
+          }),
+        );
+
+        sessionRev += 1;
+        broadcastEvent(connectedSockets, {
+          message_type: "event",
+          schema_version: "lucida-proto-0.1",
+          session_id: sessionId,
+          session_rev: sessionRev,
+          event_type: "scene_source_upsert",
+          payload: {
+            sourceId: "src_open",
+            name,
+            status: "watching",
+            latestWorkingGenerationSeq: 1,
+          },
+        });
+        sessionRev += 1;
+        broadcastEvent(connectedSockets, {
+          message_type: "event",
+          schema_version: "lucida-proto-0.1",
+          session_id: sessionId,
+          session_rev: sessionRev,
+          event_type: "scene_dataset_upsert",
+          payload: {
+            datasetId: "ds_open",
+            sourceId: "src_open",
+            resolvedGenerationSeq: 1,
+          },
+        });
+      });
+      return;
+    }
+
+    if (request.url?.includes("/v1/preview2d/")) {
+      setTimeout(() => {
+        respondPgm(response, previewBody);
+      }, 10);
+      return;
+    }
+    if (request.url?.includes("/v1/tile2d/")) {
+      setTimeout(() => {
+        respondBinary(response, tileBody);
+      }, 100);
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => {
+    httpServer.listen(0, "127.0.0.1", () => resolve());
+  });
+  const httpAddress = httpServer.address() as AddressInfo;
+  const dataBaseUrl = `http://127.0.0.1:${httpAddress.port.toString()}`;
+
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  server.on("connection", (socket) => {
+    connectedSockets.add(socket);
+    socket.on("close", () => {
+      connectedSockets.delete(socket);
+    });
+    socket.on("message", (raw) => {
+      const text = raw.toString("utf-8");
+      const parsed = JSON.parse(text) as unknown;
+      received.push(parsed);
+      if (isRecord(parsed) && parsed.message_type === "attach") {
+        socket.send(
+          JSON.stringify({
+            message_type: "session.snapshot",
+            session_id: sessionId,
+            permission_class: "view",
+            is_lease_holder: false,
+            snapshot: {
+              session: {
+                session_id: sessionId,
+                session_rev: sessionRev,
+              },
+              shared_scene: {
+                scene_rev: 1,
+                sources: {},
+                datasets: {},
+                layers: {},
+                warnings: [],
+              },
+              client_view: {
+                client_id: "cli_open_ui",
+                view_rev: 1,
+                active_layer_id: null,
+                center_x: 0,
+                center_y: 0,
+                zoom: 1,
+                z_index: 0,
+                t_index: 0,
+                selected_channels: [0],
+                warnings: [],
+              },
+              warnings: [],
+            },
+          }),
+        );
+      }
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.on("listening", () => resolve());
+  });
+  const wsAddress = server.address() as AddressInfo;
+  const wsUrl = `ws://127.0.0.1:${wsAddress.port.toString()}`;
+
+  return {
+    server,
+    httpServer,
+    url: wsUrl,
+    dataBaseUrl,
+    received,
+    openSourceRequests,
     close: async () => {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => {
@@ -350,6 +556,22 @@ function queryCanvas(testId: string): HTMLCanvasElement {
   return node;
 }
 
+function queryInput(testId: string): HTMLInputElement {
+  const node = document.querySelector(`[data-testid="${testId}"]`);
+  if (!(node instanceof HTMLInputElement)) {
+    throw new Error(`missing input data-testid node ${testId}`);
+  }
+  return node;
+}
+
+function queryButton(testId: string): HTMLButtonElement {
+  const node = document.querySelector(`[data-testid="${testId}"]`);
+  if (!(node instanceof HTMLButtonElement)) {
+    throw new Error(`missing button data-testid node ${testId}`);
+  }
+  return node;
+}
+
 async function waitFor(
   check: () => boolean,
   timeoutMs = 1200,
@@ -369,6 +591,16 @@ async function waitFor(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function broadcastEvent(
+  sockets: Set<WebSocket>,
+  payload: Record<string, unknown>,
+): void {
+  const message = JSON.stringify(payload);
+  for (const socket of sockets) {
+    socket.send(message);
+  }
 }
 
 function respondPgm(
