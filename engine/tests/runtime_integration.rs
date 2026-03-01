@@ -455,6 +455,69 @@ async fn runtime_serves_data_plane_get_and_head() {
 }
 
 #[tokio::test]
+async fn runtime_source_open_endpoint_accepts_cors_preflight() {
+    let cache_root = unique_path("cors_preflight");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let runtime = RuntimeFixture::start(&cache_root).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-cors-preflight" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present");
+
+    let response = client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!(
+                "{}/v1/sessions/{session_id}/sources",
+                runtime.http_base()
+            ),
+        )
+        .header("origin", "http://127.0.0.1:5173")
+        .header("access-control-request-method", "POST")
+        .header("access-control-request-headers", "content-type")
+        .send()
+        .await
+        .expect("OPTIONS preflight request should succeed");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-methods")
+            .and_then(|value| value.to_str().ok()),
+        Some("GET, HEAD, POST, OPTIONS")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|value| value.to_str().ok()),
+        Some("content-type")
+    );
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+}
+
+#[tokio::test]
 async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_and_tile() {
     let cache_root = unique_path("open_source_cache");
     fs::create_dir_all(&cache_root).expect("cache root should be created");

@@ -79,15 +79,24 @@ pub async fn run_runtime_server(
 ) -> std::io::Result<()> {
     let state = RuntimeState::new(&config);
     let app = Router::new()
-        .route("/v1/info", get(runtime_info))
-        .route("/v1/sessions", post(create_session))
+        .route("/v1/info", get(runtime_info).options(cors_preflight))
+        .route("/v1/sessions", post(create_session).options(cors_preflight))
         .route(
             "/v1/sessions/{session_id}/sources",
-            post(add_source_endpoint),
+            post(add_source_endpoint).options(cors_preflight),
         )
-        .route("/v1/sessions/{session_id}/snapshot", get(snapshot_endpoint))
-        .route("/v1/sessions/{session_id}/connect", get(connect_endpoint))
-        .route("/v1/data/{*chunk_path}", get(data_get).head(data_head))
+        .route(
+            "/v1/sessions/{session_id}/snapshot",
+            get(snapshot_endpoint).options(cors_preflight),
+        )
+        .route(
+            "/v1/sessions/{session_id}/connect",
+            get(connect_endpoint).options(cors_preflight),
+        )
+        .route(
+            "/v1/data/{*chunk_path}",
+            get(data_get).head(data_head).options(cors_preflight),
+        )
         .with_state(state)
         .layer(map_response(add_cors_headers));
 
@@ -1262,6 +1271,10 @@ async fn add_cors_headers(mut response: Response) -> Response {
         HeaderValue::from_static("content-type"),
     );
     response
+}
+
+async fn cors_preflight() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 fn data_plane_error(error: DataPlaneError) -> (StatusCode, Json<RuntimeHttpError>) {
