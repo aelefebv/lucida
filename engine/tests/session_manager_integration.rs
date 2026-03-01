@@ -307,3 +307,72 @@ fn session_manager_generation_state_machine_updates_dataset_resolution() {
 
     fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
 }
+
+#[test]
+fn session_manager_builds_canonical_cache_for_generation_and_records_location() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "lucida_luc203_generation_cache_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    let cache_root = std::env::temp_dir().join(format!(
+        "lucida_luc203_generation_cache_root_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+    fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+    let source_path = fixture_dir.join("canonical-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-generation-cache");
+    let added = manager
+        .add_source(
+            &created.session_id,
+            AddSourceRequest {
+                name: "canonical-source".to_owned(),
+                uri: source_path.display().to_string(),
+            },
+        )
+        .expect("source add should succeed");
+    let detected = manager
+        .detect_generation(&created.session_id, &added.source.source_id)
+        .expect("generation detection should succeed");
+    manager
+        .start_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        )
+        .expect("generation start should succeed");
+    manager
+        .mark_generation_ready(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        )
+        .expect("generation ready should succeed");
+    let built = manager
+        .build_canonical_cache_for_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+            &cache_root,
+        )
+        .expect("canonical cache build should succeed");
+
+    let canonical_cache_path = built
+        .canonical_cache_path
+        .expect("canonical cache path should be present");
+    assert!(Path::new(&canonical_cache_path).join(".zattrs").exists());
+    assert!(
+        Path::new(&canonical_cache_path)
+            .join("0")
+            .join(".zarray")
+            .exists()
+    );
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
+    fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");
+}

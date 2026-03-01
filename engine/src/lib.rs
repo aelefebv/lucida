@@ -1,3 +1,4 @@
+mod canonical_cache;
 mod clock;
 mod command_router;
 mod constants;
@@ -12,6 +13,10 @@ mod source_inspector;
 mod source_watch;
 mod warning_service;
 
+pub use canonical_cache::{
+    CanonicalCacheBuildRequest, CanonicalCacheBuildResult, CanonicalCacheBuilder,
+    CanonicalCacheError,
+};
 pub use command_router::{
     CommandAck, CommandArgs, CommandEnvelope, CommandError, CommandErrorCode, CommandOutcome,
     CommandRouter, CommandScope, command_error_to_envelope,

@@ -239,6 +239,7 @@ pub struct GenerationRecord {
     pub stage: GenerationStage,
     pub progress_percent: u8,
     pub availability: GenerationAvailability,
+    pub canonical_cache_path: Option<String>,
     pub detected_at: String,
     pub updated_at: String,
 }

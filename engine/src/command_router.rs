@@ -580,6 +580,16 @@ impl From<SessionError> for CommandError {
                     current_stage, requested_stage
                 ),
             },
+            SessionError::CanonicalCacheBuildFailed {
+                source_id,
+                generation_seq,
+                reason,
+            } => Self {
+                code: CommandErrorCode::SourceUnavailable,
+                message: format!(
+                    "canonical cache build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
+                ),
+            },
             SessionError::LayerNotFound {
                 session_id,
                 layer_id,

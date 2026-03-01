@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
+use crate::canonical_cache::{
+    CanonicalCacheBuildRequest, CanonicalCacheBuilder, CanonicalCacheError,
+};
 use crate::clock::rfc3339_now;
 use crate::constants::{
     ENGINE_VERSION, HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE,
@@ -419,6 +423,7 @@ impl SessionManager {
                         tile2d_ready_lods: vec![],
                         brick3d_ready_lods: vec![],
                     },
+                    canonical_cache_path: None,
                     detected_at: ready_at.clone(),
                     updated_at: ready_at.clone(),
                 },
@@ -469,6 +474,7 @@ impl SessionManager {
                 tile2d_ready_lods: vec![],
                 brick3d_ready_lods: vec![],
             },
+            canonical_cache_path: None,
             detected_at: detected_at.clone(),
             updated_at: detected_at,
         };
@@ -603,6 +609,93 @@ impl SessionManager {
             (generation.generation_id.clone(), generation.clone())
         };
         sync_working_dataset_generation(session, source_id, &generation_id, generation_seq);
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn build_canonical_cache_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        cache_root: impl Into<PathBuf>,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let (source_uri, source_kind, source_metadata, generation_id) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            let generation = source.generations.get(&generation_seq).ok_or_else(|| {
+                SessionError::GenerationNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                }
+            })?;
+            (
+                source.uri.clone(),
+                source.source_kind,
+                source.source_metadata.clone(),
+                generation.generation_id.clone(),
+            )
+        };
+
+        let builder = CanonicalCacheBuilder::new(cache_root);
+        let build_result = builder
+            .build(&CanonicalCacheBuildRequest {
+                source_id: source_id.to_owned(),
+                generation_id,
+                generation_seq,
+                source_uri,
+                source_kind,
+                source_metadata,
+            })
+            .map_err(|error| match error {
+                CanonicalCacheError::InvalidSourceUri { uri, message } => {
+                    SessionError::CanonicalCacheBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("invalid source URI `{uri}`: {message}"),
+                    }
+                }
+                CanonicalCacheError::IoError { path, message } => {
+                    SessionError::CanonicalCacheBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("io error at `{path}`: {message}"),
+                    }
+                }
+                CanonicalCacheError::SerializationError { message } => {
+                    SessionError::CanonicalCacheBuildFailed {
+                        source_id: source_id.to_owned(),
+                        generation_seq,
+                        reason: format!("serialization error: {message}"),
+                    }
+                }
+            })?;
+
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        generation.canonical_cache_path = Some(build_result.canonical_root.display().to_string());
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
         bump_session_rev(session);
         refresh_warnings(session);
         Ok(snapshot)
@@ -1806,6 +1899,70 @@ mod tests {
             .expect("fixture parent should exist")
             .to_path_buf();
         fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn canonical_cache_builder_writes_generation_cache_path() {
+        let source_path = fixture_tiff_path("canonical_cache");
+        let cache_root = std::env::temp_dir().join(format!(
+            "lucida_luc203_cache_root_{}_{}",
+            std::process::id(),
+            "unit"
+        ));
+        fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("canonical-cache-session");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "canonical-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+        let detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("generation detection should succeed");
+        manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation start should succeed");
+        let ready = manager
+            .mark_generation_ready(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation ready should succeed");
+
+        let built = manager
+            .build_canonical_cache_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                &cache_root,
+            )
+            .expect("canonical cache build should succeed");
+        assert_eq!(built.generation_id, ready.generation_id);
+        let canonical_path = built
+            .canonical_cache_path
+            .clone()
+            .expect("canonical cache path should be recorded");
+        let canonical_root = PathBuf::from(canonical_path);
+        assert!(canonical_root.join(".zattrs").exists());
+        assert!(canonical_root.join("0").join(".zarray").exists());
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+        fs::remove_dir_all(cache_root).expect("cache cleanup should succeed");
     }
 
     #[test]
