@@ -30,7 +30,7 @@ pub use canonical_cache::{
 };
 pub use channel_block::{
     ChannelBlockError, ChannelBlockPackaging, ChannelBlockReadResult, ChannelBlockWriteRequest,
-    PayloadCodec, PayloadKind,
+    PayloadCodec, PayloadKind, codec_from_packaged_payload,
 };
 pub use chunk_key::{ChunkAssetKind, ChunkKey, ChunkKeyError};
 pub use command_router::{

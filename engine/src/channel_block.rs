@@ -97,28 +97,18 @@ impl ChannelBlockPackaging {
     }
 
     pub fn decode(&self, bytes: &[u8]) -> Result<ChannelBlockReadResult, ChannelBlockError> {
+        let metadata = read_metadata(bytes)?;
         if bytes.len() < HEADER_LEN {
             return Err(ChannelBlockError::InvalidHeader {
                 reason: "payload is shorter than channel-block header".to_owned(),
             });
         }
-        if &bytes[0..4] != MAGIC {
-            return Err(ChannelBlockError::InvalidHeader {
-                reason: "channel-block magic mismatch".to_owned(),
-            });
-        }
-        let version = bytes[4];
-        if version != 1 {
-            return Err(ChannelBlockError::InvalidHeader {
-                reason: format!("unsupported channel-block version `{version}`"),
-            });
-        }
-        let payload_kind = parse_payload_kind(bytes[5])?;
-        let codec = parse_payload_codec(bytes[6])?;
-        let channel_count = u16::from_le_bytes([bytes[8], bytes[9]]);
-        let channel_block_size = u16::from_le_bytes([bytes[10], bytes[11]]);
-        let encoded_len = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
-        let decoded_len = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
+        let payload_kind = metadata.payload_kind;
+        let codec = metadata.codec;
+        let channel_count = metadata.channel_count;
+        let channel_block_size = metadata.channel_block_size;
+        let encoded_len = metadata.encoded_len;
+        let decoded_len = metadata.decoded_len;
 
         if bytes.len() != HEADER_LEN + encoded_len {
             return Err(ChannelBlockError::InvalidHeader {
@@ -142,6 +132,47 @@ impl ChannelBlockPackaging {
             payload,
         })
     }
+}
+
+pub fn codec_from_packaged_payload(bytes: &[u8]) -> Result<PayloadCodec, ChannelBlockError> {
+    Ok(read_metadata(bytes)?.codec)
+}
+
+struct ChannelBlockMetadata {
+    payload_kind: PayloadKind,
+    codec: PayloadCodec,
+    channel_count: u16,
+    channel_block_size: u16,
+    encoded_len: usize,
+    decoded_len: usize,
+}
+
+fn read_metadata(bytes: &[u8]) -> Result<ChannelBlockMetadata, ChannelBlockError> {
+    if bytes.len() < HEADER_LEN {
+        return Err(ChannelBlockError::InvalidHeader {
+            reason: "payload is shorter than channel-block header".to_owned(),
+        });
+    }
+    if &bytes[0..4] != MAGIC {
+        return Err(ChannelBlockError::InvalidHeader {
+            reason: "channel-block magic mismatch".to_owned(),
+        });
+    }
+    let version = bytes[4];
+    if version != 1 {
+        return Err(ChannelBlockError::InvalidHeader {
+            reason: format!("unsupported channel-block version `{version}`"),
+        });
+    }
+
+    Ok(ChannelBlockMetadata {
+        payload_kind: parse_payload_kind(bytes[5])?,
+        codec: parse_payload_codec(bytes[6])?,
+        channel_count: u16::from_le_bytes([bytes[8], bytes[9]]),
+        channel_block_size: u16::from_le_bytes([bytes[10], bytes[11]]),
+        encoded_len: u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize,
+        decoded_len: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize,
+    })
 }
 
 fn effective_channel_block_size(

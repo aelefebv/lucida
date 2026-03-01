@@ -121,6 +121,15 @@ fn data_plane_service_serves_tile_preview_and_brick_payloads_by_generation() {
         .expect("tile payload should be served");
     assert_eq!(tile_response.status_code, 200);
     assert!(!tile_response.body.is_empty());
+    assert_eq!(
+        tile_response.headers.get("content-encoding"),
+        Some(&"x-lucida-lz4".to_owned())
+    );
+    assert_eq!(
+        tile_response.headers.get("cache-control"),
+        Some(&"public, max-age=31536000, immutable".to_owned())
+    );
+    assert!(tile_response.headers.contains_key("etag"));
 
     let preview_response = service
         .serve_get(
@@ -142,6 +151,10 @@ fn data_plane_service_serves_tile_preview_and_brick_payloads_by_generation() {
         preview_response.headers.get("content-type"),
         Some(&"image/x-portable-graymap".to_owned())
     );
+    assert_eq!(
+        preview_response.headers.get("content-encoding"),
+        Some(&"identity".to_owned())
+    );
 
     let brick_response = service
         .serve_get(
@@ -162,6 +175,10 @@ fn data_plane_service_serves_tile_preview_and_brick_payloads_by_generation() {
     assert_eq!(
         brick_response.headers.get("content-type"),
         Some(&"application/octet-stream".to_owned())
+    );
+    assert_eq!(
+        brick_response.headers.get("content-encoding"),
+        Some(&"zstd".to_owned())
     );
 
     let missing = service.serve_get(

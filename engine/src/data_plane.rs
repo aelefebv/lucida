@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
+use crate::channel_block::{PayloadCodec, codec_from_packaged_payload};
 use crate::chunk_key::{ChunkAssetKind, ChunkKey};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +54,20 @@ impl DataPlaneService {
             "content-type".to_owned(),
             content_type_for_path(&payload_path),
         );
+        headers.insert(
+            "content-encoding".to_owned(),
+            content_encoding_for_payload(&key.asset_kind, &body).map_err(|reason| {
+                DataPlaneError::ReadFailed {
+                    path: payload_path.display().to_string(),
+                    reason,
+                }
+            })?,
+        );
+        headers.insert(
+            "cache-control".to_owned(),
+            "public, max-age=31536000, immutable".to_owned(),
+        );
+        headers.insert("etag".to_owned(), etag_for_bytes(&body));
         headers.insert("x-lucida-source-id".to_owned(), key.source_id.clone());
         headers.insert(
             "x-lucida-generation-seq".to_owned(),
@@ -101,14 +117,36 @@ fn content_type_for_path(path: &Path) -> String {
     }
 }
 
+fn content_encoding_for_payload(
+    asset_kind: &ChunkAssetKind,
+    body: &[u8],
+) -> Result<String, String> {
+    match asset_kind {
+        ChunkAssetKind::Preview2d => Ok("identity".to_owned()),
+        ChunkAssetKind::Tile2d | ChunkAssetKind::Brick3d => {
+            let codec = codec_from_packaged_payload(body).map_err(|error| format!("{error:?}"))?;
+            Ok(match codec {
+                PayloadCodec::Raw => "identity".to_owned(),
+                PayloadCodec::Lz4 => "x-lucida-lz4".to_owned(),
+                PayloadCodec::Zstd => "zstd".to_owned(),
+            })
+        }
+    }
+}
+
+fn etag_for_bytes(body: &[u8]) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.hash(&mut hasher);
+    format!("\"lucida-{:016x}\"", hasher.finish())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::chunk_key::{ChunkAssetKind, ChunkKey};
 
-    use super::{DataPlaneService, HttpDataPlaneResponse};
+    use super::DataPlaneService;
 
     fn unique_path(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -155,21 +193,29 @@ mod tests {
                 .format_path(),
             )
             .expect("preview request should succeed");
+        assert_eq!(response.status_code, 200);
+        assert_eq!(response.body, b"pgm".to_vec());
         assert_eq!(
-            response,
-            HttpDataPlaneResponse {
-                status_code: 200,
-                headers: BTreeMap::from([
-                    (
-                        "content-type".to_owned(),
-                        "image/x-portable-graymap".to_owned(),
-                    ),
-                    ("x-lucida-generation-seq".to_owned(), "1".to_owned()),
-                    ("x-lucida-source-id".to_owned(), "src_00000001".to_owned())
-                ]),
-                body: b"pgm".to_vec()
-            }
+            response.headers.get("content-type"),
+            Some(&"image/x-portable-graymap".to_owned())
         );
+        assert_eq!(
+            response.headers.get("content-encoding"),
+            Some(&"identity".to_owned())
+        );
+        assert_eq!(
+            response.headers.get("cache-control"),
+            Some(&"public, max-age=31536000, immutable".to_owned())
+        );
+        assert_eq!(
+            response.headers.get("x-lucida-generation-seq"),
+            Some(&"1".to_owned())
+        );
+        assert_eq!(
+            response.headers.get("x-lucida-source-id"),
+            Some(&"src_00000001".to_owned())
+        );
+        assert!(response.headers.contains_key("etag"));
 
         std::fs::remove_dir_all(cache_root).expect("fixture cleanup should succeed");
     }
