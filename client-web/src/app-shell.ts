@@ -170,16 +170,10 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
       Z
       <input data-testid="input-z-index" type="range" min="0" max="0" step="1" value="0" />
     </label>
-    <button type="button" data-testid="btn-z-dec">Z -</button>
-    <button type="button" data-testid="btn-z-inc">Z +</button>
-    <button type="button" data-testid="btn-z-apply">Set Z</button>
     <label>
       T
       <input data-testid="input-t-index" type="range" min="0" max="0" step="1" value="0" />
     </label>
-    <button type="button" data-testid="btn-t-dec">T -</button>
-    <button type="button" data-testid="btn-t-inc">T +</button>
-    <button type="button" data-testid="btn-t-apply">Set T</button>
     <label>
       Channels
       <input data-testid="input-channel-list" type="text" value="0" />
@@ -437,27 +431,6 @@ function attachInteractionHandlers(
   registerClick("btn-pan-down", () => runtime.pan(0, 24));
   registerClick("btn-zoom-in", () => runtime.zoom(1.2, 0, 0));
   registerClick("btn-zoom-out", () => runtime.zoom(0.8, 0, 0));
-  registerClick("btn-z-dec", () => {
-    withClientState((zIndex, _, __, maxZIndex) => {
-      runtime.setZ(clampAxisIndex(zIndex - 1, maxZIndex));
-    });
-  });
-  registerClick("btn-z-inc", () => {
-    withClientState((zIndex, _, __, maxZIndex) => {
-      runtime.setZ(clampAxisIndex(zIndex + 1, maxZIndex));
-    });
-  });
-  registerClick("btn-z-apply", () => {
-    const clientState = runtime.state().clientState;
-    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
-    const zIndex = readIndexInput(
-      mount,
-      "input-z-index",
-      clientState?.zIndex ?? 0,
-      bounds?.maxZIndex ?? null,
-    );
-    runtime.setZ(zIndex);
-  });
   registerInput("input-z-index", () => {
     const clientState = runtime.state().clientState;
     const bounds = clientState === null ? null : selectionBoundsFor(clientState);
@@ -472,27 +445,6 @@ function attachInteractionHandlers(
       input.value = zIndex.toString();
     }
     runtime.setZ(zIndex);
-  });
-  registerClick("btn-t-dec", () => {
-    withClientState((_, tIndex, __, ___, maxTIndex) => {
-      runtime.setT(clampAxisIndex(tIndex - 1, maxTIndex));
-    });
-  });
-  registerClick("btn-t-inc", () => {
-    withClientState((_, tIndex, __, ___, maxTIndex) => {
-      runtime.setT(clampAxisIndex(tIndex + 1, maxTIndex));
-    });
-  });
-  registerClick("btn-t-apply", () => {
-    const clientState = runtime.state().clientState;
-    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
-    const tIndex = readIndexInput(
-      mount,
-      "input-t-index",
-      clientState?.tIndex ?? 0,
-      bounds?.maxTIndex ?? null,
-    );
-    runtime.setT(tIndex);
   });
   registerInput("input-t-index", () => {
     const clientState = runtime.state().clientState;
