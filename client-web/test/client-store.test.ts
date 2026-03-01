@@ -28,6 +28,7 @@ function snapshot(): SnapshotPayload {
           datasetId: "ds_00000001",
           sourceId: "src_00000001",
           resolvedGenerationSeq: 1,
+          dtype: "uint8",
         },
       },
       layers: {

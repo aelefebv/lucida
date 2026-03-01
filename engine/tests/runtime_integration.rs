@@ -211,6 +211,14 @@ fn expected_tiff_fixture_luma(width: usize, height: usize) -> Vec<u16> {
     pixels
 }
 
+fn id_sequence(id: &str, prefix: &str) -> u64 {
+    let expected_prefix = format!("{prefix}_");
+    id.strip_prefix(&expected_prefix)
+        .expect("id should include expected prefix")
+        .parse::<u64>()
+        .expect("id suffix should parse as u64")
+}
+
 fn write_gray16_tiff(path: &Path, width: u32, height: u32, pixels: &[u16]) {
     let file = fs::File::create(path).expect("tiff fixture file should be created");
     let mut encoder =
@@ -397,6 +405,55 @@ async fn runtime_supports_attach_command_events_and_reconnect() {
         .await
         .expect("closing reconnect websocket should succeed");
     runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_persists_id_allocator_counters_across_restarts() {
+    let cache_root = unique_path("id_persistence");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let client = reqwest::Client::new();
+
+    let runtime_first = RuntimeFixture::start(&cache_root).await;
+    let first_create = client
+        .post(format!("{}/v1/sessions", runtime_first.http_base()))
+        .json(&json!({ "name": "first-runtime-session" }))
+        .send()
+        .await
+        .expect("first runtime create session request should succeed");
+    assert_eq!(first_create.status(), StatusCode::CREATED);
+    let first_body: serde_json::Value = first_create
+        .json()
+        .await
+        .expect("first runtime create response should parse as JSON");
+    let first_session_id = first_body["session_id"]
+        .as_str()
+        .expect("first runtime create response should include session id")
+        .to_owned();
+    runtime_first.stop().await;
+
+    let runtime_second = RuntimeFixture::start(&cache_root).await;
+    let second_create = client
+        .post(format!("{}/v1/sessions", runtime_second.http_base()))
+        .json(&json!({ "name": "second-runtime-session" }))
+        .send()
+        .await
+        .expect("second runtime create session request should succeed");
+    assert_eq!(second_create.status(), StatusCode::CREATED);
+    let second_body: serde_json::Value = second_create
+        .json()
+        .await
+        .expect("second runtime create response should parse as JSON");
+    let second_session_id = second_body["session_id"]
+        .as_str()
+        .expect("second runtime create response should include session id")
+        .to_owned();
+    runtime_second.stop().await;
+
+    assert_eq!(first_session_id, "sess_00000001");
+    assert_eq!(second_session_id, "sess_00000002");
+    assert!(id_sequence(&second_session_id, "sess") > id_sequence(&first_session_id, "sess"));
+
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
 }
 
@@ -621,6 +678,7 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
 
     let mut event_types = Vec::<String>::new();
     let mut preview_available = false;
+    let mut dataset_dtype: Option<String> = None;
     let started_at = tokio::time::Instant::now();
     while started_at.elapsed() < Duration::from_secs(3) {
         let maybe_frame = timeout(Duration::from_millis(250), socket.next()).await;
@@ -642,6 +700,9 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
             .as_str()
             .expect("event should include event_type")
             .to_owned();
+        if event_type == "scene_dataset_upsert" {
+            dataset_dtype = frame["payload"]["dtype"].as_str().map(ToOwned::to_owned);
+        }
         if event_type == "source_generation_progress" || event_type == "source_generation_ready" {
             preview_available = frame["payload"]["previewReady"].as_bool().unwrap_or(false);
         }
@@ -681,6 +742,7 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
             .iter()
             .any(|event| event == "source_generation_ready")
     );
+    assert_eq!(dataset_dtype.as_deref(), Some("uint8"));
     assert!(preview_available);
 
     let expected_pixels = expected_tiff_fixture_luma(32, 16);

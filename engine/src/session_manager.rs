@@ -68,11 +68,7 @@ pub struct SessionManager {
 
 impl Default for SessionManager {
     fn default() -> Self {
-        Self {
-            id_allocator: IdAllocator::new(),
-            heartbeat_tick: 0,
-            sessions: BTreeMap::new(),
-        }
+        Self::with_id_allocator(IdAllocator::new())
     }
 }
 
@@ -80,6 +76,15 @@ impl SessionManager {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn with_id_allocator(id_allocator: IdAllocator) -> Self {
+        Self {
+            id_allocator,
+            heartbeat_tick: 0,
+            sessions: BTreeMap::new(),
+        }
     }
 
     pub fn create_session(&mut self, name: impl Into<String>) -> CreatedSession {

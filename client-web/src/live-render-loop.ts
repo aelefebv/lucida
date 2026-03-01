@@ -48,12 +48,13 @@ export class LiveRenderLoop {
   private currentSelectionKey: string | null;
   private currentPreviewRequestKey: string | null;
   private currentTileRequestKey: string | null;
-  private dimensionsByGeneration: Map<number, { width: number; height: number }>;
-  private frameKindByGeneration: Map<number, "preview" | "tile">;
-  private grayscaleByGeneration: Map<number, Uint16Array>;
-  private sampleMaxByGeneration: Map<number, number>;
-  private pixelStatsByGeneration: Map<number, FramePixelStats>;
+  private dimensionsBySourceGeneration: Map<string, { width: number; height: number }>;
+  private frameKindBySourceGeneration: Map<string, "preview" | "tile">;
+  private grayscaleBySourceGeneration: Map<string, Uint16Array>;
+  private sampleMaxBySourceGeneration: Map<string, number>;
+  private pixelStatsBySourceGeneration: Map<string, FramePixelStats>;
   private latestGenerationSeq: number;
+  private latestPreferredSourceId: string | null;
   private latestClientState: ClientState | null;
   private retryTimer: ReturnType<typeof setTimeout> | null;
 
@@ -71,19 +72,21 @@ export class LiveRenderLoop {
     this.currentSelectionKey = null;
     this.currentPreviewRequestKey = null;
     this.currentTileRequestKey = null;
-    this.dimensionsByGeneration = new Map();
-    this.frameKindByGeneration = new Map();
-    this.grayscaleByGeneration = new Map();
-    this.sampleMaxByGeneration = new Map();
-    this.pixelStatsByGeneration = new Map();
+    this.dimensionsBySourceGeneration = new Map();
+    this.frameKindBySourceGeneration = new Map();
+    this.grayscaleBySourceGeneration = new Map();
+    this.sampleMaxBySourceGeneration = new Map();
+    this.pixelStatsBySourceGeneration = new Map();
     this.latestGenerationSeq = 0;
+    this.latestPreferredSourceId = null;
     this.latestClientState = null;
     this.retryTimer = null;
   }
 
-  public update(clientState: ClientState): void {
+  public update(clientState: ClientState, preferredSourceId: string | null = null): void {
     this.latestClientState = clientState;
-    const latest = selectLatestGeneration(clientState);
+    this.latestPreferredSourceId = preferredSourceId;
+    const latest = selectLatestGeneration(clientState, preferredSourceId);
     if (latest === null) {
       return;
     }
@@ -98,10 +101,10 @@ export class LiveRenderLoop {
     const selectionChanged = selectionKey !== this.currentSelectionKey;
     if (isNewGeneration) {
       this.scheduler.invalidateOlderGenerations(latest.generationSeq);
-      this.frameStore.pruneOlderThan(latest.generationSeq);
+      this.frameStore.pruneOlderThan(latest.sourceId, latest.generationSeq);
     }
     const hasFrameForGeneration =
-      this.frameStore.resolveFrame(latest.generationSeq) !== null;
+      this.frameStore.resolveFrame(latest.sourceId, latest.generationSeq) !== null;
     if (selectionChanged) {
       if (this.currentPreviewRequestKey !== null) {
         this.scheduler.cancel(this.currentPreviewRequestKey);
@@ -198,16 +201,20 @@ export class LiveRenderLoop {
       if (generationSeq > this.latestGenerationSeq) {
         this.latestGenerationSeq = generationSeq;
       }
-      this.dimensionsByGeneration.set(generationSeq, {
+      const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
+      this.dimensionsBySourceGeneration.set(sourceGeneration, {
         width: preview.width,
         height: preview.height,
       });
-      this.frameKindByGeneration.set(generationSeq, "preview");
-      this.grayscaleByGeneration.set(generationSeq, preview.grayscaleSamples);
-      this.sampleMaxByGeneration.set(generationSeq, preview.sampleMax);
-      this.pixelStatsByGeneration.set(generationSeq, preview.pixelStats);
-      this.frameStore.setPreview(generationSeq, preview.rgba);
-      this.emit(generationSeq);
+      this.frameKindBySourceGeneration.set(sourceGeneration, "preview");
+      this.grayscaleBySourceGeneration.set(
+        sourceGeneration,
+        preview.grayscaleSamples,
+      );
+      this.sampleMaxBySourceGeneration.set(sourceGeneration, preview.sampleMax);
+      this.pixelStatsBySourceGeneration.set(sourceGeneration, preview.pixelStats);
+      this.frameStore.setPreview(sourceId, generationSeq, preview.rgba);
+      this.emit(sourceId, generationSeq);
     } catch (error) {
       console.error("preview fetch failed", error);
       this.scheduleRetry();
@@ -241,16 +248,17 @@ export class LiveRenderLoop {
         this.activeFetches.delete(fetchKey);
         return;
       }
-      this.dimensionsByGeneration.set(generationSeq, {
+      const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
+      this.dimensionsBySourceGeneration.set(sourceGeneration, {
         width: tile.width,
         height: tile.height,
       });
-      this.frameKindByGeneration.set(generationSeq, "tile");
-      this.grayscaleByGeneration.set(generationSeq, tile.grayscaleSamples);
-      this.sampleMaxByGeneration.set(generationSeq, tile.sampleMax);
-      this.pixelStatsByGeneration.set(generationSeq, tile.pixelStats);
-      this.frameStore.setTiles(generationSeq, tile.rgba);
-      this.emit(generationSeq);
+      this.frameKindBySourceGeneration.set(sourceGeneration, "tile");
+      this.grayscaleBySourceGeneration.set(sourceGeneration, tile.grayscaleSamples);
+      this.sampleMaxBySourceGeneration.set(sourceGeneration, tile.sampleMax);
+      this.pixelStatsBySourceGeneration.set(sourceGeneration, tile.pixelStats);
+      this.frameStore.setTiles(sourceId, generationSeq, tile.rgba);
+      this.emit(sourceId, generationSeq);
     } catch (error) {
       // Keep preview frame active when tile refinement is unavailable.
       console.error("tile fetch failed", error);
@@ -275,34 +283,37 @@ export class LiveRenderLoop {
     return decodePortableGraymap(framePayload);
   }
 
-  private emit(generationSeq: number): void {
+  private emit(sourceId: string, generationSeq: number): void {
     if (this.latestClientState === null) {
       return;
     }
-    const frame = this.frameStore.resolveFrame(generationSeq);
+    const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
+    const frame = this.frameStore.resolveFrame(sourceId, generationSeq);
     if (frame === null) {
       return;
     }
-    const dimensions = this.dimensionsByGeneration.get(generationSeq);
+    const dimensions = this.dimensionsBySourceGeneration.get(sourceGeneration);
     if (dimensions === undefined) {
       return;
     }
-    const frameKind = this.frameKindByGeneration.get(generationSeq);
+    const frameKind = this.frameKindBySourceGeneration.get(sourceGeneration);
     if (frameKind === undefined) {
       return;
     }
-    const pixelStats = this.pixelStatsByGeneration.get(generationSeq);
+    const pixelStats = this.pixelStatsBySourceGeneration.get(sourceGeneration);
     if (pixelStats === undefined) {
       return;
     }
-    const grayscaleSamples = this.grayscaleByGeneration.get(generationSeq);
+    const grayscaleSamples = this.grayscaleBySourceGeneration.get(sourceGeneration);
     if (grayscaleSamples === undefined) {
       return;
     }
-    const sampleMax = this.sampleMaxByGeneration.get(generationSeq);
+    const sampleMax = this.sampleMaxBySourceGeneration.get(sourceGeneration);
     if (sampleMax === undefined) {
       return;
     }
+    const sourceDtype = sourceDtypeFor(this.latestClientState, sourceId);
+    const contrastSampleMax = contrastSampleMaxForDtype(sourceDtype) ?? sampleMax;
 
     const warnings = this.latestClientState.warnings as WarningEntry[];
     const layerList = Object.values(this.latestClientState.layers).map((layer) => ({
@@ -333,7 +344,7 @@ export class LiveRenderLoop {
       height: dimensions.height,
       rgba: frame,
       grayscaleSamples,
-      sampleMax,
+      sampleMax: contrastSampleMax,
       pixelStats,
       minimap,
       warningNotice: buildSessionNotice(warnings),
@@ -347,7 +358,7 @@ export class LiveRenderLoop {
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       if (this.latestClientState !== null) {
-        this.update(this.latestClientState);
+        this.update(this.latestClientState, this.latestPreferredSourceId);
       }
     }, 250);
   }
@@ -421,7 +432,20 @@ function readUint32LE(bytes: Uint8Array, offset: number): number {
 
 function selectLatestGeneration(
   clientState: ClientState,
+  preferredSourceId: string | null,
 ): { sourceId: string; generationSeq: number; tIndex: number; zIndex: number } | null {
+  if (preferredSourceId !== null) {
+    const preferred = clientState.sources[preferredSourceId];
+    if (preferred !== undefined && preferred.latestWorkingGenerationSeq > 0) {
+      return {
+        sourceId: preferred.sourceId,
+        generationSeq: preferred.latestWorkingGenerationSeq,
+        tIndex: clientState.tIndex,
+        zIndex: clientState.zIndex,
+      };
+    }
+  }
+
   const sourceValues = Object.values(clientState.sources);
   let latest:
     | { sourceId: string; generationSeq: number; tIndex: number; zIndex: number }
@@ -432,7 +456,7 @@ function selectLatestGeneration(
     }
     if (
       latest === null ||
-      source.latestWorkingGenerationSeq > latest.generationSeq
+      source.latestWorkingGenerationSeq >= latest.generationSeq
     ) {
       latest = {
         sourceId: source.sourceId,
@@ -452,6 +476,41 @@ function frameSelectionKey(
   zIndex: number,
 ): string {
   return `${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}`;
+}
+
+function sourceGenerationKey(sourceId: string, generationSeq: number): string {
+  return `${sourceId}:${generationSeq.toString()}`;
+}
+
+function sourceDtypeFor(clientState: ClientState, sourceId: string): string | null {
+  for (const dataset of Object.values(clientState.datasets)) {
+    if (dataset.sourceId === sourceId) {
+      return typeof dataset.dtype === "string" ? dataset.dtype : null;
+    }
+  }
+  return null;
+}
+
+function contrastSampleMaxForDtype(dtype: string | null): number | null {
+  if (dtype === null) {
+    return null;
+  }
+  switch (dtype) {
+    case "uint8":
+    case "int8":
+      return 255;
+    case "uint16":
+    case "int16":
+    case "uint32":
+    case "int32":
+    case "uint64":
+    case "int64":
+    case "float32":
+    case "float64":
+      return 65535;
+    default:
+      return null;
+  }
 }
 
 function requestKey(

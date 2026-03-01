@@ -74,6 +74,9 @@ export class ViewerRuntime {
   private interactionModel: InteractionModel | null;
   private interactionClientId: string | null;
   private lastAttachedClientId: string | null;
+  private preferredSourceId: string | null;
+  private nextOpenSourceRequestId: number;
+  private activeOpenSourceRequestId: number | null;
   private gestureCounter: number;
   private reconnectScheduled: boolean;
   private disposed: boolean;
@@ -106,6 +109,9 @@ export class ViewerRuntime {
     this.interactionModel = null;
     this.interactionClientId = null;
     this.lastAttachedClientId = null;
+    this.preferredSourceId = null;
+    this.nextOpenSourceRequestId = 1;
+    this.activeOpenSourceRequestId = null;
     this.gestureCounter = 1;
     this.reconnectScheduled = false;
     this.disposed = false;
@@ -173,6 +179,9 @@ export class ViewerRuntime {
     if (this.bootstrap.state().phase !== "attached") {
       return { ok: false, message: "Attach to the session before opening a source." };
     }
+    const requestId = this.nextOpenSourceRequestId;
+    this.nextOpenSourceRequestId += 1;
+    this.activeOpenSourceRequestId = requestId;
 
     const endpoint = `${runtimeHttpBase(this.route)}/v1/sessions/${encodeURIComponent(this.route.sessionId)}/sources`;
     let response: Response;
@@ -188,6 +197,9 @@ export class ViewerRuntime {
         }),
       });
     } catch (error) {
+      if (this.activeOpenSourceRequestId === requestId) {
+        this.activeOpenSourceRequestId = null;
+      }
       return {
         ok: false,
         message: `Source open request failed: ${errorMessage(error)}`,
@@ -196,6 +208,9 @@ export class ViewerRuntime {
 
     if (!response.ok) {
       const detail = await parseErrorDetail(response);
+      if (this.activeOpenSourceRequestId === requestId) {
+        this.activeOpenSourceRequestId = null;
+      }
       return {
         ok: false,
         message: `Source open failed (${response.status.toString()}): ${detail}`,
@@ -210,10 +225,20 @@ export class ViewerRuntime {
       body !== null && typeof body.source_id === "string"
         ? body.source_id
         : "unknown";
+    if (
+      sourceId !== "unknown" &&
+      this.activeOpenSourceRequestId === requestId
+    ) {
+      this.preferredSourceId = sourceId;
+      await this.refreshSnapshotFromServer();
+    }
     const generationSeq =
       body !== null && typeof body.generation_seq === "number"
         ? body.generation_seq
         : null;
+    if (this.activeOpenSourceRequestId === requestId) {
+      this.activeOpenSourceRequestId = null;
+    }
     if (generationSeq === null) {
       return {
         ok: true,
@@ -289,7 +314,7 @@ export class ViewerRuntime {
       snapshot: message.snapshot,
       clientState: nextClientState,
     };
-    this.renderLoop.update(nextClientState);
+    this.renderLoop.update(nextClientState, this.preferredSourceId);
     this.onUpdate(this.stateValue);
   }
 
@@ -320,7 +345,7 @@ export class ViewerRuntime {
           viewportFromClientState(this.stateValue.clientState),
         );
       }
-      this.renderLoop.update(this.stateValue.clientState);
+      this.renderLoop.update(this.stateValue.clientState, this.preferredSourceId);
     }
     this.onUpdate(this.stateValue);
   }
@@ -408,6 +433,34 @@ export class ViewerRuntime {
       }
       this.connect("reconnect");
     }, 80);
+  }
+
+  private async refreshSnapshotFromServer(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    const endpoint = `${runtimeHttpBase(this.route)}/v1/sessions/${encodeURIComponent(this.route.sessionId)}/snapshot`;
+    let response: Response;
+    try {
+      response = await this.fetchImpl(endpoint, {
+        method: "GET",
+        cache: "no-cache",
+      });
+    } catch {
+      return;
+    }
+    if (!response.ok) {
+      return;
+    }
+    const parsed = await parseJsonObject(response);
+    if (parsed === null) {
+      return;
+    }
+    const snapshotMessage = parseRuntimeSnapshotMessage(parsed);
+    if (snapshotMessage === null) {
+      return;
+    }
+    this.handleSnapshot(snapshotMessage);
   }
 
   private flushInteractionCommands(): void {
@@ -533,6 +586,32 @@ async function parseJsonObject(response: Response): Promise<Record<string, unkno
   } catch {
     return null;
   }
+}
+
+function parseRuntimeSnapshotMessage(
+  payload: Record<string, unknown>,
+): RuntimeSnapshotMessage | null {
+  if (payload.message_type !== "session.snapshot") {
+    return null;
+  }
+  const permissionClass = payload.permission_class;
+  if (
+    permissionClass !== "view" &&
+    permissionClass !== "control" &&
+    permissionClass !== "admin"
+  ) {
+    return null;
+  }
+  const snapshot = payload.snapshot;
+  if (!isRecord(snapshot)) {
+    return null;
+  }
+  return {
+    message_type: "session.snapshot",
+    permission_class: permissionClass,
+    is_lease_holder: Boolean(payload.is_lease_holder),
+    snapshot: snapshot as SnapshotPayload,
+  };
 }
 
 function errorMessage(error: unknown): string {

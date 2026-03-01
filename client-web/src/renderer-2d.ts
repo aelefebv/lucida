@@ -68,49 +68,71 @@ function clamp255(value: number): number {
 }
 
 type FramePayload = {
+  sourceId: string;
   generationSeq: number;
   rgba: Uint8ClampedArray;
 };
 
 export class ProgressiveFrameStore {
-  private previewFrames: Map<number, FramePayload>;
-  private tileFrames: Map<number, FramePayload>;
+  private previewFrames: Map<string, FramePayload>;
+  private tileFrames: Map<string, FramePayload>;
 
   public constructor() {
     this.previewFrames = new Map();
     this.tileFrames = new Map();
   }
 
-  public setPreview(generationSeq: number, rgba: Uint8ClampedArray): void {
-    this.previewFrames.set(generationSeq, { generationSeq, rgba });
+  public setPreview(
+    sourceId: string,
+    generationSeq: number,
+    rgba: Uint8ClampedArray,
+  ): void {
+    this.previewFrames.set(frameKey(sourceId, generationSeq), {
+      sourceId,
+      generationSeq,
+      rgba,
+    });
   }
 
-  public setTiles(generationSeq: number, rgba: Uint8ClampedArray): void {
-    this.tileFrames.set(generationSeq, { generationSeq, rgba });
+  public setTiles(
+    sourceId: string,
+    generationSeq: number,
+    rgba: Uint8ClampedArray,
+  ): void {
+    this.tileFrames.set(frameKey(sourceId, generationSeq), {
+      sourceId,
+      generationSeq,
+      rgba,
+    });
   }
 
-  public resolveFrame(generationSeq: number): Uint8ClampedArray | null {
-    const tiles = this.tileFrames.get(generationSeq);
+  public resolveFrame(sourceId: string, generationSeq: number): Uint8ClampedArray | null {
+    const key = frameKey(sourceId, generationSeq);
+    const tiles = this.tileFrames.get(key);
     if (tiles !== undefined) {
       return tiles.rgba;
     }
-    const preview = this.previewFrames.get(generationSeq);
+    const preview = this.previewFrames.get(key);
     if (preview !== undefined) {
       return preview.rgba;
     }
     return null;
   }
 
-  public pruneOlderThan(generationSeq: number): void {
-    for (const key of this.previewFrames.keys()) {
-      if (key < generationSeq) {
+  public pruneOlderThan(sourceId: string, generationSeq: number): void {
+    for (const [key, frame] of this.previewFrames.entries()) {
+      if (frame.sourceId === sourceId && frame.generationSeq < generationSeq) {
         this.previewFrames.delete(key);
       }
     }
-    for (const key of this.tileFrames.keys()) {
-      if (key < generationSeq) {
+    for (const [key, frame] of this.tileFrames.entries()) {
+      if (frame.sourceId === sourceId && frame.generationSeq < generationSeq) {
         this.tileFrames.delete(key);
       }
     }
   }
+}
+
+function frameKey(sourceId: string, generationSeq: number): string {
+  return `${sourceId}:${generationSeq.toString()}`;
 }

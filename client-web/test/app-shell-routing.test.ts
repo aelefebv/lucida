@@ -18,6 +18,10 @@ type SocketFixture = {
   close: () => Promise<void>;
 };
 
+type SourceOpenActionFixtureOptions = {
+  emitSceneUpsertEvents?: boolean;
+};
+
 const controllers: AppController[] = [];
 const fixtures: SocketFixture[] = [];
 
@@ -121,6 +125,41 @@ describe("app shell routing", () => {
 
   it("opens a source from the viewer shell and drives first render", async () => {
     const fixture = await startSourceOpenActionFixture();
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_open_ui&client=browser-open-ui&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}&dataBase=${encodeURIComponent(fixture.dataBaseUrl ?? "")}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => {
+      const status = queryText("attach-status");
+      return status.includes("Attached");
+    });
+
+    queryInput("input-source-name").value = "my-ome-source";
+    queryInput("input-source-uri").value = "/tmp/demo.ome.zarr";
+    queryButton("btn-open-source").click();
+
+    await waitFor(() => {
+      return queryText("open-source-status").includes("Opened source");
+    }, 3000);
+
+    expect(fixture.openSourceRequests).toEqual([
+      { name: "my-ome-source", uri: "/tmp/demo.ome.zarr" },
+    ]);
+
+    await waitFor(() => queryText("frame-state").includes("(preview)"), 3000);
+    await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+  });
+
+  it("switches to a newly opened source even when scene upsert events are absent", async () => {
+    const fixture = await startSourceOpenActionFixture({
+      emitSceneUpsertEvents: false,
+    });
     fixtures.push(fixture);
 
     mountApp(
@@ -350,6 +389,7 @@ async function startIntegratedRenderFixture(): Promise<SocketFixture> {
                     datasetId: "ds_fixture",
                     sourceId: "src_fixture",
                     resolvedGenerationSeq: 1,
+                    dtype: "uint8",
                   },
                 },
                 layers: {
@@ -484,6 +524,7 @@ async function startIntegratedRenderFixture16Bit(): Promise<SocketFixture> {
                     datasetId: "ds_fixture",
                     sourceId: "src_fixture",
                     resolvedGenerationSeq: 1,
+                    dtype: "uint16",
                   },
                 },
                 layers: {
@@ -552,7 +593,9 @@ async function startIntegratedRenderFixture16Bit(): Promise<SocketFixture> {
   };
 }
 
-async function startSourceOpenActionFixture(): Promise<SocketFixture> {
+async function startSourceOpenActionFixture(
+  options: SourceOpenActionFixtureOptions = {},
+): Promise<SocketFixture> {
   const received: unknown[] = [];
   const openSourceRequests: Array<{ name: string; uri: string }> = [];
   const previewBody = pgmBody(2, 1, [12, 34]);
@@ -560,6 +603,16 @@ async function startSourceOpenActionFixture(): Promise<SocketFixture> {
   let sessionRev = 1;
   const connectedSockets = new Set<WebSocket>();
   const sessionId = "sess_open_ui";
+  const emitSceneUpsertEvents = options.emitSceneUpsertEvents ?? true;
+  let openedSource:
+    | {
+        sourceId: string;
+        datasetId: string;
+        sourceName: string;
+        generationSeq: number;
+        dtype: string;
+      }
+    | null = null;
 
   const httpServer = createServer((request, response) => {
     if (request.method === "POST" && request.url === `/v1/sessions/${sessionId}/sources`) {
@@ -573,47 +626,121 @@ async function startSourceOpenActionFixture(): Promise<SocketFixture> {
         const name = typeof parsed.name === "string" ? parsed.name : "";
         const uri = typeof parsed.uri === "string" ? parsed.uri : "";
         openSourceRequests.push({ name, uri });
+        openedSource = {
+          sourceId: "src_open",
+          datasetId: "ds_open",
+          sourceName: name,
+          generationSeq: 1,
+          dtype: "uint8",
+        };
+        sessionRev += 1;
 
         response.statusCode = 201;
         response.setHeader("content-type", "application/json");
         response.end(
           JSON.stringify({
-            source_id: "src_open",
-            dataset_id: "ds_open",
+            source_id: openedSource.sourceId,
+            dataset_id: openedSource.datasetId,
             generation_id: "gen_open_1",
-            generation_seq: 1,
+            generation_seq: openedSource.generationSeq,
             source_status: "watching",
           }),
         );
 
-        sessionRev += 1;
-        broadcastEvent(connectedSockets, {
-          message_type: "event",
-          schema_version: "lucida-proto-0.1",
-          session_id: sessionId,
-          session_rev: sessionRev,
-          event_type: "scene_source_upsert",
-          payload: {
-            sourceId: "src_open",
-            name,
-            status: "watching",
-            latestWorkingGenerationSeq: 1,
-          },
-        });
-        sessionRev += 1;
-        broadcastEvent(connectedSockets, {
-          message_type: "event",
-          schema_version: "lucida-proto-0.1",
-          session_id: sessionId,
-          session_rev: sessionRev,
-          event_type: "scene_dataset_upsert",
-          payload: {
-            datasetId: "ds_open",
-            sourceId: "src_open",
-            resolvedGenerationSeq: 1,
-          },
-        });
+        if (emitSceneUpsertEvents) {
+          sessionRev += 1;
+          broadcastEvent(connectedSockets, {
+            message_type: "event",
+            schema_version: "lucida-proto-0.1",
+            session_id: sessionId,
+            session_rev: sessionRev,
+            event_type: "scene_source_upsert",
+            payload: {
+              sourceId: openedSource.sourceId,
+              name,
+              status: "watching",
+              latestWorkingGenerationSeq: openedSource.generationSeq,
+            },
+          });
+          sessionRev += 1;
+          broadcastEvent(connectedSockets, {
+            message_type: "event",
+            schema_version: "lucida-proto-0.1",
+            session_id: sessionId,
+            session_rev: sessionRev,
+            event_type: "scene_dataset_upsert",
+            payload: {
+              datasetId: openedSource.datasetId,
+              sourceId: openedSource.sourceId,
+              resolvedGenerationSeq: openedSource.generationSeq,
+              dtype: openedSource.dtype,
+            },
+          });
+        }
       });
+      return;
+    }
+    if (request.method === "GET" && request.url === `/v1/sessions/${sessionId}/snapshot`) {
+      const sources =
+        openedSource === null
+          ? {}
+          : {
+              [openedSource.sourceId]: {
+                sourceId: openedSource.sourceId,
+                name: openedSource.sourceName,
+                status: "watching",
+                latestWorkingGenerationSeq: openedSource.generationSeq,
+              },
+            };
+      const datasets =
+        openedSource === null
+          ? {}
+          : {
+              [openedSource.datasetId]: {
+                datasetId: openedSource.datasetId,
+                sourceId: openedSource.sourceId,
+                resolvedGenerationSeq: openedSource.generationSeq,
+                dtype: openedSource.dtype,
+              },
+            };
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          message_type: "session.snapshot",
+          schema_version: "lucida-proto-0.1",
+          session_id: sessionId,
+          session_rev: sessionRev,
+          permission_class: "view",
+          is_lease_holder: false,
+          snapshot: {
+            session: {
+              session_id: sessionId,
+              session_rev: sessionRev,
+            },
+            shared_scene: {
+              scene_rev: 1,
+              sources,
+              datasets,
+              layers: {},
+              warnings: [],
+            },
+            client_view: {
+              client_id: "cli_open_ui",
+              view_rev: 1,
+              active_layer_id: null,
+              center_x: 0,
+              center_y: 0,
+              zoom: 1,
+              z_index: 0,
+              t_index: 0,
+              selected_channels: [0],
+              warnings: [],
+            },
+            warnings: [],
+          },
+        }),
+      );
       return;
     }
 

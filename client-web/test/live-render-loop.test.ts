@@ -242,7 +242,16 @@ describe("LiveRenderLoop", () => {
       },
     );
 
-    loop.update(fixtureClientState());
+    const state = fixtureClientState();
+    state.datasets.ds_fixture = {
+      ...(state.datasets.ds_fixture ?? {
+        datasetId: "ds_fixture",
+        sourceId: "src_fixture",
+        resolvedGenerationSeq: 1,
+      }),
+      dtype: "uint16",
+    };
+    loop.update(state);
     await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
 
     const latest = frames.at(-1);
@@ -253,6 +262,295 @@ describe("LiveRenderLoop", () => {
     expect(Array.from(latest?.grayscaleSamples ?? [])).toEqual([87, 121]);
     expect(latest?.rgba[0]).toBe(0);
     expect(latest?.rgba[4]).toBe(255);
+    loop.dispose();
+  });
+
+  it("uses dtype bit depth for contrast max even when frame values fit in 8-bit range", async () => {
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [12, 120]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          return new Response(new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [12, 120])))]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.datasets.ds_fixture = {
+      ...(state.datasets.ds_fixture ?? {
+        datasetId: "ds_fixture",
+        sourceId: "src_fixture",
+        resolvedGenerationSeq: 1,
+      }),
+      dtype: "uint16",
+    };
+    loop.update(state);
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+
+    const latest = frames.at(-1);
+    expect(latest).toBeDefined();
+    expect(latest?.pixelStats.max).toBe(120);
+    expect(latest?.sampleMax).toBe(65535);
+    loop.dispose();
+  });
+
+  it("prefers the most recently upserted source when generation sequence ties", async () => {
+    const requestedUrls: string[] = [];
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        const isNewSource = url.includes("/src_new/");
+        if (url.includes("/v1/preview2d/")) {
+          if (isNewSource) {
+            return new Response(
+              new Blob([toArrayBuffer(pgm16Payload(2, 1, [87, 121]))]),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "image/x-portable-graymap",
+                  "content-encoding": "identity",
+                },
+              },
+            );
+          }
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [0, 255]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          if (isNewSource) {
+            return new Response(
+              new Blob([
+                toArrayBuffer(
+                  channelBlockRawPayload(pgm16Payload(2, 1, [87, 121])),
+                ),
+              ]),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/octet-stream",
+                  "content-encoding": "identity",
+                },
+              },
+            );
+          }
+          return new Response(new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [0, 255])))]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.sources = {
+      src_old: {
+        sourceId: "src_old",
+        name: "old",
+        status: "watching",
+        latestWorkingGenerationSeq: 1,
+      },
+      src_new: {
+        sourceId: "src_new",
+        name: "new",
+        status: "watching",
+        latestWorkingGenerationSeq: 1,
+      },
+    };
+    loop.update(state);
+
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+
+    expect(requestedUrls.some((url) => url.includes("/v1/preview2d/src_new/"))).toBe(true);
+    expect(requestedUrls.some((url) => url.includes("/v1/tile2d/src_new/"))).toBe(true);
+    expect(frames.at(-1)?.sampleMax).toBe(65535);
+    loop.dispose();
+  });
+
+  it("honors an explicit preferred source when selecting frames", async () => {
+    const requestedUrls: string[] = [];
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [0, 255]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          return new Response(new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [0, 255])))]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.sources = {
+      src_old: {
+        sourceId: "src_old",
+        name: "old",
+        status: "watching",
+        latestWorkingGenerationSeq: 3,
+      },
+      src_new: {
+        sourceId: "src_new",
+        name: "new",
+        status: "watching",
+        latestWorkingGenerationSeq: 1,
+      },
+    };
+    loop.update(state, "src_new");
+
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+
+    expect(requestedUrls.some((url) => url.includes("/v1/preview2d/src_new/"))).toBe(true);
+    expect(requestedUrls.some((url) => url.includes("/v1/tile2d/src_new/"))).toBe(true);
+    loop.dispose();
+  });
+
+  it("retries using the preferred source instead of falling back to another source", async () => {
+    const requestedUrls: string[] = [];
+    const frames: RenderFrameState[] = [];
+    let srcNewPreviewAttempts = 0;
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        const isNewSource = url.includes("/src_new/");
+        if (url.includes("/v1/preview2d/")) {
+          if (isNewSource) {
+            srcNewPreviewAttempts += 1;
+            if (srcNewPreviewAttempts === 1) {
+              throw new Error("transient src_new preview failure");
+            }
+            return new Response(
+              new Blob([toArrayBuffer(pgm16Payload(2, 1, [87, 121]))]),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "image/x-portable-graymap",
+                  "content-encoding": "identity",
+                },
+              },
+            );
+          }
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [0, 255]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          if (isNewSource) {
+            return new Response(
+              new Blob([
+                toArrayBuffer(
+                  channelBlockRawPayload(pgm16Payload(2, 1, [87, 121])),
+                ),
+              ]),
+              {
+                status: 200,
+                headers: {
+                  "content-type": "application/octet-stream",
+                  "content-encoding": "identity",
+                },
+              },
+            );
+          }
+          return new Response(new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [0, 255])))]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.sources = {
+      src_old: {
+        sourceId: "src_old",
+        name: "old",
+        status: "watching",
+        latestWorkingGenerationSeq: 3,
+      },
+      src_new: {
+        sourceId: "src_new",
+        name: "new",
+        status: "watching",
+        latestWorkingGenerationSeq: 1,
+      },
+    };
+    loop.update(state, "src_new");
+
+    await waitFor(
+      () => frames.some((frame) => frame.frameKind === "tile"),
+      2500,
+    );
+
+    expect(srcNewPreviewAttempts).toBeGreaterThanOrEqual(2);
+    expect(requestedUrls.some((url) => url.includes("/src_old/"))).toBe(false);
+    expect(frames.at(-1)?.sampleMax).toBe(65535);
     loop.dispose();
   });
 });
@@ -284,6 +582,7 @@ function fixtureClientState(): ClientState {
         datasetId: "ds_fixture",
         sourceId: "src_fixture",
         resolvedGenerationSeq: 1,
+        dtype: "uint8",
       },
     },
     layers: {

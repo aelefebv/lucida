@@ -28,7 +28,7 @@ use crate::model::{
     SessionSnapshotEnvelope, SourceRecord, SourceStatus, WarningCode, WarningEntry,
     WarningSeverity,
 };
-use crate::{DataPlaneService, SessionManager};
+use crate::{DataPlaneService, IdAllocator, SessionManager};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineRuntimeConfig {
@@ -53,8 +53,10 @@ struct RuntimeState {
 
 impl RuntimeState {
     fn new(config: &EngineRuntimeConfig) -> Self {
+        let allocator =
+            IdAllocator::with_persistence(config.cache_root.join("id_allocator_state.json"));
         Self {
-            session_manager: Arc::new(Mutex::new(SessionManager::new())),
+            session_manager: Arc::new(Mutex::new(SessionManager::with_id_allocator(allocator))),
             event_buses: Arc::new(Mutex::new(BTreeMap::new())),
             data_plane: DataPlaneService::new(config.cache_root.clone()),
             cache_root: config.cache_root.clone(),
@@ -77,6 +79,7 @@ pub async fn run_runtime_server(
     config: EngineRuntimeConfig,
     shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
+    std::fs::create_dir_all(&config.cache_root)?;
     let state = RuntimeState::new(&config);
     let app = Router::new()
         .route("/v1/info", get(runtime_info).options(cors_preflight))
@@ -909,6 +912,7 @@ struct RuntimeDatasetState {
     dataset_id: String,
     source_id: Option<String>,
     resolved_generation_seq: u64,
+    dtype: String,
 }
 
 impl From<&DatasetBinding> for RuntimeDatasetState {
@@ -917,6 +921,7 @@ impl From<&DatasetBinding> for RuntimeDatasetState {
             dataset_id: value.dataset_id.clone(),
             source_id: value.source_id.clone(),
             resolved_generation_seq: value.resolved_generation_seq,
+            dtype: value.dtype.clone(),
         }
     }
 }
@@ -1147,7 +1152,8 @@ fn event_payload_json(payload: &EventPayload) -> serde_json::Value {
         EventPayload::SceneDatasetUpsert(value) => serde_json::json!({
             "datasetId": value.dataset_id,
             "sourceId": value.source_id,
-            "resolvedGenerationSeq": value.resolved_generation_seq
+            "resolvedGenerationSeq": value.resolved_generation_seq,
+            "dtype": value.dtype.clone()
         }),
         EventPayload::SceneLayerUpsert(value) => serde_json::json!({
             "layerId": value.layer_id,

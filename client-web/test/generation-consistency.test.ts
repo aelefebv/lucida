@@ -9,14 +9,14 @@ describe("generation consistency", () => {
     const gen1Tile = new Uint8ClampedArray([10, 10, 10, 255]);
     const gen2Preview = new Uint8ClampedArray([200, 200, 200, 255]);
 
-    store.setPreview(1, gen1Tile);
-    store.setTiles(1, gen1Tile);
-    store.setPreview(2, gen2Preview);
-    store.pruneOlderThan(2);
+    store.setPreview("src_fixture", 1, gen1Tile);
+    store.setTiles("src_fixture", 1, gen1Tile);
+    store.setPreview("src_fixture", 2, gen2Preview);
+    store.pruneOlderThan("src_fixture", 2);
 
-    const resolved = store.resolveFrame(2);
+    const resolved = store.resolveFrame("src_fixture", 2);
     expect(Array.from(resolved ?? [])).toEqual(Array.from(gen2Preview));
-    expect(store.resolveFrame(1)).toBeNull();
+    expect(store.resolveFrame("src_fixture", 1)).toBeNull();
   });
 
   it("cancels stale generation fetches before they can resolve", async () => {

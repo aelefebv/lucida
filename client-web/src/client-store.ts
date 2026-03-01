@@ -15,6 +15,7 @@ export type DatasetState = {
   datasetId: string;
   sourceId: string | null;
   resolvedGenerationSeq: number;
+  dtype: string;
 };
 
 export type LayerState = {
