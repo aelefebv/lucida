@@ -15,6 +15,7 @@ mod metadata_sidecar;
 mod model;
 mod object_url;
 mod revision_allocator;
+mod runtime;
 mod session_manager;
 mod source_inspector;
 mod source_watch;
@@ -79,6 +80,7 @@ pub use object_url::{
     EngineDataPlaneResolver, ObjectUrlError, ObjectUrlResolver, StaticObjectResolver,
 };
 pub use revision_allocator::RevisionAllocator;
+pub use runtime::{EngineRuntimeConfig, run_runtime_server};
 pub use session_manager::{LeaseTransition, SessionManager};
 pub use source_inspector::{InspectedSource, SourceInspectionError, inspect_source};
 pub use source_watch::{
