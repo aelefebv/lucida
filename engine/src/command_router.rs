@@ -1,5 +1,12 @@
 use crate::clock::rfc3339_now;
-use crate::constants::{COMMAND_ACK_MESSAGE_TYPE, COMMAND_MESSAGE_TYPE, SCHEMA_VERSION};
+use crate::constants::{
+    COMMAND_ACK_MESSAGE_TYPE, COMMAND_MESSAGE_TYPE, ERROR_MESSAGE_TYPE, SCHEMA_VERSION,
+};
+use crate::error_model::{
+    ErrorCode, ErrorDetails, ErrorEnvelope, ErrorScope, LeaseErrorReason, LeaseRequiredDetail,
+    NotFoundDetail, NotFoundResource, PermissionDeniedDetail, ValidationErrorDetail,
+    ValidationErrorKind,
+};
 use crate::errors::SessionError;
 use crate::event_stream::{
     EventEnvelope, LayerUpsertPayload, LeaseChangedPayload, LeaseStatePayload, SourceUpsertPayload,
@@ -151,6 +158,110 @@ impl CommandRouter {
         )?;
 
         dispatch(operation, session_manager, envelope)
+    }
+}
+
+#[must_use]
+pub fn command_error_to_envelope(command: &CommandEnvelope, error: &CommandError) -> ErrorEnvelope {
+    ErrorEnvelope {
+        message_type: ERROR_MESSAGE_TYPE.to_owned(),
+        schema_version: SCHEMA_VERSION.to_owned(),
+        session_id: command.session_id.clone(),
+        request_id: command.request_id.clone(),
+        client_id: command.client_id.clone(),
+        client_seq: command.client_seq,
+        op: command.op.clone(),
+        code: error_code(error.code),
+        message: error.message.clone(),
+        retryable: is_retryable(error.code),
+        details: error_details(command, error),
+        sent_at: rfc3339_now(),
+    }
+}
+
+const fn error_scope(scope: CommandScope) -> ErrorScope {
+    match scope {
+        CommandScope::ClientView => ErrorScope::ClientView,
+        CommandScope::SceneShared => ErrorScope::SceneShared,
+        CommandScope::Admin => ErrorScope::Admin,
+    }
+}
+
+const fn error_code(code: CommandErrorCode) -> ErrorCode {
+    match code {
+        CommandErrorCode::ValidationError => ErrorCode::ValidationError,
+        CommandErrorCode::UnknownOperation => ErrorCode::UnknownOp,
+        CommandErrorCode::PermissionDenied => ErrorCode::PermissionDenied,
+        CommandErrorCode::LeaseRequired
+        | CommandErrorCode::LeaseUnavailable
+        | CommandErrorCode::LeaseNotStealable => ErrorCode::LeaseRequired,
+        CommandErrorCode::SessionNotFound
+        | CommandErrorCode::ClientNotFound
+        | CommandErrorCode::SourceNotFound
+        | CommandErrorCode::LayerNotFound => ErrorCode::NotFound,
+    }
+}
+
+const fn is_retryable(code: CommandErrorCode) -> bool {
+    match code {
+        CommandErrorCode::LeaseRequired | CommandErrorCode::LeaseUnavailable => true,
+        CommandErrorCode::ValidationError
+        | CommandErrorCode::UnknownOperation
+        | CommandErrorCode::PermissionDenied
+        | CommandErrorCode::LeaseNotStealable
+        | CommandErrorCode::SessionNotFound
+        | CommandErrorCode::ClientNotFound
+        | CommandErrorCode::SourceNotFound
+        | CommandErrorCode::LayerNotFound => false,
+    }
+}
+
+fn error_details(command: &CommandEnvelope, error: &CommandError) -> ErrorDetails {
+    match error.code {
+        CommandErrorCode::ValidationError => ErrorDetails::ValidationError(ValidationErrorDetail {
+            kind: ValidationErrorKind::CommandEnvelopeMalformed,
+        }),
+        CommandErrorCode::UnknownOperation => {
+            ErrorDetails::ValidationError(ValidationErrorDetail {
+                kind: ValidationErrorKind::UnsupportedOperation,
+            })
+        }
+        CommandErrorCode::PermissionDenied => {
+            ErrorDetails::PermissionDenied(PermissionDeniedDetail {
+                required_scope: error_scope(command.scope),
+            })
+        }
+        CommandErrorCode::LeaseRequired => ErrorDetails::LeaseRequired(LeaseRequiredDetail {
+            required_scope: ErrorScope::SceneShared,
+            reason: LeaseErrorReason::ActiveLeaseRequired,
+            current_lease_holder_client_id: None,
+        }),
+        CommandErrorCode::LeaseUnavailable => ErrorDetails::LeaseRequired(LeaseRequiredDetail {
+            required_scope: ErrorScope::SceneShared,
+            reason: LeaseErrorReason::LeaseHeldByAnotherClient,
+            current_lease_holder_client_id: None,
+        }),
+        CommandErrorCode::LeaseNotStealable => ErrorDetails::LeaseRequired(LeaseRequiredDetail {
+            required_scope: ErrorScope::SceneShared,
+            reason: LeaseErrorReason::LeaseNotStealable,
+            current_lease_holder_client_id: None,
+        }),
+        CommandErrorCode::SessionNotFound => ErrorDetails::NotFound(NotFoundDetail {
+            resource: NotFoundResource::Session,
+            resource_id: Some(command.session_id.clone()),
+        }),
+        CommandErrorCode::ClientNotFound => ErrorDetails::NotFound(NotFoundDetail {
+            resource: NotFoundResource::Client,
+            resource_id: Some(command.client_id.clone()),
+        }),
+        CommandErrorCode::SourceNotFound => ErrorDetails::NotFound(NotFoundDetail {
+            resource: NotFoundResource::Source,
+            resource_id: None,
+        }),
+        CommandErrorCode::LayerNotFound => ErrorDetails::NotFound(NotFoundDetail {
+            resource: NotFoundResource::Layer,
+            resource_id: None,
+        }),
     }
 }
 
@@ -440,11 +551,17 @@ impl From<SessionError> for CommandError {
 #[cfg(test)]
 mod tests {
     use crate::constants::{COMMAND_MESSAGE_TYPE, SCHEMA_VERSION};
+    use crate::error_model::{
+        ErrorCode, ErrorDetails, ErrorScope, LeaseErrorReason, NotFoundResource,
+    };
     use crate::event_stream::{EventPayload, EventType};
     use crate::model::{AttachRequest, PermissionClass};
     use crate::session_manager::SessionManager;
 
-    use super::{CommandArgs, CommandEnvelope, CommandErrorCode, CommandRouter, CommandScope};
+    use super::{
+        CommandArgs, CommandEnvelope, CommandErrorCode, CommandRouter, CommandScope,
+        command_error_to_envelope,
+    };
 
     #[test]
     fn rejects_malformed_command_envelope() {
@@ -943,5 +1060,136 @@ mod tests {
             .audit_log(&request_outcome.ack.session_id)
             .expect("audit log lookup should succeed");
         assert_eq!(audit_log.len(), 2);
+    }
+
+    #[test]
+    fn maps_permission_failures_to_typed_error_envelopes() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("typed-error-session");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "view-client".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("attach should succeed");
+
+        let router = CommandRouter::new();
+        let command = CommandEnvelope {
+            message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            session_id: created.session_id,
+            request_id: "req_typed_perm".to_owned(),
+            client_id: attached.snapshot.client_view.client_id,
+            client_seq: 1,
+            op: "scene.add_source".to_owned(),
+            scope: CommandScope::SceneShared,
+            requires_lease: true,
+            args: CommandArgs::SceneAddSource {
+                name: "source-a".to_owned(),
+            },
+        };
+
+        let error = router
+            .route(&mut manager, command.clone())
+            .expect_err("permission check should fail");
+        let envelope = command_error_to_envelope(&command, &error);
+
+        assert_eq!(envelope.code, ErrorCode::PermissionDenied);
+        assert_eq!(envelope.message_type, crate::constants::ERROR_MESSAGE_TYPE);
+        match envelope.details {
+            ErrorDetails::PermissionDenied(detail) => {
+                assert_eq!(detail.required_scope, ErrorScope::SceneShared);
+            }
+            other => panic!("unexpected detail variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_or_error_envelope_uses_typed_not_found_details() {
+        let mut manager = SessionManager::new();
+        let router = CommandRouter::new();
+        let command = CommandEnvelope {
+            message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            session_id: "sess_missing".to_owned(),
+            request_id: "req_typed_not_found".to_owned(),
+            client_id: "cli_00000001".to_owned(),
+            client_seq: 1,
+            op: "view.set_active_layer".to_owned(),
+            scope: CommandScope::ClientView,
+            requires_lease: false,
+            args: CommandArgs::ViewSetActiveLayer {
+                active_layer_id: None,
+            },
+        };
+
+        let error = router
+            .route(&mut manager, command.clone())
+            .expect_err("missing session should produce a route error");
+        let error_envelope = command_error_to_envelope(&command, &error);
+
+        assert_eq!(error_envelope.code, ErrorCode::NotFound);
+        assert!(!error_envelope.retryable);
+        match error_envelope.details {
+            ErrorDetails::NotFound(detail) => {
+                assert_eq!(detail.resource, NotFoundResource::Session);
+                assert_eq!(detail.resource_id.as_deref(), Some("sess_missing"));
+            }
+            other => panic!("unexpected detail variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_or_error_envelope_maps_lease_hold_conflict_without_string_parsing() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("typed-lease-session");
+        let first = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "first-control".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("first attach should succeed");
+        let second = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "second-control".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("second attach should succeed");
+
+        manager
+            .request_lease(&created.session_id, &first.snapshot.client_view.client_id)
+            .expect("first request should succeed");
+
+        let router = CommandRouter::new();
+        let command = CommandEnvelope {
+            message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            session_id: created.session_id,
+            request_id: "req_typed_lease".to_owned(),
+            client_id: second.snapshot.client_view.client_id,
+            client_seq: 1,
+            op: "lease.request".to_owned(),
+            scope: CommandScope::SceneShared,
+            requires_lease: false,
+            args: CommandArgs::LeaseRequest,
+        };
+        let error = router
+            .route(&mut manager, command.clone())
+            .expect_err("lease hold conflict should fail routing");
+        let error_envelope = command_error_to_envelope(&command, &error);
+
+        assert_eq!(error_envelope.code, ErrorCode::LeaseRequired);
+        assert!(error_envelope.retryable);
+        match error_envelope.details {
+            ErrorDetails::LeaseRequired(detail) => {
+                assert_eq!(detail.required_scope, ErrorScope::SceneShared);
+                assert_eq!(detail.reason, LeaseErrorReason::LeaseHeldByAnotherClient);
+                assert_eq!(detail.current_lease_holder_client_id, None);
+            }
+            other => panic!("unexpected detail variant: {other:?}"),
+        }
     }
 }
