@@ -250,6 +250,50 @@ describe("app shell routing", () => {
     expect((setChannels?.args as { channels?: unknown })?.channels).toEqual([1, 4]);
   });
 
+  it("maps keyboard shortcuts for zoom and t stepping", async () => {
+    const fixture = await startFixtureServer({
+      permissionClass: "view",
+      isLeaseHolder: false,
+    });
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-keys&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("attach-status").includes("Attached"));
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "=" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "_" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: ">" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "<" }));
+
+    await waitFor(() => {
+      const commandCount = fixture.received.filter((value) => {
+        return isRecord(value) && value.message_type === "command";
+      }).length;
+      return commandCount >= 4;
+    }, 2000);
+
+    const commands = fixture.received.filter((value): value is Record<string, unknown> => {
+      return isRecord(value) && value.message_type === "command";
+    });
+
+    const zoomCommands = commands.filter((command) => command.op === "view.zoom");
+    expect(zoomCommands).toHaveLength(2);
+    expect((zoomCommands[0]?.args as { zoom?: unknown })?.zoom).toBe(1.2);
+    expect((zoomCommands[1]?.args as { zoom?: unknown })?.zoom).toBe(0.96);
+
+    const setTCommands = commands.filter((command) => command.op === "view.set_t");
+    expect(setTCommands).toHaveLength(2);
+    expect((setTCommands[0]?.args as { t_index?: unknown })?.t_index).toBe(1);
+    expect((setTCommands[1]?.args as { t_index?: unknown })?.t_index).toBe(0);
+  });
+
   it("clamps z/t/channel controls to dataset bounds", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",

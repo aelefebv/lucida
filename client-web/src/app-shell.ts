@@ -351,11 +351,11 @@ function attachInteractionHandlers(
       runtime.pan(0, 24);
       return;
     }
-    if (event.key === "+") {
+    if (event.key === "+" || event.key === "=") {
       runtime.zoom(1.2, 0, 0);
       return;
     }
-    if (event.key === "-") {
+    if (event.key === "-" || event.key === "_") {
       runtime.zoom(0.8, 0, 0);
       return;
     }
@@ -371,13 +371,13 @@ function attachInteractionHandlers(
       });
       return;
     }
-    if (event.key === "t") {
+    if (event.key === ">") {
       withClientState((_, tIndex, __, ___, maxTIndex) => {
         runtime.setT(clampAxisIndex(tIndex + 1, maxTIndex));
       });
       return;
     }
-    if (event.key === "T") {
+    if (event.key === "<") {
       withClientState((_, tIndex, __, ___, maxTIndex) => {
         runtime.setT(clampAxisIndex(tIndex - 1, maxTIndex));
       });
