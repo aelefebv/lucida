@@ -84,6 +84,32 @@ fn preview_payload_path(
         .to_string()
 }
 
+fn write_minimal_rgb_tiff(path: &Path) {
+    const TIFF_BYTES: [u8; 62] = [
+        0x49, 0x49, 0x2A, 0x00, // II + classic TIFF marker
+        0x08, 0x00, 0x00, 0x00, // first IFD offset
+        0x04, 0x00, // entry count
+        0x00, 0x01, // tag 256 image width
+        0x04, 0x00, // type LONG
+        0x01, 0x00, 0x00, 0x00, // count
+        0x20, 0x00, 0x00, 0x00, // width 32
+        0x01, 0x01, // tag 257 image length
+        0x04, 0x00, // type LONG
+        0x01, 0x00, 0x00, 0x00, // count
+        0x10, 0x00, 0x00, 0x00, // height 16
+        0x15, 0x01, // tag 277 samples per pixel
+        0x03, 0x00, // type SHORT
+        0x01, 0x00, 0x00, 0x00, // count
+        0x03, 0x00, 0x00, 0x00, // 3 channels
+        0x02, 0x01, // tag 258 bits per sample
+        0x03, 0x00, // type SHORT
+        0x01, 0x00, 0x00, 0x00, // count
+        0x08, 0x00, 0x00, 0x00, // 8 bits
+        0x00, 0x00, 0x00, 0x00, // next IFD offset
+    ];
+    fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
+}
+
 async fn recv_text_frame(
     stream: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -340,4 +366,172 @@ async fn runtime_serves_data_plane_get_and_head() {
 
     runtime.stop().await;
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_open_source_bootstraps_generation_and_emits_progress_events() {
+    let cache_root = unique_path("open_source_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("open_source_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-open-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
+    let runtime = RuntimeFixture::start(&cache_root).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-open-source" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-open-source",
+                "requested_permission": "view"
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-source",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned");
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+    assert_eq!(generation_seq, 1);
+
+    let mut event_types = Vec::<String>::new();
+    let mut preview_available = false;
+    let started_at = tokio::time::Instant::now();
+    while started_at.elapsed() < Duration::from_secs(3) {
+        let maybe_frame = timeout(Duration::from_millis(250), socket.next()).await;
+        let frame = match maybe_frame {
+            Ok(Some(Ok(Message::Text(text)))) => serde_json::from_str::<serde_json::Value>(&text)
+                .expect("runtime should send valid JSON text frames"),
+            Ok(Some(Ok(Message::Binary(_))))
+            | Ok(Some(Ok(Message::Ping(_))))
+            | Ok(Some(Ok(Message::Pong(_)))) => continue,
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
+            Ok(Some(Err(error))) => panic!("websocket frame should be valid: {error}"),
+            Ok(Some(Ok(other))) => panic!("unexpected frame variant: {other:?}"),
+            Err(_) => continue,
+        };
+        if frame["message_type"] != "event" {
+            continue;
+        }
+        let event_type = frame["event_type"]
+            .as_str()
+            .expect("event should include event_type")
+            .to_owned();
+        if event_type == "source_generation_progress" || event_type == "source_generation_ready" {
+            preview_available = frame["payload"]["previewReady"].as_bool().unwrap_or(false);
+        }
+        event_types.push(event_type.clone());
+        if event_type == "source_generation_ready" {
+            break;
+        }
+    }
+
+    assert!(
+        event_types
+            .iter()
+            .any(|event| event == "scene_source_upsert")
+    );
+    assert!(
+        event_types
+            .iter()
+            .any(|event| event == "scene_dataset_upsert")
+    );
+    assert!(
+        event_types
+            .iter()
+            .any(|event| event == "source_generation_detected")
+    );
+    assert!(
+        event_types
+            .iter()
+            .any(|event| event == "source_generation_started")
+    );
+    assert!(
+        event_types
+            .iter()
+            .any(|event| event == "source_generation_progress")
+    );
+    assert!(
+        event_types
+            .iter()
+            .any(|event| event == "source_generation_ready")
+    );
+    assert!(preview_available);
+
+    let tile_url = format!(
+        "{}/v1/data/{}",
+        runtime.http_base(),
+        ChunkKey {
+            source_id: source_id.to_owned(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        }
+        .format_path()
+        .trim_start_matches('/')
+    );
+    let tile_response = client
+        .get(tile_url)
+        .send()
+        .await
+        .expect("tile request should succeed");
+    assert_eq!(tile_response.status(), StatusCode::OK);
+
+    socket
+        .close(None)
+        .await
+        .expect("closing websocket should succeed");
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
 }

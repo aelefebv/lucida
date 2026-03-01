@@ -1725,6 +1725,41 @@ impl SessionManager {
         Ok(collect_snapshot_warnings(session, client_id))
     }
 
+    pub fn source_state(
+        &self,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<SourceRecord, SessionError> {
+        let session = self.session_ref(session_id)?;
+        session
+            .shared_scene
+            .sources
+            .get(source_id)
+            .cloned()
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })
+    }
+
+    pub fn dataset_for_source(
+        &self,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<DatasetBinding, SessionError> {
+        let session = self.session_ref(session_id)?;
+        session
+            .shared_scene
+            .datasets
+            .values()
+            .find(|dataset| dataset.source_id.as_deref() == Some(source_id))
+            .cloned()
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })
+    }
+
     fn next_heartbeat_tick(&mut self) -> u64 {
         self.heartbeat_tick = self.heartbeat_tick.saturating_add(1);
         self.heartbeat_tick

@@ -17,9 +17,13 @@ use crate::command_router::{
     CommandArgs, CommandEnvelope, CommandRouter, CommandScope, command_error_to_envelope,
 };
 use crate::data_plane::DataPlaneError;
-use crate::event_stream::{EventEnvelope, EventPayload, EventType};
+use crate::errors::SessionError;
+use crate::event_stream::{
+    DatasetUpsertPayload, EventEnvelope, EventPayload, EventType, SourceGenerationPayload,
+    SourceUpsertPayload,
+};
 use crate::model::{
-    AttachRequest, DatasetBinding, LayerState, PermissionClass, ReconnectRequest,
+    AddSourceRequest, AttachRequest, DatasetBinding, LayerState, PermissionClass, ReconnectRequest,
     SessionSnapshotEnvelope, SourceRecord, SourceStatus, WarningCode, WarningEntry,
     WarningSeverity,
 };
@@ -43,6 +47,7 @@ struct RuntimeState {
     session_manager: Arc<Mutex<SessionManager>>,
     event_buses: Arc<Mutex<BTreeMap<String, broadcast::Sender<EventEnvelope>>>>,
     data_plane: DataPlaneService,
+    cache_root: PathBuf,
 }
 
 impl RuntimeState {
@@ -51,6 +56,7 @@ impl RuntimeState {
             session_manager: Arc::new(Mutex::new(SessionManager::new())),
             event_buses: Arc::new(Mutex::new(BTreeMap::new())),
             data_plane: DataPlaneService::new(config.cache_root.clone()),
+            cache_root: config.cache_root.clone(),
         }
     }
 
@@ -74,6 +80,10 @@ pub async fn run_runtime_server(
     let app = Router::new()
         .route("/v1/info", get(runtime_info))
         .route("/v1/sessions", post(create_session))
+        .route(
+            "/v1/sessions/{session_id}/sources",
+            post(add_source_endpoint),
+        )
         .route("/v1/sessions/{session_id}/snapshot", get(snapshot_endpoint))
         .route("/v1/sessions/{session_id}/connect", get(connect_endpoint))
         .route("/v1/data/{*chunk_path}", get(data_get).head(data_head))
@@ -109,6 +119,21 @@ struct CreateSessionRequest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct CreateSessionResponse {
     session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct AddSourceRuntimeRequest {
+    name: String,
+    uri: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+struct AddSourceRuntimeResponse {
+    source_id: String,
+    dataset_id: String,
+    generation_id: String,
+    generation_seq: u64,
+    source_status: &'static str,
 }
 
 async fn create_session(
@@ -166,6 +191,171 @@ async fn snapshot_endpoint(
     };
 
     Ok(Json(RuntimeSnapshotEnvelope::from_snapshot(&snapshot)))
+}
+
+async fn add_source_endpoint(
+    State(state): State<RuntimeState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<AddSourceRuntimeRequest>,
+) -> Result<(StatusCode, Json<AddSourceRuntimeResponse>), (StatusCode, Json<RuntimeHttpError>)> {
+    if request.name.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(RuntimeHttpError {
+                code: "validation_error",
+                message: "source name must be non-empty".to_owned(),
+            }),
+        ));
+    }
+    if request.uri.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(RuntimeHttpError {
+                code: "validation_error",
+                message: "source uri must be non-empty".to_owned(),
+            }),
+        ));
+    }
+
+    let (response, events) = {
+        let mut manager = state.session_manager.lock().await;
+
+        let added = manager
+            .add_source(
+                &session_id,
+                AddSourceRequest {
+                    name: request.name.trim().to_owned(),
+                    uri: request.uri.trim().to_owned(),
+                },
+            )
+            .map_err(session_error)?;
+        let (session_rev_add, _) = manager
+            .session_and_scene_revisions(&session_id)
+            .map_err(session_error)?;
+
+        let mut events = vec![
+            EventEnvelope::scene_source_upsert(
+                session_id.clone(),
+                session_rev_add,
+                SourceUpsertPayload::from(&added.source),
+                crate::clock::rfc3339_now(),
+            ),
+            EventEnvelope::scene_dataset_upsert(
+                session_id.clone(),
+                session_rev_add,
+                DatasetUpsertPayload::from(&added.dataset),
+                crate::clock::rfc3339_now(),
+            ),
+        ];
+
+        let detected = manager
+            .detect_generation(&session_id, &added.source.source_id)
+            .map_err(session_error)?;
+        let (session_rev_detected, _) = manager
+            .session_and_scene_revisions(&session_id)
+            .map_err(session_error)?;
+        events.push(EventEnvelope::source_generation_detected(
+            session_id.clone(),
+            session_rev_detected,
+            SourceGenerationPayload::from(&detected),
+            crate::clock::rfc3339_now(),
+        ));
+
+        let started = manager
+            .start_generation(
+                &session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .map_err(session_error)?;
+        let (session_rev_started, _) = manager
+            .session_and_scene_revisions(&session_id)
+            .map_err(session_error)?;
+        events.push(EventEnvelope::source_generation_started(
+            session_id.clone(),
+            session_rev_started,
+            SourceGenerationPayload::from(&started),
+            crate::clock::rfc3339_now(),
+        ));
+
+        manager
+            .build_canonical_cache_for_generation(
+                &session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                state.cache_root.clone(),
+            )
+            .map_err(session_error)?;
+        let progressed = manager
+            .build_tile_preview_for_generation(
+                &session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .map_err(session_error)?;
+        let (session_rev_progress, _) = manager
+            .session_and_scene_revisions(&session_id)
+            .map_err(session_error)?;
+        events.push(EventEnvelope::source_generation_progress(
+            session_id.clone(),
+            session_rev_progress,
+            SourceGenerationPayload::from(&progressed),
+            crate::clock::rfc3339_now(),
+        ));
+
+        let ready = manager
+            .mark_generation_ready(
+                &session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .map_err(session_error)?;
+        let source_state = manager
+            .source_state(&session_id, &added.source.source_id)
+            .map_err(session_error)?;
+        let dataset_state = manager
+            .dataset_for_source(&session_id, &added.source.source_id)
+            .map_err(session_error)?;
+        let (session_rev_ready, _) = manager
+            .session_and_scene_revisions(&session_id)
+            .map_err(session_error)?;
+        events.push(EventEnvelope::source_generation_ready(
+            session_id.clone(),
+            session_rev_ready,
+            SourceGenerationPayload::from(&ready),
+            crate::clock::rfc3339_now(),
+        ));
+        events.push(EventEnvelope::scene_source_upsert(
+            session_id.clone(),
+            session_rev_ready,
+            SourceUpsertPayload::from(&source_state),
+            crate::clock::rfc3339_now(),
+        ));
+        events.push(EventEnvelope::scene_dataset_upsert(
+            session_id.clone(),
+            session_rev_ready,
+            DatasetUpsertPayload::from(&dataset_state),
+            crate::clock::rfc3339_now(),
+        ));
+
+        (
+            AddSourceRuntimeResponse {
+                source_id: source_state.source_id,
+                dataset_id: dataset_state.dataset_id,
+                generation_id: ready.generation_id,
+                generation_seq: ready.generation_seq,
+                source_status: source_status_name(source_state.status),
+            },
+            events,
+        )
+    };
+
+    let event_bus = state.event_bus(&session_id).await;
+    for event in events {
+        let _ = event_bus.send(event);
+    }
+
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 async fn connect_endpoint(
@@ -985,6 +1175,42 @@ fn data_plane_error(error: DataPlaneError) -> (StatusCode, Json<RuntimeHttpError
             Json(RuntimeHttpError {
                 code: "internal_error",
                 message: format!("failed to read payload at {path}: {reason}"),
+            }),
+        ),
+    }
+}
+
+fn session_error(error: SessionError) -> (StatusCode, Json<RuntimeHttpError>) {
+    match error {
+        SessionError::SessionNotFound { .. } => (
+            StatusCode::NOT_FOUND,
+            Json(RuntimeHttpError {
+                code: "not_found",
+                message: error.to_string(),
+            }),
+        ),
+        SessionError::SourceUnavailable { .. } => (
+            StatusCode::BAD_REQUEST,
+            Json(RuntimeHttpError {
+                code: "source_unavailable",
+                message: error.to_string(),
+            }),
+        ),
+        SessionError::CanonicalCacheBuildFailed { .. }
+        | SessionError::TilePreviewBuildFailed { .. }
+        | SessionError::BrickBuildFailed { .. }
+        | SessionError::CacheGcFailed { .. } => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RuntimeHttpError {
+                code: "internal_error",
+                message: error.to_string(),
+            }),
+        ),
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(RuntimeHttpError {
+                code: "validation_error",
+                message: error.to_string(),
             }),
         ),
     }
