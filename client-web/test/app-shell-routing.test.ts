@@ -294,7 +294,7 @@ describe("app shell routing", () => {
     expect((setTCommands[1]?.args as { t_index?: unknown })?.t_index).toBe(0);
   });
 
-  it("adjusts viewport display size with the viewport size slider", async () => {
+  it("adjusts viewport width and height independently", async () => {
     const fixture = await startIntegratedRenderFixture();
     fixtures.push(fixture);
 
@@ -309,18 +309,32 @@ describe("app shell routing", () => {
     await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
 
     const viewport = queryCanvas("viewport-canvas");
+    expect(viewport.width).toBe(2);
+    expect(viewport.height).toBe(1);
     expect(viewport.style.width).toBe("2px");
     expect(viewport.style.height).toBe("1px");
     expect(viewport.style.imageRendering).toBe("pixelated");
-    expect(queryText("viewport-size-values")).toContain("100%");
+    expect(queryText("viewport-size-values")).toContain("2 x 1");
 
-    const slider = queryInput("slider-viewport-size");
-    slider.value = "200";
-    slider.dispatchEvent(new Event("input", { bubbles: true }));
+    const widthInput = queryInput("input-viewport-width");
+    widthInput.value = "6";
+    widthInput.dispatchEvent(new Event("input", { bubbles: true }));
 
-    expect(viewport.style.width).toBe("4px");
-    expect(viewport.style.height).toBe("2px");
-    expect(queryText("viewport-size-values")).toContain("200%");
+    expect(viewport.width).toBe(6);
+    expect(viewport.height).toBe(1);
+    expect(viewport.style.width).toBe("6px");
+    expect(viewport.style.height).toBe("1px");
+    expect(queryText("viewport-size-values")).toContain("6 x 1");
+
+    const heightInput = queryInput("input-viewport-height");
+    heightInput.value = "5";
+    heightInput.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(viewport.width).toBe(6);
+    expect(viewport.height).toBe(5);
+    expect(viewport.style.width).toBe("6px");
+    expect(viewport.style.height).toBe("5px");
+    expect(queryText("viewport-size-values")).toContain("6 x 5");
   });
 
   it("pans via viewport drag and zooms via viewport wheel", async () => {
@@ -418,9 +432,12 @@ describe("app shell routing", () => {
 
     await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
 
-    const sizeSlider = queryInput("slider-viewport-size");
-    sizeSlider.value = "200";
-    sizeSlider.dispatchEvent(new Event("input", { bubbles: true }));
+    const widthInput = queryInput("input-viewport-width");
+    widthInput.value = "8";
+    widthInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const heightInput = queryInput("input-viewport-height");
+    heightInput.value = "4";
+    heightInput.dispatchEvent(new Event("input", { bubbles: true }));
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "=" }));
 
@@ -465,7 +482,7 @@ describe("app shell routing", () => {
 
     const panCommand = commands.find((command) => command.op === "view.pan");
     expect(panCommand).toBeDefined();
-    expect((panCommand?.args as { dx?: unknown })?.dx).toBeCloseTo(-10, 6);
+    expect((panCommand?.args as { dx?: unknown })?.dx).toBeCloseTo(-20, 6);
     expect((panCommand?.args as { dy?: unknown })?.dy).toBe(0);
   });
 

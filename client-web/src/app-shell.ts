@@ -23,9 +23,10 @@ const DEFAULT_AXIS_SLIDER_MAX = 4095;
 const ZOOM_IN_SCALE = 1.2;
 const ZOOM_OUT_SCALE = 1 / ZOOM_IN_SCALE;
 const KEYBOARD_PAN_STEP_CSS_PX = 24;
-const MIN_VIEWPORT_SCALE_PERCENT = 25;
-const MAX_VIEWPORT_SCALE_PERCENT = 400;
-const DEFAULT_VIEWPORT_SCALE_PERCENT = 100;
+const MIN_VIEWPORT_DIMENSION_PX = 1;
+const MAX_VIEWPORT_DIMENSION_PX = 8192;
+const DEFAULT_VIEWPORT_WIDTH_PX = 1;
+const DEFAULT_VIEWPORT_HEIGHT_PX = 1;
 
 export function bootstrapApp(
   document: Document = window.document,
@@ -181,18 +182,30 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
   </section>
   <section data-testid="viewport-size-controls">
     <label>
-      Viewport Size
+      Viewport Width
       <input
-        data-testid="slider-viewport-size"
-        type="range"
-        min="${MIN_VIEWPORT_SCALE_PERCENT.toString()}"
-        max="${MAX_VIEWPORT_SCALE_PERCENT.toString()}"
+        data-testid="input-viewport-width"
+        type="number"
+        min="${MIN_VIEWPORT_DIMENSION_PX.toString()}"
+        max="${MAX_VIEWPORT_DIMENSION_PX.toString()}"
         step="1"
-        value="${DEFAULT_VIEWPORT_SCALE_PERCENT.toString()}"
-        aria-label="Viewport size percent"
+        value="${DEFAULT_VIEWPORT_WIDTH_PX.toString()}"
+        aria-label="Viewport width"
       />
     </label>
-    <output data-testid="viewport-size-values">${DEFAULT_VIEWPORT_SCALE_PERCENT.toString()}%</output>
+    <label>
+      Viewport Height
+      <input
+        data-testid="input-viewport-height"
+        type="number"
+        min="${MIN_VIEWPORT_DIMENSION_PX.toString()}"
+        max="${MAX_VIEWPORT_DIMENSION_PX.toString()}"
+        step="1"
+        value="${DEFAULT_VIEWPORT_HEIGHT_PX.toString()}"
+        aria-label="Viewport height"
+      />
+    </label>
+    <output data-testid="viewport-size-values">${DEFAULT_VIEWPORT_WIDTH_PX.toString()} x ${DEFAULT_VIEWPORT_HEIGHT_PX.toString()}</output>
   </section>
   <section data-testid="selection-state"></section>
   <section data-testid="contrast-controls">
@@ -540,14 +553,39 @@ function attachInteractionHandlers(
     }
     renderRuntimeState(mount, runtime.state());
   });
-  registerInput("slider-viewport-size", () => {
-    const slider = mount.querySelector('[data-testid="slider-viewport-size"]');
-    if (!(slider instanceof HTMLInputElement)) {
+  registerInput("input-viewport-width", () => {
+    const dimensions = readViewportDimensions(mount);
+    const widthInput = mount.querySelector('[data-testid="input-viewport-width"]');
+    if (!(widthInput instanceof HTMLInputElement)) {
       return;
     }
-    const parsed = Number.parseInt(slider.value, 10);
-    setViewportScalePercent(mount, parsed);
-    applyViewportDisplaySize(mount);
+    const parsed = Number.parseInt(widthInput.value, 10);
+    setViewportDimensions(
+      mount,
+      {
+        width: normalizeViewportDimension(parsed),
+        height: dimensions.height,
+      },
+      true,
+    );
+    renderRuntimeState(mount, runtime.state());
+  });
+  registerInput("input-viewport-height", () => {
+    const dimensions = readViewportDimensions(mount);
+    const heightInput = mount.querySelector('[data-testid="input-viewport-height"]');
+    if (!(heightInput instanceof HTMLInputElement)) {
+      return;
+    }
+    const parsed = Number.parseInt(heightInput.value, 10);
+    setViewportDimensions(
+      mount,
+      {
+        width: dimensions.width,
+        height: normalizeViewportDimension(parsed),
+      },
+      true,
+    );
+    renderRuntimeState(mount, runtime.state());
   });
 
   const viewportCanvas = mount.querySelector('[data-testid="viewport-canvas"]');
@@ -650,17 +688,20 @@ function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): vo
     return;
   }
 
+  const viewportDimensions = readViewportDimensions(mount);
   if (state.renderFrame === null) {
-    canvas.width = 1;
-    canvas.height = 1;
-    applyViewportDisplaySize(mount);
+    canvas.width = viewportDimensions.width;
+    canvas.height = viewportDimensions.height;
+    applyViewportCanvasPresentation(canvas);
     return;
   }
 
   const frame = state.renderFrame;
-  canvas.width = frame.width;
-  canvas.height = frame.height;
-  applyViewportDisplaySize(mount);
+  maybeAutoFitViewportToFrame(mount, frame.width, frame.height);
+  const effectiveViewportDimensions = readViewportDimensions(mount);
+  canvas.width = effectiveViewportDimensions.width;
+  canvas.height = effectiveViewportDimensions.height;
+  applyViewportCanvasPresentation(canvas);
 
   const context = tryGet2dContext(canvas);
   if (context === null) {
@@ -672,7 +713,10 @@ function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): vo
     contrast,
     frame.sampleMax,
   );
-  const imageData = context.createImageData(frame.width, frame.height);
+  const imageData = context.createImageData(
+    effectiveViewportDimensions.width,
+    effectiveViewportDimensions.height,
+  );
   const zoom = normalizeZoom(state.clientState?.zoom ?? 1);
   const panX = state.clientState?.centerX ?? 0;
   const panY = state.clientState?.centerY ?? 0;
@@ -683,6 +727,8 @@ function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): vo
     panX,
     panY,
     zoom,
+    effectiveViewportDimensions.width,
+    effectiveViewportDimensions.height,
     imageData.data,
   );
   context.putImageData(imageData, 0, 0);
@@ -690,28 +736,30 @@ function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): vo
 
 function writeViewportPixels(
   source: Uint8ClampedArray,
-  width: number,
-  height: number,
+  sourceWidth: number,
+  sourceHeight: number,
   panX: number,
   panY: number,
   zoom: number,
+  viewportWidth: number,
+  viewportHeight: number,
   output: Uint8ClampedArray,
 ): void {
-  const centerX = (width / 2) + panX;
-  const centerY = (height / 2) + panY;
-  for (let y = 0; y < height; y += 1) {
-    const sourceY = Math.round(centerY + (y - height / 2) / zoom);
-    for (let x = 0; x < width; x += 1) {
-      const outBase = ((y * width) + x) * 4;
-      const sourceX = Math.round(centerX + (x - width / 2) / zoom);
-      if (sourceX < 0 || sourceX >= width || sourceY < 0 || sourceY >= height) {
+  const centerX = (sourceWidth / 2) + panX;
+  const centerY = (sourceHeight / 2) + panY;
+  for (let y = 0; y < viewportHeight; y += 1) {
+    const sourceY = Math.round(centerY + (y - viewportHeight / 2) / zoom);
+    for (let x = 0; x < viewportWidth; x += 1) {
+      const outBase = ((y * viewportWidth) + x) * 4;
+      const sourceX = Math.round(centerX + (x - viewportWidth / 2) / zoom);
+      if (sourceX < 0 || sourceX >= sourceWidth || sourceY < 0 || sourceY >= sourceHeight) {
         output[outBase] = 0;
         output[outBase + 1] = 0;
         output[outBase + 2] = 0;
         output[outBase + 3] = 255;
         continue;
       }
-      const sourceBase = ((sourceY * width) + sourceX) * 4;
+      const sourceBase = ((sourceY * sourceWidth) + sourceX) * 4;
       output[outBase] = source[sourceBase] ?? 0;
       output[outBase + 1] = source[sourceBase + 1] ?? 0;
       output[outBase + 2] = source[sourceBase + 2] ?? 0;
@@ -841,22 +889,40 @@ function clampChannels(channels: number[], maxIndex: number | null): number[] {
 }
 
 function initializeViewportSizeControls(mount: HTMLElement): void {
-  setViewportScalePercent(mount, DEFAULT_VIEWPORT_SCALE_PERCENT);
-  applyViewportDisplaySize(mount);
+  setViewportDimensions(
+    mount,
+    {
+      width: DEFAULT_VIEWPORT_WIDTH_PX,
+      height: DEFAULT_VIEWPORT_HEIGHT_PX,
+    },
+    false,
+  );
 }
 
-function applyViewportDisplaySize(mount: HTMLElement): void {
-  const canvas = mount.querySelector('[data-testid="viewport-canvas"]');
-  if (!(canvas instanceof HTMLCanvasElement)) {
+function maybeAutoFitViewportToFrame(
+  mount: HTMLElement,
+  frameWidth: number,
+  frameHeight: number,
+): void {
+  const userAdjusted = mount.getAttribute("data-viewport-user-adjusted") === "true";
+  if (userAdjusted) {
     return;
   }
+  setViewportDimensions(
+    mount,
+    {
+      width: frameWidth,
+      height: frameHeight,
+    },
+    false,
+  );
+}
+
+function applyViewportCanvasPresentation(canvas: HTMLCanvasElement): void {
   // Keep enlarged viewport pixels sharp instead of browser-smoothed.
   canvas.style.imageRendering = "pixelated";
-  const scale = readViewportScalePercent(mount) / 100;
-  const displayWidth = Math.max(1, Math.round(canvas.width * scale));
-  const displayHeight = Math.max(1, Math.round(canvas.height * scale));
-  canvas.style.width = `${displayWidth.toString()}px`;
-  canvas.style.height = `${displayHeight.toString()}px`;
+  canvas.style.width = `${canvas.width.toString()}px`;
+  canvas.style.height = `${canvas.height.toString()}px`;
 }
 
 function canvasDisplayScale(
@@ -894,34 +960,53 @@ function normalizeDisplayScale(...candidates: number[]): number {
   return 1;
 }
 
-function readViewportScalePercent(mount: HTMLElement): number {
-  const stored = mount.getAttribute("data-viewport-scale-percent");
-  const parsed = stored === null ? Number.NaN : Number.parseInt(stored, 10);
-  return normalizeViewportScalePercent(parsed);
-}
-
-function setViewportScalePercent(mount: HTMLElement, value: number): void {
-  const normalized = normalizeViewportScalePercent(value);
-  mount.setAttribute("data-viewport-scale-percent", normalized.toString());
-  const slider = mount.querySelector('[data-testid="slider-viewport-size"]');
-  if (slider instanceof HTMLInputElement) {
-    slider.value = normalized.toString();
-  }
-  const output = mount.querySelector('[data-testid="viewport-size-values"]');
-  if (output instanceof HTMLOutputElement || output instanceof HTMLElement) {
-    output.textContent = `${normalized.toString()}%`;
-  }
-}
-
-function normalizeViewportScalePercent(value: number): number {
+function normalizeViewportDimension(value: number): number {
   if (!Number.isFinite(value)) {
-    return DEFAULT_VIEWPORT_SCALE_PERCENT;
+    return MIN_VIEWPORT_DIMENSION_PX;
   }
   const rounded = Math.round(value);
   return Math.min(
-    MAX_VIEWPORT_SCALE_PERCENT,
-    Math.max(MIN_VIEWPORT_SCALE_PERCENT, rounded),
+    MAX_VIEWPORT_DIMENSION_PX,
+    Math.max(MIN_VIEWPORT_DIMENSION_PX, rounded),
   );
+}
+
+function readViewportDimensions(mount: HTMLElement): { width: number; height: number } {
+  const widthStored = mount.getAttribute("data-viewport-width");
+  const heightStored = mount.getAttribute("data-viewport-height");
+  const widthParsed =
+    widthStored === null ? Number.NaN : Number.parseInt(widthStored, 10);
+  const heightParsed =
+    heightStored === null ? Number.NaN : Number.parseInt(heightStored, 10);
+  return {
+    width: normalizeViewportDimension(widthParsed),
+    height: normalizeViewportDimension(heightParsed),
+  };
+}
+
+function setViewportDimensions(
+  mount: HTMLElement,
+  dimensions: { width: number; height: number },
+  userAdjusted: boolean,
+): void {
+  const width = normalizeViewportDimension(dimensions.width);
+  const height = normalizeViewportDimension(dimensions.height);
+  mount.setAttribute("data-viewport-width", width.toString());
+  mount.setAttribute("data-viewport-height", height.toString());
+  mount.setAttribute("data-viewport-user-adjusted", userAdjusted ? "true" : "false");
+
+  const widthInput = mount.querySelector('[data-testid="input-viewport-width"]');
+  if (widthInput instanceof HTMLInputElement) {
+    widthInput.value = width.toString();
+  }
+  const heightInput = mount.querySelector('[data-testid="input-viewport-height"]');
+  if (heightInput instanceof HTMLInputElement) {
+    heightInput.value = height.toString();
+  }
+  const output = mount.querySelector('[data-testid="viewport-size-values"]');
+  if (output instanceof HTMLOutputElement || output instanceof HTMLElement) {
+    output.textContent = `${width.toString()} x ${height.toString()}`;
+  }
 }
 
 function initializeContrastControls(mount: HTMLElement): void {
