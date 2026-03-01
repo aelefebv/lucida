@@ -14,6 +14,7 @@ mod id_allocator;
 mod metadata_sidecar;
 mod model;
 mod object_url;
+mod raster_plane;
 mod revision_allocator;
 mod runtime;
 mod session_manager;
@@ -79,6 +80,7 @@ pub use model::{
 pub use object_url::{
     EngineDataPlaneResolver, ObjectUrlError, ObjectUrlResolver, StaticObjectResolver,
 };
+pub use raster_plane::{RasterPlane, RasterPlaneLoadError, RasterPlaneLoadRequest, load_raster_plane};
 pub use revision_allocator::RevisionAllocator;
 pub use runtime::{EngineRuntimeConfig, run_runtime_server};
 pub use session_manager::{LeaseTransition, SessionManager};

@@ -6,29 +6,24 @@ use lucida_engine::{
 };
 
 fn write_minimal_rgb_tiff(path: &Path) {
-    const TIFF_BYTES: [u8; 62] = [
-        0x49, 0x49, 0x2A, 0x00, // II + classic TIFF marker
-        0x08, 0x00, 0x00, 0x00, // first IFD offset
-        0x04, 0x00, // entry count
-        0x00, 0x01, // tag 256 image width
-        0x04, 0x00, // type LONG
-        0x01, 0x00, 0x00, 0x00, // count
-        0x20, 0x00, 0x00, 0x00, // width 32
-        0x01, 0x01, // tag 257 image length
-        0x04, 0x00, // type LONG
-        0x01, 0x00, 0x00, 0x00, // count
-        0x10, 0x00, 0x00, 0x00, // height 16
-        0x15, 0x01, // tag 277 samples per pixel
-        0x03, 0x00, // type SHORT
-        0x01, 0x00, 0x00, 0x00, // count
-        0x03, 0x00, 0x00, 0x00, // 3 channels
-        0x02, 0x01, // tag 258 bits per sample
-        0x03, 0x00, // type SHORT
-        0x01, 0x00, 0x00, 0x00, // count
-        0x08, 0x00, 0x00, 0x00, // 8 bits
-        0x00, 0x00, 0x00, 0x00, // next IFD offset
-    ];
-    fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
+    let file = fs::File::create(path).expect("tiff fixture file should be created");
+    let mut encoder =
+        tiff::encoder::TiffEncoder::new(file).expect("tiff fixture encoder should be created");
+    let width = 32_u32;
+    let height = 16_u32;
+    let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push((x as u8).wrapping_mul(7));
+            pixels.push((y as u8).wrapping_mul(9));
+            pixels.push((x as u8).wrapping_add(y as u8));
+        }
+    }
+    encoder
+        .new_image::<tiff::encoder::colortype::RGB8>(width, height)
+        .expect("tiff fixture image should be created")
+        .write_data(&pixels)
+        .expect("tiff fixture pixels should be written");
 }
 
 #[test]
@@ -123,7 +118,7 @@ fn data_plane_service_serves_tile_preview_and_brick_payloads_by_generation() {
     assert!(!tile_response.body.is_empty());
     assert_eq!(
         tile_response.headers.get("content-encoding"),
-        Some(&"x-lucida-lz4".to_owned())
+        Some(&"identity".to_owned())
     );
     assert_eq!(
         tile_response.headers.get("cache-control"),

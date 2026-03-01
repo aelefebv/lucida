@@ -7,11 +7,15 @@ use serde_json::json;
 use crate::channel_block::{
     ChannelBlockPackaging, ChannelBlockWriteRequest, PayloadCodec, PayloadKind,
 };
-use crate::model::AxisShape;
+use crate::model::{AxisShape, SourceKind};
+use crate::raster_plane::{RasterPlane, RasterPlaneLoadRequest, load_raster_plane};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TilePreviewBuildRequest {
     pub source_id: String,
+    pub source_uri: String,
+    pub source_kind: SourceKind,
+    pub source_dtype: String,
     pub generation_seq: u64,
     pub generation_root: PathBuf,
     pub shape: AxisShape,
@@ -28,6 +32,7 @@ pub struct TilePreviewBuildResult {
 pub enum TilePreviewBuildError {
     IoError { path: String, message: String },
     SerializationError { message: String },
+    DecodeError { message: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +48,7 @@ impl Default for TilePreviewBuilder {
         Self {
             tile_width: 512,
             tile_height: 512,
-            payload_codec: PayloadCodec::Lz4,
+            payload_codec: PayloadCodec::Raw,
             channel_packaging: ChannelBlockPackaging::new(4),
         }
     }
@@ -76,6 +81,15 @@ impl TilePreviewBuilder {
             .copied()
             .map(|lod| lod_descriptor(lod, &request.shape, self.tile_width, self.tile_height))
             .collect::<Vec<_>>();
+        let base_plane = load_raster_plane(&RasterPlaneLoadRequest {
+            source_uri: request.source_uri.clone(),
+            source_kind: request.source_kind,
+            dtype: request.source_dtype.clone(),
+        })
+        .map_err(|error| TilePreviewBuildError::DecodeError {
+            message: format!("{error:?}"),
+        })?;
+        let lod_planes = build_lod_planes(&base_plane, &lods);
         write_manifest(
             &tile_root,
             &request.source_id,
@@ -83,11 +97,11 @@ impl TilePreviewBuilder {
             &lod_descriptors,
             self.channel_packaging.default_block_size(),
         )?;
-        write_placeholder_tiles(
+        write_tiles(
             &tile_root,
             &lod_descriptors,
-            request.generation_seq,
-            request.shape.c.min(u64::from(u16::MAX)) as u16,
+            &lod_planes,
+            request.shape.c.max(1).min(u64::from(u16::MAX)) as u16,
             self.payload_codec,
             &self.channel_packaging,
         )?;
@@ -96,11 +110,13 @@ impl TilePreviewBuilder {
             .iter()
             .max()
             .expect("lod list should always contain at least one value");
-        for lod in &lods {
-            let descriptor =
-                lod_descriptor(*lod, &request.shape, self.tile_width, self.tile_height);
+        for descriptor in &lod_descriptors {
+            let lod = descriptor.lod;
             let preview_path = preview_root.join(format!("lod_{lod}.pgm"));
-            write_preview_image(&preview_path, descriptor.width, descriptor.height)?;
+            let plane = lod_planes
+                .get(&lod)
+                .expect("lod plane should be available for every descriptor");
+            write_preview_image(&preview_path, plane)?;
         }
         let preview_path = preview_root.join(format!("lod_{coarsest_lod}.pgm"));
 
@@ -188,10 +204,10 @@ fn write_manifest(
     Ok(())
 }
 
-fn write_placeholder_tiles(
+fn write_tiles(
     tile_root: &Path,
     lods: &[LodDescriptor],
-    generation_seq: u64,
+    lod_planes: &std::collections::BTreeMap<u8, RasterPlane>,
     channel_count: u16,
     codec: PayloadCodec,
     packaging: &ChannelBlockPackaging,
@@ -203,11 +219,10 @@ fn write_placeholder_tiles(
             message: error.to_string(),
         })?;
         let tile_path = lod_dir.join("t0_z0_cb0_r0_c0.tileblk");
-        let tile_payload = format!(
-            "placeholder tile generation={} lod={} {}x{}",
-            generation_seq, descriptor.lod, descriptor.width, descriptor.height
-        )
-        .into_bytes();
+        let plane = lod_planes
+            .get(&descriptor.lod)
+            .expect("every lod descriptor should have raster pixels");
+        let tile_payload = encode_pgm(plane.width, plane.height, &plane.pixels)?;
         let encoded_payload = packaging
             .encode(&ChannelBlockWriteRequest {
                 payload_kind: PayloadKind::Image,
@@ -229,17 +244,9 @@ fn write_placeholder_tiles(
 
 fn write_preview_image(
     preview_path: &Path,
-    width: u64,
-    height: u64,
+    plane: &RasterPlane,
 ) -> Result<(), TilePreviewBuildError> {
-    let width_u16 = width.min(u64::from(u16::MAX)) as u16;
-    let height_u16 = height.min(u64::from(u16::MAX)) as u16;
-    let mut bytes = format!("P5\n{} {}\n255\n", width_u16, height_u16).into_bytes();
-    for y in 0..height_u16 {
-        for x in 0..width_u16 {
-            bytes.push(((u32::from(x) + u32::from(y)) % 256) as u8);
-        }
-    }
+    let bytes = encode_pgm(plane.width, plane.height, &plane.pixels)?;
 
     fs::write(preview_path, bytes).map_err(|error| TilePreviewBuildError::IoError {
         path: preview_path.display().to_string(),
@@ -248,13 +255,96 @@ fn write_preview_image(
     Ok(())
 }
 
+fn build_lod_planes(
+    base: &RasterPlane,
+    lods: &[u8],
+) -> std::collections::BTreeMap<u8, RasterPlane> {
+    let mut planes = std::collections::BTreeMap::new();
+    planes.insert(0, base.clone());
+
+    let max_lod = *lods.iter().max().unwrap_or(&0);
+    for lod in 1..=max_lod {
+        let previous = planes
+            .get(&(lod - 1))
+            .expect("previous lod must exist before building next lod");
+        planes.insert(lod, downsample_half(previous));
+    }
+
+    planes
+}
+
+fn downsample_half(source: &RasterPlane) -> RasterPlane {
+    let source_width = source.width as usize;
+    let source_height = source.height as usize;
+    let target_width = source_width.div_ceil(2).max(1);
+    let target_height = source_height.div_ceil(2).max(1);
+    let mut pixels = vec![0_u8; target_width * target_height];
+
+    for target_y in 0..target_height {
+        for target_x in 0..target_width {
+            let source_x = target_x * 2;
+            let source_y = target_y * 2;
+            let mut sum = 0_u32;
+            let mut count = 0_u32;
+
+            for offset_y in 0..2 {
+                for offset_x in 0..2 {
+                    let sample_x = source_x + offset_x;
+                    let sample_y = source_y + offset_y;
+                    if sample_x >= source_width || sample_y >= source_height {
+                        continue;
+                    }
+                    let index = sample_y * source_width + sample_x;
+                    sum += u32::from(source.pixels[index]);
+                    count += 1;
+                }
+            }
+
+            let target_index = target_y * target_width + target_x;
+            pixels[target_index] = if count == 0 {
+                0
+            } else {
+                (sum / count) as u8
+            };
+        }
+    }
+
+    RasterPlane {
+        width: target_width as u64,
+        height: target_height as u64,
+        pixels,
+    }
+}
+
+fn encode_pgm(width: u64, height: u64, pixels: &[u8]) -> Result<Vec<u8>, TilePreviewBuildError> {
+    let expected_pixels = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| TilePreviewBuildError::SerializationError {
+            message: "PGM dimensions overflow".to_owned(),
+        })?;
+    if pixels.len() != expected_pixels {
+        return Err(TilePreviewBuildError::SerializationError {
+            message: format!(
+                "PGM payload length mismatch: expected {expected_pixels}, got {}",
+                pixels.len()
+            ),
+        });
+    }
+
+    let mut bytes = format!("P5\n{width} {height}\n255\n").into_bytes();
+    bytes.extend_from_slice(pixels);
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs::File;
+    use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::channel_block::ChannelBlockPackaging;
-    use crate::model::AxisShape;
+    use crate::model::{AxisShape, SourceKind};
 
     use super::{TilePreviewBuildRequest, TilePreviewBuilder};
 
@@ -270,23 +360,63 @@ mod tests {
         ))
     }
 
+    fn write_test_tiff(path: &Path, width: u32, height: u32, pixels: &[u8]) {
+        let file = File::create(path).expect("test tiff file should be created");
+        let mut encoder =
+            tiff::encoder::TiffEncoder::new(file).expect("tiff encoder creation should succeed");
+        let image = encoder
+            .new_image::<tiff::encoder::colortype::Gray8>(width, height)
+            .expect("tiff image creation should succeed");
+        image
+            .write_data(pixels)
+            .expect("tiff pixel payload write should succeed");
+    }
+
+    fn write_test_omezarr(path: &Path, width: u64, height: u64, pixels: &[u8]) {
+        std::fs::create_dir_all(path.join("0")).expect("ome-zarr data group should be created");
+        std::fs::write(
+            path.join(".zattrs"),
+            r#"{"multiscales":[{"version":"0.4","axes":[{"name":"t"},{"name":"c"},{"name":"z"},{"name":"y"},{"name":"x"}],"datasets":[{"path":"0"}]}]}"#,
+        )
+        .expect("ome-zarr attrs should be written");
+        std::fs::write(
+            path.join("0").join(".zarray"),
+            format!(
+                "{{\"zarr_format\":2,\"shape\":[1,1,1,{height},{width}],\"chunks\":[1,1,1,{height},{width}],\"dtype\":\"|u1\",\"compressor\":null,\"fill_value\":0,\"order\":\"C\",\"filters\":null}}"
+            ),
+        )
+        .expect("ome-zarr array descriptor should be written");
+        std::fs::write(path.join("0").join("0.0.0.0.0"), pixels)
+            .expect("ome-zarr chunk should be written");
+    }
+
     #[test]
-    fn builds_preview_and_tile_manifest_for_progressive_2d_refinement() {
+    fn builds_preview_and_tile_manifest_from_source_pixels() {
         let generation_root = unique_path("generation");
+        let fixture_root = unique_path("fixture");
         std::fs::create_dir_all(&generation_root).expect("generation root should be created");
+        std::fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+        let source_path = fixture_root.join("source.tiff");
+        let source_pixels: Vec<u8> = vec![
+            0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240,
+        ];
+        write_test_tiff(&source_path, 4, 4, &source_pixels);
         let builder = TilePreviewBuilder::new();
 
         let result = builder
             .build(&TilePreviewBuildRequest {
                 source_id: "src_00000001".to_owned(),
+                source_uri: source_path.display().to_string(),
+                source_kind: SourceKind::Tiff,
+                source_dtype: "uint8".to_owned(),
                 generation_seq: 1,
                 generation_root: generation_root.clone(),
                 shape: AxisShape {
                     t: 1,
                     c: 3,
                     z: 1,
-                    y: 1024,
-                    x: 2048,
+                    y: 4,
+                    x: 4,
                     extra_axes: BTreeMap::new(),
                 },
             })
@@ -306,12 +436,55 @@ mod tests {
             .decode(&tile_bytes)
             .expect("tile payload decode should succeed");
         assert_eq!(decoded_tile.channel_block_size, 3);
+        assert!(decoded_tile.payload.starts_with(b"P5\n4 4\n255\n"));
+        assert!(decoded_tile.payload.ends_with(&source_pixels));
         let manifest = std::fs::read_to_string(&result.tile_manifest_path)
             .expect("manifest read should succeed");
         assert!(manifest.contains("\"lods\""));
         assert!(manifest.contains("\"default_channel_block_size\""));
         assert!(generation_root.join("tile2d").join("lod0").exists());
+        let preview_bytes = std::fs::read(&result.preview_path).expect("preview should be readable");
+        assert!(preview_bytes.starts_with(b"P5\n1 1\n255\n"));
 
         std::fs::remove_dir_all(generation_root).expect("fixture cleanup should succeed");
+        std::fs::remove_dir_all(fixture_root).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn builds_preview_and_tiles_from_omezarr_pixels() {
+        let generation_root = unique_path("generation_omezarr");
+        let fixture_root = unique_path("fixture_omezarr").with_extension("ome.zarr");
+        std::fs::create_dir_all(&generation_root).expect("generation root should be created");
+        let source_pixels: Vec<u8> = vec![10, 20, 30, 40, 50, 60];
+        write_test_omezarr(&fixture_root, 3, 2, &source_pixels);
+
+        let builder = TilePreviewBuilder::new();
+        let result = builder
+            .build(&TilePreviewBuildRequest {
+                source_id: "src_omezarr".to_owned(),
+                source_uri: fixture_root.display().to_string(),
+                source_kind: SourceKind::OmeZarr,
+                source_dtype: "uint8".to_owned(),
+                generation_seq: 1,
+                generation_root: generation_root.clone(),
+                shape: AxisShape {
+                    t: 1,
+                    c: 1,
+                    z: 1,
+                    y: 2,
+                    x: 3,
+                    extra_axes: BTreeMap::new(),
+                },
+            })
+            .expect("tile/preview build should succeed");
+
+        let preview_lod0 = std::fs::read(generation_root.join("preview2d").join("lod_0.pgm"))
+            .expect("lod0 preview should be readable");
+        assert!(preview_lod0.starts_with(b"P5\n3 2\n255\n"));
+        assert!(preview_lod0.ends_with(&source_pixels));
+        assert!(result.preview_path.exists());
+
+        std::fs::remove_dir_all(generation_root).expect("generation cleanup should succeed");
+        std::fs::remove_dir_all(fixture_root).expect("fixture cleanup should succeed");
     }
 }
