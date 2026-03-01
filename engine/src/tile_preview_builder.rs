@@ -95,18 +95,13 @@ impl TilePreviewBuilder {
             .iter()
             .max()
             .expect("lod list should always contain at least one value");
-        let preview_descriptor = lod_descriptor(
-            coarsest_lod,
-            &request.shape,
-            self.tile_width,
-            self.tile_height,
-        );
+        for lod in &lods {
+            let descriptor =
+                lod_descriptor(*lod, &request.shape, self.tile_width, self.tile_height);
+            let preview_path = preview_root.join(format!("lod_{lod}.pgm"));
+            write_preview_image(&preview_path, descriptor.width, descriptor.height)?;
+        }
         let preview_path = preview_root.join(format!("lod_{coarsest_lod}.pgm"));
-        write_preview_image(
-            &preview_path,
-            preview_descriptor.width,
-            preview_descriptor.height,
-        )?;
 
         Ok(TilePreviewBuildResult {
             preview_path,
@@ -205,7 +200,7 @@ fn write_placeholder_tiles(
             path: lod_dir.display().to_string(),
             message: error.to_string(),
         })?;
-        let tile_path = lod_dir.join("t0_z0_c0_r0_c0.tileblk");
+        let tile_path = lod_dir.join("t0_z0_cb0_r0_c0.tileblk");
         let tile_payload = format!(
             "placeholder tile source for lod={} {}x{}",
             descriptor.lod, descriptor.width, descriptor.height
@@ -302,7 +297,7 @@ mod tests {
         let tile_payload_path = generation_root
             .join("tile2d")
             .join("lod0")
-            .join("t0_z0_c0_r0_c0.tileblk");
+            .join("t0_z0_cb0_r0_c0.tileblk");
         let tile_bytes =
             std::fs::read(&tile_payload_path).expect("tile payload read should succeed");
         let decoded_tile = channel_packaging

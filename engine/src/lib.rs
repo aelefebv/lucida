@@ -6,6 +6,7 @@ mod chunk_key;
 mod clock;
 mod command_router;
 mod constants;
+mod data_plane;
 mod error_model;
 mod errors;
 mod event_stream;
@@ -40,6 +41,7 @@ pub use constants::{
     COMMAND_ACK_MESSAGE_TYPE, COMMAND_MESSAGE_TYPE, ENGINE_VERSION, ERROR_MESSAGE_TYPE,
     HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE,
 };
+pub use data_plane::{DataPlaneError, DataPlaneService, HttpDataPlaneResponse};
 pub use error_model::{
     ErrorCode, ErrorDetails, ErrorEnvelope, ErrorMessageSerializer, ErrorScope,
     GenerationUnavailableDetail, LeaseErrorReason, LeaseRequiredDetail, MetadataMismatchDetail,
