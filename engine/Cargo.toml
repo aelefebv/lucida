@@ -14,3 +14,4 @@ name = "lucida-engine"
 path = "src/main.rs"
 
 [dependencies]
+time = { version = "0.3.44", features = ["formatting"] }
