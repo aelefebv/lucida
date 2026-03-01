@@ -10,7 +10,8 @@ use crate::error_model::{
 use crate::errors::SessionError;
 use crate::event_stream::{
     EventEnvelope, LayerUpsertPayload, LeaseChangedPayload, LeaseStatePayload, SourceUpsertPayload,
-    ViewUpdatedPayload, audit_event_kind_payload, lease_change_kind_payload,
+    ViewUpdatedPayload, WarningsUpdatedPayload, audit_event_kind_payload,
+    lease_change_kind_payload, warning_payloads,
 };
 use crate::model::PermissionClass;
 use crate::session_manager::{LeaseTransition, SessionManager};
@@ -466,6 +467,20 @@ fn dispatch(
     let (session_rev, _) = session_manager
         .session_and_scene_revisions(&envelope.session_id)
         .map_err(CommandError::from)?;
+    let warnings = session_manager
+        .combined_warnings_for_client(&envelope.session_id, &envelope.client_id)
+        .map_err(CommandError::from)?;
+    if !warnings.is_empty() {
+        events.push(EventEnvelope::warnings_updated(
+            envelope.session_id.clone(),
+            session_rev,
+            WarningsUpdatedPayload {
+                client_id: envelope.client_id.clone(),
+                warnings: warning_payloads(&warnings),
+            },
+            rfc3339_now(),
+        ));
+    }
 
     Ok(CommandOutcome {
         ack: CommandAck {
@@ -905,8 +920,18 @@ mod tests {
         assert_eq!(view_outcome.ack.resulting_view_rev, Some(1));
         assert!(view_outcome.ack.resulting_session_rev >= 3);
         assert_eq!(view_outcome.ack.resulting_scene_rev, None);
-        assert_eq!(view_outcome.events.len(), 1);
-        assert_eq!(view_outcome.events[0].event_type, EventType::ViewUpdated);
+        assert!(
+            view_outcome
+                .events
+                .iter()
+                .any(|event| event.event_type == EventType::ViewUpdated)
+        );
+        assert!(
+            view_outcome
+                .events
+                .iter()
+                .any(|event| event.event_type == EventType::WarningsUpdated)
+        );
 
         assert!(scene_outcome.ack.accepted);
         assert!(scene_outcome.ack.resulting_scene_rev.is_some());
@@ -918,10 +943,17 @@ mod tests {
                 .expect("source id should be present")
                 .starts_with("src_")
         );
-        assert_eq!(scene_outcome.events.len(), 1);
-        assert_eq!(
-            scene_outcome.events[0].event_type,
-            EventType::SceneSourceUpsert
+        assert!(
+            scene_outcome
+                .events
+                .iter()
+                .any(|event| event.event_type == EventType::SceneSourceUpsert)
+        );
+        assert!(
+            scene_outcome
+                .events
+                .iter()
+                .any(|event| event.event_type == EventType::WarningsUpdated)
         );
     }
 

@@ -32,9 +32,19 @@ pub enum WarningSeverity {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WarningCode {
+    UncalibratedOverlay,
+    StaleDerivedLayer,
+    IncompleteLabelIndex,
+    ComputedAtLod,
+    GenerationBuildIncomplete,
+    MissingActiveLayer,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarningEntry {
-    pub warning_code: String,
+    pub warning_code: WarningCode,
     pub severity: WarningSeverity,
     pub message: String,
 }

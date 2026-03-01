@@ -14,6 +14,7 @@ use crate::model::{
     WarningEntry,
 };
 use crate::revision_allocator::RevisionAllocator;
+use crate::warning_service::aggregate_warnings;
 
 #[derive(Debug)]
 struct ClientRecord {
@@ -161,13 +162,14 @@ impl SessionManager {
                 last_seen_tick,
             },
         );
+        refresh_warnings(session);
 
         let client_roster = session
             .clients
             .values()
             .map(|client| client.roster_entry.clone())
             .collect::<Vec<_>>();
-        let warnings = collect_snapshot_warnings(session);
+        let warnings = collect_snapshot_warnings(session, &view_state.client_id);
         let permissions =
             Permissions::from_permission(request.requested_permission, is_lease_holder);
 
@@ -209,6 +211,7 @@ impl SessionManager {
         if removed_held_lease {
             apply_lease_holder(session, None, None, None);
         }
+        refresh_warnings(session);
 
         Ok(bump_session_rev(session))
     }
@@ -237,6 +240,7 @@ impl SessionManager {
             .insert(source.source_id.clone(), source.clone());
         bump_session_rev(session);
         bump_scene_rev(session);
+        refresh_warnings(session);
 
         Ok(source)
     }
@@ -262,6 +266,7 @@ impl SessionManager {
         };
 
         bump_session_rev(session);
+        refresh_warnings(session);
         Ok(generation_seq)
     }
 
@@ -296,6 +301,7 @@ impl SessionManager {
             .insert(layer.layer_id.clone(), layer.clone());
         bump_session_rev(session);
         bump_scene_rev(session);
+        refresh_warnings(session);
 
         Ok(layer)
     }
@@ -321,6 +327,7 @@ impl SessionManager {
 
         bump_session_rev(session);
         bump_scene_rev(session);
+        refresh_warnings(session);
         Ok(next_layer_rev)
     }
 
@@ -344,6 +351,7 @@ impl SessionManager {
         };
 
         bump_session_rev(session);
+        refresh_warnings(session);
         Ok(next_metadata_rev)
     }
 
@@ -367,6 +375,7 @@ impl SessionManager {
         };
 
         bump_session_rev(session);
+        refresh_warnings(session);
         Ok(next_write_rev)
     }
 
@@ -391,6 +400,7 @@ impl SessionManager {
             };
 
         bump_session_rev(session);
+        refresh_warnings(session);
         Ok(next_view_rev)
     }
 
@@ -415,6 +425,7 @@ impl SessionManager {
             };
 
         bump_session_rev(session);
+        refresh_warnings(session);
         Ok(next_view_rev)
     }
 
@@ -452,6 +463,7 @@ impl SessionManager {
         };
         let acquired_at = client_id.map(|_| rfc3339_now());
         apply_lease_holder(session, client_id, lease_holder_label, acquired_at);
+        refresh_warnings(session);
         Ok(bump_session_rev(session))
     }
 
@@ -522,6 +534,7 @@ impl SessionManager {
         }
 
         if !removed_client_ids.is_empty() {
+            refresh_warnings(session);
             bump_session_rev(session);
         }
 
@@ -548,6 +561,7 @@ impl SessionManager {
                 if removed_held_lease {
                     apply_lease_holder(session, None, None, None);
                 }
+                refresh_warnings(session);
                 bump_session_rev(session);
             }
         } else if !self.sessions.contains_key(&session_id) {
@@ -589,6 +603,7 @@ impl SessionManager {
             Some(changed_by_label.clone()),
             Some(changed_at.clone()),
         );
+        refresh_warnings(session);
         let resulting_session_rev = bump_session_rev(session);
         let audit_entry = append_audit_entry(
             session,
@@ -649,6 +664,7 @@ impl SessionManager {
             Some(changed_by_label.clone()),
             Some(changed_at.clone()),
         );
+        refresh_warnings(session);
         let resulting_session_rev = bump_session_rev(session);
 
         let event_kind = if matches!(change_kind, LeaseChangeKind::Stolen) {
@@ -734,6 +750,22 @@ impl SessionManager {
         Ok(client.view_state.clone())
     }
 
+    pub fn combined_warnings_for_client(
+        &self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<Vec<WarningEntry>, SessionError> {
+        let session = self.session_ref(session_id)?;
+        if !session.clients.contains_key(client_id) {
+            return Err(SessionError::ClientNotFound {
+                session_id: session_id.to_owned(),
+                client_id: client_id.to_owned(),
+            });
+        }
+
+        Ok(collect_snapshot_warnings(session, client_id))
+    }
+
     fn next_heartbeat_tick(&mut self) -> u64 {
         self.heartbeat_tick = self.heartbeat_tick.saturating_add(1);
         self.heartbeat_tick
@@ -811,15 +843,31 @@ fn append_audit_entry(session: &mut SessionRecord, entry: AuditLogEntry) -> Audi
     entry
 }
 
-fn collect_snapshot_warnings(session: &SessionRecord) -> Vec<WarningEntry> {
+fn refresh_warnings(session: &mut SessionRecord) {
+    let client_views = session
+        .clients
+        .iter()
+        .map(|(client_id, client)| (client_id.clone(), client.view_state.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let aggregation = aggregate_warnings(&session.shared_scene, &client_views);
+
+    session.shared_scene.warnings = aggregation.shared_scene_warnings;
+    for (client_id, warnings) in aggregation.per_client_warnings {
+        if let Some(client) = session.clients.get_mut(&client_id) {
+            client.view_state.warnings = warnings;
+        }
+    }
+}
+
+fn collect_snapshot_warnings(session: &SessionRecord, client_id: &str) -> Vec<WarningEntry> {
     let mut warnings = Vec::new();
     warnings.extend(session.shared_scene.warnings.iter().cloned());
 
     let client_warnings = session
         .clients
-        .values()
-        .flat_map(|client| client.view_state.warnings.iter().cloned())
-        .collect::<Vec<_>>();
+        .get(client_id)
+        .map(|client| client.view_state.warnings.clone())
+        .unwrap_or_default();
     warnings.extend(client_warnings);
 
     warnings

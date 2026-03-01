@@ -8,6 +8,7 @@ mod id_allocator;
 mod model;
 mod revision_allocator;
 mod session_manager;
+mod warning_service;
 
 pub use command_router::{
     CommandAck, CommandArgs, CommandEnvelope, CommandError, CommandErrorCode, CommandOutcome,
@@ -28,7 +29,7 @@ pub use event_stream::{
     AuditEventKindPayload, ClientJoinedPayload, EventBus, EventEnvelope, EventMessageSerializer,
     EventPayload, EventStreamError, EventType, LayerUpsertPayload, LeaseChangedKindPayload,
     LeaseChangedPayload, LeaseStatePayload, ProjectionState, SourceUpsertPayload,
-    ViewUpdatedPayload,
+    ViewUpdatedPayload, WarningPayloadEntry, WarningsUpdatedPayload,
 };
 pub use id_allocator::{IdAllocator, IdKind};
 pub use model::{
@@ -36,7 +37,8 @@ pub use model::{
     CreatedSession, DatasetBinding, ExposureMode, ExposureViewMode, HeartbeatEnvelope, LayerState,
     LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
     ReconnectRequest, SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState,
-    SharedSceneState, SourceRecord, TargetState, WarningEntry, WarningSeverity,
+    SharedSceneState, SourceRecord, TargetState, WarningCode, WarningEntry, WarningSeverity,
 };
 pub use revision_allocator::RevisionAllocator;
 pub use session_manager::{LeaseTransition, SessionManager};
+pub use warning_service::{WarningAggregation, aggregate_warnings};

@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     AuditEventKind, ClientRosterEntry, ClientViewMode, LayerState, LeaseChangeKind, LeaseState,
-    PerClientViewState, PermissionClass, SessionSnapshotEnvelope, SourceRecord,
+    PerClientViewState, PermissionClass, SessionSnapshotEnvelope, SourceRecord, WarningCode,
+    WarningEntry, WarningSeverity,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +13,7 @@ use crate::model::{
 pub enum EventType {
     SessionClientJoined,
     LeaseChanged,
+    WarningsUpdated,
     ViewUpdated,
     SceneSourceUpsert,
     SceneLayerUpsert,
@@ -71,6 +73,19 @@ pub struct LeaseChangedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarningPayloadEntry {
+    pub warning_code: String,
+    pub severity: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WarningsUpdatedPayload {
+    pub client_id: String,
+    pub warnings: Vec<WarningPayloadEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceUpsertPayload {
     pub source_id: String,
     pub name: String,
@@ -91,6 +106,7 @@ pub struct LayerUpsertPayload {
 pub enum EventPayload {
     SessionClientJoined(ClientJoinedPayload),
     LeaseChanged(LeaseChangedPayload),
+    WarningsUpdated(WarningsUpdatedPayload),
     ViewUpdated(ViewUpdatedPayload),
     SceneSourceUpsert(SourceUpsertPayload),
     SceneLayerUpsert(LayerUpsertPayload),
@@ -158,6 +174,24 @@ impl EventEnvelope {
             session_rev,
             event_type: EventType::LeaseChanged,
             payload: EventPayload::LeaseChanged(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
+    pub fn warnings_updated(
+        session_id: String,
+        session_rev: u64,
+        payload: WarningsUpdatedPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::WarningsUpdated,
+            payload: EventPayload::WarningsUpdated(payload),
             emitted_at,
         }
     }
@@ -247,6 +281,7 @@ pub struct ProjectionState {
     pub session_id: String,
     pub session_rev: u64,
     pub lease_state: LeaseStatePayload,
+    pub client_warnings: BTreeMap<String, Vec<WarningPayloadEntry>>,
     pub client_roster: BTreeMap<String, ClientJoinedPayload>,
     pub client_views: BTreeMap<String, ViewUpdatedPayload>,
     pub sources: BTreeMap<String, SourceUpsertPayload>,
@@ -291,11 +326,16 @@ impl ProjectionState {
                 (payload.layer_id.clone(), payload)
             })
             .collect::<BTreeMap<_, _>>();
+        let client_warnings = BTreeMap::from([(
+            snapshot.snapshot.client_view.client_id.clone(),
+            warning_payloads(&snapshot.snapshot.warnings),
+        )]);
 
         Self {
             session_id: snapshot.session_id.clone(),
             session_rev: snapshot.session_rev,
             lease_state: LeaseStatePayload::from(&snapshot.snapshot.lease_state),
+            client_warnings,
             client_roster,
             client_views,
             sources,
@@ -325,6 +365,10 @@ impl ProjectionState {
             }
             EventPayload::LeaseChanged(payload) => {
                 self.lease_state = payload.lease_state.clone();
+            }
+            EventPayload::WarningsUpdated(payload) => {
+                self.client_warnings
+                    .insert(payload.client_id.clone(), payload.warnings.clone());
             }
             EventPayload::ViewUpdated(payload) => {
                 self.client_views
@@ -431,6 +475,24 @@ impl From<&LayerState> for LayerUpsertPayload {
     }
 }
 
+#[must_use]
+pub fn warning_payloads(warnings: &[WarningEntry]) -> Vec<WarningPayloadEntry> {
+    warnings
+        .iter()
+        .map(WarningPayloadEntry::from)
+        .collect::<Vec<_>>()
+}
+
+impl From<&WarningEntry> for WarningPayloadEntry {
+    fn from(value: &WarningEntry) -> Self {
+        Self {
+            warning_code: warning_code_name(value.warning_code).to_owned(),
+            severity: warning_severity_name(value.severity).to_owned(),
+            message: value.message.clone(),
+        }
+    }
+}
+
 const fn permission_class_name(permission: PermissionClass) -> &'static str {
     match permission {
         PermissionClass::View => "view",
@@ -446,6 +508,25 @@ const fn view_mode_name(view_mode: ClientViewMode) -> &'static str {
     }
 }
 
+const fn warning_code_name(code: WarningCode) -> &'static str {
+    match code {
+        WarningCode::UncalibratedOverlay => "uncalibrated_overlay",
+        WarningCode::StaleDerivedLayer => "stale_derived_layer",
+        WarningCode::IncompleteLabelIndex => "incomplete_label_index",
+        WarningCode::ComputedAtLod => "computed_at_lod",
+        WarningCode::GenerationBuildIncomplete => "generation_build_incomplete",
+        WarningCode::MissingActiveLayer => "missing_active_layer",
+    }
+}
+
+const fn warning_severity_name(severity: WarningSeverity) -> &'static str {
+    match severity {
+        WarningSeverity::Info => "info",
+        WarningSeverity::Warning => "warning",
+        WarningSeverity::Error => "error",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::model::{AttachRequest, ClientViewMode, PermissionClass};
@@ -453,7 +534,8 @@ mod tests {
 
     use super::{
         EventBus, EventEnvelope, EventMessageSerializer, EventPayload, EventStreamError,
-        ProjectionState, SourceUpsertPayload, ViewUpdatedPayload,
+        ProjectionState, SourceUpsertPayload, ViewUpdatedPayload, WarningPayloadEntry,
+        WarningsUpdatedPayload,
     };
 
     #[test]
@@ -613,5 +695,45 @@ mod tests {
             .apply_event(&wrong_session_event)
             .expect_err("session mismatch should fail");
         assert!(matches!(error, EventStreamError::SessionMismatch { .. }));
+    }
+
+    #[test]
+    fn projection_applies_warning_updates_for_target_client() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("warning-projection");
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("attach should succeed");
+
+        let mut projection = ProjectionState::from_snapshot(&snapshot);
+        let warning_event = EventEnvelope::warnings_updated(
+            created.session_id,
+            snapshot.session_rev + 1,
+            WarningsUpdatedPayload {
+                client_id: snapshot.snapshot.client_view.client_id.clone(),
+                warnings: vec![WarningPayloadEntry {
+                    warning_code: "missing_active_layer".to_owned(),
+                    severity: "warning".to_owned(),
+                    message: "active layer `lay_missing` is missing from shared scene".to_owned(),
+                }],
+            },
+            "2026-03-01T03:00:00Z".to_owned(),
+        );
+
+        projection
+            .apply_event(&warning_event)
+            .expect("warning event should apply");
+        assert_eq!(
+            projection
+                .client_warnings
+                .get(&snapshot.snapshot.client_view.client_id)
+                .expect("warning list should exist")
+                .len(),
+            1
+        );
     }
 }

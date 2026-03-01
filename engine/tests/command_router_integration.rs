@@ -1,6 +1,6 @@
 use lucida_engine::{
     AttachRequest, COMMAND_MESSAGE_TYPE, CommandArgs, CommandEnvelope, CommandRouter, CommandScope,
-    PermissionClass, SCHEMA_VERSION, SessionManager,
+    EventType, PermissionClass, SCHEMA_VERSION, SessionManager,
 };
 
 #[test]
@@ -46,7 +46,18 @@ fn command_router_routes_scene_command_with_authorization_and_lease() {
 
     assert!(outcome.ack.accepted);
     assert!(outcome.ack.resulting_scene_rev.is_some());
-    assert_eq!(outcome.events.len(), 1);
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|event| event.event_type == EventType::SceneSourceUpsert)
+    );
+    assert!(
+        outcome
+            .events
+            .iter()
+            .any(|event| event.event_type == EventType::WarningsUpdated)
+    );
     assert!(
         outcome
             .ack
