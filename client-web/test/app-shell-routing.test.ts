@@ -311,6 +311,7 @@ describe("app shell routing", () => {
     const viewport = queryCanvas("viewport-canvas");
     expect(viewport.style.width).toBe("2px");
     expect(viewport.style.height).toBe("1px");
+    expect(viewport.style.imageRendering).toBe("pixelated");
     expect(queryText("viewport-size-values")).toContain("100%");
 
     const slider = queryInput("slider-viewport-size");

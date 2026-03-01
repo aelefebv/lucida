@@ -850,6 +850,8 @@ function applyViewportDisplaySize(mount: HTMLElement): void {
   if (!(canvas instanceof HTMLCanvasElement)) {
     return;
   }
+  // Keep enlarged viewport pixels sharp instead of browser-smoothed.
+  canvas.style.imageRendering = "pixelated";
   const scale = readViewportScalePercent(mount) / 100;
   const displayWidth = Math.max(1, Math.round(canvas.width * scale));
   const displayHeight = Math.max(1, Math.round(canvas.height * scale));
