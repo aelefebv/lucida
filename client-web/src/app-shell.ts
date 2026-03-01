@@ -24,10 +24,12 @@ export function bootstrapApp(
     renderRuntimeState(mount, state);
   });
   runtime.start();
+  const detachInteractionHandlers = attachInteractionHandlers(document, mount, runtime);
   renderRuntimeState(mount, runtime.state());
 
   return {
     dispose: () => {
+      detachInteractionHandlers();
       runtime.dispose();
     },
   };
@@ -57,6 +59,12 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
     <div>Viewport canvas target</div>
     <div>Minimap target</div>
     <div>Warnings target</div>
+  </section>
+  <section data-testid="interaction-controls">
+    <button type="button" data-testid="btn-pan-left">Pan Left</button>
+    <button type="button" data-testid="btn-pan-right">Pan Right</button>
+    <button type="button" data-testid="btn-zoom-in">Zoom In</button>
+    <button type="button" data-testid="btn-zoom-out">Zoom Out</button>
   </section>
   <section data-testid="frame-state"></section>
   <section data-testid="minimap-state"></section>
@@ -118,6 +126,64 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
         ? "Warnings: none"
         : `Warnings: ${state.renderFrame.warningNotice}`;
   }
+}
+
+function attachInteractionHandlers(
+  document: Document,
+  mount: HTMLElement,
+  runtime: ViewerRuntime,
+): () => void {
+  const onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === "ArrowLeft") {
+      runtime.pan(-12, 0);
+      return;
+    }
+    if (event.key === "ArrowRight") {
+      runtime.pan(12, 0);
+      return;
+    }
+    if (event.key === "+") {
+      runtime.zoom(1.2, 0, 0);
+      return;
+    }
+    if (event.key === "-") {
+      runtime.zoom(0.8, 0, 0);
+      return;
+    }
+    if (event.key === "]") {
+      runtime.setZ(1);
+      return;
+    }
+    if (event.key === "t") {
+      runtime.setT(1);
+      return;
+    }
+    if (event.key === "c") {
+      runtime.setChannels([0, 1]);
+    }
+  };
+  document.addEventListener("keydown", onKeyDown);
+
+  const listeners: Array<{ element: HTMLElement; handler: () => void }> = [];
+  const registerClick = (testId: string, handler: () => void): void => {
+    const node = mount.querySelector(`[data-testid="${testId}"]`);
+    if (!(node instanceof HTMLElement)) {
+      return;
+    }
+    node.addEventListener("click", handler);
+    listeners.push({ element: node, handler });
+  };
+  registerClick("btn-pan-left", () => runtime.pan(-12, 0));
+  registerClick("btn-pan-right", () => runtime.pan(12, 0));
+  registerClick("btn-zoom-in", () => runtime.zoom(1.2, 0, 0));
+  registerClick("btn-zoom-out", () => runtime.zoom(0.8, 0, 0));
+
+  return () => {
+    document.removeEventListener("keydown", onKeyDown);
+    for (const listener of listeners) {
+      listener.element.removeEventListener("click", listener.handler);
+    }
+  };
 }
 
 function phaseLabel(phase: ViewerRuntimeState["connection"]["phase"]): string {

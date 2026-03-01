@@ -52,6 +52,12 @@ export type SnapshotPayload = {
     view_rev: number;
     warnings: WarningEntry[];
     active_layer_id: string | null;
+    center_x: number;
+    center_y: number;
+    zoom: number;
+    z_index: number;
+    t_index: number;
+    selected_channels: number[];
   };
   warnings: WarningEntry[];
 };
@@ -78,6 +84,12 @@ export type ClientState = {
   clientId: string;
   viewRev: number;
   activeLayerId: string | null;
+  centerX: number;
+  centerY: number;
+  zoom: number;
+  zIndex: number;
+  tIndex: number;
+  selectedChannels: number[];
   sources: Record<string, SourceState>;
   datasets: Record<string, DatasetState>;
   layers: Record<string, LayerState>;
@@ -98,6 +110,12 @@ export function hydrateClientState(snapshot: SnapshotPayload): ClientState {
     clientId: snapshot.client_view.client_id,
     viewRev: snapshot.client_view.view_rev,
     activeLayerId: snapshot.client_view.active_layer_id,
+    centerX: snapshot.client_view.center_x,
+    centerY: snapshot.client_view.center_y,
+    zoom: snapshot.client_view.zoom,
+    zIndex: snapshot.client_view.z_index,
+    tIndex: snapshot.client_view.t_index,
+    selectedChannels: [...snapshot.client_view.selected_channels],
     sources: { ...snapshot.shared_scene.sources },
     datasets: { ...snapshot.shared_scene.datasets },
     layers: { ...snapshot.shared_scene.layers },
@@ -169,12 +187,24 @@ export function applyEvent(state: ClientState, event: EventEnvelope): ClientStat
         client_id: string;
         view_rev: number;
         active_layer_id: string | null;
+        center_x: number;
+        center_y: number;
+        zoom: number;
+        z_index: number;
+        t_index: number;
+        selected_channels: number[];
       };
       if (payload.client_id !== next.clientId) {
         return next;
       }
       next.viewRev = payload.view_rev;
       next.activeLayerId = payload.active_layer_id;
+      next.centerX = payload.center_x;
+      next.centerY = payload.center_y;
+      next.zoom = payload.zoom;
+      next.zIndex = payload.z_index;
+      next.tIndex = payload.t_index;
+      next.selectedChannels = [...payload.selected_channels];
       return next;
     }
     case "source_generation_detected":

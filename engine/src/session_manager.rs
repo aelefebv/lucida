@@ -166,6 +166,12 @@ impl SessionManager {
             view_rev: 0,
             view_mode: ClientViewMode::TwoD,
             active_layer_id: None,
+            center_x: 0.0,
+            center_y: 0.0,
+            zoom: 1.0,
+            z_index: 0,
+            t_index: 0,
+            selected_channels: vec![0],
             warnings: Vec::new(),
         };
 
@@ -1247,6 +1253,133 @@ impl SessionManager {
                     }
                 })?;
                 client.view_state.active_layer_id = active_layer_id;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_pan(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        dx: f64,
+        dy: f64,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.center_x += dx;
+                client.view_state.center_y += dy;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_zoom(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        zoom: f64,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.zoom = zoom.max(0.01);
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_z_index(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        z_index: u32,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.z_index = z_index;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_t_index(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        t_index: u32,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.t_index = t_index;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn update_client_channels(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        channels: Vec<u32>,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.selected_channels = channels;
                 RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
             };
 

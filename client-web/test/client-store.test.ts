@@ -46,6 +46,12 @@ function snapshot(): SnapshotPayload {
       view_rev: 1,
       warnings: [],
       active_layer_id: "lay_00000001",
+      center_x: 32,
+      center_y: 48,
+      zoom: 1,
+      z_index: 0,
+      t_index: 0,
+      selected_channels: [0],
     },
     warnings: [],
   };
@@ -96,6 +102,12 @@ describe("client store", () => {
         client_id: "cli_00000001",
         view_rev: 99,
         active_layer_id: null,
+        center_x: 200,
+        center_y: 100,
+        zoom: 2,
+        z_index: 3,
+        t_index: 4,
+        selected_channels: [0, 1],
       },
     });
     const reconciled = reconcileWithSnapshot(drifted, snapshot());
@@ -103,6 +115,7 @@ describe("client store", () => {
     expect(reconciled.sessionRev).toBe(3);
     expect(reconciled.viewRev).toBe(1);
     expect(reconciled.activeLayerId).toBe("lay_00000001");
+    expect(reconciled.selectedChannels).toEqual([0]);
     expect(reconciled.reconnectCount).toBe(1);
   });
 
@@ -115,6 +128,12 @@ describe("client store", () => {
         client_id: "cli_00000001",
         view_rev: 3,
         active_layer_id: null,
+        center_x: 10,
+        center_y: 11,
+        zoom: 1.2,
+        z_index: 2,
+        t_index: 1,
+        selected_channels: [1],
       },
     });
     const stale = applyEvent(newer, {
@@ -124,6 +143,12 @@ describe("client store", () => {
         client_id: "cli_00000001",
         view_rev: 2,
         active_layer_id: "lay_00000001",
+        center_x: 9,
+        center_y: 9,
+        zoom: 1,
+        z_index: 0,
+        t_index: 0,
+        selected_channels: [0],
       },
     });
 

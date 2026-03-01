@@ -329,12 +329,18 @@ pub struct SharedSceneState {
     pub warnings: Vec<WarningEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PerClientViewState {
     pub client_id: String,
     pub view_rev: u64,
     pub view_mode: ClientViewMode,
     pub active_layer_id: Option<String>,
+    pub center_x: f64,
+    pub center_y: f64,
+    pub zoom: f64,
+    pub z_index: u32,
+    pub t_index: u32,
+    pub selected_channels: Vec<u32>,
     pub warnings: Vec<WarningEntry>,
 }
 
@@ -370,7 +376,7 @@ impl Permissions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionSnapshotPayload {
     pub session: SessionState,
     pub shared_scene: SharedSceneState,
@@ -381,7 +387,7 @@ pub struct SessionSnapshotPayload {
     pub warnings: Vec<WarningEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionSnapshotEnvelope {
     pub message_type: String,
     pub schema_version: String,

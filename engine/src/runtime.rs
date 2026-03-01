@@ -25,7 +25,7 @@ use crate::model::{
 };
 use crate::{DataPlaneService, SessionManager};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct EngineRuntimeConfig {
     pub cache_root: PathBuf,
 }
@@ -86,7 +86,7 @@ pub async fn run_runtime_server(
         .await
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeInfo {
     engine_runtime: &'static str,
     control_plane_transport: &'static str,
@@ -101,12 +101,12 @@ async fn runtime_info() -> Json<RuntimeInfo> {
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct CreateSessionRequest {
     name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct CreateSessionResponse {
     session_id: String,
 }
@@ -311,7 +311,7 @@ async fn handle_socket(state: RuntimeState, session_id: String, socket: WebSocke
     let _ = write_task.await;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "message_type", rename_all = "snake_case")]
 enum HandshakeMessage {
     Attach {
@@ -325,13 +325,13 @@ enum HandshakeMessage {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct AttachOutcome {
     snapshot: SessionSnapshotEnvelope,
     client_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct RuntimeWsErrorMessage {
     code: &'static str,
     message: String,
@@ -415,7 +415,7 @@ fn runtime_ws_error(code: &'static str, message: &str) -> String {
     .to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct RuntimeCommandMessage {
     message_type: String,
     schema_version: String,
@@ -467,6 +467,83 @@ fn parse_command_args(op: &str, args: serde_json::Value) -> Result<CommandArgs, 
                 .map(ToOwned::to_owned);
             Ok(CommandArgs::ViewSetActiveLayer { active_layer_id })
         }
+        "view.pan" => {
+            let dx = args
+                .get("dx")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "view.pan args.dx must be a number".to_owned())?;
+            let dy = args
+                .get("dy")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "view.pan args.dy must be a number".to_owned())?;
+            let gesture_id = args
+                .get("gesture_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "view.pan args.gesture_id must be a string".to_owned())?;
+            Ok(CommandArgs::ViewPan {
+                dx,
+                dy,
+                gesture_id: gesture_id.to_owned(),
+            })
+        }
+        "view.zoom" => {
+            let zoom = args
+                .get("zoom")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "view.zoom args.zoom must be a number".to_owned())?;
+            let anchor_x = args
+                .get("anchor_x")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "view.zoom args.anchor_x must be a number".to_owned())?;
+            let anchor_y = args
+                .get("anchor_y")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| "view.zoom args.anchor_y must be a number".to_owned())?;
+            let gesture_id = args
+                .get("gesture_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "view.zoom args.gesture_id must be a string".to_owned())?;
+            Ok(CommandArgs::ViewZoom {
+                zoom,
+                anchor_x,
+                anchor_y,
+                gesture_id: gesture_id.to_owned(),
+            })
+        }
+        "view.set_z" => {
+            let z_index = args
+                .get("z_index")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "view.set_z args.z_index must be an integer".to_owned())?;
+            let z_index = u32::try_from(z_index)
+                .map_err(|_| "view.set_z args.z_index exceeds u32 range".to_owned())?;
+            Ok(CommandArgs::ViewSetZ { z_index })
+        }
+        "view.set_t" => {
+            let t_index = args
+                .get("t_index")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| "view.set_t args.t_index must be an integer".to_owned())?;
+            let t_index = u32::try_from(t_index)
+                .map_err(|_| "view.set_t args.t_index exceeds u32 range".to_owned())?;
+            Ok(CommandArgs::ViewSetT { t_index })
+        }
+        "view.set_channels" => {
+            let channels = args
+                .get("channels")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "view.set_channels args.channels must be an array".to_owned())?
+                .iter()
+                .map(|value| {
+                    let as_u64 = value.as_u64().ok_or_else(|| {
+                        "view.set_channels channels entries must be integers".to_owned()
+                    })?;
+                    u32::try_from(as_u64)
+                        .map_err(|_| "view.set_channels channel id exceeds u32 range".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(CommandArgs::ViewSetChannels { channels })
+        }
         "scene.add_source" => {
             let name = args
                 .get("name")
@@ -496,7 +573,7 @@ fn parse_command_args(op: &str, args: serde_json::Value) -> Result<CommandArgs, 
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeWarningEntry {
     #[serde(rename = "warningCode")]
     warning_code: String,
@@ -514,7 +591,7 @@ impl From<&WarningEntry> for RuntimeWarningEntry {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSourceState {
     source_id: String,
@@ -534,7 +611,7 @@ impl From<&SourceRecord> for RuntimeSourceState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeDatasetState {
     dataset_id: String,
@@ -552,7 +629,7 @@ impl From<&DatasetBinding> for RuntimeDatasetState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeLayerState {
     layer_id: String,
@@ -574,13 +651,13 @@ impl From<&LayerState> for RuntimeLayerState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeSessionState {
     session_id: String,
     session_rev: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeSharedSceneState {
     scene_rev: u64,
     sources: BTreeMap<String, RuntimeSourceState>,
@@ -589,15 +666,21 @@ struct RuntimeSharedSceneState {
     warnings: Vec<RuntimeWarningEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeClientViewState {
     client_id: String,
     view_rev: u64,
     active_layer_id: Option<String>,
+    center_x: f64,
+    center_y: f64,
+    zoom: f64,
+    z_index: u32,
+    t_index: u32,
+    selected_channels: Vec<u32>,
     warnings: Vec<RuntimeWarningEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeSnapshotPayload {
     session: RuntimeSessionState,
     shared_scene: RuntimeSharedSceneState,
@@ -605,7 +688,7 @@ struct RuntimeSnapshotPayload {
     warnings: Vec<RuntimeWarningEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeSnapshotEnvelope {
     message_type: String,
     schema_version: String,
@@ -671,6 +754,12 @@ impl RuntimeSnapshotEnvelope {
                     client_id: snapshot.snapshot.client_view.client_id.clone(),
                     view_rev: snapshot.snapshot.client_view.view_rev,
                     active_layer_id: snapshot.snapshot.client_view.active_layer_id.clone(),
+                    center_x: snapshot.snapshot.client_view.center_x,
+                    center_y: snapshot.snapshot.client_view.center_y,
+                    zoom: snapshot.snapshot.client_view.zoom,
+                    z_index: snapshot.snapshot.client_view.z_index,
+                    t_index: snapshot.snapshot.client_view.t_index,
+                    selected_channels: snapshot.snapshot.client_view.selected_channels.clone(),
                     warnings: snapshot
                         .snapshot
                         .client_view
@@ -691,7 +780,7 @@ impl RuntimeSnapshotEnvelope {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeEventEnvelope {
     message_type: String,
     schema_version: String,
@@ -749,7 +838,13 @@ fn event_payload_json(payload: &EventPayload) -> serde_json::Value {
         EventPayload::ViewUpdated(value) => serde_json::json!({
             "client_id": value.client_id,
             "view_rev": value.view_rev,
-            "active_layer_id": value.active_layer_id
+            "active_layer_id": value.active_layer_id,
+            "center_x": value.center_x,
+            "center_y": value.center_y,
+            "zoom": value.zoom,
+            "z_index": value.z_index,
+            "t_index": value.t_index,
+            "selected_channels": value.selected_channels
         }),
         EventPayload::SceneSourceUpsert(value) => serde_json::json!({
             "sourceId": value.source_id,
@@ -784,7 +879,7 @@ fn event_payload_json(payload: &EventPayload) -> serde_json::Value {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeCommandAck {
     message_type: String,
     schema_version: String,
@@ -817,7 +912,7 @@ impl From<&crate::CommandAck> for RuntimeCommandAck {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeHttpError {
     code: &'static str,
     message: String,

@@ -17,6 +17,7 @@ import {
   LiveRenderLoop,
   type RenderFrameState,
 } from "./live-render-loop";
+import { InteractionModel, type ViewportState } from "./interaction-model";
 import type { ViewerRoute } from "./viewer-route";
 
 export type ViewerRuntimeState = {
@@ -40,6 +41,8 @@ type RuntimeErrorMessage = {
   message: string;
 };
 
+type ConnectMode = "attach" | "reconnect";
+
 const CLIENT_EVENT_TYPES = new Set<EventEnvelope["event_type"]>([
   "scene_source_upsert",
   "scene_dataset_upsert",
@@ -59,6 +62,11 @@ export class ViewerRuntime {
   private readonly renderLoop: LiveRenderLoop;
   private stateValue: ViewerRuntimeState;
   private socketValue: WebSocket | null;
+  private interactionModel: InteractionModel | null;
+  private interactionClientId: string | null;
+  private lastAttachedClientId: string | null;
+  private gestureCounter: number;
+  private reconnectScheduled: boolean;
   private disposed: boolean;
 
   public constructor(
@@ -84,64 +92,67 @@ export class ViewerRuntime {
       renderFrame: null,
     };
     this.socketValue = null;
+    this.interactionModel = null;
+    this.interactionClientId = null;
+    this.lastAttachedClientId = null;
+    this.gestureCounter = 1;
+    this.reconnectScheduled = false;
     this.disposed = false;
   }
 
   public start(): void {
-    const attachOptions: AttachOptions =
-      this.route.token === undefined
-        ? {
-            sessionId: this.route.sessionId,
-            clientLabel: this.route.clientLabel,
-            mode: this.route.mode,
-          }
-        : {
-            sessionId: this.route.sessionId,
-            clientLabel: this.route.clientLabel,
-            mode: this.route.mode,
-            token: this.route.token,
-          };
-    const payload = this.bootstrap.begin(attachOptions);
-    this.publish();
+    this.connect("attach");
+  }
 
-    const wsBase = this.route.wsBase.replace(/\/$/, "");
-    const url = `${wsBase}/v1/sessions/${encodeURIComponent(this.route.sessionId)}/connect`;
-    const socket = new WebSocket(url);
-    this.socketValue = socket;
+  public pan(dx: number, dy: number): void {
+    if (this.interactionModel === null) {
+      return;
+    }
+    const gestureId = this.nextGestureId();
+    this.interactionModel.beginGesture(gestureId);
+    this.interactionModel.pan(dx, dy);
+    this.interactionModel.endGesture();
+    this.flushInteractionCommands();
+  }
 
-    socket.addEventListener("open", () => {
-      socket.send(
-        JSON.stringify({
-          message_type: "attach",
-          client_label: payload.client_label,
-          requested_permission: payload.requested_permission,
-          auth: payload.auth,
-        }),
-      );
-    });
-    socket.addEventListener("message", (event) => {
-      this.handleFrame(event.data);
-    });
-    socket.addEventListener("error", () => {
-      if (this.disposed) {
-        return;
-      }
-      this.bootstrap.fail("control-plane transport error");
-      this.publish();
-    });
-    socket.addEventListener("close", () => {
-      if (this.disposed) {
-        return;
-      }
-      if (this.bootstrap.state().phase !== "attached") {
-        this.bootstrap.fail("control-plane connection closed before attach");
-      }
-      this.publish();
-    });
+  public zoom(scale: number, anchorX: number, anchorY: number): void {
+    if (this.interactionModel === null) {
+      return;
+    }
+    const gestureId = this.nextGestureId();
+    this.interactionModel.beginGesture(gestureId);
+    this.interactionModel.zoom(scale, anchorX, anchorY);
+    this.interactionModel.endGesture();
+    this.flushInteractionCommands();
+  }
+
+  public setZ(zIndex: number): void {
+    if (this.interactionModel === null) {
+      return;
+    }
+    this.interactionModel.setZ(zIndex);
+    this.flushInteractionCommands();
+  }
+
+  public setT(tIndex: number): void {
+    if (this.interactionModel === null) {
+      return;
+    }
+    this.interactionModel.setT(tIndex);
+    this.flushInteractionCommands();
+  }
+
+  public setChannels(channels: number[]): void {
+    if (this.interactionModel === null) {
+      return;
+    }
+    this.interactionModel.setChannels(channels);
+    this.flushInteractionCommands();
   }
 
   public dispose(): void {
     this.disposed = true;
+    this.reconnectScheduled = false;
     if (this.socketValue !== null) {
       this.socketValue.close();
       this.socketValue = null;
@@ -191,6 +202,8 @@ export class ViewerRuntime {
       this.stateValue.clientState === null
         ? hydrateClientState(message.snapshot)
         : reconcileWithSnapshot(this.stateValue.clientState, message.snapshot);
+    this.lastAttachedClientId = nextClientState.clientId;
+    this.ensureInteractionModel(nextClientState);
     this.stateValue = {
       ...this.stateValue,
       connection: this.bootstrap.state(),
@@ -225,6 +238,11 @@ export class ViewerRuntime {
       clientState: applyEvent(this.stateValue.clientState, event),
     };
     if (this.stateValue.clientState !== null) {
+      if (this.interactionModel !== null) {
+        this.interactionModel.reconcileAuthoritative(
+          viewportFromClientState(this.stateValue.clientState),
+        );
+      }
       this.renderLoop.update(this.stateValue.clientState);
     }
     this.onUpdate(this.stateValue);
@@ -238,6 +256,137 @@ export class ViewerRuntime {
         capabilitySummary(this.bootstrap.state()),
     };
     this.onUpdate(this.stateValue);
+  }
+
+  private connect(mode: ConnectMode): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.socketValue !== null) {
+      this.socketValue.close();
+      this.socketValue = null;
+    }
+
+    const payload = this.bootstrap.begin(this.attachOptions());
+    this.publish();
+
+    const wsBase = this.route.wsBase.replace(/\/$/, "");
+    const url = `${wsBase}/v1/sessions/${encodeURIComponent(this.route.sessionId)}/connect`;
+    const socket = new WebSocket(url);
+    this.socketValue = socket;
+
+    socket.addEventListener("open", () => {
+      if (mode === "reconnect" && this.lastAttachedClientId !== null) {
+        socket.send(
+          JSON.stringify({
+            message_type: "reconnect",
+            client_label: payload.client_label,
+            requested_permission: payload.requested_permission,
+            previous_client_id: this.lastAttachedClientId,
+          }),
+        );
+        return;
+      }
+      socket.send(
+        JSON.stringify({
+          message_type: "attach",
+          client_label: payload.client_label,
+          requested_permission: payload.requested_permission,
+          auth: payload.auth,
+        }),
+      );
+    });
+    socket.addEventListener("message", (event) => {
+      this.handleFrame(event.data);
+    });
+    socket.addEventListener("error", () => {
+      if (this.disposed) {
+        return;
+      }
+      this.bootstrap.fail("control-plane transport error");
+      this.publish();
+    });
+    socket.addEventListener("close", () => {
+      if (this.disposed) {
+        return;
+      }
+      if (this.bootstrap.state().phase === "attached") {
+        this.scheduleReconnect();
+        return;
+      }
+      this.bootstrap.fail("control-plane connection closed before attach");
+      this.publish();
+    });
+  }
+
+  private scheduleReconnect(): void {
+    if (this.reconnectScheduled || this.lastAttachedClientId === null) {
+      return;
+    }
+    this.reconnectScheduled = true;
+    setTimeout(() => {
+      this.reconnectScheduled = false;
+      if (this.disposed) {
+        return;
+      }
+      this.connect("reconnect");
+    }, 80);
+  }
+
+  private flushInteractionCommands(): void {
+    if (this.interactionModel === null) {
+      return;
+    }
+    const socket = this.socketValue;
+    if (socket === null || socket.readyState !== WebSocket.OPEN) {
+      this.interactionModel.drainCommands();
+      return;
+    }
+    const commands = this.interactionModel.drainCommands();
+    for (const command of commands) {
+      socket.send(JSON.stringify(command));
+    }
+  }
+
+  private ensureInteractionModel(clientState: ClientState): void {
+    if (
+      this.interactionModel === null ||
+      this.interactionClientId !== clientState.clientId
+    ) {
+      this.interactionModel = new InteractionModel(
+        clientState.sessionId,
+        clientState.clientId,
+        viewportFromClientState(clientState),
+      );
+      this.interactionClientId = clientState.clientId;
+      return;
+    }
+
+    this.interactionModel.reconcileAuthoritative(
+      viewportFromClientState(clientState),
+    );
+  }
+
+  private attachOptions(): AttachOptions {
+    if (this.route.token === undefined) {
+      return {
+        sessionId: this.route.sessionId,
+        clientLabel: this.route.clientLabel,
+        mode: this.route.mode,
+      };
+    }
+    return {
+      sessionId: this.route.sessionId,
+      clientLabel: this.route.clientLabel,
+      mode: this.route.mode,
+      token: this.route.token,
+    };
+  }
+
+  private nextGestureId(): string {
+    const next = this.gestureCounter;
+    this.gestureCounter += 1;
+    return `gesture-${next.toString()}`;
   }
 }
 
@@ -254,4 +403,15 @@ function isClientEventType(value: string): value is EventEnvelope["event_type"] 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function viewportFromClientState(clientState: ClientState): ViewportState {
+  return {
+    centerX: clientState.centerX,
+    centerY: clientState.centerY,
+    zoom: clientState.zoom,
+    zIndex: clientState.zIndex,
+    tIndex: clientState.tIndex,
+    selectedChannels: [...clientState.selectedChannels],
+  };
 }
