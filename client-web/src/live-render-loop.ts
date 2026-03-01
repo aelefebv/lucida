@@ -1,0 +1,297 @@
+import type { ClientState, WarningEntry } from "./client-store";
+import type { ChunkKey } from "./chunk-key";
+import { EngineDataPlaneUrlResolver } from "./object-url-resolver";
+import { RequestScheduler } from "./request-scheduler";
+import { ProgressiveFrameStore } from "./renderer-2d";
+import { buildMinimapState, type MinimapState } from "./minimap";
+import { buildSessionNotice } from "./warning-surface";
+
+export type RenderFrameState = {
+  generationSeq: number;
+  frameKind: "preview" | "tile";
+  width: number;
+  height: number;
+  rgba: Uint8ClampedArray;
+  minimap: MinimapState;
+  warningNotice: string | null;
+};
+
+type DecodedFrame = {
+  width: number;
+  height: number;
+  rgba: Uint8ClampedArray;
+};
+
+type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+
+export class LiveRenderLoop {
+  private readonly resolver: EngineDataPlaneUrlResolver;
+  private readonly scheduler: RequestScheduler;
+  private readonly frameStore: ProgressiveFrameStore;
+  private readonly fetchImpl: FetchLike;
+  private readonly onFrame: (state: RenderFrameState) => void;
+  private dimensionsByGeneration: Map<number, { width: number; height: number }>;
+  private frameKindByGeneration: Map<number, "preview" | "tile">;
+  private latestGenerationSeq: number;
+  private latestClientState: ClientState | null;
+
+  public constructor(
+    dataBase: string,
+    onFrame: (state: RenderFrameState) => void,
+    fetchImpl: FetchLike = fetch,
+  ) {
+    this.resolver = new EngineDataPlaneUrlResolver(dataBase);
+    this.scheduler = new RequestScheduler(2);
+    this.frameStore = new ProgressiveFrameStore();
+    this.fetchImpl = fetchImpl;
+    this.onFrame = onFrame;
+    this.dimensionsByGeneration = new Map();
+    this.frameKindByGeneration = new Map();
+    this.latestGenerationSeq = 0;
+    this.latestClientState = null;
+  }
+
+  public update(clientState: ClientState): void {
+    this.latestClientState = clientState;
+    const latest = selectLatestGeneration(clientState);
+    if (latest === null) {
+      return;
+    }
+
+    if (latest.generationSeq > this.latestGenerationSeq) {
+      this.latestGenerationSeq = latest.generationSeq;
+      this.scheduler.invalidateOlderGenerations(latest.generationSeq);
+      this.frameStore.pruneOlderThan(latest.generationSeq);
+      void this.fetchPreviewThenTiles(latest.sourceId, latest.generationSeq);
+    }
+  }
+
+  private async fetchPreviewThenTiles(
+    sourceId: string,
+    generationSeq: number,
+  ): Promise<void> {
+    try {
+      const preview = await this.scheduler.schedule<DecodedFrame>({
+        key: `preview:${sourceId}`,
+        generationSeq,
+        priority: 20,
+        execute: (signal) => {
+          return this.fetchFrame(
+            {
+              sourceId,
+              generationSeq,
+              assetKind: "preview2d",
+              lod: 0,
+              t: 0,
+              z: 0,
+              channelBlock: 0,
+              y: 0,
+              x: 0,
+            },
+            signal,
+          );
+        },
+      });
+      this.dimensionsByGeneration.set(generationSeq, {
+        width: preview.width,
+        height: preview.height,
+      });
+      this.frameKindByGeneration.set(generationSeq, "preview");
+      this.frameStore.setPreview(generationSeq, preview.rgba);
+      this.emit(generationSeq);
+    } catch {
+      return;
+    }
+
+    try {
+      const tile = await this.scheduler.schedule<DecodedFrame>({
+        key: `tile:${sourceId}`,
+        generationSeq,
+        priority: 10,
+        execute: (signal) => {
+          return this.fetchFrame(
+            {
+              sourceId,
+              generationSeq,
+              assetKind: "tile2d",
+              lod: 0,
+              t: 0,
+              z: 0,
+              channelBlock: 0,
+              y: 0,
+              x: 0,
+            },
+            signal,
+          );
+        },
+      });
+      this.dimensionsByGeneration.set(generationSeq, {
+        width: tile.width,
+        height: tile.height,
+      });
+      this.frameKindByGeneration.set(generationSeq, "tile");
+      this.frameStore.setTiles(generationSeq, tile.rgba);
+      this.emit(generationSeq);
+    } catch {
+      // Keep preview frame active when tile refinement is unavailable.
+    }
+  }
+
+  private async fetchFrame(
+    key: ChunkKey,
+    signal: AbortSignal,
+  ): Promise<DecodedFrame> {
+    const url = this.resolver.resolveChunkUrl(key);
+    const response = await this.fetchImpl(url, { signal });
+    if (!response.ok) {
+      throw new Error(
+        `frame fetch failed with status ${response.status.toString()} for ${url}`,
+      );
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    return decodePortableGraymap(bytes);
+  }
+
+  private emit(generationSeq: number): void {
+    if (this.latestClientState === null) {
+      return;
+    }
+    const frame = this.frameStore.resolveFrame(generationSeq);
+    if (frame === null) {
+      return;
+    }
+    const dimensions = this.dimensionsByGeneration.get(generationSeq);
+    if (dimensions === undefined) {
+      return;
+    }
+    const frameKind = this.frameKindByGeneration.get(generationSeq);
+    if (frameKind === undefined) {
+      return;
+    }
+
+    const warnings = this.latestClientState.warnings as WarningEntry[];
+    const layerList = Object.values(this.latestClientState.layers).map((layer) => ({
+      layerId: layer.layerId,
+      name: layer.name,
+      sourceId: null,
+    }));
+
+    const minimap = buildMinimapState(
+      layerList,
+      null,
+      this.latestClientState.activeLayerId,
+      dimensions.width,
+      dimensions.height,
+      {
+        centerX: dimensions.width / 2,
+        centerY: dimensions.height / 2,
+        zoom: 1,
+      },
+      0,
+      1,
+    );
+
+    this.onFrame({
+      generationSeq,
+      frameKind,
+      width: dimensions.width,
+      height: dimensions.height,
+      rgba: frame,
+      minimap,
+      warningNotice: buildSessionNotice(warnings),
+    });
+  }
+}
+
+function selectLatestGeneration(
+  clientState: ClientState,
+): { sourceId: string; generationSeq: number } | null {
+  const sourceValues = Object.values(clientState.sources);
+  let latest: { sourceId: string; generationSeq: number } | null = null;
+  for (const source of sourceValues) {
+    if (source.latestWorkingGenerationSeq <= 0) {
+      continue;
+    }
+    if (
+      latest === null ||
+      source.latestWorkingGenerationSeq > latest.generationSeq
+    ) {
+      latest = {
+        sourceId: source.sourceId,
+        generationSeq: source.latestWorkingGenerationSeq,
+      };
+    }
+  }
+  return latest;
+}
+
+function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
+  if (bytes.length < 4 || bytes[0] !== 0x50 || bytes[1] !== 0x35) {
+    throw new Error("payload is not a binary PGM (P5) frame");
+  }
+
+  let index = 2;
+  const tokens: string[] = [];
+  while (tokens.length < 3) {
+    while (index < bytes.length && isWhitespace(bytes[index] ?? 0)) {
+      index += 1;
+    }
+    if (bytes[index] === 0x23) {
+      while (index < bytes.length && bytes[index] !== 0x0a) {
+        index += 1;
+      }
+      continue;
+    }
+    const start = index;
+    while (index < bytes.length && !isWhitespace(bytes[index] ?? 0)) {
+      index += 1;
+    }
+    if (index === start) {
+      throw new Error("invalid PGM header");
+    }
+    const token = new TextDecoder().decode(bytes.slice(start, index));
+    tokens.push(token);
+  }
+
+  const width = Number.parseInt(tokens[0] ?? "", 10);
+  const height = Number.parseInt(tokens[1] ?? "", 10);
+  const maxValue = Number.parseInt(tokens[2] ?? "", 10);
+  if (
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    width <= 0 ||
+    height <= 0 ||
+    maxValue !== 255
+  ) {
+    throw new Error("unsupported PGM dimensions or max value");
+  }
+
+  while (index < bytes.length && isWhitespace(bytes[index] ?? 0)) {
+    index += 1;
+  }
+  const pixelCount = width * height;
+  const payload = bytes.slice(index);
+  if (payload.length < pixelCount) {
+    throw new Error("PGM payload is truncated");
+  }
+
+  const rgba = new Uint8ClampedArray(pixelCount * 4);
+  for (let i = 0; i < pixelCount; i += 1) {
+    const value = payload[i] ?? 0;
+    const offset = i * 4;
+    rgba[offset] = value;
+    rgba[offset + 1] = value;
+    rgba[offset + 2] = value;
+    rgba[offset + 3] = 255;
+  }
+
+  return {
+    width,
+    height,
+    rgba,
+  };
+}
+
+function isWhitespace(value: number): boolean {
+  return value === 0x20 || value === 0x09 || value === 0x0a || value === 0x0d;
+}

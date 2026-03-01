@@ -7,6 +7,7 @@ export type ViewerRoute = {
   mode: AttachMode;
   token: string | undefined;
   wsBase: string;
+  dataBase: string;
 };
 
 export type RouteResolution =
@@ -65,6 +66,11 @@ export function resolveRoute(location: Location): RouteResolution {
     wsBaseParam === null || wsBaseParam.trim().length === 0
       ? defaultWsBase(location)
       : wsBaseParam.trim();
+  const dataBaseParam = params.get("dataBase");
+  const dataBase =
+    dataBaseParam === null || dataBaseParam.trim().length === 0
+      ? defaultDataBase(location)
+      : dataBaseParam.trim();
 
   return {
     ok: true,
@@ -75,12 +81,18 @@ export function resolveRoute(location: Location): RouteResolution {
       mode,
       token,
       wsBase,
+      dataBase,
     },
   };
 }
 
 function defaultWsBase(location: Location): string {
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${location.host}`;
+}
+
+function defaultDataBase(location: Location): string {
+  const protocol = location.protocol === "https:" ? "https:" : "http:";
   return `${protocol}//${location.host}`;
 }
 

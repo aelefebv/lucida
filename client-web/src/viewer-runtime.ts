@@ -13,6 +13,10 @@ import {
   type EventEnvelope,
   type SnapshotPayload,
 } from "./client-store";
+import {
+  LiveRenderLoop,
+  type RenderFrameState,
+} from "./live-render-loop";
 import type { ViewerRoute } from "./viewer-route";
 
 export type ViewerRuntimeState = {
@@ -21,6 +25,7 @@ export type ViewerRuntimeState = {
   connectionSummary: string | null;
   snapshot: SnapshotPayload | null;
   clientState: ClientState | null;
+  renderFrame: RenderFrameState | null;
 };
 
 type RuntimeSnapshotMessage = {
@@ -51,6 +56,7 @@ export class ViewerRuntime {
   private readonly route: ViewerRoute;
   private readonly onUpdate: (state: ViewerRuntimeState) => void;
   private readonly bootstrap: ConnectionBootstrap;
+  private readonly renderLoop: LiveRenderLoop;
   private stateValue: ViewerRuntimeState;
   private socketValue: WebSocket | null;
   private disposed: boolean;
@@ -62,12 +68,20 @@ export class ViewerRuntime {
     this.route = route;
     this.onUpdate = onUpdate;
     this.bootstrap = new ConnectionBootstrap();
+    this.renderLoop = new LiveRenderLoop(route.dataBase, (renderFrame) => {
+      this.stateValue = {
+        ...this.stateValue,
+        renderFrame,
+      };
+      this.onUpdate(this.stateValue);
+    });
     this.stateValue = {
       routeKind: route.kind,
       connection: this.bootstrap.state(),
       connectionSummary: null,
       snapshot: null,
       clientState: null,
+      renderFrame: null,
     };
     this.socketValue = null;
     this.disposed = false;
@@ -185,6 +199,7 @@ export class ViewerRuntime {
       snapshot: message.snapshot,
       clientState: nextClientState,
     };
+    this.renderLoop.update(nextClientState);
     this.onUpdate(this.stateValue);
   }
 
@@ -209,6 +224,9 @@ export class ViewerRuntime {
       ...this.stateValue,
       clientState: applyEvent(this.stateValue.clientState, event),
     };
+    if (this.stateValue.clientState !== null) {
+      this.renderLoop.update(this.stateValue.clientState);
+    }
     this.onUpdate(this.stateValue);
   }
 

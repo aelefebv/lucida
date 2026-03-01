@@ -58,6 +58,9 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
     <div>Minimap target</div>
     <div>Warnings target</div>
   </section>
+  <section data-testid="frame-state"></section>
+  <section data-testid="minimap-state"></section>
+  <section data-testid="warning-state"></section>
   ${
     routeKind === "jupyter-viewer"
       ? '<section data-testid="jupyter-target">Jupyter iframe target route ready.</section>'
@@ -87,6 +90,33 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
     const clientId = state.clientState?.clientId ?? "n/a";
     layoutNode.setAttribute("data-session-id", sessionId);
     layoutNode.setAttribute("data-client-id", clientId);
+  }
+
+  const frameNode = mount.querySelector('[data-testid="frame-state"]');
+  if (frameNode instanceof HTMLElement) {
+    if (state.renderFrame === null) {
+      frameNode.textContent = "Frame: pending";
+    } else {
+      frameNode.textContent = `Frame: gen ${state.renderFrame.generationSeq.toString()} (${state.renderFrame.frameKind})`;
+    }
+  }
+
+  const minimapNode = mount.querySelector('[data-testid="minimap-state"]');
+  if (minimapNode instanceof HTMLElement) {
+    if (state.renderFrame === null) {
+      minimapNode.textContent = "Minimap: pending";
+    } else {
+      minimapNode.textContent = `Minimap: ${state.renderFrame.minimap.zIndicatorLabel}`;
+    }
+  }
+
+  const warningNode = mount.querySelector('[data-testid="warning-state"]');
+  if (warningNode instanceof HTMLElement) {
+    warningNode.textContent =
+      state.renderFrame?.warningNotice === null ||
+      state.renderFrame?.warningNotice === undefined
+        ? "Warnings: none"
+        : `Warnings: ${state.renderFrame.warningNotice}`;
   }
 }
 
