@@ -163,6 +163,7 @@ Exit when:
 - **Goal:** Turn spec invariants and workflow expectations into a traceable acceptance matrix.
 - **Deliverables:** matrix mapping features to acceptance tests and milestone gates.
 - **Acceptance:** each milestone has explicit exit criteria linked to tests.
+- **References:** `docs/acceptance_matrix.md`
 
 ---
 
