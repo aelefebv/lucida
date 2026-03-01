@@ -11,6 +11,7 @@ mod error_model;
 mod errors;
 mod event_stream;
 mod id_allocator;
+mod metadata_sidecar;
 mod model;
 mod object_url;
 mod revision_allocator;
@@ -58,6 +59,10 @@ pub use event_stream::{
     WarningsUpdatedPayload,
 };
 pub use id_allocator::{IdAllocator, IdKind};
+pub use metadata_sidecar::{
+    FilterCompression, FilterQueryResult, MetadataEndpointResponse, MetadataEntry,
+    MetadataSidecarDocument, MetadataSidecarError, MetadataSidecarService,
+};
 pub use model::{
     AddSourceRequest, AddedSource, AttachRequest, AuditEventKind, AuditLogEntry, AxisName,
     AxisShape, AxisSpacing, CalibrationMetadata, CalibrationStatus, ChannelDescription,
