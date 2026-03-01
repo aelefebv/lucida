@@ -19,6 +19,7 @@ type ContrastControlsState = ContrastWindow & {
 
 const DEFAULT_CONTRAST_MIN = 0;
 const DEFAULT_CONTRAST_MAX = 255;
+const DEFAULT_AXIS_SLIDER_MAX = 4095;
 
 export function bootstrapApp(
   document: Document = window.document,
@@ -167,14 +168,14 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
   <section data-testid="axis-controls">
     <label>
       Z
-      <input data-testid="input-z-index" type="number" min="0" step="1" value="0" />
+      <input data-testid="input-z-index" type="range" min="0" max="0" step="1" value="0" />
     </label>
     <button type="button" data-testid="btn-z-dec">Z -</button>
     <button type="button" data-testid="btn-z-inc">Z +</button>
     <button type="button" data-testid="btn-z-apply">Set Z</button>
     <label>
       T
-      <input data-testid="input-t-index" type="number" min="0" step="1" value="0" />
+      <input data-testid="input-t-index" type="range" min="0" max="0" step="1" value="0" />
     </label>
     <button type="button" data-testid="btn-t-dec">T -</button>
     <button type="button" data-testid="btn-t-inc">T +</button>
@@ -457,6 +458,21 @@ function attachInteractionHandlers(
     );
     runtime.setZ(zIndex);
   });
+  registerInput("input-z-index", () => {
+    const clientState = runtime.state().clientState;
+    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
+    const zIndex = readIndexInput(
+      mount,
+      "input-z-index",
+      clientState?.zIndex ?? 0,
+      bounds?.maxZIndex ?? null,
+    );
+    const input = mount.querySelector('[data-testid="input-z-index"]');
+    if (input instanceof HTMLInputElement) {
+      input.value = zIndex.toString();
+    }
+    runtime.setZ(zIndex);
+  });
   registerClick("btn-t-dec", () => {
     withClientState((_, tIndex, __, ___, maxTIndex) => {
       runtime.setT(clampAxisIndex(tIndex - 1, maxTIndex));
@@ -476,6 +492,21 @@ function attachInteractionHandlers(
       clientState?.tIndex ?? 0,
       bounds?.maxTIndex ?? null,
     );
+    runtime.setT(tIndex);
+  });
+  registerInput("input-t-index", () => {
+    const clientState = runtime.state().clientState;
+    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
+    const tIndex = readIndexInput(
+      mount,
+      "input-t-index",
+      clientState?.tIndex ?? 0,
+      bounds?.maxTIndex ?? null,
+    );
+    const input = mount.querySelector('[data-testid="input-t-index"]');
+    if (input instanceof HTMLInputElement) {
+      input.value = tIndex.toString();
+    }
     runtime.setT(tIndex);
   });
   registerClick("btn-channels-apply", () => {
@@ -677,21 +708,15 @@ function syncSelectionInputsFromState(
   const bounds = selectionBoundsFor(clientState);
   const zInput = mount.querySelector('[data-testid="input-z-index"]');
   if (zInput instanceof HTMLInputElement) {
-    if (bounds?.maxZIndex !== null && bounds?.maxZIndex !== undefined) {
-      zInput.max = bounds.maxZIndex.toString();
-    } else {
-      zInput.removeAttribute("max");
-    }
-    zInput.value = clampAxisIndex(clientState.zIndex, bounds?.maxZIndex ?? null).toString();
+    const maxZIndex = bounds?.maxZIndex ?? DEFAULT_AXIS_SLIDER_MAX;
+    zInput.max = maxZIndex.toString();
+    zInput.value = clampAxisIndex(clientState.zIndex, maxZIndex).toString();
   }
   const tInput = mount.querySelector('[data-testid="input-t-index"]');
   if (tInput instanceof HTMLInputElement) {
-    if (bounds?.maxTIndex !== null && bounds?.maxTIndex !== undefined) {
-      tInput.max = bounds.maxTIndex.toString();
-    } else {
-      tInput.removeAttribute("max");
-    }
-    tInput.value = clampAxisIndex(clientState.tIndex, bounds?.maxTIndex ?? null).toString();
+    const maxTIndex = bounds?.maxTIndex ?? DEFAULT_AXIS_SLIDER_MAX;
+    tInput.max = maxTIndex.toString();
+    tInput.value = clampAxisIndex(clientState.tIndex, maxTIndex).toString();
   }
   const channelInput = mount.querySelector('[data-testid="input-channel-list"]');
   if (channelInput instanceof HTMLInputElement) {

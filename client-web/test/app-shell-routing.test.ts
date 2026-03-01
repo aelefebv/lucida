@@ -212,9 +212,9 @@ describe("app shell routing", () => {
     queryButton("btn-zoom-in").click();
 
     queryInput("input-z-index").value = "3";
-    queryButton("btn-z-apply").click();
+    queryInput("input-z-index").dispatchEvent(new Event("input", { bubbles: true }));
     queryInput("input-t-index").value = "2";
-    queryButton("btn-t-apply").click();
+    queryInput("input-t-index").dispatchEvent(new Event("input", { bubbles: true }));
     queryInput("input-channel-list").value = "1, 4";
     queryButton("btn-channels-apply").click();
 
@@ -278,9 +278,9 @@ describe("app shell routing", () => {
     expect(queryInput("input-t-index").max).toBe("29");
 
     queryInput("input-z-index").value = "99";
-    queryButton("btn-z-apply").click();
+    queryInput("input-z-index").dispatchEvent(new Event("input", { bubbles: true }));
     queryInput("input-t-index").value = "44";
-    queryButton("btn-t-apply").click();
+    queryInput("input-t-index").dispatchEvent(new Event("input", { bubbles: true }));
     queryInput("input-channel-list").value = "7, 3";
     queryButton("btn-channels-apply").click();
 
