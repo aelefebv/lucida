@@ -397,6 +397,7 @@ function attachInteractionHandlers(
     event: "click" | "input";
     handler: EventListener;
   }> = [];
+  const viewportDisposers: Array<() => void> = [];
   const registerListener = (
     testId: string,
     event: "click" | "input",
@@ -506,10 +507,83 @@ function attachInteractionHandlers(
     renderRuntimeState(mount, runtime.state());
   });
 
+  const viewportCanvas = mount.querySelector('[data-testid="viewport-canvas"]');
+  if (viewportCanvas instanceof HTMLCanvasElement) {
+    let isDragging = false;
+    let lastClientX = 0;
+    let lastClientY = 0;
+
+    const onViewportMouseDown = (event: MouseEvent): void => {
+      if (event.button !== 0) {
+        return;
+      }
+      isDragging = true;
+      lastClientX = event.clientX;
+      lastClientY = event.clientY;
+      event.preventDefault();
+    };
+
+    const onDocumentMouseMove = (event: MouseEvent): void => {
+      if (!isDragging) {
+        return;
+      }
+      const dx = event.clientX - lastClientX;
+      const dy = event.clientY - lastClientY;
+      lastClientX = event.clientX;
+      lastClientY = event.clientY;
+      if (dx === 0 && dy === 0) {
+        return;
+      }
+      // Keep the image under the cursor while dragging.
+      runtime.pan(-dx, -dy);
+      event.preventDefault();
+    };
+
+    const onDocumentMouseUp = (event: MouseEvent): void => {
+      if (event.button !== 0) {
+        return;
+      }
+      isDragging = false;
+    };
+
+    const onDocumentMouseLeave = (): void => {
+      isDragging = false;
+    };
+
+    const onViewportWheel = (event: WheelEvent): void => {
+      if (event.deltaY === 0) {
+        return;
+      }
+      const rect = viewportCanvas.getBoundingClientRect();
+      const anchorX = event.clientX - rect.left;
+      const anchorY = event.clientY - rect.top;
+      const scale = event.deltaY < 0 ? ZOOM_IN_SCALE : ZOOM_OUT_SCALE;
+      runtime.zoom(scale, anchorX, anchorY);
+      event.preventDefault();
+    };
+
+    viewportCanvas.addEventListener("mousedown", onViewportMouseDown);
+    document.addEventListener("mousemove", onDocumentMouseMove);
+    document.addEventListener("mouseup", onDocumentMouseUp);
+    document.addEventListener("mouseleave", onDocumentMouseLeave);
+    viewportCanvas.addEventListener("wheel", onViewportWheel, { passive: false });
+
+    viewportDisposers.push(() => {
+      viewportCanvas.removeEventListener("mousedown", onViewportMouseDown);
+      document.removeEventListener("mousemove", onDocumentMouseMove);
+      document.removeEventListener("mouseup", onDocumentMouseUp);
+      document.removeEventListener("mouseleave", onDocumentMouseLeave);
+      viewportCanvas.removeEventListener("wheel", onViewportWheel);
+    });
+  }
+
   return () => {
     document.removeEventListener("keydown", onKeyDown);
     for (const listener of listeners) {
       listener.element.removeEventListener(listener.event, listener.handler);
+    }
+    for (const dispose of viewportDisposers) {
+      dispose();
     }
   };
 }

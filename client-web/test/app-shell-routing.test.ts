@@ -294,6 +294,87 @@ describe("app shell routing", () => {
     expect((setTCommands[1]?.args as { t_index?: unknown })?.t_index).toBe(0);
   });
 
+  it("pans via viewport drag and zooms via viewport wheel", async () => {
+    const fixture = await startFixtureServer({
+      permissionClass: "view",
+      isLeaseHolder: false,
+    });
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-pointer&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("attach-status").includes("Attached"));
+
+    const viewport = queryCanvas("viewport-canvas");
+    viewport.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        button: 0,
+        clientX: 40,
+        clientY: 60,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mousemove", {
+        bubbles: true,
+        clientX: 58,
+        clientY: 49,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        button: 0,
+        clientX: 58,
+        clientY: 49,
+      }),
+    );
+    viewport.dispatchEvent(
+      new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        deltaY: -100,
+        clientX: 58,
+        clientY: 49,
+      }),
+    );
+    viewport.dispatchEvent(
+      new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        deltaY: 100,
+        clientX: 58,
+        clientY: 49,
+      }),
+    );
+
+    await waitFor(() => {
+      const commandCount = fixture.received.filter((value) => {
+        return isRecord(value) && value.message_type === "command";
+      }).length;
+      return commandCount >= 3;
+    }, 2000);
+
+    const commands = fixture.received.filter((value): value is Record<string, unknown> => {
+      return isRecord(value) && value.message_type === "command";
+    });
+    const panCommand = commands.find((command) => command.op === "view.pan");
+    expect(panCommand).toBeDefined();
+    expect((panCommand?.args as { dx?: unknown })?.dx).toBe(-18);
+    expect((panCommand?.args as { dy?: unknown })?.dy).toBe(11);
+
+    const zoomCommands = commands.filter((command) => command.op === "view.zoom");
+    expect(zoomCommands).toHaveLength(2);
+    expect((zoomCommands[0]?.args as { zoom?: unknown })?.zoom).toBe(1.2);
+    expect((zoomCommands[1]?.args as { zoom?: unknown })?.zoom).toBe(1);
+  });
+
   it("clamps z/t/channel controls to dataset bounds", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",
