@@ -23,6 +23,7 @@ type DecodedFrame = {
 };
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
+const defaultFetchImpl: FetchLike = (input, init) => globalThis.fetch(input, init);
 
 export class LiveRenderLoop {
   private readonly resolver: EngineDataPlaneUrlResolver;
@@ -40,7 +41,7 @@ export class LiveRenderLoop {
   public constructor(
     dataBase: string,
     onFrame: (state: RenderFrameState) => void,
-    fetchImpl: FetchLike = fetch,
+    fetchImpl: FetchLike = defaultFetchImpl,
   ) {
     this.resolver = new EngineDataPlaneUrlResolver(dataBase);
     this.scheduler = new RequestScheduler(2);
