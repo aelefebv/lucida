@@ -525,3 +525,89 @@ fn session_manager_builds_lazy_bricks_for_generation_and_marks_completed_lod() {
     fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
     fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");
 }
+
+#[test]
+fn session_manager_garbage_collect_source_cache_keeps_latest_and_pinned_generations() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "lucida_luc206_generation_gc_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    let cache_root = std::env::temp_dir().join(format!(
+        "lucida_luc206_generation_gc_root_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+    fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+    let source_path = fixture_dir.join("gc-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-generation-gc");
+    let added = manager
+        .add_source(
+            &created.session_id,
+            AddSourceRequest {
+                name: "gc-source".to_owned(),
+                uri: source_path.display().to_string(),
+            },
+        )
+        .expect("source add should succeed");
+
+    let mut generation_seqs = Vec::new();
+    for _ in 0..3 {
+        let detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("generation detection should succeed");
+        manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation start should succeed");
+        manager
+            .build_canonical_cache_for_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                &cache_root,
+            )
+            .expect("canonical cache build should succeed");
+        manager
+            .mark_generation_ready(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("generation ready should succeed");
+        generation_seqs.push(detected.generation_seq);
+    }
+    manager
+        .pin_generation(
+            &created.session_id,
+            &added.source.source_id,
+            generation_seqs[0],
+        )
+        .expect("pin should succeed");
+
+    let removed = manager
+        .garbage_collect_source_cache(
+            &created.session_id,
+            &added.source.source_id,
+            &cache_root,
+            1_772_281_600,
+            0,
+        )
+        .expect("cache gc should succeed");
+
+    assert_eq!(removed, vec![generation_seqs[1]]);
+    let source_cache_root = cache_root.join(&added.source.source_id);
+    assert!(source_cache_root.join("gen_00000001").exists());
+    assert!(!source_cache_root.join("gen_00000002").exists());
+    assert!(source_cache_root.join("gen_00000003").exists());
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
+    fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");
+}

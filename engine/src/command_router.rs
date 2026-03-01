@@ -610,6 +610,17 @@ impl From<SessionError> for CommandError {
                     "brick build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
                 ),
             },
+            SessionError::CacheGcFailed {
+                source_id,
+                generation_seq,
+                path,
+                reason,
+            } => Self {
+                code: CommandErrorCode::SourceUnavailable,
+                message: format!(
+                    "cache GC failed for source `{source_id}` generation `{generation_seq}` at `{path}`: {reason}"
+                ),
+            },
             SessionError::LayerNotFound {
                 session_id,
                 layer_id,

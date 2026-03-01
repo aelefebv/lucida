@@ -50,6 +50,12 @@ pub enum SessionError {
         generation_seq: u64,
         reason: String,
     },
+    CacheGcFailed {
+        source_id: String,
+        generation_seq: u64,
+        path: String,
+        reason: String,
+    },
     LeaseUnavailable {
         session_id: String,
         lease_holder_client_id: String,
@@ -130,6 +136,15 @@ impl Display for SessionError {
             } => write!(
                 f,
                 "brick build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
+            ),
+            SessionError::CacheGcFailed {
+                source_id,
+                generation_seq,
+                path,
+                reason,
+            } => write!(
+                f,
+                "cache GC failed for source `{source_id}` generation `{generation_seq}` at `{path}`: {reason}"
             ),
             SessionError::LeaseUnavailable {
                 session_id,

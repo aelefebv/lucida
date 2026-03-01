@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::brick3d_builder::{Brick3dBuilder, BrickBuildError, BrickBuildRequest};
+use crate::cache_layout::{RetentionPolicy, decide_retention, remove_generation_artifacts};
 use crate::canonical_cache::{
     CanonicalCacheBuildRequest, CanonicalCacheBuilder, CanonicalCacheError,
 };
@@ -990,6 +991,84 @@ impl SessionManager {
         bump_session_rev(session);
         refresh_warnings(session);
         Ok(snapshot)
+    }
+
+    pub fn garbage_collect_source_cache(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        cache_root: impl AsRef<Path>,
+        now_unix_seconds: i64,
+        previous_working_ttl_secs: u64,
+    ) -> Result<Vec<u64>, SessionError> {
+        let cache_root = cache_root.as_ref().to_path_buf();
+        let session = self.session_mut(session_id)?;
+        let (latest_working_generation_seq, retention_decision) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            let retention_decision = decide_retention(
+                &source.generations,
+                source.latest_working_generation_seq,
+                now_unix_seconds,
+                RetentionPolicy {
+                    previous_working_ttl_secs,
+                },
+            );
+            (source.latest_working_generation_seq, retention_decision)
+        };
+
+        if retention_decision.gc_generation_seqs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        for generation_seq in &retention_decision.gc_generation_seqs {
+            remove_generation_artifacts(&cache_root, source_id, *generation_seq).map_err(
+                |error| SessionError::CacheGcFailed {
+                    source_id: source_id.to_owned(),
+                    generation_seq: *generation_seq,
+                    path: cache_root
+                        .join(source_id)
+                        .join(format!("gen_{generation_seq:08}"))
+                        .display()
+                        .to_string(),
+                    reason: error.to_string(),
+                },
+            )?;
+        }
+
+        let removed = {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+            for generation_seq in &retention_decision.gc_generation_seqs {
+                if let Some(generation) = source.generations.get_mut(generation_seq) {
+                    generation.stage = GenerationStage::GarbageCollected;
+                    generation.updated_at = rfc3339_now();
+                }
+            }
+            if latest_working_generation_seq > 0
+                && !source
+                    .generations
+                    .contains_key(&latest_working_generation_seq)
+            {
+                source.latest_working_generation_id = None;
+                source.latest_working_generation_seq = 0;
+            }
+            retention_decision.gc_generation_seqs
+        };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(removed)
     }
 
     pub fn bump_source_generation_seq(

@@ -1,4 +1,5 @@
 mod brick3d_builder;
+mod cache_layout;
 mod canonical_cache;
 mod clock;
 mod command_router;
@@ -16,6 +17,10 @@ mod tile_preview_builder;
 mod warning_service;
 
 pub use brick3d_builder::{Brick3dBuilder, BrickBuildError, BrickBuildRequest, BrickBuildResult};
+pub use cache_layout::{
+    GenerationArtifactLayout, RetentionDecision, RetentionPolicy, decide_retention,
+    remove_generation_artifacts,
+};
 pub use canonical_cache::{
     CanonicalCacheBuildRequest, CanonicalCacheBuildResult, CanonicalCacheBuilder,
     CanonicalCacheError,
