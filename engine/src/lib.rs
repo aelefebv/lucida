@@ -15,7 +15,7 @@ pub use command_router::{
 };
 pub use constants::{
     COMMAND_ACK_MESSAGE_TYPE, COMMAND_MESSAGE_TYPE, ENGINE_VERSION, ERROR_MESSAGE_TYPE,
-    SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE,
+    HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE,
 };
 pub use error_model::{
     ErrorCode, ErrorDetails, ErrorEnvelope, ErrorMessageSerializer, ErrorScope,
@@ -33,10 +33,10 @@ pub use event_stream::{
 pub use id_allocator::{IdAllocator, IdKind};
 pub use model::{
     AttachRequest, AuditEventKind, AuditLogEntry, ClientRosterEntry, ClientViewMode,
-    CreatedSession, DatasetBinding, ExposureMode, ExposureViewMode, LayerState, LeaseChangeKind,
-    LeaseState, PerClientViewState, PermissionClass, Permissions, SceneMode,
-    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord,
-    TargetState, WarningEntry, WarningSeverity,
+    CreatedSession, DatasetBinding, ExposureMode, ExposureViewMode, HeartbeatEnvelope, LayerState,
+    LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
+    ReconnectRequest, SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState,
+    SharedSceneState, SourceRecord, TargetState, WarningEntry, WarningSeverity,
 };
 pub use revision_allocator::RevisionAllocator;
 pub use session_manager::{LeaseTransition, SessionManager};

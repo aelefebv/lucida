@@ -4,4 +4,5 @@ pub const ENGINE_VERSION: &str = "0.1.0";
 pub const COMMAND_MESSAGE_TYPE: &str = "command";
 pub const COMMAND_ACK_MESSAGE_TYPE: &str = "command_ack";
 pub const ERROR_MESSAGE_TYPE: &str = "error";
+pub const HEARTBEAT_MESSAGE_TYPE: &str = "heartbeat";
 pub const SNAPSHOT_MESSAGE_TYPE: &str = "session.snapshot";

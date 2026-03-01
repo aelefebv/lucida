@@ -1,14 +1,17 @@
 use std::collections::BTreeMap;
 
 use crate::clock::rfc3339_now;
-use crate::constants::{ENGINE_VERSION, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
+use crate::constants::{
+    ENGINE_VERSION, HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE,
+};
 use crate::errors::SessionError;
 use crate::id_allocator::{IdAllocator, IdKind};
 use crate::model::{
     AttachRequest, AuditEventKind, AuditLogEntry, ClientRosterEntry, ClientViewMode,
-    CreatedSession, ExposureMode, ExposureViewMode, LayerState, LeaseChangeKind, LeaseState,
-    PerClientViewState, PermissionClass, Permissions, SceneMode, SessionSnapshotEnvelope,
-    SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord, WarningEntry,
+    CreatedSession, ExposureMode, ExposureViewMode, HeartbeatEnvelope, LayerState, LeaseChangeKind,
+    LeaseState, PerClientViewState, PermissionClass, Permissions, ReconnectRequest, SceneMode,
+    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord,
+    WarningEntry,
 };
 use crate::revision_allocator::RevisionAllocator;
 
@@ -16,6 +19,7 @@ use crate::revision_allocator::RevisionAllocator;
 struct ClientRecord {
     roster_entry: ClientRosterEntry,
     view_state: PerClientViewState,
+    last_seen_tick: u64,
 }
 
 #[derive(Debug)]
@@ -43,6 +47,7 @@ pub struct LeaseTransition {
 #[derive(Debug)]
 pub struct SessionManager {
     id_allocator: IdAllocator,
+    heartbeat_tick: u64,
     sessions: BTreeMap<String, SessionRecord>,
 }
 
@@ -50,6 +55,7 @@ impl Default for SessionManager {
     fn default() -> Self {
         Self {
             id_allocator: IdAllocator::new(),
+            heartbeat_tick: 0,
             sessions: BTreeMap::new(),
         }
     }
@@ -119,6 +125,7 @@ impl SessionManager {
 
         let client_id = self.id_allocator.allocate(IdKind::Client);
         let now = rfc3339_now();
+        let last_seen_tick = self.next_heartbeat_tick();
         let session = self.session_mut(&request.session_id)?;
 
         bump_session_rev(session);
@@ -151,6 +158,7 @@ impl SessionManager {
             ClientRecord {
                 roster_entry: roster_entry.clone(),
                 view_state: view_state.clone(),
+                last_seen_tick,
             },
         );
 
@@ -187,6 +195,8 @@ impl SessionManager {
         client_id: &str,
     ) -> Result<u64, SessionError> {
         let session = self.session_mut(session_id)?;
+        let removed_held_lease =
+            session.lease_state.lease_holder_client_id.as_deref() == Some(client_id);
 
         let removed = session.clients.remove(client_id);
         if removed.is_none() {
@@ -194,6 +204,10 @@ impl SessionManager {
                 session_id: session_id.to_owned(),
                 client_id: client_id.to_owned(),
             });
+        }
+
+        if removed_held_lease {
+            apply_lease_holder(session, None, None, None);
         }
 
         Ok(bump_session_rev(session))
@@ -441,6 +455,112 @@ impl SessionManager {
         Ok(bump_session_rev(session))
     }
 
+    pub fn heartbeat(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<HeartbeatEnvelope, SessionError> {
+        let now = rfc3339_now();
+        let heartbeat_tick = self.next_heartbeat_tick();
+        let session = self.session_mut(session_id)?;
+        let client =
+            session
+                .clients
+                .get_mut(client_id)
+                .ok_or_else(|| SessionError::ClientNotFound {
+                    session_id: session_id.to_owned(),
+                    client_id: client_id.to_owned(),
+                })?;
+
+        client.roster_entry.last_seen_at = now.clone();
+        client.last_seen_tick = heartbeat_tick;
+
+        Ok(HeartbeatEnvelope {
+            message_type: HEARTBEAT_MESSAGE_TYPE.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            session_id: session_id.to_owned(),
+            client_id: client_id.to_owned(),
+            session_rev: session.session_state.session_rev,
+            sent_at: now,
+        })
+    }
+
+    pub fn disconnect_idle_clients(
+        &mut self,
+        session_id: &str,
+        max_idle_ticks: u64,
+    ) -> Result<Vec<String>, SessionError> {
+        let current_tick = self.heartbeat_tick;
+        let session = self.session_mut(session_id)?;
+        let stale_client_ids = session
+            .clients
+            .iter()
+            .filter_map(|(client_id, client)| {
+                if current_tick.saturating_sub(client.last_seen_tick) > max_idle_ticks {
+                    Some(client_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if stale_client_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut removed_client_ids = Vec::with_capacity(stale_client_ids.len());
+        for client_id in stale_client_ids {
+            let removed = session.clients.remove(&client_id);
+            if removed.is_some() {
+                let removed_held_lease = session.lease_state.lease_holder_client_id.as_deref()
+                    == Some(client_id.as_str());
+                if removed_held_lease {
+                    apply_lease_holder(session, None, None, None);
+                }
+                removed_client_ids.push(client_id);
+            }
+        }
+
+        if !removed_client_ids.is_empty() {
+            bump_session_rev(session);
+        }
+
+        Ok(removed_client_ids)
+    }
+
+    pub fn reconnect_client(
+        &mut self,
+        request: ReconnectRequest,
+    ) -> Result<SessionSnapshotEnvelope, SessionError> {
+        let ReconnectRequest {
+            session_id,
+            previous_client_id,
+            client_label,
+            requested_permission,
+        } = request;
+
+        if let Some(previous_client_id) = previous_client_id.as_deref() {
+            let session = self.session_mut(&session_id)?;
+            let removed_held_lease =
+                session.lease_state.lease_holder_client_id.as_deref() == Some(previous_client_id);
+            let removed = session.clients.remove(previous_client_id);
+            if removed.is_some() {
+                if removed_held_lease {
+                    apply_lease_holder(session, None, None, None);
+                }
+                bump_session_rev(session);
+            }
+        } else if !self.sessions.contains_key(&session_id) {
+            return Err(SessionError::SessionNotFound { session_id });
+        }
+
+        self.attach_client(AttachRequest {
+            session_id,
+            client_label,
+            requested_permission,
+        })
+    }
+
     pub fn request_lease(
         &mut self,
         session_id: &str,
@@ -614,6 +734,11 @@ impl SessionManager {
         Ok(client.view_state.clone())
     }
 
+    fn next_heartbeat_tick(&mut self) -> u64 {
+        self.heartbeat_tick = self.heartbeat_tick.saturating_add(1);
+        self.heartbeat_tick
+    }
+
     fn session_ref(&self, session_id: &str) -> Result<&SessionRecord, SessionError> {
         self.sessions
             .get(session_id)
@@ -702,10 +827,11 @@ fn collect_snapshot_warnings(session: &SessionRecord) -> Vec<WarningEntry> {
 
 #[cfg(test)]
 mod tests {
-    use crate::constants::{SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
+    use crate::constants::{HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
     use crate::errors::SessionError;
     use crate::model::{
         AttachRequest, AuditEventKind, ClientViewMode, LeaseChangeKind, PermissionClass,
+        ReconnectRequest,
     };
 
     use super::SessionManager;
@@ -1040,5 +1166,164 @@ mod tests {
             .audit_log(&created.session_id)
             .expect("audit log lookup should succeed");
         assert_eq!(audit_log.len(), 1);
+    }
+
+    #[test]
+    fn heartbeat_returns_envelope_and_keeps_session_revision_stable() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("heartbeat-session");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("attach should succeed");
+
+        let before = manager
+            .session_and_scene_revisions(&created.session_id)
+            .expect("revision lookup should succeed")
+            .0;
+        let heartbeat = manager
+            .heartbeat(
+                &created.session_id,
+                &attached.snapshot.client_view.client_id,
+            )
+            .expect("heartbeat should succeed");
+        let after = manager
+            .session_and_scene_revisions(&created.session_id)
+            .expect("revision lookup should succeed")
+            .0;
+
+        assert_eq!(heartbeat.message_type, HEARTBEAT_MESSAGE_TYPE);
+        assert_eq!(heartbeat.schema_version, SCHEMA_VERSION);
+        assert_eq!(heartbeat.session_id, created.session_id);
+        assert_eq!(heartbeat.client_id, attached.snapshot.client_view.client_id);
+        assert_eq!(heartbeat.session_rev, before);
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn disconnect_idle_clients_removes_stale_clients_and_clears_lease_holder() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("idle-disconnect");
+        let first = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "first".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("first attach should succeed");
+        let second = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "second".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("second attach should succeed");
+
+        manager
+            .set_lease_holder(
+                &created.session_id,
+                Some(&first.snapshot.client_view.client_id),
+            )
+            .expect("set lease holder should succeed");
+        manager
+            .heartbeat(&created.session_id, &second.snapshot.client_view.client_id)
+            .expect("heartbeat should succeed");
+
+        let removed = manager
+            .disconnect_idle_clients(&created.session_id, 0)
+            .expect("disconnect should succeed");
+
+        assert_eq!(removed, vec![first.snapshot.client_view.client_id.clone()]);
+        assert!(
+            !manager
+                .client_permission_and_lease(
+                    &created.session_id,
+                    &second.snapshot.client_view.client_id
+                )
+                .expect("second state lookup should succeed")
+                .1
+        );
+        assert_eq!(
+            manager.client_permission_and_lease(
+                &created.session_id,
+                &first.snapshot.client_view.client_id
+            ),
+            Err(SessionError::ClientNotFound {
+                session_id: created.session_id.clone(),
+                client_id: first.snapshot.client_view.client_id.clone(),
+            })
+        );
+
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id,
+                client_label: "observer".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("observer attach should succeed");
+        assert_eq!(snapshot.snapshot.lease_state.lease_holder_client_id, None);
+    }
+
+    #[test]
+    fn reconnect_client_replaces_old_client_and_preserves_shared_state() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("reconnect-session");
+        let first = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("first attach should succeed");
+        let source = manager
+            .add_source(&created.session_id, "source-a")
+            .expect("source add should succeed");
+        let layer = manager
+            .add_layer(&created.session_id, "layer-a")
+            .expect("layer add should succeed");
+        manager
+            .set_lease_holder(
+                &created.session_id,
+                Some(&first.snapshot.client_view.client_id),
+            )
+            .expect("set lease holder should succeed");
+
+        let reconnected = manager
+            .reconnect_client(ReconnectRequest {
+                session_id: created.session_id,
+                previous_client_id: Some(first.snapshot.client_view.client_id.clone()),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("reconnect should succeed");
+
+        assert_eq!(reconnected.snapshot.shared_scene.sources.len(), 1);
+        assert_eq!(reconnected.snapshot.shared_scene.layers.len(), 1);
+        assert!(
+            reconnected
+                .snapshot
+                .shared_scene
+                .sources
+                .contains_key(&source.source_id)
+        );
+        assert!(
+            reconnected
+                .snapshot
+                .shared_scene
+                .layers
+                .contains_key(&layer.layer_id)
+        );
+        assert_eq!(reconnected.snapshot.client_roster.len(), 1);
+        assert_ne!(
+            reconnected.snapshot.client_view.client_id,
+            first.snapshot.client_view.client_id
+        );
+        assert_eq!(
+            reconnected.snapshot.lease_state.lease_holder_client_id,
+            None
+        );
     }
 }

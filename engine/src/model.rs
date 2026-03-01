@@ -226,3 +226,21 @@ pub struct AttachRequest {
     pub client_label: String,
     pub requested_permission: PermissionClass,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconnectRequest {
+    pub session_id: String,
+    pub previous_client_id: Option<String>,
+    pub client_label: String,
+    pub requested_permission: PermissionClass,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeartbeatEnvelope {
+    pub message_type: String,
+    pub schema_version: String,
+    pub session_id: String,
+    pub client_id: String,
+    pub session_rev: u64,
+    pub sent_at: String,
+}

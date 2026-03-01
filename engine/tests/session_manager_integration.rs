@@ -1,4 +1,6 @@
-use lucida_engine::{AttachRequest, ClientViewMode, PermissionClass, SessionManager};
+use lucida_engine::{
+    AttachRequest, ClientViewMode, PermissionClass, ReconnectRequest, SessionManager,
+};
 
 #[test]
 fn session_manager_public_api_allocates_ids_and_revisions() {
@@ -45,4 +47,45 @@ fn session_manager_public_api_allocates_ids_and_revisions() {
     assert_eq!(metadata_rev, 1);
     assert_eq!(write_rev, 1);
     assert_eq!(view_rev, 1);
+}
+
+#[test]
+fn session_manager_supports_heartbeat_idle_disconnect_and_reconnect() {
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-reconnect");
+
+    let first = manager
+        .attach_client(AttachRequest {
+            session_id: created.session_id.clone(),
+            client_label: "first".to_owned(),
+            requested_permission: PermissionClass::Control,
+        })
+        .expect("first attach should succeed");
+    let second = manager
+        .attach_client(AttachRequest {
+            session_id: created.session_id.clone(),
+            client_label: "second".to_owned(),
+            requested_permission: PermissionClass::Control,
+        })
+        .expect("second attach should succeed");
+
+    manager
+        .heartbeat(&created.session_id, &second.snapshot.client_view.client_id)
+        .expect("heartbeat should succeed");
+    let removed = manager
+        .disconnect_idle_clients(&created.session_id, 0)
+        .expect("disconnect should succeed");
+
+    assert_eq!(removed, vec![first.snapshot.client_view.client_id.clone()]);
+
+    let reconnected = manager
+        .reconnect_client(ReconnectRequest {
+            session_id: created.session_id,
+            previous_client_id: Some(first.snapshot.client_view.client_id),
+            client_label: "first".to_owned(),
+            requested_permission: PermissionClass::Control,
+        })
+        .expect("reconnect should succeed");
+
+    assert_eq!(reconnected.snapshot.client_roster.len(), 2);
 }
