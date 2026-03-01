@@ -411,6 +411,13 @@ async fn runtime_serves_data_plane_get_and_head() {
     assert_eq!(
         get_response
             .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+    assert_eq!(
+        get_response
+            .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok()),
         Some("image/x-portable-graymap")
@@ -427,6 +434,13 @@ async fn runtime_serves_data_plane_get_and_head() {
         .await
         .expect("data HEAD should succeed");
     assert_eq!(head_response.status(), StatusCode::OK);
+    assert_eq!(
+        head_response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
     let head_body = head_response
         .bytes()
         .await

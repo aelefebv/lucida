@@ -5,6 +5,7 @@ use std::sync::Arc;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
+use axum::middleware::map_response;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -87,7 +88,8 @@ pub async fn run_runtime_server(
         .route("/v1/sessions/{session_id}/snapshot", get(snapshot_endpoint))
         .route("/v1/sessions/{session_id}/connect", get(connect_endpoint))
         .route("/v1/data/{*chunk_path}", get(data_get).head(data_head))
-        .with_state(state);
+        .with_state(state)
+        .layer(map_response(add_cors_headers));
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async {
@@ -1243,6 +1245,23 @@ fn data_response(
     }
 
     Ok(response)
+}
+
+async fn add_cors_headers(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        HeaderName::from_static("access-control-allow-origin"),
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        HeaderName::from_static("access-control-allow-methods"),
+        HeaderValue::from_static("GET, HEAD, POST, OPTIONS"),
+    );
+    headers.insert(
+        HeaderName::from_static("access-control-allow-headers"),
+        HeaderValue::from_static("content-type"),
+    );
+    response
 }
 
 fn data_plane_error(error: DataPlaneError) -> (StatusCode, Json<RuntimeHttpError>) {
