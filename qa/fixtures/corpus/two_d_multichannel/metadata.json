@@ -1,0 +1,21 @@
+{
+  "channels": [
+    "DAPI",
+    "GFP",
+    "RFP"
+  ],
+  "dtype": "uint8",
+  "name": "two_d_multichannel",
+  "shape": {
+    "c": 3,
+    "t": 1,
+    "x": 64,
+    "y": 64,
+    "z": 1
+  },
+  "spacing": {
+    "x": 1.0,
+    "y": 1.0,
+    "z": 1.0
+  }
+}
