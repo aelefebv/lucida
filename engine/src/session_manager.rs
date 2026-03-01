@@ -6,9 +6,9 @@ use crate::errors::SessionError;
 use crate::id_allocator::{IdAllocator, IdKind};
 use crate::model::{
     AttachRequest, ClientRosterEntry, ClientViewMode, CreatedSession, ExposureMode,
-    ExposureViewMode, LayerState, LeaseState, PerClientViewState, Permissions, SceneMode,
-    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord,
-    WarningEntry,
+    ExposureViewMode, LayerState, LeaseState, PerClientViewState, PermissionClass, Permissions,
+    SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState,
+    SourceRecord, WarningEntry,
 };
 use crate::revision_allocator::RevisionAllocator;
 
@@ -365,6 +365,131 @@ impl SessionManager {
         Ok(next_view_rev)
     }
 
+    pub fn update_client_active_layer(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        active_layer_id: Option<String>,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.active_layer_id = active_layer_id;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        Ok(next_view_rev)
+    }
+
+    pub fn client_permission_and_lease(
+        &self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<(PermissionClass, bool), SessionError> {
+        let session = self.session_ref(session_id)?;
+        let client =
+            session
+                .clients
+                .get(client_id)
+                .ok_or_else(|| SessionError::ClientNotFound {
+                    session_id: session_id.to_owned(),
+                    client_id: client_id.to_owned(),
+                })?;
+
+        Ok((
+            client.roster_entry.permission_class,
+            client.roster_entry.is_lease_holder,
+        ))
+    }
+
+    pub fn set_lease_holder(
+        &mut self,
+        session_id: &str,
+        client_id: Option<&str>,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        if let Some(id) = client_id {
+            if !session.clients.contains_key(id) {
+                return Err(SessionError::ClientNotFound {
+                    session_id: session_id.to_owned(),
+                    client_id: id.to_owned(),
+                });
+            }
+
+            let holder_label = session
+                .clients
+                .get(id)
+                .map(|client| client.roster_entry.label.clone())
+                .expect("checked contains_key above");
+
+            session.lease_state.lease_holder_client_id = Some(id.to_owned());
+            session.lease_state.lease_holder_label = Some(holder_label);
+            session.lease_state.acquired_at = Some(rfc3339_now());
+            session.lease_state.expires_at = None;
+        } else {
+            session.lease_state.lease_holder_client_id = None;
+            session.lease_state.lease_holder_label = None;
+            session.lease_state.acquired_at = None;
+            session.lease_state.expires_at = None;
+        }
+
+        let lease_holder_id = session.lease_state.lease_holder_client_id.clone();
+        for client in session.clients.values_mut() {
+            client.roster_entry.is_lease_holder = lease_holder_id
+                .as_deref()
+                .is_some_and(|holder| holder == client.roster_entry.client_id);
+        }
+
+        sync_lease_state(session);
+        Ok(bump_session_rev(session))
+    }
+
+    pub fn session_and_scene_revisions(
+        &self,
+        session_id: &str,
+    ) -> Result<(u64, u64), SessionError> {
+        let session = self.session_ref(session_id)?;
+        Ok((
+            session.session_state.session_rev,
+            session.session_state.scene_rev,
+        ))
+    }
+
+    pub fn client_view_revision(
+        &self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_ref(session_id)?;
+        let client =
+            session
+                .clients
+                .get(client_id)
+                .ok_or_else(|| SessionError::ClientNotFound {
+                    session_id: session_id.to_owned(),
+                    client_id: client_id.to_owned(),
+                })?;
+
+        Ok(client.view_state.view_rev)
+    }
+
+    fn session_ref(&self, session_id: &str) -> Result<&SessionRecord, SessionError> {
+        self.sessions
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            })
+    }
+
     fn session_mut(&mut self, session_id: &str) -> Result<&mut SessionRecord, SessionError> {
         self.sessions
             .get_mut(session_id)
@@ -382,6 +507,10 @@ fn bump_scene_rev(session: &mut SessionRecord) -> u64 {
     let scene_rev = RevisionAllocator::next_scene_rev(&mut session.session_state.scene_rev);
     session.shared_scene.scene_rev = scene_rev;
     scene_rev
+}
+
+fn sync_lease_state(session: &mut SessionRecord) {
+    session.session_state.lease_state = session.lease_state.clone();
 }
 
 fn collect_snapshot_warnings(session: &SessionRecord) -> Vec<WarningEntry> {
@@ -569,5 +698,46 @@ mod tests {
         assert_eq!(metadata_rev, 1);
         assert_eq!(write_rev, 1);
         assert_eq!(view_rev, 1);
+    }
+
+    #[test]
+    fn set_lease_holder_updates_client_lease_flags() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("lease-session");
+
+        let first = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("first attach should succeed");
+        let second = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "bob".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("second attach should succeed");
+
+        let _ = manager
+            .set_lease_holder(
+                &created.session_id,
+                Some(&first.snapshot.client_view.client_id),
+            )
+            .expect("set lease holder should succeed");
+
+        let first_state = manager
+            .client_permission_and_lease(&created.session_id, &first.snapshot.client_view.client_id)
+            .expect("first client lookup should succeed");
+        let second_state = manager
+            .client_permission_and_lease(
+                &created.session_id,
+                &second.snapshot.client_view.client_id,
+            )
+            .expect("second client lookup should succeed");
+
+        assert!(first_state.1);
+        assert!(!second_state.1);
     }
 }
