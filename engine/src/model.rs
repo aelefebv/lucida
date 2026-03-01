@@ -66,6 +66,29 @@ impl Default for LeaseState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseChangeKind {
+    Requested,
+    Stolen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditEventKind {
+    LeaseRequested,
+    LeaseStolen,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditLogEntry {
+    pub session_rev: u64,
+    pub event_kind: AuditEventKind,
+    pub actor_client_id: String,
+    pub actor_label: String,
+    pub previous_lease_holder_client_id: Option<String>,
+    pub previous_lease_holder_label: Option<String>,
+    pub recorded_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionState {
     pub session_id: String,

@@ -5,10 +5,10 @@ use crate::constants::{ENGINE_VERSION, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
 use crate::errors::SessionError;
 use crate::id_allocator::{IdAllocator, IdKind};
 use crate::model::{
-    AttachRequest, ClientRosterEntry, ClientViewMode, CreatedSession, ExposureMode,
-    ExposureViewMode, LayerState, LeaseState, PerClientViewState, PermissionClass, Permissions,
-    SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState,
-    SourceRecord, WarningEntry,
+    AttachRequest, AuditEventKind, AuditLogEntry, ClientRosterEntry, ClientViewMode,
+    CreatedSession, ExposureMode, ExposureViewMode, LayerState, LeaseChangeKind, LeaseState,
+    PerClientViewState, PermissionClass, Permissions, SceneMode, SessionSnapshotEnvelope,
+    SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord, WarningEntry,
 };
 use crate::revision_allocator::RevisionAllocator;
 
@@ -24,6 +24,20 @@ struct SessionRecord {
     shared_scene: SharedSceneState,
     lease_state: LeaseState,
     clients: BTreeMap<String, ClientRecord>,
+    audit_log: Vec<AuditLogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseTransition {
+    pub change_kind: LeaseChangeKind,
+    pub changed_by_client_id: String,
+    pub changed_by_label: String,
+    pub changed_at: String,
+    pub previous_lease_holder_client_id: Option<String>,
+    pub previous_lease_holder_label: Option<String>,
+    pub lease_state: LeaseState,
+    pub resulting_session_rev: u64,
+    pub audit_entry: AuditLogEntry,
 }
 
 #[derive(Debug)]
@@ -86,6 +100,7 @@ impl SessionManager {
             shared_scene,
             lease_state: LeaseState::default(),
             clients: BTreeMap::new(),
+            audit_log: Vec::new(),
         };
 
         self.sessions.insert(session_id.clone(), record);
@@ -416,41 +431,140 @@ impl SessionManager {
         client_id: Option<&str>,
     ) -> Result<u64, SessionError> {
         let session = self.session_mut(session_id)?;
+        let lease_holder_label = if let Some(id) = client_id {
+            Some(client_label(session, session_id, id)?.to_owned())
+        } else {
+            None
+        };
+        let acquired_at = client_id.map(|_| rfc3339_now());
+        apply_lease_holder(session, client_id, lease_holder_label, acquired_at);
+        Ok(bump_session_rev(session))
+    }
 
-        if let Some(id) = client_id {
-            if !session.clients.contains_key(id) {
-                return Err(SessionError::ClientNotFound {
-                    session_id: session_id.to_owned(),
-                    client_id: id.to_owned(),
-                });
+    pub fn request_lease(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<Option<LeaseTransition>, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let changed_by_label = client_label(session, session_id, client_id)?.to_owned();
+        let previous_lease_holder_client_id = session.lease_state.lease_holder_client_id.clone();
+        let previous_lease_holder_label = session.lease_state.lease_holder_label.clone();
+
+        if let Some(holder_id) = previous_lease_holder_client_id.as_deref() {
+            if holder_id == client_id {
+                return Ok(None);
             }
 
-            let holder_label = session
-                .clients
-                .get(id)
-                .map(|client| client.roster_entry.label.clone())
-                .expect("checked contains_key above");
+            return Err(SessionError::LeaseUnavailable {
+                session_id: session_id.to_owned(),
+                lease_holder_client_id: holder_id.to_owned(),
+            });
+        }
 
-            session.lease_state.lease_holder_client_id = Some(id.to_owned());
-            session.lease_state.lease_holder_label = Some(holder_label);
-            session.lease_state.acquired_at = Some(rfc3339_now());
-            session.lease_state.expires_at = None;
+        let changed_at = rfc3339_now();
+        apply_lease_holder(
+            session,
+            Some(client_id),
+            Some(changed_by_label.clone()),
+            Some(changed_at.clone()),
+        );
+        let resulting_session_rev = bump_session_rev(session);
+        let audit_entry = append_audit_entry(
+            session,
+            AuditLogEntry {
+                session_rev: resulting_session_rev,
+                event_kind: AuditEventKind::LeaseRequested,
+                actor_client_id: client_id.to_owned(),
+                actor_label: changed_by_label.clone(),
+                previous_lease_holder_client_id: previous_lease_holder_client_id.clone(),
+                previous_lease_holder_label: previous_lease_holder_label.clone(),
+                recorded_at: changed_at.clone(),
+            },
+        );
+
+        Ok(Some(LeaseTransition {
+            change_kind: LeaseChangeKind::Requested,
+            changed_by_client_id: client_id.to_owned(),
+            changed_by_label,
+            changed_at,
+            previous_lease_holder_client_id,
+            previous_lease_holder_label,
+            lease_state: session.lease_state.clone(),
+            resulting_session_rev,
+            audit_entry,
+        }))
+    }
+
+    pub fn steal_lease(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<Option<LeaseTransition>, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let changed_by_label = client_label(session, session_id, client_id)?.to_owned();
+
+        if !session.lease_state.stealable {
+            return Err(SessionError::LeaseNotStealable {
+                session_id: session_id.to_owned(),
+            });
+        }
+
+        let previous_lease_holder_client_id = session.lease_state.lease_holder_client_id.clone();
+        let previous_lease_holder_label = session.lease_state.lease_holder_label.clone();
+        if previous_lease_holder_client_id.as_deref() == Some(client_id) {
+            return Ok(None);
+        }
+
+        let change_kind = if previous_lease_holder_client_id.is_some() {
+            LeaseChangeKind::Stolen
         } else {
-            session.lease_state.lease_holder_client_id = None;
-            session.lease_state.lease_holder_label = None;
-            session.lease_state.acquired_at = None;
-            session.lease_state.expires_at = None;
-        }
+            LeaseChangeKind::Requested
+        };
 
-        let lease_holder_id = session.lease_state.lease_holder_client_id.clone();
-        for client in session.clients.values_mut() {
-            client.roster_entry.is_lease_holder = lease_holder_id
-                .as_deref()
-                .is_some_and(|holder| holder == client.roster_entry.client_id);
-        }
+        let changed_at = rfc3339_now();
+        apply_lease_holder(
+            session,
+            Some(client_id),
+            Some(changed_by_label.clone()),
+            Some(changed_at.clone()),
+        );
+        let resulting_session_rev = bump_session_rev(session);
 
-        sync_lease_state(session);
-        Ok(bump_session_rev(session))
+        let event_kind = if matches!(change_kind, LeaseChangeKind::Stolen) {
+            AuditEventKind::LeaseStolen
+        } else {
+            AuditEventKind::LeaseRequested
+        };
+        let audit_entry = append_audit_entry(
+            session,
+            AuditLogEntry {
+                session_rev: resulting_session_rev,
+                event_kind,
+                actor_client_id: client_id.to_owned(),
+                actor_label: changed_by_label.clone(),
+                previous_lease_holder_client_id: previous_lease_holder_client_id.clone(),
+                previous_lease_holder_label: previous_lease_holder_label.clone(),
+                recorded_at: changed_at.clone(),
+            },
+        );
+
+        Ok(Some(LeaseTransition {
+            change_kind,
+            changed_by_client_id: client_id.to_owned(),
+            changed_by_label,
+            changed_at,
+            previous_lease_holder_client_id,
+            previous_lease_holder_label,
+            lease_state: session.lease_state.clone(),
+            resulting_session_rev,
+            audit_entry,
+        }))
+    }
+
+    pub fn audit_log(&self, session_id: &str) -> Result<Vec<AuditLogEntry>, SessionError> {
+        let session = self.session_ref(session_id)?;
+        Ok(session.audit_log.clone())
     }
 
     pub fn session_and_scene_revisions(
@@ -531,6 +645,47 @@ fn sync_lease_state(session: &mut SessionRecord) {
     session.session_state.lease_state = session.lease_state.clone();
 }
 
+fn client_label<'a>(
+    session: &'a SessionRecord,
+    session_id: &str,
+    client_id: &str,
+) -> Result<&'a str, SessionError> {
+    let client = session
+        .clients
+        .get(client_id)
+        .ok_or_else(|| SessionError::ClientNotFound {
+            session_id: session_id.to_owned(),
+            client_id: client_id.to_owned(),
+        })?;
+    Ok(client.roster_entry.label.as_str())
+}
+
+fn apply_lease_holder(
+    session: &mut SessionRecord,
+    client_id: Option<&str>,
+    lease_holder_label: Option<String>,
+    acquired_at: Option<String>,
+) {
+    session.lease_state.lease_holder_client_id = client_id.map(ToOwned::to_owned);
+    session.lease_state.lease_holder_label = lease_holder_label;
+    session.lease_state.acquired_at = acquired_at;
+    session.lease_state.expires_at = None;
+
+    let lease_holder_id = session.lease_state.lease_holder_client_id.clone();
+    for client in session.clients.values_mut() {
+        client.roster_entry.is_lease_holder = lease_holder_id
+            .as_deref()
+            .is_some_and(|holder| holder == client.roster_entry.client_id);
+    }
+
+    sync_lease_state(session);
+}
+
+fn append_audit_entry(session: &mut SessionRecord, entry: AuditLogEntry) -> AuditLogEntry {
+    session.audit_log.push(entry.clone());
+    entry
+}
+
 fn collect_snapshot_warnings(session: &SessionRecord) -> Vec<WarningEntry> {
     let mut warnings = Vec::new();
     warnings.extend(session.shared_scene.warnings.iter().cloned());
@@ -549,7 +704,9 @@ fn collect_snapshot_warnings(session: &SessionRecord) -> Vec<WarningEntry> {
 mod tests {
     use crate::constants::{SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
     use crate::errors::SessionError;
-    use crate::model::{AttachRequest, ClientViewMode, PermissionClass};
+    use crate::model::{
+        AttachRequest, AuditEventKind, ClientViewMode, LeaseChangeKind, PermissionClass,
+    };
 
     use super::SessionManager;
 
@@ -757,5 +914,131 @@ mod tests {
 
         assert!(first_state.1);
         assert!(!second_state.1);
+    }
+
+    #[test]
+    fn request_and_steal_lease_enforce_single_holder_and_are_audit_logged() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("lease-sm-session");
+
+        let first = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("first attach should succeed");
+        let second = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "bob".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("second attach should succeed");
+
+        let first_transition = manager
+            .request_lease(&created.session_id, &first.snapshot.client_view.client_id)
+            .expect("initial lease request should succeed")
+            .expect("first request should mutate lease state");
+        assert_eq!(first_transition.change_kind, LeaseChangeKind::Requested);
+        assert_eq!(
+            first_transition
+                .lease_state
+                .lease_holder_client_id
+                .as_deref(),
+            Some(first.snapshot.client_view.client_id.as_str())
+        );
+
+        let error = manager
+            .request_lease(&created.session_id, &second.snapshot.client_view.client_id)
+            .expect_err("request by non-holder should fail when another holder exists");
+        assert_eq!(
+            error,
+            SessionError::LeaseUnavailable {
+                session_id: created.session_id.clone(),
+                lease_holder_client_id: first.snapshot.client_view.client_id.clone(),
+            }
+        );
+
+        let second_transition = manager
+            .steal_lease(&created.session_id, &second.snapshot.client_view.client_id)
+            .expect("lease steal should succeed")
+            .expect("steal should mutate lease state");
+        assert_eq!(second_transition.change_kind, LeaseChangeKind::Stolen);
+        assert_eq!(
+            second_transition.previous_lease_holder_client_id.as_deref(),
+            Some(first.snapshot.client_view.client_id.as_str())
+        );
+        assert_eq!(
+            second_transition
+                .lease_state
+                .lease_holder_client_id
+                .as_deref(),
+            Some(second.snapshot.client_view.client_id.as_str())
+        );
+
+        let first_state = manager
+            .client_permission_and_lease(&created.session_id, &first.snapshot.client_view.client_id)
+            .expect("first client lookup should succeed");
+        let second_state = manager
+            .client_permission_and_lease(
+                &created.session_id,
+                &second.snapshot.client_view.client_id,
+            )
+            .expect("second client lookup should succeed");
+        assert!(!first_state.1);
+        assert!(second_state.1);
+
+        let audit_log = manager
+            .audit_log(&created.session_id)
+            .expect("audit log lookup should succeed");
+        assert_eq!(audit_log.len(), 2);
+        assert_eq!(audit_log[0].event_kind, AuditEventKind::LeaseRequested);
+        assert_eq!(
+            audit_log[0].actor_client_id,
+            first.snapshot.client_view.client_id
+        );
+        assert_eq!(audit_log[1].event_kind, AuditEventKind::LeaseStolen);
+        assert_eq!(
+            audit_log[1].actor_client_id,
+            second.snapshot.client_view.client_id
+        );
+        assert_eq!(
+            audit_log[1].previous_lease_holder_client_id.as_deref(),
+            Some(first.snapshot.client_view.client_id.as_str())
+        );
+    }
+
+    #[test]
+    fn request_lease_is_idempotent_for_current_holder() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("lease-idempotent");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("attach should succeed");
+
+        let first = manager
+            .request_lease(
+                &created.session_id,
+                &attached.snapshot.client_view.client_id,
+            )
+            .expect("first request should succeed");
+        let second = manager
+            .request_lease(
+                &created.session_id,
+                &attached.snapshot.client_view.client_id,
+            )
+            .expect("second request should also succeed");
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+        let audit_log = manager
+            .audit_log(&created.session_id)
+            .expect("audit log lookup should succeed");
+        assert_eq!(audit_log.len(), 1);
     }
 }

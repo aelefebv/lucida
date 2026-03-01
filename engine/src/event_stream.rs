@@ -3,17 +3,32 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    ClientRosterEntry, ClientViewMode, LayerState, PerClientViewState, PermissionClass,
-    SessionSnapshotEnvelope, SourceRecord,
+    AuditEventKind, ClientRosterEntry, ClientViewMode, LayerState, LeaseChangeKind, LeaseState,
+    PerClientViewState, PermissionClass, SessionSnapshotEnvelope, SourceRecord,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventType {
     SessionClientJoined,
+    LeaseChanged,
     ViewUpdated,
     SceneSourceUpsert,
     SceneLayerUpsert,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseChangedKindPayload {
+    Requested,
+    Stolen,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditEventKindPayload {
+    LeaseRequested,
+    LeaseStolen,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +47,27 @@ pub struct ViewUpdatedPayload {
     pub view_rev: u64,
     pub view_mode: String,
     pub active_layer_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseStatePayload {
+    pub lease_holder_client_id: Option<String>,
+    pub lease_holder_label: Option<String>,
+    pub acquired_at: Option<String>,
+    pub stealable: bool,
+    pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeaseChangedPayload {
+    pub lease_state: LeaseStatePayload,
+    pub change_kind: LeaseChangedKindPayload,
+    pub changed_by_client_id: String,
+    pub changed_by_label: String,
+    pub previous_lease_holder_client_id: Option<String>,
+    pub previous_lease_holder_label: Option<String>,
+    pub audit_event_kind: AuditEventKindPayload,
+    pub audit_recorded_at: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +90,7 @@ pub struct LayerUpsertPayload {
 #[serde(tag = "payload_type", content = "payload", rename_all = "snake_case")]
 pub enum EventPayload {
     SessionClientJoined(ClientJoinedPayload),
+    LeaseChanged(LeaseChangedPayload),
     ViewUpdated(ViewUpdatedPayload),
     SceneSourceUpsert(SourceUpsertPayload),
     SceneLayerUpsert(LayerUpsertPayload),
@@ -103,6 +140,24 @@ impl EventEnvelope {
             session_rev,
             event_type: EventType::ViewUpdated,
             payload: EventPayload::ViewUpdated(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
+    pub fn lease_changed(
+        session_id: String,
+        session_rev: u64,
+        payload: LeaseChangedPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::LeaseChanged,
+            payload: EventPayload::LeaseChanged(payload),
             emitted_at,
         }
     }
@@ -191,6 +246,7 @@ impl EventBus {
 pub struct ProjectionState {
     pub session_id: String,
     pub session_rev: u64,
+    pub lease_state: LeaseStatePayload,
     pub client_roster: BTreeMap<String, ClientJoinedPayload>,
     pub client_views: BTreeMap<String, ViewUpdatedPayload>,
     pub sources: BTreeMap<String, SourceUpsertPayload>,
@@ -239,6 +295,7 @@ impl ProjectionState {
         Self {
             session_id: snapshot.session_id.clone(),
             session_rev: snapshot.session_rev,
+            lease_state: LeaseStatePayload::from(&snapshot.snapshot.lease_state),
             client_roster,
             client_views,
             sources,
@@ -265,6 +322,9 @@ impl ProjectionState {
             EventPayload::SessionClientJoined(payload) => {
                 self.client_roster
                     .insert(payload.client_id.clone(), payload.clone());
+            }
+            EventPayload::LeaseChanged(payload) => {
+                self.lease_state = payload.lease_state.clone();
             }
             EventPayload::ViewUpdated(payload) => {
                 self.client_views
@@ -321,6 +381,18 @@ impl From<&PerClientViewState> for ViewUpdatedPayload {
     }
 }
 
+impl From<&LeaseState> for LeaseStatePayload {
+    fn from(value: &LeaseState) -> Self {
+        Self {
+            lease_holder_client_id: value.lease_holder_client_id.clone(),
+            lease_holder_label: value.lease_holder_label.clone(),
+            acquired_at: value.acquired_at.clone(),
+            stealable: value.stealable,
+            expires_at: value.expires_at.clone(),
+        }
+    }
+}
+
 impl From<&SourceRecord> for SourceUpsertPayload {
     fn from(value: &SourceRecord) -> Self {
         Self {
@@ -328,6 +400,22 @@ impl From<&SourceRecord> for SourceUpsertPayload {
             name: value.name.clone(),
             latest_working_generation_seq: value.latest_working_generation_seq,
         }
+    }
+}
+
+#[must_use]
+pub const fn lease_change_kind_payload(value: LeaseChangeKind) -> LeaseChangedKindPayload {
+    match value {
+        LeaseChangeKind::Requested => LeaseChangedKindPayload::Requested,
+        LeaseChangeKind::Stolen => LeaseChangedKindPayload::Stolen,
+    }
+}
+
+#[must_use]
+pub const fn audit_event_kind_payload(value: AuditEventKind) -> AuditEventKindPayload {
+    match value {
+        AuditEventKind::LeaseRequested => AuditEventKindPayload::LeaseRequested,
+        AuditEventKind::LeaseStolen => AuditEventKindPayload::LeaseStolen,
     }
 }
 

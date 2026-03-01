@@ -18,6 +18,13 @@ pub enum SessionError {
         session_id: String,
         layer_id: String,
     },
+    LeaseUnavailable {
+        session_id: String,
+        lease_holder_client_id: String,
+    },
+    LeaseNotStealable {
+        session_id: String,
+    },
 }
 
 impl Display for SessionError {
@@ -47,6 +54,16 @@ impl Display for SessionError {
                 f,
                 "layer `{layer_id}` was not found in session `{session_id}`"
             ),
+            SessionError::LeaseUnavailable {
+                session_id,
+                lease_holder_client_id,
+            } => write!(
+                f,
+                "lease in session `{session_id}` is held by `{lease_holder_client_id}`"
+            ),
+            SessionError::LeaseNotStealable { session_id } => {
+                write!(f, "lease in session `{session_id}` is not stealable")
+            }
         }
     }
 }

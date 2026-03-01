@@ -18,16 +18,18 @@ pub use constants::{
 };
 pub use errors::SessionError;
 pub use event_stream::{
-    ClientJoinedPayload, EventBus, EventEnvelope, EventMessageSerializer, EventPayload,
-    EventStreamError, EventType, LayerUpsertPayload, ProjectionState, SourceUpsertPayload,
+    AuditEventKindPayload, ClientJoinedPayload, EventBus, EventEnvelope, EventMessageSerializer,
+    EventPayload, EventStreamError, EventType, LayerUpsertPayload, LeaseChangedKindPayload,
+    LeaseChangedPayload, LeaseStatePayload, ProjectionState, SourceUpsertPayload,
     ViewUpdatedPayload,
 };
 pub use id_allocator::{IdAllocator, IdKind};
 pub use model::{
-    AttachRequest, ClientRosterEntry, ClientViewMode, CreatedSession, DatasetBinding, ExposureMode,
-    ExposureViewMode, LayerState, LeaseState, PerClientViewState, PermissionClass, Permissions,
-    SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState,
-    SourceRecord, TargetState, WarningEntry, WarningSeverity,
+    AttachRequest, AuditEventKind, AuditLogEntry, ClientRosterEntry, ClientViewMode,
+    CreatedSession, DatasetBinding, ExposureMode, ExposureViewMode, LayerState, LeaseChangeKind,
+    LeaseState, PerClientViewState, PermissionClass, Permissions, SceneMode,
+    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord,
+    TargetState, WarningEntry, WarningSeverity,
 };
 pub use revision_allocator::RevisionAllocator;
-pub use session_manager::SessionManager;
+pub use session_manager::{LeaseTransition, SessionManager};

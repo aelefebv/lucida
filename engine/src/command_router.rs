@@ -2,10 +2,11 @@ use crate::clock::rfc3339_now;
 use crate::constants::{COMMAND_ACK_MESSAGE_TYPE, COMMAND_MESSAGE_TYPE, SCHEMA_VERSION};
 use crate::errors::SessionError;
 use crate::event_stream::{
-    EventEnvelope, LayerUpsertPayload, SourceUpsertPayload, ViewUpdatedPayload,
+    EventEnvelope, LayerUpsertPayload, LeaseChangedPayload, LeaseStatePayload, SourceUpsertPayload,
+    ViewUpdatedPayload, audit_event_kind_payload, lease_change_kind_payload,
 };
 use crate::model::PermissionClass;
-use crate::session_manager::SessionManager;
+use crate::session_manager::{LeaseTransition, SessionManager};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandScope {
@@ -19,6 +20,8 @@ pub enum CommandArgs {
     ViewSetActiveLayer { active_layer_id: Option<String> },
     SceneAddSource { name: String },
     SceneLayerAdd { name: String },
+    LeaseRequest,
+    LeaseSteal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +65,8 @@ pub enum CommandErrorCode {
     UnknownOperation,
     PermissionDenied,
     LeaseRequired,
+    LeaseUnavailable,
+    LeaseNotStealable,
     SessionNotFound,
     ClientNotFound,
     SourceNotFound,
@@ -79,6 +84,8 @@ enum Operation {
     ViewSetActiveLayer,
     SceneAddSource,
     SceneLayerAdd,
+    LeaseRequest,
+    LeaseSteal,
 }
 
 impl Operation {
@@ -87,6 +94,8 @@ impl Operation {
             "view.set_active_layer" => Ok(Self::ViewSetActiveLayer),
             "scene.add_source" => Ok(Self::SceneAddSource),
             "scene.layer_add" => Ok(Self::SceneLayerAdd),
+            "lease.request" => Ok(Self::LeaseRequest),
+            "lease.steal" => Ok(Self::LeaseSteal),
             _ => Err(CommandError {
                 code: CommandErrorCode::UnknownOperation,
                 message: format!("unsupported op `{op}`"),
@@ -99,6 +108,8 @@ impl Operation {
             Operation::ViewSetActiveLayer => CommandScope::ClientView,
             Operation::SceneAddSource => CommandScope::SceneShared,
             Operation::SceneLayerAdd => CommandScope::SceneShared,
+            Operation::LeaseRequest => CommandScope::SceneShared,
+            Operation::LeaseSteal => CommandScope::SceneShared,
         }
     }
 
@@ -107,6 +118,8 @@ impl Operation {
             Operation::ViewSetActiveLayer => false,
             Operation::SceneAddSource => true,
             Operation::SceneLayerAdd => true,
+            Operation::LeaseRequest => false,
+            Operation::LeaseSteal => false,
         }
     }
 }
@@ -198,7 +211,9 @@ fn validate_envelope(envelope: &CommandEnvelope) -> Result<Operation, CommandErr
     match (operation, &envelope.args) {
         (Operation::ViewSetActiveLayer, CommandArgs::ViewSetActiveLayer { .. })
         | (Operation::SceneAddSource, CommandArgs::SceneAddSource { .. })
-        | (Operation::SceneLayerAdd, CommandArgs::SceneLayerAdd { .. }) => Ok(operation),
+        | (Operation::SceneLayerAdd, CommandArgs::SceneLayerAdd { .. })
+        | (Operation::LeaseRequest, CommandArgs::LeaseRequest)
+        | (Operation::LeaseSteal, CommandArgs::LeaseSteal) => Ok(operation),
         _ => Err(CommandError {
             code: CommandErrorCode::ValidationError,
             message: format!("args shape does not match op `{}`", envelope.op),
@@ -313,6 +328,22 @@ fn dispatch(
                 rfc3339_now(),
             ));
         }
+        (Operation::LeaseRequest, CommandArgs::LeaseRequest) => {
+            if let Some(transition) = session_manager
+                .request_lease(&envelope.session_id, &envelope.client_id)
+                .map_err(CommandError::from)?
+            {
+                events.push(lease_changed_event(&envelope.session_id, &transition));
+            }
+        }
+        (Operation::LeaseSteal, CommandArgs::LeaseSteal) => {
+            if let Some(transition) = session_manager
+                .steal_lease(&envelope.session_id, &envelope.client_id)
+                .map_err(CommandError::from)?
+            {
+                events.push(lease_changed_event(&envelope.session_id, &transition));
+            }
+        }
         _ => {
             return Err(CommandError {
                 code: CommandErrorCode::ValidationError,
@@ -343,6 +374,24 @@ fn dispatch(
     })
 }
 
+fn lease_changed_event(session_id: &str, transition: &LeaseTransition) -> EventEnvelope {
+    EventEnvelope::lease_changed(
+        session_id.to_owned(),
+        transition.resulting_session_rev,
+        LeaseChangedPayload {
+            lease_state: LeaseStatePayload::from(&transition.lease_state),
+            change_kind: lease_change_kind_payload(transition.change_kind),
+            changed_by_client_id: transition.changed_by_client_id.clone(),
+            changed_by_label: transition.changed_by_label.clone(),
+            previous_lease_holder_client_id: transition.previous_lease_holder_client_id.clone(),
+            previous_lease_holder_label: transition.previous_lease_holder_label.clone(),
+            audit_event_kind: audit_event_kind_payload(transition.audit_entry.event_kind),
+            audit_recorded_at: transition.audit_entry.recorded_at.clone(),
+        },
+        transition.changed_at.clone(),
+    )
+}
+
 impl From<SessionError> for CommandError {
     fn from(value: SessionError) -> Self {
         match value {
@@ -371,6 +420,19 @@ impl From<SessionError> for CommandError {
                 code: CommandErrorCode::LayerNotFound,
                 message: format!("layer `{layer_id}` was not found in session `{session_id}`"),
             },
+            SessionError::LeaseUnavailable {
+                session_id,
+                lease_holder_client_id,
+            } => Self {
+                code: CommandErrorCode::LeaseUnavailable,
+                message: format!(
+                    "lease in session `{session_id}` is held by `{lease_holder_client_id}`"
+                ),
+            },
+            SessionError::LeaseNotStealable { session_id } => Self {
+                code: CommandErrorCode::LeaseNotStealable,
+                message: format!("lease in session `{session_id}` is not stealable"),
+            },
         }
     }
 }
@@ -378,7 +440,7 @@ impl From<SessionError> for CommandError {
 #[cfg(test)]
 mod tests {
     use crate::constants::{COMMAND_MESSAGE_TYPE, SCHEMA_VERSION};
-    use crate::event_stream::EventType;
+    use crate::event_stream::{EventPayload, EventType};
     use crate::model::{AttachRequest, PermissionClass};
     use crate::session_manager::SessionManager;
 
@@ -744,5 +806,142 @@ mod tests {
             scene_outcome.events[0].event_type,
             EventType::SceneSourceUpsert
         );
+    }
+
+    #[test]
+    fn rejects_lease_request_when_another_client_holds_the_lease() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("lease-cmd-session");
+        let first = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "first-control".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("first attach should succeed");
+        let second = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "second-control".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("second attach should succeed");
+
+        manager
+            .request_lease(&created.session_id, &first.snapshot.client_view.client_id)
+            .expect("first request should succeed");
+
+        let router = CommandRouter::new();
+        let result = router.route(
+            &mut manager,
+            CommandEnvelope {
+                message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+                schema_version: SCHEMA_VERSION.to_owned(),
+                session_id: created.session_id,
+                request_id: "req_lease_fail".to_owned(),
+                client_id: second.snapshot.client_view.client_id,
+                client_seq: 1,
+                op: "lease.request".to_owned(),
+                scope: CommandScope::SceneShared,
+                requires_lease: false,
+                args: CommandArgs::LeaseRequest,
+            },
+        );
+
+        assert_eq!(
+            result
+                .expect_err("request should fail when held by another client")
+                .code,
+            CommandErrorCode::LeaseUnavailable
+        );
+    }
+
+    #[test]
+    fn routes_lease_request_and_steal_with_passive_events() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("lease-cmd-session");
+        let first = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "first-control".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("first attach should succeed");
+        let second = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "second-control".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("second attach should succeed");
+
+        let router = CommandRouter::new();
+        let request_outcome = router
+            .route(
+                &mut manager,
+                CommandEnvelope {
+                    message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+                    schema_version: SCHEMA_VERSION.to_owned(),
+                    session_id: created.session_id.clone(),
+                    request_id: "req_lease_request".to_owned(),
+                    client_id: first.snapshot.client_view.client_id.clone(),
+                    client_seq: 1,
+                    op: "lease.request".to_owned(),
+                    scope: CommandScope::SceneShared,
+                    requires_lease: false,
+                    args: CommandArgs::LeaseRequest,
+                },
+            )
+            .expect("lease request should succeed");
+
+        let steal_outcome = router
+            .route(
+                &mut manager,
+                CommandEnvelope {
+                    message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+                    schema_version: SCHEMA_VERSION.to_owned(),
+                    session_id: created.session_id,
+                    request_id: "req_lease_steal".to_owned(),
+                    client_id: second.snapshot.client_view.client_id.clone(),
+                    client_seq: 2,
+                    op: "lease.steal".to_owned(),
+                    scope: CommandScope::SceneShared,
+                    requires_lease: false,
+                    args: CommandArgs::LeaseSteal,
+                },
+            )
+            .expect("lease steal should succeed");
+
+        assert!(request_outcome.ack.accepted);
+        assert_eq!(request_outcome.events.len(), 1);
+        assert_eq!(
+            request_outcome.events[0].event_type,
+            EventType::LeaseChanged
+        );
+        assert!(matches!(
+            request_outcome.events[0].payload,
+            EventPayload::LeaseChanged(_)
+        ));
+
+        assert!(steal_outcome.ack.accepted);
+        assert_eq!(steal_outcome.events.len(), 1);
+        assert_eq!(steal_outcome.events[0].event_type, EventType::LeaseChanged);
+        let payload = match &steal_outcome.events[0].payload {
+            EventPayload::LeaseChanged(payload) => payload,
+            _ => panic!("expected lease changed payload"),
+        };
+        assert_eq!(
+            payload.previous_lease_holder_client_id.as_deref(),
+            Some(first.snapshot.client_view.client_id.as_str())
+        );
+        assert_eq!(
+            payload.lease_state.lease_holder_client_id.as_deref(),
+            Some(second.snapshot.client_view.client_id.as_str())
+        );
+
+        let audit_log = manager
+            .audit_log(&request_outcome.ack.session_id)
+            .expect("audit log lookup should succeed");
+        assert_eq!(audit_log.len(), 2);
     }
 }
