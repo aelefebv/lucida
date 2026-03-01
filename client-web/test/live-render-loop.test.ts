@@ -100,6 +100,102 @@ describe("LiveRenderLoop", () => {
     expect(latest?.rgba[4]).toBe(255);
     expect(latest?.rgba[5]).toBe(255);
     expect(latest?.rgba[6]).toBe(255);
+    expect(latest?.pixelStats.min).toBe(0);
+    expect(latest?.pixelStats.max).toBe(255);
+    expect(latest?.pixelStats.nonZeroRatio).toBe(0.5);
+    expect(latest?.pixelStats.mean).toBe(127.5);
+    loop.dispose();
+  });
+
+  it("uses active t/z selection when requesting preview and tile payloads", async () => {
+    const requestedUrls: string[] = [];
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [0, 255]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          return new Response(new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [0, 255])))]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.tIndex = 2;
+    state.zIndex = 3;
+    loop.update(state);
+
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+
+    expect(
+      requestedUrls.some((url) => url.includes("/v1/preview2d/") && url.includes("/t/2/z/3/")),
+    ).toBe(true);
+    expect(
+      requestedUrls.some((url) => url.includes("/v1/tile2d/") && url.includes("/t/2/z/3/")),
+    ).toBe(true);
+    loop.dispose();
+  });
+
+  it("reports empty-frame pixel stats when payload is all zeros", async () => {
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [0, 0]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          return new Response(new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [0, 0])))]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    loop.update(fixtureClientState());
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+
+    const latest = frames.at(-1);
+    expect(latest).toBeDefined();
+    expect(latest?.pixelStats.min).toBe(0);
+    expect(latest?.pixelStats.max).toBe(0);
+    expect(latest?.pixelStats.nonZeroRatio).toBe(0);
+    expect(latest?.pixelStats.mean).toBe(0);
     loop.dispose();
   });
 });

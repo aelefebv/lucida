@@ -12,14 +12,23 @@ export type RenderFrameState = {
   width: number;
   height: number;
   rgba: Uint8ClampedArray;
+  pixelStats: FramePixelStats;
   minimap: MinimapState;
   warningNotice: string | null;
+};
+
+export type FramePixelStats = {
+  min: number;
+  max: number;
+  nonZeroRatio: number;
+  mean: number;
 };
 
 type DecodedFrame = {
   width: number;
   height: number;
   rgba: Uint8ClampedArray;
+  pixelStats: FramePixelStats;
 };
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -32,8 +41,12 @@ export class LiveRenderLoop {
   private readonly fetchImpl: FetchLike;
   private readonly onFrame: (state: RenderFrameState) => void;
   private readonly activeFetches: Set<string>;
+  private currentSelectionKey: string | null;
+  private currentPreviewRequestKey: string | null;
+  private currentTileRequestKey: string | null;
   private dimensionsByGeneration: Map<number, { width: number; height: number }>;
   private frameKindByGeneration: Map<number, "preview" | "tile">;
+  private pixelStatsByGeneration: Map<number, FramePixelStats>;
   private latestGenerationSeq: number;
   private latestClientState: ClientState | null;
   private retryTimer: ReturnType<typeof setTimeout> | null;
@@ -49,8 +62,12 @@ export class LiveRenderLoop {
     this.fetchImpl = fetchImpl;
     this.onFrame = onFrame;
     this.activeFetches = new Set();
+    this.currentSelectionKey = null;
+    this.currentPreviewRequestKey = null;
+    this.currentTileRequestKey = null;
     this.dimensionsByGeneration = new Map();
     this.frameKindByGeneration = new Map();
+    this.pixelStatsByGeneration = new Map();
     this.latestGenerationSeq = 0;
     this.latestClientState = null;
     this.retryTimer = null;
@@ -62,16 +79,52 @@ export class LiveRenderLoop {
     if (latest === null) {
       return;
     }
+    const selectionKey = frameSelectionKey(
+      latest.sourceId,
+      latest.generationSeq,
+      latest.tIndex,
+      latest.zIndex,
+    );
 
     const isNewGeneration = latest.generationSeq > this.latestGenerationSeq;
+    const selectionChanged = selectionKey !== this.currentSelectionKey;
     if (isNewGeneration) {
       this.scheduler.invalidateOlderGenerations(latest.generationSeq);
       this.frameStore.pruneOlderThan(latest.generationSeq);
     }
     const hasFrameForGeneration =
       this.frameStore.resolveFrame(latest.generationSeq) !== null;
-    if (isNewGeneration || !hasFrameForGeneration) {
-      void this.fetchPreviewThenTiles(latest.sourceId, latest.generationSeq);
+    if (selectionChanged) {
+      if (this.currentPreviewRequestKey !== null) {
+        this.scheduler.cancel(this.currentPreviewRequestKey);
+      }
+      if (this.currentTileRequestKey !== null) {
+        this.scheduler.cancel(this.currentTileRequestKey);
+      }
+      this.currentSelectionKey = selectionKey;
+      this.currentPreviewRequestKey = requestKey(
+        "preview",
+        latest.sourceId,
+        latest.generationSeq,
+        latest.tIndex,
+        latest.zIndex,
+      );
+      this.currentTileRequestKey = requestKey(
+        "tile",
+        latest.sourceId,
+        latest.generationSeq,
+        latest.tIndex,
+        latest.zIndex,
+      );
+    }
+    if (isNewGeneration || selectionChanged || !hasFrameForGeneration) {
+      void this.fetchPreviewThenTiles(
+        latest.sourceId,
+        latest.generationSeq,
+        latest.tIndex,
+        latest.zIndex,
+        selectionKey,
+      );
     }
   }
 
@@ -85,15 +138,32 @@ export class LiveRenderLoop {
   private async fetchPreviewThenTiles(
     sourceId: string,
     generationSeq: number,
+    tIndex: number,
+    zIndex: number,
+    selectionKey: string,
   ): Promise<void> {
-    const fetchKey = `${sourceId}:${generationSeq.toString()}`;
+    const fetchKey = selectionKey;
     if (this.activeFetches.has(fetchKey)) {
       return;
     }
+    const previewRequestKey = requestKey(
+      "preview",
+      sourceId,
+      generationSeq,
+      tIndex,
+      zIndex,
+    );
+    const tileRequestKey = requestKey(
+      "tile",
+      sourceId,
+      generationSeq,
+      tIndex,
+      zIndex,
+    );
     this.activeFetches.add(fetchKey);
     try {
       const preview = await this.scheduler.schedule<DecodedFrame>({
-        key: `preview:${sourceId}`,
+        key: previewRequestKey,
         generationSeq,
         priority: 20,
         execute: (signal) => {
@@ -103,8 +173,8 @@ export class LiveRenderLoop {
               generationSeq,
               assetKind: "preview2d",
               lod: 0,
-              t: 0,
-              z: 0,
+              t: tIndex,
+              z: zIndex,
               channelBlock: 0,
               y: 0,
               x: 0,
@@ -113,6 +183,10 @@ export class LiveRenderLoop {
           );
         },
       });
+      if (this.currentSelectionKey !== selectionKey) {
+        this.activeFetches.delete(fetchKey);
+        return;
+      }
       if (generationSeq > this.latestGenerationSeq) {
         this.latestGenerationSeq = generationSeq;
       }
@@ -121,6 +195,7 @@ export class LiveRenderLoop {
         height: preview.height,
       });
       this.frameKindByGeneration.set(generationSeq, "preview");
+      this.pixelStatsByGeneration.set(generationSeq, preview.pixelStats);
       this.frameStore.setPreview(generationSeq, preview.rgba);
       this.emit(generationSeq);
     } catch (error) {
@@ -132,7 +207,7 @@ export class LiveRenderLoop {
 
     try {
       const tile = await this.scheduler.schedule<DecodedFrame>({
-        key: `tile:${sourceId}`,
+        key: tileRequestKey,
         generationSeq,
         priority: 10,
         execute: (signal) => {
@@ -142,8 +217,8 @@ export class LiveRenderLoop {
               generationSeq,
               assetKind: "tile2d",
               lod: 0,
-              t: 0,
-              z: 0,
+              t: tIndex,
+              z: zIndex,
               channelBlock: 0,
               y: 0,
               x: 0,
@@ -152,11 +227,16 @@ export class LiveRenderLoop {
           );
         },
       });
+      if (this.currentSelectionKey !== selectionKey) {
+        this.activeFetches.delete(fetchKey);
+        return;
+      }
       this.dimensionsByGeneration.set(generationSeq, {
         width: tile.width,
         height: tile.height,
       });
       this.frameKindByGeneration.set(generationSeq, "tile");
+      this.pixelStatsByGeneration.set(generationSeq, tile.pixelStats);
       this.frameStore.setTiles(generationSeq, tile.rgba);
       this.emit(generationSeq);
     } catch (error) {
@@ -199,6 +279,10 @@ export class LiveRenderLoop {
     if (frameKind === undefined) {
       return;
     }
+    const pixelStats = this.pixelStatsByGeneration.get(generationSeq);
+    if (pixelStats === undefined) {
+      return;
+    }
 
     const warnings = this.latestClientState.warnings as WarningEntry[];
     const layerList = Object.values(this.latestClientState.layers).map((layer) => ({
@@ -228,6 +312,7 @@ export class LiveRenderLoop {
       width: dimensions.width,
       height: dimensions.height,
       rgba: frame,
+      pixelStats,
       minimap,
       warningNotice: buildSessionNotice(warnings),
     });
@@ -314,9 +399,11 @@ function readUint32LE(bytes: Uint8Array, offset: number): number {
 
 function selectLatestGeneration(
   clientState: ClientState,
-): { sourceId: string; generationSeq: number } | null {
+): { sourceId: string; generationSeq: number; tIndex: number; zIndex: number } | null {
   const sourceValues = Object.values(clientState.sources);
-  let latest: { sourceId: string; generationSeq: number } | null = null;
+  let latest:
+    | { sourceId: string; generationSeq: number; tIndex: number; zIndex: number }
+    | null = null;
   for (const source of sourceValues) {
     if (source.latestWorkingGenerationSeq <= 0) {
       continue;
@@ -328,10 +415,31 @@ function selectLatestGeneration(
       latest = {
         sourceId: source.sourceId,
         generationSeq: source.latestWorkingGenerationSeq,
+        tIndex: clientState.tIndex,
+        zIndex: clientState.zIndex,
       };
     }
   }
   return latest;
+}
+
+function frameSelectionKey(
+  sourceId: string,
+  generationSeq: number,
+  tIndex: number,
+  zIndex: number,
+): string {
+  return `${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}`;
+}
+
+function requestKey(
+  kind: "preview" | "tile",
+  sourceId: string,
+  generationSeq: number,
+  tIndex: number,
+  zIndex: number,
+): string {
+  return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}`;
 }
 
 function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
@@ -386,8 +494,22 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
   const adjusted = stretchToDisplayRange(payload.subarray(0, pixelCount));
 
   const rgba = new Uint8ClampedArray(pixelCount * 4);
+  let min = 255;
+  let max = 0;
+  let nonZeroCount = 0;
+  let sum = 0;
   for (let i = 0; i < pixelCount; i += 1) {
     const value = adjusted[i] ?? 0;
+    if (value < min) {
+      min = value;
+    }
+    if (value > max) {
+      max = value;
+    }
+    if (value !== 0) {
+      nonZeroCount += 1;
+    }
+    sum += value;
     const offset = i * 4;
     rgba[offset] = value;
     rgba[offset + 1] = value;
@@ -399,6 +521,12 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
     width,
     height,
     rgba,
+    pixelStats: {
+      min,
+      max,
+      nonZeroRatio: nonZeroCount / pixelCount,
+      mean: sum / pixelCount,
+    },
   };
 }
 

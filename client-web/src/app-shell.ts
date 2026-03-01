@@ -119,7 +119,8 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
     if (state.renderFrame === null) {
       frameNode.textContent = "Frame: pending";
     } else {
-      frameNode.textContent = `Frame: gen ${state.renderFrame.generationSeq.toString()} (${state.renderFrame.frameKind})`;
+      const stats = state.renderFrame.pixelStats;
+      frameNode.textContent = `Frame: gen ${state.renderFrame.generationSeq.toString()} (${state.renderFrame.frameKind}) min ${stats.min.toString()} max ${stats.max.toString()} nz ${(stats.nonZeroRatio * 100).toFixed(2)}%`;
     }
   }
 
@@ -134,11 +135,20 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
 
   const warningNode = mount.querySelector('[data-testid="warning-state"]');
   if (warningNode instanceof HTMLElement) {
-    warningNode.textContent =
+    const serverWarning =
       state.renderFrame?.warningNotice === null ||
       state.renderFrame?.warningNotice === undefined
-        ? "Warnings: none"
-        : `Warnings: ${state.renderFrame.warningNotice}`;
+        ? null
+        : state.renderFrame.warningNotice;
+    const emptyFrameWarning =
+      state.renderFrame !== null && state.renderFrame.pixelStats.max === 0
+        ? "Frame is empty at current selection (all pixels are zero)."
+        : null;
+    const warnings = [serverWarning, emptyFrameWarning].filter(
+      (value): value is string => value !== null,
+    );
+    warningNode.textContent =
+      warnings.length === 0 ? "Warnings: none" : `Warnings: ${warnings.join(" | ")}`;
   }
 
   renderViewportCanvas(mount, state);
