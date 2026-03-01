@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 from .client import LucidaClient
 
@@ -10,6 +11,8 @@ class WidgetConfig:
     base_url: str
     session_id: str
     client_id: str
+    ws_base: str | None = None
+    data_base: str | None = None
     width: int = 960
     height: int = 600
 
@@ -28,9 +31,18 @@ class LucidaWidgetShell:
         return self._config
 
     def iframe_html(self) -> str:
+        params: dict[str, str] = {
+            "session": self._config.session_id,
+            "client": self._config.client_id,
+        }
+        if self._config.ws_base is not None:
+            params["wsBase"] = self._config.ws_base
+        if self._config.data_base is not None:
+            params["dataBase"] = self._config.data_base
+        query = urlencode(params)
         src = (
             f"{self._config.base_url.rstrip('/')}/viewer?"
-            f"session_id={self._config.session_id}&client_id={self._config.client_id}"
+            f"{query}"
         )
         return (
             "<iframe "
@@ -55,6 +67,8 @@ def create_widget_shell(
     base_url: str,
     session_id: str,
     client_id: str,
+    ws_base: str | None = None,
+    data_base: str | None = None,
     width: int = 960,
     height: int = 600,
 ) -> LucidaWidgetShell:
@@ -64,6 +78,8 @@ def create_widget_shell(
             base_url=base_url,
             session_id=session_id,
             client_id=client_id,
+            ws_base=ws_base,
+            data_base=data_base,
             width=width,
             height=height,
         ),
