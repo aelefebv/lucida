@@ -159,14 +159,6 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
     <button type="button" data-testid="btn-open-source">Open Source</button>
   </section>
   <section data-testid="open-source-status">Source action: idle</section>
-  <section data-testid="interaction-controls">
-    <button type="button" data-testid="btn-pan-left">Pan Left</button>
-    <button type="button" data-testid="btn-pan-right">Pan Right</button>
-    <button type="button" data-testid="btn-pan-up">Pan Up</button>
-    <button type="button" data-testid="btn-pan-down">Pan Down</button>
-    <button type="button" data-testid="btn-zoom-in">Zoom In</button>
-    <button type="button" data-testid="btn-zoom-out">Zoom Out</button>
-  </section>
   <section data-testid="axis-controls">
     <label>
       Z
@@ -427,12 +419,6 @@ function attachInteractionHandlers(
       handler();
     });
   };
-  registerClick("btn-pan-left", () => runtime.pan(-24, 0));
-  registerClick("btn-pan-right", () => runtime.pan(24, 0));
-  registerClick("btn-pan-up", () => runtime.pan(0, -24));
-  registerClick("btn-pan-down", () => runtime.pan(0, 24));
-  registerClick("btn-zoom-in", () => runtime.zoom(ZOOM_IN_SCALE, 0, 0));
-  registerClick("btn-zoom-out", () => runtime.zoom(ZOOM_OUT_SCALE, 0, 0));
   registerInput("input-z-index", () => {
     const clientState = runtime.state().clientState;
     const bounds = clientState === null ? null : selectionBoundsFor(clientState);

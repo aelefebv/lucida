@@ -191,7 +191,7 @@ describe("app shell routing", () => {
     await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
   });
 
-  it("sends pan/zoom and z/t/channel commands from viewer controls", async () => {
+  it("sends pan/zoom from keyboard and z/t/channel from controls", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",
       isLeaseHolder: false,
@@ -208,8 +208,8 @@ describe("app shell routing", () => {
 
     await waitFor(() => queryText("attach-status").includes("Attached"));
 
-    queryButton("btn-pan-left").click();
-    queryButton("btn-zoom-in").click();
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "=" }));
 
     queryInput("input-z-index").value = "3";
     queryInput("input-z-index").dispatchEvent(new Event("input", { bubbles: true }));
