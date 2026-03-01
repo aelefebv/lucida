@@ -120,12 +120,52 @@ class LucidaClient:
             args={"x": x, "y": y, "z": z, "t": t},
         )
 
+    def pan(self, dx: float, dy: float, gesture_id: str = "cli") -> CommandEnvelope:
+        return self._emit(
+            op="view.pan",
+            scope=PermissionScope.CLIENT_VIEW,
+            requires_lease=False,
+            args={"dx": dx, "dy": dy, "gesture_id": gesture_id},
+        )
+
     def set_camera(self, center_x: float, center_y: float, zoom: float) -> CommandEnvelope:
         return self._emit(
             op="view.set_camera",
             scope=PermissionScope.CLIENT_VIEW,
             requires_lease=False,
             args={"center_x": center_x, "center_y": center_y, "zoom": zoom},
+        )
+
+    def set_z(self, z_index: int) -> CommandEnvelope:
+        return self._emit(
+            op="view.set_z",
+            scope=PermissionScope.CLIENT_VIEW,
+            requires_lease=False,
+            args={"z_index": z_index},
+        )
+
+    def set_t(self, t_index: int) -> CommandEnvelope:
+        return self._emit(
+            op="view.set_t",
+            scope=PermissionScope.CLIENT_VIEW,
+            requires_lease=False,
+            args={"t_index": t_index},
+        )
+
+    def set_channels(self, channels: list[int]) -> CommandEnvelope:
+        return self._emit(
+            op="view.set_channels",
+            scope=PermissionScope.CLIENT_VIEW,
+            requires_lease=False,
+            args={"channels": channels},
+        )
+
+    def set_active_layer(self, active_layer_id: str | None) -> CommandEnvelope:
+        return self._emit(
+            op="view.set_active_layer",
+            scope=PermissionScope.CLIENT_VIEW,
+            requires_lease=False,
+            args={"active_layer_id": active_layer_id},
         )
 
     def _emit(
