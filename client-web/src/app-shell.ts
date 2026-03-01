@@ -158,9 +158,33 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
   <section data-testid="interaction-controls">
     <button type="button" data-testid="btn-pan-left">Pan Left</button>
     <button type="button" data-testid="btn-pan-right">Pan Right</button>
+    <button type="button" data-testid="btn-pan-up">Pan Up</button>
+    <button type="button" data-testid="btn-pan-down">Pan Down</button>
     <button type="button" data-testid="btn-zoom-in">Zoom In</button>
     <button type="button" data-testid="btn-zoom-out">Zoom Out</button>
   </section>
+  <section data-testid="axis-controls">
+    <label>
+      Z
+      <input data-testid="input-z-index" type="number" min="0" step="1" value="0" />
+    </label>
+    <button type="button" data-testid="btn-z-dec">Z -</button>
+    <button type="button" data-testid="btn-z-inc">Z +</button>
+    <button type="button" data-testid="btn-z-apply">Set Z</button>
+    <label>
+      T
+      <input data-testid="input-t-index" type="number" min="0" step="1" value="0" />
+    </label>
+    <button type="button" data-testid="btn-t-dec">T -</button>
+    <button type="button" data-testid="btn-t-inc">T +</button>
+    <button type="button" data-testid="btn-t-apply">Set T</button>
+    <label>
+      Channels
+      <input data-testid="input-channel-list" type="text" value="0" />
+    </label>
+    <button type="button" data-testid="btn-channels-apply">Set Channels</button>
+  </section>
+  <section data-testid="selection-state"></section>
   <section data-testid="contrast-controls">
     <div>Contrast Limits</div>
     <div class="dual-range" data-testid="contrast-dual-slider">
@@ -202,6 +226,7 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
 
 function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void {
   maybeAutoSetContrastFromFrame(mount, state);
+  syncSelectionInputsFromState(mount, state);
   const statusNode = mount.querySelector('[data-testid="attach-status"]');
   if (statusNode instanceof HTMLElement) {
     statusNode.textContent = `Attach phase: ${phaseLabel(state.connection.phase)}`;
@@ -230,7 +255,11 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
       frameNode.textContent = "Frame: pending";
     } else {
       const stats = state.renderFrame.pixelStats;
+      const zoom = state.clientState?.zoom ?? 1;
+      const panX = state.clientState?.centerX ?? 0;
+      const panY = state.clientState?.centerY ?? 0;
       frameNode.textContent = `Frame: gen ${state.renderFrame.generationSeq.toString()} (${state.renderFrame.frameKind}) min ${stats.min.toString()} max ${stats.max.toString()} nz ${(stats.nonZeroRatio * 100).toFixed(2)}%`;
+      frameNode.textContent += ` zoom ${zoom.toFixed(2)} pan (${panX.toFixed(1)}, ${panY.toFixed(1)})`;
     }
   }
 
@@ -266,6 +295,15 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
       warnings.length === 0 ? "Warnings: none" : `Warnings: ${warnings.join(" | ")}`;
   }
 
+  const selectionNode = mount.querySelector('[data-testid="selection-state"]');
+  if (selectionNode instanceof HTMLElement) {
+    if (state.clientState === null) {
+      selectionNode.textContent = "Selection: pending";
+    } else {
+      selectionNode.textContent = `Selection: z ${state.clientState.zIndex.toString()} t ${state.clientState.tIndex.toString()} c [${state.clientState.selectedChannels.join(", ")}]`;
+    }
+  }
+
   renderViewportCanvas(mount, state);
 }
 
@@ -274,13 +312,30 @@ function attachInteractionHandlers(
   mount: HTMLElement,
   runtime: ViewerRuntime,
 ): () => void {
+  const withClientState = (fn: (zIndex: number, tIndex: number, channels: number[]) => void): void => {
+    const state = runtime.state().clientState;
+    if (state === null) {
+      fn(0, 0, [0]);
+      return;
+    }
+    fn(state.zIndex, state.tIndex, state.selectedChannels);
+  };
+
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === "ArrowLeft") {
-      runtime.pan(-12, 0);
+      runtime.pan(-24, 0);
       return;
     }
     if (event.key === "ArrowRight") {
-      runtime.pan(12, 0);
+      runtime.pan(24, 0);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      runtime.pan(0, -24);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      runtime.pan(0, 24);
       return;
     }
     if (event.key === "+") {
@@ -292,15 +347,40 @@ function attachInteractionHandlers(
       return;
     }
     if (event.key === "]") {
-      runtime.setZ(1);
+      withClientState((zIndex) => {
+        runtime.setZ(Math.max(0, zIndex + 1));
+      });
+      return;
+    }
+    if (event.key === "[") {
+      withClientState((zIndex) => {
+        runtime.setZ(Math.max(0, zIndex - 1));
+      });
       return;
     }
     if (event.key === "t") {
-      runtime.setT(1);
+      withClientState((_, tIndex) => {
+        runtime.setT(Math.max(0, tIndex + 1));
+      });
+      return;
+    }
+    if (event.key === "T") {
+      withClientState((_, tIndex) => {
+        runtime.setT(Math.max(0, tIndex - 1));
+      });
       return;
     }
     if (event.key === "c") {
-      runtime.setChannels([0, 1]);
+      withClientState((_, __, channels) => {
+        const current = channels[0] ?? 0;
+        runtime.setChannels([current + 1]);
+      });
+    }
+    if (event.key === "C") {
+      withClientState((_, __, channels) => {
+        const current = channels[0] ?? 0;
+        runtime.setChannels([Math.max(0, current - 1)]);
+      });
     }
   };
   document.addEventListener("keydown", onKeyDown);
@@ -332,10 +412,48 @@ function attachInteractionHandlers(
       handler();
     });
   };
-  registerClick("btn-pan-left", () => runtime.pan(-12, 0));
-  registerClick("btn-pan-right", () => runtime.pan(12, 0));
+  registerClick("btn-pan-left", () => runtime.pan(-24, 0));
+  registerClick("btn-pan-right", () => runtime.pan(24, 0));
+  registerClick("btn-pan-up", () => runtime.pan(0, -24));
+  registerClick("btn-pan-down", () => runtime.pan(0, 24));
   registerClick("btn-zoom-in", () => runtime.zoom(1.2, 0, 0));
   registerClick("btn-zoom-out", () => runtime.zoom(0.8, 0, 0));
+  registerClick("btn-z-dec", () => {
+    withClientState((zIndex) => {
+      runtime.setZ(Math.max(0, zIndex - 1));
+    });
+  });
+  registerClick("btn-z-inc", () => {
+    withClientState((zIndex) => {
+      runtime.setZ(Math.max(0, zIndex + 1));
+    });
+  });
+  registerClick("btn-z-apply", () => {
+    const zIndex = readIndexInput(mount, "input-z-index", runtime.state().clientState?.zIndex ?? 0);
+    runtime.setZ(zIndex);
+  });
+  registerClick("btn-t-dec", () => {
+    withClientState((_, tIndex) => {
+      runtime.setT(Math.max(0, tIndex - 1));
+    });
+  });
+  registerClick("btn-t-inc", () => {
+    withClientState((_, tIndex) => {
+      runtime.setT(Math.max(0, tIndex + 1));
+    });
+  });
+  registerClick("btn-t-apply", () => {
+    const tIndex = readIndexInput(mount, "input-t-index", runtime.state().clientState?.tIndex ?? 0);
+    runtime.setT(tIndex);
+  });
+  registerClick("btn-channels-apply", () => {
+    const channelInput = mount.querySelector('[data-testid="input-channel-list"]');
+    if (!(channelInput instanceof HTMLInputElement)) {
+      return;
+    }
+    const parsedChannels = parseChannelList(channelInput.value);
+    runtime.setChannels(parsedChannels);
+  });
   registerClick("btn-open-source", () => {
     const nameInput = mount.querySelector('[data-testid="input-source-name"]');
     const uriInput = mount.querySelector('[data-testid="input-source-uri"]');
@@ -428,8 +546,58 @@ function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): vo
     frame.sampleMax,
   );
   const imageData = context.createImageData(frame.width, frame.height);
-  imageData.data.set(contrasted);
+  const zoom = normalizeZoom(state.clientState?.zoom ?? 1);
+  const panX = state.clientState?.centerX ?? 0;
+  const panY = state.clientState?.centerY ?? 0;
+  writeViewportPixels(
+    contrasted,
+    frame.width,
+    frame.height,
+    panX,
+    panY,
+    zoom,
+    imageData.data,
+  );
   context.putImageData(imageData, 0, 0);
+}
+
+function writeViewportPixels(
+  source: Uint8ClampedArray,
+  width: number,
+  height: number,
+  panX: number,
+  panY: number,
+  zoom: number,
+  output: Uint8ClampedArray,
+): void {
+  const centerX = (width / 2) + panX;
+  const centerY = (height / 2) + panY;
+  for (let y = 0; y < height; y += 1) {
+    const sourceY = Math.round(centerY + (y - height / 2) / zoom);
+    for (let x = 0; x < width; x += 1) {
+      const outBase = ((y * width) + x) * 4;
+      const sourceX = Math.round(centerX + (x - width / 2) / zoom);
+      if (sourceX < 0 || sourceX >= width || sourceY < 0 || sourceY >= height) {
+        output[outBase] = 0;
+        output[outBase + 1] = 0;
+        output[outBase + 2] = 0;
+        output[outBase + 3] = 255;
+        continue;
+      }
+      const sourceBase = ((sourceY * width) + sourceX) * 4;
+      output[outBase] = source[sourceBase] ?? 0;
+      output[outBase + 1] = source[sourceBase + 1] ?? 0;
+      output[outBase + 2] = source[sourceBase + 2] ?? 0;
+      output[outBase + 3] = source[sourceBase + 3] ?? 255;
+    }
+  }
+}
+
+function normalizeZoom(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 1;
+  }
+  return Math.max(0.1, Math.min(32, value));
 }
 
 function tryGet2dContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
@@ -459,6 +627,59 @@ function setOpenSourceStatus(mount: HTMLElement, message: string): void {
     return;
   }
   statusNode.textContent = message;
+}
+
+function syncSelectionInputsFromState(
+  mount: HTMLElement,
+  state: ViewerRuntimeState,
+): void {
+  const clientState = state.clientState;
+  if (clientState === null) {
+    return;
+  }
+  const zInput = mount.querySelector('[data-testid="input-z-index"]');
+  if (zInput instanceof HTMLInputElement) {
+    zInput.value = clientState.zIndex.toString();
+  }
+  const tInput = mount.querySelector('[data-testid="input-t-index"]');
+  if (tInput instanceof HTMLInputElement) {
+    tInput.value = clientState.tIndex.toString();
+  }
+  const channelInput = mount.querySelector('[data-testid="input-channel-list"]');
+  if (channelInput instanceof HTMLInputElement) {
+    channelInput.value = clientState.selectedChannels.join(",");
+  }
+}
+
+function readIndexInput(mount: HTMLElement, testId: string, fallback: number): number {
+  const input = mount.querySelector(`[data-testid="${testId}"]`);
+  if (!(input instanceof HTMLInputElement)) {
+    return Math.max(0, fallback);
+  }
+  const parsed = Number.parseInt(input.value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return Math.max(0, fallback);
+  }
+  return parsed;
+}
+
+function parseChannelList(value: string): number[] {
+  const entries = value
+    .split(/[\s,]+/)
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  const channels: number[] = [];
+  for (const entry of entries) {
+    const parsed = Number.parseInt(entry, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      continue;
+    }
+    channels.push(parsed);
+  }
+  if (channels.length === 0) {
+    return [0];
+  }
+  return [...new Set(channels)];
 }
 
 function initializeContrastControls(mount: HTMLElement): void {

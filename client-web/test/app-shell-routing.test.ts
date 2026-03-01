@@ -191,6 +191,65 @@ describe("app shell routing", () => {
     await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
   });
 
+  it("sends pan/zoom and z/t/channel commands from viewer controls", async () => {
+    const fixture = await startFixtureServer({
+      permissionClass: "view",
+      isLeaseHolder: false,
+    });
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-controls&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("attach-status").includes("Attached"));
+
+    queryButton("btn-pan-left").click();
+    queryButton("btn-zoom-in").click();
+
+    queryInput("input-z-index").value = "3";
+    queryButton("btn-z-apply").click();
+    queryInput("input-t-index").value = "2";
+    queryButton("btn-t-apply").click();
+    queryInput("input-channel-list").value = "1, 4";
+    queryButton("btn-channels-apply").click();
+
+    await waitFor(() => {
+      const commandCount = fixture.received.filter((value) => {
+        return isRecord(value) && value.message_type === "command";
+      }).length;
+      return commandCount >= 5;
+    }, 2000);
+
+    const commands = fixture.received.filter((value): value is Record<string, unknown> => {
+      return isRecord(value) && value.message_type === "command";
+    });
+    const ops = commands
+      .map((command) => command.op)
+      .filter((value): value is string => typeof value === "string");
+    expect(ops).toContain("view.pan");
+    expect(ops).toContain("view.zoom");
+    expect(ops).toContain("view.set_z");
+    expect(ops).toContain("view.set_t");
+    expect(ops).toContain("view.set_channels");
+
+    const setZ = commands.find((command) => command.op === "view.set_z");
+    expect(setZ).toBeDefined();
+    expect((setZ?.args as { z_index?: unknown })?.z_index).toBe(3);
+
+    const setT = commands.find((command) => command.op === "view.set_t");
+    expect(setT).toBeDefined();
+    expect((setT?.args as { t_index?: unknown })?.t_index).toBe(2);
+
+    const setChannels = commands.find((command) => command.op === "view.set_channels");
+    expect(setChannels).toBeDefined();
+    expect((setChannels?.args as { channels?: unknown })?.channels).toEqual([1, 4]);
+  });
+
   it("updates contrast limits from sliders and supports auto reset", async () => {
     const fixture = await startIntegratedRenderFixture();
     fixtures.push(fixture);

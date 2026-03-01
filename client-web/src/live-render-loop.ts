@@ -99,6 +99,7 @@ export class LiveRenderLoop {
       latest.generationSeq,
       latest.tIndex,
       latest.zIndex,
+      latest.selectedChannels,
     );
 
     const isNewGeneration = latest.generationSeq > this.latestGenerationSeq;
@@ -123,6 +124,7 @@ export class LiveRenderLoop {
         latest.generationSeq,
         latest.tIndex,
         latest.zIndex,
+        latest.channelBlock,
       );
       this.currentTileRequestKey = requestKey(
         "tile",
@@ -130,6 +132,7 @@ export class LiveRenderLoop {
         latest.generationSeq,
         latest.tIndex,
         latest.zIndex,
+        latest.channelBlock,
       );
     }
     if (isNewGeneration || selectionChanged || !hasFrameForGeneration) {
@@ -138,6 +141,7 @@ export class LiveRenderLoop {
         latest.generationSeq,
         latest.tIndex,
         latest.zIndex,
+        latest.channelBlock,
         selectionKey,
       );
     }
@@ -155,6 +159,7 @@ export class LiveRenderLoop {
     generationSeq: number,
     tIndex: number,
     zIndex: number,
+    channelBlock: number,
     selectionKey: string,
   ): Promise<void> {
     const fetchKey = selectionKey;
@@ -167,6 +172,7 @@ export class LiveRenderLoop {
       generationSeq,
       tIndex,
       zIndex,
+      channelBlock,
     );
     const tileRequestKey = requestKey(
       "tile",
@@ -174,6 +180,7 @@ export class LiveRenderLoop {
       generationSeq,
       tIndex,
       zIndex,
+      channelBlock,
     );
     this.activeFetches.add(fetchKey);
     try {
@@ -190,7 +197,7 @@ export class LiveRenderLoop {
               lod: 0,
               t: tIndex,
               z: zIndex,
-              channelBlock: 0,
+              channelBlock,
               y: 0,
               x: 0,
             },
@@ -240,7 +247,7 @@ export class LiveRenderLoop {
               lod: 0,
               t: tIndex,
               z: zIndex,
-              channelBlock: 0,
+              channelBlock,
               y: 0,
               x: 0,
             },
@@ -437,7 +444,16 @@ function readUint32LE(bytes: Uint8Array, offset: number): number {
 function selectLatestGeneration(
   clientState: ClientState,
   preferredSourceId: string | null,
-): { sourceId: string; generationSeq: number; tIndex: number; zIndex: number } | null {
+): {
+  sourceId: string;
+  generationSeq: number;
+  tIndex: number;
+  zIndex: number;
+  selectedChannels: number[];
+  channelBlock: number;
+} | null {
+  const selectedChannels = [...clientState.selectedChannels];
+  const channelBlock = selectedChannelBlock(selectedChannels);
   if (preferredSourceId !== null) {
     const preferred = clientState.sources[preferredSourceId];
     if (preferred !== undefined && preferred.latestWorkingGenerationSeq > 0) {
@@ -446,13 +462,22 @@ function selectLatestGeneration(
         generationSeq: preferred.latestWorkingGenerationSeq,
         tIndex: clientState.tIndex,
         zIndex: clientState.zIndex,
+        selectedChannels,
+        channelBlock,
       };
     }
   }
 
   const sourceValues = Object.values(clientState.sources);
   let latest:
-    | { sourceId: string; generationSeq: number; tIndex: number; zIndex: number }
+    | {
+        sourceId: string;
+        generationSeq: number;
+        tIndex: number;
+        zIndex: number;
+        selectedChannels: number[];
+        channelBlock: number;
+      }
     | null = null;
   for (const source of sourceValues) {
     if (source.latestWorkingGenerationSeq <= 0) {
@@ -467,6 +492,8 @@ function selectLatestGeneration(
         generationSeq: source.latestWorkingGenerationSeq,
         tIndex: clientState.tIndex,
         zIndex: clientState.zIndex,
+        selectedChannels,
+        channelBlock,
       };
     }
   }
@@ -478,8 +505,9 @@ function frameSelectionKey(
   generationSeq: number,
   tIndex: number,
   zIndex: number,
+  selectedChannels: number[],
 ): string {
-  return `${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}`;
+  return `${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:c${selectedChannels.join(",")}`;
 }
 
 function sourceGenerationKey(sourceId: string, generationSeq: number): string {
@@ -523,8 +551,17 @@ function requestKey(
   generationSeq: number,
   tIndex: number,
   zIndex: number,
+  channelBlock: number,
 ): string {
-  return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}`;
+  return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:cb${channelBlock.toString()}`;
+}
+
+function selectedChannelBlock(channels: readonly number[]): number {
+  const primary = channels[0] ?? 0;
+  if (!Number.isFinite(primary) || primary < 0) {
+    return 0;
+  }
+  return Math.floor(primary / 4);
 }
 
 function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
