@@ -316,9 +316,30 @@ describe("app shell routing", () => {
     expect(viewport.style.imageRendering).toBe("pixelated");
     expect(queryText("viewport-size-values")).toContain("2 x 1");
 
-    const widthInput = queryInput("input-viewport-width");
-    widthInput.value = "6";
-    widthInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const eastHandle = queryElement("viewport-resize-e");
+    eastHandle.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        button: 0,
+        clientX: 10,
+        clientY: 10,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mousemove", {
+        bubbles: true,
+        clientX: 14,
+        clientY: 10,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        button: 0,
+        clientX: 14,
+        clientY: 10,
+      }),
+    );
 
     expect(viewport.width).toBe(6);
     expect(viewport.height).toBe(1);
@@ -326,9 +347,30 @@ describe("app shell routing", () => {
     expect(viewport.style.height).toBe("1px");
     expect(queryText("viewport-size-values")).toContain("6 x 1");
 
-    const heightInput = queryInput("input-viewport-height");
-    heightInput.value = "5";
-    heightInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const southHandle = queryElement("viewport-resize-s");
+    southHandle.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        button: 0,
+        clientX: 12,
+        clientY: 12,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mousemove", {
+        bubbles: true,
+        clientX: 12,
+        clientY: 16,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        button: 0,
+        clientX: 12,
+        clientY: 16,
+      }),
+    );
 
     expect(viewport.width).toBe(6);
     expect(viewport.height).toBe(5);
@@ -432,12 +474,30 @@ describe("app shell routing", () => {
 
     await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
 
-    const widthInput = queryInput("input-viewport-width");
-    widthInput.value = "8";
-    widthInput.dispatchEvent(new Event("input", { bubbles: true }));
-    const heightInput = queryInput("input-viewport-height");
-    heightInput.value = "4";
-    heightInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const southEastHandle = queryElement("viewport-resize-se");
+    southEastHandle.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        button: 0,
+        clientX: 12,
+        clientY: 12,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mousemove", {
+        bubbles: true,
+        clientX: 18,
+        clientY: 15,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        button: 0,
+        clientX: 18,
+        clientY: 15,
+      }),
+    );
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "=" }));
 

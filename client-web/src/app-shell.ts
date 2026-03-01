@@ -75,6 +75,74 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
   return `
 <main class="viewer-shell" data-route="${routeKind}" data-testid="viewer-shell">
   <style>
+    .viewer-shell .viewport-frame {
+      position: relative;
+      display: inline-block;
+      line-height: 0;
+    }
+    .viewer-shell .viewport-frame canvas {
+      display: block;
+    }
+    .viewer-shell .viewport-resize-handle {
+      position: absolute;
+      z-index: 2;
+      background: rgba(255, 255, 255, 0.01);
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="n"],
+    .viewer-shell .viewport-resize-handle[data-direction="s"] {
+      left: 8px;
+      right: 8px;
+      height: 8px;
+      cursor: ns-resize;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="n"] {
+      top: -4px;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="s"] {
+      bottom: -4px;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="e"],
+    .viewer-shell .viewport-resize-handle[data-direction="w"] {
+      top: 8px;
+      bottom: 8px;
+      width: 8px;
+      cursor: ew-resize;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="e"] {
+      right: -4px;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="w"] {
+      left: -4px;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="ne"],
+    .viewer-shell .viewport-resize-handle[data-direction="nw"],
+    .viewer-shell .viewport-resize-handle[data-direction="se"],
+    .viewer-shell .viewport-resize-handle[data-direction="sw"] {
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.08);
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="ne"] {
+      top: -5px;
+      right: -5px;
+      cursor: nesw-resize;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="nw"] {
+      top: -5px;
+      left: -5px;
+      cursor: nwse-resize;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="se"] {
+      bottom: -5px;
+      right: -5px;
+      cursor: nwse-resize;
+    }
+    .viewer-shell .viewport-resize-handle[data-direction="sw"] {
+      bottom: -5px;
+      left: -5px;
+      cursor: nesw-resize;
+    }
     .viewer-shell .dual-range {
       position: relative;
       width: 320px;
@@ -148,7 +216,17 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
   <section data-testid="capability-state"></section>
   <section data-testid="viewer-layout">
     <div>Viewport canvas target</div>
-    <canvas data-testid="viewport-canvas" width="1" height="1"></canvas>
+    <div class="viewport-frame" data-testid="viewport-frame">
+      <canvas data-testid="viewport-canvas" width="1" height="1"></canvas>
+      <div class="viewport-resize-handle" data-testid="viewport-resize-n" data-direction="n"></div>
+      <div class="viewport-resize-handle" data-testid="viewport-resize-s" data-direction="s"></div>
+      <div class="viewport-resize-handle" data-testid="viewport-resize-e" data-direction="e"></div>
+      <div class="viewport-resize-handle" data-testid="viewport-resize-w" data-direction="w"></div>
+      <div class="viewport-resize-handle" data-testid="viewport-resize-ne" data-direction="ne"></div>
+      <div class="viewport-resize-handle" data-testid="viewport-resize-nw" data-direction="nw"></div>
+      <div class="viewport-resize-handle" data-testid="viewport-resize-se" data-direction="se"></div>
+      <div class="viewport-resize-handle" data-testid="viewport-resize-sw" data-direction="sw"></div>
+    </div>
     <div>Minimap target</div>
     <canvas data-testid="minimap-canvas" width="1" height="1"></canvas>
     <div>Warnings target</div>
@@ -181,30 +259,7 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
     <button type="button" data-testid="btn-channels-apply">Set Channels</button>
   </section>
   <section data-testid="viewport-size-controls">
-    <label>
-      Viewport Width
-      <input
-        data-testid="input-viewport-width"
-        type="number"
-        min="${MIN_VIEWPORT_DIMENSION_PX.toString()}"
-        max="${MAX_VIEWPORT_DIMENSION_PX.toString()}"
-        step="1"
-        value="${DEFAULT_VIEWPORT_WIDTH_PX.toString()}"
-        aria-label="Viewport width"
-      />
-    </label>
-    <label>
-      Viewport Height
-      <input
-        data-testid="input-viewport-height"
-        type="number"
-        min="${MIN_VIEWPORT_DIMENSION_PX.toString()}"
-        max="${MAX_VIEWPORT_DIMENSION_PX.toString()}"
-        step="1"
-        value="${DEFAULT_VIEWPORT_HEIGHT_PX.toString()}"
-        aria-label="Viewport height"
-      />
-    </label>
+    <div>Drag viewport edges/corners to resize</div>
     <output data-testid="viewport-size-values">${DEFAULT_VIEWPORT_WIDTH_PX.toString()} x ${DEFAULT_VIEWPORT_HEIGHT_PX.toString()}</output>
   </section>
   <section data-testid="selection-state"></section>
@@ -553,39 +608,70 @@ function attachInteractionHandlers(
     }
     renderRuntimeState(mount, runtime.state());
   });
-  registerInput("input-viewport-width", () => {
-    const dimensions = readViewportDimensions(mount);
-    const widthInput = mount.querySelector('[data-testid="input-viewport-width"]');
-    if (!(widthInput instanceof HTMLInputElement)) {
+  let activeResize: {
+    direction: ViewportResizeDirection;
+    startClientX: number;
+    startClientY: number;
+    startWidth: number;
+    startHeight: number;
+  } | null = null;
+  const resizeHandleNodes = mount.querySelectorAll<HTMLElement>('[data-direction]');
+  const onResizeHandleMouseDown = (event: MouseEvent): void => {
+    if (event.button !== 0) {
       return;
     }
-    const parsed = Number.parseInt(widthInput.value, 10);
-    setViewportDimensions(
-      mount,
-      {
-        width: normalizeViewportDimension(parsed),
-        height: dimensions.height,
-      },
-      true,
-    );
-    renderRuntimeState(mount, runtime.state());
-  });
-  registerInput("input-viewport-height", () => {
-    const dimensions = readViewportDimensions(mount);
-    const heightInput = mount.querySelector('[data-testid="input-viewport-height"]');
-    if (!(heightInput instanceof HTMLInputElement)) {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) {
       return;
     }
-    const parsed = Number.parseInt(heightInput.value, 10);
-    setViewportDimensions(
-      mount,
-      {
-        width: dimensions.width,
-        height: normalizeViewportDimension(parsed),
-      },
-      true,
+    const direction = parseViewportResizeDirection(target.getAttribute("data-direction"));
+    if (direction === null) {
+      return;
+    }
+    const dimensions = readViewportDimensions(mount);
+    activeResize = {
+      direction,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startWidth: dimensions.width,
+      startHeight: dimensions.height,
+    };
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  const onDocumentMouseMoveResize = (event: MouseEvent): void => {
+    if (activeResize === null) {
+      return;
+    }
+    const deltaX = event.clientX - activeResize.startClientX;
+    const deltaY = event.clientY - activeResize.startClientY;
+    const nextDimensions = resizedViewportDimensions(
+      activeResize.direction,
+      activeResize.startWidth,
+      activeResize.startHeight,
+      deltaX,
+      deltaY,
     );
+    setViewportDimensions(mount, nextDimensions, true);
     renderRuntimeState(mount, runtime.state());
+    event.preventDefault();
+  };
+  const stopResize = (): void => {
+    activeResize = null;
+  };
+  for (const handle of resizeHandleNodes) {
+    handle.addEventListener("mousedown", onResizeHandleMouseDown);
+  }
+  document.addEventListener("mousemove", onDocumentMouseMoveResize);
+  document.addEventListener("mouseup", stopResize);
+  document.addEventListener("mouseleave", stopResize);
+  viewportDisposers.push(() => {
+    for (const handle of resizeHandleNodes) {
+      handle.removeEventListener("mousedown", onResizeHandleMouseDown);
+    }
+    document.removeEventListener("mousemove", onDocumentMouseMoveResize);
+    document.removeEventListener("mouseup", stopResize);
+    document.removeEventListener("mouseleave", stopResize);
   });
 
   const viewportCanvas = mount.querySelector('[data-testid="viewport-canvas"]');
@@ -888,6 +974,57 @@ function clampChannels(channels: number[], maxIndex: number | null): number[] {
   return [clampAxisIndex(0, maxIndex)];
 }
 
+type ViewportResizeDirection =
+  | "n"
+  | "s"
+  | "e"
+  | "w"
+  | "ne"
+  | "nw"
+  | "se"
+  | "sw";
+
+function parseViewportResizeDirection(value: string | null): ViewportResizeDirection | null {
+  switch (value) {
+    case "n":
+    case "s":
+    case "e":
+    case "w":
+    case "ne":
+    case "nw":
+    case "se":
+    case "sw":
+      return value;
+    default:
+      return null;
+  }
+}
+
+function resizedViewportDimensions(
+  direction: ViewportResizeDirection,
+  startWidth: number,
+  startHeight: number,
+  deltaX: number,
+  deltaY: number,
+): { width: number; height: number } {
+  let width = startWidth;
+  let height = startHeight;
+  if (direction.includes("e")) {
+    width = startWidth + deltaX;
+  } else if (direction.includes("w")) {
+    width = startWidth - deltaX;
+  }
+  if (direction.includes("s")) {
+    height = startHeight + deltaY;
+  } else if (direction.includes("n")) {
+    height = startHeight - deltaY;
+  }
+  return {
+    width: normalizeViewportDimension(width),
+    height: normalizeViewportDimension(height),
+  };
+}
+
 function initializeViewportSizeControls(mount: HTMLElement): void {
   setViewportDimensions(
     mount,
@@ -994,15 +1131,6 @@ function setViewportDimensions(
   mount.setAttribute("data-viewport-width", width.toString());
   mount.setAttribute("data-viewport-height", height.toString());
   mount.setAttribute("data-viewport-user-adjusted", userAdjusted ? "true" : "false");
-
-  const widthInput = mount.querySelector('[data-testid="input-viewport-width"]');
-  if (widthInput instanceof HTMLInputElement) {
-    widthInput.value = width.toString();
-  }
-  const heightInput = mount.querySelector('[data-testid="input-viewport-height"]');
-  if (heightInput instanceof HTMLInputElement) {
-    heightInput.value = height.toString();
-  }
   const output = mount.querySelector('[data-testid="viewport-size-values"]');
   if (output instanceof HTMLOutputElement || output instanceof HTMLElement) {
     output.textContent = `${width.toString()} x ${height.toString()}`;
