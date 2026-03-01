@@ -294,6 +294,34 @@ describe("app shell routing", () => {
     expect((setTCommands[1]?.args as { t_index?: unknown })?.t_index).toBe(0);
   });
 
+  it("adjusts viewport display size with the viewport size slider", async () => {
+    const fixture = await startIntegratedRenderFixture();
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-size&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}&dataBase=${encodeURIComponent(fixture.dataBaseUrl ?? "")}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+
+    const viewport = queryCanvas("viewport-canvas");
+    expect(viewport.style.width).toBe("2px");
+    expect(viewport.style.height).toBe("1px");
+    expect(queryText("viewport-size-values")).toContain("100%");
+
+    const slider = queryInput("slider-viewport-size");
+    slider.value = "200";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+
+    expect(viewport.style.width).toBe("4px");
+    expect(viewport.style.height).toBe("2px");
+    expect(queryText("viewport-size-values")).toContain("200%");
+  });
+
   it("pans via viewport drag and zooms via viewport wheel", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",

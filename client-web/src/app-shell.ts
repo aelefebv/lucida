@@ -22,6 +22,9 @@ const DEFAULT_CONTRAST_MAX = 255;
 const DEFAULT_AXIS_SLIDER_MAX = 4095;
 const ZOOM_IN_SCALE = 1.2;
 const ZOOM_OUT_SCALE = 1 / ZOOM_IN_SCALE;
+const MIN_VIEWPORT_SCALE_PERCENT = 25;
+const MAX_VIEWPORT_SCALE_PERCENT = 400;
+const DEFAULT_VIEWPORT_SCALE_PERCENT = 100;
 
 export function bootstrapApp(
   document: Document = window.document,
@@ -39,6 +42,7 @@ export function bootstrapApp(
 
   mount.innerHTML = shellMarkup(resolved.route.kind);
   initializeContrastControls(mount);
+  initializeViewportSizeControls(mount);
   const runtime = new ViewerRuntime(resolved.route, (state) => {
     renderRuntimeState(mount, state);
   });
@@ -173,6 +177,21 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
       <input data-testid="input-channel-list" type="text" value="0" />
     </label>
     <button type="button" data-testid="btn-channels-apply">Set Channels</button>
+  </section>
+  <section data-testid="viewport-size-controls">
+    <label>
+      Viewport Size
+      <input
+        data-testid="slider-viewport-size"
+        type="range"
+        min="${MIN_VIEWPORT_SCALE_PERCENT.toString()}"
+        max="${MAX_VIEWPORT_SCALE_PERCENT.toString()}"
+        step="1"
+        value="${DEFAULT_VIEWPORT_SCALE_PERCENT.toString()}"
+        aria-label="Viewport size percent"
+      />
+    </label>
+    <output data-testid="viewport-size-values">${DEFAULT_VIEWPORT_SCALE_PERCENT.toString()}%</output>
   </section>
   <section data-testid="selection-state"></section>
   <section data-testid="contrast-controls">
@@ -506,6 +525,15 @@ function attachInteractionHandlers(
     }
     renderRuntimeState(mount, runtime.state());
   });
+  registerInput("slider-viewport-size", () => {
+    const slider = mount.querySelector('[data-testid="slider-viewport-size"]');
+    if (!(slider instanceof HTMLInputElement)) {
+      return;
+    }
+    const parsed = Number.parseInt(slider.value, 10);
+    setViewportScalePercent(mount, parsed);
+    applyViewportDisplaySize(mount);
+  });
 
   const viewportCanvas = mount.querySelector('[data-testid="viewport-canvas"]');
   if (viewportCanvas instanceof HTMLCanvasElement) {
@@ -610,12 +638,14 @@ function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): vo
   if (state.renderFrame === null) {
     canvas.width = 1;
     canvas.height = 1;
+    applyViewportDisplaySize(mount);
     return;
   }
 
   const frame = state.renderFrame;
   canvas.width = frame.width;
   canvas.height = frame.height;
+  applyViewportDisplaySize(mount);
 
   const context = tryGet2dContext(canvas);
   if (context === null) {
@@ -793,6 +823,53 @@ function clampChannels(channels: number[], maxIndex: number | null): number[] {
     return clamped;
   }
   return [clampAxisIndex(0, maxIndex)];
+}
+
+function initializeViewportSizeControls(mount: HTMLElement): void {
+  setViewportScalePercent(mount, DEFAULT_VIEWPORT_SCALE_PERCENT);
+  applyViewportDisplaySize(mount);
+}
+
+function applyViewportDisplaySize(mount: HTMLElement): void {
+  const canvas = mount.querySelector('[data-testid="viewport-canvas"]');
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    return;
+  }
+  const scale = readViewportScalePercent(mount) / 100;
+  const displayWidth = Math.max(1, Math.round(canvas.width * scale));
+  const displayHeight = Math.max(1, Math.round(canvas.height * scale));
+  canvas.style.width = `${displayWidth.toString()}px`;
+  canvas.style.height = `${displayHeight.toString()}px`;
+}
+
+function readViewportScalePercent(mount: HTMLElement): number {
+  const stored = mount.getAttribute("data-viewport-scale-percent");
+  const parsed = stored === null ? Number.NaN : Number.parseInt(stored, 10);
+  return normalizeViewportScalePercent(parsed);
+}
+
+function setViewportScalePercent(mount: HTMLElement, value: number): void {
+  const normalized = normalizeViewportScalePercent(value);
+  mount.setAttribute("data-viewport-scale-percent", normalized.toString());
+  const slider = mount.querySelector('[data-testid="slider-viewport-size"]');
+  if (slider instanceof HTMLInputElement) {
+    slider.value = normalized.toString();
+  }
+  const output = mount.querySelector('[data-testid="viewport-size-values"]');
+  if (output instanceof HTMLOutputElement || output instanceof HTMLElement) {
+    output.textContent = `${normalized.toString()}%`;
+  }
+}
+
+function normalizeViewportScalePercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_VIEWPORT_SCALE_PERCENT;
+  }
+  const rounded = Math.round(value);
+  return Math.min(
+    MAX_VIEWPORT_SCALE_PERCENT,
+    Math.max(MIN_VIEWPORT_SCALE_PERCENT, rounded),
+  );
 }
 
 function initializeContrastControls(mount: HTMLElement): void {
