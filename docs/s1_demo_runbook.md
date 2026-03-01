@@ -33,6 +33,8 @@ The JSON report is written to:
 
 - `qa/reports/s1_demo_report.json`
 
+`T-M1-02` is runtime-backed: it opens a real TIFF source, waits for generation readiness, and verifies that `/v1/data` preview/tile payloads decode to source-derived pixels.
+
 For a stage-by-stage workflow (source open, canonical cache, preview/refine, stable interactive 2D), see:
 
 - [docs/s1_2d_viewing_workflow.md](./s1_2d_viewing_workflow.md)

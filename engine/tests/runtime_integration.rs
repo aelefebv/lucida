@@ -3,7 +3,10 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use futures::{SinkExt, StreamExt};
-use lucida_engine::{ChunkAssetKind, ChunkKey, EngineRuntimeConfig, run_runtime_server};
+use lucida_engine::{
+    ChannelBlockPackaging, ChunkAssetKind, ChunkKey, EngineRuntimeConfig, PayloadCodec,
+    run_runtime_server,
+};
 use reqwest::StatusCode;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -84,6 +87,14 @@ fn preview_payload_path(
         .to_string()
 }
 
+fn data_plane_url(runtime: &RuntimeFixture, chunk_key: ChunkKey) -> String {
+    format!(
+        "{}/v1/data/{}",
+        runtime.http_base(),
+        chunk_key.format_path().trim_start_matches('/')
+    )
+}
+
 fn write_minimal_rgb_tiff(path: &Path) {
     let file = fs::File::create(path).expect("tiff fixture file should be created");
     let mut encoder =
@@ -121,6 +132,64 @@ async fn recv_text_frame(
         }
         other => panic!("unexpected non-text websocket frame: {other:?}"),
     }
+}
+
+fn parse_pgm(payload: &[u8]) -> (u64, u64, Vec<u8>) {
+    let mut newline_indices = payload
+        .iter()
+        .enumerate()
+        .filter_map(|(index, byte)| (*byte == b'\n').then_some(index));
+    let magic_end = newline_indices
+        .next()
+        .expect("pgm payload should include magic line");
+    let dims_end = newline_indices
+        .next()
+        .expect("pgm payload should include dimensions line");
+    let max_value_end = newline_indices
+        .next()
+        .expect("pgm payload should include max-value line");
+
+    let magic = std::str::from_utf8(&payload[..magic_end]).expect("pgm magic should be utf-8");
+    assert_eq!(magic, "P5");
+
+    let dims = std::str::from_utf8(&payload[(magic_end + 1)..dims_end])
+        .expect("pgm dimensions should be utf-8");
+    let mut dims_parts = dims.split_ascii_whitespace();
+    let width = dims_parts
+        .next()
+        .expect("pgm dimensions should include width")
+        .parse::<u64>()
+        .expect("pgm width should parse as u64");
+    let height = dims_parts
+        .next()
+        .expect("pgm dimensions should include height")
+        .parse::<u64>()
+        .expect("pgm height should parse as u64");
+
+    let max_value = std::str::from_utf8(&payload[(dims_end + 1)..max_value_end])
+        .expect("pgm max value should be utf-8");
+    assert_eq!(max_value, "255");
+
+    let expected_pixel_len = (width as usize)
+        .checked_mul(height as usize)
+        .expect("pgm dimensions should not overflow");
+    let pixels = payload[(max_value_end + 1)..].to_vec();
+    assert_eq!(
+        pixels.len(),
+        expected_pixel_len,
+        "pgm payload length should match declared dimensions"
+    );
+    (width, height, pixels)
+}
+
+fn expected_tiff_fixture_luma(width: usize, height: usize) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(width * height);
+    for _y in 0..height {
+        for x in 0..width {
+            pixels.push((x as u8).wrapping_mul(7));
+        }
+    }
+    pixels
 }
 
 #[tokio::test]
@@ -372,7 +441,7 @@ async fn runtime_serves_data_plane_get_and_head() {
 }
 
 #[tokio::test]
-async fn runtime_open_source_bootstraps_generation_and_emits_progress_events() {
+async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_and_tile() {
     let cache_root = unique_path("open_source_cache");
     fs::create_dir_all(&cache_root).expect("cache root should be created");
     let fixture_dir = unique_path("open_source_fixture");
@@ -510,9 +579,46 @@ async fn runtime_open_source_bootstraps_generation_and_emits_progress_events() {
     );
     assert!(preview_available);
 
-    let tile_url = format!(
-        "{}/v1/data/{}",
-        runtime.http_base(),
+    let expected_pixels = expected_tiff_fixture_luma(32, 16);
+
+    let preview_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.to_owned(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Preview2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+    let preview_response = client
+        .get(&preview_url)
+        .send()
+        .await
+        .expect("preview request should succeed");
+    assert_eq!(preview_response.status(), StatusCode::OK);
+    assert_eq!(
+        preview_response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/x-portable-graymap")
+    );
+    let preview_payload = preview_response
+        .bytes()
+        .await
+        .expect("preview payload should be readable");
+    let (preview_width, preview_height, preview_pixels) = parse_pgm(preview_payload.as_ref());
+    assert_eq!(preview_width, 32);
+    assert_eq!(preview_height, 16);
+    assert_eq!(preview_pixels, expected_pixels);
+
+    let tile_url = data_plane_url(
+        &runtime,
         ChunkKey {
             source_id: source_id.to_owned(),
             generation_seq,
@@ -523,16 +629,34 @@ async fn runtime_open_source_bootstraps_generation_and_emits_progress_events() {
             channel_block: 0,
             y: 0,
             x: 0,
-        }
-        .format_path()
-        .trim_start_matches('/')
+        },
     );
     let tile_response = client
-        .get(tile_url)
+        .get(&tile_url)
         .send()
         .await
         .expect("tile request should succeed");
     assert_eq!(tile_response.status(), StatusCode::OK);
+    assert_eq!(
+        tile_response
+            .headers()
+            .get("content-encoding")
+            .and_then(|value| value.to_str().ok()),
+        Some("identity")
+    );
+    let tile_payload = tile_response
+        .bytes()
+        .await
+        .expect("tile payload should be readable");
+    let channel_packaging = ChannelBlockPackaging::default();
+    let decoded_tile = channel_packaging
+        .decode(tile_payload.as_ref())
+        .expect("tile payload should decode as channel block");
+    assert_eq!(decoded_tile.codec, PayloadCodec::Raw);
+    let (tile_width, tile_height, tile_pixels) = parse_pgm(&decoded_tile.payload);
+    assert_eq!(tile_width, 32);
+    assert_eq!(tile_height, 16);
+    assert_eq!(tile_pixels, expected_pixels);
 
     socket
         .close(None)

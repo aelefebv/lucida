@@ -58,11 +58,11 @@ def build_acceptance_cases() -> list[AcceptanceCase]:
         ),
         AcceptanceCase(
             test_id="T-M1-02",
-            description="Preview-first paint then same-generation tile refinement",
+            description="Runtime-backed source open plus source-derived preview/refinement payloads",
             command=[
                 "sh",
                 "-c",
-                "cd client-web && npm run test -- test/app-shell-routing.test.ts -t \"renders preview-first then tile refinement with coherent minimap and warnings\"",
+                "cd engine && cargo test --test runtime_integration runtime_open_source_emits_progress_and_serves_source_derived_preview_and_tile -- --exact",
             ],
             cwd=REPO_ROOT,
         ),

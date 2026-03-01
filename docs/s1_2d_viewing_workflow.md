@@ -59,6 +59,13 @@ This exercises source registration, generation lifecycle, and canonical cache la
 
 ### 2) First Preview + Refinement
 
+Runtime-backed source -> preview/refinement validation (authoritative M1 gate for this stage):
+
+```bash
+cd engine
+cargo test --test runtime_integration runtime_open_source_emits_progress_and_serves_source_derived_preview_and_tile -- --exact
+```
+
 Engine-side preview/tile artifact build:
 
 ```bash
@@ -132,7 +139,7 @@ curl -sS -X POST http://127.0.0.1:8787/v1/sessions \
 Open viewer in browser:
 
 ```text
-http://127.0.0.1:5173/viewer?session=<SESSION_ID>&wsBase=ws://127.0.0.1:8787&dataBase=http://127.0.0.1:8787
+http://127.0.0.1:5173/viewer?session=<SESSION_ID>&wsBase=ws://127.0.0.1:8787&dataBase=http://127.0.0.1:8787/v1/data
 ```
 
 Current manual controls in app shell:
@@ -143,4 +150,4 @@ Current manual controls in app shell:
 - `t`: set t index
 - `c`: set channels
 
-Note: the authoritative source/cache/preview refinement validation path is the acceptance harness and targeted tests above.
+Note: for M1 acceptance, the authoritative source/cache/preview/refinement validation path is the runtime-backed `T-M1-02` acceptance case in the harness.
