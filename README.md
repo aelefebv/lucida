@@ -33,3 +33,16 @@ npm run format:check
 npm run test
 npm run build
 ```
+
+## Canonical S0 demo
+
+Run the end-to-end S0 demo script to exercise:
+- session create/attach snapshot flow
+- typed error and typed event emission
+- lease request + shared scene mutation
+- warning aggregation updates
+- heartbeat, idle disconnect, and reconnect recovery
+
+```bash
+./scripts/s0_demo.sh
+```
