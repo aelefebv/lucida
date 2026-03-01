@@ -240,6 +240,8 @@ pub struct GenerationRecord {
     pub progress_percent: u8,
     pub availability: GenerationAvailability,
     pub canonical_cache_path: Option<String>,
+    pub preview_path: Option<String>,
+    pub tile_manifest_path: Option<String>,
     pub detected_at: String,
     pub updated_at: String,
 }

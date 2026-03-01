@@ -376,3 +376,73 @@ fn session_manager_builds_canonical_cache_for_generation_and_records_location() 
     fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
     fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");
 }
+
+#[test]
+fn session_manager_builds_preview_and_tile_manifest_for_generation() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "lucida_luc204_generation_preview_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    let cache_root = std::env::temp_dir().join(format!(
+        "lucida_luc204_generation_preview_root_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+    fs::create_dir_all(&cache_root).expect("cache root creation should succeed");
+    let source_path = fixture_dir.join("preview-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-generation-preview");
+    let added = manager
+        .add_source(
+            &created.session_id,
+            AddSourceRequest {
+                name: "preview-source".to_owned(),
+                uri: source_path.display().to_string(),
+            },
+        )
+        .expect("source add should succeed");
+    let detected = manager
+        .detect_generation(&created.session_id, &added.source.source_id)
+        .expect("generation detection should succeed");
+    manager
+        .start_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        )
+        .expect("generation start should succeed");
+    manager
+        .build_canonical_cache_for_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+            &cache_root,
+        )
+        .expect("canonical cache build should succeed");
+    let built = manager
+        .build_tile_preview_for_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        )
+        .expect("tile/preview build should succeed");
+
+    assert!(built.availability.preview_ready);
+    assert!(!built.availability.tile2d_ready_lods.is_empty());
+    assert!(Path::new(&built.preview_path.expect("preview path should be present")).exists());
+    assert!(
+        Path::new(
+            &built
+                .tile_manifest_path
+                .expect("tile manifest path should be present")
+        )
+        .exists()
+    );
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
+    fs::remove_dir_all(&cache_root).expect("cache root cleanup should succeed");
+}

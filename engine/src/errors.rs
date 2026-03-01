@@ -40,6 +40,11 @@ pub enum SessionError {
         generation_seq: u64,
         reason: String,
     },
+    TilePreviewBuildFailed {
+        source_id: String,
+        generation_seq: u64,
+        reason: String,
+    },
     LeaseUnavailable {
         session_id: String,
         lease_holder_client_id: String,
@@ -104,6 +109,14 @@ impl Display for SessionError {
             } => write!(
                 f,
                 "canonical cache build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
+            ),
+            SessionError::TilePreviewBuildFailed {
+                source_id,
+                generation_seq,
+                reason,
+            } => write!(
+                f,
+                "tile/preview build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
             ),
             SessionError::LeaseUnavailable {
                 session_id,

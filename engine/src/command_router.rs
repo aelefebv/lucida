@@ -590,6 +590,16 @@ impl From<SessionError> for CommandError {
                     "canonical cache build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
                 ),
             },
+            SessionError::TilePreviewBuildFailed {
+                source_id,
+                generation_seq,
+                reason,
+            } => Self {
+                code: CommandErrorCode::SourceUnavailable,
+                message: format!(
+                    "tile/preview build failed for source `{source_id}` generation `{generation_seq}`: {reason}"
+                ),
+            },
             SessionError::LayerNotFound {
                 session_id,
                 layer_id,

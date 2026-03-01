@@ -11,6 +11,7 @@ mod revision_allocator;
 mod session_manager;
 mod source_inspector;
 mod source_watch;
+mod tile_preview_builder;
 mod warning_service;
 
 pub use canonical_cache::{
@@ -57,5 +58,8 @@ pub use source_inspector::{InspectedSource, SourceInspectionError, inspect_sourc
 pub use source_watch::{
     DirectoryWatcher, FileWatcher, SourceWatchController, SourceWatcher, SourceWatcherKind,
     StabilityWindowGate, WatchDecision, WatchError, WatchPoll, WatchSignature,
+};
+pub use tile_preview_builder::{
+    TilePreviewBuildError, TilePreviewBuildRequest, TilePreviewBuildResult, TilePreviewBuilder,
 };
 pub use warning_service::{WarningAggregation, aggregate_warnings};
