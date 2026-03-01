@@ -86,6 +86,24 @@ describe("app shell routing", () => {
     expect(queryText("jupyter-target")).toContain("Jupyter iframe target route ready");
   });
 
+  it("boots /viewer without session in demo mode and renders a frame", async () => {
+    mountApp("/viewer");
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => {
+      return queryText("frame-state").includes("(tile)");
+    }, 3000);
+
+    expect(queryText("route-kind")).toContain("viewer-demo");
+    expect(queryText("capability-state")).toContain("View only (demo)");
+    expect(queryText("viewport-meta")).toContain("384x256");
+
+    const canvas = document.querySelector('[data-testid="viewport-canvas"]');
+    expect(canvas).toBeInstanceOf(HTMLCanvasElement);
+    expect((canvas as HTMLCanvasElement).getAttribute("data-frame-kind")).toBe("tile");
+  });
+
   it("shows route guidance for unsupported paths", () => {
     mountApp("/unknown");
     const controller = bootstrapApp(document, window.location);

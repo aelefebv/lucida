@@ -1,5 +1,7 @@
 import type { AttachMode } from "./connection-bootstrap";
 
+export type ViewerRouteKind = "viewer" | "jupyter-viewer" | "viewer-demo";
+
 export type ViewerRoute = {
   kind: "viewer" | "jupyter-viewer";
   sessionId: string;
@@ -10,10 +12,15 @@ export type ViewerRoute = {
   dataBase: string;
 };
 
+export type DemoViewerRoute = {
+  kind: "viewer-demo";
+  demoId: string;
+};
+
 export type RouteResolution =
   | {
       ok: true;
-      route: ViewerRoute;
+      route: ViewerRoute | DemoViewerRoute;
     }
   | {
       ok: false;
@@ -28,16 +35,35 @@ const VALID_ATTACH_MODES: readonly AttachMode[] = [
 
 export function resolveRoute(location: Location): RouteResolution {
   const path = normalizePath(location.pathname);
-  if (path !== "/viewer" && path !== "/jupyter/viewer") {
+  if (path !== "/viewer" && path !== "/jupyter/viewer" && path !== "/viewer/demo") {
     return {
       ok: false,
       message:
-        "Unknown route. Use /viewer or /jupyter/viewer with ?session=<session_id>.",
+        "Unknown route. Use /viewer?session=<session_id>, /jupyter/viewer?session=<session_id>, or /viewer for demo mode.",
     };
   }
 
   const params = new URLSearchParams(location.search);
+  if (path === "/viewer/demo") {
+    return {
+      ok: true,
+      route: {
+        kind: "viewer-demo",
+        demoId: parseDemoId(params),
+      },
+    };
+  }
+
   const sessionId = params.get("session");
+  if ((sessionId === null || sessionId.trim().length === 0) && path === "/viewer") {
+    return {
+      ok: true,
+      route: {
+        kind: "viewer-demo",
+        demoId: parseDemoId(params),
+      },
+    };
+  }
   if (sessionId === null || sessionId.trim().length === 0) {
     return {
       ok: false,
@@ -115,4 +141,12 @@ function parseAttachMode(value: string | null): AttachMode | null {
     return value as AttachMode;
   }
   return null;
+}
+
+function parseDemoId(params: URLSearchParams): string {
+  const demoId = params.get("demo");
+  if (demoId === null || demoId.trim().length === 0) {
+    return "default";
+  }
+  return demoId.trim();
 }

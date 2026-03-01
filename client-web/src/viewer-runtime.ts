@@ -18,10 +18,10 @@ import {
   type RenderFrameState,
 } from "./live-render-loop";
 import { InteractionModel, type ViewportState } from "./interaction-model";
-import type { ViewerRoute } from "./viewer-route";
+import type { ViewerRoute, ViewerRouteKind } from "./viewer-route";
 
 export type ViewerRuntimeState = {
-  routeKind: ViewerRoute["kind"];
+  routeKind: ViewerRouteKind;
   connection: ConnectionState;
   connectionSummary: string | null;
   snapshot: SnapshotPayload | null;

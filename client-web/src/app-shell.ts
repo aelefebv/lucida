@@ -1,7 +1,23 @@
-import { resolveRoute } from "./viewer-route";
+import { DemoViewerRuntime } from "./demo-runtime";
+import {
+  resolveRoute,
+  type DemoViewerRoute,
+  type ViewerRoute,
+} from "./viewer-route";
 import { ViewerRuntime, type ViewerRuntimeState } from "./viewer-runtime";
 
 export type AppController = {
+  dispose: () => void;
+};
+
+type RuntimeController = {
+  start: () => void;
+  pan: (dx: number, dy: number) => void;
+  zoom: (scale: number, anchorX: number, anchorY: number) => void;
+  setZ: (zIndex: number) => void;
+  setT: (tIndex: number) => void;
+  setChannels: (channels: number[]) => void;
+  state: () => ViewerRuntimeState;
   dispose: () => void;
 };
 
@@ -20,11 +36,15 @@ export function bootstrapApp(
   }
 
   mount.innerHTML = shellMarkup(resolved.route.kind);
-  const runtime = new ViewerRuntime(resolved.route, (state) => {
+  const runtime = createRuntime(resolved.route, (state) => {
     renderRuntimeState(mount, state);
   });
   runtime.start();
-  const detachInteractionHandlers = attachInteractionHandlers(document, mount, runtime);
+  const detachInteractionHandlers = attachInteractionHandlers(
+    document,
+    mount,
+    runtime,
+  );
   renderRuntimeState(mount, runtime.state());
 
   return {
@@ -46,7 +66,17 @@ function ensureMount(document: Document): HTMLElement {
   return created;
 }
 
-function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
+function createRuntime(
+  route: ViewerRoute | DemoViewerRoute,
+  onUpdate: (state: ViewerRuntimeState) => void,
+): RuntimeController {
+  if (route.kind === "viewer-demo") {
+    return new DemoViewerRuntime(route.demoId, onUpdate);
+  }
+  return new ViewerRuntime(route, onUpdate);
+}
+
+function shellMarkup(routeKind: ViewerRuntimeState["routeKind"]): string {
   return `
 <main class="viewer-shell" data-route="${routeKind}" data-testid="viewer-shell">
   <header>
@@ -56,9 +86,14 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
   <section data-testid="attach-status"></section>
   <section data-testid="capability-state"></section>
   <section data-testid="viewer-layout">
-    <div>Viewport canvas target</div>
-    <div>Minimap target</div>
-    <div>Warnings target</div>
+    <canvas
+      data-testid="viewport-canvas"
+      width="384"
+      height="256"
+      aria-label="Lucida viewport"
+      style="display:block;width:min(100%, 960px);height:auto;image-rendering:pixelated;border:1px solid #222;background:#111;"
+    ></canvas>
+    <p data-testid="viewport-meta">Viewport: waiting for frame</p>
   </section>
   <section data-testid="interaction-controls">
     <button type="button" data-testid="btn-pan-left">Pan Left</button>
@@ -100,6 +135,15 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
     layoutNode.setAttribute("data-client-id", clientId);
   }
 
+  const viewportMetaNode = mount.querySelector('[data-testid="viewport-meta"]');
+  if (viewportMetaNode instanceof HTMLElement) {
+    if (state.renderFrame === null) {
+      viewportMetaNode.textContent = "Viewport: waiting for frame";
+    } else {
+      viewportMetaNode.textContent = `Viewport: ${state.renderFrame.width.toString()}x${state.renderFrame.height.toString()} (${state.renderFrame.frameKind})`;
+    }
+  }
+
   const frameNode = mount.querySelector('[data-testid="frame-state"]');
   if (frameNode instanceof HTMLElement) {
     if (state.renderFrame === null) {
@@ -126,12 +170,14 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
         ? "Warnings: none"
         : `Warnings: ${state.renderFrame.warningNotice}`;
   }
+
+  renderViewportCanvas(mount, state);
 }
 
 function attachInteractionHandlers(
   document: Document,
   mount: HTMLElement,
-  runtime: ViewerRuntime,
+  runtime: RuntimeController,
 ): () => void {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === "ArrowLeft") {
@@ -184,6 +230,31 @@ function attachInteractionHandlers(
       listener.element.removeEventListener("click", listener.handler);
     }
   };
+}
+
+function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): void {
+  const canvas = mount.querySelector('[data-testid="viewport-canvas"]');
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    return;
+  }
+  if (state.renderFrame === null) {
+    canvas.setAttribute("data-frame-kind", "pending");
+    return;
+  }
+
+  canvas.width = state.renderFrame.width;
+  canvas.height = state.renderFrame.height;
+  canvas.setAttribute("data-frame-kind", state.renderFrame.frameKind);
+  const context = canvas.getContext("2d");
+  if (context === null) {
+    return;
+  }
+  const image = context.createImageData(
+    state.renderFrame.width,
+    state.renderFrame.height,
+  );
+  image.data.set(state.renderFrame.rgba);
+  context.putImageData(image, 0, 0);
 }
 
 function phaseLabel(phase: ViewerRuntimeState["connection"]["phase"]): string {
