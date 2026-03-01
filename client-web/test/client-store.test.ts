@@ -4,6 +4,7 @@ import {
   applyEvent,
   hydrateClientState,
   reconcileWithSnapshot,
+  selectionBoundsFor,
   type SnapshotPayload,
 } from "../src/client-store";
 
@@ -156,5 +157,29 @@ describe("client store", () => {
     expect(stale.sessionRev).toBe(6);
     expect(stale.viewRev).toBe(3);
     expect(stale.activeLayerId).toBeNull();
+  });
+
+  it("derives z/t/c bounds from dataset shape metadata", () => {
+    const shaped = snapshot();
+    const baseDataset = shaped.shared_scene.datasets.ds_00000001;
+    if (baseDataset === undefined) {
+      throw new Error("dataset fixture should be present");
+    }
+    shaped.shared_scene.datasets.ds_00000001 = {
+      ...baseDataset,
+      sizeT: 30,
+      sizeC: 2,
+      sizeZ: 17,
+      sizeY: 192,
+      sizeX: 279,
+    };
+
+    const hydrated = hydrateClientState(shaped);
+    const bounds = selectionBoundsFor(hydrated);
+
+    expect(bounds).not.toBeNull();
+    expect(bounds?.maxTIndex).toBe(29);
+    expect(bounds?.maxChannelIndex).toBe(1);
+    expect(bounds?.maxZIndex).toBe(16);
   });
 });

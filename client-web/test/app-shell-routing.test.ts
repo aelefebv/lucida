@@ -250,6 +250,60 @@ describe("app shell routing", () => {
     expect((setChannels?.args as { channels?: unknown })?.channels).toEqual([1, 4]);
   });
 
+  it("clamps z/t/channel controls to dataset bounds", async () => {
+    const fixture = await startFixtureServer({
+      permissionClass: "view",
+      isLeaseHolder: false,
+      datasetShape: {
+        sizeT: 30,
+        sizeC: 2,
+        sizeZ: 17,
+        sizeY: 192,
+        sizeX: 279,
+      },
+    });
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-controls&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("attach-status").includes("Attached"));
+
+    expect(queryInput("input-z-index").max).toBe("16");
+    expect(queryInput("input-t-index").max).toBe("29");
+
+    queryInput("input-z-index").value = "99";
+    queryButton("btn-z-apply").click();
+    queryInput("input-t-index").value = "44";
+    queryButton("btn-t-apply").click();
+    queryInput("input-channel-list").value = "7, 3";
+    queryButton("btn-channels-apply").click();
+
+    await waitFor(() => {
+      const commandCount = fixture.received.filter((value) => {
+        return isRecord(value) && value.message_type === "command";
+      }).length;
+      return commandCount >= 3;
+    }, 2000);
+
+    const commands = fixture.received.filter((value): value is Record<string, unknown> => {
+      return isRecord(value) && value.message_type === "command";
+    });
+    const setZ = commands.find((command) => command.op === "view.set_z");
+    expect((setZ?.args as { z_index?: unknown })?.z_index).toBe(16);
+
+    const setT = commands.find((command) => command.op === "view.set_t");
+    expect((setT?.args as { t_index?: unknown })?.t_index).toBe(29);
+
+    const setChannels = commands.find((command) => command.op === "view.set_channels");
+    expect((setChannels?.args as { channels?: unknown })?.channels).toEqual([1]);
+  });
+
   it("updates contrast limits from sliders and supports auto reset", async () => {
     const fixture = await startIntegratedRenderFixture();
     fixtures.push(fixture);
@@ -313,9 +367,44 @@ describe("app shell routing", () => {
 async function startFixtureServer(config: {
   permissionClass: "view" | "control" | "admin";
   isLeaseHolder: boolean;
+  datasetShape?: {
+    sizeT: number;
+    sizeC: number;
+    sizeZ: number;
+    sizeY?: number;
+    sizeX?: number;
+  };
 }): Promise<SocketFixture> {
   const received: unknown[] = [];
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+
+  const sources =
+    config.datasetShape === undefined
+      ? {}
+      : {
+          src_fixture: {
+            sourceId: "src_fixture",
+            name: "fixture",
+            status: "watching",
+            latestWorkingGenerationSeq: 1,
+          },
+        };
+  const datasets =
+    config.datasetShape === undefined
+      ? {}
+      : {
+          ds_fixture: {
+            datasetId: "ds_fixture",
+            sourceId: "src_fixture",
+            resolvedGenerationSeq: 1,
+            dtype: "uint16",
+            sizeT: config.datasetShape.sizeT,
+            sizeC: config.datasetShape.sizeC,
+            sizeZ: config.datasetShape.sizeZ,
+            sizeY: config.datasetShape.sizeY ?? 1,
+            sizeX: config.datasetShape.sizeX ?? 1,
+          },
+        };
 
   server.on("connection", (socket) => {
     socket.on("message", (raw) => {
@@ -336,8 +425,8 @@ async function startFixtureServer(config: {
               },
               shared_scene: {
                 scene_rev: 0,
-                sources: {},
-                datasets: {},
+                sources,
+                datasets,
                 layers: {},
                 warnings: [],
               },

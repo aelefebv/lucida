@@ -4,6 +4,7 @@ import {
   normalizeContrastWindow,
   type ContrastWindow,
 } from "./contrast-window";
+import { selectionBoundsFor } from "./client-store";
 import { resolveRoute } from "./viewer-route";
 import { ViewerRuntime, type ViewerRuntimeState } from "./viewer-runtime";
 
@@ -312,13 +313,30 @@ function attachInteractionHandlers(
   mount: HTMLElement,
   runtime: ViewerRuntime,
 ): () => void {
-  const withClientState = (fn: (zIndex: number, tIndex: number, channels: number[]) => void): void => {
+  const withClientState = (
+    fn: (
+      zIndex: number,
+      tIndex: number,
+      channels: number[],
+      maxZIndex: number | null,
+      maxTIndex: number | null,
+      maxChannelIndex: number | null,
+    ) => void,
+  ): void => {
     const state = runtime.state().clientState;
     if (state === null) {
-      fn(0, 0, [0]);
+      fn(0, 0, [0], null, null, null);
       return;
     }
-    fn(state.zIndex, state.tIndex, state.selectedChannels);
+    const bounds = selectionBoundsFor(state);
+    fn(
+      state.zIndex,
+      state.tIndex,
+      state.selectedChannels,
+      bounds?.maxZIndex ?? null,
+      bounds?.maxTIndex ?? null,
+      bounds?.maxChannelIndex ?? null,
+    );
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
@@ -347,39 +365,39 @@ function attachInteractionHandlers(
       return;
     }
     if (event.key === "]") {
-      withClientState((zIndex) => {
-        runtime.setZ(Math.max(0, zIndex + 1));
+      withClientState((zIndex, _, __, maxZIndex) => {
+        runtime.setZ(clampAxisIndex(zIndex + 1, maxZIndex));
       });
       return;
     }
     if (event.key === "[") {
-      withClientState((zIndex) => {
-        runtime.setZ(Math.max(0, zIndex - 1));
+      withClientState((zIndex, _, __, maxZIndex) => {
+        runtime.setZ(clampAxisIndex(zIndex - 1, maxZIndex));
       });
       return;
     }
     if (event.key === "t") {
-      withClientState((_, tIndex) => {
-        runtime.setT(Math.max(0, tIndex + 1));
+      withClientState((_, tIndex, __, ___, maxTIndex) => {
+        runtime.setT(clampAxisIndex(tIndex + 1, maxTIndex));
       });
       return;
     }
     if (event.key === "T") {
-      withClientState((_, tIndex) => {
-        runtime.setT(Math.max(0, tIndex - 1));
+      withClientState((_, tIndex, __, ___, maxTIndex) => {
+        runtime.setT(clampAxisIndex(tIndex - 1, maxTIndex));
       });
       return;
     }
     if (event.key === "c") {
-      withClientState((_, __, channels) => {
+      withClientState((_, __, channels, ___, ____, maxChannelIndex) => {
         const current = channels[0] ?? 0;
-        runtime.setChannels([current + 1]);
+        runtime.setChannels([clampAxisIndex(current + 1, maxChannelIndex)]);
       });
     }
     if (event.key === "C") {
-      withClientState((_, __, channels) => {
+      withClientState((_, __, channels, ___, ____, maxChannelIndex) => {
         const current = channels[0] ?? 0;
-        runtime.setChannels([Math.max(0, current - 1)]);
+        runtime.setChannels([clampAxisIndex(current - 1, maxChannelIndex)]);
       });
     }
   };
@@ -419,39 +437,58 @@ function attachInteractionHandlers(
   registerClick("btn-zoom-in", () => runtime.zoom(1.2, 0, 0));
   registerClick("btn-zoom-out", () => runtime.zoom(0.8, 0, 0));
   registerClick("btn-z-dec", () => {
-    withClientState((zIndex) => {
-      runtime.setZ(Math.max(0, zIndex - 1));
+    withClientState((zIndex, _, __, maxZIndex) => {
+      runtime.setZ(clampAxisIndex(zIndex - 1, maxZIndex));
     });
   });
   registerClick("btn-z-inc", () => {
-    withClientState((zIndex) => {
-      runtime.setZ(Math.max(0, zIndex + 1));
+    withClientState((zIndex, _, __, maxZIndex) => {
+      runtime.setZ(clampAxisIndex(zIndex + 1, maxZIndex));
     });
   });
   registerClick("btn-z-apply", () => {
-    const zIndex = readIndexInput(mount, "input-z-index", runtime.state().clientState?.zIndex ?? 0);
+    const clientState = runtime.state().clientState;
+    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
+    const zIndex = readIndexInput(
+      mount,
+      "input-z-index",
+      clientState?.zIndex ?? 0,
+      bounds?.maxZIndex ?? null,
+    );
     runtime.setZ(zIndex);
   });
   registerClick("btn-t-dec", () => {
-    withClientState((_, tIndex) => {
-      runtime.setT(Math.max(0, tIndex - 1));
+    withClientState((_, tIndex, __, ___, maxTIndex) => {
+      runtime.setT(clampAxisIndex(tIndex - 1, maxTIndex));
     });
   });
   registerClick("btn-t-inc", () => {
-    withClientState((_, tIndex) => {
-      runtime.setT(Math.max(0, tIndex + 1));
+    withClientState((_, tIndex, __, ___, maxTIndex) => {
+      runtime.setT(clampAxisIndex(tIndex + 1, maxTIndex));
     });
   });
   registerClick("btn-t-apply", () => {
-    const tIndex = readIndexInput(mount, "input-t-index", runtime.state().clientState?.tIndex ?? 0);
+    const clientState = runtime.state().clientState;
+    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
+    const tIndex = readIndexInput(
+      mount,
+      "input-t-index",
+      clientState?.tIndex ?? 0,
+      bounds?.maxTIndex ?? null,
+    );
     runtime.setT(tIndex);
   });
   registerClick("btn-channels-apply", () => {
+    const clientState = runtime.state().clientState;
+    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
     const channelInput = mount.querySelector('[data-testid="input-channel-list"]');
     if (!(channelInput instanceof HTMLInputElement)) {
       return;
     }
-    const parsedChannels = parseChannelList(channelInput.value);
+    const parsedChannels = parseChannelList(
+      channelInput.value,
+      bounds?.maxChannelIndex ?? null,
+    );
     runtime.setChannels(parsedChannels);
   });
   registerClick("btn-open-source", () => {
@@ -637,33 +674,52 @@ function syncSelectionInputsFromState(
   if (clientState === null) {
     return;
   }
+  const bounds = selectionBoundsFor(clientState);
   const zInput = mount.querySelector('[data-testid="input-z-index"]');
   if (zInput instanceof HTMLInputElement) {
-    zInput.value = clientState.zIndex.toString();
+    if (bounds?.maxZIndex !== null && bounds?.maxZIndex !== undefined) {
+      zInput.max = bounds.maxZIndex.toString();
+    } else {
+      zInput.removeAttribute("max");
+    }
+    zInput.value = clampAxisIndex(clientState.zIndex, bounds?.maxZIndex ?? null).toString();
   }
   const tInput = mount.querySelector('[data-testid="input-t-index"]');
   if (tInput instanceof HTMLInputElement) {
-    tInput.value = clientState.tIndex.toString();
+    if (bounds?.maxTIndex !== null && bounds?.maxTIndex !== undefined) {
+      tInput.max = bounds.maxTIndex.toString();
+    } else {
+      tInput.removeAttribute("max");
+    }
+    tInput.value = clampAxisIndex(clientState.tIndex, bounds?.maxTIndex ?? null).toString();
   }
   const channelInput = mount.querySelector('[data-testid="input-channel-list"]');
   if (channelInput instanceof HTMLInputElement) {
-    channelInput.value = clientState.selectedChannels.join(",");
+    channelInput.value = clampChannels(
+      clientState.selectedChannels,
+      bounds?.maxChannelIndex ?? null,
+    ).join(",");
   }
 }
 
-function readIndexInput(mount: HTMLElement, testId: string, fallback: number): number {
+function readIndexInput(
+  mount: HTMLElement,
+  testId: string,
+  fallback: number,
+  maxIndex: number | null = null,
+): number {
   const input = mount.querySelector(`[data-testid="${testId}"]`);
   if (!(input instanceof HTMLInputElement)) {
-    return Math.max(0, fallback);
+    return clampAxisIndex(fallback, maxIndex);
   }
   const parsed = Number.parseInt(input.value, 10);
   if (!Number.isFinite(parsed) || parsed < 0) {
-    return Math.max(0, fallback);
+    return clampAxisIndex(fallback, maxIndex);
   }
-  return parsed;
+  return clampAxisIndex(parsed, maxIndex);
 }
 
-function parseChannelList(value: string): number[] {
+function parseChannelList(value: string, maxIndex: number | null = null): number[] {
   const entries = value
     .split(/[\s,]+/)
     .map((entry) => entry.trim())
@@ -674,12 +730,30 @@ function parseChannelList(value: string): number[] {
     if (!Number.isFinite(parsed) || parsed < 0) {
       continue;
     }
-    channels.push(parsed);
+    channels.push(clampAxisIndex(parsed, maxIndex));
   }
   if (channels.length === 0) {
-    return [0];
+    return [clampAxisIndex(0, maxIndex)];
   }
   return [...new Set(channels)];
+}
+
+function clampAxisIndex(value: number, maxIndex: number | null): number {
+  const nonNegative = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
+  if (maxIndex === null || !Number.isFinite(maxIndex)) {
+    return nonNegative;
+  }
+  return Math.min(nonNegative, Math.max(0, Math.floor(maxIndex)));
+}
+
+function clampChannels(channels: number[], maxIndex: number | null): number[] {
+  const clamped = channels
+    .map((channel) => clampAxisIndex(channel, maxIndex))
+    .filter((channel, index, values) => values.indexOf(channel) === index);
+  if (clamped.length > 0) {
+    return clamped;
+  }
+  return [clampAxisIndex(0, maxIndex)];
 }
 
 function initializeContrastControls(mount: HTMLElement): void {

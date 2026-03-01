@@ -913,6 +913,11 @@ struct RuntimeDatasetState {
     source_id: Option<String>,
     resolved_generation_seq: u64,
     dtype: String,
+    size_t: u64,
+    size_c: u64,
+    size_z: u64,
+    size_y: u64,
+    size_x: u64,
 }
 
 impl From<&DatasetBinding> for RuntimeDatasetState {
@@ -922,6 +927,11 @@ impl From<&DatasetBinding> for RuntimeDatasetState {
             source_id: value.source_id.clone(),
             resolved_generation_seq: value.resolved_generation_seq,
             dtype: value.dtype.clone(),
+            size_t: value.shape.t.max(1),
+            size_c: value.shape.c.max(1),
+            size_z: value.shape.z.max(1),
+            size_y: value.shape.y.max(1),
+            size_x: value.shape.x.max(1),
         }
     }
 }
@@ -1153,7 +1163,12 @@ fn event_payload_json(payload: &EventPayload) -> serde_json::Value {
             "datasetId": value.dataset_id,
             "sourceId": value.source_id,
             "resolvedGenerationSeq": value.resolved_generation_seq,
-            "dtype": value.dtype.clone()
+            "dtype": value.dtype.clone(),
+            "sizeT": value.size_t,
+            "sizeC": value.size_c,
+            "sizeZ": value.size_z,
+            "sizeY": value.size_y,
+            "sizeX": value.size_x
         }),
         EventPayload::SceneLayerUpsert(value) => serde_json::json!({
             "layerId": value.layer_id,

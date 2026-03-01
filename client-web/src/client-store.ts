@@ -16,6 +16,11 @@ export type DatasetState = {
   sourceId: string | null;
   resolvedGenerationSeq: number;
   dtype: string;
+  sizeT?: number;
+  sizeC?: number;
+  sizeZ?: number;
+  sizeY?: number;
+  sizeX?: number;
 };
 
 export type LayerState = {
@@ -99,8 +104,92 @@ export type ClientState = {
   reconnectCount: number;
 };
 
+export type AxisSelectionBounds = {
+  sourceId: string | null;
+  maxZIndex: number | null;
+  maxTIndex: number | null;
+  maxChannelIndex: number | null;
+};
+
 function generationKey(sourceId: string, generationSeq: number): string {
   return `${sourceId}:${generationSeq.toString()}`;
+}
+
+export function selectionBoundsFor(
+  clientState: ClientState,
+  preferredSourceId: string | null = null,
+): AxisSelectionBounds | null {
+  const source = resolveSelectionSource(clientState, preferredSourceId);
+  if (source === null) {
+    return null;
+  }
+  const dataset = resolveDatasetForSource(clientState, source.sourceId);
+  if (dataset === null) {
+    return null;
+  }
+  return {
+    sourceId: source.sourceId,
+    maxZIndex: sizeToMaxIndex(dataset.sizeZ),
+    maxTIndex: sizeToMaxIndex(dataset.sizeT),
+    maxChannelIndex: sizeToMaxIndex(dataset.sizeC),
+  };
+}
+
+function resolveSelectionSource(
+  clientState: ClientState,
+  preferredSourceId: string | null,
+): SourceState | null {
+  if (preferredSourceId !== null) {
+    const preferred = clientState.sources[preferredSourceId];
+    if (preferred !== undefined) {
+      return preferred;
+    }
+  }
+  const sources = Object.values(clientState.sources);
+  if (sources.length === 0) {
+    return null;
+  }
+  const first = sources[0];
+  if (first === undefined) {
+    return null;
+  }
+  let selected: SourceState = first;
+  for (const source of sources) {
+    if (source.latestWorkingGenerationSeq >= selected.latestWorkingGenerationSeq) {
+      selected = source;
+    }
+  }
+  return selected;
+}
+
+function resolveDatasetForSource(
+  clientState: ClientState,
+  sourceId: string,
+): DatasetState | null {
+  let selected: DatasetState | null = null;
+  for (const dataset of Object.values(clientState.datasets)) {
+    if (dataset.sourceId !== sourceId) {
+      continue;
+    }
+    if (
+      selected === null ||
+      dataset.resolvedGenerationSeq >= selected.resolvedGenerationSeq
+    ) {
+      selected = dataset;
+    }
+  }
+  return selected;
+}
+
+function sizeToMaxIndex(size: number | undefined): number | null {
+  if (size === undefined || !Number.isFinite(size)) {
+    return null;
+  }
+  const integerSize = Math.floor(size);
+  if (integerSize <= 1) {
+    return 0;
+  }
+  return integerSize - 1;
 }
 
 export function hydrateClientState(snapshot: SnapshotPayload): ClientState {

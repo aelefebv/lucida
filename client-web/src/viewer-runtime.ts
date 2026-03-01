@@ -9,6 +9,7 @@ import {
   applyEvent,
   hydrateClientState,
   reconcileWithSnapshot,
+  selectionBoundsFor,
   type ClientState,
   type EventEnvelope,
   type SnapshotPayload,
@@ -149,7 +150,11 @@ export class ViewerRuntime {
     if (this.interactionModel === null) {
       return;
     }
-    this.interactionModel.setZ(zIndex);
+    const bounds =
+      this.stateValue.clientState === null
+        ? null
+        : selectionBoundsFor(this.stateValue.clientState, this.preferredSourceId);
+    this.interactionModel.setZ(clampAxisIndex(zIndex, bounds?.maxZIndex ?? null));
     this.flushInteractionCommands();
   }
 
@@ -157,7 +162,11 @@ export class ViewerRuntime {
     if (this.interactionModel === null) {
       return;
     }
-    this.interactionModel.setT(tIndex);
+    const bounds =
+      this.stateValue.clientState === null
+        ? null
+        : selectionBoundsFor(this.stateValue.clientState, this.preferredSourceId);
+    this.interactionModel.setT(clampAxisIndex(tIndex, bounds?.maxTIndex ?? null));
     this.flushInteractionCommands();
   }
 
@@ -165,7 +174,13 @@ export class ViewerRuntime {
     if (this.interactionModel === null) {
       return;
     }
-    this.interactionModel.setChannels(channels);
+    const bounds =
+      this.stateValue.clientState === null
+        ? null
+        : selectionBoundsFor(this.stateValue.clientState, this.preferredSourceId);
+    this.interactionModel.setChannels(
+      clampChannels(channels, bounds?.maxChannelIndex ?? null),
+    );
     this.flushInteractionCommands();
   }
 
@@ -316,7 +331,10 @@ export class ViewerRuntime {
       snapshot: message.snapshot,
       clientState: nextClientState,
     };
-    this.renderLoop.update(nextClientState, this.preferredSourceId);
+    this.enforceSelectionBounds();
+    if (this.stateValue.clientState !== null) {
+      this.renderLoop.update(this.stateValue.clientState, this.preferredSourceId);
+    }
     this.onUpdate(this.stateValue);
   }
 
@@ -341,6 +359,7 @@ export class ViewerRuntime {
       ...this.stateValue,
       clientState: applyEvent(this.stateValue.clientState, event),
     };
+    this.enforceSelectionBounds();
     if (this.stateValue.clientState !== null) {
       if (this.interactionModel !== null) {
         this.interactionModel.reconcileAuthoritative(
@@ -499,6 +518,68 @@ export class ViewerRuntime {
     );
   }
 
+  private enforceSelectionBounds(): void {
+    if (this.stateValue.clientState === null) {
+      return;
+    }
+    const bounds = selectionBoundsFor(
+      this.stateValue.clientState,
+      this.preferredSourceId,
+    );
+    if (bounds === null) {
+      return;
+    }
+    const clampedZ = clampAxisIndex(
+      this.stateValue.clientState.zIndex,
+      bounds.maxZIndex,
+    );
+    const clampedT = clampAxisIndex(
+      this.stateValue.clientState.tIndex,
+      bounds.maxTIndex,
+    );
+    const clampedChannels = clampChannels(
+      this.stateValue.clientState.selectedChannels,
+      bounds.maxChannelIndex,
+    );
+    const channelsChanged = !numberArrayEqual(
+      clampedChannels,
+      this.stateValue.clientState.selectedChannels,
+    );
+    if (
+      clampedZ === this.stateValue.clientState.zIndex &&
+      clampedT === this.stateValue.clientState.tIndex &&
+      !channelsChanged
+    ) {
+      return;
+    }
+
+    const previousState = this.stateValue.clientState;
+    const nextClientState: ClientState = {
+      ...previousState,
+      zIndex: clampedZ,
+      tIndex: clampedT,
+      selectedChannels: clampedChannels,
+    };
+    this.stateValue = {
+      ...this.stateValue,
+      clientState: nextClientState,
+    };
+
+    if (this.interactionModel === null) {
+      return;
+    }
+    if (clampedZ !== previousState.zIndex) {
+      this.interactionModel.setZ(clampedZ);
+    }
+    if (clampedT !== previousState.tIndex) {
+      this.interactionModel.setT(clampedT);
+    }
+    if (channelsChanged) {
+      this.interactionModel.setChannels(clampedChannels);
+    }
+    this.flushInteractionCommands();
+  }
+
   private attachOptions(): AttachOptions {
     if (this.route.token === undefined) {
       return {
@@ -636,4 +717,34 @@ function errorMessage(error: unknown): string {
     return error.message;
   }
   return "unknown transport error";
+}
+
+function clampAxisIndex(value: number, maxIndex: number | null): number {
+  const nonNegative = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0));
+  if (maxIndex === null || !Number.isFinite(maxIndex)) {
+    return nonNegative;
+  }
+  return Math.min(nonNegative, Math.max(0, Math.floor(maxIndex)));
+}
+
+function clampChannels(channels: number[], maxIndex: number | null): number[] {
+  const clamped = channels
+    .map((channel) => clampAxisIndex(channel, maxIndex))
+    .filter((channel, index, values) => values.indexOf(channel) === index);
+  if (clamped.length > 0) {
+    return clamped;
+  }
+  return [clampAxisIndex(0, maxIndex)];
+}
+
+function numberArrayEqual(left: number[], right: number[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) {
+      return false;
+    }
+  }
+  return true;
 }

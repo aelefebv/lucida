@@ -118,6 +118,11 @@ pub struct DatasetUpsertPayload {
     pub canonical_axes: Vec<String>,
     pub dtype: String,
     pub channel_count: u32,
+    pub size_t: u64,
+    pub size_c: u64,
+    pub size_z: u64,
+    pub size_y: u64,
+    pub size_x: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -653,6 +658,11 @@ impl From<&DatasetBinding> for DatasetUpsertPayload {
                 .collect::<Vec<_>>(),
             dtype: value.dtype.clone(),
             channel_count: value.channel_table.channel_count,
+            size_t: value.shape.t.max(1),
+            size_c: value.shape.c.max(1),
+            size_z: value.shape.z.max(1),
+            size_y: value.shape.y.max(1),
+            size_x: value.shape.x.max(1),
         }
     }
 }
