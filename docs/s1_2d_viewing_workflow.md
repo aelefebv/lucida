@@ -101,6 +101,12 @@ The report contains explicit per-case status for `T-M1-01` through `T-M1-05`.
 
 This path is useful for transport/viewer debugging.
 
+If local startup fails with `address already in use`, clear current sessions/processes first:
+
+```bash
+./scripts/close_sessions.sh
+```
+
 Start engine runtime:
 
 ```bash

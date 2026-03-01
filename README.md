@@ -66,3 +66,17 @@ Expected success markers include:
 
 See [docs/s1_demo_runbook.md](docs/s1_demo_runbook.md) for the full runbook.
 See [docs/s1_2d_viewing_workflow.md](docs/s1_2d_viewing_workflow.md) for stage-by-stage S1 2D workflow details.
+
+## Clear dev sessions (port conflicts)
+
+If you see `address already in use` for local runtime bring-up, close active dev sessions with:
+
+```bash
+./scripts/close_sessions.sh
+```
+
+Default ports cleared are `8787` (engine) and `5173` (web client). You can override:
+
+```bash
+./scripts/close_sessions.sh --ports 8787,5173,4173
+```
