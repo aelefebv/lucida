@@ -37,7 +37,11 @@ fn write_revision_rgb_tiff(path: &Path, revision: u8) {
     for y in 0..height {
         for x in 0..width {
             pixels.push((x as u8).wrapping_mul(7).wrapping_add(revision));
-            pixels.push((y as u8).wrapping_mul(9).wrapping_add(revision.wrapping_mul(2)));
+            pixels.push(
+                (y as u8)
+                    .wrapping_mul(9)
+                    .wrapping_add(revision.wrapping_mul(2)),
+            );
             pixels.push(
                 (x as u8)
                     .wrapping_add(y as u8)

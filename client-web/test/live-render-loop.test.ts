@@ -100,10 +100,12 @@ describe("LiveRenderLoop", () => {
     expect(latest?.rgba[4]).toBe(255);
     expect(latest?.rgba[5]).toBe(255);
     expect(latest?.rgba[6]).toBe(255);
-    expect(latest?.pixelStats.min).toBe(0);
-    expect(latest?.pixelStats.max).toBe(255);
-    expect(latest?.pixelStats.nonZeroRatio).toBe(0.5);
-    expect(latest?.pixelStats.mean).toBe(127.5);
+    expect(latest?.pixelStats.min).toBe(2);
+    expect(latest?.pixelStats.max).toBe(4);
+    expect(latest?.pixelStats.nonZeroRatio).toBe(1);
+    expect(latest?.pixelStats.mean).toBe(3);
+    expect(latest?.sampleMax).toBe(255);
+    expect(Array.from(latest?.grayscaleSamples ?? [])).toEqual([2, 4]);
     loop.dispose();
   });
 
@@ -198,6 +200,61 @@ describe("LiveRenderLoop", () => {
     expect(latest?.pixelStats.mean).toBe(0);
     loop.dispose();
   });
+
+  it("decodes 16-bit PGM payloads and reports 16-bit contrast range", async () => {
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(
+            new Blob([toArrayBuffer(pgm16Payload(2, 1, [87, 121]))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "image/x-portable-graymap",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/v1/tile2d/")) {
+          return new Response(
+            new Blob([
+              toArrayBuffer(
+                channelBlockRawPayload(pgm16Payload(2, 1, [87, 121])),
+              ),
+            ]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    loop.update(fixtureClientState());
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+
+    const latest = frames.at(-1);
+    expect(latest).toBeDefined();
+    expect(latest?.sampleMax).toBe(65535);
+    expect(latest?.pixelStats.min).toBe(87);
+    expect(latest?.pixelStats.max).toBe(121);
+    expect(Array.from(latest?.grayscaleSamples ?? [])).toEqual([87, 121]);
+    expect(latest?.rgba[0]).toBe(0);
+    expect(latest?.rgba[4]).toBe(255);
+    loop.dispose();
+  });
 });
 
 function fixtureClientState(): ClientState {
@@ -250,6 +307,25 @@ function pgmPayload(width: number, height: number, values: number[]): Uint8Array
     `P5\n${width.toString()} ${height.toString()}\n255\n`,
   );
   const pixels = new Uint8Array(values);
+  const payload = new Uint8Array(header.length + pixels.length);
+  payload.set(header, 0);
+  payload.set(pixels, header.length);
+  return payload;
+}
+
+function pgm16Payload(width: number, height: number, values: number[]): Uint8Array {
+  const encoder = new TextEncoder();
+  const header = encoder.encode(
+    `P5\n${width.toString()} ${height.toString()}\n65535\n`,
+  );
+  const pixels = new Uint8Array(values.length * 2);
+  for (let i = 0; i < values.length; i += 1) {
+    const value = values[i] ?? 0;
+    const clamped = Math.max(0, Math.min(65535, value));
+    const offset = i * 2;
+    pixels[offset] = (clamped >> 8) & 0xff;
+    pixels[offset + 1] = clamped & 0xff;
+  }
   const payload = new Uint8Array(header.length + pixels.length);
   payload.set(header, 0);
   payload.set(pixels, header.length);

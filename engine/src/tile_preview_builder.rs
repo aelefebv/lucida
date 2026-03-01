@@ -222,7 +222,7 @@ fn write_tiles(
         let plane = lod_planes
             .get(&descriptor.lod)
             .expect("every lod descriptor should have raster pixels");
-        let tile_payload = encode_pgm(plane.width, plane.height, &plane.pixels)?;
+        let tile_payload = encode_pgm(plane.width, plane.height, plane.max_value, &plane.pixels)?;
         let encoded_payload = packaging
             .encode(&ChannelBlockWriteRequest {
                 payload_kind: PayloadKind::Image,
@@ -246,7 +246,7 @@ fn write_preview_image(
     preview_path: &Path,
     plane: &RasterPlane,
 ) -> Result<(), TilePreviewBuildError> {
-    let bytes = encode_pgm(plane.width, plane.height, &plane.pixels)?;
+    let bytes = encode_pgm(plane.width, plane.height, plane.max_value, &plane.pixels)?;
 
     fs::write(preview_path, bytes).map_err(|error| TilePreviewBuildError::IoError {
         path: preview_path.display().to_string(),
@@ -278,14 +278,14 @@ fn downsample_half(source: &RasterPlane) -> RasterPlane {
     let source_height = source.height as usize;
     let target_width = source_width.div_ceil(2).max(1);
     let target_height = source_height.div_ceil(2).max(1);
-    let mut pixels = vec![0_u8; target_width * target_height];
+    let mut pixels = vec![0_u16; target_width * target_height];
 
     for target_y in 0..target_height {
         for target_x in 0..target_width {
             let source_x = target_x * 2;
             let source_y = target_y * 2;
-            let mut sum = 0_u32;
-            let mut count = 0_u32;
+            let mut sum = 0_u64;
+            let mut count = 0_u64;
 
             for offset_y in 0..2 {
                 for offset_x in 0..2 {
@@ -295,28 +295,30 @@ fn downsample_half(source: &RasterPlane) -> RasterPlane {
                         continue;
                     }
                     let index = sample_y * source_width + sample_x;
-                    sum += u32::from(source.pixels[index]);
+                    sum += u64::from(source.pixels[index]);
                     count += 1;
                 }
             }
 
             let target_index = target_y * target_width + target_x;
-            pixels[target_index] = if count == 0 {
-                0
-            } else {
-                (sum / count) as u8
-            };
+            pixels[target_index] = if count == 0 { 0 } else { (sum / count) as u16 };
         }
     }
 
     RasterPlane {
         width: target_width as u64,
         height: target_height as u64,
+        max_value: source.max_value,
         pixels,
     }
 }
 
-fn encode_pgm(width: u64, height: u64, pixels: &[u8]) -> Result<Vec<u8>, TilePreviewBuildError> {
+fn encode_pgm(
+    width: u64,
+    height: u64,
+    max_value: u16,
+    pixels: &[u16],
+) -> Result<Vec<u8>, TilePreviewBuildError> {
     let expected_pixels = (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| TilePreviewBuildError::SerializationError {
@@ -331,8 +333,22 @@ fn encode_pgm(width: u64, height: u64, pixels: &[u8]) -> Result<Vec<u8>, TilePre
         });
     }
 
-    let mut bytes = format!("P5\n{width} {height}\n255\n").into_bytes();
-    bytes.extend_from_slice(pixels);
+    if max_value == 0 {
+        return Err(TilePreviewBuildError::SerializationError {
+            message: "PGM max value must be greater than zero".to_owned(),
+        });
+    }
+    let mut bytes = format!("P5\n{width} {height}\n{max_value}\n").into_bytes();
+    if max_value <= 255 {
+        for pixel in pixels {
+            bytes.push((*pixel).min(max_value) as u8);
+        }
+    } else {
+        for pixel in pixels {
+            let clamped = (*pixel).min(max_value);
+            bytes.extend_from_slice(&clamped.to_be_bytes());
+        }
+    }
     Ok(bytes)
 }
 
@@ -372,6 +388,18 @@ mod tests {
             .expect("tiff pixel payload write should succeed");
     }
 
+    fn write_test_tiff_u16(path: &Path, width: u32, height: u32, pixels: &[u16]) {
+        let file = File::create(path).expect("test tiff file should be created");
+        let mut encoder =
+            tiff::encoder::TiffEncoder::new(file).expect("tiff encoder creation should succeed");
+        let image = encoder
+            .new_image::<tiff::encoder::colortype::Gray16>(width, height)
+            .expect("tiff image creation should succeed");
+        image
+            .write_data(pixels)
+            .expect("tiff pixel payload write should succeed");
+    }
+
     fn write_test_omezarr(path: &Path, width: u64, height: u64, pixels: &[u8]) {
         std::fs::create_dir_all(path.join("0")).expect("ome-zarr data group should be created");
         std::fs::write(
@@ -388,6 +416,58 @@ mod tests {
         .expect("ome-zarr array descriptor should be written");
         std::fs::write(path.join("0").join("0.0.0.0.0"), pixels)
             .expect("ome-zarr chunk should be written");
+    }
+
+    fn parse_pgm_u16(payload: &[u8]) -> (u64, u64, u16, Vec<u16>) {
+        let mut newline_indices = payload
+            .iter()
+            .enumerate()
+            .filter_map(|(index, byte)| (*byte == b'\n').then_some(index));
+        let magic_end = newline_indices
+            .next()
+            .expect("pgm payload should include magic line");
+        let dims_end = newline_indices
+            .next()
+            .expect("pgm payload should include dimensions line");
+        let max_value_end = newline_indices
+            .next()
+            .expect("pgm payload should include max-value line");
+
+        let magic = std::str::from_utf8(&payload[..magic_end]).expect("pgm magic should be utf-8");
+        assert_eq!(magic, "P5");
+
+        let dims = std::str::from_utf8(&payload[(magic_end + 1)..dims_end])
+            .expect("pgm dimensions should be utf-8");
+        let mut dims_parts = dims.split_ascii_whitespace();
+        let width = dims_parts
+            .next()
+            .expect("pgm dimensions should include width")
+            .parse::<u64>()
+            .expect("pgm width should parse as u64");
+        let height = dims_parts
+            .next()
+            .expect("pgm dimensions should include height")
+            .parse::<u64>()
+            .expect("pgm height should parse as u64");
+        let max_value = std::str::from_utf8(&payload[(dims_end + 1)..max_value_end])
+            .expect("pgm max value should be utf-8")
+            .parse::<u16>()
+            .expect("pgm max value should parse as u16");
+
+        let body = &payload[(max_value_end + 1)..];
+        let expected_pixels = (width as usize)
+            .checked_mul(height as usize)
+            .expect("pgm dimensions should not overflow");
+        let pixels = if max_value <= 255 {
+            assert_eq!(body.len(), expected_pixels);
+            body.iter().copied().map(u16::from).collect::<Vec<_>>()
+        } else {
+            assert_eq!(body.len(), expected_pixels * 2);
+            body.chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                .collect::<Vec<_>>()
+        };
+        (width, height, max_value, pixels)
     }
 
     #[test]
@@ -443,7 +523,8 @@ mod tests {
         assert!(manifest.contains("\"lods\""));
         assert!(manifest.contains("\"default_channel_block_size\""));
         assert!(generation_root.join("tile2d").join("lod0").exists());
-        let preview_bytes = std::fs::read(&result.preview_path).expect("preview should be readable");
+        let preview_bytes =
+            std::fs::read(&result.preview_path).expect("preview should be readable");
         assert!(preview_bytes.starts_with(b"P5\n1 1\n255\n"));
 
         std::fs::remove_dir_all(generation_root).expect("fixture cleanup should succeed");
@@ -482,6 +563,66 @@ mod tests {
             .expect("lod0 preview should be readable");
         assert!(preview_lod0.starts_with(b"P5\n3 2\n255\n"));
         assert!(preview_lod0.ends_with(&source_pixels));
+        assert!(result.preview_path.exists());
+
+        std::fs::remove_dir_all(generation_root).expect("generation cleanup should succeed");
+        std::fs::remove_dir_all(fixture_root).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn builds_preview_and_tiles_from_uint16_tiff_without_8bit_clamping() {
+        let generation_root = unique_path("generation_uint16");
+        let fixture_root = unique_path("fixture_uint16");
+        std::fs::create_dir_all(&generation_root).expect("generation root should be created");
+        std::fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+
+        let source_path = fixture_root.join("source_uint16.tiff");
+        let source_pixels: Vec<u16> = vec![87, 98, 109, 121];
+        write_test_tiff_u16(&source_path, 2, 2, &source_pixels);
+        let builder = TilePreviewBuilder::new();
+        let result = builder
+            .build(&TilePreviewBuildRequest {
+                source_id: "src_uint16".to_owned(),
+                source_uri: source_path.display().to_string(),
+                source_kind: SourceKind::Tiff,
+                source_dtype: "uint16".to_owned(),
+                generation_seq: 1,
+                generation_root: generation_root.clone(),
+                shape: AxisShape {
+                    t: 1,
+                    c: 1,
+                    z: 1,
+                    y: 2,
+                    x: 2,
+                    extra_axes: BTreeMap::new(),
+                },
+            })
+            .expect("tile/preview build should succeed");
+
+        let channel_packaging = ChannelBlockPackaging::default();
+        let tile_payload_path = generation_root
+            .join("tile2d")
+            .join("lod0")
+            .join("t0_z0_cb0_r0_c0.tileblk");
+        let tile_bytes =
+            std::fs::read(&tile_payload_path).expect("tile payload read should succeed");
+        let decoded_tile = channel_packaging
+            .decode(&tile_bytes)
+            .expect("tile payload decode should succeed");
+        let (tile_width, tile_height, tile_max, tile_pixels) = parse_pgm_u16(&decoded_tile.payload);
+        assert_eq!(tile_width, 2);
+        assert_eq!(tile_height, 2);
+        assert_eq!(tile_max, u16::MAX);
+        assert_eq!(tile_pixels, source_pixels);
+
+        let preview_lod0 = std::fs::read(generation_root.join("preview2d").join("lod_0.pgm"))
+            .expect("lod0 preview should be readable");
+        let (preview_width, preview_height, preview_max, preview_pixels) =
+            parse_pgm_u16(&preview_lod0);
+        assert_eq!(preview_width, 2);
+        assert_eq!(preview_height, 2);
+        assert_eq!(preview_max, u16::MAX);
+        assert_eq!(preview_pixels, source_pixels);
         assert!(result.preview_path.exists());
 
         std::fs::remove_dir_all(generation_root).expect("generation cleanup should succeed");

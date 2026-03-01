@@ -6,13 +6,17 @@ export type ContrastWindow = {
 const MIN_SAMPLE_VALUE = 0;
 const MAX_SAMPLE_VALUE = 255;
 
-export function normalizeContrastWindow(window: ContrastWindow): ContrastWindow {
-  let min = clampSampleValue(window.min);
-  let max = clampSampleValue(window.max);
+export function normalizeContrastWindow(
+  window: ContrastWindow,
+  sampleMax = MAX_SAMPLE_VALUE,
+): ContrastWindow {
+  const normalizedSampleMax = normalizeSampleMax(sampleMax);
+  let min = clampSampleValue(window.min, normalizedSampleMax);
+  let max = clampSampleValue(window.max, normalizedSampleMax);
   if (max <= min) {
-    if (min >= MAX_SAMPLE_VALUE) {
-      min = MAX_SAMPLE_VALUE - 1;
-      max = MAX_SAMPLE_VALUE;
+    if (min >= normalizedSampleMax) {
+      min = normalizedSampleMax - 1;
+      max = normalizedSampleMax;
     } else {
       max = min + 1;
     }
@@ -20,13 +24,18 @@ export function normalizeContrastWindow(window: ContrastWindow): ContrastWindow 
   return { min, max };
 }
 
-export function autoContrastWindow(min: number, max: number): ContrastWindow {
-  const minClamped = clampSampleValue(min);
-  const maxClamped = clampSampleValue(max);
+export function autoContrastWindow(
+  min: number,
+  max: number,
+  sampleMax = MAX_SAMPLE_VALUE,
+): ContrastWindow {
+  const normalizedSampleMax = normalizeSampleMax(sampleMax);
+  const minClamped = clampSampleValue(min, normalizedSampleMax);
+  const maxClamped = clampSampleValue(max, normalizedSampleMax);
   if (maxClamped <= minClamped) {
     return {
       min: MIN_SAMPLE_VALUE,
-      max: MAX_SAMPLE_VALUE,
+      max: normalizedSampleMax,
     };
   }
   return {
@@ -35,18 +44,21 @@ export function autoContrastWindow(min: number, max: number): ContrastWindow {
   };
 }
 
-export function applyContrastWindowToRgba(
-  rgba: Uint8ClampedArray,
+export function applyContrastWindowToSamples(
+  samples: Uint16Array,
   window: ContrastWindow,
+  sampleMax = MAX_SAMPLE_VALUE,
 ): Uint8ClampedArray {
-  const normalized = normalizeContrastWindow(window);
-  const out = new Uint8ClampedArray(rgba.length);
+  const normalized = normalizeContrastWindow(window, sampleMax);
+  const out = new Uint8ClampedArray(samples.length * 4);
   const span = normalized.max - normalized.min;
-  for (let i = 0; i < rgba.length; i += 4) {
-    out[i] = remapSample(rgba[i] ?? 0, normalized.min, span);
-    out[i + 1] = remapSample(rgba[i + 1] ?? 0, normalized.min, span);
-    out[i + 2] = remapSample(rgba[i + 2] ?? 0, normalized.min, span);
-    out[i + 3] = rgba[i + 3] ?? 255;
+  for (let i = 0; i < samples.length; i += 1) {
+    const value = remapSample(samples[i] ?? 0, normalized.min, span);
+    const offset = i * 4;
+    out[offset] = value;
+    out[offset + 1] = value;
+    out[offset + 2] = value;
+    out[offset + 3] = 255;
   }
   return out;
 }
@@ -61,15 +73,26 @@ function remapSample(value: number, min: number, span: number): number {
   return Math.round(((value - min) * 255) / span);
 }
 
-function clampSampleValue(value: number): number {
+function clampSampleValue(value: number, sampleMax: number): number {
   if (!Number.isFinite(value)) {
     return MIN_SAMPLE_VALUE;
   }
   if (value < MIN_SAMPLE_VALUE) {
     return MIN_SAMPLE_VALUE;
   }
-  if (value > MAX_SAMPLE_VALUE) {
-    return MAX_SAMPLE_VALUE;
+  if (value > sampleMax) {
+    return sampleMax;
   }
   return Math.round(value);
+}
+
+function normalizeSampleMax(value: number): number {
+  if (!Number.isFinite(value)) {
+    return MAX_SAMPLE_VALUE;
+  }
+  const rounded = Math.round(value);
+  if (rounded < 1) {
+    return 1;
+  }
+  return rounded;
 }

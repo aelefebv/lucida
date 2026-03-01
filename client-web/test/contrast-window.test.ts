@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  applyContrastWindowToRgba,
+  applyContrastWindowToSamples,
   autoContrastWindow,
   normalizeContrastWindow,
 } from "../src/contrast-window";
@@ -20,25 +20,29 @@ describe("contrast-window", () => {
       min: 254,
       max: 255,
     });
+    expect(normalizeContrastWindow({ min: -1, max: 70000 }, 65535)).toEqual({
+      min: 0,
+      max: 65535,
+    });
   });
 
-  it("applies contrast limits to RGBA while preserving alpha", () => {
-    const input = new Uint8ClampedArray([
-      0, 20, 40, 10,
-      50, 100, 150, 20,
-      200, 220, 240, 30,
-    ]);
-    const output = applyContrastWindowToRgba(input, { min: 50, max: 200 });
+  it("applies contrast limits to sample buffers", () => {
+    const input = new Uint16Array([0, 50, 200]);
+    const output = applyContrastWindowToSamples(input, { min: 50, max: 200 }, 255);
 
     expect(Array.from(output)).toEqual([
-      0, 0, 0, 10,
-      0, 85, 170, 20,
-      255, 255, 255, 30,
+      0, 0, 0, 255,
+      0, 0, 0, 255,
+      255, 255, 255, 255,
     ]);
   });
 
   it("falls back to full range for degenerate auto windows", () => {
     expect(autoContrastWindow(220, 220)).toEqual({ min: 0, max: 255 });
     expect(autoContrastWindow(0, 0)).toEqual({ min: 0, max: 255 });
+    expect(autoContrastWindow(1000, 1000, 65535)).toEqual({
+      min: 0,
+      max: 65535,
+    });
   });
 });

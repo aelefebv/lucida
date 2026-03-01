@@ -12,6 +12,8 @@ export type RenderFrameState = {
   width: number;
   height: number;
   rgba: Uint8ClampedArray;
+  grayscaleSamples: Uint16Array;
+  sampleMax: number;
   pixelStats: FramePixelStats;
   minimap: MinimapState;
   warningNotice: string | null;
@@ -28,6 +30,8 @@ type DecodedFrame = {
   width: number;
   height: number;
   rgba: Uint8ClampedArray;
+  grayscaleSamples: Uint16Array;
+  sampleMax: number;
   pixelStats: FramePixelStats;
 };
 
@@ -46,6 +50,8 @@ export class LiveRenderLoop {
   private currentTileRequestKey: string | null;
   private dimensionsByGeneration: Map<number, { width: number; height: number }>;
   private frameKindByGeneration: Map<number, "preview" | "tile">;
+  private grayscaleByGeneration: Map<number, Uint16Array>;
+  private sampleMaxByGeneration: Map<number, number>;
   private pixelStatsByGeneration: Map<number, FramePixelStats>;
   private latestGenerationSeq: number;
   private latestClientState: ClientState | null;
@@ -67,6 +73,8 @@ export class LiveRenderLoop {
     this.currentTileRequestKey = null;
     this.dimensionsByGeneration = new Map();
     this.frameKindByGeneration = new Map();
+    this.grayscaleByGeneration = new Map();
+    this.sampleMaxByGeneration = new Map();
     this.pixelStatsByGeneration = new Map();
     this.latestGenerationSeq = 0;
     this.latestClientState = null;
@@ -195,6 +203,8 @@ export class LiveRenderLoop {
         height: preview.height,
       });
       this.frameKindByGeneration.set(generationSeq, "preview");
+      this.grayscaleByGeneration.set(generationSeq, preview.grayscaleSamples);
+      this.sampleMaxByGeneration.set(generationSeq, preview.sampleMax);
       this.pixelStatsByGeneration.set(generationSeq, preview.pixelStats);
       this.frameStore.setPreview(generationSeq, preview.rgba);
       this.emit(generationSeq);
@@ -236,6 +246,8 @@ export class LiveRenderLoop {
         height: tile.height,
       });
       this.frameKindByGeneration.set(generationSeq, "tile");
+      this.grayscaleByGeneration.set(generationSeq, tile.grayscaleSamples);
+      this.sampleMaxByGeneration.set(generationSeq, tile.sampleMax);
       this.pixelStatsByGeneration.set(generationSeq, tile.pixelStats);
       this.frameStore.setTiles(generationSeq, tile.rgba);
       this.emit(generationSeq);
@@ -283,6 +295,14 @@ export class LiveRenderLoop {
     if (pixelStats === undefined) {
       return;
     }
+    const grayscaleSamples = this.grayscaleByGeneration.get(generationSeq);
+    if (grayscaleSamples === undefined) {
+      return;
+    }
+    const sampleMax = this.sampleMaxByGeneration.get(generationSeq);
+    if (sampleMax === undefined) {
+      return;
+    }
 
     const warnings = this.latestClientState.warnings as WarningEntry[];
     const layerList = Object.values(this.latestClientState.layers).map((layer) => ({
@@ -312,6 +332,8 @@ export class LiveRenderLoop {
       width: dimensions.width,
       height: dimensions.height,
       rgba: frame,
+      grayscaleSamples,
+      sampleMax,
       pixelStats,
       minimap,
       warningNotice: buildSessionNotice(warnings),
@@ -478,7 +500,9 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
     !Number.isFinite(height) ||
     width <= 0 ||
     height <= 0 ||
-    maxValue !== 255
+    !Number.isFinite(maxValue) ||
+    maxValue <= 0 ||
+    maxValue > 65535
   ) {
     throw new Error("unsupported PGM dimensions or max value");
   }
@@ -488,28 +512,56 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
   }
   const pixelCount = width * height;
   const payload = bytes.slice(index);
-  if (payload.length < pixelCount) {
+  const bytesPerSample = maxValue <= 255 ? 1 : 2;
+  const expectedPayloadLength = pixelCount * bytesPerSample;
+  if (payload.length < expectedPayloadLength) {
     throw new Error("PGM payload is truncated");
   }
-  const adjusted = stretchToDisplayRange(payload.subarray(0, pixelCount));
 
-  const rgba = new Uint8ClampedArray(pixelCount * 4);
-  let min = 255;
-  let max = 0;
+  const grayscaleSamples = new Uint16Array(pixelCount);
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
   let nonZeroCount = 0;
   let sum = 0;
+  if (bytesPerSample === 1) {
+    for (let i = 0; i < pixelCount; i += 1) {
+      const value = payload[i] ?? 0;
+      grayscaleSamples[i] = value;
+      if (value < min) {
+        min = value;
+      }
+      if (value > max) {
+        max = value;
+      }
+      if (value !== 0) {
+        nonZeroCount += 1;
+      }
+      sum += value;
+    }
+  } else {
+    for (let i = 0; i < pixelCount; i += 1) {
+      const sampleOffset = i * 2;
+      const value = ((payload[sampleOffset] ?? 0) << 8) | (payload[sampleOffset + 1] ?? 0);
+      grayscaleSamples[i] = value;
+      if (value < min) {
+        min = value;
+      }
+      if (value > max) {
+        max = value;
+      }
+      if (value !== 0) {
+        nonZeroCount += 1;
+      }
+      sum += value;
+    }
+  }
+
+  const autoWindow = normalizedAutoWindow(min, max, maxValue);
+  const rgba = new Uint8ClampedArray(pixelCount * 4);
+  const span = autoWindow.max - autoWindow.min;
   for (let i = 0; i < pixelCount; i += 1) {
-    const value = adjusted[i] ?? 0;
-    if (value < min) {
-      min = value;
-    }
-    if (value > max) {
-      max = value;
-    }
-    if (value !== 0) {
-      nonZeroCount += 1;
-    }
-    sum += value;
+    const sample = grayscaleSamples[i] ?? 0;
+    const value = mapSampleToDisplay(sample, autoWindow.min, span);
     const offset = i * 4;
     rgba[offset] = value;
     rgba[offset + 1] = value;
@@ -521,6 +573,8 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
     width,
     height,
     rgba,
+    grayscaleSamples,
+    sampleMax: maxValue,
     pixelStats: {
       min,
       max,
@@ -534,62 +588,33 @@ function isWhitespace(value: number): boolean {
   return value === 0x20 || value === 0x09 || value === 0x0a || value === 0x0d;
 }
 
-function stretchToDisplayRange(payload: Uint8Array): Uint8Array {
-  if (payload.length === 0) {
-    return payload;
+function normalizedAutoWindow(
+  min: number,
+  max: number,
+  sampleMax: number,
+): { min: number; max: number } {
+  if (max <= min) {
+    return {
+      min: 0,
+      max: sampleMax,
+    };
   }
-  let min = 255;
-  let max = 0;
+  return { min, max };
+}
 
-  const histogram = new Uint32Array(256);
-  for (const value of payload) {
-    histogram[value] = (histogram[value] ?? 0) + 1;
-    if (value < min) {
-      min = value;
-    }
-    if (value > max) {
-      max = value;
-    }
+function mapSampleToDisplay(
+  value: number,
+  min: number,
+  span: number,
+): number {
+  if (value <= min) {
+    return 0;
   }
-
-  const total = payload.length;
-  const lowRank = Math.floor((total - 1) * 0.02);
-  const highRank = Math.floor((total - 1) * 0.98);
-
-  let cumulative = 0;
-  let low = 0;
-  for (let i = 0; i < histogram.length; i += 1) {
-    cumulative += histogram[i] ?? 0;
-    if (cumulative > lowRank) {
-      low = i;
-      break;
-    }
+  if (value >= min + span) {
+    return 255;
   }
-
-  cumulative = 0;
-  let high = 255;
-  for (let i = 0; i < histogram.length; i += 1) {
-    cumulative += histogram[i] ?? 0;
-    if (cumulative > highRank) {
-      high = i;
-      break;
-    }
+  if (span <= 0) {
+    return 0;
   }
-
-  if (high <= low) {
-    low = min;
-    high = max;
-    if (high <= low) {
-      return payload;
-    }
-  }
-  const span = high - low;
-
-  const stretched = new Uint8Array(payload.length);
-  for (let i = 0; i < payload.length; i += 1) {
-    const value = payload[i] ?? 0;
-    const scaled = ((value - low) * 255) / span;
-    stretched[i] = Math.max(0, Math.min(255, Math.round(scaled)));
-  }
-  return stretched;
+  return Math.max(0, Math.min(255, Math.round(((value - min) * 255) / span)));
 }

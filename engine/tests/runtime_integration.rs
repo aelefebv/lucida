@@ -134,7 +134,7 @@ async fn recv_text_frame(
     }
 }
 
-fn parse_pgm(payload: &[u8]) -> (u64, u64, Vec<u8>) {
+fn parse_pgm(payload: &[u8]) -> (u64, u64, u16, Vec<u16>) {
     let mut newline_indices = payload
         .iter()
         .enumerate()
@@ -168,28 +168,58 @@ fn parse_pgm(payload: &[u8]) -> (u64, u64, Vec<u8>) {
 
     let max_value = std::str::from_utf8(&payload[(dims_end + 1)..max_value_end])
         .expect("pgm max value should be utf-8");
-    assert_eq!(max_value, "255");
+    let max_value = max_value
+        .parse::<u16>()
+        .expect("pgm max value should parse as u16");
 
     let expected_pixel_len = (width as usize)
         .checked_mul(height as usize)
         .expect("pgm dimensions should not overflow");
-    let pixels = payload[(max_value_end + 1)..].to_vec();
-    assert_eq!(
-        pixels.len(),
-        expected_pixel_len,
-        "pgm payload length should match declared dimensions"
-    );
-    (width, height, pixels)
+    let payload_body = &payload[(max_value_end + 1)..];
+    let pixels = if max_value <= 255 {
+        assert_eq!(
+            payload_body.len(),
+            expected_pixel_len,
+            "8-bit pgm payload length should match declared dimensions"
+        );
+        payload_body
+            .iter()
+            .copied()
+            .map(u16::from)
+            .collect::<Vec<_>>()
+    } else {
+        assert_eq!(
+            payload_body.len(),
+            expected_pixel_len * 2,
+            "16-bit pgm payload length should match declared dimensions"
+        );
+        payload_body
+            .chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect::<Vec<_>>()
+    };
+    (width, height, max_value, pixels)
 }
 
-fn expected_tiff_fixture_luma(width: usize, height: usize) -> Vec<u8> {
+fn expected_tiff_fixture_luma(width: usize, height: usize) -> Vec<u16> {
     let mut pixels = Vec::with_capacity(width * height);
     for _y in 0..height {
         for x in 0..width {
-            pixels.push((x as u8).wrapping_mul(7));
+            pixels.push(u16::from((x as u8).wrapping_mul(7)));
         }
     }
     pixels
+}
+
+fn write_gray16_tiff(path: &Path, width: u32, height: u32, pixels: &[u16]) {
+    let file = fs::File::create(path).expect("tiff fixture file should be created");
+    let mut encoder =
+        tiff::encoder::TiffEncoder::new(file).expect("tiff fixture encoder should be created");
+    encoder
+        .new_image::<tiff::encoder::colortype::Gray16>(width, height)
+        .expect("tiff fixture image should be created")
+        .write_data(pixels)
+        .expect("tiff fixture pixels should be written");
 }
 
 #[tokio::test]
@@ -479,10 +509,7 @@ async fn runtime_source_open_endpoint_accepts_cors_preflight() {
     let response = client
         .request(
             reqwest::Method::OPTIONS,
-            format!(
-                "{}/v1/sessions/{session_id}/sources",
-                runtime.http_base()
-            ),
+            format!("{}/v1/sessions/{session_id}/sources", runtime.http_base()),
         )
         .header("origin", "http://127.0.0.1:5173")
         .header("access-control-request-method", "POST")
@@ -689,9 +716,11 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
         .bytes()
         .await
         .expect("preview payload should be readable");
-    let (preview_width, preview_height, preview_pixels) = parse_pgm(preview_payload.as_ref());
+    let (preview_width, preview_height, preview_max_value, preview_pixels) =
+        parse_pgm(preview_payload.as_ref());
     assert_eq!(preview_width, 32);
     assert_eq!(preview_height, 16);
+    assert_eq!(preview_max_value, 255);
     assert_eq!(preview_pixels, expected_pixels);
 
     let tile_url = data_plane_url(
@@ -730,15 +759,140 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
         .decode(tile_payload.as_ref())
         .expect("tile payload should decode as channel block");
     assert_eq!(decoded_tile.codec, PayloadCodec::Raw);
-    let (tile_width, tile_height, tile_pixels) = parse_pgm(&decoded_tile.payload);
+    let (tile_width, tile_height, tile_max_value, tile_pixels) = parse_pgm(&decoded_tile.payload);
     assert_eq!(tile_width, 32);
     assert_eq!(tile_height, 16);
+    assert_eq!(tile_max_value, 255);
     assert_eq!(tile_pixels, expected_pixels);
 
     socket
         .close(None)
         .await
         .expect("closing websocket should succeed");
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_open_uint16_source_serves_16bit_preview_and_tile_payloads() {
+    let cache_root = unique_path("open_source_uint16_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("open_source_uint16_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-open-source-uint16.tiff");
+    let source_pixels: Vec<u16> = vec![87, 98, 109, 121];
+    write_gray16_tiff(&source_path, 2, 2, &source_pixels);
+
+    let runtime = RuntimeFixture::start(&cache_root).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-open-source-uint16" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-source-uint16",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned");
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+    assert_eq!(generation_seq, 1);
+
+    let preview_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.to_owned(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Preview2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+    let preview_response = client
+        .get(&preview_url)
+        .send()
+        .await
+        .expect("preview request should succeed");
+    assert_eq!(preview_response.status(), StatusCode::OK);
+    let preview_payload = preview_response
+        .bytes()
+        .await
+        .expect("preview payload should be readable");
+    let (preview_width, preview_height, preview_max, preview_pixels) =
+        parse_pgm(preview_payload.as_ref());
+    assert_eq!(preview_width, 2);
+    assert_eq!(preview_height, 2);
+    assert_eq!(preview_max, u16::MAX);
+    assert_eq!(preview_pixels, source_pixels);
+
+    let tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.to_owned(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+    let tile_response = client
+        .get(&tile_url)
+        .send()
+        .await
+        .expect("tile request should succeed");
+    assert_eq!(tile_response.status(), StatusCode::OK);
+    let tile_payload = tile_response
+        .bytes()
+        .await
+        .expect("tile payload should be readable");
+    let channel_packaging = ChannelBlockPackaging::default();
+    let decoded_tile = channel_packaging
+        .decode(tile_payload.as_ref())
+        .expect("tile payload should decode as channel block");
+    let (tile_width, tile_height, tile_max, tile_pixels) = parse_pgm(&decoded_tile.payload);
+    assert_eq!(tile_width, 2);
+    assert_eq!(tile_height, 2);
+    assert_eq!(tile_max, u16::MAX);
+    assert_eq!(tile_pixels, source_pixels);
+
     runtime.stop().await;
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
     fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");

@@ -1,5 +1,5 @@
 import {
-  applyContrastWindowToRgba,
+  applyContrastWindowToSamples,
   autoContrastWindow,
   normalizeContrastWindow,
   type ContrastWindow,
@@ -12,6 +12,7 @@ export type AppController = {
 };
 
 type ContrastControlsState = ContrastWindow & {
+  sampleMax: number;
   userAdjusted: boolean;
 };
 
@@ -244,7 +245,7 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
   const contrastNode = mount.querySelector('[data-testid="contrast-state"]');
   if (contrastNode instanceof HTMLElement) {
     const contrast = readContrastControlsState(mount);
-    contrastNode.textContent = `Contrast: ${contrast.min.toString()}-${contrast.max.toString()}`;
+    contrastNode.textContent = `Contrast: ${contrast.min.toString()}-${contrast.max.toString()} / ${contrast.sampleMax.toString()}`;
   }
 
   const warningNode = mount.querySelector('[data-testid="warning-state"]');
@@ -361,15 +362,18 @@ function attachInteractionHandlers(
       setContrastControlsState(mount, {
         min: DEFAULT_CONTRAST_MIN,
         max: DEFAULT_CONTRAST_MAX,
+        sampleMax: DEFAULT_CONTRAST_MAX,
         userAdjusted: false,
       });
     } else {
       const autoWindow = autoContrastWindow(
         frame.pixelStats.min,
         frame.pixelStats.max,
+        frame.sampleMax,
       );
       setContrastControlsState(mount, {
         ...autoWindow,
+        sampleMax: frame.sampleMax,
         userAdjusted: false,
       });
     }
@@ -418,7 +422,11 @@ function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): vo
     return;
   }
   const contrast = readContrastControlsState(mount);
-  const contrasted = applyContrastWindowToRgba(frame.rgba, contrast);
+  const contrasted = applyContrastWindowToSamples(
+    frame.grayscaleSamples,
+    contrast,
+    frame.sampleMax,
+  );
   const imageData = context.createImageData(frame.width, frame.height);
   imageData.data.set(contrasted);
   context.putImageData(imageData, 0, 0);
@@ -457,6 +465,7 @@ function initializeContrastControls(mount: HTMLElement): void {
   setContrastControlsState(mount, {
     min: DEFAULT_CONTRAST_MIN,
     max: DEFAULT_CONTRAST_MAX,
+    sampleMax: DEFAULT_CONTRAST_MAX,
     userAdjusted: false,
   });
 }
@@ -468,6 +477,7 @@ function maybeAutoSetContrastFromFrame(
   if (state.renderFrame === null) {
     return;
   }
+  syncContrastSliderLimit(mount, state.renderFrame.sampleMax);
   const current = readContrastControlsState(mount);
   if (current.userAdjusted) {
     return;
@@ -475,9 +485,11 @@ function maybeAutoSetContrastFromFrame(
   const autoWindow = autoContrastWindow(
     state.renderFrame.pixelStats.min,
     state.renderFrame.pixelStats.max,
+    state.renderFrame.sampleMax,
   );
   setContrastControlsState(mount, {
     ...autoWindow,
+    sampleMax: state.renderFrame.sampleMax,
     userAdjusted: false,
   });
 }
@@ -495,12 +507,14 @@ function applyUserContrastSelection(mount: HTMLElement): void {
   ) {
     return;
   }
+  const sampleMax = readSliderSampleMax(mount);
   const normalized = normalizeContrastWindow({
     min: Number.parseInt(minInput.value, 10),
     max: Number.parseInt(maxInput.value, 10),
-  });
+  }, sampleMax);
   setContrastControlsState(mount, {
     ...normalized,
+    sampleMax,
     userAdjusted: true,
   });
 }
@@ -513,6 +527,7 @@ function readContrastControlsState(mount: HTMLElement): ContrastControlsState {
     '[data-testid="slider-contrast-max"]',
   );
   const userAdjusted = mount.getAttribute("data-contrast-user-adjusted") === "true";
+  const sampleMax = readSliderSampleMax(mount);
   const minRaw =
     minInput instanceof HTMLInputElement
       ? Number.parseInt(minInput.value, 10)
@@ -521,9 +536,13 @@ function readContrastControlsState(mount: HTMLElement): ContrastControlsState {
     maxInput instanceof HTMLInputElement
       ? Number.parseInt(maxInput.value, 10)
       : DEFAULT_CONTRAST_MAX;
-  const normalized = normalizeContrastWindow({ min: minRaw, max: maxRaw });
+  const normalized = normalizeContrastWindow(
+    { min: minRaw, max: maxRaw },
+    sampleMax,
+  );
   return {
     ...normalized,
+    sampleMax,
     userAdjusted,
   };
 }
@@ -532,11 +551,13 @@ function setContrastControlsState(
   mount: HTMLElement,
   state: ContrastControlsState,
 ): void {
-  const normalized = normalizeContrastWindow(state);
+  const sampleMax = normalizeSampleMax(state.sampleMax);
+  const normalized = normalizeContrastWindow(state, sampleMax);
   mount.setAttribute(
     "data-contrast-user-adjusted",
     state.userAdjusted ? "true" : "false",
   );
+  mount.setAttribute("data-contrast-sample-max", sampleMax.toString());
   const minInput = mount.querySelector(
     '[data-testid="slider-contrast-min"]',
   );
@@ -544,29 +565,69 @@ function setContrastControlsState(
     '[data-testid="slider-contrast-max"]',
   );
   if (minInput instanceof HTMLInputElement) {
+    minInput.max = sampleMax.toString();
     minInput.value = normalized.min.toString();
   }
   if (maxInput instanceof HTMLInputElement) {
+    maxInput.max = sampleMax.toString();
     maxInput.value = normalized.max.toString();
   }
   const valueNode = mount.querySelector('[data-testid="contrast-values"]');
   if (valueNode instanceof HTMLOutputElement || valueNode instanceof HTMLElement) {
-    valueNode.textContent = `${normalized.min.toString()}-${normalized.max.toString()}`;
+    valueNode.textContent = `${normalized.min.toString()}-${normalized.max.toString()} / ${sampleMax.toString()}`;
   }
-  updateContrastActiveRangeVisual(mount, normalized.min, normalized.max);
+  updateContrastActiveRangeVisual(
+    mount,
+    normalized.min,
+    normalized.max,
+    sampleMax,
+  );
 }
 
 function updateContrastActiveRangeVisual(
   mount: HTMLElement,
   min: number,
   max: number,
+  sampleMax: number,
 ): void {
   const activeRange = mount.querySelector('[data-testid="contrast-range-active"]');
   if (!(activeRange instanceof HTMLElement)) {
     return;
   }
-  const left = (min / DEFAULT_CONTRAST_MAX) * 100;
-  const right = ((DEFAULT_CONTRAST_MAX - max) / DEFAULT_CONTRAST_MAX) * 100;
+  const denominator = Math.max(1, sampleMax);
+  const left = (min / denominator) * 100;
+  const right = ((denominator - max) / denominator) * 100;
   activeRange.style.left = `${left.toFixed(2)}%`;
   activeRange.style.right = `${right.toFixed(2)}%`;
+}
+
+function syncContrastSliderLimit(mount: HTMLElement, sampleMax: number): void {
+  const normalizedSampleMax = normalizeSampleMax(sampleMax);
+  const current = readContrastControlsState(mount);
+  if (current.sampleMax === normalizedSampleMax) {
+    return;
+  }
+  setContrastControlsState(mount, {
+    min: current.min,
+    max: current.max,
+    sampleMax: normalizedSampleMax,
+    userAdjusted: current.userAdjusted,
+  });
+}
+
+function readSliderSampleMax(mount: HTMLElement): number {
+  const stored = mount.getAttribute("data-contrast-sample-max");
+  const parsed = stored === null ? Number.NaN : Number.parseInt(stored, 10);
+  return normalizeSampleMax(parsed);
+}
+
+function normalizeSampleMax(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_CONTRAST_MAX;
+  }
+  const rounded = Math.round(value);
+  if (rounded < 1) {
+    return 1;
+  }
+  return rounded;
 }

@@ -184,6 +184,32 @@ describe("app shell routing", () => {
     expect(queryText("contrast-values")).toContain("0-255");
     expect(queryText("contrast-state")).toContain("0-255");
   });
+
+  it("adapts contrast slider range to 16-bit frame payloads", async () => {
+    const fixture = await startIntegratedRenderFixture16Bit();
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-a&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}&dataBase=${encodeURIComponent(fixture.dataBaseUrl ?? "")}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+
+    const minSlider = queryInput("slider-contrast-min");
+    const maxSlider = queryInput("slider-contrast-max");
+    expect(minSlider.max).toBe("65535");
+    expect(maxSlider.max).toBe("65535");
+    expect(queryText("contrast-values")).toContain("/ 65535");
+    expect(queryText("contrast-state")).toContain("/ 65535");
+
+    minSlider.value = "100";
+    minSlider.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(queryText("contrast-values")).toContain("100-121 / 65535");
+  });
 });
 
 async function startFixtureServer(config: {
@@ -356,6 +382,134 @@ async function startIntegratedRenderFixture(): Promise<SocketFixture> {
                   message: "Generation 1 still refining.",
                 },
               ],
+            },
+          }),
+        );
+      }
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.on("listening", () => resolve());
+  });
+  const wsAddress = server.address() as AddressInfo;
+  const wsUrl = `ws://127.0.0.1:${wsAddress.port.toString()}`;
+
+  return {
+    server,
+    httpServer,
+    url: wsUrl,
+    dataBaseUrl,
+    received,
+    openSourceRequests: [],
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      await new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+async function startIntegratedRenderFixture16Bit(): Promise<SocketFixture> {
+  const received: unknown[] = [];
+  const previewBody = pgm16Body(2, 1, [87, 121]);
+  const tileBody = channelBlockRawPayload(pgm16Body(2, 1, [87, 121]));
+
+  const httpServer = createServer((request, response) => {
+    if (request.url?.includes("/v1/preview2d/")) {
+      setTimeout(() => {
+        respondPgm(response, previewBody);
+      }, 20);
+      return;
+    }
+    if (request.url?.includes("/v1/tile2d/")) {
+      setTimeout(() => {
+        respondBinary(response, tileBody);
+      }, 80);
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => {
+    httpServer.listen(0, "127.0.0.1", () => resolve());
+  });
+  const httpAddress = httpServer.address() as AddressInfo;
+  const dataBaseUrl = `http://127.0.0.1:${httpAddress.port.toString()}`;
+
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  server.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const text = raw.toString("utf-8");
+      const parsed = JSON.parse(text) as unknown;
+      received.push(parsed);
+      if (isRecord(parsed) && parsed.message_type === "attach") {
+        socket.send(
+          JSON.stringify({
+            message_type: "session.snapshot",
+            session_id: "sess_fixture",
+            permission_class: "view",
+            is_lease_holder: false,
+            snapshot: {
+              session: {
+                session_id: "sess_fixture",
+                session_rev: 2,
+              },
+              shared_scene: {
+                scene_rev: 1,
+                sources: {
+                  src_fixture: {
+                    sourceId: "src_fixture",
+                    name: "fixture",
+                    status: "watching",
+                    latestWorkingGenerationSeq: 1,
+                  },
+                },
+                datasets: {
+                  ds_fixture: {
+                    datasetId: "ds_fixture",
+                    sourceId: "src_fixture",
+                    resolvedGenerationSeq: 1,
+                  },
+                },
+                layers: {
+                  lay_fixture: {
+                    layerId: "lay_fixture",
+                    name: "raw",
+                    layerRev: 1,
+                    metadataRev: 0,
+                    writeRev: 0,
+                  },
+                },
+                warnings: [],
+              },
+              client_view: {
+                client_id: "cli_fixture",
+                view_rev: 1,
+                active_layer_id: "lay_fixture",
+                center_x: 0,
+                center_y: 0,
+                zoom: 1,
+                z_index: 0,
+                t_index: 0,
+                selected_channels: [0],
+                warnings: [],
+              },
+              warnings: [],
             },
           }),
         );
@@ -667,6 +821,20 @@ function respondBinary(
 function pgmBody(width: number, height: number, values: number[]): Buffer {
   const header = Buffer.from(`P5\n${width.toString()} ${height.toString()}\n255\n`, "ascii");
   return Buffer.concat([header, Buffer.from(values)]);
+}
+
+function pgm16Body(width: number, height: number, values: number[]): Buffer {
+  const header = Buffer.from(
+    `P5\n${width.toString()} ${height.toString()}\n65535\n`,
+    "ascii",
+  );
+  const pixels = Buffer.alloc(values.length * 2);
+  for (let i = 0; i < values.length; i += 1) {
+    const value = values[i] ?? 0;
+    const clamped = Math.max(0, Math.min(65535, value));
+    pixels.writeUInt16BE(clamped, i * 2);
+  }
+  return Buffer.concat([header, pixels]);
 }
 
 function channelBlockRawPayload(payload: Buffer): Buffer {

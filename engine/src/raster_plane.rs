@@ -24,7 +24,8 @@ pub struct RasterPlaneLoadRequest {
 pub struct RasterPlane {
     pub width: u64,
     pub height: u64,
-    pub pixels: Vec<u8>,
+    pub max_value: u16,
+    pub pixels: Vec<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,7 +42,9 @@ pub fn load_raster_plane(
 ) -> Result<RasterPlane, RasterPlaneLoadError> {
     match request.source_kind {
         SourceKind::Tiff | SourceKind::BigTiff => load_tiff_plane(&request.source_uri),
-        SourceKind::OmeZarr | SourceKind::Zarr => load_zarr_plane(&request.source_uri, &request.dtype),
+        SourceKind::OmeZarr | SourceKind::Zarr => {
+            load_zarr_plane(&request.source_uri, &request.dtype)
+        }
         SourceKind::Other => Err(RasterPlaneLoadError::UnsupportedSourceKind {
             source_kind: request.source_kind,
         }),
@@ -69,12 +72,12 @@ fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
             })?;
     let width = u64::from(width_u32);
     let height = u64::from(height_u32);
-    let color_type = decoder.colortype().map_err(|error| {
-        RasterPlaneLoadError::DecodeFailed {
+    let color_type = decoder
+        .colortype()
+        .map_err(|error| RasterPlaneLoadError::DecodeFailed {
             path: path.display().to_string(),
             message: error.to_string(),
-        }
-    })?;
+        })?;
     let channel_count = channels_for_color_type(color_type);
     let expected_pixels = (width as usize)
         .checked_mul(height as usize)
@@ -89,44 +92,71 @@ fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
             path: path.display().to_string(),
             message: error.to_string(),
         })?;
-    let pixels = match image {
+    let (pixels, max_value) = match image {
         TiffDecodingResult::U8(samples) => {
-            interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?
+            let first_channel =
+                interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
+            (
+                first_channel
+                    .iter()
+                    .copied()
+                    .map(u16::from)
+                    .collect::<Vec<_>>(),
+                255,
+            )
         }
         TiffDecodingResult::U16(samples) => {
             let first_channel =
                 interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
-            normalize_dynamic_range(&first_channel, |value| f64::from(value))
+            (first_channel, u16::MAX)
         }
         TiffDecodingResult::I8(samples) => {
             let first_channel =
                 interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
-            normalize_dynamic_range(&first_channel, |value| f64::from(value))
+            (
+                normalize_dynamic_range_to_u16(&first_channel, |value| f64::from(value)),
+                u16::MAX,
+            )
         }
         TiffDecodingResult::I16(samples) => {
             let first_channel =
                 interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
-            normalize_dynamic_range(&first_channel, |value| f64::from(value))
+            (
+                normalize_dynamic_range_to_u16(&first_channel, |value| f64::from(value)),
+                u16::MAX,
+            )
         }
         TiffDecodingResult::U32(samples) => {
             let first_channel =
                 interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
-            normalize_dynamic_range(&first_channel, |value| value as f64)
+            (
+                normalize_dynamic_range_to_u16(&first_channel, |value| value as f64),
+                u16::MAX,
+            )
         }
         TiffDecodingResult::I32(samples) => {
             let first_channel =
                 interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
-            normalize_dynamic_range(&first_channel, |value| value as f64)
+            (
+                normalize_dynamic_range_to_u16(&first_channel, |value| value as f64),
+                u16::MAX,
+            )
         }
         TiffDecodingResult::F32(samples) => {
             let first_channel =
                 interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
-            normalize_dynamic_range(&first_channel, |value| value as f64)
+            (
+                normalize_dynamic_range_to_u16(&first_channel, |value| value as f64),
+                u16::MAX,
+            )
         }
         TiffDecodingResult::F64(samples) => {
             let first_channel =
                 interleaved_first_channel(&samples, channel_count, expected_pixels, &path)?;
-            normalize_dynamic_range(&first_channel, |value| value)
+            (
+                normalize_dynamic_range_to_u16(&first_channel, |value| value),
+                u16::MAX,
+            )
         }
         _ => {
             return Err(RasterPlaneLoadError::DecodeFailed {
@@ -139,18 +169,20 @@ fn load_tiff_plane(uri: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
     Ok(RasterPlane {
         width,
         height,
+        max_value,
         pixels,
     })
 }
 
 fn load_zarr_plane(uri: &str, dtype: &str) -> Result<RasterPlane, RasterPlaneLoadError> {
     let path = source_path_from_uri(uri)?;
-    let store: ReadableWritableListableStorage = Arc::new(
-        FilesystemStore::new(&path).map_err(|error| RasterPlaneLoadError::ReadFailed {
-            path: path.display().to_string(),
-            message: error.to_string(),
-        })?,
-    );
+    let store: ReadableWritableListableStorage =
+        Arc::new(FilesystemStore::new(&path).map_err(|error| {
+            RasterPlaneLoadError::ReadFailed {
+                path: path.display().to_string(),
+                message: error.to_string(),
+            }
+        })?);
 
     let array = Array::open(store.clone(), "/0")
         .or_else(|_| Array::open(store, "/"))
@@ -172,40 +204,64 @@ fn load_zarr_plane(uri: &str, dtype: &str) -> Result<RasterPlane, RasterPlaneLoa
     let ranges = plane_ranges(&shape);
     let subset = ArraySubset::new_with_ranges(&ranges);
 
-    let pixels = match dtype {
+    let (pixels, max_value) = match dtype {
         "uint8" => array
             .retrieve_array_subset::<Vec<u8>>(&subset)
             .map_err(|error| RasterPlaneLoadError::DecodeFailed {
                 path: path.display().to_string(),
                 message: error.to_string(),
+            })
+            .map(|values| {
+                (
+                    values.iter().copied().map(u16::from).collect::<Vec<_>>(),
+                    255,
+                )
             })?,
         "uint16" => {
             let values = array_values::<u16, _>(&array, &subset, &path)?;
-            normalize_dynamic_range(&values, |value| f64::from(value))
+            (values, u16::MAX)
         }
         "uint32" => {
             let values = array_values::<u32, _>(&array, &subset, &path)?;
-            normalize_dynamic_range(&values, |value| value as f64)
+            (
+                normalize_dynamic_range_to_u16(&values, |value| value as f64),
+                u16::MAX,
+            )
         }
         "int8" => {
             let values = array_values::<i8, _>(&array, &subset, &path)?;
-            normalize_dynamic_range(&values, |value| f64::from(value))
+            (
+                normalize_dynamic_range_to_u16(&values, |value| f64::from(value)),
+                u16::MAX,
+            )
         }
         "int16" => {
             let values = array_values::<i16, _>(&array, &subset, &path)?;
-            normalize_dynamic_range(&values, |value| f64::from(value))
+            (
+                normalize_dynamic_range_to_u16(&values, |value| f64::from(value)),
+                u16::MAX,
+            )
         }
         "int32" => {
             let values = array_values::<i32, _>(&array, &subset, &path)?;
-            normalize_dynamic_range(&values, |value| value as f64)
+            (
+                normalize_dynamic_range_to_u16(&values, |value| value as f64),
+                u16::MAX,
+            )
         }
         "float32" => {
             let values = array_values::<f32, _>(&array, &subset, &path)?;
-            normalize_dynamic_range(&values, |value| value as f64)
+            (
+                normalize_dynamic_range_to_u16(&values, |value| value as f64),
+                u16::MAX,
+            )
         }
         "float64" => {
             let values = array_values::<f64, _>(&array, &subset, &path)?;
-            normalize_dynamic_range(&values, |value| value)
+            (
+                normalize_dynamic_range_to_u16(&values, |value| value),
+                u16::MAX,
+            )
         }
         other => {
             return Err(RasterPlaneLoadError::UnsupportedDtype {
@@ -233,6 +289,7 @@ fn load_zarr_plane(uri: &str, dtype: &str) -> Result<RasterPlane, RasterPlaneLoa
     Ok(RasterPlane {
         width,
         height,
+        max_value,
         pixels,
     })
 }
@@ -287,13 +344,12 @@ fn interleaved_first_channel<T: Copy>(
     expected_pixels: usize,
     path: &Path,
 ) -> Result<Vec<T>, RasterPlaneLoadError> {
-    let expected_samples =
-        expected_pixels
-            .checked_mul(channel_count)
-            .ok_or_else(|| RasterPlaneLoadError::DecodeFailed {
-                path: path.display().to_string(),
-                message: "sample count overflow".to_owned(),
-            })?;
+    let expected_samples = expected_pixels.checked_mul(channel_count).ok_or_else(|| {
+        RasterPlaneLoadError::DecodeFailed {
+            path: path.display().to_string(),
+            message: "sample count overflow".to_owned(),
+        }
+    })?;
     if samples.len() < expected_samples {
         return Err(RasterPlaneLoadError::DecodeFailed {
             path: path.display().to_string(),
@@ -336,7 +392,7 @@ where
         })
 }
 
-fn normalize_dynamic_range<T: Copy>(values: &[T], to_f64: fn(T) -> f64) -> Vec<u8> {
+fn normalize_dynamic_range_to_u16<T: Copy>(values: &[T], to_f64: fn(T) -> f64) -> Vec<u16> {
     let mut min_value = f64::INFINITY;
     let mut max_value = f64::NEG_INFINITY;
 
@@ -354,12 +410,12 @@ fn normalize_dynamic_range<T: Copy>(values: &[T], to_f64: fn(T) -> f64) -> Vec<u
     }
 
     if !min_value.is_finite() || !max_value.is_finite() {
-        return vec![0_u8; values.len()];
+        return vec![0_u16; values.len()];
     }
 
     let span = max_value - min_value;
     if span <= f64::EPSILON {
-        return vec![0_u8; values.len()];
+        return vec![0_u16; values.len()];
     }
 
     values
@@ -367,9 +423,11 @@ fn normalize_dynamic_range<T: Copy>(values: &[T], to_f64: fn(T) -> f64) -> Vec<u
         .map(|value| {
             let scalar = to_f64(*value);
             if !scalar.is_finite() {
-                return 0_u8;
+                return 0_u16;
             }
-            (((scalar - min_value) / span) * 255.0).round().clamp(0.0, 255.0) as u8
+            (((scalar - min_value) / span) * f64::from(u16::MAX))
+                .round()
+                .clamp(0.0, f64::from(u16::MAX)) as u16
         })
         .collect()
 }
@@ -382,7 +440,7 @@ mod tests {
 
     use crate::model::SourceKind;
 
-    use super::{RasterPlaneLoadRequest, load_raster_plane, normalize_dynamic_range};
+    use super::{RasterPlaneLoadRequest, load_raster_plane, normalize_dynamic_range_to_u16};
 
     fn unique_path(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -409,14 +467,18 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_dynamic_range_to_visible_uint8_span() {
+    fn normalizes_dynamic_range_to_visible_uint16_span() {
         let values = vec![87_u16, 98_u16, 109_u16, 121_u16];
-        let normalized = normalize_dynamic_range(&values, |value| f64::from(value));
-        assert_eq!(normalized, vec![0, 83, 165, 255]);
+        let normalized = normalize_dynamic_range_to_u16(&values, |value| f64::from(value));
+        assert_eq!(normalized.len(), values.len());
+        assert_eq!(normalized.first().copied(), Some(0));
+        assert_eq!(normalized.last().copied(), Some(u16::MAX));
+        assert!(normalized[1] > normalized[0]);
+        assert!(normalized[2] > normalized[1]);
     }
 
     #[test]
-    fn loads_uint16_tiff_with_dynamic_range_normalization() {
+    fn loads_uint16_tiff_without_loss_of_source_dynamic_range() {
         let source_path = unique_path("uint16_tiff").with_extension("tif");
         write_gray16_tiff(&source_path, 2, 2, &[87, 98, 109, 121]);
 
@@ -429,7 +491,8 @@ mod tests {
 
         assert_eq!(plane.width, 2);
         assert_eq!(plane.height, 2);
-        assert_eq!(plane.pixels, vec![0, 83, 165, 255]);
+        assert_eq!(plane.max_value, u16::MAX);
+        assert_eq!(plane.pixels, vec![87, 98, 109, 121]);
 
         std::fs::remove_file(source_path).expect("fixture cleanup should succeed");
     }
