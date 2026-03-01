@@ -1,0 +1,8 @@
+- before starting to work on a slice:
+    - create a github milestone for the slice
+    - each ticket related to the milestone gets a github issue as part of the milestone
+    - each ticket should be worked on independently, and get its own commit
+- when the slice is confirmed finished
+    - make canonical demo(s) for it to showcase what has been done
+    - yeet the changes
+- each ticket should implement red/green TDD if possible
