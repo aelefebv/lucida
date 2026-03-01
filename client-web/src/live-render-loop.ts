@@ -383,10 +383,11 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
   if (payload.length < pixelCount) {
     throw new Error("PGM payload is truncated");
   }
+  const adjusted = stretchToDisplayRange(payload.subarray(0, pixelCount));
 
   const rgba = new Uint8ClampedArray(pixelCount * 4);
   for (let i = 0; i < pixelCount; i += 1) {
-    const value = payload[i] ?? 0;
+    const value = adjusted[i] ?? 0;
     const offset = i * 4;
     rgba[offset] = value;
     rgba[offset + 1] = value;
@@ -403,4 +404,64 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
 
 function isWhitespace(value: number): boolean {
   return value === 0x20 || value === 0x09 || value === 0x0a || value === 0x0d;
+}
+
+function stretchToDisplayRange(payload: Uint8Array): Uint8Array {
+  if (payload.length === 0) {
+    return payload;
+  }
+  let min = 255;
+  let max = 0;
+
+  const histogram = new Uint32Array(256);
+  for (const value of payload) {
+    histogram[value] = (histogram[value] ?? 0) + 1;
+    if (value < min) {
+      min = value;
+    }
+    if (value > max) {
+      max = value;
+    }
+  }
+
+  const total = payload.length;
+  const lowRank = Math.floor((total - 1) * 0.02);
+  const highRank = Math.floor((total - 1) * 0.98);
+
+  let cumulative = 0;
+  let low = 0;
+  for (let i = 0; i < histogram.length; i += 1) {
+    cumulative += histogram[i] ?? 0;
+    if (cumulative > lowRank) {
+      low = i;
+      break;
+    }
+  }
+
+  cumulative = 0;
+  let high = 255;
+  for (let i = 0; i < histogram.length; i += 1) {
+    cumulative += histogram[i] ?? 0;
+    if (cumulative > highRank) {
+      high = i;
+      break;
+    }
+  }
+
+  if (high <= low) {
+    low = min;
+    high = max;
+    if (high <= low) {
+      return payload;
+    }
+  }
+  const span = high - low;
+
+  const stretched = new Uint8Array(payload.length);
+  for (let i = 0; i < payload.length; i += 1) {
+    const value = payload[i] ?? 0;
+    const scaled = ((value - low) * 255) / span;
+    stretched[i] = Math.max(0, Math.min(255, Math.round(scaled)));
+  }
+  return stretched;
 }
