@@ -6,3 +6,6 @@
     - make canonical demo(s) for it to showcase what has been done
     - yeet the changes
 - each ticket should implement red/green TDD if possible
+- when closing a ticket/issue:
+    - include a clickable commit link in the closing comment
+    - write real multiline markdown (not literal `\n` sequences); use `gh issue comment --body-file` or equivalent
