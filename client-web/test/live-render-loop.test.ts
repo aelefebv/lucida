@@ -109,6 +109,53 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
+  it("preserves the first pixel when it is a whitespace byte value", async () => {
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [10, 30]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          return new Response(
+            new Blob([
+              toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [10, 30]))),
+            ]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    loop.update(fixtureClientState());
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+
+    const latest = frames.at(-1);
+    expect(latest).toBeDefined();
+    expect(latest?.pixelStats.min).toBe(10);
+    expect(latest?.pixelStats.max).toBe(30);
+    expect(Array.from(latest?.grayscaleSamples ?? [])).toEqual([10, 30]);
+    loop.dispose();
+  });
+
   it("uses active t/z selection when requesting preview and tile payloads", async () => {
     const requestedUrls: string[] = [];
     const frames: RenderFrameState[] = [];

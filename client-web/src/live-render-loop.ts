@@ -7,6 +7,7 @@ import { buildMinimapState, type MinimapState } from "./minimap";
 import { buildSessionNotice } from "./warning-surface";
 
 export type RenderFrameState = {
+  sourceId: string;
   generationSeq: number;
   frameKind: "preview" | "tile";
   width: number;
@@ -373,6 +374,7 @@ export class LiveRenderLoop {
     );
 
     this.onFrame({
+      sourceId,
       generationSeq,
       frameKind,
       width: dimensions.width,
@@ -651,9 +653,7 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
     throw new Error("unsupported PGM dimensions or max value");
   }
 
-  while (index < bytes.length && isWhitespace(bytes[index] ?? 0)) {
-    index += 1;
-  }
+  index = consumePgmHeaderDelimiter(bytes, index);
   const pixelCount = width * height;
   const payload = bytes.slice(index);
   const bytesPerSample = maxValue <= 255 ? 1 : 2;
@@ -730,6 +730,22 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
 
 function isWhitespace(value: number): boolean {
   return value === 0x20 || value === 0x09 || value === 0x0a || value === 0x0d;
+}
+
+function consumePgmHeaderDelimiter(bytes: Uint8Array, index: number): number {
+  if (index >= bytes.length) {
+    throw new Error("PGM payload is truncated");
+  }
+  const delimiter = bytes[index] ?? 0;
+  if (!isWhitespace(delimiter)) {
+    throw new Error("invalid PGM header delimiter");
+  }
+  let next = index + 1;
+  // Accept CRLF as a single line ending delimiter without discarding payload bytes.
+  if (delimiter === 0x0d && (bytes[next] ?? -1) === 0x0a) {
+    next += 1;
+  }
+  return next;
 }
 
 function normalizedAutoWindow(

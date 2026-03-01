@@ -362,6 +362,32 @@ describe("app shell routing", () => {
     minSlider.dispatchEvent(new Event("input", { bubbles: true }));
     expect(queryText("contrast-values")).toContain("100-121 / 65535");
   });
+
+  it("does not auto-adjust contrast while changing t until auto is clicked", async () => {
+    const fixture = await startAxisSensitiveContrastFixture();
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-a&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}&dataBase=${encodeURIComponent(fixture.dataBaseUrl ?? "")}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+    expect(queryText("contrast-values")).toContain("10-30 / 255");
+
+    queryInput("input-t-index").value = "1";
+    queryInput("input-t-index").dispatchEvent(new Event("input", { bubbles: true }));
+
+    await waitFor(() => queryText("selection-state").includes("t 1"), 2000);
+    await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+    expect(queryText("contrast-values")).toContain("10-30 / 255");
+
+    queryButton("btn-contrast-auto").click();
+    expect(queryText("contrast-values")).toContain("100-180 / 255");
+  });
 });
 
 async function startFixtureServer(config: {
@@ -703,6 +729,197 @@ async function startIntegratedRenderFixture16Bit(): Promise<SocketFixture> {
           }),
         );
       }
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.on("listening", () => resolve());
+  });
+  const wsAddress = server.address() as AddressInfo;
+  const wsUrl = `ws://127.0.0.1:${wsAddress.port.toString()}`;
+
+  return {
+    server,
+    httpServer,
+    url: wsUrl,
+    dataBaseUrl,
+    received,
+    openSourceRequests: [],
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      await new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+async function startAxisSensitiveContrastFixture(): Promise<SocketFixture> {
+  const received: unknown[] = [];
+  const frameByT = new Map<number, { preview: Buffer; tile: Buffer }>([
+    [0, { preview: pgmBody(2, 1, [10, 30]), tile: channelBlockRawPayload(pgmBody(2, 1, [10, 30])) }],
+    [1, { preview: pgmBody(2, 1, [100, 180]), tile: channelBlockRawPayload(pgmBody(2, 1, [100, 180])) }],
+  ]);
+
+  const tFromUrl = (url: string | undefined): number => {
+    if (typeof url !== "string") {
+      return 0;
+    }
+    const match = url.match(/\/t\/(\d+)\//);
+    if (match === null) {
+      return 0;
+    }
+    const parsed = Number.parseInt(match[1] ?? "0", 10);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+
+  const httpServer = createServer((request, response) => {
+    const tIndex = tFromUrl(request.url);
+    const frame = frameByT.get(tIndex) ?? frameByT.get(0);
+    if (frame === undefined) {
+      response.statusCode = 404;
+      response.end();
+      return;
+    }
+    if (request.url?.includes("/v1/preview2d/")) {
+      respondPgm(response, frame.preview);
+      return;
+    }
+    if (request.url?.includes("/v1/tile2d/")) {
+      respondBinary(response, frame.tile);
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => {
+    httpServer.listen(0, "127.0.0.1", () => resolve());
+  });
+  const httpAddress = httpServer.address() as AddressInfo;
+  const dataBaseUrl = `http://127.0.0.1:${httpAddress.port.toString()}`;
+
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  let sessionRev = 2;
+  let viewRev = 1;
+  let tIndex = 0;
+  server.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const text = raw.toString("utf-8");
+      const parsed = JSON.parse(text) as unknown;
+      received.push(parsed);
+      if (isRecord(parsed) && parsed.message_type === "attach") {
+        socket.send(
+          JSON.stringify({
+            message_type: "session.snapshot",
+            session_id: "sess_fixture",
+            permission_class: "view",
+            is_lease_holder: false,
+            snapshot: {
+              session: {
+                session_id: "sess_fixture",
+                session_rev: sessionRev,
+              },
+              shared_scene: {
+                scene_rev: 1,
+                sources: {
+                  src_fixture: {
+                    sourceId: "src_fixture",
+                    name: "fixture",
+                    status: "watching",
+                    latestWorkingGenerationSeq: 1,
+                  },
+                },
+                datasets: {
+                  ds_fixture: {
+                    datasetId: "ds_fixture",
+                    sourceId: "src_fixture",
+                    resolvedGenerationSeq: 1,
+                    dtype: "uint8",
+                    sizeT: 2,
+                    sizeC: 1,
+                    sizeZ: 1,
+                    sizeY: 1,
+                    sizeX: 2,
+                  },
+                },
+                layers: {
+                  lay_fixture: {
+                    layerId: "lay_fixture",
+                    name: "raw",
+                    layerRev: 1,
+                    metadataRev: 0,
+                    writeRev: 0,
+                  },
+                },
+                warnings: [],
+              },
+              client_view: {
+                client_id: "cli_fixture",
+                view_rev: viewRev,
+                active_layer_id: "lay_fixture",
+                center_x: 0,
+                center_y: 0,
+                zoom: 1,
+                z_index: 0,
+                t_index: tIndex,
+                selected_channels: [0],
+                warnings: [],
+              },
+              warnings: [],
+            },
+          }),
+        );
+        return;
+      }
+
+      if (
+        !isRecord(parsed) ||
+        parsed.message_type !== "command" ||
+        parsed.op !== "view.set_t"
+      ) {
+        return;
+      }
+      const args = parsed.args;
+      if (!isRecord(args)) {
+        return;
+      }
+      const requested = Number(args.t_index);
+      tIndex = Number.isFinite(requested) ? Math.max(0, Math.min(1, Math.floor(requested))) : 0;
+      sessionRev += 1;
+      viewRev += 1;
+      socket.send(
+        JSON.stringify({
+          message_type: "event",
+          schema_version: "lucida-proto-0.1",
+          session_id: "sess_fixture",
+          session_rev: sessionRev,
+          event_type: "view_updated",
+          payload: {
+            client_id: "cli_fixture",
+            view_rev: viewRev,
+            active_layer_id: "lay_fixture",
+            center_x: 0,
+            center_y: 0,
+            zoom: 1,
+            z_index: 0,
+            t_index: tIndex,
+            selected_channels: [0],
+          },
+        }),
+      );
     });
   });
   await new Promise<void>((resolve) => {

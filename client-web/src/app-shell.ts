@@ -734,6 +734,7 @@ function clampChannels(channels: number[], maxIndex: number | null): number[] {
 }
 
 function initializeContrastControls(mount: HTMLElement): void {
+  mount.removeAttribute("data-contrast-auto-source-id");
   setContrastControlsState(mount, {
     min: DEFAULT_CONTRAST_MIN,
     max: DEFAULT_CONTRAST_MAX,
@@ -750,8 +751,8 @@ function maybeAutoSetContrastFromFrame(
     return;
   }
   syncContrastSliderLimit(mount, state.renderFrame.sampleMax);
-  const current = readContrastControlsState(mount);
-  if (current.userAdjusted) {
+  const previousAutoSourceId = mount.getAttribute("data-contrast-auto-source-id");
+  if (previousAutoSourceId === state.renderFrame.sourceId) {
     return;
   }
   const autoWindow = autoContrastWindow(
@@ -764,6 +765,7 @@ function maybeAutoSetContrastFromFrame(
     sampleMax: state.renderFrame.sampleMax,
     userAdjusted: false,
   });
+  mount.setAttribute("data-contrast-auto-source-id", state.renderFrame.sourceId);
 }
 
 function applyUserContrastSelection(mount: HTMLElement): void {
