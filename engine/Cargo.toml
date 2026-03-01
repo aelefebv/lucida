@@ -1,0 +1,16 @@
+[package]
+name = "lucida-engine"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Lucida engine skeleton for S0 contract-driven implementation"
+
+[lib]
+name = "lucida_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lucida-engine"
+path = "src/main.rs"
+
+[dependencies]
