@@ -250,7 +250,7 @@ describe("app shell routing", () => {
     expect((setChannels?.args as { channels?: unknown })?.channels).toEqual([1, 4]);
   });
 
-  it("maps keyboard shortcuts for zoom and t stepping", async () => {
+  it("maps keyboard shortcuts for zoom and t stepping with comma/period", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",
       isLeaseHolder: false,
@@ -269,8 +269,8 @@ describe("app shell routing", () => {
 
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "=" }));
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "_" }));
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: ">" }));
-    document.dispatchEvent(new KeyboardEvent("keydown", { key: "<" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "." }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "," }));
 
     await waitFor(() => {
       const commandCount = fixture.received.filter((value) => {

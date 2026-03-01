@@ -371,13 +371,13 @@ function attachInteractionHandlers(
       });
       return;
     }
-    if (event.key === ">") {
+    if (event.key === ".") {
       withClientState((_, tIndex, __, ___, maxTIndex) => {
         runtime.setT(clampAxisIndex(tIndex + 1, maxTIndex));
       });
       return;
     }
-    if (event.key === "<") {
+    if (event.key === ",") {
       withClientState((_, tIndex, __, ___, maxTIndex) => {
         runtime.setT(clampAxisIndex(tIndex - 1, maxTIndex));
       });
