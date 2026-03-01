@@ -286,7 +286,7 @@ describe("app shell routing", () => {
     const zoomCommands = commands.filter((command) => command.op === "view.zoom");
     expect(zoomCommands).toHaveLength(2);
     expect((zoomCommands[0]?.args as { zoom?: unknown })?.zoom).toBe(1.2);
-    expect((zoomCommands[1]?.args as { zoom?: unknown })?.zoom).toBe(0.96);
+    expect((zoomCommands[1]?.args as { zoom?: unknown })?.zoom).toBe(1);
 
     const setTCommands = commands.filter((command) => command.op === "view.set_t");
     expect(setTCommands).toHaveLength(2);

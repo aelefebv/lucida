@@ -20,6 +20,8 @@ type ContrastControlsState = ContrastWindow & {
 const DEFAULT_CONTRAST_MIN = 0;
 const DEFAULT_CONTRAST_MAX = 255;
 const DEFAULT_AXIS_SLIDER_MAX = 4095;
+const ZOOM_IN_SCALE = 1.2;
+const ZOOM_OUT_SCALE = 1 / ZOOM_IN_SCALE;
 
 export function bootstrapApp(
   document: Document = window.document,
@@ -352,11 +354,11 @@ function attachInteractionHandlers(
       return;
     }
     if (event.key === "+" || event.key === "=") {
-      runtime.zoom(1.2, 0, 0);
+      runtime.zoom(ZOOM_IN_SCALE, 0, 0);
       return;
     }
     if (event.key === "-" || event.key === "_") {
-      runtime.zoom(0.8, 0, 0);
+      runtime.zoom(ZOOM_OUT_SCALE, 0, 0);
       return;
     }
     if (event.key === "]") {
@@ -429,8 +431,8 @@ function attachInteractionHandlers(
   registerClick("btn-pan-right", () => runtime.pan(24, 0));
   registerClick("btn-pan-up", () => runtime.pan(0, -24));
   registerClick("btn-pan-down", () => runtime.pan(0, 24));
-  registerClick("btn-zoom-in", () => runtime.zoom(1.2, 0, 0));
-  registerClick("btn-zoom-out", () => runtime.zoom(0.8, 0, 0));
+  registerClick("btn-zoom-in", () => runtime.zoom(ZOOM_IN_SCALE, 0, 0));
+  registerClick("btn-zoom-out", () => runtime.zoom(ZOOM_OUT_SCALE, 0, 0));
   registerInput("input-z-index", () => {
     const clientState = runtime.state().clientState;
     const bounds = clientState === null ? null : selectionBoundsFor(clientState);
