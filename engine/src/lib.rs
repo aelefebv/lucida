@@ -2,20 +2,26 @@ mod clock;
 mod command_router;
 mod constants;
 mod errors;
+mod event_stream;
 mod id_allocator;
 mod model;
 mod revision_allocator;
 mod session_manager;
 
 pub use command_router::{
-    CommandAck, CommandArgs, CommandEnvelope, CommandError, CommandErrorCode, CommandRouter,
-    CommandScope,
+    CommandAck, CommandArgs, CommandEnvelope, CommandError, CommandErrorCode, CommandOutcome,
+    CommandRouter, CommandScope,
 };
 pub use constants::{
     COMMAND_ACK_MESSAGE_TYPE, COMMAND_MESSAGE_TYPE, ENGINE_VERSION, SCHEMA_VERSION,
     SNAPSHOT_MESSAGE_TYPE,
 };
 pub use errors::SessionError;
+pub use event_stream::{
+    ClientJoinedPayload, EventBus, EventEnvelope, EventMessageSerializer, EventPayload,
+    EventStreamError, EventType, LayerUpsertPayload, ProjectionState, SourceUpsertPayload,
+    ViewUpdatedPayload,
+};
 pub use id_allocator::{IdAllocator, IdKind};
 pub use model::{
     AttachRequest, ClientRosterEntry, ClientViewMode, CreatedSession, DatasetBinding, ExposureMode,

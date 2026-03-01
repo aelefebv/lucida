@@ -1,0 +1,529 @@
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+use crate::model::{
+    ClientRosterEntry, ClientViewMode, LayerState, PerClientViewState, PermissionClass,
+    SessionSnapshotEnvelope, SourceRecord,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventType {
+    SessionClientJoined,
+    ViewUpdated,
+    SceneSourceUpsert,
+    SceneLayerUpsert,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientJoinedPayload {
+    pub client_id: String,
+    pub label: String,
+    pub permission_class: String,
+    pub connected_at: String,
+    pub last_seen_at: String,
+    pub is_lease_holder: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewUpdatedPayload {
+    pub client_id: String,
+    pub view_rev: u64,
+    pub view_mode: String,
+    pub active_layer_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceUpsertPayload {
+    pub source_id: String,
+    pub name: String,
+    pub latest_working_generation_seq: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LayerUpsertPayload {
+    pub layer_id: String,
+    pub name: String,
+    pub layer_rev: u64,
+    pub metadata_rev: u64,
+    pub write_rev: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "payload_type", content = "payload", rename_all = "snake_case")]
+pub enum EventPayload {
+    SessionClientJoined(ClientJoinedPayload),
+    ViewUpdated(ViewUpdatedPayload),
+    SceneSourceUpsert(SourceUpsertPayload),
+    SceneLayerUpsert(LayerUpsertPayload),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventEnvelope {
+    pub message_type: String,
+    pub schema_version: String,
+    pub session_id: String,
+    pub session_rev: u64,
+    pub event_type: EventType,
+    pub payload: EventPayload,
+    pub emitted_at: String,
+}
+
+impl EventEnvelope {
+    #[must_use]
+    pub fn session_client_joined(
+        session_id: String,
+        session_rev: u64,
+        payload: ClientJoinedPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SessionClientJoined,
+            payload: EventPayload::SessionClientJoined(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
+    pub fn view_updated(
+        session_id: String,
+        session_rev: u64,
+        payload: ViewUpdatedPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::ViewUpdated,
+            payload: EventPayload::ViewUpdated(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
+    pub fn scene_source_upsert(
+        session_id: String,
+        session_rev: u64,
+        payload: SourceUpsertPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SceneSourceUpsert,
+            payload: EventPayload::SceneSourceUpsert(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
+    pub fn scene_layer_upsert(
+        session_id: String,
+        session_rev: u64,
+        payload: LayerUpsertPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SceneLayerUpsert,
+            payload: EventPayload::SceneLayerUpsert(payload),
+            emitted_at,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventStreamError {
+    NonMonotonicSessionRevision {
+        last_session_rev: u64,
+        next_session_rev: u64,
+    },
+    SessionMismatch {
+        expected_session_id: String,
+        actual_session_id: String,
+    },
+}
+
+#[derive(Debug, Default)]
+pub struct EventBus {
+    events: Vec<EventEnvelope>,
+}
+
+impl EventBus {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn publish(&mut self, event: EventEnvelope) -> Result<(), EventStreamError> {
+        if let Some(last) = self.events.last()
+            && event.session_rev <= last.session_rev
+        {
+            return Err(EventStreamError::NonMonotonicSessionRevision {
+                last_session_rev: last.session_rev,
+                next_session_rev: event.session_rev,
+            });
+        }
+
+        self.events.push(event);
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn events(&self) -> &[EventEnvelope] {
+        &self.events
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionState {
+    pub session_id: String,
+    pub session_rev: u64,
+    pub client_roster: BTreeMap<String, ClientJoinedPayload>,
+    pub client_views: BTreeMap<String, ViewUpdatedPayload>,
+    pub sources: BTreeMap<String, SourceUpsertPayload>,
+    pub layers: BTreeMap<String, LayerUpsertPayload>,
+}
+
+impl ProjectionState {
+    #[must_use]
+    pub fn from_snapshot(snapshot: &SessionSnapshotEnvelope) -> Self {
+        let client_roster = snapshot
+            .snapshot
+            .client_roster
+            .iter()
+            .map(|entry| {
+                let payload = ClientJoinedPayload::from(entry);
+                (payload.client_id.clone(), payload)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let client_view_payload = ViewUpdatedPayload::from(&snapshot.snapshot.client_view);
+        let client_views =
+            BTreeMap::from([(client_view_payload.client_id.clone(), client_view_payload)]);
+
+        let sources = snapshot
+            .snapshot
+            .shared_scene
+            .sources
+            .values()
+            .map(|source| {
+                let payload = SourceUpsertPayload::from(source);
+                (payload.source_id.clone(), payload)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let layers = snapshot
+            .snapshot
+            .shared_scene
+            .layers
+            .values()
+            .map(|layer| {
+                let payload = LayerUpsertPayload::from(layer);
+                (payload.layer_id.clone(), payload)
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        Self {
+            session_id: snapshot.session_id.clone(),
+            session_rev: snapshot.session_rev,
+            client_roster,
+            client_views,
+            sources,
+            layers,
+        }
+    }
+
+    pub fn apply_event(&mut self, event: &EventEnvelope) -> Result<(), EventStreamError> {
+        if event.session_id != self.session_id {
+            return Err(EventStreamError::SessionMismatch {
+                expected_session_id: self.session_id.clone(),
+                actual_session_id: event.session_id.clone(),
+            });
+        }
+
+        if event.session_rev <= self.session_rev {
+            return Err(EventStreamError::NonMonotonicSessionRevision {
+                last_session_rev: self.session_rev,
+                next_session_rev: event.session_rev,
+            });
+        }
+
+        match &event.payload {
+            EventPayload::SessionClientJoined(payload) => {
+                self.client_roster
+                    .insert(payload.client_id.clone(), payload.clone());
+            }
+            EventPayload::ViewUpdated(payload) => {
+                self.client_views
+                    .insert(payload.client_id.clone(), payload.clone());
+            }
+            EventPayload::SceneSourceUpsert(payload) => {
+                self.sources
+                    .insert(payload.source_id.clone(), payload.clone());
+            }
+            EventPayload::SceneLayerUpsert(payload) => {
+                self.layers
+                    .insert(payload.layer_id.clone(), payload.clone());
+            }
+        }
+
+        self.session_rev = event.session_rev;
+        Ok(())
+    }
+}
+
+pub struct EventMessageSerializer;
+
+impl EventMessageSerializer {
+    pub fn serialize(event: &EventEnvelope) -> Result<String, serde_json::Error> {
+        serde_json::to_string(event)
+    }
+
+    pub fn deserialize(raw: &str) -> Result<EventEnvelope, serde_json::Error> {
+        serde_json::from_str(raw)
+    }
+}
+
+impl From<&ClientRosterEntry> for ClientJoinedPayload {
+    fn from(value: &ClientRosterEntry) -> Self {
+        Self {
+            client_id: value.client_id.clone(),
+            label: value.label.clone(),
+            permission_class: permission_class_name(value.permission_class).to_owned(),
+            connected_at: value.connected_at.clone(),
+            last_seen_at: value.last_seen_at.clone(),
+            is_lease_holder: value.is_lease_holder,
+        }
+    }
+}
+
+impl From<&PerClientViewState> for ViewUpdatedPayload {
+    fn from(value: &PerClientViewState) -> Self {
+        Self {
+            client_id: value.client_id.clone(),
+            view_rev: value.view_rev,
+            view_mode: view_mode_name(value.view_mode).to_owned(),
+            active_layer_id: value.active_layer_id.clone(),
+        }
+    }
+}
+
+impl From<&SourceRecord> for SourceUpsertPayload {
+    fn from(value: &SourceRecord) -> Self {
+        Self {
+            source_id: value.source_id.clone(),
+            name: value.name.clone(),
+            latest_working_generation_seq: value.latest_working_generation_seq,
+        }
+    }
+}
+
+impl From<&LayerState> for LayerUpsertPayload {
+    fn from(value: &LayerState) -> Self {
+        Self {
+            layer_id: value.layer_id.clone(),
+            name: value.name.clone(),
+            layer_rev: value.layer_rev,
+            metadata_rev: value.metadata_rev,
+            write_rev: value.write_rev,
+        }
+    }
+}
+
+const fn permission_class_name(permission: PermissionClass) -> &'static str {
+    match permission {
+        PermissionClass::View => "view",
+        PermissionClass::Control => "control",
+        PermissionClass::Admin => "admin",
+    }
+}
+
+const fn view_mode_name(view_mode: ClientViewMode) -> &'static str {
+    match view_mode {
+        ClientViewMode::TwoD => "2d",
+        ClientViewMode::ThreeD => "3d",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::{AttachRequest, ClientViewMode, PermissionClass};
+    use crate::session_manager::SessionManager;
+
+    use super::{
+        EventBus, EventEnvelope, EventMessageSerializer, EventPayload, EventStreamError,
+        ProjectionState, SourceUpsertPayload, ViewUpdatedPayload,
+    };
+
+    #[test]
+    fn event_bus_rejects_non_monotonic_session_revisions() {
+        let mut bus = EventBus::new();
+
+        let first = EventEnvelope::scene_source_upsert(
+            "sess_00000001".to_owned(),
+            2,
+            SourceUpsertPayload {
+                source_id: "src_00000001".to_owned(),
+                name: "source-a".to_owned(),
+                latest_working_generation_seq: 0,
+            },
+            "2026-03-01T01:00:00Z".to_owned(),
+        );
+        let second = EventEnvelope::scene_source_upsert(
+            "sess_00000001".to_owned(),
+            2,
+            SourceUpsertPayload {
+                source_id: "src_00000002".to_owned(),
+                name: "source-b".to_owned(),
+                latest_working_generation_seq: 0,
+            },
+            "2026-03-01T01:00:01Z".to_owned(),
+        );
+
+        bus.publish(first)
+            .expect("first monotonic event should succeed");
+        let error = bus
+            .publish(second)
+            .expect_err("second non-monotonic event should fail");
+        assert_eq!(
+            error,
+            EventStreamError::NonMonotonicSessionRevision {
+                last_session_rev: 2,
+                next_session_rev: 2
+            }
+        );
+    }
+
+    #[test]
+    fn projection_hydrates_from_snapshot_and_applies_typed_events() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("projection-session");
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("attach should succeed");
+
+        let mut projection = ProjectionState::from_snapshot(&snapshot);
+        assert!(projection.sources.is_empty());
+
+        let source_event = EventEnvelope::scene_source_upsert(
+            created.session_id.clone(),
+            snapshot.session_rev + 1,
+            SourceUpsertPayload {
+                source_id: "src_90000001".to_owned(),
+                name: "projection-source".to_owned(),
+                latest_working_generation_seq: 3,
+            },
+            "2026-03-01T01:00:10Z".to_owned(),
+        );
+        projection
+            .apply_event(&source_event)
+            .expect("source upsert event should apply");
+
+        let view_event = EventEnvelope::view_updated(
+            created.session_id,
+            snapshot.session_rev + 2,
+            ViewUpdatedPayload {
+                client_id: snapshot.snapshot.client_view.client_id.clone(),
+                view_rev: 1,
+                view_mode: "3d".to_owned(),
+                active_layer_id: Some("lay_00000001".to_owned()),
+            },
+            "2026-03-01T01:00:11Z".to_owned(),
+        );
+        projection
+            .apply_event(&view_event)
+            .expect("view updated event should apply");
+
+        let source_payload = projection
+            .sources
+            .get("src_90000001")
+            .expect("source payload should exist");
+        assert_eq!(source_payload.latest_working_generation_seq, 3);
+
+        let view_payload = projection
+            .client_views
+            .get(&snapshot.snapshot.client_view.client_id)
+            .expect("client view payload should exist");
+        assert_eq!(view_payload.view_mode, "3d");
+        assert_eq!(
+            view_payload.active_layer_id.as_deref(),
+            Some("lay_00000001")
+        );
+        assert_eq!(projection.session_rev, snapshot.session_rev + 2);
+    }
+
+    #[test]
+    fn serializer_round_trips_event_envelopes() {
+        let event = EventEnvelope::view_updated(
+            "sess_00000001".to_owned(),
+            7,
+            ViewUpdatedPayload {
+                client_id: "cli_00000001".to_owned(),
+                view_rev: 2,
+                view_mode: "2d".to_owned(),
+                active_layer_id: None,
+            },
+            "2026-03-01T01:00:20Z".to_owned(),
+        );
+
+        let encoded =
+            EventMessageSerializer::serialize(&event).expect("event serialization should succeed");
+        let decoded = EventMessageSerializer::deserialize(&encoded)
+            .expect("event deserialization should succeed");
+
+        assert_eq!(decoded, event);
+        assert!(matches!(decoded.payload, EventPayload::ViewUpdated(_)));
+    }
+
+    #[test]
+    fn projection_rejects_session_mismatch() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("mismatch-session");
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("attach should succeed");
+        let mut projection = ProjectionState::from_snapshot(&snapshot);
+
+        let wrong_session_event = EventEnvelope::view_updated(
+            "sess_other".to_owned(),
+            snapshot.session_rev + 1,
+            ViewUpdatedPayload {
+                client_id: snapshot.snapshot.client_view.client_id.clone(),
+                view_rev: 1,
+                view_mode: match ClientViewMode::TwoD {
+                    ClientViewMode::TwoD => "2d",
+                    ClientViewMode::ThreeD => "3d",
+                }
+                .to_owned(),
+                active_layer_id: None,
+            },
+            "2026-03-01T01:00:30Z".to_owned(),
+        );
+
+        let error = projection
+            .apply_event(&wrong_session_event)
+            .expect_err("session mismatch should fail");
+        assert!(matches!(error, EventStreamError::SessionMismatch { .. }));
+    }
+}

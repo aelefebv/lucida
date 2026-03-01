@@ -24,7 +24,7 @@ fn command_router_routes_scene_command_with_authorization_and_lease() {
         .expect("lease assignment should succeed");
 
     let router = CommandRouter::new();
-    let ack = router
+    let outcome = router
         .route(
             &mut manager,
             CommandEnvelope {
@@ -44,10 +44,13 @@ fn command_router_routes_scene_command_with_authorization_and_lease() {
         )
         .expect("scene command should succeed");
 
-    assert!(ack.accepted);
-    assert!(ack.resulting_scene_rev.is_some());
+    assert!(outcome.ack.accepted);
+    assert!(outcome.ack.resulting_scene_rev.is_some());
+    assert_eq!(outcome.events.len(), 1);
     assert!(
-        ack.created_object_id
+        outcome
+            .ack
+            .created_object_id
             .expect("source id should be included")
             .starts_with("src_")
     );

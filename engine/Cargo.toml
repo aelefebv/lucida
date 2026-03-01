@@ -14,4 +14,6 @@ name = "lucida-engine"
 path = "src/main.rs"
 
 [dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
 time = { version = "0.3.44", features = ["formatting"] }

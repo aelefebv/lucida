@@ -80,4 +80,26 @@ mod tests {
         assert_eq!(client, "cli_00000001");
         assert_eq!(next_session, "sess_00000002");
     }
+
+    #[test]
+    fn allocate_covers_expected_prefixes_for_all_kinds() {
+        let mut allocator = IdAllocator::new();
+
+        assert!(allocator.allocate(IdKind::Session).starts_with("sess_"));
+        assert!(allocator.allocate(IdKind::Client).starts_with("cli_"));
+        assert!(allocator.allocate(IdKind::Scene).starts_with("scn_"));
+        assert!(allocator.allocate(IdKind::Source).starts_with("src_"));
+        assert!(allocator.allocate(IdKind::Dataset).starts_with("ds_"));
+        assert!(allocator.allocate(IdKind::Layer).starts_with("lay_"));
+        assert!(allocator.allocate(IdKind::Target).starts_with("tgt_"));
+        assert!(allocator.allocate(IdKind::Generation).starts_with("gen_"));
+        assert!(allocator.allocate(IdKind::Recipe).starts_with("rr_"));
+        assert!(allocator.allocate(IdKind::PublishBatch).starts_with("pub_"));
+        assert!(allocator.allocate(IdKind::Token).starts_with("tok_"));
+        assert!(
+            allocator
+                .allocate(IdKind::ContextPackage)
+                .starts_with("lcp_")
+        );
+    }
 }

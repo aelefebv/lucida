@@ -1,5 +1,9 @@
+use crate::clock::rfc3339_now;
 use crate::constants::{COMMAND_ACK_MESSAGE_TYPE, COMMAND_MESSAGE_TYPE, SCHEMA_VERSION};
 use crate::errors::SessionError;
+use crate::event_stream::{
+    EventEnvelope, LayerUpsertPayload, SourceUpsertPayload, ViewUpdatedPayload,
+};
 use crate::model::PermissionClass;
 use crate::session_manager::SessionManager;
 
@@ -44,6 +48,12 @@ pub struct CommandAck {
     pub resulting_scene_rev: Option<u64>,
     pub resulting_view_rev: Option<u64>,
     pub created_object_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandOutcome {
+    pub ack: CommandAck,
+    pub events: Vec<EventEnvelope>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +124,7 @@ impl CommandRouter {
         &self,
         session_manager: &mut SessionManager,
         envelope: CommandEnvelope,
-    ) -> Result<CommandAck, CommandError> {
+    ) -> Result<CommandOutcome, CommandError> {
         let operation = validate_envelope(&envelope)?;
 
         let (permission_class, is_lease_holder) = session_manager
@@ -241,10 +251,11 @@ fn dispatch(
     operation: Operation,
     session_manager: &mut SessionManager,
     envelope: CommandEnvelope,
-) -> Result<CommandAck, CommandError> {
+) -> Result<CommandOutcome, CommandError> {
     let mut resulting_scene_rev = None;
     let mut resulting_view_rev = None;
     let mut created_object_id = None;
+    let mut events = Vec::new();
 
     match (operation, envelope.args) {
         (Operation::ViewSetActiveLayer, CommandArgs::ViewSetActiveLayer { active_layer_id }) => {
@@ -256,26 +267,51 @@ fn dispatch(
                 )
                 .map_err(CommandError::from)?;
             resulting_view_rev = Some(view_rev);
+
+            let view_state = session_manager
+                .client_view_state(&envelope.session_id, &envelope.client_id)
+                .map_err(CommandError::from)?;
+            let (session_rev, _) = session_manager
+                .session_and_scene_revisions(&envelope.session_id)
+                .map_err(CommandError::from)?;
+            events.push(EventEnvelope::view_updated(
+                envelope.session_id.clone(),
+                session_rev,
+                ViewUpdatedPayload::from(&view_state),
+                rfc3339_now(),
+            ));
         }
         (Operation::SceneAddSource, CommandArgs::SceneAddSource { name }) => {
             let source = session_manager
                 .add_source(&envelope.session_id, name)
                 .map_err(CommandError::from)?;
-            created_object_id = Some(source.source_id);
-            let (_, scene_rev) = session_manager
+            created_object_id = Some(source.source_id.clone());
+            let (session_rev, scene_rev) = session_manager
                 .session_and_scene_revisions(&envelope.session_id)
                 .map_err(CommandError::from)?;
             resulting_scene_rev = Some(scene_rev);
+            events.push(EventEnvelope::scene_source_upsert(
+                envelope.session_id.clone(),
+                session_rev,
+                SourceUpsertPayload::from(&source),
+                rfc3339_now(),
+            ));
         }
         (Operation::SceneLayerAdd, CommandArgs::SceneLayerAdd { name }) => {
             let layer = session_manager
                 .add_layer(&envelope.session_id, name)
                 .map_err(CommandError::from)?;
-            created_object_id = Some(layer.layer_id);
-            let (_, scene_rev) = session_manager
+            created_object_id = Some(layer.layer_id.clone());
+            let (session_rev, scene_rev) = session_manager
                 .session_and_scene_revisions(&envelope.session_id)
                 .map_err(CommandError::from)?;
             resulting_scene_rev = Some(scene_rev);
+            events.push(EventEnvelope::scene_layer_upsert(
+                envelope.session_id.clone(),
+                session_rev,
+                LayerUpsertPayload::from(&layer),
+                rfc3339_now(),
+            ));
         }
         _ => {
             return Err(CommandError {
@@ -289,18 +325,21 @@ fn dispatch(
         .session_and_scene_revisions(&envelope.session_id)
         .map_err(CommandError::from)?;
 
-    Ok(CommandAck {
-        message_type: COMMAND_ACK_MESSAGE_TYPE.to_owned(),
-        schema_version: SCHEMA_VERSION.to_owned(),
-        session_id: envelope.session_id,
-        request_id: envelope.request_id,
-        client_id: envelope.client_id,
-        client_seq: envelope.client_seq,
-        accepted: true,
-        resulting_session_rev: session_rev,
-        resulting_scene_rev,
-        resulting_view_rev,
-        created_object_id,
+    Ok(CommandOutcome {
+        ack: CommandAck {
+            message_type: COMMAND_ACK_MESSAGE_TYPE.to_owned(),
+            schema_version: SCHEMA_VERSION.to_owned(),
+            session_id: envelope.session_id,
+            request_id: envelope.request_id,
+            client_id: envelope.client_id,
+            client_seq: envelope.client_seq,
+            accepted: true,
+            resulting_session_rev: session_rev,
+            resulting_scene_rev,
+            resulting_view_rev,
+            created_object_id,
+        },
+        events,
     })
 }
 
@@ -338,11 +377,12 @@ impl From<SessionError> for CommandError {
 
 #[cfg(test)]
 mod tests {
+    use crate::constants::{COMMAND_MESSAGE_TYPE, SCHEMA_VERSION};
+    use crate::event_stream::EventType;
     use crate::model::{AttachRequest, PermissionClass};
+    use crate::session_manager::SessionManager;
 
     use super::{CommandArgs, CommandEnvelope, CommandErrorCode, CommandRouter, CommandScope};
-    use crate::constants::{COMMAND_MESSAGE_TYPE, SCHEMA_VERSION};
-    use crate::session_manager::SessionManager;
 
     #[test]
     fn rejects_malformed_command_envelope() {
@@ -380,6 +420,170 @@ mod tests {
             result
                 .expect_err("expected malformed envelope to fail")
                 .code,
+            CommandErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_operation() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("cmd-session");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "client-a".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("attach should succeed");
+
+        let router = CommandRouter::new();
+        let result = router.route(
+            &mut manager,
+            CommandEnvelope {
+                message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+                schema_version: SCHEMA_VERSION.to_owned(),
+                session_id: created.session_id,
+                request_id: "req_1b".to_owned(),
+                client_id: attached.snapshot.client_view.client_id,
+                client_seq: 1,
+                op: "view.does_not_exist".to_owned(),
+                scope: CommandScope::ClientView,
+                requires_lease: false,
+                args: CommandArgs::ViewSetActiveLayer {
+                    active_layer_id: None,
+                },
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("unknown operation should fail").code,
+            CommandErrorCode::UnknownOperation
+        );
+    }
+
+    #[test]
+    fn rejects_scope_mismatch() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("cmd-session");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "client-a".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("attach should succeed");
+
+        let router = CommandRouter::new();
+        let result = router.route(
+            &mut manager,
+            CommandEnvelope {
+                message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+                schema_version: SCHEMA_VERSION.to_owned(),
+                session_id: created.session_id,
+                request_id: "req_1c".to_owned(),
+                client_id: attached.snapshot.client_view.client_id,
+                client_seq: 1,
+                op: "view.set_active_layer".to_owned(),
+                scope: CommandScope::SceneShared,
+                requires_lease: false,
+                args: CommandArgs::ViewSetActiveLayer {
+                    active_layer_id: None,
+                },
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("scope mismatch should fail").code,
+            CommandErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn rejects_requires_lease_mismatch() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("cmd-session");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "control-client".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("attach should succeed");
+
+        manager
+            .set_lease_holder(
+                &created.session_id,
+                Some(&attached.snapshot.client_view.client_id),
+            )
+            .expect("lease holder assignment should succeed");
+
+        let router = CommandRouter::new();
+        let result = router.route(
+            &mut manager,
+            CommandEnvelope {
+                message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+                schema_version: SCHEMA_VERSION.to_owned(),
+                session_id: created.session_id,
+                request_id: "req_1d".to_owned(),
+                client_id: attached.snapshot.client_view.client_id,
+                client_seq: 1,
+                op: "scene.add_source".to_owned(),
+                scope: CommandScope::SceneShared,
+                requires_lease: false,
+                args: CommandArgs::SceneAddSource {
+                    name: "source-a".to_owned(),
+                },
+            },
+        );
+
+        assert_eq!(
+            result
+                .expect_err("requires_lease mismatch should fail")
+                .code,
+            CommandErrorCode::ValidationError
+        );
+    }
+
+    #[test]
+    fn rejects_args_shape_mismatch() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("cmd-session");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "control-client".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("attach should succeed");
+
+        manager
+            .set_lease_holder(
+                &created.session_id,
+                Some(&attached.snapshot.client_view.client_id),
+            )
+            .expect("lease holder assignment should succeed");
+
+        let router = CommandRouter::new();
+        let result = router.route(
+            &mut manager,
+            CommandEnvelope {
+                message_type: COMMAND_MESSAGE_TYPE.to_owned(),
+                schema_version: SCHEMA_VERSION.to_owned(),
+                session_id: created.session_id,
+                request_id: "req_1e".to_owned(),
+                client_id: attached.snapshot.client_view.client_id,
+                client_seq: 1,
+                op: "scene.add_source".to_owned(),
+                scope: CommandScope::SceneShared,
+                requires_lease: true,
+                args: CommandArgs::SceneLayerAdd {
+                    name: "layer-a".to_owned(),
+                },
+            },
+        );
+
+        assert_eq!(
+            result.expect_err("args mismatch should fail").code,
             CommandErrorCode::ValidationError
         );
     }
@@ -459,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn routes_valid_commands_and_returns_typed_ack() {
+    fn routes_valid_commands_and_returns_typed_ack_and_events() {
         let mut manager = SessionManager::new();
         let created = manager.create_session("cmd-session");
         let attached = manager
@@ -478,7 +682,7 @@ mod tests {
 
         let router = CommandRouter::new();
 
-        let view_ack = router
+        let view_outcome = router
             .route(
                 &mut manager,
                 CommandEnvelope {
@@ -498,7 +702,7 @@ mod tests {
             )
             .expect("view command should be accepted");
 
-        let scene_ack = router
+        let scene_outcome = router
             .route(
                 &mut manager,
                 CommandEnvelope {
@@ -518,19 +722,27 @@ mod tests {
             )
             .expect("scene command should be accepted");
 
-        assert!(view_ack.accepted);
-        assert_eq!(view_ack.resulting_view_rev, Some(1));
-        assert!(view_ack.resulting_session_rev >= 3);
-        assert_eq!(view_ack.resulting_scene_rev, None);
+        assert!(view_outcome.ack.accepted);
+        assert_eq!(view_outcome.ack.resulting_view_rev, Some(1));
+        assert!(view_outcome.ack.resulting_session_rev >= 3);
+        assert_eq!(view_outcome.ack.resulting_scene_rev, None);
+        assert_eq!(view_outcome.events.len(), 1);
+        assert_eq!(view_outcome.events[0].event_type, EventType::ViewUpdated);
 
-        assert!(scene_ack.accepted);
-        assert!(scene_ack.resulting_scene_rev.is_some());
-        assert!(scene_ack.resulting_session_rev > view_ack.resulting_session_rev);
+        assert!(scene_outcome.ack.accepted);
+        assert!(scene_outcome.ack.resulting_scene_rev.is_some());
+        assert!(scene_outcome.ack.resulting_session_rev > view_outcome.ack.resulting_session_rev);
         assert!(
-            scene_ack
+            scene_outcome
+                .ack
                 .created_object_id
                 .expect("source id should be present")
                 .starts_with("src_")
+        );
+        assert_eq!(scene_outcome.events.len(), 1);
+        assert_eq!(
+            scene_outcome.events[0].event_type,
+            EventType::SceneSourceUpsert
         );
     }
 }

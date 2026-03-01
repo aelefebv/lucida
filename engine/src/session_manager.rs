@@ -482,6 +482,24 @@ impl SessionManager {
         Ok(client.view_state.view_rev)
     }
 
+    pub fn client_view_state(
+        &self,
+        session_id: &str,
+        client_id: &str,
+    ) -> Result<PerClientViewState, SessionError> {
+        let session = self.session_ref(session_id)?;
+        let client =
+            session
+                .clients
+                .get(client_id)
+                .ok_or_else(|| SessionError::ClientNotFound {
+                    session_id: session_id.to_owned(),
+                    client_id: client_id.to_owned(),
+                })?;
+
+        Ok(client.view_state.clone())
+    }
+
     fn session_ref(&self, session_id: &str) -> Result<&SessionRecord, SessionError> {
         self.sessions
             .get(session_id)
