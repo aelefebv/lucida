@@ -2,6 +2,7 @@ mod brick3d_builder;
 mod cache_layout;
 mod canonical_cache;
 mod channel_block;
+mod chunk_key;
 mod clock;
 mod command_router;
 mod constants;
@@ -30,6 +31,7 @@ pub use channel_block::{
     ChannelBlockError, ChannelBlockPackaging, ChannelBlockReadResult, ChannelBlockWriteRequest,
     PayloadCodec, PayloadKind,
 };
+pub use chunk_key::{ChunkAssetKind, ChunkKey, ChunkKeyError};
 pub use command_router::{
     CommandAck, CommandArgs, CommandEnvelope, CommandError, CommandErrorCode, CommandOutcome,
     CommandRouter, CommandScope, command_error_to_envelope,
