@@ -32,3 +32,7 @@ The run is considered successful when output includes:
 The JSON report is written to:
 
 - `qa/reports/s1_demo_report.json`
+
+For a stage-by-stage workflow (source open, canonical cache, preview/refine, stable interactive 2D), see:
+
+- [docs/s1_2d_viewing_workflow.md](./s1_2d_viewing_workflow.md)

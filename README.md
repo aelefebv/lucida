@@ -65,3 +65,4 @@ Expected success markers include:
 - `T-M1-01: passed` through `T-M1-05: passed`
 
 See [docs/s1_demo_runbook.md](docs/s1_demo_runbook.md) for the full runbook.
+See [docs/s1_2d_viewing_workflow.md](docs/s1_2d_viewing_workflow.md) for stage-by-stage S1 2D workflow details.
