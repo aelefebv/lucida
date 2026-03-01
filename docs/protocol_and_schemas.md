@@ -1464,6 +1464,11 @@ Context packages MUST include:
 
 This document does not fully enumerate every command, but the command namespace is expected to look like this.
 
+Gesture transactions are canonical commands and are used for history checkpoint behavior:
+- `gesture.begin`
+- `gesture.update`
+- `gesture.end`
+
 ### 19.1 Client view commands
 
 - `view.pan`

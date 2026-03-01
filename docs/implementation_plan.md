@@ -146,6 +146,7 @@ Exit when:
 - **Goal:** Capture the major irrevocable design choices in ADR form.
 - **Deliverables:** ADRs for engine authority, shared/per-client state split, dual representations, channel blocking, dense label remap, and lease semantics.
 - **Acceptance:** ADRs merged and referenced from implementation docs.
+- **References:** `docs/adr/README.md` and ADRs `ADR-0001` through `ADR-0006`.
 
 ### LUC-002 - Repository bootstrap and CI baseline
 - **Lane:** ARCH
@@ -162,6 +163,7 @@ Exit when:
 - **Goal:** Turn spec invariants and workflow expectations into a traceable acceptance matrix.
 - **Deliverables:** matrix mapping features to acceptance tests and milestone gates.
 - **Acceptance:** each milestone has explicit exit criteria linked to tests.
+- **References:** `docs/acceptance_matrix.md`
 
 ---
 

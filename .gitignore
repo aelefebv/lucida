@@ -182,3 +182,7 @@ output/*.jpg
 output/*.jpeg
 output/*.webp
 tmp/
+
+# Node / frontend
+node_modules/
+client-web/dist/
