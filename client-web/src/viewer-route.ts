@@ -93,7 +93,7 @@ function defaultWsBase(location: Location): string {
 
 function defaultDataBase(location: Location): string {
   const protocol = location.protocol === "https:" ? "https:" : "http:";
-  return `${protocol}//${location.host}`;
+  return `${protocol}//${location.host}/v1/data`;
 }
 
 function normalizePath(path: string): string {

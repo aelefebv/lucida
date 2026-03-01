@@ -10,13 +10,15 @@ function normalizeBaseUrl(baseUrl: string): string {
 
 export class EngineDataPlaneUrlResolver implements ObjectUrlResolver {
   private readonly baseUrl: string;
+  private readonly dataPathPrefix: string;
 
   public constructor(baseUrl: string) {
     this.baseUrl = normalizeBaseUrl(baseUrl);
+    this.dataPathPrefix = this.baseUrl.endsWith("/v1/data") ? "" : "/v1/data";
   }
 
   public resolveChunkUrl(key: ChunkKey): string {
-    return `${this.baseUrl}${formatChunkKeyPath(key)}`;
+    return `${this.baseUrl}${this.dataPathPrefix}${formatChunkKeyPath(key)}`;
   }
 }
 
