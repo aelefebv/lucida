@@ -558,6 +558,28 @@ impl From<SessionError> for CommandError {
                 code: CommandErrorCode::SourceUnavailable,
                 message: format!("source `{uri}` is unavailable: {reason}"),
             },
+            SessionError::GenerationNotFound {
+                session_id,
+                source_id,
+                generation_seq,
+            } => Self {
+                code: CommandErrorCode::SourceNotFound,
+                message: format!(
+                    "generation `{generation_seq}` for source `{source_id}` was not found in session `{session_id}`"
+                ),
+            },
+            SessionError::InvalidGenerationTransition {
+                source_id,
+                generation_seq,
+                current_stage,
+                requested_stage,
+            } => Self {
+                code: CommandErrorCode::ValidationError,
+                message: format!(
+                    "invalid generation transition for source `{source_id}` generation `{generation_seq}`: {:?} -> {:?}",
+                    current_stage, requested_stage
+                ),
+            },
             SessionError::LayerNotFound {
                 session_id,
                 layer_id,

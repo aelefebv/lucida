@@ -1,6 +1,6 @@
 use lucida_engine::{
-    AddSourceRequest, AttachRequest, AxisName, ClientViewMode, PermissionClass, ReconnectRequest,
-    SessionManager, SourceKind,
+    AddSourceRequest, AttachRequest, AxisName, ClientViewMode, GenerationAvailability,
+    GenerationStage, PermissionClass, ReconnectRequest, SessionManager, SourceKind,
 };
 use std::fs;
 use std::path::Path;
@@ -227,6 +227,83 @@ fn session_manager_watcher_stability_gate_requires_debounce_before_generation_bu
         .get(&added.source.source_id)
         .expect("source should remain present");
     assert_eq!(source.latest_working_generation_seq, 1);
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[test]
+fn session_manager_generation_state_machine_updates_dataset_resolution() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "lucida_luc202_generation_sm_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+    let source_path = fixture_dir.join("generation-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-generation-sm");
+    let added = manager
+        .add_source(
+            &created.session_id,
+            AddSourceRequest {
+                name: "generation-source".to_owned(),
+                uri: source_path.display().to_string(),
+            },
+        )
+        .expect("source add should succeed");
+    let detected = manager
+        .detect_generation(&created.session_id, &added.source.source_id)
+        .expect("generation detection should succeed");
+    assert_eq!(detected.stage, GenerationStage::Detected);
+    manager
+        .start_generation(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        )
+        .expect("start transition should succeed");
+    manager
+        .report_generation_partial(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+            70,
+            GenerationAvailability {
+                preview_ready: true,
+                tile2d_ready_lods: vec![4, 3],
+                brick3d_ready_lods: vec![],
+            },
+        )
+        .expect("partial transition should succeed");
+    let ready = manager
+        .mark_generation_ready(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        )
+        .expect("ready transition should succeed");
+
+    let snapshot = manager
+        .attach_client(AttachRequest {
+            session_id: created.session_id,
+            client_label: "observer".to_owned(),
+            requested_permission: PermissionClass::View,
+        })
+        .expect("observer attach should succeed");
+    let dataset = snapshot
+        .snapshot
+        .shared_scene
+        .datasets
+        .values()
+        .find(|dataset| dataset.source_id.as_deref() == Some(added.source.source_id.as_str()))
+        .expect("dataset should exist for source");
+    assert_eq!(dataset.resolved_generation_seq, detected.generation_seq);
+    assert_eq!(
+        dataset.resolved_generation_id.as_deref(),
+        Some(ready.generation_id.as_str())
+    );
 
     fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
 }

@@ -166,6 +166,7 @@ mod tests {
                             channels: vec![],
                         },
                     },
+                    generations: BTreeMap::new(),
                     warnings: Vec::new(),
                 },
             )]),

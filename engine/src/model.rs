@@ -213,6 +213,36 @@ pub struct SourceMetadata {
     pub channel_table: ChannelTable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationStage {
+    Detected,
+    Started,
+    Partial,
+    Ready,
+    Pinned,
+    GarbageCollected,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationAvailability {
+    pub preview_ready: bool,
+    pub tile2d_ready_lods: Vec<u8>,
+    pub brick3d_ready_lods: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationRecord {
+    pub generation_id: String,
+    pub source_id: String,
+    pub generation_seq: u64,
+    pub stage: GenerationStage,
+    pub progress_percent: u8,
+    pub availability: GenerationAvailability,
+    pub detected_at: String,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRecord {
     pub source_id: String,
@@ -226,6 +256,7 @@ pub struct SourceRecord {
     pub latest_working_generation_seq: u64,
     pub stability_window: StabilityWindow,
     pub source_metadata: SourceMetadata,
+    pub generations: BTreeMap<u64, GenerationRecord>,
     pub warnings: Vec<WarningEntry>,
 }
 

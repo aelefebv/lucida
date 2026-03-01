@@ -9,10 +9,11 @@ use crate::id_allocator::{IdAllocator, IdKind};
 use crate::model::{
     AddSourceRequest, AddedSource, AttachRequest, AuditEventKind, AuditLogEntry, AxisName,
     ClientRosterEntry, ClientViewMode, CreatedSession, DatasetBinding, DatasetKind, ExposureMode,
-    ExposureViewMode, GenerationRef, GenerationRefMode, HeartbeatEnvelope, LayerState,
-    LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
-    ReconnectRequest, SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState,
-    SharedSceneState, SourceRecord, SourceStatus, SourceWatchMode, StabilityWindow, WarningEntry,
+    ExposureViewMode, GenerationAvailability, GenerationRecord, GenerationRef, GenerationRefMode,
+    GenerationStage, HeartbeatEnvelope, LayerState, LeaseChangeKind, LeaseState,
+    PerClientViewState, PermissionClass, Permissions, ReconnectRequest, SceneMode,
+    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord,
+    SourceStatus, SourceWatchMode, StabilityWindow, WarningEntry,
 };
 use crate::revision_allocator::RevisionAllocator;
 use crate::source_inspector::{SourceInspectionError, inspect_source};
@@ -266,6 +267,7 @@ impl SessionManager {
                 single_file_verify_ms: 200,
             },
             source_metadata: inspected.source_metadata.clone(),
+            generations: BTreeMap::new(),
             warnings: Vec::new(),
         };
         let dataset = DatasetBinding {
@@ -341,6 +343,7 @@ impl SessionManager {
         source_id: &str,
         now_ms: u64,
     ) -> Result<Option<u64>, SessionError> {
+        let prospective_generation_id = self.id_allocator.allocate(IdKind::Generation);
         let session = self.session_mut(session_id)?;
         let (source_uri, stability_window) = {
             let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
@@ -392,7 +395,8 @@ impl SessionManager {
             return Ok(None);
         }
 
-        let generation_seq = {
+        let ready_at = rfc3339_now();
+        let (generation_seq, source_id_owned) = {
             let source = session
                 .shared_scene
                 .sources
@@ -401,15 +405,281 @@ impl SessionManager {
                     session_id: session_id.to_owned(),
                     source_id: source_id.to_owned(),
                 })?;
-            let seq =
-                RevisionAllocator::next_generation_seq(&mut source.latest_working_generation_seq);
+            let seq = next_generation_seq(source);
+            source.generations.insert(
+                seq,
+                GenerationRecord {
+                    generation_id: prospective_generation_id.clone(),
+                    source_id: source.source_id.clone(),
+                    generation_seq: seq,
+                    stage: GenerationStage::Ready,
+                    progress_percent: 100,
+                    availability: GenerationAvailability {
+                        preview_ready: true,
+                        tile2d_ready_lods: vec![],
+                        brick3d_ready_lods: vec![],
+                    },
+                    detected_at: ready_at.clone(),
+                    updated_at: ready_at.clone(),
+                },
+            );
+            source.latest_working_generation_id = Some(prospective_generation_id.clone());
+            source.latest_working_generation_seq = seq;
             source.status = SourceStatus::Watching;
-            seq
+            (seq, source.source_id.clone())
         };
+        sync_working_dataset_generation(
+            session,
+            &source_id_owned,
+            &prospective_generation_id,
+            generation_seq,
+        );
 
         bump_session_rev(session);
         refresh_warnings(session);
         Ok(Some(generation_seq))
+    }
+
+    pub fn detect_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<GenerationRecord, SessionError> {
+        let generation_id = self.id_allocator.allocate(IdKind::Generation);
+        let detected_at = rfc3339_now();
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+
+        let generation_seq = next_generation_seq(source);
+        let generation = GenerationRecord {
+            generation_id,
+            source_id: source.source_id.clone(),
+            generation_seq,
+            stage: GenerationStage::Detected,
+            progress_percent: 0,
+            availability: GenerationAvailability {
+                preview_ready: false,
+                tile2d_ready_lods: vec![],
+                brick3d_ready_lods: vec![],
+            },
+            detected_at: detected_at.clone(),
+            updated_at: detected_at,
+        };
+        source
+            .generations
+            .insert(generation_seq, generation.clone());
+        source.status = SourceStatus::Building;
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(generation)
+    }
+
+    pub fn start_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+
+        ensure_generation_transition(
+            source_id,
+            generation_seq,
+            generation.stage,
+            GenerationStage::Started,
+            &[GenerationStage::Detected],
+        )?;
+        generation.stage = GenerationStage::Started;
+        generation.updated_at = rfc3339_now();
+        source.status = SourceStatus::Building;
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn report_generation_partial(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        progress_percent: u8,
+        availability: GenerationAvailability,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+
+        ensure_generation_transition(
+            source_id,
+            generation_seq,
+            generation.stage,
+            GenerationStage::Partial,
+            &[GenerationStage::Started, GenerationStage::Partial],
+        )?;
+        generation.stage = GenerationStage::Partial;
+        generation.progress_percent = progress_percent.min(99);
+        generation.availability = availability;
+        generation.updated_at = rfc3339_now();
+        source.status = SourceStatus::Building;
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn mark_generation_ready(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let (generation_id, snapshot) = {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+            let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+                SessionError::GenerationNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                    generation_seq,
+                }
+            })?;
+
+            ensure_generation_transition(
+                source_id,
+                generation_seq,
+                generation.stage,
+                GenerationStage::Ready,
+                &[GenerationStage::Started, GenerationStage::Partial],
+            )?;
+            generation.stage = GenerationStage::Ready;
+            generation.progress_percent = 100;
+            generation.updated_at = rfc3339_now();
+            source.latest_working_generation_id = Some(generation.generation_id.clone());
+            source.latest_working_generation_seq = generation_seq;
+            source.status = SourceStatus::Watching;
+            (generation.generation_id.clone(), generation.clone())
+        };
+        sync_working_dataset_generation(session, source_id, &generation_id, generation_seq);
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn pin_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        ensure_generation_transition(
+            source_id,
+            generation_seq,
+            generation.stage,
+            GenerationStage::Pinned,
+            &[GenerationStage::Ready],
+        )?;
+        generation.stage = GenerationStage::Pinned;
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
+    pub fn garbage_collect_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        ensure_generation_transition(
+            source_id,
+            generation_seq,
+            generation.stage,
+            GenerationStage::GarbageCollected,
+            &[GenerationStage::Ready],
+        )?;
+        generation.stage = GenerationStage::GarbageCollected;
+        generation.updated_at = rfc3339_now();
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
     }
 
     pub fn bump_source_generation_seq(
@@ -965,6 +1235,54 @@ fn bump_scene_rev(session: &mut SessionRecord) -> u64 {
     scene_rev
 }
 
+fn next_generation_seq(source: &SourceRecord) -> u64 {
+    source
+        .generations
+        .keys()
+        .next_back()
+        .copied()
+        .unwrap_or(source.latest_working_generation_seq)
+        .saturating_add(1)
+}
+
+fn ensure_generation_transition(
+    source_id: &str,
+    generation_seq: u64,
+    current_stage: GenerationStage,
+    requested_stage: GenerationStage,
+    allowed_from: &[GenerationStage],
+) -> Result<(), SessionError> {
+    if allowed_from.contains(&current_stage) {
+        return Ok(());
+    }
+
+    Err(SessionError::InvalidGenerationTransition {
+        source_id: source_id.to_owned(),
+        generation_seq,
+        current_stage,
+        requested_stage,
+    })
+}
+
+fn sync_working_dataset_generation(
+    session: &mut SessionRecord,
+    source_id: &str,
+    generation_id: &str,
+    generation_seq: u64,
+) {
+    for dataset in session.shared_scene.datasets.values_mut() {
+        if dataset.source_id.as_deref() != Some(source_id) {
+            continue;
+        }
+        if !matches!(dataset.generation_ref.mode, GenerationRefMode::Working) {
+            continue;
+        }
+
+        dataset.resolved_generation_id = Some(generation_id.to_owned());
+        dataset.resolved_generation_seq = generation_seq;
+    }
+}
+
 fn sync_lease_state(session: &mut SessionRecord) {
     session.session_state.lease_state = session.lease_state.clone();
 }
@@ -1048,8 +1366,8 @@ mod tests {
     use crate::constants::{HEARTBEAT_MESSAGE_TYPE, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
     use crate::errors::SessionError;
     use crate::model::{
-        AddSourceRequest, AttachRequest, AuditEventKind, ClientViewMode, LeaseChangeKind,
-        PermissionClass, ReconnectRequest, SourceStatus,
+        AddSourceRequest, AttachRequest, AuditEventKind, ClientViewMode, GenerationAvailability,
+        GenerationStage, LeaseChangeKind, PermissionClass, ReconnectRequest, SourceStatus,
     };
 
     use super::SessionManager;
@@ -1340,6 +1658,147 @@ mod tests {
         assert_ne!(
             attached.snapshot.client_view.client_id,
             snapshot.snapshot.client_view.client_id
+        );
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn generation_state_machine_transitions_and_updates_working_dataset() {
+        let source_path = fixture_tiff_path("generation_state_machine");
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("generation-session");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "generation-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+
+        let detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("detected generation should be created");
+        assert_eq!(detected.stage, GenerationStage::Detected);
+        assert_eq!(detected.progress_percent, 0);
+
+        let invalid_ready = manager.mark_generation_ready(
+            &created.session_id,
+            &added.source.source_id,
+            detected.generation_seq,
+        );
+        assert!(matches!(
+            invalid_ready,
+            Err(SessionError::InvalidGenerationTransition { .. })
+        ));
+
+        let started = manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("start transition should succeed");
+        assert_eq!(started.stage, GenerationStage::Started);
+
+        let partial = manager
+            .report_generation_partial(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+                60,
+                GenerationAvailability {
+                    preview_ready: true,
+                    tile2d_ready_lods: vec![4, 3],
+                    brick3d_ready_lods: vec![2],
+                },
+            )
+            .expect("partial progress should succeed");
+        assert_eq!(partial.stage, GenerationStage::Partial);
+        assert_eq!(partial.progress_percent, 60);
+
+        let ready = manager
+            .mark_generation_ready(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("ready transition should succeed");
+        assert_eq!(ready.stage, GenerationStage::Ready);
+        assert_eq!(ready.progress_percent, 100);
+
+        let pinned = manager
+            .pin_generation(
+                &created.session_id,
+                &added.source.source_id,
+                detected.generation_seq,
+            )
+            .expect("pin transition should succeed");
+        assert_eq!(pinned.stage, GenerationStage::Pinned);
+
+        let second_detected = manager
+            .detect_generation(&created.session_id, &added.source.source_id)
+            .expect("second generation detection should succeed");
+        manager
+            .start_generation(
+                &created.session_id,
+                &added.source.source_id,
+                second_detected.generation_seq,
+            )
+            .expect("second generation start should succeed");
+        let second_ready = manager
+            .mark_generation_ready(
+                &created.session_id,
+                &added.source.source_id,
+                second_detected.generation_seq,
+            )
+            .expect("second generation ready should succeed");
+        let garbage_collected = manager
+            .garbage_collect_generation(
+                &created.session_id,
+                &added.source.source_id,
+                second_detected.generation_seq,
+            )
+            .expect("garbage collect transition should succeed");
+        assert_eq!(garbage_collected.stage, GenerationStage::GarbageCollected);
+
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "observer".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("observer attach should succeed");
+        let source = snapshot
+            .snapshot
+            .shared_scene
+            .sources
+            .get(&added.source.source_id)
+            .expect("source should exist");
+        assert_eq!(
+            source.latest_working_generation_seq,
+            second_detected.generation_seq
+        );
+        assert_eq!(
+            source.latest_working_generation_id.as_deref(),
+            Some(second_ready.generation_id.as_str())
+        );
+        let dataset = snapshot
+            .snapshot
+            .shared_scene
+            .datasets
+            .values()
+            .find(|dataset| dataset.source_id.as_deref() == Some(added.source.source_id.as_str()))
+            .expect("dataset should exist for source");
+        assert_eq!(
+            dataset.resolved_generation_seq,
+            second_detected.generation_seq
         );
 
         let fixture_dir = source_path

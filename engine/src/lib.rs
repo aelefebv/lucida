@@ -31,18 +31,20 @@ pub use event_stream::{
     AuditEventKindPayload, ClientJoinedPayload, DatasetUpsertPayload, EventBus, EventEnvelope,
     EventMessageSerializer, EventPayload, EventStreamError, EventType, LayerUpsertPayload,
     LeaseChangedKindPayload, LeaseChangedPayload, LeaseStatePayload, ProjectionState,
-    SourceUpsertPayload, ViewUpdatedPayload, WarningPayloadEntry, WarningsUpdatedPayload,
+    SourceGenerationPayload, SourceUpsertPayload, ViewUpdatedPayload, WarningPayloadEntry,
+    WarningsUpdatedPayload,
 };
 pub use id_allocator::{IdAllocator, IdKind};
 pub use model::{
     AddSourceRequest, AddedSource, AttachRequest, AuditEventKind, AuditLogEntry, AxisName,
     AxisShape, AxisSpacing, CalibrationMetadata, CalibrationStatus, ChannelDescription,
     ChannelTable, ClientRosterEntry, ClientViewMode, CreatedSession, DatasetBinding, DatasetKind,
-    ExposureMode, ExposureViewMode, GenerationRef, GenerationRefMode, HeartbeatEnvelope,
-    LayerState, LeaseChangeKind, LeaseState, PerClientViewState, PermissionClass, Permissions,
-    ReconnectRequest, SceneMode, SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState,
-    SharedSceneState, SourceKind, SourceMetadata, SourceRecord, SourceStatus, SourceWatchMode,
-    StabilityWindow, TargetState, WarningCode, WarningEntry, WarningSeverity,
+    ExposureMode, ExposureViewMode, GenerationAvailability, GenerationRecord, GenerationRef,
+    GenerationRefMode, GenerationStage, HeartbeatEnvelope, LayerState, LeaseChangeKind, LeaseState,
+    PerClientViewState, PermissionClass, Permissions, ReconnectRequest, SceneMode,
+    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceKind,
+    SourceMetadata, SourceRecord, SourceStatus, SourceWatchMode, StabilityWindow, TargetState,
+    WarningCode, WarningEntry, WarningSeverity,
 };
 pub use revision_allocator::RevisionAllocator;
 pub use session_manager::{LeaseTransition, SessionManager};

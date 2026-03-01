@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     AuditEventKind, AxisName, ClientRosterEntry, ClientViewMode, DatasetBinding, DatasetKind,
-    GenerationRefMode, LayerState, LeaseChangeKind, LeaseState, PerClientViewState,
-    PermissionClass, SessionSnapshotEnvelope, SourceKind, SourceRecord, SourceStatus, WarningCode,
-    WarningEntry, WarningSeverity,
+    GenerationRecord, GenerationRefMode, GenerationStage, LayerState, LeaseChangeKind, LeaseState,
+    PerClientViewState, PermissionClass, SessionSnapshotEnvelope, SourceKind, SourceRecord,
+    SourceStatus, WarningCode, WarningEntry, WarningSeverity,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -19,6 +19,10 @@ pub enum EventType {
     SceneSourceUpsert,
     SceneDatasetUpsert,
     SceneLayerUpsert,
+    SourceGenerationDetected,
+    SourceGenerationStarted,
+    SourceGenerationProgress,
+    SourceGenerationReady,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +124,18 @@ pub struct LayerUpsertPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceGenerationPayload {
+    pub generation_id: String,
+    pub source_id: String,
+    pub generation_seq: u64,
+    pub stage: String,
+    pub progress_percent: u8,
+    pub preview_ready: bool,
+    pub tile2d_ready_lods: Vec<u8>,
+    pub brick3d_ready_lods: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "payload_type", content = "payload", rename_all = "snake_case")]
 pub enum EventPayload {
     SessionClientJoined(ClientJoinedPayload),
@@ -129,6 +145,10 @@ pub enum EventPayload {
     SceneSourceUpsert(SourceUpsertPayload),
     SceneDatasetUpsert(DatasetUpsertPayload),
     SceneLayerUpsert(LayerUpsertPayload),
+    SourceGenerationDetected(SourceGenerationPayload),
+    SourceGenerationStarted(SourceGenerationPayload),
+    SourceGenerationProgress(SourceGenerationPayload),
+    SourceGenerationReady(SourceGenerationPayload),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -268,6 +288,78 @@ impl EventEnvelope {
             emitted_at,
         }
     }
+
+    #[must_use]
+    pub fn source_generation_detected(
+        session_id: String,
+        session_rev: u64,
+        payload: SourceGenerationPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SourceGenerationDetected,
+            payload: EventPayload::SourceGenerationDetected(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
+    pub fn source_generation_started(
+        session_id: String,
+        session_rev: u64,
+        payload: SourceGenerationPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SourceGenerationStarted,
+            payload: EventPayload::SourceGenerationStarted(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
+    pub fn source_generation_progress(
+        session_id: String,
+        session_rev: u64,
+        payload: SourceGenerationPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SourceGenerationProgress,
+            payload: EventPayload::SourceGenerationProgress(payload),
+            emitted_at,
+        }
+    }
+
+    #[must_use]
+    pub fn source_generation_ready(
+        session_id: String,
+        session_rev: u64,
+        payload: SourceGenerationPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SourceGenerationReady,
+            payload: EventPayload::SourceGenerationReady(payload),
+            emitted_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +416,7 @@ pub struct ProjectionState {
     pub sources: BTreeMap<String, SourceUpsertPayload>,
     pub datasets: BTreeMap<String, DatasetUpsertPayload>,
     pub layers: BTreeMap<String, LayerUpsertPayload>,
+    pub source_generations: BTreeMap<String, SourceGenerationPayload>,
 }
 
 impl ProjectionState {
@@ -374,6 +467,20 @@ impl ProjectionState {
                 (payload.dataset_id.clone(), payload)
             })
             .collect::<BTreeMap<_, _>>();
+        let source_generations = snapshot
+            .snapshot
+            .shared_scene
+            .sources
+            .values()
+            .flat_map(|source| source.generations.values())
+            .map(|generation| {
+                let payload = SourceGenerationPayload::from(generation);
+                (
+                    generation_projection_key(&payload.source_id, payload.generation_seq),
+                    payload,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let client_warnings = BTreeMap::from([(
             snapshot.snapshot.client_view.client_id.clone(),
             warning_payloads(&snapshot.snapshot.warnings),
@@ -389,6 +496,7 @@ impl ProjectionState {
             sources,
             datasets,
             layers,
+            source_generations,
         }
     }
 
@@ -434,6 +542,15 @@ impl ProjectionState {
             EventPayload::SceneLayerUpsert(payload) => {
                 self.layers
                     .insert(payload.layer_id.clone(), payload.clone());
+            }
+            EventPayload::SourceGenerationDetected(payload)
+            | EventPayload::SourceGenerationStarted(payload)
+            | EventPayload::SourceGenerationProgress(payload)
+            | EventPayload::SourceGenerationReady(payload) => {
+                self.source_generations.insert(
+                    generation_projection_key(&payload.source_id, payload.generation_seq),
+                    payload.clone(),
+                );
             }
         }
 
@@ -552,6 +669,21 @@ impl From<&LayerState> for LayerUpsertPayload {
     }
 }
 
+impl From<&GenerationRecord> for SourceGenerationPayload {
+    fn from(value: &GenerationRecord) -> Self {
+        Self {
+            generation_id: value.generation_id.clone(),
+            source_id: value.source_id.clone(),
+            generation_seq: value.generation_seq,
+            stage: generation_stage_name(value.stage).to_owned(),
+            progress_percent: value.progress_percent,
+            preview_ready: value.availability.preview_ready,
+            tile2d_ready_lods: value.availability.tile2d_ready_lods.clone(),
+            brick3d_ready_lods: value.availability.brick3d_ready_lods.clone(),
+        }
+    }
+}
+
 #[must_use]
 pub fn warning_payloads(warnings: &[WarningEntry]) -> Vec<WarningPayloadEntry> {
     warnings
@@ -629,6 +761,22 @@ fn axis_name(axis: &AxisName) -> &str {
     }
 }
 
+const fn generation_stage_name(stage: GenerationStage) -> &'static str {
+    match stage {
+        GenerationStage::Detected => "detected",
+        GenerationStage::Started => "started",
+        GenerationStage::Partial => "partial",
+        GenerationStage::Ready => "ready",
+        GenerationStage::Pinned => "pinned",
+        GenerationStage::GarbageCollected => "garbage_collected",
+        GenerationStage::Failed => "failed",
+    }
+}
+
+fn generation_projection_key(source_id: &str, generation_seq: u64) -> String {
+    format!("{source_id}:{generation_seq}")
+}
+
 const fn warning_code_name(code: WarningCode) -> &'static str {
     match code {
         WarningCode::UncalibratedOverlay => "uncalibrated_overlay",
@@ -655,8 +803,8 @@ mod tests {
 
     use super::{
         EventBus, EventEnvelope, EventMessageSerializer, EventPayload, EventStreamError,
-        ProjectionState, SourceUpsertPayload, ViewUpdatedPayload, WarningPayloadEntry,
-        WarningsUpdatedPayload,
+        ProjectionState, SourceGenerationPayload, SourceUpsertPayload, ViewUpdatedPayload,
+        WarningPayloadEntry, WarningsUpdatedPayload,
     };
 
     #[test]
@@ -767,6 +915,105 @@ mod tests {
             Some("lay_00000001")
         );
         assert_eq!(projection.session_rev, snapshot.session_rev + 2);
+    }
+
+    #[test]
+    fn projection_applies_generation_lifecycle_events_coherently() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("generation-projection-session");
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("attach should succeed");
+        let mut projection = ProjectionState::from_snapshot(&snapshot);
+
+        let detected = EventEnvelope::source_generation_detected(
+            created.session_id.clone(),
+            snapshot.session_rev + 1,
+            SourceGenerationPayload {
+                generation_id: "gen_00000001".to_owned(),
+                source_id: "src_00000001".to_owned(),
+                generation_seq: 1,
+                stage: "detected".to_owned(),
+                progress_percent: 0,
+                preview_ready: false,
+                tile2d_ready_lods: vec![],
+                brick3d_ready_lods: vec![],
+            },
+            "2026-03-01T02:00:00Z".to_owned(),
+        );
+        projection
+            .apply_event(&detected)
+            .expect("detected event should apply");
+
+        let started = EventEnvelope::source_generation_started(
+            created.session_id.clone(),
+            snapshot.session_rev + 2,
+            SourceGenerationPayload {
+                generation_id: "gen_00000001".to_owned(),
+                source_id: "src_00000001".to_owned(),
+                generation_seq: 1,
+                stage: "started".to_owned(),
+                progress_percent: 10,
+                preview_ready: false,
+                tile2d_ready_lods: vec![],
+                brick3d_ready_lods: vec![],
+            },
+            "2026-03-01T02:00:01Z".to_owned(),
+        );
+        projection
+            .apply_event(&started)
+            .expect("started event should apply");
+
+        let progress = EventEnvelope::source_generation_progress(
+            created.session_id.clone(),
+            snapshot.session_rev + 3,
+            SourceGenerationPayload {
+                generation_id: "gen_00000001".to_owned(),
+                source_id: "src_00000001".to_owned(),
+                generation_seq: 1,
+                stage: "partial".to_owned(),
+                progress_percent: 75,
+                preview_ready: true,
+                tile2d_ready_lods: vec![4, 3],
+                brick3d_ready_lods: vec![],
+            },
+            "2026-03-01T02:00:02Z".to_owned(),
+        );
+        projection
+            .apply_event(&progress)
+            .expect("progress event should apply");
+
+        let ready = EventEnvelope::source_generation_ready(
+            created.session_id,
+            snapshot.session_rev + 4,
+            SourceGenerationPayload {
+                generation_id: "gen_00000001".to_owned(),
+                source_id: "src_00000001".to_owned(),
+                generation_seq: 1,
+                stage: "ready".to_owned(),
+                progress_percent: 100,
+                preview_ready: true,
+                tile2d_ready_lods: vec![4, 3, 2, 1, 0],
+                brick3d_ready_lods: vec![2, 1, 0],
+            },
+            "2026-03-01T02:00:03Z".to_owned(),
+        );
+        projection
+            .apply_event(&ready)
+            .expect("ready event should apply");
+
+        let generation = projection
+            .source_generations
+            .get("src_00000001:1")
+            .expect("generation payload should exist");
+        assert_eq!(generation.stage, "ready");
+        assert_eq!(generation.progress_percent, 100);
+        assert_eq!(generation.tile2d_ready_lods, vec![4, 3, 2, 1, 0]);
+        assert_eq!(projection.session_rev, snapshot.session_rev + 4);
     }
 
     #[test]
