@@ -174,13 +174,14 @@ export class LiveRenderLoop {
       zIndex,
       channelBlock,
     );
+    const tileSelection = effectiveTileSelection(tIndex, zIndex, channelBlock);
     const tileRequestKey = requestKey(
       "tile",
       sourceId,
       generationSeq,
-      tIndex,
-      zIndex,
-      channelBlock,
+      tileSelection.t,
+      tileSelection.z,
+      tileSelection.channelBlock,
     );
     this.activeFetches.add(fetchKey);
     try {
@@ -245,9 +246,9 @@ export class LiveRenderLoop {
               generationSeq,
               assetKind: "tile2d",
               lod: 0,
-              t: tIndex,
-              z: zIndex,
-              channelBlock,
+              t: tileSelection.t,
+              z: tileSelection.z,
+              channelBlock: tileSelection.channelBlock,
               y: 0,
               x: 0,
             },
@@ -597,6 +598,15 @@ function selectedChannelBlock(channels: readonly number[]): number {
     return 0;
   }
   return Math.floor(primary / 4);
+}
+
+function effectiveTileSelection(
+  _tIndex: number,
+  _zIndex: number,
+  _channelBlock: number,
+): { t: number; z: number; channelBlock: number } {
+  // S1 engine currently packages tile payloads only for base-plane keys.
+  return { t: 0, z: 0, channelBlock: 0 };
 }
 
 function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
