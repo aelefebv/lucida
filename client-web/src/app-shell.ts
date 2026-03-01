@@ -57,7 +57,9 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
   <section data-testid="capability-state"></section>
   <section data-testid="viewer-layout">
     <div>Viewport canvas target</div>
+    <canvas data-testid="viewport-canvas" width="1" height="1"></canvas>
     <div>Minimap target</div>
+    <canvas data-testid="minimap-canvas" width="1" height="1"></canvas>
     <div>Warnings target</div>
   </section>
   <section data-testid="interaction-controls">
@@ -126,6 +128,8 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
         ? "Warnings: none"
         : `Warnings: ${state.renderFrame.warningNotice}`;
   }
+
+  renderViewportCanvas(mount, state);
 }
 
 function attachInteractionHandlers(
@@ -196,6 +200,43 @@ function phaseLabel(phase: ViewerRuntimeState["connection"]["phase"]): string {
       return "Attached";
     case "error":
       return "Error";
+  }
+}
+
+function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): void {
+  const canvas = mount.querySelector('[data-testid="viewport-canvas"]');
+  if (!(canvas instanceof HTMLCanvasElement)) {
+    return;
+  }
+
+  if (state.renderFrame === null) {
+    canvas.width = 1;
+    canvas.height = 1;
+    return;
+  }
+
+  const frame = state.renderFrame;
+  canvas.width = frame.width;
+  canvas.height = frame.height;
+
+  const context = tryGet2dContext(canvas);
+  if (context === null) {
+    return;
+  }
+  const imageData = context.createImageData(frame.width, frame.height);
+  imageData.data.set(frame.rgba);
+  context.putImageData(imageData, 0, 0);
+}
+
+function tryGet2dContext(canvas: HTMLCanvasElement): CanvasRenderingContext2D | null {
+  try {
+    const context = canvas.getContext("2d");
+    if (context === null) {
+      return null;
+    }
+    return context;
+  } catch {
+    return null;
   }
 }
 

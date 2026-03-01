@@ -113,6 +113,9 @@ describe("app shell routing", () => {
 
     expect(queryText("minimap-state")).toContain("z 0 / 0");
     expect(queryText("warning-state")).toContain("Generation 1 still refining.");
+    const viewportCanvas = queryCanvas("viewport-canvas");
+    expect(viewportCanvas.width).toBe(2);
+    expect(viewportCanvas.height).toBe(1);
   });
 });
 
@@ -196,7 +199,7 @@ async function startFixtureServer(config: {
 async function startIntegratedRenderFixture(): Promise<SocketFixture> {
   const received: unknown[] = [];
   const previewBody = pgmBody(2, 1, [20, 20]);
-  const tileBody = pgmBody(2, 1, [220, 220]);
+  const tileBody = channelBlockRawPayload(pgmBody(2, 1, [220, 220]));
 
   const httpServer = createServer((request, response) => {
     if (request.url?.includes("/v1/preview2d/")) {
@@ -207,7 +210,7 @@ async function startIntegratedRenderFixture(): Promise<SocketFixture> {
     }
     if (request.url?.includes("/v1/tile2d/")) {
       setTimeout(() => {
-        respondPgm(response, tileBody);
+        respondBinary(response, tileBody);
       }, 140);
       return;
     }
@@ -339,6 +342,14 @@ function queryText(testId: string): string {
   return node.textContent ?? "";
 }
 
+function queryCanvas(testId: string): HTMLCanvasElement {
+  const node = document.querySelector(`[data-testid="${testId}"]`);
+  if (!(node instanceof HTMLCanvasElement)) {
+    throw new Error(`missing canvas data-testid node ${testId}`);
+  }
+  return node;
+}
+
 async function waitFor(
   check: () => boolean,
   timeoutMs = 1200,
@@ -366,10 +377,35 @@ function respondPgm(
 ): void {
   response.statusCode = 200;
   response.setHeader("content-type", "image/x-portable-graymap");
+  response.setHeader("content-encoding", "identity");
+  response.end(body);
+}
+
+function respondBinary(
+  response: ServerResponse<IncomingMessage>,
+  body: Buffer,
+): void {
+  response.statusCode = 200;
+  response.setHeader("content-type", "application/octet-stream");
+  response.setHeader("content-encoding", "identity");
   response.end(body);
 }
 
 function pgmBody(width: number, height: number, values: number[]): Buffer {
   const header = Buffer.from(`P5\n${width.toString()} ${height.toString()}\n255\n`, "ascii");
   return Buffer.concat([header, Buffer.from(values)]);
+}
+
+function channelBlockRawPayload(payload: Buffer): Buffer {
+  const header = Buffer.alloc(20);
+  header.write("LCBK", 0, "ascii");
+  header[4] = 1; // format version
+  header[5] = 0; // payload kind image
+  header[6] = 0; // codec raw
+  header[7] = 0; // reserved
+  header.writeUInt16LE(1, 8); // channel count
+  header.writeUInt16LE(1, 10); // channel block size
+  header.writeUInt32LE(payload.length, 12); // encoded length
+  header.writeUInt32LE(payload.length, 16); // decoded length
+  return Buffer.concat([header, payload]);
 }

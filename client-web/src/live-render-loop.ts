@@ -149,7 +149,8 @@ export class LiveRenderLoop {
       );
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
-    return decodePortableGraymap(bytes);
+    const framePayload = decodeFramePayload(bytes);
+    return decodePortableGraymap(framePayload);
   }
 
   private emit(generationSeq: number): void {
@@ -201,6 +202,72 @@ export class LiveRenderLoop {
       warningNotice: buildSessionNotice(warnings),
     });
   }
+}
+
+function decodeFramePayload(bytes: Uint8Array): Uint8Array {
+  if (isPortableGraymap(bytes)) {
+    return bytes;
+  }
+  if (isChannelBlockPayload(bytes)) {
+    return decodeChannelBlockPayload(bytes);
+  }
+  throw new Error("unsupported frame payload format");
+}
+
+function isPortableGraymap(bytes: Uint8Array): boolean {
+  return bytes.length >= 2 && bytes[0] === 0x50 && bytes[1] === 0x35;
+}
+
+function isChannelBlockPayload(bytes: Uint8Array): boolean {
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x4c &&
+    bytes[1] === 0x43 &&
+    bytes[2] === 0x42 &&
+    bytes[3] === 0x4b
+  );
+}
+
+function decodeChannelBlockPayload(bytes: Uint8Array): Uint8Array {
+  const headerLength = 20;
+  if (bytes.length < headerLength) {
+    throw new Error("channel block payload is shorter than header");
+  }
+  const version = bytes[4] ?? -1;
+  if (version !== 1) {
+    throw new Error(`unsupported channel block version ${version.toString()}`);
+  }
+  const codec = bytes[6] ?? -1;
+  const encodedLength = readUint32LE(bytes, 12);
+  const decodedLength = readUint32LE(bytes, 16);
+  const payloadStart = headerLength;
+  const payloadEnd = payloadStart + encodedLength;
+  if (payloadEnd > bytes.length) {
+    throw new Error("channel block encoded length exceeds payload size");
+  }
+  const encodedPayload = bytes.slice(payloadStart, payloadEnd);
+
+  let decodedPayload: Uint8Array;
+  if (codec === 0) {
+    decodedPayload = encodedPayload;
+  } else {
+    throw new Error(
+      `unsupported channel block codec ${codec.toString()} in browser runtime`,
+    );
+  }
+  if (decodedPayload.length !== decodedLength) {
+    throw new Error("channel block decoded length mismatch");
+  }
+  return decodedPayload;
+}
+
+function readUint32LE(bytes: Uint8Array, offset: number): number {
+  return (
+    (bytes[offset] ?? 0) |
+    ((bytes[offset + 1] ?? 0) << 8) |
+    ((bytes[offset + 2] ?? 0) << 16) |
+    ((bytes[offset + 3] ?? 0) << 24)
+  );
 }
 
 function selectLatestGeneration(
