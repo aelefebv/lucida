@@ -44,4 +44,13 @@ describe("object URL resolvers", () => {
       "https://cdn.example.com/lucida-cache/v1/tile2d/src_00000001/gen/7/lod/0/t/0/z/0/cb/0/y/1/x/2",
     );
   });
+
+  it("adds a cache scope query suffix when configured", () => {
+    const resolver = new EngineDataPlaneUrlResolver("http://localhost:4000/", {
+      cacheScope: "sess_abc:runtime_1",
+    });
+    expect(resolver.resolveChunkUrl(sampleKey)).toBe(
+      "http://localhost:4000/v1/data/v1/tile2d/src_00000001/gen/7/lod/0/t/0/z/0/cb/0/y/1/x/2?scope=sess_abc%3Aruntime_1",
+    );
+  });
 });

@@ -62,8 +62,12 @@ export class LiveRenderLoop {
     dataBase: string,
     onFrame: (state: RenderFrameState) => void,
     fetchImpl: FetchLike = defaultFetchImpl,
+    cacheScope: string | null = null,
   ) {
-    this.resolver = new EngineDataPlaneUrlResolver(dataBase);
+    this.resolver =
+      cacheScope === null
+        ? new EngineDataPlaneUrlResolver(dataBase)
+        : new EngineDataPlaneUrlResolver(dataBase, { cacheScope });
     this.scheduler = new RequestScheduler(2);
     this.frameStore = new ProgressiveFrameStore();
     this.fetchImpl = fetchImpl;

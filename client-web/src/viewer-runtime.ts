@@ -69,6 +69,7 @@ export class ViewerRuntime {
   private readonly bootstrap: ConnectionBootstrap;
   private readonly renderLoop: LiveRenderLoop;
   private readonly fetchImpl: FetchLike;
+  private readonly dataCacheScope: string;
   private stateValue: ViewerRuntimeState;
   private socketValue: WebSocket | null;
   private interactionModel: InteractionModel | null;
@@ -89,13 +90,14 @@ export class ViewerRuntime {
     this.route = route;
     this.onUpdate = onUpdate;
     this.bootstrap = new ConnectionBootstrap();
+    this.dataCacheScope = createDataCacheScope(route.sessionId);
     this.renderLoop = new LiveRenderLoop(route.dataBase, (renderFrame) => {
       this.stateValue = {
         ...this.stateValue,
         renderFrame,
       };
       this.onUpdate(this.stateValue);
-    });
+    }, fetchImpl, this.dataCacheScope);
     this.fetchImpl = fetchImpl;
     this.stateValue = {
       routeKind: route.kind,
@@ -612,6 +614,21 @@ function parseRuntimeSnapshotMessage(
     is_lease_holder: Boolean(payload.is_lease_holder),
     snapshot: snapshot as SnapshotPayload,
   };
+}
+
+function createDataCacheScope(sessionId: string): string {
+  const timestamp = Date.now().toString(36);
+  let entropy = `${Math.random().toString(36).slice(2)}${Math.random()
+    .toString(36)
+    .slice(2)}`;
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    const bytes = new Uint8Array(8);
+    globalThis.crypto.getRandomValues(bytes);
+    entropy = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join(
+      "",
+    );
+  }
+  return `${sessionId}:${timestamp}:${entropy}`;
 }
 
 function errorMessage(error: unknown): string {
