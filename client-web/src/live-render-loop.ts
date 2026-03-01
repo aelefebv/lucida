@@ -30,10 +30,12 @@ export class LiveRenderLoop {
   private readonly frameStore: ProgressiveFrameStore;
   private readonly fetchImpl: FetchLike;
   private readonly onFrame: (state: RenderFrameState) => void;
+  private readonly activeFetches: Set<string>;
   private dimensionsByGeneration: Map<number, { width: number; height: number }>;
   private frameKindByGeneration: Map<number, "preview" | "tile">;
   private latestGenerationSeq: number;
   private latestClientState: ClientState | null;
+  private retryTimer: ReturnType<typeof setTimeout> | null;
 
   public constructor(
     dataBase: string,
@@ -45,10 +47,12 @@ export class LiveRenderLoop {
     this.frameStore = new ProgressiveFrameStore();
     this.fetchImpl = fetchImpl;
     this.onFrame = onFrame;
+    this.activeFetches = new Set();
     this.dimensionsByGeneration = new Map();
     this.frameKindByGeneration = new Map();
     this.latestGenerationSeq = 0;
     this.latestClientState = null;
+    this.retryTimer = null;
   }
 
   public update(clientState: ClientState): void {
@@ -58,11 +62,22 @@ export class LiveRenderLoop {
       return;
     }
 
-    if (latest.generationSeq > this.latestGenerationSeq) {
-      this.latestGenerationSeq = latest.generationSeq;
+    const isNewGeneration = latest.generationSeq > this.latestGenerationSeq;
+    if (isNewGeneration) {
       this.scheduler.invalidateOlderGenerations(latest.generationSeq);
       this.frameStore.pruneOlderThan(latest.generationSeq);
+    }
+    const hasFrameForGeneration =
+      this.frameStore.resolveFrame(latest.generationSeq) !== null;
+    if (isNewGeneration || !hasFrameForGeneration) {
       void this.fetchPreviewThenTiles(latest.sourceId, latest.generationSeq);
+    }
+  }
+
+  public dispose(): void {
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
     }
   }
 
@@ -70,6 +85,11 @@ export class LiveRenderLoop {
     sourceId: string,
     generationSeq: number,
   ): Promise<void> {
+    const fetchKey = `${sourceId}:${generationSeq.toString()}`;
+    if (this.activeFetches.has(fetchKey)) {
+      return;
+    }
+    this.activeFetches.add(fetchKey);
     try {
       const preview = await this.scheduler.schedule<DecodedFrame>({
         key: `preview:${sourceId}`,
@@ -92,6 +112,9 @@ export class LiveRenderLoop {
           );
         },
       });
+      if (generationSeq > this.latestGenerationSeq) {
+        this.latestGenerationSeq = generationSeq;
+      }
       this.dimensionsByGeneration.set(generationSeq, {
         width: preview.width,
         height: preview.height,
@@ -99,7 +122,10 @@ export class LiveRenderLoop {
       this.frameKindByGeneration.set(generationSeq, "preview");
       this.frameStore.setPreview(generationSeq, preview.rgba);
       this.emit(generationSeq);
-    } catch {
+    } catch (error) {
+      console.error("preview fetch failed", error);
+      this.scheduleRetry();
+      this.activeFetches.delete(fetchKey);
       return;
     }
 
@@ -132,9 +158,12 @@ export class LiveRenderLoop {
       this.frameKindByGeneration.set(generationSeq, "tile");
       this.frameStore.setTiles(generationSeq, tile.rgba);
       this.emit(generationSeq);
-    } catch {
+    } catch (error) {
       // Keep preview frame active when tile refinement is unavailable.
+      console.error("tile fetch failed", error);
+      this.scheduleRetry();
     }
+    this.activeFetches.delete(fetchKey);
   }
 
   private async fetchFrame(
@@ -201,6 +230,18 @@ export class LiveRenderLoop {
       minimap,
       warningNotice: buildSessionNotice(warnings),
     });
+  }
+
+  private scheduleRetry(): void {
+    if (this.retryTimer !== null) {
+      return;
+    }
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (this.latestClientState !== null) {
+        this.update(this.latestClientState);
+      }
+    }, 250);
   }
 }
 

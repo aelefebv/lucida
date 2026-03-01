@@ -153,6 +153,7 @@ export class ViewerRuntime {
   public dispose(): void {
     this.disposed = true;
     this.reconnectScheduled = false;
+    this.renderLoop.dispose();
     if (this.socketValue !== null) {
       this.socketValue.close();
       this.socketValue = null;
