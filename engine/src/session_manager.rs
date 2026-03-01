@@ -16,6 +16,7 @@ use crate::model::{
 };
 use crate::revision_allocator::RevisionAllocator;
 use crate::source_inspector::{SourceInspectionError, inspect_source};
+use crate::source_watch::{SourceWatchController, WatchError};
 use crate::warning_service::aggregate_warnings;
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ struct SessionRecord {
     lease_state: LeaseState,
     clients: BTreeMap<String, ClientRecord>,
     audit_log: Vec<AuditLogEntry>,
+    source_watch_states: BTreeMap<String, SourceWatchController>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +112,7 @@ impl SessionManager {
             lease_state: LeaseState::default(),
             clients: BTreeMap::new(),
             audit_log: Vec::new(),
+            source_watch_states: BTreeMap::new(),
         };
 
         self.sessions.insert(session_id.clone(), record);
@@ -297,6 +300,21 @@ impl SessionManager {
             channel_table: inspected.source_metadata.channel_table,
             warnings: Vec::new(),
         };
+        let watch_controller =
+            SourceWatchController::from_uri(&source.uri).map_err(|error| match error {
+                WatchError::InvalidSourceUri { uri, message } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                },
+                WatchError::SourceNotFound { uri } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: "source path does not exist".to_owned(),
+                },
+                WatchError::ReadFailed { uri, message } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                },
+            })?;
 
         let session = self.session_mut(session_id)?;
         session
@@ -307,11 +325,91 @@ impl SessionManager {
             .shared_scene
             .datasets
             .insert(dataset.dataset_id.clone(), dataset.clone());
+        session
+            .source_watch_states
+            .insert(source.source_id.clone(), watch_controller);
         bump_session_rev(session);
         bump_scene_rev(session);
         refresh_warnings(session);
 
         Ok(AddedSource { source, dataset })
+    }
+
+    pub fn poll_source_watch(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        now_ms: u64,
+    ) -> Result<Option<u64>, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let (source_uri, stability_window) = {
+            let source = session.shared_scene.sources.get(source_id).ok_or_else(|| {
+                SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                }
+            })?;
+            (source.uri.clone(), source.stability_window.clone())
+        };
+        let decision = session
+            .source_watch_states
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?
+            .poll_and_evaluate(&source_uri, now_ms, &stability_window)
+            .map_err(|error| match error {
+                WatchError::InvalidSourceUri { uri, message } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                },
+                WatchError::SourceNotFound { uri } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: "source path does not exist".to_owned(),
+                },
+                WatchError::ReadFailed { uri, message } => SessionError::SourceUnavailable {
+                    uri,
+                    reason: message,
+                },
+            })?;
+
+        if decision.changed {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+            source.status = SourceStatus::Building;
+            bump_session_rev(session);
+            refresh_warnings(session);
+        }
+
+        if !decision.stable_for_ingest {
+            return Ok(None);
+        }
+
+        let generation_seq = {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+            let seq =
+                RevisionAllocator::next_generation_seq(&mut source.latest_working_generation_seq);
+            source.status = SourceStatus::Watching;
+            seq
+        };
+
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(Some(generation_seq))
     }
 
     pub fn bump_source_generation_seq(
@@ -951,7 +1049,7 @@ mod tests {
     use crate::errors::SessionError;
     use crate::model::{
         AddSourceRequest, AttachRequest, AuditEventKind, ClientViewMode, LeaseChangeKind,
-        PermissionClass, ReconnectRequest,
+        PermissionClass, ReconnectRequest, SourceStatus,
     };
 
     use super::SessionManager;
@@ -992,6 +1090,10 @@ mod tests {
         let path = fixture_dir.join("source.tiff");
         write_minimal_rgb_tiff(&path);
         path
+    }
+
+    fn overwrite_file(path: &Path, data: &[u8]) {
+        fs::write(path, data).expect("fixture overwrite should succeed");
     }
 
     #[test]
@@ -1164,6 +1266,81 @@ mod tests {
         assert_eq!(metadata_rev, 1);
         assert_eq!(write_rev, 1);
         assert_eq!(view_rev, 1);
+
+        let fixture_dir = source_path
+            .parent()
+            .expect("fixture parent should exist")
+            .to_path_buf();
+        fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn source_watch_polling_bumps_generation_only_after_stability_window() {
+        let source_path = fixture_tiff_path("watch_polling");
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("watch-session");
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("attach should succeed");
+        let added = manager
+            .add_source(
+                &created.session_id,
+                AddSourceRequest {
+                    name: "watch-source".to_owned(),
+                    uri: source_path.display().to_string(),
+                },
+            )
+            .expect("source add should succeed");
+
+        let first_poll = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 0)
+            .expect("first watch poll should succeed");
+        assert_eq!(first_poll, None);
+
+        overwrite_file(&source_path, b"changed-on-disk");
+        let changed_poll = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 1000)
+            .expect("changed poll should succeed");
+        assert_eq!(changed_poll, None);
+
+        let before_debounce = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 2500)
+            .expect("before debounce poll should succeed");
+        assert_eq!(before_debounce, None);
+
+        let start_verify = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 3000)
+            .expect("verify start poll should succeed");
+        assert_eq!(start_verify, None);
+
+        let ready = manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 3200)
+            .expect("ready poll should succeed");
+        assert_eq!(ready, Some(1));
+
+        let snapshot = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id,
+                client_label: "observer".to_owned(),
+                requested_permission: PermissionClass::View,
+            })
+            .expect("observer attach should succeed");
+        let source = snapshot
+            .snapshot
+            .shared_scene
+            .sources
+            .get(&added.source.source_id)
+            .expect("source should remain present");
+        assert_eq!(source.latest_working_generation_seq, 1);
+        assert_eq!(source.status, SourceStatus::Watching);
+        assert_ne!(
+            attached.snapshot.client_view.client_id,
+            snapshot.snapshot.client_view.client_id
+        );
 
         let fixture_dir = source_path
             .parent()

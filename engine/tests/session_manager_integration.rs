@@ -32,6 +32,10 @@ fn write_minimal_rgb_tiff(path: &Path) {
     fs::write(path, TIFF_BYTES).expect("TIFF fixture write should succeed");
 }
 
+fn overwrite_file(path: &Path, data: &[u8]) {
+    fs::write(path, data).expect("fixture overwrite should succeed");
+}
+
 #[test]
 fn session_manager_public_api_allocates_ids_and_revisions() {
     let fixture_dir = std::env::temp_dir().join(format!(
@@ -150,4 +154,79 @@ fn session_manager_supports_heartbeat_idle_disconnect_and_reconnect() {
         .expect("reconnect should succeed");
 
     assert_eq!(reconnected.snapshot.client_roster.len(), 2);
+}
+
+#[test]
+fn session_manager_watcher_stability_gate_requires_debounce_before_generation_bump() {
+    let fixture_dir = std::env::temp_dir().join(format!(
+        "lucida_luc201_session_manager_watch_{}_{}",
+        std::process::id(),
+        1_u64
+    ));
+    fs::create_dir_all(&fixture_dir).expect("fixture dir creation should succeed");
+    let source_path = fixture_dir.join("watch-source.tiff");
+    write_minimal_rgb_tiff(&source_path);
+
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-watch");
+    let attached = manager
+        .attach_client(AttachRequest {
+            session_id: created.session_id.clone(),
+            client_label: "integration-client".to_owned(),
+            requested_permission: PermissionClass::Control,
+        })
+        .expect("attach should succeed");
+    let added = manager
+        .add_source(
+            &created.session_id,
+            AddSourceRequest {
+                name: "watch-source".to_owned(),
+                uri: source_path.display().to_string(),
+            },
+        )
+        .expect("source add should succeed");
+
+    assert_eq!(
+        manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 0)
+            .expect("initial poll should succeed"),
+        None
+    );
+    overwrite_file(&source_path, b"changed");
+    assert_eq!(
+        manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 1000)
+            .expect("change poll should succeed"),
+        None
+    );
+    assert_eq!(
+        manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 3000)
+            .expect("verify start should succeed"),
+        None
+    );
+    assert_eq!(
+        manager
+            .poll_source_watch(&created.session_id, &added.source.source_id, 3200)
+            .expect("stable poll should succeed"),
+        Some(1)
+    );
+
+    let reconnected = manager
+        .reconnect_client(ReconnectRequest {
+            session_id: created.session_id,
+            previous_client_id: Some(attached.snapshot.client_view.client_id),
+            client_label: "integration-client".to_owned(),
+            requested_permission: PermissionClass::Control,
+        })
+        .expect("reconnect should succeed");
+    let source = reconnected
+        .snapshot
+        .shared_scene
+        .sources
+        .get(&added.source.source_id)
+        .expect("source should remain present");
+    assert_eq!(source.latest_working_generation_seq, 1);
+
+    fs::remove_dir_all(&fixture_dir).expect("fixture cleanup should succeed");
 }

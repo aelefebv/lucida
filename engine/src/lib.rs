@@ -9,6 +9,7 @@ mod model;
 mod revision_allocator;
 mod session_manager;
 mod source_inspector;
+mod source_watch;
 mod warning_service;
 
 pub use command_router::{
@@ -46,4 +47,8 @@ pub use model::{
 pub use revision_allocator::RevisionAllocator;
 pub use session_manager::{LeaseTransition, SessionManager};
 pub use source_inspector::{InspectedSource, SourceInspectionError, inspect_source};
+pub use source_watch::{
+    DirectoryWatcher, FileWatcher, SourceWatchController, SourceWatcher, SourceWatcherKind,
+    StabilityWindowGate, WatchDecision, WatchError, WatchPoll, WatchSignature,
+};
 pub use warning_service::{WarningAggregation, aggregate_warnings};
