@@ -165,6 +165,7 @@ describe("app shell routing", () => {
     controllers.push(controller);
 
     await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+    expect(queryElement("contrast-dual-slider")).toBeInstanceOf(HTMLElement);
 
     const minSlider = queryInput("slider-contrast-min");
     const maxSlider = queryInput("slider-contrast-max");
@@ -600,6 +601,14 @@ function queryButton(testId: string): HTMLButtonElement {
   const node = document.querySelector(`[data-testid="${testId}"]`);
   if (!(node instanceof HTMLButtonElement)) {
     throw new Error(`missing button data-testid node ${testId}`);
+  }
+  return node;
+}
+
+function queryElement(testId: string): HTMLElement {
+  const node = document.querySelector(`[data-testid="${testId}"]`);
+  if (!(node instanceof HTMLElement)) {
+    throw new Error(`missing element data-testid node ${testId}`);
   }
   return node;
 }

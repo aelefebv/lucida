@@ -63,6 +63,72 @@ function ensureMount(document: Document): HTMLElement {
 function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
   return `
 <main class="viewer-shell" data-route="${routeKind}" data-testid="viewer-shell">
+  <style>
+    .viewer-shell .dual-range {
+      position: relative;
+      width: 320px;
+      height: 24px;
+    }
+    .viewer-shell .dual-range-track {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 10px;
+      height: 4px;
+      background: #b0b0b0;
+      border-radius: 2px;
+    }
+    .viewer-shell .dual-range-active {
+      position: absolute;
+      top: 10px;
+      height: 4px;
+      background: #202020;
+      border-radius: 2px;
+      left: 0%;
+      right: 0%;
+    }
+    .viewer-shell .dual-range input[type="range"] {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 100%;
+      height: 24px;
+      margin: 0;
+      background: transparent;
+      pointer-events: none;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .viewer-shell .dual-range input[type="range"]::-webkit-slider-runnable-track {
+      height: 4px;
+      background: transparent;
+    }
+    .viewer-shell .dual-range input[type="range"]::-moz-range-track {
+      height: 4px;
+      background: transparent;
+    }
+    .viewer-shell .dual-range input[type="range"]::-webkit-slider-thumb {
+      width: 14px;
+      height: 14px;
+      margin-top: -5px;
+      border: 1px solid #ffffff;
+      border-radius: 50%;
+      background: #101010;
+      pointer-events: auto;
+      cursor: pointer;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .viewer-shell .dual-range input[type="range"]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border: 1px solid #ffffff;
+      border-radius: 50%;
+      background: #101010;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+  </style>
   <header>
     <h1>Lucida S1 Viewer</h1>
     <p data-testid="route-kind">${routeKind}</p>
@@ -95,14 +161,29 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
     <button type="button" data-testid="btn-zoom-out">Zoom Out</button>
   </section>
   <section data-testid="contrast-controls">
-    <label>
-      Contrast Min
-      <input data-testid="slider-contrast-min" type="range" min="0" max="255" step="1" value="0" />
-    </label>
-    <label>
-      Contrast Max
-      <input data-testid="slider-contrast-max" type="range" min="0" max="255" step="1" value="255" />
-    </label>
+    <div>Contrast Limits</div>
+    <div class="dual-range" data-testid="contrast-dual-slider">
+      <div class="dual-range-track"></div>
+      <div class="dual-range-active" data-testid="contrast-range-active"></div>
+      <input
+        data-testid="slider-contrast-min"
+        type="range"
+        min="0"
+        max="255"
+        step="1"
+        value="0"
+        aria-label="Contrast minimum"
+      />
+      <input
+        data-testid="slider-contrast-max"
+        type="range"
+        min="0"
+        max="255"
+        step="1"
+        value="255"
+        aria-label="Contrast maximum"
+      />
+    </div>
     <button type="button" data-testid="btn-contrast-auto">Auto Contrast</button>
     <output data-testid="contrast-values">0-255</output>
   </section>
@@ -472,4 +553,20 @@ function setContrastControlsState(
   if (valueNode instanceof HTMLOutputElement || valueNode instanceof HTMLElement) {
     valueNode.textContent = `${normalized.min.toString()}-${normalized.max.toString()}`;
   }
+  updateContrastActiveRangeVisual(mount, normalized.min, normalized.max);
+}
+
+function updateContrastActiveRangeVisual(
+  mount: HTMLElement,
+  min: number,
+  max: number,
+): void {
+  const activeRange = mount.querySelector('[data-testid="contrast-range-active"]');
+  if (!(activeRange instanceof HTMLElement)) {
+    return;
+  }
+  const left = (min / DEFAULT_CONTRAST_MAX) * 100;
+  const right = ((DEFAULT_CONTRAST_MAX - max) / DEFAULT_CONTRAST_MAX) * 100;
+  activeRange.style.left = `${left.toFixed(2)}%`;
+  activeRange.style.right = `${right.toFixed(2)}%`;
 }
