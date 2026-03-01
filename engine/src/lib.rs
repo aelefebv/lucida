@@ -12,6 +12,7 @@ mod errors;
 mod event_stream;
 mod id_allocator;
 mod model;
+mod object_url;
 mod revision_allocator;
 mod session_manager;
 mod source_inspector;
@@ -67,6 +68,9 @@ pub use model::{
     SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceKind,
     SourceMetadata, SourceRecord, SourceStatus, SourceWatchMode, StabilityWindow, TargetState,
     WarningCode, WarningEntry, WarningSeverity,
+};
+pub use object_url::{
+    EngineDataPlaneResolver, ObjectUrlError, ObjectUrlResolver, StaticObjectResolver,
 };
 pub use revision_allocator::RevisionAllocator;
 pub use session_manager::{LeaseTransition, SessionManager};
