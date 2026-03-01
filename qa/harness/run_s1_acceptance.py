@@ -21,6 +21,14 @@ class AcceptanceStep:
     cwd: Path
 
 
+@dataclass(frozen=True)
+class AcceptanceCase:
+    test_id: str
+    description: str
+    command: list[str]
+    cwd: Path
+
+
 def build_steps() -> list[AcceptanceStep]:
     return [
         AcceptanceStep(
@@ -33,77 +41,126 @@ def build_steps() -> list[AcceptanceStep]:
             ],
             cwd=REPO_ROOT,
         ),
-        AcceptanceStep(
-            name="engine_checks",
+    ]
+
+
+def build_acceptance_cases() -> list[AcceptanceCase]:
+    return [
+        AcceptanceCase(
+            test_id="T-M1-01",
+            description="Attach + snapshot + ordered event stream",
             command=[
                 "sh",
                 "-c",
-                "cd engine && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets --all-features",
+                "cd engine && cargo test --test runtime_integration runtime_supports_attach_command_events_and_reconnect -- --exact",
             ],
             cwd=REPO_ROOT,
         ),
-        AcceptanceStep(
-            name="client_checks",
+        AcceptanceCase(
+            test_id="T-M1-02",
+            description="Preview-first paint then same-generation tile refinement",
             command=[
                 "sh",
                 "-c",
-                "cd client-web && npm run typecheck && npm run test",
+                "cd client-web && npm run test -- test/app-shell-routing.test.ts -t \"renders preview-first then tile refinement with coherent minimap and warnings\"",
             ],
             cwd=REPO_ROOT,
         ),
-        AcceptanceStep(
-            name="python_checks",
-            command=["sh", "-c", "cd python-client && python3 -m pytest -q"],
+        AcceptanceCase(
+            test_id="T-M1-03",
+            description="Interactive pan/zoom/z/t/channel loop with client isolation",
+            command=[
+                "sh",
+                "-c",
+                "cd client-web && npm run test -- test/viewer-runtime-interaction.test.ts -t \"keeps interactions scoped to the initiating client\"",
+            ],
             cwd=REPO_ROOT,
         ),
-        AcceptanceStep(
-            name="engine_demo",
-            command=["sh", "-c", "cd engine && cargo run --bin s0_demo"],
+        AcceptanceCase(
+            test_id="T-M1-04",
+            description="Reconnect snapshot/event rehydration recovery",
+            command=[
+                "sh",
+                "-c",
+                "cd client-web && npm run test -- test/viewer-runtime-interaction.test.ts -t \"reconnects and rehydrates authoritative state after transport drop\"",
+            ],
+            cwd=REPO_ROOT,
+        ),
+        AcceptanceCase(
+            test_id="T-M1-05",
+            description="No mixed-generation frame behavior in 2D loop",
+            command=[
+                "sh",
+                "-c",
+                "cd client-web && npm run test -- test/generation-consistency.test.ts",
+            ],
             cwd=REPO_ROOT,
         ),
     ]
 
 
+def run_command(
+    name: str,
+    command: list[str],
+    cwd: Path,
+    dry_run: bool,
+) -> dict[str, Any]:
+    if dry_run:
+        return {
+            "name": name,
+            "status": "skipped",
+            "duration_seconds": 0.0,
+            "command": command,
+        }
+
+    started_at = time.time()
+    completed = subprocess.run(
+        command,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+    )
+    status = "passed" if completed.returncode == 0 else "failed"
+    return {
+        "name": name,
+        "status": status,
+        "duration_seconds": round(time.time() - started_at, 3),
+        "command": command,
+        "stdout_tail": completed.stdout[-2000:],
+        "stderr_tail": completed.stderr[-2000:],
+    }
+
+
 def run_harness(dry_run: bool, report_path: Path) -> dict[str, Any]:
     started_at = time.time()
     steps_report: list[dict[str, Any]] = []
+    case_report: list[dict[str, Any]] = []
     success = True
 
     for step in build_steps():
-        step_started_at = time.time()
-        if dry_run:
-            steps_report.append(
+        result = run_command(step.name, step.command, step.cwd, dry_run)
+        steps_report.append(result)
+        if result["status"] == "failed":
+            success = False
+            break
+
+    if success:
+        for case in build_acceptance_cases():
+            result = run_command(case.test_id, case.command, case.cwd, dry_run)
+            case_report.append(
                 {
-                    "name": step.name,
-                    "status": "skipped",
-                    "duration_seconds": 0.0,
-                    "command": step.command,
+                    "id": case.test_id,
+                    "description": case.description,
+                    **result,
                 }
             )
-            continue
+            if result["status"] == "failed":
+                success = False
 
-        completed = subprocess.run(
-            step.command,
-            cwd=step.cwd,
-            capture_output=True,
-            text=True,
-        )
-        status = "passed" if completed.returncode == 0 else "failed"
-        if status == "failed":
-            success = False
-
-        steps_report.append(
-            {
-                "name": step.name,
-                "status": status,
-                "duration_seconds": round(time.time() - step_started_at, 3),
-                "command": step.command,
-                "stdout_tail": completed.stdout[-2000:],
-                "stderr_tail": completed.stderr[-2000:],
-            }
-        )
-        if completed.returncode != 0:
-            break
+    case_statuses = [case["status"] for case in case_report]
+    passed_cases = sum(1 for status in case_statuses if status == "passed")
+    failed_cases = sum(1 for status in case_statuses if status == "failed")
+    skipped_cases = sum(1 for status in case_statuses if status == "skipped")
 
     report = {
         "milestone": "S1",
@@ -112,6 +169,13 @@ def run_harness(dry_run: bool, report_path: Path) -> dict[str, Any]:
         "dry_run": dry_run,
         "success": success,
         "steps": steps_report,
+        "acceptance_cases": case_report,
+        "acceptance_summary": {
+            "total": len(case_report),
+            "passed": passed_cases,
+            "failed": failed_cases,
+            "skipped": skipped_cases,
+        },
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")

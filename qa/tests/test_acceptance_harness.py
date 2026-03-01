@@ -25,3 +25,11 @@ def test_acceptance_harness_generates_structured_report(tmp_path: Path) -> None:
     assert isinstance(report["steps"], list)
     assert report["steps"][0]["name"] == "generate_fixtures"
     assert all(step["status"] == "skipped" for step in report["steps"])
+    assert [case["id"] for case in report["acceptance_cases"]] == [
+        "T-M1-01",
+        "T-M1-02",
+        "T-M1-03",
+        "T-M1-04",
+        "T-M1-05",
+    ]
+    assert all(case["status"] == "skipped" for case in report["acceptance_cases"])
