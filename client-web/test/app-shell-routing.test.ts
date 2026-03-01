@@ -403,6 +403,71 @@ describe("app shell routing", () => {
     expect((zoomCommands[1]?.args as { zoom?: unknown })?.zoom).toBe(1);
   });
 
+  it("keeps drag pan distance consistent across zoom and viewport size", async () => {
+    const fixture = await startIntegratedRenderFixture();
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-pointer-scale&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}&dataBase=${encodeURIComponent(fixture.dataBaseUrl ?? "")}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+
+    const sizeSlider = queryInput("slider-viewport-size");
+    sizeSlider.value = "200";
+    sizeSlider.dispatchEvent(new Event("input", { bubbles: true }));
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "=" }));
+
+    const viewport = queryCanvas("viewport-canvas");
+    viewport.dispatchEvent(
+      new MouseEvent("mousedown", {
+        bubbles: true,
+        button: 0,
+        clientX: 20,
+        clientY: 20,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mousemove", {
+        bubbles: true,
+        clientX: 44,
+        clientY: 20,
+      }),
+    );
+    document.dispatchEvent(
+      new MouseEvent("mouseup", {
+        bubbles: true,
+        button: 0,
+        clientX: 44,
+        clientY: 20,
+      }),
+    );
+
+    await waitFor(() => {
+      const commandCount = fixture.received.filter((value) => {
+        return isRecord(value) && value.message_type === "command";
+      }).length;
+      return commandCount >= 2;
+    }, 2000);
+
+    const commands = fixture.received.filter((value): value is Record<string, unknown> => {
+      return isRecord(value) && value.message_type === "command";
+    });
+    const zoomCommand = commands.find((command) => command.op === "view.zoom");
+    expect(zoomCommand).toBeDefined();
+    expect((zoomCommand?.args as { zoom?: unknown })?.zoom).toBe(1.2);
+
+    const panCommand = commands.find((command) => command.op === "view.pan");
+    expect(panCommand).toBeDefined();
+    expect((panCommand?.args as { dx?: unknown })?.dx).toBeCloseTo(-10, 6);
+    expect((panCommand?.args as { dy?: unknown })?.dy).toBe(0);
+  });
+
   it("clamps z/t/channel controls to dataset bounds", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",

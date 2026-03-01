@@ -282,6 +282,13 @@ export class ViewerRuntime {
     return this.stateValue;
   }
 
+  public currentZoom(): number {
+    if (this.interactionModel !== null) {
+      return this.interactionModel.state().zoom;
+    }
+    return this.stateValue.clientState?.zoom ?? 1;
+  }
+
   private handleFrame(rawFrame: unknown): void {
     if (typeof rawFrame !== "string") {
       return;

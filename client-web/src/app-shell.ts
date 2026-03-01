@@ -22,6 +22,7 @@ const DEFAULT_CONTRAST_MAX = 255;
 const DEFAULT_AXIS_SLIDER_MAX = 4095;
 const ZOOM_IN_SCALE = 1.2;
 const ZOOM_OUT_SCALE = 1 / ZOOM_IN_SCALE;
+const KEYBOARD_PAN_STEP_CSS_PX = 24;
 const MIN_VIEWPORT_SCALE_PERCENT = 25;
 const MAX_VIEWPORT_SCALE_PERCENT = 400;
 const DEFAULT_VIEWPORT_SCALE_PERCENT = 100;
@@ -347,21 +348,35 @@ function attachInteractionHandlers(
     );
   };
 
+  const panByScreenPixels = (panXCss: number, panYCss: number): void => {
+    const canvas = mount.querySelector('[data-testid="viewport-canvas"]');
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      runtime.pan(panXCss, panYCss);
+      return;
+    }
+    const zoom = normalizeZoom(runtime.currentZoom());
+    const displayScale = canvasDisplayScale(canvas);
+    runtime.pan(
+      panXCss / (zoom * displayScale.x),
+      panYCss / (zoom * displayScale.y),
+    );
+  };
+
   const onKeyDown = (event: KeyboardEvent): void => {
     if (event.key === "ArrowLeft") {
-      runtime.pan(-24, 0);
+      panByScreenPixels(-KEYBOARD_PAN_STEP_CSS_PX, 0);
       return;
     }
     if (event.key === "ArrowRight") {
-      runtime.pan(24, 0);
+      panByScreenPixels(KEYBOARD_PAN_STEP_CSS_PX, 0);
       return;
     }
     if (event.key === "ArrowUp") {
-      runtime.pan(0, -24);
+      panByScreenPixels(0, -KEYBOARD_PAN_STEP_CSS_PX);
       return;
     }
     if (event.key === "ArrowDown") {
-      runtime.pan(0, 24);
+      panByScreenPixels(0, KEYBOARD_PAN_STEP_CSS_PX);
       return;
     }
     if (event.key === "+" || event.key === "=") {
@@ -563,7 +578,7 @@ function attachInteractionHandlers(
         return;
       }
       // Keep the image under the cursor while dragging.
-      runtime.pan(-dx, -dy);
+      panByScreenPixels(-dx, -dy);
       event.preventDefault();
     };
 
@@ -840,6 +855,41 @@ function applyViewportDisplaySize(mount: HTMLElement): void {
   const displayHeight = Math.max(1, Math.round(canvas.height * scale));
   canvas.style.width = `${displayWidth.toString()}px`;
   canvas.style.height = `${displayHeight.toString()}px`;
+}
+
+function canvasDisplayScale(
+  canvas: HTMLCanvasElement,
+): { x: number; y: number } {
+  const intrinsicWidth = Math.max(1, canvas.width);
+  const intrinsicHeight = Math.max(1, canvas.height);
+  const rect = canvas.getBoundingClientRect();
+  const fromRectX =
+    rect.width > 0 ? rect.width / intrinsicWidth : Number.NaN;
+  const fromRectY =
+    rect.height > 0 ? rect.height / intrinsicHeight : Number.NaN;
+  const fromStyleX = parseCssPixels(canvas.style.width) / intrinsicWidth;
+  const fromStyleY = parseCssPixels(canvas.style.height) / intrinsicHeight;
+  return {
+    x: normalizeDisplayScale(fromRectX, fromStyleX),
+    y: normalizeDisplayScale(fromRectY, fromStyleY),
+  };
+}
+
+function parseCssPixels(value: string): number {
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return Number.NaN;
+  }
+  return parsed;
+}
+
+function normalizeDisplayScale(...candidates: number[]): number {
+  for (const candidate of candidates) {
+    if (Number.isFinite(candidate) && candidate > 0) {
+      return candidate;
+    }
+  }
+  return 1;
 }
 
 function readViewportScalePercent(mount: HTMLElement): number {
