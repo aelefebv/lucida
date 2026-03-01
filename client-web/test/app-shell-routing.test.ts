@@ -151,6 +151,38 @@ describe("app shell routing", () => {
     await waitFor(() => queryText("frame-state").includes("(preview)"), 3000);
     await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
   });
+
+  it("updates contrast limits from sliders and supports auto reset", async () => {
+    const fixture = await startIntegratedRenderFixture();
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_demo&client=browser-a&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}&dataBase=${encodeURIComponent(fixture.dataBaseUrl ?? "")}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
+
+    const minSlider = queryInput("slider-contrast-min");
+    const maxSlider = queryInput("slider-contrast-max");
+
+    minSlider.value = "100";
+    minSlider.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(queryText("contrast-values")).toContain("100-255");
+    expect(queryText("contrast-state")).toContain("100-255");
+
+    maxSlider.value = "180";
+    maxSlider.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(queryText("contrast-values")).toContain("100-180");
+    expect(queryText("contrast-state")).toContain("100-180");
+
+    queryButton("btn-contrast-auto").click();
+    expect(queryText("contrast-values")).toContain("0-255");
+    expect(queryText("contrast-state")).toContain("0-255");
+  });
 });
 
 async function startFixtureServer(config: {

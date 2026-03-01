@@ -1,9 +1,22 @@
+import {
+  applyContrastWindowToRgba,
+  autoContrastWindow,
+  normalizeContrastWindow,
+  type ContrastWindow,
+} from "./contrast-window";
 import { resolveRoute } from "./viewer-route";
 import { ViewerRuntime, type ViewerRuntimeState } from "./viewer-runtime";
 
 export type AppController = {
   dispose: () => void;
 };
+
+type ContrastControlsState = ContrastWindow & {
+  userAdjusted: boolean;
+};
+
+const DEFAULT_CONTRAST_MIN = 0;
+const DEFAULT_CONTRAST_MAX = 255;
 
 export function bootstrapApp(
   document: Document = window.document,
@@ -20,6 +33,7 @@ export function bootstrapApp(
   }
 
   mount.innerHTML = shellMarkup(resolved.route.kind);
+  initializeContrastControls(mount);
   const runtime = new ViewerRuntime(resolved.route, (state) => {
     renderRuntimeState(mount, state);
   });
@@ -80,6 +94,19 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
     <button type="button" data-testid="btn-zoom-in">Zoom In</button>
     <button type="button" data-testid="btn-zoom-out">Zoom Out</button>
   </section>
+  <section data-testid="contrast-controls">
+    <label>
+      Contrast Min
+      <input data-testid="slider-contrast-min" type="range" min="0" max="255" step="1" value="0" />
+    </label>
+    <label>
+      Contrast Max
+      <input data-testid="slider-contrast-max" type="range" min="0" max="255" step="1" value="255" />
+    </label>
+    <button type="button" data-testid="btn-contrast-auto">Auto Contrast</button>
+    <output data-testid="contrast-values">0-255</output>
+  </section>
+  <section data-testid="contrast-state"></section>
   <section data-testid="frame-state"></section>
   <section data-testid="minimap-state"></section>
   <section data-testid="warning-state"></section>
@@ -92,6 +119,7 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
 }
 
 function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void {
+  maybeAutoSetContrastFromFrame(mount, state);
   const statusNode = mount.querySelector('[data-testid="attach-status"]');
   if (statusNode instanceof HTMLElement) {
     statusNode.textContent = `Attach phase: ${phaseLabel(state.connection.phase)}`;
@@ -131,6 +159,11 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
     } else {
       minimapNode.textContent = `Minimap: ${state.renderFrame.minimap.zIndicatorLabel}`;
     }
+  }
+  const contrastNode = mount.querySelector('[data-testid="contrast-state"]');
+  if (contrastNode instanceof HTMLElement) {
+    const contrast = readContrastControlsState(mount);
+    contrastNode.textContent = `Contrast: ${contrast.min.toString()}-${contrast.max.toString()}`;
   }
 
   const warningNode = mount.querySelector('[data-testid="warning-state"]');
@@ -190,14 +223,32 @@ function attachInteractionHandlers(
   };
   document.addEventListener("keydown", onKeyDown);
 
-  const listeners: Array<{ element: HTMLElement; handler: () => void }> = [];
-  const registerClick = (testId: string, handler: () => void): void => {
+  const listeners: Array<{
+    element: HTMLElement;
+    event: "click" | "input";
+    handler: EventListener;
+  }> = [];
+  const registerListener = (
+    testId: string,
+    event: "click" | "input",
+    handler: EventListener,
+  ): void => {
     const node = mount.querySelector(`[data-testid="${testId}"]`);
     if (!(node instanceof HTMLElement)) {
       return;
     }
-    node.addEventListener("click", handler);
-    listeners.push({ element: node, handler });
+    node.addEventListener(event, handler);
+    listeners.push({ element: node, event, handler });
+  };
+  const registerClick = (testId: string, handler: () => void): void => {
+    registerListener(testId, "click", () => {
+      handler();
+    });
+  };
+  const registerInput = (testId: string, handler: () => void): void => {
+    registerListener(testId, "input", () => {
+      handler();
+    });
   };
   registerClick("btn-pan-left", () => runtime.pan(-12, 0));
   registerClick("btn-pan-right", () => runtime.pan(12, 0));
@@ -215,11 +266,39 @@ function attachInteractionHandlers(
       setOpenSourceStatus(mount, result.message);
     });
   });
+  registerInput("slider-contrast-min", () => {
+    applyUserContrastSelection(mount);
+    renderRuntimeState(mount, runtime.state());
+  });
+  registerInput("slider-contrast-max", () => {
+    applyUserContrastSelection(mount);
+    renderRuntimeState(mount, runtime.state());
+  });
+  registerClick("btn-contrast-auto", () => {
+    const frame = runtime.state().renderFrame;
+    if (frame === null) {
+      setContrastControlsState(mount, {
+        min: DEFAULT_CONTRAST_MIN,
+        max: DEFAULT_CONTRAST_MAX,
+        userAdjusted: false,
+      });
+    } else {
+      const autoWindow = autoContrastWindow(
+        frame.pixelStats.min,
+        frame.pixelStats.max,
+      );
+      setContrastControlsState(mount, {
+        ...autoWindow,
+        userAdjusted: false,
+      });
+    }
+    renderRuntimeState(mount, runtime.state());
+  });
 
   return () => {
     document.removeEventListener("keydown", onKeyDown);
     for (const listener of listeners) {
-      listener.element.removeEventListener("click", listener.handler);
+      listener.element.removeEventListener(listener.event, listener.handler);
     }
   };
 }
@@ -257,8 +336,10 @@ function renderViewportCanvas(mount: HTMLElement, state: ViewerRuntimeState): vo
   if (context === null) {
     return;
   }
+  const contrast = readContrastControlsState(mount);
+  const contrasted = applyContrastWindowToRgba(frame.rgba, contrast);
   const imageData = context.createImageData(frame.width, frame.height);
-  imageData.data.set(frame.rgba);
+  imageData.data.set(contrasted);
   context.putImageData(imageData, 0, 0);
 }
 
@@ -289,4 +370,106 @@ function setOpenSourceStatus(mount: HTMLElement, message: string): void {
     return;
   }
   statusNode.textContent = message;
+}
+
+function initializeContrastControls(mount: HTMLElement): void {
+  setContrastControlsState(mount, {
+    min: DEFAULT_CONTRAST_MIN,
+    max: DEFAULT_CONTRAST_MAX,
+    userAdjusted: false,
+  });
+}
+
+function maybeAutoSetContrastFromFrame(
+  mount: HTMLElement,
+  state: ViewerRuntimeState,
+): void {
+  if (state.renderFrame === null) {
+    return;
+  }
+  const current = readContrastControlsState(mount);
+  if (current.userAdjusted) {
+    return;
+  }
+  const autoWindow = autoContrastWindow(
+    state.renderFrame.pixelStats.min,
+    state.renderFrame.pixelStats.max,
+  );
+  setContrastControlsState(mount, {
+    ...autoWindow,
+    userAdjusted: false,
+  });
+}
+
+function applyUserContrastSelection(mount: HTMLElement): void {
+  const minInput = mount.querySelector(
+    '[data-testid="slider-contrast-min"]',
+  );
+  const maxInput = mount.querySelector(
+    '[data-testid="slider-contrast-max"]',
+  );
+  if (
+    !(minInput instanceof HTMLInputElement) ||
+    !(maxInput instanceof HTMLInputElement)
+  ) {
+    return;
+  }
+  const normalized = normalizeContrastWindow({
+    min: Number.parseInt(minInput.value, 10),
+    max: Number.parseInt(maxInput.value, 10),
+  });
+  setContrastControlsState(mount, {
+    ...normalized,
+    userAdjusted: true,
+  });
+}
+
+function readContrastControlsState(mount: HTMLElement): ContrastControlsState {
+  const minInput = mount.querySelector(
+    '[data-testid="slider-contrast-min"]',
+  );
+  const maxInput = mount.querySelector(
+    '[data-testid="slider-contrast-max"]',
+  );
+  const userAdjusted = mount.getAttribute("data-contrast-user-adjusted") === "true";
+  const minRaw =
+    minInput instanceof HTMLInputElement
+      ? Number.parseInt(minInput.value, 10)
+      : DEFAULT_CONTRAST_MIN;
+  const maxRaw =
+    maxInput instanceof HTMLInputElement
+      ? Number.parseInt(maxInput.value, 10)
+      : DEFAULT_CONTRAST_MAX;
+  const normalized = normalizeContrastWindow({ min: minRaw, max: maxRaw });
+  return {
+    ...normalized,
+    userAdjusted,
+  };
+}
+
+function setContrastControlsState(
+  mount: HTMLElement,
+  state: ContrastControlsState,
+): void {
+  const normalized = normalizeContrastWindow(state);
+  mount.setAttribute(
+    "data-contrast-user-adjusted",
+    state.userAdjusted ? "true" : "false",
+  );
+  const minInput = mount.querySelector(
+    '[data-testid="slider-contrast-min"]',
+  );
+  const maxInput = mount.querySelector(
+    '[data-testid="slider-contrast-max"]',
+  );
+  if (minInput instanceof HTMLInputElement) {
+    minInput.value = normalized.min.toString();
+  }
+  if (maxInput instanceof HTMLInputElement) {
+    maxInput.value = normalized.max.toString();
+  }
+  const valueNode = mount.querySelector('[data-testid="contrast-values"]');
+  if (valueNode instanceof HTMLOutputElement || valueNode instanceof HTMLElement) {
+    valueNode.textContent = `${normalized.min.toString()}-${normalized.max.toString()}`;
+  }
 }
