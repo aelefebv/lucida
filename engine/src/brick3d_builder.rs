@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::channel_block::{
+    ChannelBlockPackaging, ChannelBlockWriteRequest, PayloadCodec, PayloadKind,
+};
 use crate::model::AxisShape;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,12 +36,16 @@ pub enum BrickBuildError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct Brick3dBuilder;
+pub struct Brick3dBuilder {
+    channel_packaging: ChannelBlockPackaging,
+}
 
 impl Brick3dBuilder {
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            channel_packaging: ChannelBlockPackaging::new(4),
+        }
     }
 
     pub fn build_lazy(
@@ -61,12 +68,24 @@ impl Brick3dBuilder {
 
         for index in 0..to_build {
             let brick_index = existing + index;
-            let brick_path = lod_root.join(format!("brick_{brick_index:08}.blk"));
+            let brick_path = lod_root.join(format!("brick_{brick_index:08}.blkpkg"));
             let payload = format!(
                 "brick index={} lod={} dims={:?} brick_shape={:?}",
                 brick_index, request.lod, dims, brick_shape
             );
-            fs::write(&brick_path, payload).map_err(|error| BrickBuildError::IoError {
+            let encoded_payload = self
+                .channel_packaging
+                .encode(&ChannelBlockWriteRequest {
+                    payload_kind: PayloadKind::Image,
+                    codec: PayloadCodec::Zstd,
+                    channel_count: request.shape.c.min(u64::from(u16::MAX)) as u16,
+                    channel_block_size_override: None,
+                    payload: payload.into_bytes(),
+                })
+                .map_err(|error| BrickBuildError::SerializationError {
+                    message: format!("channel block encoding failed: {error:?}"),
+                })?;
+            fs::write(&brick_path, encoded_payload).map_err(|error| BrickBuildError::IoError {
                 path: brick_path.display().to_string(),
                 message: error.to_string(),
             })?;
@@ -157,7 +176,7 @@ fn existing_bricks(lod_root: &Path) -> Result<u32, BrickBuildError> {
     })?;
     let count = entries
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "blk"))
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "blkpkg"))
         .count() as u32;
     Ok(count)
 }
@@ -175,6 +194,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::channel_block::ChannelBlockPackaging;
     use crate::model::AxisShape;
 
     use super::{Brick3dBuilder, BrickBuildRequest};
@@ -225,6 +245,16 @@ mod tests {
             .expect("second lazy build should succeed");
         assert!(second.built_bricks >= first.built_bricks);
         assert!(second.brick_manifest_path.exists());
+        let first_brick_path = generation_root
+            .join("brick3d")
+            .join("lod0")
+            .join("brick_00000000.blkpkg");
+        let brick_bytes =
+            std::fs::read(first_brick_path).expect("brick payload read should succeed");
+        let decoded = ChannelBlockPackaging::default()
+            .decode(&brick_bytes)
+            .expect("brick payload decode should succeed");
+        assert_eq!(decoded.channel_block_size, 1);
 
         std::fs::remove_dir_all(generation_root).expect("fixture cleanup should succeed");
     }

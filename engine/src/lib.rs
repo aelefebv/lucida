@@ -1,6 +1,7 @@
 mod brick3d_builder;
 mod cache_layout;
 mod canonical_cache;
+mod channel_block;
 mod clock;
 mod command_router;
 mod constants;
@@ -24,6 +25,10 @@ pub use cache_layout::{
 pub use canonical_cache::{
     CanonicalCacheBuildRequest, CanonicalCacheBuildResult, CanonicalCacheBuilder,
     CanonicalCacheError,
+};
+pub use channel_block::{
+    ChannelBlockError, ChannelBlockPackaging, ChannelBlockReadResult, ChannelBlockWriteRequest,
+    PayloadCodec, PayloadKind,
 };
 pub use command_router::{
     CommandAck, CommandArgs, CommandEnvelope, CommandError, CommandErrorCode, CommandOutcome,

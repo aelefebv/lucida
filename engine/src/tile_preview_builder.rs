@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::channel_block::{
+    ChannelBlockPackaging, ChannelBlockWriteRequest, PayloadCodec, PayloadKind,
+};
 use crate::model::AxisShape;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +34,8 @@ pub enum TilePreviewBuildError {
 pub struct TilePreviewBuilder {
     tile_width: u16,
     tile_height: u16,
+    payload_codec: PayloadCodec,
+    channel_packaging: ChannelBlockPackaging,
 }
 
 impl Default for TilePreviewBuilder {
@@ -38,6 +43,8 @@ impl Default for TilePreviewBuilder {
         Self {
             tile_width: 512,
             tile_height: 512,
+            payload_codec: PayloadCodec::Lz4,
+            channel_packaging: ChannelBlockPackaging::new(4),
         }
     }
 }
@@ -74,8 +81,15 @@ impl TilePreviewBuilder {
             &request.source_id,
             request.generation_seq,
             &lod_descriptors,
+            self.channel_packaging.default_block_size(),
         )?;
-        write_placeholder_tiles(&tile_root, &lod_descriptors)?;
+        write_placeholder_tiles(
+            &tile_root,
+            &lod_descriptors,
+            request.shape.c.min(u64::from(u16::MAX)) as u16,
+            self.payload_codec,
+            &self.channel_packaging,
+        )?;
 
         let coarsest_lod = *lods
             .iter()
@@ -156,12 +170,14 @@ fn write_manifest(
     source_id: &str,
     generation_seq: u64,
     lods: &[LodDescriptor],
+    default_channel_block_size: u16,
 ) -> Result<(), TilePreviewBuildError> {
     let manifest_path = tile_root.join("manifest.json");
     let manifest = json!({
         "source_id": source_id,
         "generation_seq": generation_seq,
         "tile_shape": [lods.first().map_or(512, |lod| lod.tile_height), lods.first().map_or(512, |lod| lod.tile_width)],
+        "default_channel_block_size": default_channel_block_size,
         "lods": lods
     });
     let bytes = serde_json::to_vec_pretty(&manifest).map_err(|error| {
@@ -179,6 +195,9 @@ fn write_manifest(
 fn write_placeholder_tiles(
     tile_root: &Path,
     lods: &[LodDescriptor],
+    channel_count: u16,
+    codec: PayloadCodec,
+    packaging: &ChannelBlockPackaging,
 ) -> Result<(), TilePreviewBuildError> {
     for descriptor in lods {
         let lod_dir = tile_root.join(format!("lod{}", descriptor.lod));
@@ -186,13 +205,24 @@ fn write_placeholder_tiles(
             path: lod_dir.display().to_string(),
             message: error.to_string(),
         })?;
-        let tile_path = lod_dir.join("t0_z0_c0_r0_c0.tile");
+        let tile_path = lod_dir.join("t0_z0_c0_r0_c0.tileblk");
         let tile_payload = format!(
             "placeholder tile source for lod={} {}x{}",
             descriptor.lod, descriptor.width, descriptor.height
         )
         .into_bytes();
-        fs::write(&tile_path, tile_payload).map_err(|error| TilePreviewBuildError::IoError {
+        let encoded_payload = packaging
+            .encode(&ChannelBlockWriteRequest {
+                payload_kind: PayloadKind::Image,
+                codec,
+                channel_count,
+                channel_block_size_override: None,
+                payload: tile_payload,
+            })
+            .map_err(|error| TilePreviewBuildError::SerializationError {
+                message: format!("channel block encoding failed: {error:?}"),
+            })?;
+        fs::write(&tile_path, encoded_payload).map_err(|error| TilePreviewBuildError::IoError {
             path: tile_path.display().to_string(),
             message: error.to_string(),
         })?;
@@ -226,6 +256,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use crate::channel_block::ChannelBlockPackaging;
     use crate::model::AxisShape;
 
     use super::{TilePreviewBuildRequest, TilePreviewBuilder};
@@ -267,9 +298,21 @@ mod tests {
         assert!(result.preview_path.exists());
         assert!(result.tile_manifest_path.exists());
         assert!(result.available_lods.len() > 1);
+        let channel_packaging = ChannelBlockPackaging::default();
+        let tile_payload_path = generation_root
+            .join("tile2d")
+            .join("lod0")
+            .join("t0_z0_c0_r0_c0.tileblk");
+        let tile_bytes =
+            std::fs::read(&tile_payload_path).expect("tile payload read should succeed");
+        let decoded_tile = channel_packaging
+            .decode(&tile_bytes)
+            .expect("tile payload decode should succeed");
+        assert_eq!(decoded_tile.channel_block_size, 3);
         let manifest = std::fs::read_to_string(&result.tile_manifest_path)
             .expect("manifest read should succeed");
         assert!(manifest.contains("\"lods\""));
+        assert!(manifest.contains("\"default_channel_block_size\""));
         assert!(generation_root.join("tile2d").join("lod0").exists());
 
         std::fs::remove_dir_all(generation_root).expect("fixture cleanup should succeed");
