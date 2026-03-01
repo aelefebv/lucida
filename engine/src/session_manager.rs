@@ -3,11 +3,14 @@ use std::collections::BTreeMap;
 use crate::clock::rfc3339_now;
 use crate::constants::{ENGINE_VERSION, SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
 use crate::errors::SessionError;
+use crate::id_allocator::{IdAllocator, IdKind};
 use crate::model::{
     AttachRequest, ClientRosterEntry, ClientViewMode, CreatedSession, ExposureMode,
-    ExposureViewMode, LeaseState, PerClientViewState, Permissions, SceneMode,
-    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, WarningEntry,
+    ExposureViewMode, LayerState, LeaseState, PerClientViewState, Permissions, SceneMode,
+    SessionSnapshotEnvelope, SessionSnapshotPayload, SessionState, SharedSceneState, SourceRecord,
+    WarningEntry,
 };
+use crate::revision_allocator::RevisionAllocator;
 
 #[derive(Debug)]
 struct ClientRecord {
@@ -23,12 +26,19 @@ struct SessionRecord {
     clients: BTreeMap<String, ClientRecord>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SessionManager {
-    next_session_index: u64,
-    next_scene_index: u64,
-    next_client_index: u64,
+    id_allocator: IdAllocator,
     sessions: BTreeMap<String, SessionRecord>,
+}
+
+impl Default for SessionManager {
+    fn default() -> Self {
+        Self {
+            id_allocator: IdAllocator::new(),
+            sessions: BTreeMap::new(),
+        }
+    }
 }
 
 impl SessionManager {
@@ -38,11 +48,8 @@ impl SessionManager {
     }
 
     pub fn create_session(&mut self, name: impl Into<String>) -> CreatedSession {
-        self.next_session_index += 1;
-        self.next_scene_index += 1;
-
-        let session_id = format!("sess_{:08}", self.next_session_index);
-        let scene_id = format!("scn_{:08}", self.next_scene_index);
+        let session_id = self.id_allocator.allocate(IdKind::Session);
+        let scene_id = self.id_allocator.allocate(IdKind::Scene);
         let now = rfc3339_now();
         let session_name = name.into();
 
@@ -89,16 +96,17 @@ impl SessionManager {
         &mut self,
         request: AttachRequest,
     ) -> Result<SessionSnapshotEnvelope, SessionError> {
-        let session = self.sessions.get_mut(&request.session_id).ok_or_else(|| {
-            SessionError::SessionNotFound {
-                session_id: request.session_id.clone(),
-            }
-        })?;
-        self.next_client_index += 1;
-        let client_id = format!("cli_{:08}", self.next_client_index);
-        let now = rfc3339_now();
+        if !self.sessions.contains_key(&request.session_id) {
+            return Err(SessionError::SessionNotFound {
+                session_id: request.session_id,
+            });
+        }
 
-        session.session_state.session_rev += 1;
+        let client_id = self.id_allocator.allocate(IdKind::Client);
+        let now = rfc3339_now();
+        let session = self.session_mut(&request.session_id)?;
+
+        bump_session_rev(session);
 
         let is_lease_holder = session
             .lease_state
@@ -124,7 +132,7 @@ impl SessionManager {
         };
 
         session.clients.insert(
-            client_id.clone(),
+            client_id,
             ClientRecord {
                 roster_entry: roster_entry.clone(),
                 view_state: view_state.clone(),
@@ -163,12 +171,7 @@ impl SessionManager {
         session_id: &str,
         client_id: &str,
     ) -> Result<u64, SessionError> {
-        let session =
-            self.sessions
-                .get_mut(session_id)
-                .ok_or_else(|| SessionError::SessionNotFound {
-                    session_id: session_id.to_owned(),
-                })?;
+        let session = self.session_mut(session_id)?;
 
         let removed = session.clients.remove(client_id);
         if removed.is_none() {
@@ -178,9 +181,207 @@ impl SessionManager {
             });
         }
 
-        session.session_state.session_rev += 1;
-        Ok(session.session_state.session_rev)
+        Ok(bump_session_rev(session))
     }
+
+    pub fn add_source(
+        &mut self,
+        session_id: &str,
+        name: impl Into<String>,
+    ) -> Result<SourceRecord, SessionError> {
+        if !self.sessions.contains_key(session_id) {
+            return Err(SessionError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            });
+        }
+
+        let source = SourceRecord {
+            source_id: self.id_allocator.allocate(IdKind::Source),
+            name: name.into(),
+            latest_working_generation_seq: 0,
+        };
+
+        let session = self.session_mut(session_id)?;
+        session
+            .shared_scene
+            .sources
+            .insert(source.source_id.clone(), source.clone());
+        bump_session_rev(session);
+        bump_scene_rev(session);
+
+        Ok(source)
+    }
+
+    pub fn bump_source_generation_seq(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let generation_seq = {
+            let source = session
+                .shared_scene
+                .sources
+                .get_mut(source_id)
+                .ok_or_else(|| SessionError::SourceNotFound {
+                    session_id: session_id.to_owned(),
+                    source_id: source_id.to_owned(),
+                })?;
+
+            RevisionAllocator::next_generation_seq(&mut source.latest_working_generation_seq)
+        };
+
+        bump_session_rev(session);
+        Ok(generation_seq)
+    }
+
+    pub fn add_layer(
+        &mut self,
+        session_id: &str,
+        name: impl Into<String>,
+    ) -> Result<LayerState, SessionError> {
+        if !self.sessions.contains_key(session_id) {
+            return Err(SessionError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            });
+        }
+
+        let mut layer = LayerState {
+            layer_id: self.id_allocator.allocate(IdKind::Layer),
+            name: name.into(),
+            layer_rev: 0,
+            metadata_rev: 0,
+            write_rev: 0,
+        };
+        RevisionAllocator::next_layer_rev(&mut layer.layer_rev);
+
+        let session = self.session_mut(session_id)?;
+        session
+            .shared_scene
+            .layer_order
+            .push(layer.layer_id.clone());
+        session
+            .shared_scene
+            .layers
+            .insert(layer.layer_id.clone(), layer.clone());
+        bump_session_rev(session);
+        bump_scene_rev(session);
+
+        Ok(layer)
+    }
+
+    pub fn bump_layer_revision(
+        &mut self,
+        session_id: &str,
+        layer_id: &str,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_layer_rev = {
+            let layer = session
+                .shared_scene
+                .layers
+                .get_mut(layer_id)
+                .ok_or_else(|| SessionError::LayerNotFound {
+                    session_id: session_id.to_owned(),
+                    layer_id: layer_id.to_owned(),
+                })?;
+            RevisionAllocator::next_layer_rev(&mut layer.layer_rev)
+        };
+
+        bump_session_rev(session);
+        bump_scene_rev(session);
+        Ok(next_layer_rev)
+    }
+
+    pub fn bump_layer_metadata_revision(
+        &mut self,
+        session_id: &str,
+        layer_id: &str,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_metadata_rev = {
+            let layer = session
+                .shared_scene
+                .layers
+                .get_mut(layer_id)
+                .ok_or_else(|| SessionError::LayerNotFound {
+                    session_id: session_id.to_owned(),
+                    layer_id: layer_id.to_owned(),
+                })?;
+            RevisionAllocator::next_metadata_rev(&mut layer.metadata_rev)
+        };
+
+        bump_session_rev(session);
+        Ok(next_metadata_rev)
+    }
+
+    pub fn bump_layer_write_revision(
+        &mut self,
+        session_id: &str,
+        layer_id: &str,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_write_rev = {
+            let layer = session
+                .shared_scene
+                .layers
+                .get_mut(layer_id)
+                .ok_or_else(|| SessionError::LayerNotFound {
+                    session_id: session_id.to_owned(),
+                    layer_id: layer_id.to_owned(),
+                })?;
+            RevisionAllocator::next_write_rev(&mut layer.write_rev)
+        };
+
+        bump_session_rev(session);
+        Ok(next_write_rev)
+    }
+
+    pub fn update_client_view_mode(
+        &mut self,
+        session_id: &str,
+        client_id: &str,
+        view_mode: ClientViewMode,
+    ) -> Result<u64, SessionError> {
+        let session = self.session_mut(session_id)?;
+
+        let next_view_rev =
+            {
+                let client = session.clients.get_mut(client_id).ok_or_else(|| {
+                    SessionError::ClientNotFound {
+                        session_id: session_id.to_owned(),
+                        client_id: client_id.to_owned(),
+                    }
+                })?;
+                client.view_state.view_mode = view_mode;
+                RevisionAllocator::next_view_rev(&mut client.view_state.view_rev)
+            };
+
+        bump_session_rev(session);
+        Ok(next_view_rev)
+    }
+
+    fn session_mut(&mut self, session_id: &str) -> Result<&mut SessionRecord, SessionError> {
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound {
+                session_id: session_id.to_owned(),
+            })
+    }
+}
+
+fn bump_session_rev(session: &mut SessionRecord) -> u64 {
+    RevisionAllocator::next_session_rev(&mut session.session_state.session_rev)
+}
+
+fn bump_scene_rev(session: &mut SessionRecord) -> u64 {
+    let scene_rev = RevisionAllocator::next_scene_rev(&mut session.session_state.scene_rev);
+    session.shared_scene.scene_rev = scene_rev;
+    scene_rev
 }
 
 fn collect_snapshot_warnings(session: &SessionRecord) -> Vec<WarningEntry> {
@@ -201,7 +402,7 @@ fn collect_snapshot_warnings(session: &SessionRecord) -> Vec<WarningEntry> {
 mod tests {
     use crate::constants::{SCHEMA_VERSION, SNAPSHOT_MESSAGE_TYPE};
     use crate::errors::SessionError;
-    use crate::model::{AttachRequest, PermissionClass};
+    use crate::model::{AttachRequest, ClientViewMode, PermissionClass};
 
     use super::SessionManager;
 
@@ -315,5 +516,58 @@ mod tests {
         assert_eq!(reattach.session_rev, 3);
         assert_eq!(reattach.snapshot.client_roster.len(), 1);
         assert_eq!(reattach.snapshot.client_roster[0].label, "bob");
+    }
+
+    #[test]
+    fn handles_revision_families_for_source_layer_and_view() {
+        let mut manager = SessionManager::new();
+        let created = manager.create_session("revision-session");
+
+        let attached = manager
+            .attach_client(AttachRequest {
+                session_id: created.session_id.clone(),
+                client_label: "alice".to_owned(),
+                requested_permission: PermissionClass::Control,
+            })
+            .expect("attach should succeed");
+
+        let source = manager
+            .add_source(&created.session_id, "source-a")
+            .expect("source add should succeed");
+        let gen_1 = manager
+            .bump_source_generation_seq(&created.session_id, &source.source_id)
+            .expect("generation bump 1 should succeed");
+        let gen_2 = manager
+            .bump_source_generation_seq(&created.session_id, &source.source_id)
+            .expect("generation bump 2 should succeed");
+
+        let layer = manager
+            .add_layer(&created.session_id, "layer-a")
+            .expect("layer add should succeed");
+        let layer_rev = manager
+            .bump_layer_revision(&created.session_id, &layer.layer_id)
+            .expect("layer rev bump should succeed");
+        let metadata_rev = manager
+            .bump_layer_metadata_revision(&created.session_id, &layer.layer_id)
+            .expect("metadata rev bump should succeed");
+        let write_rev = manager
+            .bump_layer_write_revision(&created.session_id, &layer.layer_id)
+            .expect("write rev bump should succeed");
+        let view_rev = manager
+            .update_client_view_mode(
+                &created.session_id,
+                &attached.snapshot.client_view.client_id,
+                ClientViewMode::ThreeD,
+            )
+            .expect("view rev bump should succeed");
+
+        assert!(source.source_id.starts_with("src_"));
+        assert!(layer.layer_id.starts_with("lay_"));
+        assert_eq!(gen_1, 1);
+        assert_eq!(gen_2, 2);
+        assert_eq!(layer_rev, 2);
+        assert_eq!(metadata_rev, 1);
+        assert_eq!(write_rev, 1);
+        assert_eq!(view_rev, 1);
     }
 }

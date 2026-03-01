@@ -1,0 +1,48 @@
+use lucida_engine::{AttachRequest, ClientViewMode, PermissionClass, SessionManager};
+
+#[test]
+fn session_manager_public_api_allocates_ids_and_revisions() {
+    let mut manager = SessionManager::new();
+    let created = manager.create_session("integration-session");
+
+    let attached = manager
+        .attach_client(AttachRequest {
+            session_id: created.session_id.clone(),
+            client_label: "integration-client".to_owned(),
+            requested_permission: PermissionClass::Control,
+        })
+        .expect("attach should succeed");
+
+    let source = manager
+        .add_source(&created.session_id, "integration-source")
+        .expect("source add should succeed");
+    let layer = manager
+        .add_layer(&created.session_id, "integration-layer")
+        .expect("layer add should succeed");
+
+    let generation_seq = manager
+        .bump_source_generation_seq(&created.session_id, &source.source_id)
+        .expect("generation bump should succeed");
+    let metadata_rev = manager
+        .bump_layer_metadata_revision(&created.session_id, &layer.layer_id)
+        .expect("metadata rev bump should succeed");
+    let write_rev = manager
+        .bump_layer_write_revision(&created.session_id, &layer.layer_id)
+        .expect("write rev bump should succeed");
+    let view_rev = manager
+        .update_client_view_mode(
+            &created.session_id,
+            &attached.snapshot.client_view.client_id,
+            ClientViewMode::ThreeD,
+        )
+        .expect("view rev bump should succeed");
+
+    assert!(created.session_id.starts_with("sess_"));
+    assert!(attached.snapshot.client_view.client_id.starts_with("cli_"));
+    assert!(source.source_id.starts_with("src_"));
+    assert!(layer.layer_id.starts_with("lay_"));
+    assert_eq!(generation_seq, 1);
+    assert_eq!(metadata_rev, 1);
+    assert_eq!(write_rev, 1);
+    assert_eq!(view_rev, 1);
+}

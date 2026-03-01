@@ -10,6 +10,14 @@ pub enum SessionError {
         session_id: String,
         client_id: String,
     },
+    SourceNotFound {
+        session_id: String,
+        source_id: String,
+    },
+    LayerNotFound {
+        session_id: String,
+        layer_id: String,
+    },
 }
 
 impl Display for SessionError {
@@ -24,6 +32,20 @@ impl Display for SessionError {
             } => write!(
                 f,
                 "client `{client_id}` was not found in session `{session_id}`"
+            ),
+            SessionError::SourceNotFound {
+                session_id,
+                source_id,
+            } => write!(
+                f,
+                "source `{source_id}` was not found in session `{session_id}`"
+            ),
+            SessionError::LayerNotFound {
+                session_id,
+                layer_id,
+            } => write!(
+                f,
+                "layer `{layer_id}` was not found in session `{session_id}`"
             ),
         }
     }

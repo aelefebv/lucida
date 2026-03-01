@@ -89,17 +89,32 @@ pub struct ClientRosterEntry {
     pub is_lease_holder: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct SourceRecord;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceRecord {
+    pub source_id: String,
+    pub name: String,
+    pub latest_working_generation_seq: u64,
+}
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct DatasetBinding;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatasetBinding {
+    pub dataset_id: String,
+    pub source_id: String,
+}
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct LayerState;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerState {
+    pub layer_id: String,
+    pub name: String,
+    pub layer_rev: u64,
+    pub metadata_rev: u64,
+    pub write_rev: u64,
+}
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct TargetState;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetState {
+    pub target_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedSceneState {
