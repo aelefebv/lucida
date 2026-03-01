@@ -239,7 +239,7 @@ export class LiveRenderLoop {
         generationSeq,
         priority: 10,
         execute: (signal) => {
-          return this.fetchFrame(
+          return this.fetchTileWithFallback(
             {
               sourceId,
               generationSeq,
@@ -285,13 +285,36 @@ export class LiveRenderLoop {
     const url = this.resolver.resolveChunkUrl(key);
     const response = await this.fetchImpl(url, { signal });
     if (!response.ok) {
-      throw new Error(
-        `frame fetch failed with status ${response.status.toString()} for ${url}`,
-      );
+      throw new FrameFetchError(response.status, url);
     }
     const bytes = new Uint8Array(await response.arrayBuffer());
     const framePayload = decodeFramePayload(bytes);
     return decodePortableGraymap(framePayload);
+  }
+
+  private async fetchTileWithFallback(
+    key: ChunkKey,
+    signal: AbortSignal,
+  ): Promise<DecodedFrame> {
+    try {
+      return await this.fetchFrame(key, signal);
+    } catch (error) {
+      if (!(error instanceof FrameFetchError) || error.status !== 404) {
+        throw error;
+      }
+      if (key.t === 0 && key.z === 0 && key.channelBlock === 0) {
+        throw error;
+      }
+    }
+    return this.fetchFrame(
+      {
+        ...key,
+        t: 0,
+        z: 0,
+        channelBlock: 0,
+      },
+      signal,
+    );
   }
 
   private emit(sourceId: string, generationSeq: number): void {
@@ -372,6 +395,18 @@ export class LiveRenderLoop {
         this.update(this.latestClientState, this.latestPreferredSourceId);
       }
     }, 250);
+  }
+}
+
+class FrameFetchError extends Error {
+  public readonly status: number;
+
+  public readonly url: string;
+
+  public constructor(status: number, url: string) {
+    super(`frame fetch failed with status ${status.toString()} for ${url}`);
+    this.status = status;
+    this.url = url;
   }
 }
 

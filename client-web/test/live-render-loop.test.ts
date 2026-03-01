@@ -553,6 +553,65 @@ describe("LiveRenderLoop", () => {
     expect(frames.at(-1)?.sampleMax).toBe(65535);
     loop.dispose();
   });
+
+  it("falls back to base t/z/channel-block tile when selected plane is unavailable", async () => {
+    const requestedUrls: string[] = [];
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [11, 40]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          if (url.includes("/t/1/") || url.includes("/z/1/") || url.includes("/cb/1/")) {
+            return new Response("", { status: 404 });
+          }
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [90, 180])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.tIndex = 1;
+    state.zIndex = 1;
+    state.selectedChannels = [4];
+    loop.update(state);
+
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+
+    expect(
+      requestedUrls.some((url) => url.includes("/v1/tile2d/src_fixture/gen/1/lod/0/t/1/z/1/cb/1/")),
+    ).toBe(true);
+    expect(
+      requestedUrls.some((url) => url.includes("/v1/tile2d/src_fixture/gen/1/lod/0/t/0/z/0/cb/0/")),
+    ).toBe(true);
+    const latest = frames.at(-1);
+    expect(latest?.frameKind).toBe("tile");
+    expect(latest?.pixelStats.max).toBe(180);
+    loop.dispose();
+  });
 });
 
 function fixtureClientState(): ClientState {
