@@ -18,6 +18,7 @@ mod revision_allocator;
 mod session_manager;
 mod source_inspector;
 mod source_watch;
+mod storage_layout_validator;
 mod tile_preview_builder;
 mod warning_service;
 
@@ -83,6 +84,10 @@ pub use source_inspector::{InspectedSource, SourceInspectionError, inspect_sourc
 pub use source_watch::{
     DirectoryWatcher, FileWatcher, SourceWatchController, SourceWatcher, SourceWatcherKind,
     StabilityWindowGate, WatchDecision, WatchError, WatchPoll, WatchSignature,
+};
+pub use storage_layout_validator::{
+    LayoutValidationError, LayoutValidationIssue, LayoutValidationReport,
+    validate_generation_layout,
 };
 pub use tile_preview_builder::{
     TilePreviewBuildError, TilePreviewBuildRequest, TilePreviewBuildResult, TilePreviewBuilder,
