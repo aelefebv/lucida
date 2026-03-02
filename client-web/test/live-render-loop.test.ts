@@ -427,6 +427,285 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
+  it("progressively composites partial tiles over preview fallback", async () => {
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(
+            new Blob([toArrayBuffer(pgmPayload(4, 1, [10, 10, 10, 10]))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "image/x-portable-graymap",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/v1/tile2d/") && url.includes("/y/0/x/0")) {
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [100, 100])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/v1/tile2d/") && url.includes("/y/0/x/1")) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, 140);
+          });
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [200, 200])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.centerX = 0;
+    state.centerY = 0;
+    state.zoom = 1;
+    state.generations["src_fixture:1"] = {
+      sourceId: "src_fixture",
+      generationSeq: 1,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 4,
+            height: 1,
+            tileWidth: 2,
+            tileHeight: 1,
+            rows: 1,
+            cols: 2,
+          },
+        ],
+      },
+    };
+
+    loop.update(state);
+
+    await waitFor(
+      () =>
+        frames.some(
+          (frame) => frame.frameKind === "tile" && frame.width === 4 && frame.height === 1,
+        ),
+      2000,
+    );
+
+    const firstTileFrame = frames.find((frame) => frame.frameKind === "tile");
+    expect(firstTileFrame).toBeDefined();
+    expect(sampleRedPixels(firstTileFrame?.rgba ?? new Uint8ClampedArray())).toEqual([
+      100,
+      100,
+      10,
+      10,
+    ]);
+
+    await waitFor(
+      () =>
+        frames.filter((frame) => frame.frameKind === "tile").some((frame) => {
+          return sampleRedPixels(frame.rgba).join(",") === "100,100,200,200";
+        }),
+      2000,
+    );
+
+    const latestTile = frames.filter((frame) => frame.frameKind === "tile").at(-1);
+    expect(sampleRedPixels(latestTile?.rgba ?? new Uint8ClampedArray())).toEqual([
+      100,
+      100,
+      200,
+      200,
+    ]);
+    loop.dispose();
+  });
+
+  it("keeps composed frames isolated by generation under overlap", async () => {
+    const frames: RenderFrameState[] = [];
+    const requestedUrls: string[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        if (url.includes("/gen/1/") && url.includes("/v1/preview2d/")) {
+          return new Response(
+            new Blob([toArrayBuffer(pgmPayload(4, 1, [10, 10, 10, 10]))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "image/x-portable-graymap",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/gen/2/") && url.includes("/v1/preview2d/")) {
+          return new Response(
+            new Blob([toArrayBuffer(pgmPayload(4, 1, [30, 30, 30, 30]))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "image/x-portable-graymap",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/gen/1/") && url.includes("/v1/tile2d/")) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, 220);
+          });
+          const values = url.includes("/x/0") ? [210, 210] : [220, 220];
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, values)))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/gen/2/") && url.includes("/v1/tile2d/")) {
+          const values = url.includes("/x/0") ? [40, 40] : [50, 50];
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, values)))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.zoom = 1;
+    state.generations["src_fixture:1"] = {
+      sourceId: "src_fixture",
+      generationSeq: 1,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 4,
+            height: 1,
+            tileWidth: 2,
+            tileHeight: 1,
+            rows: 1,
+            cols: 2,
+          },
+        ],
+      },
+    };
+    state.generations["src_fixture:2"] = {
+      sourceId: "src_fixture",
+      generationSeq: 2,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 4,
+            height: 1,
+            tileWidth: 2,
+            tileHeight: 1,
+            rows: 1,
+            cols: 2,
+          },
+        ],
+      },
+    };
+
+    state.sources.src_fixture = {
+      sourceId: "src_fixture",
+      name: "fixture-source",
+      status: "watching",
+      latestWorkingGenerationSeq: 1,
+    };
+    loop.update(state);
+    await waitFor(
+      () => requestedUrls.some((url) => url.includes("/gen/1/") && url.includes("/v1/tile2d/")),
+      1000,
+    );
+
+    state.sources.src_fixture = {
+      sourceId: "src_fixture",
+      name: "fixture-source",
+      status: "watching",
+      latestWorkingGenerationSeq: 2,
+    };
+    loop.update(state);
+
+    await waitFor(
+      () =>
+        frames.some(
+          (frame) => frame.generationSeq === 2 && frame.frameKind === "tile",
+        ),
+      2000,
+    );
+
+    const generationTwoFrames = frames.filter((frame) => frame.generationSeq === 2);
+    expect(generationTwoFrames.length).toBeGreaterThan(0);
+    for (const frame of generationTwoFrames) {
+      expect(sampleRedPixels(frame.rgba).includes(210)).toBe(false);
+      expect(sampleRedPixels(frame.rgba).includes(220)).toBe(false);
+    }
+
+    const latestGenTwo = generationTwoFrames.at(-1);
+    expect(sampleRedPixels(latestGenTwo?.rgba ?? new Uint8ClampedArray())).toEqual([
+      40,
+      40,
+      50,
+      50,
+    ]);
+    loop.dispose();
+  });
+
   it("reports empty-frame pixel stats when payload is all zeros", async () => {
     const frames: RenderFrameState[] = [];
     const loop = new LiveRenderLoop(
@@ -988,6 +1267,13 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return buffer;
 }
 
+function sampleRedPixels(rgba: Uint8ClampedArray): number[] {
+  const values: number[] = [];
+  for (let offset = 0; offset < rgba.length; offset += 4) {
+    values.push(rgba[offset] ?? 0);
+  }
+  return values;
+}
 
 async function waitFor(
   check: () => boolean,

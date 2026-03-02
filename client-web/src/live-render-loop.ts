@@ -211,6 +211,7 @@ export class LiveRenderLoop {
       ),
     );
     this.activeFetches.add(fetchKey);
+    let tileCanvas: TileCanvasGeometry | null = null;
     try {
       const preview = await this.scheduler.schedule<DecodedFrame>({
         key: previewRequestKey,
@@ -240,6 +241,7 @@ export class LiveRenderLoop {
       if (generationSeq > this.latestGenerationSeq) {
         this.latestGenerationSeq = generationSeq;
       }
+      tileCanvas = resolveTileCanvasGeometry(tileLayout, preview.width, preview.height);
       const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
       this.dimensionsBySourceGeneration.set(sourceGeneration, {
         width: preview.width,
@@ -252,7 +254,13 @@ export class LiveRenderLoop {
       );
       this.sampleMaxBySourceGeneration.set(sourceGeneration, preview.sampleMax);
       this.pixelStatsBySourceGeneration.set(sourceGeneration, preview.pixelStats);
-      this.frameStore.setPreview(sourceId, generationSeq, preview.rgba);
+      this.frameStore.setPreview(
+        sourceId,
+        generationSeq,
+        preview.rgba,
+        preview.width,
+        preview.height,
+      );
       this.emit(sourceId, generationSeq);
     } catch (error) {
       if (!isCancellationError(error) && this.currentSelectionKey === selectionKey) {
@@ -311,20 +319,32 @@ export class LiveRenderLoop {
           this.activeFetches.delete(fetchKey);
           return;
         }
-        if (!emittedTile) {
-          const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
-          this.dimensionsBySourceGeneration.set(sourceGeneration, {
-            width: tile.width,
-            height: tile.height,
-          });
-          this.frameKindBySourceGeneration.set(sourceGeneration, "tile");
-          this.grayscaleBySourceGeneration.set(sourceGeneration, tile.grayscaleSamples);
-          this.sampleMaxBySourceGeneration.set(sourceGeneration, tile.sampleMax);
-          this.pixelStatsBySourceGeneration.set(sourceGeneration, tile.pixelStats);
-          this.frameStore.setTiles(sourceId, generationSeq, tile.rgba);
-          this.emit(sourceId, generationSeq);
-          emittedTile = true;
-        }
+        const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
+        const canvas = tileCanvas ?? {
+          width: tile.width,
+          height: tile.height,
+          tileWidth: tile.width,
+          tileHeight: tile.height,
+        };
+        this.dimensionsBySourceGeneration.set(sourceGeneration, {
+          width: canvas.width,
+          height: canvas.height,
+        });
+        this.frameKindBySourceGeneration.set(sourceGeneration, "tile");
+        this.grayscaleBySourceGeneration.set(sourceGeneration, tile.grayscaleSamples);
+        this.sampleMaxBySourceGeneration.set(sourceGeneration, tile.sampleMax);
+        this.pixelStatsBySourceGeneration.set(sourceGeneration, tile.pixelStats);
+        this.frameStore.composeTilePatch(sourceId, generationSeq, {
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          offsetX: target.col * canvas.tileWidth,
+          offsetY: target.row * canvas.tileHeight,
+          width: tile.width,
+          height: tile.height,
+          rgba: tile.rgba,
+        });
+        this.emit(sourceId, generationSeq);
+        emittedTile = true;
       } catch (error) {
         if (this.currentSelectionKey !== selectionKey || isCancellationError(error)) {
           this.activeFetches.delete(fetchKey);
@@ -640,6 +660,13 @@ type VisibleTileTarget = {
   col: number;
 };
 
+type TileCanvasGeometry = {
+  width: number;
+  height: number;
+  tileWidth: number;
+  tileHeight: number;
+};
+
 function resolveVisibleTileTargets(
   tileLayout: TileLayout | null,
   selection: { t: number; z: number; channelBlock: number },
@@ -648,14 +675,41 @@ function resolveVisibleTileTargets(
   zoom: number,
 ): VisibleTileTarget[] {
   void selection;
-  if (tileLayout === null) {
-    return [{ row: 0, col: 0 }];
-  }
-  const lod0 = tileLayout.lods.find((lod) => lod.lod === 0) ?? tileLayout.lods[0];
+  const lod0 = lod0Layout(tileLayout);
   if (lod0 === undefined) {
     return [{ row: 0, col: 0 }];
   }
   return visibleTileTargetsForViewport(lod0, centerX, centerY, zoom);
+}
+
+function resolveTileCanvasGeometry(
+  tileLayout: TileLayout | null,
+  fallbackWidth: number,
+  fallbackHeight: number,
+): TileCanvasGeometry {
+  const fallback = {
+    width: Math.max(1, Math.floor(fallbackWidth)),
+    height: Math.max(1, Math.floor(fallbackHeight)),
+    tileWidth: Math.max(1, Math.floor(fallbackWidth)),
+    tileHeight: Math.max(1, Math.floor(fallbackHeight)),
+  };
+  const lod0 = lod0Layout(tileLayout);
+  if (lod0 === undefined) {
+    return fallback;
+  }
+  return {
+    width: Math.max(1, Math.floor(lod0.width)),
+    height: Math.max(1, Math.floor(lod0.height)),
+    tileWidth: Math.max(1, Math.floor(lod0.tileWidth)),
+    tileHeight: Math.max(1, Math.floor(lod0.tileHeight)),
+  };
+}
+
+function lod0Layout(tileLayout: TileLayout | null): TileLodLayout | undefined {
+  if (tileLayout === null) {
+    return undefined;
+  }
+  return tileLayout.lods.find((lod) => lod.lod === 0) ?? tileLayout.lods[0];
 }
 
 function visibleTileTargetsForViewport(
