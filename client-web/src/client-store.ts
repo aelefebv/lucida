@@ -96,6 +96,7 @@ export type EventEnvelope = {
     | "source_generation_detected"
     | "source_generation_started"
     | "source_generation_progress"
+    | "source_generation_failed"
     | "source_generation_ready";
   payload: unknown;
 };
@@ -323,6 +324,7 @@ export function applyEvent(state: ClientState, event: EventEnvelope): ClientStat
     case "source_generation_detected":
     case "source_generation_started":
     case "source_generation_progress":
+    case "source_generation_failed":
     case "source_generation_ready": {
       const payload = event.payload as GenerationState;
       next.generations = {

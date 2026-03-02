@@ -13,6 +13,7 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::time::Duration;
 
 use crate::command_router::{
     CommandArgs, CommandEnvelope, CommandRouter, CommandScope, command_error_to_envelope,
@@ -33,14 +34,23 @@ use crate::{DataPlaneService, IdAllocator, SessionManager};
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineRuntimeConfig {
     pub cache_root: PathBuf,
+    pub generation_worker_startup_delay_ms: u64,
 }
 
 impl Default for EngineRuntimeConfig {
     fn default() -> Self {
         Self {
             cache_root: PathBuf::from(".tmp/cache"),
+            generation_worker_startup_delay_ms: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GenerationBuildRequest {
+    session_id: String,
+    source_id: String,
+    generation_seq: u64,
 }
 
 #[derive(Clone)]
@@ -49,10 +59,14 @@ struct RuntimeState {
     event_buses: Arc<Mutex<BTreeMap<String, broadcast::Sender<EventEnvelope>>>>,
     data_plane: DataPlaneService,
     cache_root: PathBuf,
+    generation_queue: mpsc::UnboundedSender<GenerationBuildRequest>,
 }
 
 impl RuntimeState {
-    fn new(config: &EngineRuntimeConfig) -> Self {
+    fn new(
+        config: &EngineRuntimeConfig,
+        generation_queue: mpsc::UnboundedSender<GenerationBuildRequest>,
+    ) -> Self {
         let allocator =
             IdAllocator::with_persistence(config.cache_root.join("id_allocator_state.json"));
         Self {
@@ -60,6 +74,7 @@ impl RuntimeState {
             event_buses: Arc::new(Mutex::new(BTreeMap::new())),
             data_plane: DataPlaneService::new(config.cache_root.clone()),
             cache_root: config.cache_root.clone(),
+            generation_queue,
         }
     }
 
@@ -80,7 +95,13 @@ pub async fn run_runtime_server(
     shutdown: oneshot::Receiver<()>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(&config.cache_root)?;
-    let state = RuntimeState::new(&config);
+    let (generation_queue, generation_rx) = mpsc::unbounded_channel();
+    let state = RuntimeState::new(&config, generation_queue);
+    tokio::spawn(generation_worker_loop(
+        state.clone(),
+        generation_rx,
+        Duration::from_millis(config.generation_worker_startup_delay_ms),
+    ));
     let app = Router::new()
         .route("/v1/info", get(runtime_info).options(cors_preflight))
         .route("/v1/sessions", post(create_session).options(cors_preflight))
@@ -231,7 +252,7 @@ async fn add_source_endpoint(
         ));
     }
 
-    let (response, events) = {
+    let (response, events, build_request) = {
         let mut manager = state.session_manager.lock().await;
 
         let added = manager
@@ -292,77 +313,39 @@ async fn add_source_endpoint(
             crate::clock::rfc3339_now(),
         ));
 
-        manager
-            .build_canonical_cache_for_generation(
-                &session_id,
-                &added.source.source_id,
-                detected.generation_seq,
-                state.cache_root.clone(),
-            )
-            .map_err(session_error)?;
-        let progressed = manager
-            .build_tile_preview_for_generation(
-                &session_id,
-                &added.source.source_id,
-                detected.generation_seq,
-            )
-            .map_err(session_error)?;
-        let (session_rev_progress, _) = manager
-            .session_and_scene_revisions(&session_id)
-            .map_err(session_error)?;
-        events.push(EventEnvelope::source_generation_progress(
-            session_id.clone(),
-            session_rev_progress,
-            SourceGenerationPayload::from(&progressed),
-            crate::clock::rfc3339_now(),
-        ));
-
-        let ready = manager
-            .mark_generation_ready(
-                &session_id,
-                &added.source.source_id,
-                detected.generation_seq,
-            )
-            .map_err(session_error)?;
         let source_state = manager
             .source_state(&session_id, &added.source.source_id)
             .map_err(session_error)?;
         let dataset_state = manager
             .dataset_for_source(&session_id, &added.source.source_id)
             .map_err(session_error)?;
-        let (session_rev_ready, _) = manager
-            .session_and_scene_revisions(&session_id)
-            .map_err(session_error)?;
-        events.push(EventEnvelope::source_generation_ready(
-            session_id.clone(),
-            session_rev_ready,
-            SourceGenerationPayload::from(&ready),
-            crate::clock::rfc3339_now(),
-        ));
-        events.push(EventEnvelope::scene_source_upsert(
-            session_id.clone(),
-            session_rev_ready,
-            SourceUpsertPayload::from(&source_state),
-            crate::clock::rfc3339_now(),
-        ));
-        events.push(EventEnvelope::scene_dataset_upsert(
-            session_id.clone(),
-            session_rev_ready,
-            DatasetUpsertPayload::from(&dataset_state),
-            crate::clock::rfc3339_now(),
-        ));
 
         (
             AddSourceRuntimeResponse {
                 source_id: source_state.source_id,
                 dataset_id: dataset_state.dataset_id,
-                generation_id: ready.generation_id,
-                generation_seq: ready.generation_seq,
+                generation_id: started.generation_id,
+                generation_seq: started.generation_seq,
                 source_status: source_status_name(source_state.status),
             },
             events,
+            GenerationBuildRequest {
+                session_id: session_id.clone(),
+                source_id: added.source.source_id,
+                generation_seq: detected.generation_seq,
+            },
         )
     };
+
+    state.generation_queue.send(build_request).map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(RuntimeHttpError {
+                code: "internal_error",
+                message: "generation worker queue is unavailable".to_owned(),
+            }),
+        )
+    })?;
 
     let event_bus = state.event_bus(&session_id).await;
     for event in events {
@@ -370,6 +353,137 @@ async fn add_source_endpoint(
     }
 
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn generation_worker_loop(
+    state: RuntimeState,
+    mut receiver: mpsc::UnboundedReceiver<GenerationBuildRequest>,
+    startup_delay: Duration,
+) {
+    while let Some(request) = receiver.recv().await {
+        if !startup_delay.is_zero() {
+            tokio::time::sleep(startup_delay).await;
+        }
+        let events = {
+            let mut manager = state.session_manager.lock().await;
+            execute_generation_build_pipeline(&mut manager, &request, state.cache_root.clone())
+        };
+        if events.is_empty() {
+            continue;
+        }
+        let event_bus = state.event_bus(&request.session_id).await;
+        for event in events {
+            let _ = event_bus.send(event);
+        }
+    }
+}
+
+fn execute_generation_build_pipeline(
+    manager: &mut SessionManager,
+    request: &GenerationBuildRequest,
+    cache_root: PathBuf,
+) -> Vec<EventEnvelope> {
+    if let Err(error) = manager.build_canonical_cache_for_generation(
+        &request.session_id,
+        &request.source_id,
+        request.generation_seq,
+        cache_root,
+    ) {
+        return generation_failure_events(manager, request, &error);
+    }
+
+    let progressed = match manager.build_tile_preview_for_generation(
+        &request.session_id,
+        &request.source_id,
+        request.generation_seq,
+    ) {
+        Ok(value) => value,
+        Err(error) => return generation_failure_events(manager, request, &error),
+    };
+    let (session_rev_progress, _) = match manager.session_and_scene_revisions(&request.session_id) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let mut events = vec![EventEnvelope::source_generation_progress(
+        request.session_id.clone(),
+        session_rev_progress,
+        SourceGenerationPayload::from(&progressed),
+        crate::clock::rfc3339_now(),
+    )];
+
+    let ready = match manager.mark_generation_ready(
+        &request.session_id,
+        &request.source_id,
+        request.generation_seq,
+    ) {
+        Ok(value) => value,
+        Err(error) => return generation_failure_events(manager, request, &error),
+    };
+    let source_state = match manager.source_state(&request.session_id, &request.source_id) {
+        Ok(value) => value,
+        Err(_) => return events,
+    };
+    let dataset_state = match manager.dataset_for_source(&request.session_id, &request.source_id) {
+        Ok(value) => value,
+        Err(_) => return events,
+    };
+    let (session_rev_ready, _) = match manager.session_and_scene_revisions(&request.session_id) {
+        Ok(value) => value,
+        Err(_) => return events,
+    };
+    events.push(EventEnvelope::source_generation_ready(
+        request.session_id.clone(),
+        session_rev_ready,
+        SourceGenerationPayload::from(&ready),
+        crate::clock::rfc3339_now(),
+    ));
+    events.push(EventEnvelope::scene_source_upsert(
+        request.session_id.clone(),
+        session_rev_ready,
+        SourceUpsertPayload::from(&source_state),
+        crate::clock::rfc3339_now(),
+    ));
+    events.push(EventEnvelope::scene_dataset_upsert(
+        request.session_id.clone(),
+        session_rev_ready,
+        DatasetUpsertPayload::from(&dataset_state),
+        crate::clock::rfc3339_now(),
+    ));
+    events
+}
+
+fn generation_failure_events(
+    manager: &mut SessionManager,
+    request: &GenerationBuildRequest,
+    _error: &SessionError,
+) -> Vec<EventEnvelope> {
+    let failed = match manager.mark_generation_failed(
+        &request.session_id,
+        &request.source_id,
+        request.generation_seq,
+    ) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let (session_rev_failed, _) = match manager.session_and_scene_revisions(&request.session_id) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let mut events = vec![EventEnvelope::source_generation_failed(
+        request.session_id.clone(),
+        session_rev_failed,
+        SourceGenerationPayload::from(&failed),
+        crate::clock::rfc3339_now(),
+    )];
+    if let Ok(source_state) = manager.source_state(&request.session_id, &request.source_id) {
+        events.push(EventEnvelope::scene_source_upsert(
+            request.session_id.clone(),
+            session_rev_failed,
+            SourceUpsertPayload::from(&source_state),
+            crate::clock::rfc3339_now(),
+        ));
+    }
+    events
 }
 
 async fn connect_endpoint(
@@ -1257,6 +1371,7 @@ fn event_payload_json(payload: &EventPayload) -> serde_json::Value {
         EventPayload::SourceGenerationDetected(value)
         | EventPayload::SourceGenerationStarted(value)
         | EventPayload::SourceGenerationProgress(value)
+        | EventPayload::SourceGenerationFailed(value)
         | EventPayload::SourceGenerationReady(value) => serde_json::json!({
             "sourceId": value.source_id,
             "generationSeq": value.generation_seq,
@@ -1518,6 +1633,7 @@ fn event_type_name(value: EventType) -> &'static str {
         EventType::SourceGenerationDetected => "source_generation_detected",
         EventType::SourceGenerationStarted => "source_generation_started",
         EventType::SourceGenerationProgress => "source_generation_progress",
+        EventType::SourceGenerationFailed => "source_generation_failed",
         EventType::SourceGenerationReady => "source_generation_ready",
     }
 }

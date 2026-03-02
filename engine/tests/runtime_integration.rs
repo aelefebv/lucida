@@ -23,6 +23,14 @@ struct RuntimeFixture {
 
 impl RuntimeFixture {
     async fn start(cache_root: &Path) -> Self {
+        Self::start_with_config(EngineRuntimeConfig {
+            cache_root: cache_root.to_path_buf(),
+            ..EngineRuntimeConfig::default()
+        })
+        .await
+    }
+
+    async fn start_with_config(config: EngineRuntimeConfig) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test runtime should bind an ephemeral port");
@@ -30,9 +38,6 @@ impl RuntimeFixture {
             .local_addr()
             .expect("bound runtime should expose local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let config = EngineRuntimeConfig {
-            cache_root: cache_root.to_path_buf(),
-        };
         let task = tokio::spawn(async move {
             run_runtime_server(listener, config, shutdown_rx)
                 .await
@@ -953,6 +958,249 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
         .close(None)
         .await
         .expect("closing websocket should succeed");
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_open_source_returns_before_background_generation_finishes() {
+    let cache_root = unique_path("open_source_async_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("open_source_async_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-open-source-async.tiff");
+    write_rgb_tiff(&source_path, 600, 600);
+
+    let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
+        cache_root: cache_root.clone(),
+        generation_worker_startup_delay_ms: 250,
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-open-source-async" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-open-source-async",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let request_started_at = tokio::time::Instant::now();
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-source-async",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    let request_elapsed = request_started_at.elapsed();
+
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    assert!(
+        request_elapsed < Duration::from_millis(200),
+        "source open should return before delayed background generation completes; elapsed={request_elapsed:?}"
+    );
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    assert_eq!(
+        open_source_body["generation_seq"]
+            .as_u64()
+            .expect("generation seq should be returned"),
+        1
+    );
+
+    let mut saw_detected = false;
+    let mut saw_started = false;
+    let mut saw_progress = false;
+    let mut saw_ready = false;
+    let started_at = tokio::time::Instant::now();
+    while started_at.elapsed() < Duration::from_secs(5) {
+        let frame = timeout(Duration::from_millis(500), socket.next())
+            .await
+            .expect("websocket should receive generation event in time")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] != "event" {
+            continue;
+        }
+        match payload["event_type"].as_str() {
+            Some("source_generation_detected") => saw_detected = true,
+            Some("source_generation_started") => saw_started = true,
+            Some("source_generation_progress") => saw_progress = true,
+            Some("source_generation_ready") => {
+                saw_ready = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_detected, "source_generation_detected should be emitted");
+    assert!(saw_started, "source_generation_started should be emitted");
+    assert!(saw_progress, "source_generation_progress should be emitted");
+    assert!(saw_ready, "source_generation_ready should be emitted");
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_background_generation_surfaces_failed_stage_event_on_build_error() {
+    let cache_root = unique_path("open_source_failure_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("open_source_failure_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-open-source-failure.tiff");
+    write_rgb_tiff(&source_path, 64, 64);
+
+    let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
+        cache_root: cache_root.clone(),
+        generation_worker_startup_delay_ms: 250,
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-open-source-failure" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-open-source-failure",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-source-failure",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+
+    fs::remove_file(&source_path).expect("fixture source should be removable after source open");
+
+    let started_at = tokio::time::Instant::now();
+    let mut saw_failed = false;
+    let mut saw_source_error_status = false;
+    while started_at.elapsed() < Duration::from_secs(5) {
+        let frame = timeout(Duration::from_millis(500), socket.next())
+            .await
+            .expect("websocket should receive generation failure event in time")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] != "event" {
+            continue;
+        }
+        if payload["event_type"] == "source_generation_failed" {
+            assert_eq!(
+                payload["payload"]["stage"]
+                    .as_str()
+                    .expect("failed payload stage should be string"),
+                "failed"
+            );
+            saw_failed = true;
+        }
+        if payload["event_type"] == "scene_source_upsert" && payload["payload"]["status"] == "error"
+        {
+            saw_source_error_status = true;
+        }
+        if saw_failed && saw_source_error_status {
+            break;
+        }
+    }
+    assert!(
+        saw_failed,
+        "background generation should emit source_generation_failed when build errors"
+    );
+    assert!(
+        saw_source_error_status,
+        "source should transition to error status on generation failure"
+    );
+
     runtime.stop().await;
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
     fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");

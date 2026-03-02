@@ -47,6 +47,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = shutdown_tx.send(());
     });
 
-    run_runtime_server(listener, EngineRuntimeConfig { cache_root }, shutdown_rx).await?;
+    run_runtime_server(
+        listener,
+        EngineRuntimeConfig {
+            cache_root,
+            ..EngineRuntimeConfig::default()
+        },
+        shutdown_rx,
+    )
+    .await?;
     Ok(())
 }

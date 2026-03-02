@@ -22,6 +22,7 @@ pub enum EventType {
     SourceGenerationDetected,
     SourceGenerationStarted,
     SourceGenerationProgress,
+    SourceGenerationFailed,
     SourceGenerationReady,
 }
 
@@ -181,6 +182,7 @@ pub enum EventPayload {
     SourceGenerationDetected(SourceGenerationPayload),
     SourceGenerationStarted(SourceGenerationPayload),
     SourceGenerationProgress(SourceGenerationPayload),
+    SourceGenerationFailed(SourceGenerationPayload),
     SourceGenerationReady(SourceGenerationPayload),
 }
 
@@ -393,6 +395,24 @@ impl EventEnvelope {
             emitted_at,
         }
     }
+
+    #[must_use]
+    pub fn source_generation_failed(
+        session_id: String,
+        session_rev: u64,
+        payload: SourceGenerationPayload,
+        emitted_at: String,
+    ) -> Self {
+        Self {
+            message_type: "event".to_owned(),
+            schema_version: crate::SCHEMA_VERSION.to_owned(),
+            session_id,
+            session_rev,
+            event_type: EventType::SourceGenerationFailed,
+            payload: EventPayload::SourceGenerationFailed(payload),
+            emitted_at,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -579,6 +599,7 @@ impl ProjectionState {
             EventPayload::SourceGenerationDetected(payload)
             | EventPayload::SourceGenerationStarted(payload)
             | EventPayload::SourceGenerationProgress(payload)
+            | EventPayload::SourceGenerationFailed(payload)
             | EventPayload::SourceGenerationReady(payload) => {
                 self.source_generations.insert(
                     generation_projection_key(&payload.source_id, payload.generation_seq),

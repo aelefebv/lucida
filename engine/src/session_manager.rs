@@ -638,6 +638,37 @@ impl SessionManager {
         Ok(snapshot)
     }
 
+    pub fn mark_generation_failed(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        generation.stage = GenerationStage::Failed;
+        generation.updated_at = rfc3339_now();
+        source.status = SourceStatus::Error;
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
     pub fn build_canonical_cache_for_generation(
         &mut self,
         session_id: &str,
