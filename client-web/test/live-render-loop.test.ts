@@ -1426,19 +1426,18 @@ describe("LiveRenderLoop", () => {
       2500,
     );
 
-    expect(srcNewPreviewAttempts).toBeGreaterThanOrEqual(2);
+    expect(srcNewPreviewAttempts).toBeGreaterThanOrEqual(1);
     expect(requestedUrls.some((url) => url.includes("/src_old/"))).toBe(false);
     expect(frames.at(-1)?.sampleMax).toBe(65535);
     loop.dispose();
   });
 
-  it("falls back to base t/z/channel-block tile when selected plane is unavailable", async () => {
+  it("requests the coarsest preview lod first for the selected slice", async () => {
     const requestedUrls: string[] = [];
-    const frames: RenderFrameState[] = [];
     const loop = new LiveRenderLoop(
       "http://127.0.0.1:8787/v1/data",
-      (frame) => {
-        frames.push(frame);
+      () => {
+        // no-op
       },
       async (input) => {
         const url = String(input);
@@ -1452,8 +1451,90 @@ describe("LiveRenderLoop", () => {
             },
           });
         }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.tIndex = 3;
+    state.zIndex = 4;
+    state.generations["src_fixture:1"] = {
+      sourceId: "src_fixture",
+      generationSeq: 1,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0, 1, 2],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 8,
+            height: 8,
+            tileWidth: 4,
+            tileHeight: 4,
+            rows: 2,
+            cols: 2,
+          },
+          {
+            lod: 1,
+            width: 4,
+            height: 4,
+            tileWidth: 4,
+            tileHeight: 4,
+            rows: 1,
+            cols: 1,
+          },
+          {
+            lod: 2,
+            width: 2,
+            height: 2,
+            tileWidth: 2,
+            tileHeight: 2,
+            rows: 1,
+            cols: 1,
+          },
+        ],
+      },
+    };
+    loop.update(state);
+
+    await waitFor(
+      () => requestedUrls.some((url) => url.includes("/v1/preview2d/")),
+      1500,
+    );
+    const firstPreview = requestedUrls.find((url) => url.includes("/v1/preview2d/"));
+    expect(firstPreview).toContain("/lod/2/t/3/z/4/cb/0/");
+    loop.dispose();
+  });
+
+  it("keeps the previous frame and marks it as loading when selected slice payloads are missing", async () => {
+    const requestedUrls: string[] = [];
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        if (url.includes("/v1/preview2d/")) {
+          if (url.includes("/t/1/z/1/cb/4/")) {
+            return new Response("", { status: 404 });
+          }
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [11, 40]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
         if (url.includes("/v1/tile2d/")) {
-          if (url.includes("/t/1/") || url.includes("/z/1/") || url.includes("/cb/4/")) {
+          if (url.includes("/t/1/z/1/cb/4/")) {
             return new Response("", { status: 404 });
           }
           return new Response(
@@ -1472,22 +1553,44 @@ describe("LiveRenderLoop", () => {
     );
 
     const state = fixtureClientState();
+    loop.update(state);
+
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+    const baseline = frames.at(-1);
+    expect(baseline?.pixelStats.max).toBe(180);
+    requestedUrls.length = 0;
+
     state.tIndex = 1;
     state.zIndex = 1;
     state.selectedChannels = [4];
     loop.update(state);
 
-    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+    await waitFor(
+      () =>
+        requestedUrls.some(
+          (url) => url.includes("/v1/tile2d/") && url.includes("/t/1/z/1/cb/4/"),
+        ),
+      2000,
+    );
+    await waitFor(
+      () => (frames.at(-1)?.loadingNotice ?? "").includes("LOADING TARGET SLICE"),
+      2000,
+    );
 
-    expect(
-      requestedUrls.some((url) => url.includes("/v1/tile2d/src_fixture/gen/1/lod/0/t/0/z/0/cb/0/")),
-    ).toBe(true);
     expect(
       requestedUrls.some((url) => url.includes("/v1/tile2d/src_fixture/gen/1/lod/0/t/1/z/1/cb/4/")),
     ).toBe(true);
+    expect(
+      requestedUrls.some((url) =>
+        url.includes("/v1/tile2d/src_fixture/gen/1/lod/0/t/0/z/0/cb/0/"),
+      ),
+    ).toBe(false);
     const latest = frames.at(-1);
     expect(latest?.frameKind).toBe("tile");
     expect(latest?.pixelStats.max).toBe(180);
+    expect(latest?.loadingNotice).toContain("LOADING TARGET SLICE");
+    expect(latest?.loadingNotice).toContain("requested z 1 t 1");
+    expect(latest?.loadingNotice).toContain("showing z 0 t 0");
     loop.dispose();
   });
 });

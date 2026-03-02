@@ -15,6 +15,8 @@ export type RenderFrameState = {
   sourceId: string;
   generationSeq: number;
   frameKind: "preview" | "tile";
+  renderedSelection: RenderFrameSelection;
+  targetSelection: RenderFrameSelection;
   width: number;
   height: number;
   rgba: Uint8ClampedArray;
@@ -23,6 +25,14 @@ export type RenderFrameState = {
   pixelStats: FramePixelStats;
   minimap: MinimapState;
   warningNotice: string | null;
+  loadingNotice: string | null;
+};
+
+export type RenderFrameSelection = {
+  tIndex: number;
+  zIndex: number;
+  selectedChannels: number[];
+  channelBlock: number;
 };
 
 export type FramePixelStats = {
@@ -66,6 +76,8 @@ export class LiveRenderLoop {
   private grayscaleBySourceGeneration: Map<string, Uint16Array>;
   private sampleMaxBySourceGeneration: Map<string, number>;
   private pixelStatsBySourceGeneration: Map<string, FramePixelStats>;
+  private renderedSelectionBySourceGeneration: Map<string, RenderFrameSelection>;
+  private requestedSelectionBySourceGeneration: Map<string, RenderFrameSelection>;
   private latestGenerationSeq: number;
   private latestPreferredSourceId: string | null;
   private latestClientState: ClientState | null;
@@ -97,6 +109,8 @@ export class LiveRenderLoop {
     this.grayscaleBySourceGeneration = new Map();
     this.sampleMaxBySourceGeneration = new Map();
     this.pixelStatsBySourceGeneration = new Map();
+    this.renderedSelectionBySourceGeneration = new Map();
+    this.requestedSelectionBySourceGeneration = new Map();
     this.latestGenerationSeq = 0;
     this.latestPreferredSourceId = null;
     this.latestClientState = null;
@@ -137,6 +151,20 @@ export class LiveRenderLoop {
       this.frameStore.pruneOlderThan(latest.sourceId, latest.generationSeq);
     }
     const sourceGeneration = sourceGenerationKey(latest.sourceId, latest.generationSeq);
+    const targetSelection: RenderFrameSelection = {
+      tIndex: latest.tIndex,
+      zIndex: latest.zIndex,
+      selectedChannels: [...latest.selectedChannels],
+      channelBlock: latest.channelBlock,
+    };
+    this.requestedSelectionBySourceGeneration.set(sourceGeneration, targetSelection);
+    const previewLods = previewLodCandidatesForGeneration(
+      clientState,
+      latest.sourceId,
+      latest.generationSeq,
+      latest.tileLayout,
+    );
+    const previewStartLod = previewLods[0] ?? 0;
     const hasFrameForGeneration =
       this.frameStore.resolveFrame(latest.sourceId, latest.generationSeq) !== null;
     const hasTileFrameForGeneration =
@@ -168,7 +196,7 @@ export class LiveRenderLoop {
         latest.tIndex,
         latest.zIndex,
         latest.channelBlock,
-        0,
+        previewStartLod,
         0,
         0,
       );
@@ -179,6 +207,14 @@ export class LiveRenderLoop {
       !dataSelectionChanged &&
       hasTileFrameForGeneration &&
       hasFrameMetadataForGeneration;
+    if (
+      selectionChanged &&
+      dataSelectionChanged &&
+      hasFrameForGeneration &&
+      hasFrameMetadataForGeneration
+    ) {
+      this.emit(latest.sourceId, latest.generationSeq);
+    }
     if (isNewGeneration || selectionChanged || !hasFrameForGeneration) {
       if (skipPreviewFetch) {
         this.currentPreviewRequestKey = null;
@@ -194,6 +230,8 @@ export class LiveRenderLoop {
         latest.centerY,
         latest.zoom,
         latest.tileLayout,
+        previewLods,
+        targetSelection,
         selectionKey,
         prefetchEnabled,
         skipPreviewFetch,
@@ -218,6 +256,8 @@ export class LiveRenderLoop {
     centerY: number,
     zoom: number,
     tileLayout: TileLayout | null,
+    previewLods: number[],
+    targetSelection: RenderFrameSelection,
     selectionKey: string,
     prefetchEnabled: boolean,
     skipPreviewFetch: boolean,
@@ -226,24 +266,15 @@ export class LiveRenderLoop {
     if (this.activeFetches.has(fetchKey)) {
       return;
     }
-    const previewRequestKey = requestKey(
-      "preview",
-      sourceId,
-      generationSeq,
-      tIndex,
-      zIndex,
-      channelBlock,
-      0,
-      0,
-      0,
-    );
     const tileSelection = effectiveTileSelection(tIndex, zIndex, channelBlock);
+    const visibleTileLod = finestLodIndex(tileLayout);
     const visibleTileTargets = resolveVisibleTileTargets(
       tileLayout,
       tileSelection,
       centerX,
       centerY,
       zoom,
+      visibleTileLod,
     );
     this.currentTileRequestKeys = new Set(
       visibleTileTargets.map((target) =>
@@ -254,7 +285,7 @@ export class LiveRenderLoop {
           tileSelection.t,
           tileSelection.z,
           tileSelection.channelBlock,
-          0,
+          visibleTileLod,
           target.row,
           target.col,
         ),
@@ -262,6 +293,7 @@ export class LiveRenderLoop {
     );
     this.activeFetches.add(fetchKey);
     let tileCanvas: TileCanvasGeometry | null = null;
+    let previewRendered = false;
     if (skipPreviewFetch) {
       if (generationSeq > this.latestGenerationSeq) {
         this.latestGenerationSeq = generationSeq;
@@ -276,64 +308,23 @@ export class LiveRenderLoop {
         );
       }
     } else {
-      try {
-        const preview = await this.scheduler.schedule<DecodedFrame>({
-          key: previewRequestKey,
-          generationSeq,
-          priorityClass: "coarse_fallback",
-          execute: (signal) => {
-            return this.fetchFrame(
-              {
-                sourceId,
-                generationSeq,
-                assetKind: "preview2d",
-                lod: 0,
-                t: tIndex,
-                z: zIndex,
-                channelBlock,
-                y: 0,
-                x: 0,
-              },
-              signal,
-            );
-          },
-        });
-        if (this.currentSelectionKey !== selectionKey) {
-          this.activeFetches.delete(fetchKey);
-          return;
-        }
-        if (generationSeq > this.latestGenerationSeq) {
-          this.latestGenerationSeq = generationSeq;
-        }
-        tileCanvas = resolveTileCanvasGeometry(tileLayout, preview.width, preview.height);
-        const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
-        this.dimensionsBySourceGeneration.set(sourceGeneration, {
-          width: preview.width,
-          height: preview.height,
-        });
-        this.frameKindBySourceGeneration.set(sourceGeneration, "preview");
-        this.grayscaleBySourceGeneration.set(
-          sourceGeneration,
-          preview.grayscaleSamples,
-        );
-        this.sampleMaxBySourceGeneration.set(sourceGeneration, preview.sampleMax);
-        this.pixelStatsBySourceGeneration.set(sourceGeneration, preview.pixelStats);
-        this.frameStore.setPreview(
-          sourceId,
-          generationSeq,
-          preview.rgba,
-          preview.width,
-          preview.height,
-        );
-        this.emit(sourceId, generationSeq);
-      } catch (error) {
-        if (!isCancellationError(error) && this.currentSelectionKey === selectionKey) {
-          console.error("preview fetch failed", error);
-          this.scheduleRetry();
-        }
+      const previewResult = await this.fetchCoarsePreviewForSelection({
+        sourceId,
+        generationSeq,
+        tIndex,
+        zIndex,
+        channelBlock,
+        tileLayout,
+        previewLods,
+        targetSelection,
+        selectionKey,
+      });
+      if (previewResult.cancelled) {
         this.activeFetches.delete(fetchKey);
         return;
       }
+      tileCanvas = previewResult.tileCanvas;
+      previewRendered = previewResult.previewRendered;
     }
 
     let emittedTile = false;
@@ -355,7 +346,7 @@ export class LiveRenderLoop {
         tileSelection.t,
         tileSelection.z,
         tileSelection.channelBlock,
-        0,
+        visibleTileLod,
         target.row,
         target.col,
       );
@@ -366,12 +357,12 @@ export class LiveRenderLoop {
           priorityClass: index === 0 ? "visible_center" : "visible_ring",
           priority: 100 - index,
           execute: (signal) => {
-            return this.fetchTileWithFallback(
+            return this.fetchFrame(
               {
                 sourceId,
                 generationSeq,
                 assetKind: "tile2d",
-                lod: 0,
+                lod: visibleTileLod,
                 t: tileSelection.t,
                 z: tileSelection.z,
                 channelBlock: tileSelection.channelBlock,
@@ -401,6 +392,10 @@ export class LiveRenderLoop {
         this.grayscaleBySourceGeneration.set(sourceGeneration, tile.grayscaleSamples);
         this.sampleMaxBySourceGeneration.set(sourceGeneration, tile.sampleMax);
         this.pixelStatsBySourceGeneration.set(sourceGeneration, tile.pixelStats);
+        this.renderedSelectionBySourceGeneration.set(
+          sourceGeneration,
+          cloneFrameSelection(targetSelection),
+        );
         this.frameStore.composeTilePatch(sourceId, generationSeq, {
           canvasWidth: canvas.width,
           canvasHeight: canvas.height,
@@ -434,11 +429,114 @@ export class LiveRenderLoop {
       }
     }
     if (!emittedTile && tileFailure !== null && this.currentSelectionKey === selectionKey) {
-      // Keep preview frame active when tile refinement is unavailable.
       console.error("tile fetch failed", tileFailure);
       this.scheduleRetry();
     }
+    if (!emittedTile && !previewRendered && this.currentSelectionKey === selectionKey) {
+      this.scheduleRetry();
+    }
     this.activeFetches.delete(fetchKey);
+  }
+
+  private async fetchCoarsePreviewForSelection(input: {
+    sourceId: string;
+    generationSeq: number;
+    tIndex: number;
+    zIndex: number;
+    channelBlock: number;
+    tileLayout: TileLayout | null;
+    previewLods: number[];
+    targetSelection: RenderFrameSelection;
+    selectionKey: string;
+  }): Promise<{ cancelled: boolean; previewRendered: boolean; tileCanvas: TileCanvasGeometry | null }> {
+    const sourceGeneration = sourceGenerationKey(input.sourceId, input.generationSeq);
+    const dimensions = this.dimensionsBySourceGeneration.get(sourceGeneration);
+    let tileCanvas =
+      dimensions === undefined
+        ? null
+        : resolveTileCanvasGeometry(input.tileLayout, dimensions.width, dimensions.height);
+    const lodCandidates = input.previewLods.length === 0 ? [0] : input.previewLods;
+    let sawNon404PreviewFailure = false;
+    for (const previewLod of lodCandidates) {
+      const previewRequestKey = requestKey(
+        "preview",
+        input.sourceId,
+        input.generationSeq,
+        input.tIndex,
+        input.zIndex,
+        input.channelBlock,
+        previewLod,
+        0,
+        0,
+      );
+      this.currentPreviewRequestKey = previewRequestKey;
+      try {
+        const preview = await this.scheduler.schedule<DecodedFrame>({
+          key: previewRequestKey,
+          generationSeq: input.generationSeq,
+          priorityClass: "coarse_fallback",
+          execute: (signal) => {
+            return this.fetchFrame(
+              {
+                sourceId: input.sourceId,
+                generationSeq: input.generationSeq,
+                assetKind: "preview2d",
+                lod: previewLod,
+                t: input.tIndex,
+                z: input.zIndex,
+                channelBlock: input.channelBlock,
+                y: 0,
+                x: 0,
+              },
+              signal,
+            );
+          },
+        });
+        if (this.currentSelectionKey !== input.selectionKey) {
+          return { cancelled: true, previewRendered: false, tileCanvas };
+        }
+        if (input.generationSeq > this.latestGenerationSeq) {
+          this.latestGenerationSeq = input.generationSeq;
+        }
+        tileCanvas = resolveTileCanvasGeometry(input.tileLayout, preview.width, preview.height);
+        const normalizedPreview = frameForCanvas(preview, tileCanvas);
+        this.dimensionsBySourceGeneration.set(sourceGeneration, {
+          width: normalizedPreview.width,
+          height: normalizedPreview.height,
+        });
+        this.frameKindBySourceGeneration.set(sourceGeneration, "preview");
+        this.grayscaleBySourceGeneration.set(sourceGeneration, normalizedPreview.grayscaleSamples);
+        this.sampleMaxBySourceGeneration.set(sourceGeneration, normalizedPreview.sampleMax);
+        this.pixelStatsBySourceGeneration.set(sourceGeneration, normalizedPreview.pixelStats);
+        this.renderedSelectionBySourceGeneration.set(
+          sourceGeneration,
+          cloneFrameSelection(input.targetSelection),
+        );
+        this.frameStore.setPreview(
+          input.sourceId,
+          input.generationSeq,
+          normalizedPreview.rgba,
+          normalizedPreview.width,
+          normalizedPreview.height,
+        );
+        this.emit(input.sourceId, input.generationSeq);
+        return { cancelled: false, previewRendered: true, tileCanvas };
+      } catch (error) {
+        if (this.currentSelectionKey !== input.selectionKey || isCancellationError(error)) {
+          return { cancelled: true, previewRendered: false, tileCanvas };
+        }
+        if (error instanceof FrameFetchError && error.status === 404) {
+          continue;
+        }
+        sawNon404PreviewFailure = true;
+        console.error("preview fetch failed", error);
+        break;
+      }
+    }
+    if (sawNon404PreviewFailure) {
+      this.scheduleRetry();
+    }
+    return { cancelled: false, previewRendered: false, tileCanvas };
   }
 
   private async fetchFrame(
@@ -453,31 +551,6 @@ export class LiveRenderLoop {
     const bytes = new Uint8Array(await response.arrayBuffer());
     const framePayload = decodeFramePayload(bytes);
     return decodePortableGraymap(framePayload);
-  }
-
-  private async fetchTileWithFallback(
-    key: ChunkKey,
-    signal: AbortSignal,
-  ): Promise<DecodedFrame> {
-    try {
-      return await this.fetchFrame(key, signal);
-    } catch (error) {
-      if (!(error instanceof FrameFetchError) || error.status !== 404) {
-        throw error;
-      }
-      if (key.t === 0 && key.z === 0 && key.channelBlock === 0) {
-        throw error;
-      }
-    }
-    return this.fetchFrame(
-      {
-        ...key,
-        t: 0,
-        z: 0,
-        channelBlock: 0,
-      },
-      signal,
-    );
   }
 
   private emit(sourceId: string, generationSeq: number): void {
@@ -509,6 +582,13 @@ export class LiveRenderLoop {
     if (sampleMax === undefined) {
       return;
     }
+    const renderedSelection = this.renderedSelectionBySourceGeneration.get(sourceGeneration);
+    if (renderedSelection === undefined) {
+      return;
+    }
+    const targetSelection =
+      this.requestedSelectionBySourceGeneration.get(sourceGeneration) ?? renderedSelection;
+    const loadingNotice = loadingNoticeForSelections(renderedSelection, targetSelection);
     const sourceDtype = sourceDtypeFor(this.latestClientState, sourceId);
     const contrastSampleMax = contrastSampleMaxForDtype(sourceDtype) ?? sampleMax;
 
@@ -538,6 +618,8 @@ export class LiveRenderLoop {
       sourceId,
       generationSeq,
       frameKind,
+      renderedSelection: cloneFrameSelection(renderedSelection),
+      targetSelection: cloneFrameSelection(targetSelection),
       width: dimensions.width,
       height: dimensions.height,
       rgba: frame,
@@ -546,6 +628,7 @@ export class LiveRenderLoop {
       pixelStats,
       minimap,
       warningNotice: buildSessionNotice(warnings),
+      loadingNotice,
     });
   }
 
@@ -592,7 +675,7 @@ export class LiveRenderLoop {
           generationSeq: input.generationSeq,
           priorityClass: target.priorityClass,
           execute: (signal) => {
-            return this.fetchTileWithFallback(
+            return this.fetchFrame(
               {
                 sourceId: input.sourceId,
                 generationSeq: input.generationSeq,
@@ -819,6 +902,32 @@ function lod0TileLayoutForGeneration(
   return generation.tileLayout;
 }
 
+function previewLodCandidatesForGeneration(
+  clientState: ClientState,
+  sourceId: string,
+  generationSeq: number,
+  tileLayout: TileLayout | null,
+): number[] {
+  const lods = new Set<number>();
+  lods.add(0);
+  const generation = clientState.generations[sourceGenerationKey(sourceId, generationSeq)];
+  if (generation !== undefined) {
+    for (const lod of generation.tile2dReadyLods) {
+      if (Number.isFinite(lod) && lod >= 0) {
+        lods.add(Math.floor(lod));
+      }
+    }
+  }
+  if (tileLayout !== null) {
+    for (const lod of tileLayout.lods) {
+      if (Number.isFinite(lod.lod) && lod.lod >= 0) {
+        lods.add(Math.floor(lod.lod));
+      }
+    }
+  }
+  return [...lods].sort((left, right) => right - left);
+}
+
 type VisibleTileTarget = {
   row: number;
   col: number;
@@ -844,13 +953,14 @@ function resolveVisibleTileTargets(
   centerX: number,
   centerY: number,
   zoom: number,
+  lodIndex: number,
 ): VisibleTileTarget[] {
   void selection;
-  const lod0 = lod0Layout(tileLayout);
-  if (lod0 === undefined) {
+  const visibleLod = lodLayoutForIndex(tileLayout, lodIndex);
+  if (visibleLod === undefined) {
     return [{ row: 0, col: 0 }];
   }
-  return visibleTileTargetsForViewport(lod0, centerX, centerY, zoom);
+  return visibleTileTargetsForViewport(visibleLod, centerX, centerY, zoom);
 }
 
 function resolveTileCanvasGeometry(
@@ -881,6 +991,24 @@ function lod0Layout(tileLayout: TileLayout | null): TileLodLayout | undefined {
     return undefined;
   }
   return tileLayout.lods.find((lod) => lod.lod === 0) ?? tileLayout.lods[0];
+}
+
+function finestLodIndex(tileLayout: TileLayout | null): number {
+  if (tileLayout === null || tileLayout.lods.length === 0) {
+    return 0;
+  }
+  const lods = [...tileLayout.lods].sort((left, right) => left.lod - right.lod);
+  return lods[0]?.lod ?? 0;
+}
+
+function lodLayoutForIndex(
+  tileLayout: TileLayout | null,
+  lodIndex: number,
+): TileLodLayout | undefined {
+  if (tileLayout === null) {
+    return undefined;
+  }
+  return tileLayout.lods.find((lod) => lod.lod === lodIndex) ?? lod0Layout(tileLayout);
 }
 
 function resolvePrefetchPlan(
@@ -1147,6 +1275,30 @@ function requestKey(
   return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:cb${channelBlock.toString()}:lod${lodIndex.toString()}:y${yIndex.toString()}:x${xIndex.toString()}`;
 }
 
+function cloneFrameSelection(selection: RenderFrameSelection): RenderFrameSelection {
+  return {
+    tIndex: selection.tIndex,
+    zIndex: selection.zIndex,
+    selectedChannels: [...selection.selectedChannels],
+    channelBlock: selection.channelBlock,
+  };
+}
+
+function loadingNoticeForSelections(
+  renderedSelection: RenderFrameSelection,
+  targetSelection: RenderFrameSelection,
+): string | null {
+  if (
+    renderedSelection.tIndex === targetSelection.tIndex &&
+    renderedSelection.zIndex === targetSelection.zIndex &&
+    renderedSelection.channelBlock === targetSelection.channelBlock &&
+    renderedSelection.selectedChannels.join(",") === targetSelection.selectedChannels.join(",")
+  ) {
+    return null;
+  }
+  return `LOADING TARGET SLICE: requested z ${targetSelection.zIndex.toString()} t ${targetSelection.tIndex.toString()} channels [${targetSelection.selectedChannels.join(", ")}]; currently showing z ${renderedSelection.zIndex.toString()} t ${renderedSelection.tIndex.toString()} channels [${renderedSelection.selectedChannels.join(", ")}].`;
+}
+
 function selectedChannelBlock(channels: readonly number[]): number {
   const primary = channels[0] ?? 0;
   if (!Number.isFinite(primary) || primary < 0) {
@@ -1177,6 +1329,119 @@ function effectiveTileSelection(
   channelBlock: number,
 ): { t: number; z: number; channelBlock: number } {
   return { t: tIndex, z: zIndex, channelBlock };
+}
+
+function frameForCanvas(
+  frame: DecodedFrame,
+  canvas: TileCanvasGeometry,
+): DecodedFrame {
+  if (frame.width === canvas.width && frame.height === canvas.height) {
+    return frame;
+  }
+  const upsampledRgba = resampleRgbaNearest(
+    frame.rgba,
+    frame.width,
+    frame.height,
+    canvas.width,
+    canvas.height,
+  );
+  const upsampledSamples = resampleU16Nearest(
+    frame.grayscaleSamples,
+    frame.width,
+    frame.height,
+    canvas.width,
+    canvas.height,
+  );
+  return {
+    width: canvas.width,
+    height: canvas.height,
+    rgba: upsampledRgba,
+    grayscaleSamples: upsampledSamples,
+    sampleMax: frame.sampleMax,
+    pixelStats: pixelStatsForSamples(upsampledSamples),
+  };
+}
+
+function resampleRgbaNearest(
+  source: Uint8ClampedArray,
+  sourceWidth: number,
+  sourceHeight: number,
+  targetWidth: number,
+  targetHeight: number,
+): Uint8ClampedArray {
+  const output = new Uint8ClampedArray(targetWidth * targetHeight * 4);
+  const widthScale = sourceWidth / targetWidth;
+  const heightScale = sourceHeight / targetHeight;
+  for (let row = 0; row < targetHeight; row += 1) {
+    const sourceRow = Math.min(sourceHeight - 1, Math.floor(row * heightScale));
+    for (let col = 0; col < targetWidth; col += 1) {
+      const sourceCol = Math.min(sourceWidth - 1, Math.floor(col * widthScale));
+      const sourceOffset = (sourceRow * sourceWidth + sourceCol) * 4;
+      const targetOffset = (row * targetWidth + col) * 4;
+      output[targetOffset] = source[sourceOffset] ?? 0;
+      output[targetOffset + 1] = source[sourceOffset + 1] ?? 0;
+      output[targetOffset + 2] = source[sourceOffset + 2] ?? 0;
+      output[targetOffset + 3] = source[sourceOffset + 3] ?? 255;
+    }
+  }
+  return output;
+}
+
+function resampleU16Nearest(
+  source: Uint16Array,
+  sourceWidth: number,
+  sourceHeight: number,
+  targetWidth: number,
+  targetHeight: number,
+): Uint16Array {
+  const output = new Uint16Array(targetWidth * targetHeight);
+  const widthScale = sourceWidth / targetWidth;
+  const heightScale = sourceHeight / targetHeight;
+  for (let row = 0; row < targetHeight; row += 1) {
+    const sourceRow = Math.min(sourceHeight - 1, Math.floor(row * heightScale));
+    for (let col = 0; col < targetWidth; col += 1) {
+      const sourceCol = Math.min(sourceWidth - 1, Math.floor(col * widthScale));
+      const sourceIndex = sourceRow * sourceWidth + sourceCol;
+      const targetIndex = row * targetWidth + col;
+      output[targetIndex] = source[sourceIndex] ?? 0;
+    }
+  }
+  return output;
+}
+
+function pixelStatsForSamples(samples: Uint16Array): FramePixelStats {
+  const sampleCount = samples.length;
+  if (sampleCount === 0) {
+    return {
+      min: 0,
+      max: 0,
+      nonZeroRatio: 0,
+      mean: 0,
+    };
+  }
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  let nonZeroCount = 0;
+  let sum = 0;
+  for (let index = 0; index < sampleCount; index += 1) {
+    const value = samples[index] ?? 0;
+    if (value < min) {
+      min = value;
+    }
+    if (value > max) {
+      max = value;
+    }
+    if (value !== 0) {
+      nonZeroCount += 1;
+    }
+    sum += value;
+  }
+  return {
+    min,
+    max,
+    nonZeroRatio: nonZeroCount / sampleCount,
+    mean: sum / sampleCount,
+  };
 }
 
 function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {

@@ -343,6 +343,9 @@ function renderRuntimeState(
       const panY = state.clientState?.centerY ?? 0;
       frameNode.textContent = `Frame: gen ${state.renderFrame.generationSeq.toString()} (${state.renderFrame.frameKind}) min ${stats.min.toString()} max ${stats.max.toString()} nz ${(stats.nonZeroRatio * 100).toFixed(2)}%`;
       frameNode.textContent += ` zoom ${zoom.toFixed(2)} pan (${panX.toFixed(1)}, ${panY.toFixed(1)})`;
+      if (state.renderFrame.loadingNotice !== null) {
+        frameNode.textContent += " [LOADING TARGET SLICE]";
+      }
     }
   }
 
@@ -362,6 +365,10 @@ function renderRuntimeState(
 
   const warningNode = mount.querySelector('[data-testid="warning-state"]');
   if (warningNode instanceof HTMLElement) {
+    const loadingNotice =
+      state.renderFrame?.loadingNotice === null || state.renderFrame?.loadingNotice === undefined
+        ? null
+        : state.renderFrame.loadingNotice;
     const serverWarning =
       state.renderFrame?.warningNotice === null ||
       state.renderFrame?.warningNotice === undefined
@@ -374,6 +381,9 @@ function renderRuntimeState(
     const warnings = [serverWarning, emptyFrameWarning].filter(
       (value): value is string => value !== null,
     );
+    if (loadingNotice !== null) {
+      warnings.unshift(loadingNotice);
+    }
     warningNode.textContent =
       warnings.length === 0 ? "Warnings: none" : `Warnings: ${warnings.join(" | ")}`;
   }
