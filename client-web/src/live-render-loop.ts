@@ -57,6 +57,7 @@ const CHURN_WINDOW_MS = 600;
 const CHURN_THRESHOLD = 3;
 const PREFETCH_NEIGHBOR_LIMIT = 8;
 const PREFETCH_REFINE_LIMIT = 6;
+const DEFAULT_FRAME_TOKEN = "default";
 
 export class LiveRenderLoop {
   private readonly resolver: EngineDataPlaneUrlResolver;
@@ -78,6 +79,7 @@ export class LiveRenderLoop {
   private pixelStatsBySourceGeneration: Map<string, FramePixelStats>;
   private renderedSelectionBySourceGeneration: Map<string, RenderFrameSelection>;
   private requestedSelectionBySourceGeneration: Map<string, RenderFrameSelection>;
+  private renderFrameTokenBySourceGeneration: Map<string, string>;
   private latestGenerationSeq: number;
   private latestPreferredSourceId: string | null;
   private latestClientState: ClientState | null;
@@ -111,6 +113,7 @@ export class LiveRenderLoop {
     this.pixelStatsBySourceGeneration = new Map();
     this.renderedSelectionBySourceGeneration = new Map();
     this.requestedSelectionBySourceGeneration = new Map();
+    this.renderFrameTokenBySourceGeneration = new Map();
     this.latestGenerationSeq = 0;
     this.latestPreferredSourceId = null;
     this.latestClientState = null;
@@ -157,6 +160,9 @@ export class LiveRenderLoop {
       selectedChannels: [...latest.selectedChannels],
       channelBlock: latest.channelBlock,
     };
+    const targetFrameToken = frameTokenForSelection(targetSelection);
+    const renderedFrameToken =
+      this.renderFrameTokenBySourceGeneration.get(sourceGeneration) ?? targetFrameToken;
     this.requestedSelectionBySourceGeneration.set(sourceGeneration, targetSelection);
     const previewLods = previewLodCandidatesForGeneration(
       clientState,
@@ -166,7 +172,7 @@ export class LiveRenderLoop {
     );
     const previewStartLod = previewLods[0] ?? 0;
     const hasFrameForGeneration =
-      this.frameStore.resolveFrame(latest.sourceId, latest.generationSeq) !== null;
+      this.frameStore.resolveFrame(latest.sourceId, latest.generationSeq, renderedFrameToken) !== null;
     const hasTileFrameForGeneration =
       this.frameKindBySourceGeneration.get(sourceGeneration) === "tile";
     const hasFrameMetadataForGeneration =
@@ -212,18 +218,8 @@ export class LiveRenderLoop {
       dataSelectionChanged &&
       hasFrameForGeneration &&
       hasFrameMetadataForGeneration;
-    if (
-      deferPreviewPresentation
-    ) {
+    if (deferPreviewPresentation) {
       this.emit(latest.sourceId, latest.generationSeq);
-    }
-    if (selectionChanged && dataSelectionChanged) {
-      this.frameStore.clearGeneration(latest.sourceId, latest.generationSeq);
-      this.frameKindBySourceGeneration.delete(sourceGeneration);
-      this.grayscaleBySourceGeneration.delete(sourceGeneration);
-      this.sampleMaxBySourceGeneration.delete(sourceGeneration);
-      this.pixelStatsBySourceGeneration.delete(sourceGeneration);
-      this.renderedSelectionBySourceGeneration.delete(sourceGeneration);
     }
     if (isNewGeneration || selectionChanged || !hasFrameForGeneration) {
       if (skipPreviewFetch) {
@@ -242,6 +238,7 @@ export class LiveRenderLoop {
         latest.tileLayout,
         previewLods,
         targetSelection,
+        targetFrameToken,
         !deferPreviewPresentation,
         selectionKey,
         prefetchEnabled,
@@ -269,6 +266,7 @@ export class LiveRenderLoop {
     tileLayout: TileLayout | null,
     previewLods: number[],
     targetSelection: RenderFrameSelection,
+    targetFrameToken: string,
     emitPreviewFrame: boolean,
     selectionKey: string,
     prefetchEnabled: boolean,
@@ -329,6 +327,7 @@ export class LiveRenderLoop {
         tileLayout,
         previewLods,
         targetSelection,
+        targetFrameToken,
         emitPreviewFrame,
         selectionKey,
       });
@@ -417,7 +416,15 @@ export class LiveRenderLoop {
           width: tile.width,
           height: tile.height,
           rgba: tile.rgba,
-        });
+        }, targetFrameToken);
+        const previousFrameToken = this.renderFrameTokenBySourceGeneration.get(sourceGeneration);
+        if (
+          previousFrameToken !== undefined &&
+          previousFrameToken !== targetFrameToken
+        ) {
+          this.frameStore.clearGeneration(sourceId, generationSeq, previousFrameToken);
+        }
+        this.renderFrameTokenBySourceGeneration.set(sourceGeneration, targetFrameToken);
         this.emit(sourceId, generationSeq);
         emittedTile = true;
         if (prefetchEnabled && !prefetchQueued) {
@@ -460,6 +467,7 @@ export class LiveRenderLoop {
     tileLayout: TileLayout | null;
     previewLods: number[];
     targetSelection: RenderFrameSelection;
+    targetFrameToken: string;
     emitPreviewFrame: boolean;
     selectionKey: string;
   }): Promise<{ cancelled: boolean; previewRendered: boolean; tileCanvas: TileCanvasGeometry | null }> {
@@ -514,26 +522,39 @@ export class LiveRenderLoop {
         }
         tileCanvas = resolveTileCanvasGeometry(input.tileLayout, preview.width, preview.height);
         const normalizedPreview = frameForCanvas(preview, tileCanvas);
-        this.dimensionsBySourceGeneration.set(sourceGeneration, {
-          width: normalizedPreview.width,
-          height: normalizedPreview.height,
-        });
-        this.frameKindBySourceGeneration.set(sourceGeneration, "preview");
-        this.grayscaleBySourceGeneration.set(sourceGeneration, normalizedPreview.grayscaleSamples);
-        this.sampleMaxBySourceGeneration.set(sourceGeneration, normalizedPreview.sampleMax);
-        this.pixelStatsBySourceGeneration.set(sourceGeneration, normalizedPreview.pixelStats);
-        this.renderedSelectionBySourceGeneration.set(
-          sourceGeneration,
-          cloneFrameSelection(input.targetSelection),
-        );
         this.frameStore.setPreview(
           input.sourceId,
           input.generationSeq,
           normalizedPreview.rgba,
           normalizedPreview.width,
           normalizedPreview.height,
+          input.targetFrameToken,
         );
         if (input.emitPreviewFrame) {
+          this.dimensionsBySourceGeneration.set(sourceGeneration, {
+            width: normalizedPreview.width,
+            height: normalizedPreview.height,
+          });
+          this.frameKindBySourceGeneration.set(sourceGeneration, "preview");
+          this.grayscaleBySourceGeneration.set(sourceGeneration, normalizedPreview.grayscaleSamples);
+          this.sampleMaxBySourceGeneration.set(sourceGeneration, normalizedPreview.sampleMax);
+          this.pixelStatsBySourceGeneration.set(sourceGeneration, normalizedPreview.pixelStats);
+          this.renderedSelectionBySourceGeneration.set(
+            sourceGeneration,
+            cloneFrameSelection(input.targetSelection),
+          );
+          const previousFrameToken = this.renderFrameTokenBySourceGeneration.get(sourceGeneration);
+          if (
+            previousFrameToken !== undefined &&
+            previousFrameToken !== input.targetFrameToken
+          ) {
+            this.frameStore.clearGeneration(
+              input.sourceId,
+              input.generationSeq,
+              previousFrameToken,
+            );
+          }
+          this.renderFrameTokenBySourceGeneration.set(sourceGeneration, input.targetFrameToken);
           this.emit(input.sourceId, input.generationSeq);
           return { cancelled: false, previewRendered: true, tileCanvas };
         }
@@ -575,7 +596,10 @@ export class LiveRenderLoop {
       return;
     }
     const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
-    const frame = this.frameStore.resolveFrame(sourceId, generationSeq);
+    const frameToken =
+      this.renderFrameTokenBySourceGeneration.get(sourceGeneration) ??
+      DEFAULT_FRAME_TOKEN;
+    const frame = this.frameStore.resolveFrame(sourceId, generationSeq, frameToken);
     if (frame === null) {
       return;
     }
@@ -1290,6 +1314,10 @@ function requestKey(
   xIndex: number,
 ): string {
   return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:cb${channelBlock.toString()}:lod${lodIndex.toString()}:y${yIndex.toString()}:x${xIndex.toString()}`;
+}
+
+function frameTokenForSelection(selection: RenderFrameSelection): string {
+  return `t${selection.tIndex.toString()}:z${selection.zIndex.toString()}:cb${selection.channelBlock.toString()}:c${selection.selectedChannels.join(",")}`;
 }
 
 function cloneFrameSelection(selection: RenderFrameSelection): RenderFrameSelection {

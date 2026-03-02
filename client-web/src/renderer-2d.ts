@@ -100,9 +100,10 @@ export class ProgressiveFrameStore {
     rgba: Uint8ClampedArray,
     width?: number,
     height?: number,
+    frameToken: string = "default",
   ): void {
     const dimensions = normalizedFrameDimensions(rgba, width, height);
-    this.previewFrames.set(frameKey(sourceId, generationSeq), {
+    this.previewFrames.set(frameKey(sourceId, generationSeq, frameToken), {
       sourceId,
       generationSeq,
       width: dimensions.width,
@@ -117,9 +118,10 @@ export class ProgressiveFrameStore {
     rgba: Uint8ClampedArray,
     width?: number,
     height?: number,
+    frameToken: string = "default",
   ): void {
     const dimensions = normalizedFrameDimensions(rgba, width, height);
-    this.tileFrames.set(frameKey(sourceId, generationSeq), {
+    this.tileFrames.set(frameKey(sourceId, generationSeq, frameToken), {
       sourceId,
       generationSeq,
       width: dimensions.width,
@@ -132,8 +134,9 @@ export class ProgressiveFrameStore {
     sourceId: string,
     generationSeq: number,
     patch: TilePatch,
+    frameToken: string = "default",
   ): void {
-    const key = frameKey(sourceId, generationSeq);
+    const key = frameKey(sourceId, generationSeq, frameToken);
     const canvasWidth = normalizedDimension(patch.canvasWidth, 1);
     const canvasHeight = normalizedDimension(patch.canvasHeight, 1);
     const tileWidth = normalizedDimension(patch.width, 1);
@@ -158,8 +161,12 @@ export class ProgressiveFrameStore {
     );
   }
 
-  public resolveFrame(sourceId: string, generationSeq: number): Uint8ClampedArray | null {
-    const key = frameKey(sourceId, generationSeq);
+  public resolveFrame(
+    sourceId: string,
+    generationSeq: number,
+    frameToken: string = "default",
+  ): Uint8ClampedArray | null {
+    const key = frameKey(sourceId, generationSeq, frameToken);
     const tiles = this.tileFrames.get(key);
     if (tiles !== undefined) {
       return tiles.rgba;
@@ -184,10 +191,27 @@ export class ProgressiveFrameStore {
     }
   }
 
-  public clearGeneration(sourceId: string, generationSeq: number): void {
-    const key = frameKey(sourceId, generationSeq);
-    this.previewFrames.delete(key);
-    this.tileFrames.delete(key);
+  public clearGeneration(
+    sourceId: string,
+    generationSeq: number,
+    frameToken: string | null = null,
+  ): void {
+    if (frameToken !== null) {
+      const key = frameKey(sourceId, generationSeq, frameToken);
+      this.previewFrames.delete(key);
+      this.tileFrames.delete(key);
+      return;
+    }
+    for (const [key, frame] of this.previewFrames.entries()) {
+      if (frame.sourceId === sourceId && frame.generationSeq === generationSeq) {
+        this.previewFrames.delete(key);
+      }
+    }
+    for (const [key, frame] of this.tileFrames.entries()) {
+      if (frame.sourceId === sourceId && frame.generationSeq === generationSeq) {
+        this.tileFrames.delete(key);
+      }
+    }
   }
 
   private ensureTileFrame(
@@ -227,8 +251,8 @@ export class ProgressiveFrameStore {
   }
 }
 
-function frameKey(sourceId: string, generationSeq: number): string {
-  return `${sourceId}:${generationSeq.toString()}`;
+function frameKey(sourceId: string, generationSeq: number, frameToken: string): string {
+  return `${sourceId}:${generationSeq.toString()}:${frameToken}`;
 }
 
 function normalizedDimension(value: number | undefined, fallback: number): number {
