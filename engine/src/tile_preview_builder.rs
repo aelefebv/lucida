@@ -253,30 +253,110 @@ fn write_tiles_for_selection(
             path: lod_dir.display().to_string(),
             message: error.to_string(),
         })?;
-        let tile_path = lod_dir.join(format!(
-            "t{t_index}_z{z_index}_cb{channel_block}_r0_c0.tileblk"
-        ));
         let plane = lod_planes
             .get(&descriptor.lod)
             .expect("every lod descriptor should have raster pixels");
-        let tile_payload = encode_pgm(plane.width, plane.height, plane.max_value, &plane.pixels)?;
-        let encoded_payload = packaging
-            .encode(&ChannelBlockWriteRequest {
-                payload_kind: PayloadKind::Image,
-                codec,
-                channel_count,
-                channel_block_size_override: None,
-                payload: tile_payload,
-            })
-            .map_err(|error| TilePreviewBuildError::SerializationError {
-                message: format!("channel block encoding failed: {error:?}"),
-            })?;
-        fs::write(&tile_path, encoded_payload).map_err(|error| TilePreviewBuildError::IoError {
-            path: tile_path.display().to_string(),
-            message: error.to_string(),
-        })?;
+        for row in 0..descriptor.rows {
+            for col in 0..descriptor.cols {
+                let tile_plane = tile_plane_for_cell(
+                    plane,
+                    row,
+                    col,
+                    descriptor.tile_height,
+                    descriptor.tile_width,
+                )?;
+                let tile_path = lod_dir.join(format!(
+                    "t{t_index}_z{z_index}_cb{channel_block}_r{row}_c{col}.tileblk"
+                ));
+                let tile_payload = encode_pgm(
+                    tile_plane.width,
+                    tile_plane.height,
+                    tile_plane.max_value,
+                    &tile_plane.pixels,
+                )?;
+                let encoded_payload = packaging
+                    .encode(&ChannelBlockWriteRequest {
+                        payload_kind: PayloadKind::Image,
+                        codec,
+                        channel_count,
+                        channel_block_size_override: None,
+                        payload: tile_payload,
+                    })
+                    .map_err(|error| TilePreviewBuildError::SerializationError {
+                        message: format!("channel block encoding failed: {error:?}"),
+                    })?;
+                fs::write(&tile_path, encoded_payload).map_err(|error| {
+                    TilePreviewBuildError::IoError {
+                        path: tile_path.display().to_string(),
+                        message: error.to_string(),
+                    }
+                })?;
+            }
+        }
     }
     Ok(())
+}
+
+fn tile_plane_for_cell(
+    plane: &RasterPlane,
+    row: u32,
+    col: u32,
+    tile_height: u16,
+    tile_width: u16,
+) -> Result<RasterPlane, TilePreviewBuildError> {
+    let source_width =
+        usize::try_from(plane.width).map_err(|_| TilePreviewBuildError::SerializationError {
+            message: "source plane width overflows usize".to_owned(),
+        })?;
+    let source_height =
+        usize::try_from(plane.height).map_err(|_| TilePreviewBuildError::SerializationError {
+            message: "source plane height overflows usize".to_owned(),
+        })?;
+    let tile_start_y = (row as usize).saturating_mul(tile_height as usize);
+    let tile_start_x = (col as usize).saturating_mul(tile_width as usize);
+    let tile_end_y = tile_start_y
+        .saturating_add(tile_height as usize)
+        .min(source_height);
+    let tile_end_x = tile_start_x
+        .saturating_add(tile_width as usize)
+        .min(source_width);
+
+    if tile_start_y >= source_height || tile_start_x >= source_width {
+        return Err(TilePreviewBuildError::SerializationError {
+            message: format!(
+                "tile coordinates out of bounds: row={row} col={col} source={source_width}x{source_height}"
+            ),
+        });
+    }
+
+    let tile_width_px = tile_end_x.saturating_sub(tile_start_x);
+    let tile_height_px = tile_end_y.saturating_sub(tile_start_y);
+    let mut pixels = Vec::with_capacity(tile_width_px.saturating_mul(tile_height_px));
+    for y in tile_start_y..tile_end_y {
+        let row_start = y
+            .checked_mul(source_width)
+            .and_then(|offset| offset.checked_add(tile_start_x))
+            .ok_or_else(|| TilePreviewBuildError::SerializationError {
+                message: "source row start overflow while slicing tile".to_owned(),
+            })?;
+        let row_end = row_start.checked_add(tile_width_px).ok_or_else(|| {
+            TilePreviewBuildError::SerializationError {
+                message: "source row end overflow while slicing tile".to_owned(),
+            }
+        })?;
+        pixels.extend_from_slice(plane.pixels.get(row_start..row_end).ok_or_else(|| {
+            TilePreviewBuildError::SerializationError {
+                message: "source row slice out of bounds while slicing tile".to_owned(),
+            }
+        })?);
+    }
+
+    Ok(RasterPlane {
+        width: tile_width_px as u64,
+        height: tile_height_px as u64,
+        max_value: plane.max_value,
+        pixels,
+    })
 }
 
 fn write_preview_images_for_selection(
@@ -745,6 +825,83 @@ mod tests {
         assert_eq!(preview_max, u16::MAX);
         assert_eq!(preview_pixels, source_pixels);
         assert!(result.preview_path.exists());
+
+        std::fs::remove_dir_all(generation_root).expect("generation cleanup should succeed");
+        std::fs::remove_dir_all(fixture_root).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn builds_multiple_tiles_when_plane_exceeds_tile_dimensions() {
+        let generation_root = unique_path("generation_multitile");
+        let fixture_root = unique_path("fixture_multitile");
+        std::fs::create_dir_all(&generation_root).expect("generation root should be created");
+        std::fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+
+        let source_path = fixture_root.join("source_multitile.tiff");
+        let width = 600_u32;
+        let height = 600_u32;
+        let source_pixels = vec![127_u8; (width as usize) * (height as usize)];
+        write_test_tiff(&source_path, width, height, &source_pixels);
+
+        let builder = TilePreviewBuilder::new();
+        let _result = builder
+            .build(&TilePreviewBuildRequest {
+                source_id: "src_multitile".to_owned(),
+                source_uri: source_path.display().to_string(),
+                source_kind: SourceKind::Tiff,
+                source_dtype: "uint8".to_owned(),
+                generation_seq: 1,
+                generation_root: generation_root.clone(),
+                shape: AxisShape {
+                    t: 1,
+                    c: 1,
+                    z: 1,
+                    y: u64::from(height),
+                    x: u64::from(width),
+                    extra_axes: BTreeMap::new(),
+                },
+                axis_order: vec![
+                    AxisName::T,
+                    AxisName::C,
+                    AxisName::Z,
+                    AxisName::Y,
+                    AxisName::X,
+                ],
+            })
+            .expect("tile/preview build should succeed");
+
+        let channel_packaging = ChannelBlockPackaging::default();
+        let lod0_dir = generation_root.join("tile2d").join("lod0");
+        let tile00_path = lod0_dir.join("t0_z0_cb0_r0_c0.tileblk");
+        let tile01_path = lod0_dir.join("t0_z0_cb0_r0_c1.tileblk");
+        let tile10_path = lod0_dir.join("t0_z0_cb0_r1_c0.tileblk");
+        let tile11_path = lod0_dir.join("t0_z0_cb0_r1_c1.tileblk");
+        assert!(tile00_path.exists(), "tile r0 c0 should exist");
+        assert!(tile01_path.exists(), "tile r0 c1 should exist");
+        assert!(tile10_path.exists(), "tile r1 c0 should exist");
+        assert!(tile11_path.exists(), "tile r1 c1 should exist");
+
+        let tile00 = channel_packaging
+            .decode(&std::fs::read(&tile00_path).expect("tile 00 payload should be readable"))
+            .expect("tile 00 payload should decode");
+        let tile01 = channel_packaging
+            .decode(&std::fs::read(&tile01_path).expect("tile 01 payload should be readable"))
+            .expect("tile 01 payload should decode");
+        let tile10 = channel_packaging
+            .decode(&std::fs::read(&tile10_path).expect("tile 10 payload should be readable"))
+            .expect("tile 10 payload should decode");
+        let tile11 = channel_packaging
+            .decode(&std::fs::read(&tile11_path).expect("tile 11 payload should be readable"))
+            .expect("tile 11 payload should decode");
+
+        let (w00, h00, _, _) = parse_pgm_u16(&tile00.payload);
+        let (w01, h01, _, _) = parse_pgm_u16(&tile01.payload);
+        let (w10, h10, _, _) = parse_pgm_u16(&tile10.payload);
+        let (w11, h11, _, _) = parse_pgm_u16(&tile11.payload);
+        assert_eq!((w00, h00), (512, 512));
+        assert_eq!((w01, h01), (88, 512));
+        assert_eq!((w10, h10), (512, 88));
+        assert_eq!((w11, h11), (88, 88));
 
         std::fs::remove_dir_all(generation_root).expect("generation cleanup should succeed");
         std::fs::remove_dir_all(fixture_root).expect("fixture cleanup should succeed");
