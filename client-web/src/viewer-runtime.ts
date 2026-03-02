@@ -491,7 +491,43 @@ export class ViewerRuntime {
     if (snapshotMessage === null) {
       return;
     }
-    this.handleSnapshot(snapshotMessage);
+    this.refreshSceneStateFromSnapshot(snapshotMessage.snapshot);
+  }
+
+  private refreshSceneStateFromSnapshot(snapshot: SnapshotPayload): void {
+    const sceneHydrated = hydrateClientState(snapshot);
+    const current = this.stateValue.clientState;
+    if (current === null) {
+      return;
+    }
+    if (sceneHydrated.sessionRev < current.sessionRev) {
+      return;
+    }
+    this.stateValue = {
+      ...this.stateValue,
+      snapshot,
+      clientState: {
+        ...current,
+        sessionId: sceneHydrated.sessionId,
+        sessionRev: sceneHydrated.sessionRev,
+        sceneRev: sceneHydrated.sceneRev,
+        sources: sceneHydrated.sources,
+        datasets: sceneHydrated.datasets,
+        layers: sceneHydrated.layers,
+        generations: sceneHydrated.generations,
+        warnings: sceneHydrated.warnings,
+      },
+    };
+    this.enforceSelectionBounds();
+    if (this.stateValue.clientState !== null) {
+      if (this.interactionModel !== null) {
+        this.interactionModel.reconcileAuthoritative(
+          viewportFromClientState(this.stateValue.clientState),
+        );
+      }
+      this.renderLoop.update(this.stateValue.clientState, this.preferredSourceId);
+    }
+    this.onUpdate(this.stateValue);
   }
 
   private flushInteractionCommands(): void {

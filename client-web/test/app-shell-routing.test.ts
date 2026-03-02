@@ -1559,13 +1559,15 @@ async function startPreferredSourceBoundsFixture(): Promise<SocketFixture> {
   const previewBody = pgmBody(2, 1, [12, 34]);
   const tileBody = channelBlockRawPayload(pgmBody(2, 1, [200, 210]));
   const sessionId = "sess_preferred_bounds";
+  const wsClientId = "cli_preferred_bounds_ws";
+  const httpSnapshotClientId = "cli_preferred_bounds_http_snapshot";
   let sessionRev = 1;
   let viewRev = 1;
   let zIndex = 0;
   let tIndex = 0;
   let openedSourceName = "source";
 
-  const snapshotPayload = (): Record<string, unknown> => {
+  const snapshotPayload = (clientId: string): Record<string, unknown> => {
     return {
       message_type: "session.snapshot",
       schema_version: "lucida-proto-0.1",
@@ -1622,7 +1624,7 @@ async function startPreferredSourceBoundsFixture(): Promise<SocketFixture> {
           warnings: [],
         },
         client_view: {
-          client_id: "cli_preferred_bounds",
+          client_id: clientId,
           view_rev: viewRev,
           active_layer_id: null,
           center_x: 0,
@@ -1670,7 +1672,7 @@ async function startPreferredSourceBoundsFixture(): Promise<SocketFixture> {
     if (request.method === "GET" && request.url === `/v1/sessions/${sessionId}/snapshot`) {
       response.statusCode = 200;
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify(snapshotPayload()));
+      response.end(JSON.stringify(snapshotPayload(httpSnapshotClientId)));
       return;
     }
     if (request.url?.includes("/v1/preview2d/")) {
@@ -1701,7 +1703,7 @@ async function startPreferredSourceBoundsFixture(): Promise<SocketFixture> {
       const parsed = JSON.parse(text) as unknown;
       received.push(parsed);
       if (isRecord(parsed) && parsed.message_type === "attach") {
-        socket.send(JSON.stringify(snapshotPayload()));
+        socket.send(JSON.stringify(snapshotPayload(wsClientId)));
         return;
       }
       if (
@@ -1709,6 +1711,31 @@ async function startPreferredSourceBoundsFixture(): Promise<SocketFixture> {
         parsed.message_type !== "command" ||
         (parsed.op !== "view.set_z" && parsed.op !== "view.set_t")
       ) {
+        return;
+      }
+      if (parsed.client_id !== wsClientId) {
+        socket.send(
+          JSON.stringify({
+            message_type: "error",
+            schema_version: "lucida-proto-0.1",
+            session_id: sessionId,
+            request_id: String(parsed.request_id ?? "req"),
+            client_id: String(parsed.client_id ?? "unknown"),
+            client_seq: Number(parsed.client_seq ?? 1),
+            op: String(parsed.op ?? "unknown"),
+            code: "client_not_found",
+            message: "client not found",
+            retryable: false,
+            details: {
+              detail_type: "not_found",
+              detail: {
+                resource: "client",
+                resource_id: String(parsed.client_id ?? "unknown"),
+              },
+            },
+            sent_at: new Date().toISOString(),
+          }),
+        );
         return;
       }
       const args = parsed.args;
@@ -1736,7 +1763,7 @@ async function startPreferredSourceBoundsFixture(): Promise<SocketFixture> {
           session_rev: sessionRev,
           event_type: "view_updated",
           payload: {
-            client_id: "cli_preferred_bounds",
+            client_id: wsClientId,
             view_rev: viewRev,
             active_layer_id: null,
             center_x: 0,
