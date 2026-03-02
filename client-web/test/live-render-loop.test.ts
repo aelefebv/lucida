@@ -205,6 +205,106 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
+  it("requests tile y/x sets that follow viewport pan and zoom", async () => {
+    const requestedUrls: string[] = [];
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [0, 255]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          return new Response(new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [0, 255])))]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.centerX = 256;
+    state.centerY = 256;
+    state.zoom = 4;
+    state.generations["src_fixture:1"] = {
+      sourceId: "src_fixture",
+      generationSeq: 1,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 1024,
+            height: 1024,
+            tileWidth: 512,
+            tileHeight: 512,
+            rows: 2,
+            cols: 2,
+          },
+        ],
+      },
+    };
+
+    loop.update(state);
+    await waitFor(
+      () =>
+        requestedUrls.some(
+          (url) => url.includes("/v1/tile2d/") && url.includes("/y/0/x/0"),
+        ),
+      2000,
+    );
+
+    requestedUrls.length = 0;
+    state.centerX = 768;
+    state.centerY = 768;
+    loop.update(state);
+    await waitFor(
+      () =>
+        requestedUrls.some(
+          (url) => url.includes("/v1/tile2d/") && url.includes("/y/1/x/1"),
+        ),
+      2000,
+    );
+
+    requestedUrls.length = 0;
+    state.zoom = 1;
+    loop.update(state);
+    await waitFor(
+      () =>
+        requestedUrls.some(
+          (url) => url.includes("/v1/tile2d/") && url.includes("/y/0/x/0"),
+        ) &&
+        requestedUrls.some(
+          (url) => url.includes("/v1/tile2d/") && url.includes("/y/1/x/1"),
+        ),
+      2000,
+    );
+
+    expect(frames.some((frame) => frame.frameKind === "tile")).toBe(true);
+    loop.dispose();
+  });
+
   it("reports empty-frame pixel stats when payload is all zeros", async () => {
     const frames: RenderFrameState[] = [];
     const loop = new LiveRenderLoop(

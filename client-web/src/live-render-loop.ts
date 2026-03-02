@@ -1,4 +1,9 @@
-import type { ClientState, WarningEntry } from "./client-store";
+import type {
+  ClientState,
+  TileLayout,
+  TileLodLayout,
+  WarningEntry,
+} from "./client-store";
 import type { ChunkKey } from "./chunk-key";
 import { EngineDataPlaneUrlResolver } from "./object-url-resolver";
 import { RequestScheduler } from "./request-scheduler";
@@ -48,7 +53,7 @@ export class LiveRenderLoop {
   private readonly activeFetches: Set<string>;
   private currentSelectionKey: string | null;
   private currentPreviewRequestKey: string | null;
-  private currentTileRequestKey: string | null;
+  private currentTileRequestKeys: Set<string>;
   private dimensionsBySourceGeneration: Map<string, { width: number; height: number }>;
   private frameKindBySourceGeneration: Map<string, "preview" | "tile">;
   private grayscaleBySourceGeneration: Map<string, Uint16Array>;
@@ -76,7 +81,7 @@ export class LiveRenderLoop {
     this.activeFetches = new Set();
     this.currentSelectionKey = null;
     this.currentPreviewRequestKey = null;
-    this.currentTileRequestKey = null;
+    this.currentTileRequestKeys = new Set();
     this.dimensionsBySourceGeneration = new Map();
     this.frameKindBySourceGeneration = new Map();
     this.grayscaleBySourceGeneration = new Map();
@@ -101,6 +106,9 @@ export class LiveRenderLoop {
       latest.tIndex,
       latest.zIndex,
       latest.selectedChannels,
+      latest.centerX,
+      latest.centerY,
+      latest.zoom,
     );
 
     const isNewGeneration = latest.generationSeq > this.latestGenerationSeq;
@@ -115,9 +123,10 @@ export class LiveRenderLoop {
       if (this.currentPreviewRequestKey !== null) {
         this.scheduler.cancel(this.currentPreviewRequestKey);
       }
-      if (this.currentTileRequestKey !== null) {
-        this.scheduler.cancel(this.currentTileRequestKey);
+      for (const tileRequestKey of this.currentTileRequestKeys) {
+        this.scheduler.cancel(tileRequestKey);
       }
+      this.currentTileRequestKeys = new Set();
       this.currentSelectionKey = selectionKey;
       this.currentPreviewRequestKey = requestKey(
         "preview",
@@ -126,14 +135,8 @@ export class LiveRenderLoop {
         latest.tIndex,
         latest.zIndex,
         latest.channelBlock,
-      );
-      this.currentTileRequestKey = requestKey(
-        "tile",
-        latest.sourceId,
-        latest.generationSeq,
-        latest.tIndex,
-        latest.zIndex,
-        latest.channelBlock,
+        0,
+        0,
       );
     }
     if (isNewGeneration || selectionChanged || !hasFrameForGeneration) {
@@ -143,6 +146,10 @@ export class LiveRenderLoop {
         latest.tIndex,
         latest.zIndex,
         latest.channelBlock,
+        latest.centerX,
+        latest.centerY,
+        latest.zoom,
+        latest.tileLayout,
         selectionKey,
       );
     }
@@ -161,6 +168,10 @@ export class LiveRenderLoop {
     tIndex: number,
     zIndex: number,
     channelBlock: number,
+    centerX: number,
+    centerY: number,
+    zoom: number,
+    tileLayout: TileLayout | null,
     selectionKey: string,
   ): Promise<void> {
     const fetchKey = selectionKey;
@@ -174,15 +185,30 @@ export class LiveRenderLoop {
       tIndex,
       zIndex,
       channelBlock,
+      0,
+      0,
     );
     const tileSelection = effectiveTileSelection(tIndex, zIndex, channelBlock);
-    const tileRequestKey = requestKey(
-      "tile",
-      sourceId,
-      generationSeq,
-      tileSelection.t,
-      tileSelection.z,
-      tileSelection.channelBlock,
+    const visibleTileTargets = resolveVisibleTileTargets(
+      tileLayout,
+      tileSelection,
+      centerX,
+      centerY,
+      zoom,
+    );
+    this.currentTileRequestKeys = new Set(
+      visibleTileTargets.map((target) =>
+        requestKey(
+          "tile",
+          sourceId,
+          generationSeq,
+          tileSelection.t,
+          tileSelection.z,
+          tileSelection.channelBlock,
+          target.row,
+          target.col,
+        ),
+      ),
     );
     this.activeFetches.add(fetchKey);
     try {
@@ -235,46 +261,70 @@ export class LiveRenderLoop {
       return;
     }
 
-    try {
-      const tile = await this.scheduler.schedule<DecodedFrame>({
-        key: tileRequestKey,
-        generationSeq,
-        priority: 10,
-        execute: (signal) => {
-          return this.fetchTileWithFallback(
-            {
-              sourceId,
-              generationSeq,
-              assetKind: "tile2d",
-              lod: 0,
-              t: tileSelection.t,
-              z: tileSelection.z,
-              channelBlock: tileSelection.channelBlock,
-              y: 0,
-              x: 0,
-            },
-            signal,
-          );
-        },
-      });
-      if (this.currentSelectionKey !== selectionKey) {
-        this.activeFetches.delete(fetchKey);
-        return;
+    let emittedTile = false;
+    let tileFailure: unknown = null;
+    for (let index = 0; index < visibleTileTargets.length; index += 1) {
+      const target = visibleTileTargets[index];
+      if (target === undefined) {
+        continue;
       }
-      const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
-      this.dimensionsBySourceGeneration.set(sourceGeneration, {
-        width: tile.width,
-        height: tile.height,
-      });
-      this.frameKindBySourceGeneration.set(sourceGeneration, "tile");
-      this.grayscaleBySourceGeneration.set(sourceGeneration, tile.grayscaleSamples);
-      this.sampleMaxBySourceGeneration.set(sourceGeneration, tile.sampleMax);
-      this.pixelStatsBySourceGeneration.set(sourceGeneration, tile.pixelStats);
-      this.frameStore.setTiles(sourceId, generationSeq, tile.rgba);
-      this.emit(sourceId, generationSeq);
-    } catch (error) {
+      const tileRequestKey = requestKey(
+        "tile",
+        sourceId,
+        generationSeq,
+        tileSelection.t,
+        tileSelection.z,
+        tileSelection.channelBlock,
+        target.row,
+        target.col,
+      );
+      try {
+        const tile = await this.scheduler.schedule<DecodedFrame>({
+          key: tileRequestKey,
+          generationSeq,
+          priority: 10 - index,
+          execute: (signal) => {
+            return this.fetchTileWithFallback(
+              {
+                sourceId,
+                generationSeq,
+                assetKind: "tile2d",
+                lod: 0,
+                t: tileSelection.t,
+                z: tileSelection.z,
+                channelBlock: tileSelection.channelBlock,
+                y: target.row,
+                x: target.col,
+              },
+              signal,
+            );
+          },
+        });
+        if (this.currentSelectionKey !== selectionKey) {
+          this.activeFetches.delete(fetchKey);
+          return;
+        }
+        if (!emittedTile) {
+          const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
+          this.dimensionsBySourceGeneration.set(sourceGeneration, {
+            width: tile.width,
+            height: tile.height,
+          });
+          this.frameKindBySourceGeneration.set(sourceGeneration, "tile");
+          this.grayscaleBySourceGeneration.set(sourceGeneration, tile.grayscaleSamples);
+          this.sampleMaxBySourceGeneration.set(sourceGeneration, tile.sampleMax);
+          this.pixelStatsBySourceGeneration.set(sourceGeneration, tile.pixelStats);
+          this.frameStore.setTiles(sourceId, generationSeq, tile.rgba);
+          this.emit(sourceId, generationSeq);
+          emittedTile = true;
+        }
+      } catch (error) {
+        tileFailure = error;
+      }
+    }
+    if (!emittedTile && tileFailure !== null) {
       // Keep preview frame active when tile refinement is unavailable.
-      console.error("tile fetch failed", error);
+      console.error("tile fetch failed", tileFailure);
       this.scheduleRetry();
     }
     this.activeFetches.delete(fetchKey);
@@ -489,6 +539,10 @@ function selectLatestGeneration(
   zIndex: number;
   selectedChannels: number[];
   channelBlock: number;
+  centerX: number;
+  centerY: number;
+  zoom: number;
+  tileLayout: TileLayout | null;
 } | null {
   const selectedChannels = [...clientState.selectedChannels];
   const channelBlock = selectedChannelBlock(selectedChannels);
@@ -502,6 +556,14 @@ function selectLatestGeneration(
         zIndex: clientState.zIndex,
         selectedChannels,
         channelBlock,
+        centerX: clientState.centerX,
+        centerY: clientState.centerY,
+        zoom: clientState.zoom,
+        tileLayout: lod0TileLayoutForGeneration(
+          clientState,
+          preferred.sourceId,
+          preferred.latestWorkingGenerationSeq,
+        ),
       };
     }
   }
@@ -515,6 +577,10 @@ function selectLatestGeneration(
         zIndex: number;
         selectedChannels: number[];
         channelBlock: number;
+        centerX: number;
+        centerY: number;
+        zoom: number;
+        tileLayout: TileLayout | null;
       }
     | null = null;
   for (const source of sourceValues) {
@@ -532,10 +598,102 @@ function selectLatestGeneration(
         zIndex: clientState.zIndex,
         selectedChannels,
         channelBlock,
+        centerX: clientState.centerX,
+        centerY: clientState.centerY,
+        zoom: clientState.zoom,
+        tileLayout: lod0TileLayoutForGeneration(
+          clientState,
+          source.sourceId,
+          source.latestWorkingGenerationSeq,
+        ),
       };
     }
   }
   return latest;
+}
+
+function lod0TileLayoutForGeneration(
+  clientState: ClientState,
+  sourceId: string,
+  generationSeq: number,
+): TileLayout | null {
+  const generation = clientState.generations[sourceGenerationKey(sourceId, generationSeq)];
+  if (generation === undefined || generation.tileLayout === null || generation.tileLayout === undefined) {
+    return null;
+  }
+  return generation.tileLayout;
+}
+
+type VisibleTileTarget = {
+  row: number;
+  col: number;
+};
+
+function resolveVisibleTileTargets(
+  tileLayout: TileLayout | null,
+  selection: { t: number; z: number; channelBlock: number },
+  centerX: number,
+  centerY: number,
+  zoom: number,
+): VisibleTileTarget[] {
+  void selection;
+  if (tileLayout === null) {
+    return [{ row: 0, col: 0 }];
+  }
+  const lod0 = tileLayout.lods.find((lod) => lod.lod === 0) ?? tileLayout.lods[0];
+  if (lod0 === undefined) {
+    return [{ row: 0, col: 0 }];
+  }
+  return visibleTileTargetsForViewport(lod0, centerX, centerY, zoom);
+}
+
+function visibleTileTargetsForViewport(
+  lod: TileLodLayout,
+  centerX: number,
+  centerY: number,
+  zoom: number,
+): VisibleTileTarget[] {
+  const normalizedZoom = Number.isFinite(zoom) ? Math.max(zoom, 0.01) : 1;
+  const imageWidth = Math.max(1, Math.floor(lod.width));
+  const imageHeight = Math.max(1, Math.floor(lod.height));
+  const tileWidth = Math.max(1, Math.floor(lod.tileWidth));
+  const tileHeight = Math.max(1, Math.floor(lod.tileHeight));
+  const maxCol = Math.max(0, Math.floor(lod.cols) - 1);
+  const maxRow = Math.max(0, Math.floor(lod.rows) - 1);
+
+  const halfVisibleWidth = imageWidth / (2 * normalizedZoom);
+  const halfVisibleHeight = imageHeight / (2 * normalizedZoom);
+  const minX = clamp(centerX - halfVisibleWidth, 0, imageWidth - 1);
+  const maxX = clamp(centerX + halfVisibleWidth, 0, imageWidth - 1);
+  const minY = clamp(centerY - halfVisibleHeight, 0, imageHeight - 1);
+  const maxY = clamp(centerY + halfVisibleHeight, 0, imageHeight - 1);
+
+  const startCol = clamp(Math.floor(minX / tileWidth), 0, maxCol);
+  const endCol = clamp(Math.floor(maxX / tileWidth), 0, maxCol);
+  const startRow = clamp(Math.floor(minY / tileHeight), 0, maxRow);
+  const endRow = clamp(Math.floor(maxY / tileHeight), 0, maxRow);
+  const centerCol = clamp(Math.floor(centerX / tileWidth), 0, maxCol);
+  const centerRow = clamp(Math.floor(centerY / tileHeight), 0, maxRow);
+
+  const targets: VisibleTileTarget[] = [];
+  for (let row = startRow; row <= endRow; row += 1) {
+    for (let col = startCol; col <= endCol; col += 1) {
+      targets.push({ row, col });
+    }
+  }
+  targets.sort((left, right) => {
+    const leftDistance = Math.abs(left.row - centerRow) + Math.abs(left.col - centerCol);
+    const rightDistance =
+      Math.abs(right.row - centerRow) + Math.abs(right.col - centerCol);
+    if (leftDistance !== rightDistance) {
+      return leftDistance - rightDistance;
+    }
+    if (left.row !== right.row) {
+      return left.row - right.row;
+    }
+    return left.col - right.col;
+  });
+  return targets;
 }
 
 function frameSelectionKey(
@@ -544,8 +702,11 @@ function frameSelectionKey(
   tIndex: number,
   zIndex: number,
   selectedChannels: number[],
+  centerX: number,
+  centerY: number,
+  zoom: number,
 ): string {
-  return `${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:c${selectedChannels.join(",")}`;
+  return `${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:c${selectedChannels.join(",")}:cx${centerX.toFixed(3)}:cy${centerY.toFixed(3)}:zm${zoom.toFixed(3)}`;
 }
 
 function sourceGenerationKey(sourceId: string, generationSeq: number): string {
@@ -590,8 +751,10 @@ function requestKey(
   tIndex: number,
   zIndex: number,
   channelBlock: number,
+  yIndex: number,
+  xIndex: number,
 ): string {
-  return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:cb${channelBlock.toString()}`;
+  return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:cb${channelBlock.toString()}:y${yIndex.toString()}:x${xIndex.toString()}`;
 }
 
 function selectedChannelBlock(channels: readonly number[]): number {
@@ -726,6 +889,16 @@ function decodePortableGraymap(bytes: Uint8Array): DecodedFrame {
       mean: sum / pixelCount,
     },
   };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (value <= min) {
+    return min;
+  }
+  if (value >= max) {
+    return max;
+  }
+  return value;
 }
 
 function isWhitespace(value: number): boolean {
