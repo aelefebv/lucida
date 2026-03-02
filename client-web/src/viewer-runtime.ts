@@ -315,6 +315,9 @@ export class ViewerRuntime {
     }
     if (messageType === "error") {
       const error = parsed as RuntimeErrorMessage;
+      if (this.bootstrap.state().phase === "attached") {
+        return;
+      }
       this.bootstrap.fail(error.message);
       this.publish();
     }
