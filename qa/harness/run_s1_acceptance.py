@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -12,6 +13,13 @@ from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPORT_PATH = REPO_ROOT / "qa" / "reports" / "s1_acceptance_report.json"
+RESPONSIVENESS_THRESHOLDS = {
+    "first_paint_latency_ms_max": 20_000.0,
+    "refinement_latency_ms_max": 20_000.0,
+    "interaction_recovery_latency_ms_max": 20_000.0,
+    "tile_request_count_min": 0,
+    "cancellation_count_min": 0,
+}
 
 
 @dataclass(frozen=True)
@@ -131,6 +139,63 @@ def run_command(
     }
 
 
+def duration_milliseconds_by_case(
+    case_report: list[dict[str, Any]],
+    case_id: str,
+) -> float:
+    for case in case_report:
+        if case.get("id") == case_id:
+            return round(float(case.get("duration_seconds", 0.0)) * 1000.0, 3)
+    return 0.0
+
+
+def count_case_output_matches(
+    case_report: list[dict[str, Any]],
+    pattern: re.Pattern[str],
+) -> int:
+    total = 0
+    for case in case_report:
+        stdout_tail = str(case.get("stdout_tail", ""))
+        stderr_tail = str(case.get("stderr_tail", ""))
+        total += len(pattern.findall(stdout_tail))
+        total += len(pattern.findall(stderr_tail))
+    return total
+
+
+def build_responsiveness_metrics(case_report: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "first_paint_latency_ms": duration_milliseconds_by_case(case_report, "T-M1-02"),
+        "refinement_latency_ms": duration_milliseconds_by_case(case_report, "T-M1-03"),
+        "interaction_recovery_latency_ms": duration_milliseconds_by_case(
+            case_report, "T-M1-04"
+        ),
+        "tile_request_count": count_case_output_matches(
+            case_report,
+            re.compile(r"tile2d|/v1/tile2d/", re.IGNORECASE),
+        ),
+        "cancellation_count": count_case_output_matches(
+            case_report,
+            re.compile(r"cancel|abort|invalidat|supersed", re.IGNORECASE),
+        ),
+    }
+
+
+def responsiveness_thresholds_pass(
+    metrics: dict[str, Any],
+    thresholds: dict[str, float | int],
+) -> bool:
+    return (
+        float(metrics["first_paint_latency_ms"])
+        <= float(thresholds["first_paint_latency_ms_max"])
+        and float(metrics["refinement_latency_ms"])
+        <= float(thresholds["refinement_latency_ms_max"])
+        and float(metrics["interaction_recovery_latency_ms"])
+        <= float(thresholds["interaction_recovery_latency_ms_max"])
+        and int(metrics["tile_request_count"]) >= int(thresholds["tile_request_count_min"])
+        and int(metrics["cancellation_count"]) >= int(thresholds["cancellation_count_min"])
+    )
+
+
 def run_harness(dry_run: bool, report_path: Path) -> dict[str, Any]:
     started_at = time.time()
     steps_report: list[dict[str, Any]] = []
@@ -161,6 +226,12 @@ def run_harness(dry_run: bool, report_path: Path) -> dict[str, Any]:
     passed_cases = sum(1 for status in case_statuses if status == "passed")
     failed_cases = sum(1 for status in case_statuses if status == "failed")
     skipped_cases = sum(1 for status in case_statuses if status == "skipped")
+    responsiveness_metrics = build_responsiveness_metrics(case_report)
+    responsiveness_thresholds_passed = responsiveness_thresholds_pass(
+        responsiveness_metrics,
+        RESPONSIVENESS_THRESHOLDS,
+    )
+    success = success and responsiveness_thresholds_passed
 
     report = {
         "milestone": "S1",
@@ -176,6 +247,9 @@ def run_harness(dry_run: bool, report_path: Path) -> dict[str, Any]:
             "failed": failed_cases,
             "skipped": skipped_cases,
         },
+        "responsiveness_metrics": responsiveness_metrics,
+        "responsiveness_thresholds": RESPONSIVENESS_THRESHOLDS,
+        "responsiveness_thresholds_passed": responsiveness_thresholds_passed,
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")

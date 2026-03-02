@@ -102,3 +102,6 @@ jobs:
 
       - name: Run S1 acceptance harness
         run: python qa/harness/run_s1_acceptance.py --report-path qa/reports/s1_acceptance_report.json
+
+      - name: Validate S1 acceptance report metrics and thresholds
+        run: python qa/harness/validate_s1_report.py --report-path qa/reports/s1_acceptance_report.json
