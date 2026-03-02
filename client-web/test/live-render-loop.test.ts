@@ -305,6 +305,128 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
+  it("cancels stale tile work during rapid viewport churn", async () => {
+    const tileRequests: string[] = [];
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input, init) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [0, 255]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          tileRequests.push(url);
+          return new Promise<Response>((resolve, reject) => {
+            const timer = setTimeout(() => {
+              resolve(
+                new Response(
+                  new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [0, 255])))]),
+                  {
+                    status: 200,
+                    headers: {
+                      "content-type": "application/octet-stream",
+                      "content-encoding": "identity",
+                    },
+                  },
+                ),
+              );
+            }, 120);
+            const signal = init?.signal;
+            if (signal !== undefined && signal !== null) {
+              signal.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  reject(new Error("aborted"));
+                },
+                { once: true },
+              );
+            }
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.centerX = 128;
+    state.centerY = 128;
+    state.zoom = 1;
+    state.generations["src_fixture:1"] = {
+      sourceId: "src_fixture",
+      generationSeq: 1,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 1024,
+            height: 1024,
+            tileWidth: 512,
+            tileHeight: 512,
+            rows: 2,
+            cols: 2,
+          },
+        ],
+      },
+    };
+
+    loop.update(state);
+    await waitFor(
+      () =>
+        tileRequests.some(
+          (url) => url.includes("/v1/tile2d/") && url.includes("/y/0/x/0"),
+        ),
+      1000,
+    );
+
+    const requestCountBeforeChurn = tileRequests.length;
+    state.centerX = 896;
+    state.centerY = 896;
+    state.zoom = 4;
+    loop.update(state);
+
+    await waitFor(
+      () =>
+        tileRequests.some(
+          (url) => url.includes("/v1/tile2d/") && url.includes("/y/1/x/1"),
+        ),
+      2000,
+    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, 260);
+    });
+
+    const requestsDuringChurn = tileRequests.slice(requestCountBeforeChurn);
+    expect(
+      requestsDuringChurn.some(
+        (url) => url.includes("/v1/tile2d/") && url.includes("/y/0/x/1"),
+      ),
+    ).toBe(false);
+    expect(
+      requestsDuringChurn.some(
+        (url) => url.includes("/v1/tile2d/") && url.includes("/y/1/x/0"),
+      ),
+    ).toBe(false);
+    expect(frames.some((frame) => frame.frameKind === "tile")).toBe(true);
+    loop.dispose();
+  });
+
   it("reports empty-frame pixel stats when payload is all zeros", async () => {
     const frames: RenderFrameState[] = [];
     const loop = new LiveRenderLoop(

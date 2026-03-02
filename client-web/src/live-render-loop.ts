@@ -215,7 +215,7 @@ export class LiveRenderLoop {
       const preview = await this.scheduler.schedule<DecodedFrame>({
         key: previewRequestKey,
         generationSeq,
-        priority: 20,
+        priorityClass: "coarse_fallback",
         execute: (signal) => {
           return this.fetchFrame(
             {
@@ -255,8 +255,10 @@ export class LiveRenderLoop {
       this.frameStore.setPreview(sourceId, generationSeq, preview.rgba);
       this.emit(sourceId, generationSeq);
     } catch (error) {
-      console.error("preview fetch failed", error);
-      this.scheduleRetry();
+      if (!isCancellationError(error) && this.currentSelectionKey === selectionKey) {
+        console.error("preview fetch failed", error);
+        this.scheduleRetry();
+      }
       this.activeFetches.delete(fetchKey);
       return;
     }
@@ -264,6 +266,10 @@ export class LiveRenderLoop {
     let emittedTile = false;
     let tileFailure: unknown = null;
     for (let index = 0; index < visibleTileTargets.length; index += 1) {
+      if (this.currentSelectionKey !== selectionKey) {
+        this.activeFetches.delete(fetchKey);
+        return;
+      }
       const target = visibleTileTargets[index];
       if (target === undefined) {
         continue;
@@ -282,7 +288,8 @@ export class LiveRenderLoop {
         const tile = await this.scheduler.schedule<DecodedFrame>({
           key: tileRequestKey,
           generationSeq,
-          priority: 10 - index,
+          priorityClass: index === 0 ? "visible_center" : "visible_ring",
+          priority: 100 - index,
           execute: (signal) => {
             return this.fetchTileWithFallback(
               {
@@ -319,10 +326,14 @@ export class LiveRenderLoop {
           emittedTile = true;
         }
       } catch (error) {
+        if (this.currentSelectionKey !== selectionKey || isCancellationError(error)) {
+          this.activeFetches.delete(fetchKey);
+          return;
+        }
         tileFailure = error;
       }
     }
-    if (!emittedTile && tileFailure !== null) {
+    if (!emittedTile && tileFailure !== null && this.currentSelectionKey === selectionKey) {
       // Keep preview frame active when tile refinement is unavailable.
       console.error("tile fetch failed", tileFailure);
       this.scheduleRetry();
@@ -763,6 +774,22 @@ function selectedChannelBlock(channels: readonly number[]): number {
     return 0;
   }
   return Math.floor(primary);
+}
+
+function isCancellationError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") {
+    return true;
+  }
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    return (
+      message.includes("abort") ||
+      message.includes("cancel") ||
+      message.includes("invalidat") ||
+      message.includes("supersed")
+    );
+  }
+  return false;
 }
 
 function effectiveTileSelection(

@@ -57,6 +57,96 @@ describe("request scheduler", () => {
 
     await expect(pending).resolves.toMatch(/cancelled|aborted/);
   });
+
+  it("prioritizes visible-center ahead of ring requests with deterministic tie ordering", async () => {
+    const scheduler = new RequestScheduler(1);
+    const order: string[] = [];
+
+    const blocker = scheduler.schedule({
+      key: "blocker",
+      generationSeq: 1,
+      priorityClass: "coarse_fallback",
+      execute: delayedValue("blocker", 25),
+    }).then((value) => {
+      order.push(value);
+      return value;
+    });
+
+    const ringA = scheduler.schedule({
+      key: "ring-a",
+      generationSeq: 1,
+      priorityClass: "visible_ring",
+      execute: delayedValue("ring-a", 1),
+    }).then((value) => {
+      order.push(value);
+      return value;
+    });
+
+    const center = scheduler.schedule({
+      key: "center",
+      generationSeq: 1,
+      priorityClass: "visible_center",
+      execute: delayedValue("center", 1),
+    }).then((value) => {
+      order.push(value);
+      return value;
+    });
+
+    const ringB = scheduler.schedule({
+      key: "ring-b",
+      generationSeq: 1,
+      priorityClass: "visible_ring",
+      execute: delayedValue("ring-b", 1),
+    }).then((value) => {
+      order.push(value);
+      return value;
+    });
+
+    await expect(Promise.all([blocker, ringA, center, ringB])).resolves.toEqual([
+      "blocker",
+      "ring-a",
+      "center",
+      "ring-b",
+    ]);
+    expect(order).toEqual(["blocker", "center", "ring-a", "ring-b"]);
+  });
+
+  it("drops lowest-priority queued work when queue pressure exceeds limits", async () => {
+    const scheduler = new RequestScheduler(1, 2);
+
+    const blocker = scheduler.schedule({
+      key: "blocker",
+      generationSeq: 1,
+      priority: 100,
+      execute: delayedValue("blocker", 30),
+    });
+
+    const high = scheduler.schedule({
+      key: "high",
+      generationSeq: 1,
+      priority: 90,
+      execute: delayedValue("high", 1),
+    });
+    const medium = scheduler.schedule({
+      key: "medium",
+      generationSeq: 1,
+      priority: 80,
+      execute: delayedValue("medium", 1),
+    });
+    const low = scheduler
+      .schedule({
+        key: "low",
+        generationSeq: 1,
+        priority: 10,
+        execute: delayedValue("low", 1),
+      })
+      .catch((error: unknown) => (error as Error).message);
+
+    await expect(blocker).resolves.toBe("blocker");
+    await expect(high).resolves.toBe("high");
+    await expect(medium).resolves.toBe("medium");
+    await expect(low).resolves.toMatch(/queue pressure/);
+  });
 });
 
 describe("lru generation cache", () => {

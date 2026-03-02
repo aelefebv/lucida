@@ -1,32 +1,48 @@
+export type RequestPriorityClass =
+  | "visible_center"
+  | "visible_ring"
+  | "coarse_fallback"
+  | "refine"
+  | "prefetch_neighbor"
+  | "prefetch_refine";
+
 export type ScheduledRequest<T> = {
   key: string;
   generationSeq: number;
-  priority: number;
+  priority?: number;
+  priorityClass?: RequestPriorityClass;
   execute: (signal: AbortSignal) => Promise<T>;
 };
 
 type QueueEntry<T> = {
   request: ScheduledRequest<T>;
+  effectivePriority: number;
+  sequence: number;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
 };
 
 export class RequestScheduler {
   private readonly maxConcurrent: number;
+  private readonly maxQueueSize: number;
   private queue: QueueEntry<unknown>[];
   private readonly active: Map<
     string,
     { controller: AbortController; generationSeq: number }
   >;
+  private sequenceCounter: number;
 
-  public constructor(maxConcurrent = 4) {
+  public constructor(maxConcurrent = 4, maxQueueSize = 128) {
     this.maxConcurrent = Math.max(1, maxConcurrent);
+    this.maxQueueSize = Math.max(1, maxQueueSize);
     this.queue = [];
     this.active = new Map();
+    this.sequenceCounter = 0;
   }
 
   public schedule<T>(request: ScheduledRequest<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
+      const effectivePriority = requestPriority(request);
       this.queue = this.queue.filter((entry) => {
         const existing = entry.request as ScheduledRequest<unknown>;
         if (
@@ -40,10 +56,14 @@ export class RequestScheduler {
       });
       this.queue.push({
         request,
+        effectivePriority,
+        sequence: this.sequenceCounter,
         resolve: resolve as (value: unknown) => void,
         reject,
       });
-      this.queue.sort((left, right) => right.request.priority - left.request.priority);
+      this.sequenceCounter += 1;
+      this.queue.sort(compareQueueEntries);
+      this.applyQueuePressure();
       this.pump();
     });
   }
@@ -104,6 +124,16 @@ export class RequestScheduler {
         });
     }
   }
+
+  private applyQueuePressure(): void {
+    while (this.queue.length > this.maxQueueSize) {
+      const dropped = this.queue.pop();
+      if (dropped === undefined) {
+        return;
+      }
+      dropped.reject(new Error("request dropped due queue pressure"));
+    }
+  }
 }
 
 type CacheEntry<T> = {
@@ -159,4 +189,33 @@ export class LruGenerationCache<T> {
       this.entries.delete(oldestKey);
     }
   }
+}
+
+const PRIORITY_BY_CLASS: Record<RequestPriorityClass, number> = {
+  visible_center: 100,
+  visible_ring: 90,
+  coarse_fallback: 80,
+  refine: 70,
+  prefetch_neighbor: 50,
+  prefetch_refine: 40,
+};
+
+function requestPriority(request: ScheduledRequest<unknown>): number {
+  if (typeof request.priority === "number" && Number.isFinite(request.priority)) {
+    return request.priority;
+  }
+  if (request.priorityClass !== undefined) {
+    return PRIORITY_BY_CLASS[request.priorityClass];
+  }
+  return 0;
+}
+
+function compareQueueEntries(
+  left: QueueEntry<unknown>,
+  right: QueueEntry<unknown>,
+): number {
+  if (left.effectivePriority !== right.effectivePriority) {
+    return right.effectivePriority - left.effectivePriority;
+  }
+  return left.sequence - right.sequence;
 }
