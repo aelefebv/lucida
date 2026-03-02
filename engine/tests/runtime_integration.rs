@@ -97,11 +97,13 @@ fn data_plane_url(runtime: &RuntimeFixture, chunk_key: ChunkKey) -> String {
 }
 
 fn write_minimal_rgb_tiff(path: &Path) {
+    write_rgb_tiff(path, 32, 16);
+}
+
+fn write_rgb_tiff(path: &Path, width: u32, height: u32) {
     let file = fs::File::create(path).expect("tiff fixture file should be created");
     let mut encoder =
         tiff::encoder::TiffEncoder::new(file).expect("tiff fixture encoder should be created");
-    let width = 32_u32;
-    let height = 16_u32;
     let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
     for y in 0..height {
         for x in 0..width {
@@ -951,6 +953,135 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
         .close(None)
         .await
         .expect("closing websocket should succeed");
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_data_plane_serves_non_zero_row_col_tiles_and_404s_missing_tiles() {
+    let cache_root = unique_path("non_zero_tile_data_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("non_zero_tile_data_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-non-zero-row-col.tiff");
+    write_rgb_tiff(&source_path, 600, 600);
+
+    let runtime = RuntimeFixture::start(&cache_root).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-non-zero-row-col" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-non-zero-row-col-source",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned")
+        .to_owned();
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+
+    let served_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.clone(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 1,
+            x: 1,
+        },
+    );
+    let served_tile_response = client
+        .get(&served_tile_url)
+        .send()
+        .await
+        .expect("non-zero tile request should succeed");
+    assert_eq!(served_tile_response.status(), StatusCode::OK);
+    assert_eq!(
+        served_tile_response
+            .headers()
+            .get("content-encoding")
+            .and_then(|value| value.to_str().ok()),
+        Some("identity")
+    );
+    assert_eq!(
+        served_tile_response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert!(
+        served_tile_response.headers().contains_key("etag"),
+        "tile response should include immutable etag"
+    );
+    let served_payload = served_tile_response
+        .bytes()
+        .await
+        .expect("served tile payload should be readable");
+    let packaging = ChannelBlockPackaging::default();
+    let decoded_tile = packaging
+        .decode(served_payload.as_ref())
+        .expect("served tile payload should decode as channel block");
+    let (tile_width, tile_height, _, _) = parse_pgm(&decoded_tile.payload);
+    assert_eq!(tile_width, 88);
+    assert_eq!(tile_height, 88);
+
+    let missing_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id,
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 2,
+            x: 1,
+        },
+    );
+    let missing_response = client
+        .get(&missing_tile_url)
+        .send()
+        .await
+        .expect("missing non-zero tile request should return http response");
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+
     runtime.stop().await;
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
     fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
