@@ -395,10 +395,14 @@ describe("LiveRenderLoop", () => {
       1000,
     );
 
+    state.centerX = 640;
+    state.centerY = 640;
+    state.zoom = 4;
+    loop.update(state);
+
     const requestCountBeforeChurn = tileRequests.length;
     state.centerX = 896;
     state.centerY = 896;
-    state.zoom = 4;
     loop.update(state);
 
     await waitFor(
@@ -703,6 +707,273 @@ describe("LiveRenderLoop", () => {
       50,
       50,
     ]);
+    loop.dispose();
+  });
+
+  it("queues neighbor and refinement prefetch after visible tiles", async () => {
+    const tileRequests: string[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      () => {
+        // no-op
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(
+            new Blob([
+              toArrayBuffer(
+                pgmPayload(6, 6, [
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                ]),
+              ),
+            ]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "image/x-portable-graymap",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/v1/tile2d/")) {
+          tileRequests.push(url);
+          const payload = channelBlockRawPayload(
+            pgmPayload(2, 2, [180, 180, 180, 180]),
+          );
+          return new Response(new Blob([toArrayBuffer(payload)]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.centerX = 3;
+    state.centerY = 3;
+    state.zoom = 4;
+    state.generations["src_fixture:1"] = {
+      sourceId: "src_fixture",
+      generationSeq: 1,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0, 1],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 6,
+            height: 6,
+            tileWidth: 2,
+            tileHeight: 2,
+            rows: 3,
+            cols: 3,
+          },
+          {
+            lod: 1,
+            width: 3,
+            height: 3,
+            tileWidth: 2,
+            tileHeight: 2,
+            rows: 2,
+            cols: 2,
+          },
+        ],
+      },
+    };
+
+    loop.update(state);
+
+    await waitFor(
+      () =>
+        tileRequests.some(
+          (url) =>
+            url.includes("/v1/tile2d/") &&
+            url.includes("/lod/0/") &&
+            url.includes("/y/1/x/1"),
+        ),
+      1500,
+    );
+
+    await waitFor(
+      () =>
+        tileRequests.some(
+          (url) =>
+            url.includes("/v1/tile2d/") &&
+            url.includes("/lod/0/") &&
+            !url.includes("/y/1/x/1"),
+        ) &&
+        tileRequests.some(
+          (url) => url.includes("/v1/tile2d/") && url.includes("/lod/1/"),
+        ),
+      1500,
+    );
+
+    const visibleIndex = tileRequests.findIndex(
+      (url) =>
+        url.includes("/v1/tile2d/") &&
+        url.includes("/lod/0/") &&
+        url.includes("/y/1/x/1"),
+    );
+    const firstNeighborIndex = tileRequests.findIndex(
+      (url) =>
+        url.includes("/v1/tile2d/") &&
+        url.includes("/lod/0/") &&
+        !url.includes("/y/1/x/1"),
+    );
+    const firstRefineIndex = tileRequests.findIndex(
+      (url) => url.includes("/v1/tile2d/") && url.includes("/lod/1/"),
+    );
+    expect(visibleIndex).toBeGreaterThanOrEqual(0);
+    expect(firstNeighborIndex).toBeGreaterThan(visibleIndex);
+    expect(firstRefineIndex).toBeGreaterThan(visibleIndex);
+    loop.dispose();
+  });
+
+  it("drops prefetch work when viewport churn is high", async () => {
+    const tileRequests: string[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      () => {
+        // no-op
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(
+            new Blob([
+              toArrayBuffer(
+                pgmPayload(6, 6, [
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                  10, 10, 10, 10, 10, 10,
+                ]),
+              ),
+            ]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "image/x-portable-graymap",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/v1/tile2d/")) {
+          tileRequests.push(url);
+          const payload = channelBlockRawPayload(
+            pgmPayload(2, 2, [160, 160, 160, 160]),
+          );
+          return new Response(new Blob([toArrayBuffer(payload)]), {
+            status: 200,
+            headers: {
+              "content-type": "application/octet-stream",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.zoom = 4;
+    state.generations["src_fixture:1"] = {
+      sourceId: "src_fixture",
+      generationSeq: 1,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0, 1],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 6,
+            height: 6,
+            tileWidth: 2,
+            tileHeight: 2,
+            rows: 3,
+            cols: 3,
+          },
+          {
+            lod: 1,
+            width: 3,
+            height: 3,
+            tileWidth: 2,
+            tileHeight: 2,
+            rows: 2,
+            cols: 2,
+          },
+        ],
+      },
+    };
+
+    state.centerX = 3;
+    state.centerY = 3;
+    loop.update(state);
+    state.centerX = 1;
+    state.centerY = 1;
+    loop.update(state);
+    state.centerX = 5;
+    state.centerY = 5;
+    loop.update(state);
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+    tileRequests.length = 0;
+    state.centerX = 3;
+    state.centerY = 3;
+    loop.update(state);
+
+    await waitFor(
+      () =>
+        tileRequests.some(
+          (url) =>
+            url.includes("/v1/tile2d/") &&
+            url.includes("/lod/0/") &&
+            url.includes("/y/1/x/1"),
+        ),
+      1500,
+    );
+    await new Promise((resolve) => {
+      setTimeout(resolve, 260);
+    });
+
+    const postChurnRequests = tileRequests;
+    expect(
+      postChurnRequests.some(
+        (url) =>
+          url.includes("/v1/tile2d/") &&
+          url.includes("/lod/0/") &&
+          !url.includes("/y/1/x/1"),
+      ),
+    ).toBe(false);
+    expect(
+      postChurnRequests.some(
+        (url) => url.includes("/v1/tile2d/") && url.includes("/lod/1/"),
+      ),
+    ).toBe(false);
     loop.dispose();
   });
 

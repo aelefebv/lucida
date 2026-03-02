@@ -43,6 +43,10 @@ type DecodedFrame = {
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 const defaultFetchImpl: FetchLike = (input, init) => globalThis.fetch(input, init);
+const CHURN_WINDOW_MS = 600;
+const CHURN_THRESHOLD = 3;
+const PREFETCH_NEIGHBOR_LIMIT = 8;
+const PREFETCH_REFINE_LIMIT = 6;
 
 export class LiveRenderLoop {
   private readonly resolver: EngineDataPlaneUrlResolver;
@@ -54,6 +58,8 @@ export class LiveRenderLoop {
   private currentSelectionKey: string | null;
   private currentPreviewRequestKey: string | null;
   private currentTileRequestKeys: Set<string>;
+  private currentPrefetchRequestKeys: Set<string>;
+  private selectionChangeTimestampsMs: number[];
   private dimensionsBySourceGeneration: Map<string, { width: number; height: number }>;
   private frameKindBySourceGeneration: Map<string, "preview" | "tile">;
   private grayscaleBySourceGeneration: Map<string, Uint16Array>;
@@ -82,6 +88,8 @@ export class LiveRenderLoop {
     this.currentSelectionKey = null;
     this.currentPreviewRequestKey = null;
     this.currentTileRequestKeys = new Set();
+    this.currentPrefetchRequestKeys = new Set();
+    this.selectionChangeTimestampsMs = [];
     this.dimensionsBySourceGeneration = new Map();
     this.frameKindBySourceGeneration = new Map();
     this.grayscaleBySourceGeneration = new Map();
@@ -113,6 +121,7 @@ export class LiveRenderLoop {
 
     const isNewGeneration = latest.generationSeq > this.latestGenerationSeq;
     const selectionChanged = selectionKey !== this.currentSelectionKey;
+    const now = Date.now();
     if (isNewGeneration) {
       this.scheduler.invalidateOlderGenerations(latest.generationSeq);
       this.frameStore.pruneOlderThan(latest.sourceId, latest.generationSeq);
@@ -126,7 +135,12 @@ export class LiveRenderLoop {
       for (const tileRequestKey of this.currentTileRequestKeys) {
         this.scheduler.cancel(tileRequestKey);
       }
+      for (const prefetchRequestKey of this.currentPrefetchRequestKeys) {
+        this.scheduler.cancel(prefetchRequestKey);
+      }
       this.currentTileRequestKeys = new Set();
+      this.currentPrefetchRequestKeys = new Set();
+      this.recordSelectionChange(now);
       this.currentSelectionKey = selectionKey;
       this.currentPreviewRequestKey = requestKey(
         "preview",
@@ -137,9 +151,11 @@ export class LiveRenderLoop {
         latest.channelBlock,
         0,
         0,
+        0,
       );
     }
     if (isNewGeneration || selectionChanged || !hasFrameForGeneration) {
+      const prefetchEnabled = !this.isInteractionChurnHigh(now);
       void this.fetchPreviewThenTiles(
         latest.sourceId,
         latest.generationSeq,
@@ -151,6 +167,7 @@ export class LiveRenderLoop {
         latest.zoom,
         latest.tileLayout,
         selectionKey,
+        prefetchEnabled,
       );
     }
   }
@@ -173,6 +190,7 @@ export class LiveRenderLoop {
     zoom: number,
     tileLayout: TileLayout | null,
     selectionKey: string,
+    prefetchEnabled: boolean,
   ): Promise<void> {
     const fetchKey = selectionKey;
     if (this.activeFetches.has(fetchKey)) {
@@ -185,6 +203,7 @@ export class LiveRenderLoop {
       tIndex,
       zIndex,
       channelBlock,
+      0,
       0,
       0,
     );
@@ -205,6 +224,7 @@ export class LiveRenderLoop {
           tileSelection.t,
           tileSelection.z,
           tileSelection.channelBlock,
+          0,
           target.row,
           target.col,
         ),
@@ -272,6 +292,7 @@ export class LiveRenderLoop {
     }
 
     let emittedTile = false;
+    let prefetchQueued = false;
     let tileFailure: unknown = null;
     for (let index = 0; index < visibleTileTargets.length; index += 1) {
       if (this.currentSelectionKey !== selectionKey) {
@@ -289,6 +310,7 @@ export class LiveRenderLoop {
         tileSelection.t,
         tileSelection.z,
         tileSelection.channelBlock,
+        0,
         target.row,
         target.col,
       );
@@ -345,6 +367,19 @@ export class LiveRenderLoop {
         });
         this.emit(sourceId, generationSeq);
         emittedTile = true;
+        if (prefetchEnabled && !prefetchQueued) {
+          this.queuePrefetchRequests({
+            sourceId,
+            generationSeq,
+            tIndex: tileSelection.t,
+            zIndex: tileSelection.z,
+            channelBlock: tileSelection.channelBlock,
+            tileLayout,
+            visibleTargets: visibleTileTargets,
+            selectionKey,
+          });
+          prefetchQueued = true;
+        }
       } catch (error) {
         if (this.currentSelectionKey !== selectionKey || isCancellationError(error)) {
           this.activeFetches.delete(fetchKey);
@@ -467,6 +502,90 @@ export class LiveRenderLoop {
       minimap,
       warningNotice: buildSessionNotice(warnings),
     });
+  }
+
+  private queuePrefetchRequests(input: {
+    sourceId: string;
+    generationSeq: number;
+    tIndex: number;
+    zIndex: number;
+    channelBlock: number;
+    tileLayout: TileLayout | null;
+    visibleTargets: VisibleTileTarget[];
+    selectionKey: string;
+  }): void {
+    if (this.currentSelectionKey !== input.selectionKey) {
+      return;
+    }
+    const plan = resolvePrefetchPlan(input.tileLayout, input.visibleTargets);
+    const prefetchTargets = [
+      ...plan.neighbors.slice(0, PREFETCH_NEIGHBOR_LIMIT),
+      ...plan.refinements.slice(0, PREFETCH_REFINE_LIMIT),
+    ];
+    for (const target of prefetchTargets) {
+      const prefetchKey = requestKey(
+        "tile",
+        input.sourceId,
+        input.generationSeq,
+        input.tIndex,
+        input.zIndex,
+        input.channelBlock,
+        target.lod,
+        target.row,
+        target.col,
+      );
+      if (
+        this.currentTileRequestKeys.has(prefetchKey) ||
+        this.currentPrefetchRequestKeys.has(prefetchKey)
+      ) {
+        continue;
+      }
+      this.currentPrefetchRequestKeys.add(prefetchKey);
+      void this.scheduler
+        .schedule<DecodedFrame>({
+          key: prefetchKey,
+          generationSeq: input.generationSeq,
+          priorityClass: target.priorityClass,
+          execute: (signal) => {
+            return this.fetchTileWithFallback(
+              {
+                sourceId: input.sourceId,
+                generationSeq: input.generationSeq,
+                assetKind: "tile2d",
+                lod: target.lod,
+                t: input.tIndex,
+                z: input.zIndex,
+                channelBlock: input.channelBlock,
+                y: target.row,
+                x: target.col,
+              },
+              signal,
+            );
+          },
+        })
+        .catch(() => {
+          // Cancellation and 404 misses are expected in prefetch paths.
+        })
+        .finally(() => {
+          this.currentPrefetchRequestKeys.delete(prefetchKey);
+        });
+    }
+  }
+
+  private recordSelectionChange(nowMs: number): void {
+    this.pruneSelectionHistory(nowMs);
+    this.selectionChangeTimestampsMs.push(nowMs);
+  }
+
+  private isInteractionChurnHigh(nowMs: number): boolean {
+    this.pruneSelectionHistory(nowMs);
+    return this.selectionChangeTimestampsMs.length >= CHURN_THRESHOLD;
+  }
+
+  private pruneSelectionHistory(nowMs: number): void {
+    this.selectionChangeTimestampsMs = this.selectionChangeTimestampsMs.filter(
+      (timestampMs) => nowMs - timestampMs <= CHURN_WINDOW_MS,
+    );
   }
 
   private scheduleRetry(): void {
@@ -667,6 +786,13 @@ type TileCanvasGeometry = {
   tileHeight: number;
 };
 
+type PrefetchTileTarget = {
+  lod: number;
+  row: number;
+  col: number;
+  priorityClass: "prefetch_neighbor" | "prefetch_refine";
+};
+
 function resolveVisibleTileTargets(
   tileLayout: TileLayout | null,
   selection: { t: number; z: number; channelBlock: number },
@@ -710,6 +836,149 @@ function lod0Layout(tileLayout: TileLayout | null): TileLodLayout | undefined {
     return undefined;
   }
   return tileLayout.lods.find((lod) => lod.lod === 0) ?? tileLayout.lods[0];
+}
+
+function resolvePrefetchPlan(
+  tileLayout: TileLayout | null,
+  visibleTargets: VisibleTileTarget[],
+): { neighbors: PrefetchTileTarget[]; refinements: PrefetchTileTarget[] } {
+  const lod0 = lod0Layout(tileLayout);
+  if (lod0 === undefined || visibleTargets.length === 0 || tileLayout === null) {
+    return { neighbors: [], refinements: [] };
+  }
+  return {
+    neighbors: neighborPrefetchTargets(lod0, visibleTargets),
+    refinements: refinementPrefetchTargets(tileLayout, lod0, visibleTargets),
+  };
+}
+
+function neighborPrefetchTargets(
+  lod0: TileLodLayout,
+  visibleTargets: VisibleTileTarget[],
+): PrefetchTileTarget[] {
+  const visibleSet = new Set(
+    visibleTargets.map((target) => `${target.row.toString()}:${target.col.toString()}`),
+  );
+  let minRow = Number.POSITIVE_INFINITY;
+  let maxRow = Number.NEGATIVE_INFINITY;
+  let minCol = Number.POSITIVE_INFINITY;
+  let maxCol = Number.NEGATIVE_INFINITY;
+  for (const target of visibleTargets) {
+    minRow = Math.min(minRow, target.row);
+    maxRow = Math.max(maxRow, target.row);
+    minCol = Math.min(minCol, target.col);
+    maxCol = Math.max(maxCol, target.col);
+  }
+  const maxRowBound = Math.max(0, Math.floor(lod0.rows) - 1);
+  const maxColBound = Math.max(0, Math.floor(lod0.cols) - 1);
+  const startRow = clamp(minRow - 1, 0, maxRowBound);
+  const endRow = clamp(maxRow + 1, 0, maxRowBound);
+  const startCol = clamp(minCol - 1, 0, maxColBound);
+  const endCol = clamp(maxCol + 1, 0, maxColBound);
+  const centerTarget = visibleTargets[0] ?? { row: 0, col: 0 };
+  const neighbors: PrefetchTileTarget[] = [];
+  for (let row = startRow; row <= endRow; row += 1) {
+    for (let col = startCol; col <= endCol; col += 1) {
+      if (visibleSet.has(`${row.toString()}:${col.toString()}`)) {
+        continue;
+      }
+      neighbors.push({
+        lod: 0,
+        row,
+        col,
+        priorityClass: "prefetch_neighbor",
+      });
+    }
+  }
+  neighbors.sort((left, right) => {
+    const leftDistance = tileDistance(left.row, left.col, centerTarget.row, centerTarget.col);
+    const rightDistance = tileDistance(
+      right.row,
+      right.col,
+      centerTarget.row,
+      centerTarget.col,
+    );
+    if (leftDistance !== rightDistance) {
+      return leftDistance - rightDistance;
+    }
+    if (left.row !== right.row) {
+      return left.row - right.row;
+    }
+    return left.col - right.col;
+  });
+  return neighbors;
+}
+
+function refinementPrefetchTargets(
+  tileLayout: TileLayout,
+  lod0: TileLodLayout,
+  visibleTargets: VisibleTileTarget[],
+): PrefetchTileTarget[] {
+  const lods = [...tileLayout.lods]
+    .filter((lod) => lod.lod > 0)
+    .sort((left, right) => left.lod - right.lod);
+  const centerTarget = visibleTargets[0] ?? { row: 0, col: 0 };
+  const targets: PrefetchTileTarget[] = [];
+  const seen = new Set<string>();
+  for (const lod of lods) {
+    for (const visible of visibleTargets) {
+      const mapped = mapLod0TargetToLod(visible, lod0, lod);
+      const key = `${lod.lod.toString()}:${mapped.row.toString()}:${mapped.col.toString()}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      targets.push({
+        lod: lod.lod,
+        row: mapped.row,
+        col: mapped.col,
+        priorityClass: "prefetch_refine",
+      });
+    }
+  }
+  targets.sort((left, right) => {
+    if (left.lod !== right.lod) {
+      return left.lod - right.lod;
+    }
+    const leftDistance = tileDistance(left.row, left.col, centerTarget.row, centerTarget.col);
+    const rightDistance = tileDistance(right.row, right.col, centerTarget.row, centerTarget.col);
+    if (leftDistance !== rightDistance) {
+      return leftDistance - rightDistance;
+    }
+    if (left.row !== right.row) {
+      return left.row - right.row;
+    }
+    return left.col - right.col;
+  });
+  return targets;
+}
+
+function mapLod0TargetToLod(
+  visible: VisibleTileTarget,
+  lod0: TileLodLayout,
+  lod: TileLodLayout,
+): VisibleTileTarget {
+  const lod0TileWidth = Math.max(1, Math.floor(lod0.tileWidth));
+  const lod0TileHeight = Math.max(1, Math.floor(lod0.tileHeight));
+  const lodTileWidth = Math.max(1, Math.floor(lod.tileWidth));
+  const lodTileHeight = Math.max(1, Math.floor(lod.tileHeight));
+  const centerX = visible.col * lod0TileWidth + lod0TileWidth / 2;
+  const centerY = visible.row * lod0TileHeight + lod0TileHeight / 2;
+  const maxRow = Math.max(0, Math.floor(lod.rows) - 1);
+  const maxCol = Math.max(0, Math.floor(lod.cols) - 1);
+  return {
+    row: clamp(Math.floor(centerY / lodTileHeight), 0, maxRow),
+    col: clamp(Math.floor(centerX / lodTileWidth), 0, maxCol),
+  };
+}
+
+function tileDistance(
+  row: number,
+  col: number,
+  centerRow: number,
+  centerCol: number,
+): number {
+  return Math.abs(row - centerRow) + Math.abs(col - centerCol);
 }
 
 function visibleTileTargetsForViewport(
@@ -816,10 +1085,11 @@ function requestKey(
   tIndex: number,
   zIndex: number,
   channelBlock: number,
+  lodIndex: number,
   yIndex: number,
   xIndex: number,
 ): string {
-  return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:cb${channelBlock.toString()}:y${yIndex.toString()}:x${xIndex.toString()}`;
+  return `${kind}:${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:cb${channelBlock.toString()}:lod${lodIndex.toString()}:y${yIndex.toString()}:x${xIndex.toString()}`;
 }
 
 function selectedChannelBlock(channels: readonly number[]): number {
