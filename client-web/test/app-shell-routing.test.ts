@@ -191,6 +191,45 @@ describe("app shell routing", () => {
     await waitFor(() => queryText("frame-state").includes("(tile)"), 3000);
   });
 
+  it("uses preferred-source bounds for z/t controls right after opening a new source", async () => {
+    const fixture = await startPreferredSourceBoundsFixture();
+    fixtures.push(fixture);
+
+    mountApp(
+      `/viewer?session=sess_preferred_bounds&client=browser-preferred-bounds&wsBase=${encodeURIComponent(
+        fixture.url,
+      )}&dataBase=${encodeURIComponent(fixture.dataBaseUrl ?? "")}`,
+    );
+    const controller = bootstrapApp(document, window.location);
+    controllers.push(controller);
+
+    await waitFor(() => queryText("attach-status").includes("Attached"));
+
+    queryInput("input-source-name").value = "new-source";
+    queryInput("input-source-uri").value = "/tmp/new-source.ome.tif";
+    queryButton("btn-open-source").click();
+    await waitFor(() => queryText("open-source-status").includes("Opened source"), 3000);
+
+    expect(queryInput("input-z-index").max).toBe("16");
+    expect(queryInput("input-t-index").max).toBe("29");
+
+    queryInput("input-z-index").value = "6";
+    queryInput("input-z-index").dispatchEvent(new Event("input", { bubbles: true }));
+    queryInput("input-t-index").value = "8";
+    queryInput("input-t-index").dispatchEvent(new Event("input", { bubbles: true }));
+
+    await waitFor(() => queryText("selection-state").includes("z 6 t 8"), 2000);
+
+    const commands = fixture.received.filter((value): value is Record<string, unknown> => {
+      return isRecord(value) && value.message_type === "command";
+    });
+    const reversedCommands = [...commands].reverse();
+    const setZ = reversedCommands.find((command) => command.op === "view.set_z");
+    const setT = reversedCommands.find((command) => command.op === "view.set_t");
+    expect((setZ?.args as { z_index?: unknown })?.z_index).toBe(6);
+    expect((setT?.args as { t_index?: unknown })?.t_index).toBe(8);
+  });
+
   it("sends pan/zoom from keyboard and z/t/channel from controls", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",
@@ -250,7 +289,7 @@ describe("app shell routing", () => {
     expect((setChannels?.args as { channels?: unknown })?.channels).toEqual([1, 4]);
   });
 
-  it("maps keyboard shortcuts for zoom and t stepping with comma/period", async () => {
+  it("maps keyboard shortcuts for zoom and t stepping with comma/period and t/T aliases", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",
       isLeaseHolder: false,
@@ -271,12 +310,14 @@ describe("app shell routing", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "_" }));
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "." }));
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "," }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "T" }));
 
     await waitFor(() => {
       const commandCount = fixture.received.filter((value) => {
         return isRecord(value) && value.message_type === "command";
       }).length;
-      return commandCount >= 4;
+      return commandCount >= 6;
     }, 2000);
 
     const commands = fixture.received.filter((value): value is Record<string, unknown> => {
@@ -289,9 +330,11 @@ describe("app shell routing", () => {
     expect((zoomCommands[1]?.args as { zoom?: unknown })?.zoom).toBe(1);
 
     const setTCommands = commands.filter((command) => command.op === "view.set_t");
-    expect(setTCommands).toHaveLength(2);
+    expect(setTCommands).toHaveLength(4);
     expect((setTCommands[0]?.args as { t_index?: unknown })?.t_index).toBe(1);
     expect((setTCommands[1]?.args as { t_index?: unknown })?.t_index).toBe(0);
+    expect((setTCommands[2]?.args as { t_index?: unknown })?.t_index).toBe(1);
+    expect((setTCommands[3]?.args as { t_index?: unknown })?.t_index).toBe(0);
   });
 
   it("adjusts viewport width and height independently", async () => {
@@ -1472,6 +1515,266 @@ async function startSourceOpenActionFixture(
           }),
         );
       }
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.on("listening", () => resolve());
+  });
+  const wsAddress = server.address() as AddressInfo;
+  const wsUrl = `ws://127.0.0.1:${wsAddress.port.toString()}`;
+
+  return {
+    server,
+    httpServer,
+    url: wsUrl,
+    dataBaseUrl,
+    received,
+    openSourceRequests,
+    close: async () => {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+      await new Promise<void>((resolve, reject) => {
+        httpServer.close((error) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+          resolve();
+        });
+      });
+    },
+  };
+}
+
+async function startPreferredSourceBoundsFixture(): Promise<SocketFixture> {
+  const received: unknown[] = [];
+  const openSourceRequests: Array<{ name: string; uri: string }> = [];
+  const previewBody = pgmBody(2, 1, [12, 34]);
+  const tileBody = channelBlockRawPayload(pgmBody(2, 1, [200, 210]));
+  const sessionId = "sess_preferred_bounds";
+  const wsClientId = "cli_preferred_bounds_ws";
+  const httpSnapshotClientId = "cli_preferred_bounds_http_snapshot";
+  let sessionRev = 1;
+  let viewRev = 1;
+  let zIndex = 0;
+  let tIndex = 0;
+  let openedSourceName = "source";
+
+  const snapshotPayload = (clientId: string): Record<string, unknown> => {
+    return {
+      message_type: "session.snapshot",
+      schema_version: "lucida-proto-0.1",
+      session_id: sessionId,
+      session_rev: sessionRev,
+      permission_class: "view",
+      is_lease_holder: false,
+      snapshot: {
+        session: {
+          session_id: sessionId,
+          session_rev: sessionRev,
+        },
+        shared_scene: {
+          scene_rev: 1,
+          sources: {
+            src_existing: {
+              sourceId: "src_existing",
+              name: "existing",
+              status: "watching",
+              latestWorkingGenerationSeq: 1,
+            },
+            src_open: {
+              sourceId: "src_open",
+              name: openedSourceName,
+              status: "watching",
+              latestWorkingGenerationSeq: 0,
+            },
+          },
+          datasets: {
+            ds_existing: {
+              datasetId: "ds_existing",
+              sourceId: "src_existing",
+              resolvedGenerationSeq: 1,
+              dtype: "uint8",
+              sizeT: 1,
+              sizeC: 1,
+              sizeZ: 1,
+              sizeY: 1,
+              sizeX: 2,
+            },
+            ds_open: {
+              datasetId: "ds_open",
+              sourceId: "src_open",
+              resolvedGenerationSeq: 0,
+              dtype: "uint8",
+              sizeT: 30,
+              sizeC: 2,
+              sizeZ: 17,
+              sizeY: 192,
+              sizeX: 279,
+            },
+          },
+          layers: {},
+          warnings: [],
+        },
+        client_view: {
+          client_id: clientId,
+          view_rev: viewRev,
+          active_layer_id: null,
+          center_x: 0,
+          center_y: 0,
+          zoom: 1,
+          z_index: zIndex,
+          t_index: tIndex,
+          selected_channels: [0],
+          warnings: [],
+        },
+        warnings: [],
+      },
+    };
+  };
+
+  const httpServer = createServer((request, response) => {
+    if (request.method === "POST" && request.url === `/v1/sessions/${sessionId}/sources`) {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk) => {
+        chunks.push(Buffer.from(chunk));
+      });
+      request.on("end", () => {
+        const bodyText = Buffer.concat(chunks).toString("utf-8");
+        const parsed = JSON.parse(bodyText) as { name?: unknown; uri?: unknown };
+        const name = typeof parsed.name === "string" ? parsed.name : "";
+        const uri = typeof parsed.uri === "string" ? parsed.uri : "";
+        openSourceRequests.push({ name, uri });
+        openedSourceName = name.length > 0 ? name : openedSourceName;
+        sessionRev += 1;
+
+        response.statusCode = 201;
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({
+            source_id: "src_open",
+            dataset_id: "ds_open",
+            generation_id: "gen_open_0",
+            generation_seq: 0,
+            source_status: "watching",
+          }),
+        );
+      });
+      return;
+    }
+    if (request.method === "GET" && request.url === `/v1/sessions/${sessionId}/snapshot`) {
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify(snapshotPayload(httpSnapshotClientId)));
+      return;
+    }
+    if (request.url?.includes("/v1/preview2d/")) {
+      setTimeout(() => {
+        respondPgm(response, previewBody);
+      }, 10);
+      return;
+    }
+    if (request.url?.includes("/v1/tile2d/")) {
+      setTimeout(() => {
+        respondBinary(response, tileBody);
+      }, 100);
+      return;
+    }
+    response.statusCode = 404;
+    response.end();
+  });
+  await new Promise<void>((resolve) => {
+    httpServer.listen(0, "127.0.0.1", () => resolve());
+  });
+  const httpAddress = httpServer.address() as AddressInfo;
+  const dataBaseUrl = `http://127.0.0.1:${httpAddress.port.toString()}`;
+
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  server.on("connection", (socket) => {
+    socket.on("message", (raw) => {
+      const text = raw.toString("utf-8");
+      const parsed = JSON.parse(text) as unknown;
+      received.push(parsed);
+      if (isRecord(parsed) && parsed.message_type === "attach") {
+        socket.send(JSON.stringify(snapshotPayload(wsClientId)));
+        return;
+      }
+      if (
+        !isRecord(parsed) ||
+        parsed.message_type !== "command" ||
+        (parsed.op !== "view.set_z" && parsed.op !== "view.set_t")
+      ) {
+        return;
+      }
+      if (parsed.client_id !== wsClientId) {
+        socket.send(
+          JSON.stringify({
+            message_type: "error",
+            schema_version: "lucida-proto-0.1",
+            session_id: sessionId,
+            request_id: String(parsed.request_id ?? "req"),
+            client_id: String(parsed.client_id ?? "unknown"),
+            client_seq: Number(parsed.client_seq ?? 1),
+            op: String(parsed.op ?? "unknown"),
+            code: "client_not_found",
+            message: "client not found",
+            retryable: false,
+            details: {
+              detail_type: "not_found",
+              detail: {
+                resource: "client",
+                resource_id: String(parsed.client_id ?? "unknown"),
+              },
+            },
+            sent_at: new Date().toISOString(),
+          }),
+        );
+        return;
+      }
+      const args = parsed.args;
+      if (!isRecord(args)) {
+        return;
+      }
+      if (parsed.op === "view.set_z") {
+        const requested = Number(args.z_index);
+        if (Number.isFinite(requested)) {
+          zIndex = Math.max(0, Math.floor(requested));
+        }
+      } else {
+        const requested = Number(args.t_index);
+        if (Number.isFinite(requested)) {
+          tIndex = Math.max(0, Math.floor(requested));
+        }
+      }
+      sessionRev += 1;
+      viewRev += 1;
+      socket.send(
+        JSON.stringify({
+          message_type: "event",
+          schema_version: "lucida-proto-0.1",
+          session_id: sessionId,
+          session_rev: sessionRev,
+          event_type: "view_updated",
+          payload: {
+            client_id: wsClientId,
+            view_rev: viewRev,
+            active_layer_id: null,
+            center_x: 0,
+            center_y: 0,
+            zoom: 1,
+            z_index: zIndex,
+            t_index: tIndex,
+            selected_channels: [0],
+          },
+        }),
+      );
     });
   });
   await new Promise<void>((resolve) => {

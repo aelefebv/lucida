@@ -148,6 +148,7 @@ mod tests {
                 canonical_cache_path: None,
                 preview_path: None,
                 tile_manifest_path: None,
+                tile_layout: None,
                 brick_manifest_path: None,
                 detected_at: updated_at.to_owned(),
                 updated_at: updated_at.to_owned(),

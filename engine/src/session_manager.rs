@@ -25,7 +25,7 @@ use crate::revision_allocator::RevisionAllocator;
 use crate::source_inspector::{SourceInspectionError, inspect_source};
 use crate::source_watch::{SourceWatchController, WatchError};
 use crate::tile_preview_builder::{
-    TilePreviewBuildError, TilePreviewBuildRequest, TilePreviewBuilder,
+    TilePreviewBuildError, TilePreviewBuildRequest, TilePreviewBuilder, TilePreviewSelection,
 };
 use crate::warning_service::aggregate_warnings;
 
@@ -44,6 +44,17 @@ struct SessionRecord {
     clients: BTreeMap<String, ClientRecord>,
     audit_log: Vec<AuditLogEntry>,
     source_watch_states: BTreeMap<String, SourceWatchController>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TilePreviewGenerationMode {
+    Full,
+    FirstPaint,
+    Selection {
+        t_index: u64,
+        z_index: u64,
+        channel_block: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -442,6 +453,7 @@ impl SessionManager {
                     canonical_cache_path: None,
                     preview_path: None,
                     tile_manifest_path: None,
+                    tile_layout: None,
                     brick_manifest_path: None,
                     detected_at: ready_at.clone(),
                     updated_at: ready_at.clone(),
@@ -496,6 +508,7 @@ impl SessionManager {
             canonical_cache_path: None,
             preview_path: None,
             tile_manifest_path: None,
+            tile_layout: None,
             brick_manifest_path: None,
             detected_at: detected_at.clone(),
             updated_at: detected_at,
@@ -636,6 +649,37 @@ impl SessionManager {
         Ok(snapshot)
     }
 
+    pub fn mark_generation_failed(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        let session = self.session_mut(session_id)?;
+        let source = session
+            .shared_scene
+            .sources
+            .get_mut(source_id)
+            .ok_or_else(|| SessionError::SourceNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+            })?;
+        let generation = source.generations.get_mut(&generation_seq).ok_or_else(|| {
+            SessionError::GenerationNotFound {
+                session_id: session_id.to_owned(),
+                source_id: source_id.to_owned(),
+                generation_seq,
+            }
+        })?;
+        generation.stage = GenerationStage::Failed;
+        generation.updated_at = rfc3339_now();
+        source.status = SourceStatus::Error;
+        let snapshot = generation.clone();
+        bump_session_rev(session);
+        refresh_warnings(session);
+        Ok(snapshot)
+    }
+
     pub fn build_canonical_cache_for_generation(
         &mut self,
         session_id: &str,
@@ -729,6 +773,56 @@ impl SessionManager {
         source_id: &str,
         generation_seq: u64,
     ) -> Result<GenerationRecord, SessionError> {
+        self.build_tile_preview_for_generation_with_mode(
+            session_id,
+            source_id,
+            generation_seq,
+            TilePreviewGenerationMode::Full,
+        )
+    }
+
+    pub fn build_first_paint_tile_preview_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        self.build_tile_preview_for_generation_with_mode(
+            session_id,
+            source_id,
+            generation_seq,
+            TilePreviewGenerationMode::FirstPaint,
+        )
+    }
+
+    pub fn build_tile_selection_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        t_index: u64,
+        z_index: u64,
+        channel_block: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        self.build_tile_preview_for_generation_with_mode(
+            session_id,
+            source_id,
+            generation_seq,
+            TilePreviewGenerationMode::Selection {
+                t_index,
+                z_index,
+                channel_block,
+            },
+        )
+    }
+
+    fn build_tile_preview_for_generation_with_mode(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        mode: TilePreviewGenerationMode,
+    ) -> Result<GenerationRecord, SessionError> {
         let session = self.session_mut(session_id)?;
         let (
             source_shape,
@@ -779,40 +873,34 @@ impl SessionManager {
         };
 
         let builder = TilePreviewBuilder::new();
-        let build_result = builder
-            .build(&TilePreviewBuildRequest {
-                source_id: source_id.to_owned(),
-                source_uri,
-                source_kind,
-                source_dtype,
-                generation_seq,
-                generation_root,
-                shape: source_shape,
-                axis_order: source_axis_order,
-            })
-            .map_err(|error| match error {
-                TilePreviewBuildError::IoError { path, message } => {
-                    SessionError::TilePreviewBuildFailed {
-                        source_id: source_id.to_owned(),
-                        generation_seq,
-                        reason: format!("io error at `{path}`: {message}"),
-                    }
-                }
-                TilePreviewBuildError::SerializationError { message } => {
-                    SessionError::TilePreviewBuildFailed {
-                        source_id: source_id.to_owned(),
-                        generation_seq,
-                        reason: format!("serialization error: {message}"),
-                    }
-                }
-                TilePreviewBuildError::DecodeError { message } => {
-                    SessionError::TilePreviewBuildFailed {
-                        source_id: source_id.to_owned(),
-                        generation_seq,
-                        reason: format!("decode error: {message}"),
-                    }
-                }
-            })?;
+        let request = TilePreviewBuildRequest {
+            source_id: source_id.to_owned(),
+            source_uri,
+            source_kind,
+            source_dtype,
+            generation_seq,
+            generation_root,
+            shape: source_shape,
+            axis_order: source_axis_order,
+        };
+        let build_result = match mode {
+            TilePreviewGenerationMode::Full => builder.build(&request),
+            TilePreviewGenerationMode::FirstPaint => builder.build_first_paint(&request),
+            TilePreviewGenerationMode::Selection {
+                t_index,
+                z_index,
+                channel_block,
+            } => builder.build_selection(
+                &request,
+                TilePreviewSelection {
+                    t_index,
+                    z_index,
+                    channel_index: channel_block,
+                    channel_block,
+                },
+            ),
+        }
+        .map_err(|error| map_tile_preview_error(source_id, generation_seq, error))?;
 
         let source = session
             .shared_scene
@@ -834,8 +922,19 @@ impl SessionManager {
         if matches!(generation.stage, GenerationStage::Started) {
             generation.stage = GenerationStage::Partial;
         }
+        if generation.progress_percent < 100 {
+            generation.progress_percent = match mode {
+                TilePreviewGenerationMode::FirstPaint => {
+                    generation.progress_percent.max(25).min(90)
+                }
+                TilePreviewGenerationMode::Full | TilePreviewGenerationMode::Selection { .. } => {
+                    generation.progress_percent.max(95).min(99)
+                }
+            };
+        }
         generation.preview_path = Some(build_result.preview_path.display().to_string());
         generation.tile_manifest_path = Some(build_result.tile_manifest_path.display().to_string());
+        generation.tile_layout = Some(build_result.tile_layout);
         generation.updated_at = rfc3339_now();
         let snapshot = generation.clone();
         bump_session_rev(session);
@@ -1769,6 +1868,22 @@ impl SessionManager {
             })
     }
 
+    #[must_use]
+    pub fn session_id_for_generation(
+        &self,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Option<String> {
+        self.sessions.iter().find_map(|(session_id, session)| {
+            session
+                .shared_scene
+                .sources
+                .get(source_id)
+                .and_then(|source| source.generations.get(&generation_seq))
+                .map(|_| session_id.clone())
+        })
+    }
+
     pub fn dataset_for_source(
         &self,
         session_id: &str,
@@ -1827,6 +1942,32 @@ fn next_generation_seq(source: &SourceRecord) -> u64 {
         .copied()
         .unwrap_or(source.latest_working_generation_seq)
         .saturating_add(1)
+}
+
+fn map_tile_preview_error(
+    source_id: &str,
+    generation_seq: u64,
+    error: TilePreviewBuildError,
+) -> SessionError {
+    match error {
+        TilePreviewBuildError::IoError { path, message } => SessionError::TilePreviewBuildFailed {
+            source_id: source_id.to_owned(),
+            generation_seq,
+            reason: format!("io error at `{path}`: {message}"),
+        },
+        TilePreviewBuildError::SerializationError { message } => {
+            SessionError::TilePreviewBuildFailed {
+                source_id: source_id.to_owned(),
+                generation_seq,
+                reason: format!("serialization error: {message}"),
+            }
+        }
+        TilePreviewBuildError::DecodeError { message } => SessionError::TilePreviewBuildFailed {
+            source_id: source_id.to_owned(),
+            generation_seq,
+            reason: format!("decode error: {message}"),
+        },
+    }
 }
 
 fn ensure_generation_transition(

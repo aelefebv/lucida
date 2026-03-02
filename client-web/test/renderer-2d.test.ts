@@ -58,9 +58,9 @@ describe("2D compositing renderer", () => {
     const previewGen2 = new Uint8ClampedArray([20, 20, 20, 255]);
     const tileGen2 = new Uint8ClampedArray([200, 200, 200, 255]);
 
-    store.setPreview("src_fixture", 1, previewGen1);
-    store.setPreview("src_fixture", 2, previewGen2);
-    store.setTiles("src_fixture", 2, tileGen2);
+    store.setPreview("src_fixture", 1, previewGen1, 1, 1);
+    store.setPreview("src_fixture", 2, previewGen2, 1, 1);
+    store.setTiles("src_fixture", 2, tileGen2, 1, 1);
     store.pruneOlderThan("src_fixture", 2);
 
     expect(Array.from(store.resolveFrame("src_fixture", 1) ?? [])).toEqual([]);
@@ -68,4 +68,70 @@ describe("2D compositing renderer", () => {
       Array.from(tileGen2),
     );
   });
+
+  it("progressively composites tile patches over preview fallback", () => {
+    const store = new ProgressiveFrameStore();
+    const preview = rgbaSamples([10, 10, 10, 10]);
+    const leftTile = rgbaSamples([100, 100]);
+    const rightTile = rgbaSamples([200, 200]);
+
+    store.setPreview("src_fixture", 1, preview, 4, 1);
+    store.composeTilePatch("src_fixture", 1, {
+      canvasWidth: 4,
+      canvasHeight: 1,
+      offsetX: 0,
+      offsetY: 0,
+      width: 2,
+      height: 1,
+      rgba: leftTile,
+    });
+
+    expect(sampleRedChannel(store.resolveFrame("src_fixture", 1))).toEqual([
+      100,
+      100,
+      10,
+      10,
+    ]);
+
+    store.composeTilePatch("src_fixture", 1, {
+      canvasWidth: 4,
+      canvasHeight: 1,
+      offsetX: 2,
+      offsetY: 0,
+      width: 2,
+      height: 1,
+      rgba: rightTile,
+    });
+
+    expect(sampleRedChannel(store.resolveFrame("src_fixture", 1))).toEqual([
+      100,
+      100,
+      200,
+      200,
+    ]);
+  });
 });
+
+function rgbaSamples(values: number[]): Uint8ClampedArray {
+  const rgba = new Uint8ClampedArray(values.length * 4);
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index] ?? 0;
+    const offset = index * 4;
+    rgba[offset] = value;
+    rgba[offset + 1] = value;
+    rgba[offset + 2] = value;
+    rgba[offset + 3] = 255;
+  }
+  return rgba;
+}
+
+function sampleRedChannel(rgba: Uint8ClampedArray | null): number[] {
+  if (rgba === null) {
+    return [];
+  }
+  const out: number[] = [];
+  for (let offset = 0; offset < rgba.length; offset += 4) {
+    out.push(rgba[offset] ?? 0);
+  }
+  return out;
+}

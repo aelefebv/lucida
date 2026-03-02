@@ -23,6 +23,14 @@ struct RuntimeFixture {
 
 impl RuntimeFixture {
     async fn start(cache_root: &Path) -> Self {
+        Self::start_with_config(EngineRuntimeConfig {
+            cache_root: cache_root.to_path_buf(),
+            ..EngineRuntimeConfig::default()
+        })
+        .await
+    }
+
+    async fn start_with_config(config: EngineRuntimeConfig) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test runtime should bind an ephemeral port");
@@ -30,9 +38,6 @@ impl RuntimeFixture {
             .local_addr()
             .expect("bound runtime should expose local addr");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let config = EngineRuntimeConfig {
-            cache_root: cache_root.to_path_buf(),
-        };
         let task = tokio::spawn(async move {
             run_runtime_server(listener, config, shutdown_rx)
                 .await
@@ -97,11 +102,13 @@ fn data_plane_url(runtime: &RuntimeFixture, chunk_key: ChunkKey) -> String {
 }
 
 fn write_minimal_rgb_tiff(path: &Path) {
+    write_rgb_tiff(path, 32, 16);
+}
+
+fn write_rgb_tiff(path: &Path, width: u32, height: u32) {
     let file = fs::File::create(path).expect("tiff fixture file should be created");
     let mut encoder =
         tiff::encoder::TiffEncoder::new(file).expect("tiff fixture encoder should be created");
-    let width = 32_u32;
-    let height = 16_u32;
     let mut pixels = Vec::with_capacity((width as usize) * (height as usize) * 3);
     for y in 0..height {
         for x in 0..width {
@@ -745,6 +752,7 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
     let mut event_types = Vec::<String>::new();
     let mut preview_available = false;
     let mut dataset_dtype: Option<String> = None;
+    let mut generation_tile_layout_lod0: Option<(u64, u64, u32, u32)> = None;
     let started_at = tokio::time::Instant::now();
     while started_at.elapsed() < Duration::from_secs(3) {
         let maybe_frame = timeout(Duration::from_millis(250), socket.next()).await;
@@ -771,6 +779,25 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
         }
         if event_type == "source_generation_progress" || event_type == "source_generation_ready" {
             preview_available = frame["payload"]["previewReady"].as_bool().unwrap_or(false);
+            let lod0 = frame["payload"]["tileLayout"]["lods"]
+                .as_array()
+                .and_then(|lods| lods.first())
+                .cloned();
+            if let Some(lod0) = lod0 {
+                let width = lod0["width"].as_u64();
+                let height = lod0["height"].as_u64();
+                let rows = lod0["rows"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok());
+                let cols = lod0["cols"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok());
+                if let (Some(width), Some(height), Some(rows), Some(cols)) =
+                    (width, height, rows, cols)
+                {
+                    generation_tile_layout_lod0 = Some((width, height, rows, cols));
+                }
+            }
         }
         event_types.push(event_type.clone());
         if event_type == "source_generation_ready" {
@@ -810,6 +837,40 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
     );
     assert_eq!(dataset_dtype.as_deref(), Some("uint8"));
     assert!(preview_available);
+    assert_eq!(generation_tile_layout_lod0, Some((32, 16, 1, 1)));
+
+    let snapshot_response = client
+        .get(format!(
+            "{}/v1/sessions/{session_id}/snapshot",
+            runtime.http_base()
+        ))
+        .send()
+        .await
+        .expect("snapshot request should succeed");
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    let snapshot_body: serde_json::Value = snapshot_response
+        .json()
+        .await
+        .expect("snapshot response should parse as JSON");
+    let source_generations = snapshot_body["snapshot"]["shared_scene"]["source_generations"]
+        .as_object()
+        .expect("snapshot should include source_generations map");
+    assert!(
+        !source_generations.is_empty(),
+        "source_generations should include at least one generation payload"
+    );
+    let first_generation = source_generations
+        .values()
+        .next()
+        .expect("source generation payload should be present");
+    assert_eq!(
+        first_generation["tileLayout"]["lods"][0]["width"].as_u64(),
+        Some(32)
+    );
+    assert_eq!(
+        first_generation["tileLayout"]["lods"][0]["height"].as_u64(),
+        Some(16)
+    );
 
     let expected_pixels = expected_tiff_fixture_luma(32, 16);
 
@@ -897,6 +958,886 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
         .close(None)
         .await
         .expect("closing websocket should succeed");
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_open_source_returns_before_background_generation_finishes() {
+    let cache_root = unique_path("open_source_async_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("open_source_async_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-open-source-async.tiff");
+    write_rgb_tiff(&source_path, 600, 600);
+
+    let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
+        cache_root: cache_root.clone(),
+        generation_worker_startup_delay_ms: 250,
+        ..EngineRuntimeConfig::default()
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-open-source-async" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-open-source-async",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let request_started_at = tokio::time::Instant::now();
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-source-async",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    let request_elapsed = request_started_at.elapsed();
+
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    assert!(
+        request_elapsed < Duration::from_millis(200),
+        "source open should return before delayed background generation completes; elapsed={request_elapsed:?}"
+    );
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    assert_eq!(
+        open_source_body["generation_seq"]
+            .as_u64()
+            .expect("generation seq should be returned"),
+        1
+    );
+
+    let mut saw_detected = false;
+    let mut saw_started = false;
+    let mut saw_progress = false;
+    let mut saw_ready = false;
+    let started_at = tokio::time::Instant::now();
+    while started_at.elapsed() < Duration::from_secs(5) {
+        let frame = timeout(Duration::from_millis(500), socket.next())
+            .await
+            .expect("websocket should receive generation event in time")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] != "event" {
+            continue;
+        }
+        match payload["event_type"].as_str() {
+            Some("source_generation_detected") => saw_detected = true,
+            Some("source_generation_started") => saw_started = true,
+            Some("source_generation_progress") => saw_progress = true,
+            Some("source_generation_ready") => {
+                saw_ready = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_detected, "source_generation_detected should be emitted");
+    assert!(saw_started, "source_generation_started should be emitted");
+    assert!(saw_progress, "source_generation_progress should be emitted");
+    assert!(saw_ready, "source_generation_ready should be emitted");
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_background_generation_surfaces_failed_stage_event_on_build_error() {
+    let cache_root = unique_path("open_source_failure_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("open_source_failure_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-open-source-failure.tiff");
+    write_rgb_tiff(&source_path, 64, 64);
+
+    let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
+        cache_root: cache_root.clone(),
+        generation_worker_startup_delay_ms: 250,
+        ..EngineRuntimeConfig::default()
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-open-source-failure" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-open-source-failure",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-source-failure",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+
+    fs::remove_file(&source_path).expect("fixture source should be removable after source open");
+
+    let started_at = tokio::time::Instant::now();
+    let mut saw_failed = false;
+    let mut saw_source_error_status = false;
+    while started_at.elapsed() < Duration::from_secs(5) {
+        let frame = timeout(Duration::from_millis(500), socket.next())
+            .await
+            .expect("websocket should receive generation failure event in time")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] != "event" {
+            continue;
+        }
+        if payload["event_type"] == "source_generation_failed" {
+            assert_eq!(
+                payload["payload"]["stage"]
+                    .as_str()
+                    .expect("failed payload stage should be string"),
+                "failed"
+            );
+            saw_failed = true;
+        }
+        if payload["event_type"] == "scene_source_upsert" && payload["payload"]["status"] == "error"
+        {
+            saw_source_error_status = true;
+        }
+        if saw_failed && saw_source_error_status {
+            break;
+        }
+    }
+    assert!(
+        saw_failed,
+        "background generation should emit source_generation_failed when build errors"
+    );
+    assert!(
+        saw_source_error_status,
+        "source should transition to error status on generation failure"
+    );
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_generation_emits_first_paint_before_deferred_full_completion() {
+    let cache_root = unique_path("first_paint_ordering_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("first_paint_ordering_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-first-paint-ordering.ome.tif");
+    write_tczyx_ome_tiff(&source_path, 2, 1, 2, 32, 16);
+
+    let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
+        cache_root: cache_root.clone(),
+        generation_worker_startup_delay_ms: 0,
+        generation_worker_full_build_delay_ms: 350,
+        eager_full_build_on_open: true,
+        ..EngineRuntimeConfig::default()
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-first-paint-ordering" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-first-paint-ordering",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-first-paint-ordering-source",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned")
+        .to_owned();
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+
+    let first_progress = loop {
+        let frame = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("websocket should receive first-paint progress event")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] != "event" {
+            continue;
+        }
+        if payload["event_type"] == "source_generation_progress" {
+            break payload;
+        }
+    };
+    assert_eq!(
+        first_progress["payload"]["stage"]
+            .as_str()
+            .expect("stage should be present"),
+        "partial"
+    );
+    assert_eq!(
+        first_progress["payload"]["previewReady"]
+            .as_bool()
+            .expect("previewReady should be present"),
+        true
+    );
+    assert!(
+        first_progress["payload"]["progressPercent"]
+            .as_u64()
+            .expect("progressPercent should be present")
+            < 100
+    );
+
+    let first_paint_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.clone(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+    let first_paint_tile_response = client
+        .get(&first_paint_tile_url)
+        .send()
+        .await
+        .expect("first paint tile request should succeed");
+    assert_eq!(first_paint_tile_response.status(), StatusCode::OK);
+
+    let deferred_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.clone(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 1,
+            z: 1,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+
+    let early_ready = timeout(Duration::from_millis(150), socket.next()).await;
+    assert!(
+        early_ready.is_err(),
+        "full-ready should be deferred long enough for first paint to render first"
+    );
+
+    let mut saw_ready = false;
+    let started_at = tokio::time::Instant::now();
+    while started_at.elapsed() < Duration::from_secs(5) {
+        let frame = timeout(Duration::from_millis(500), socket.next())
+            .await
+            .expect("websocket should eventually receive ready event")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] == "event" && payload["event_type"] == "source_generation_ready"
+        {
+            saw_ready = true;
+            break;
+        }
+    }
+    assert!(saw_ready, "generation should transition to ready");
+
+    let deferred_tile_response_after_ready = client
+        .get(&deferred_tile_url)
+        .send()
+        .await
+        .expect("deferred tile request should succeed after full build");
+    assert_eq!(deferred_tile_response_after_ready.status(), StatusCode::OK);
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_open_source_skips_eager_nonvisible_planes_and_builds_them_on_demand() {
+    let cache_root = unique_path("lazy_plane_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("lazy_plane_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-lazy-plane.ome.tif");
+    write_tczyx_ome_tiff(&source_path, 2, 1, 2, 2, 1);
+
+    let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
+        cache_root: cache_root.clone(),
+        ..EngineRuntimeConfig::default()
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-lazy-plane" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-lazy-plane",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-lazy-plane-source",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned")
+        .to_owned();
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+
+    let started_at = tokio::time::Instant::now();
+    let mut saw_ready = false;
+    while started_at.elapsed() < Duration::from_secs(5) {
+        let frame = timeout(Duration::from_millis(500), socket.next())
+            .await
+            .expect("websocket should receive ready event")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] == "event" && payload["event_type"] == "source_generation_ready"
+        {
+            saw_ready = true;
+            break;
+        }
+    }
+    assert!(
+        saw_ready,
+        "generation should be marked ready after first paint"
+    );
+
+    let deferred_tile_path = cache_root
+        .join(&source_id)
+        .join(format!("gen_{generation_seq:08}"))
+        .join("tile2d")
+        .join("lod0")
+        .join("t1_z1_cb0_r0_c0.tileblk");
+    assert!(
+        !deferred_tile_path.exists(),
+        "non-visible plane tiles should not be precomputed on source open"
+    );
+
+    let deferred_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.clone(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 1,
+            z: 1,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+    let deferred_tile_response = client
+        .get(&deferred_tile_url)
+        .send()
+        .await
+        .expect("on-demand tile request should succeed");
+    assert_eq!(deferred_tile_response.status(), StatusCode::OK);
+    assert!(
+        deferred_tile_path.exists(),
+        "on-demand tile request should materialize cached tile payloads"
+    );
+
+    let cached_tile_response = client
+        .get(&deferred_tile_url)
+        .send()
+        .await
+        .expect("cached on-demand tile request should succeed");
+    assert_eq!(cached_tile_response.status(), StatusCode::OK);
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_on_demand_plane_build_dedupes_concurrent_requests() {
+    let cache_root = unique_path("lazy_plane_dedupe_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("lazy_plane_dedupe_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-lazy-plane-dedupe.ome.tif");
+    write_tczyx_ome_tiff(&source_path, 2, 1, 2, 2, 1);
+
+    let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
+        cache_root: cache_root.clone(),
+        generation_on_demand_build_delay_ms: 250,
+        ..EngineRuntimeConfig::default()
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-lazy-plane-dedupe" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-lazy-plane-dedupe",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-lazy-plane-dedupe-source",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned")
+        .to_owned();
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+
+    let started_at = tokio::time::Instant::now();
+    while started_at.elapsed() < Duration::from_secs(5) {
+        let frame = timeout(Duration::from_millis(500), socket.next())
+            .await
+            .expect("websocket should receive ready event")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] == "event" && payload["event_type"] == "source_generation_ready"
+        {
+            break;
+        }
+    }
+
+    let deferred_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id,
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 1,
+            z: 1,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+
+    let (response_a, response_b) = tokio::join!(
+        client.get(&deferred_tile_url).send(),
+        client.get(&deferred_tile_url).send()
+    );
+    assert_eq!(
+        response_a
+            .expect("first concurrent request should resolve")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        response_b
+            .expect("second concurrent request should resolve")
+            .status(),
+        StatusCode::OK
+    );
+
+    let mut on_demand_progress_events = 0_u32;
+    let drain_started = tokio::time::Instant::now();
+    while drain_started.elapsed() < Duration::from_secs(2) {
+        let frame = match timeout(Duration::from_millis(150), socket.next()).await {
+            Ok(Some(Ok(value))) => value,
+            Ok(Some(Err(error))) => panic!("websocket frame should be valid: {error}"),
+            Ok(None) => break,
+            Err(_) => break,
+        };
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] == "event"
+            && payload["event_type"] == "source_generation_progress"
+            && payload["payload"]["stage"] == "ready"
+        {
+            on_demand_progress_events = on_demand_progress_events.saturating_add(1);
+        }
+    }
+    assert_eq!(
+        on_demand_progress_events, 1,
+        "concurrent requests for the same deferred plane should share one on-demand build"
+    );
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_data_plane_serves_non_zero_row_col_tiles_and_404s_missing_tiles() {
+    let cache_root = unique_path("non_zero_tile_data_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("non_zero_tile_data_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-non-zero-row-col.tiff");
+    write_rgb_tiff(&source_path, 600, 600);
+
+    let runtime = RuntimeFixture::start(&cache_root).await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-non-zero-row-col" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-non-zero-row-col-source",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned")
+        .to_owned();
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+
+    let served_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.clone(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 1,
+            x: 1,
+        },
+    );
+    let served_tile_response = client
+        .get(&served_tile_url)
+        .send()
+        .await
+        .expect("non-zero tile request should succeed");
+    assert_eq!(served_tile_response.status(), StatusCode::OK);
+    assert_eq!(
+        served_tile_response
+            .headers()
+            .get("content-encoding")
+            .and_then(|value| value.to_str().ok()),
+        Some("identity")
+    );
+    assert_eq!(
+        served_tile_response
+            .headers()
+            .get("cache-control")
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert!(
+        served_tile_response.headers().contains_key("etag"),
+        "tile response should include immutable etag"
+    );
+    let served_payload = served_tile_response
+        .bytes()
+        .await
+        .expect("served tile payload should be readable");
+    let packaging = ChannelBlockPackaging::default();
+    let decoded_tile = packaging
+        .decode(served_payload.as_ref())
+        .expect("served tile payload should decode as channel block");
+    let (tile_width, tile_height, _, _) = parse_pgm(&decoded_tile.payload);
+    assert_eq!(tile_width, 88);
+    assert_eq!(tile_height, 88);
+
+    let missing_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id,
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 2,
+            x: 1,
+        },
+    );
+    let missing_response = client
+        .get(&missing_tile_url)
+        .send()
+        .await
+        .expect("missing non-zero tile request should return http response");
+    assert_eq!(missing_response.status(), StatusCode::NOT_FOUND);
+
     runtime.stop().await;
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
     fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");

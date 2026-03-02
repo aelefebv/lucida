@@ -122,30 +122,11 @@ fn resolve_existing_payload_path(cache_root: &Path, key: &ChunkKey) -> PathBuf {
             if legacy.exists() {
                 return legacy;
             }
-            if key.t != 0 || key.z != 0 || key.channel_block != 0 {
-                let base = cache_root
-                    .join(&key.source_id)
-                    .join(format!("gen_{:08}", key.generation_seq))
-                    .join("preview2d")
-                    .join(format!("lod{}", key.lod))
-                    .join("t0_z0_cb0.pgm");
-                if base.exists() {
-                    return base;
-                }
-            }
         }
         ChunkAssetKind::Tile2d => {
-            if key.t != 0 || key.z != 0 || key.channel_block != 0 {
-                let base = cache_root
-                    .join(&key.source_id)
-                    .join(format!("gen_{:08}", key.generation_seq))
-                    .join("tile2d")
-                    .join(format!("lod{}", key.lod))
-                    .join(format!("t0_z0_cb0_r{}_c{}.tileblk", key.y, key.x));
-                if base.exists() {
-                    return base;
-                }
-            }
+            // Tile chunks are selection-specific. Missing non-zero T/Z/CB tiles should remain
+            // missing so callers can trigger on-demand generation instead of receiving
+            // mismatched fallback content.
         }
         ChunkAssetKind::Brick3d => {}
     }
@@ -194,7 +175,7 @@ mod tests {
 
     use crate::chunk_key::{ChunkAssetKind, ChunkKey};
 
-    use super::DataPlaneService;
+    use super::{DataPlaneError, DataPlaneService};
 
     fn unique_path(prefix: &str) -> std::path::PathBuf {
         let nanos = SystemTime::now()
@@ -264,6 +245,46 @@ mod tests {
             Some(&"src_00000001".to_owned())
         );
         assert!(response.headers.contains_key("etag"));
+
+        std::fs::remove_dir_all(cache_root).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn does_not_fallback_preview_to_base_slice_for_nonzero_selection() {
+        let cache_root = unique_path("preview_no_fallback");
+        let base_payload_path = cache_root
+            .join("src_00000002")
+            .join("gen_00000001")
+            .join("preview2d")
+            .join("lod0")
+            .join("t0_z0_cb0.pgm");
+        std::fs::create_dir_all(
+            base_payload_path
+                .parent()
+                .expect("preview parent should be present"),
+        )
+        .expect("preview parent creation should succeed");
+        std::fs::write(&base_payload_path, b"pgm").expect("preview payload write should succeed");
+
+        let service = DataPlaneService::new(&cache_root);
+        let result = service.serve_get(
+            &ChunkKey {
+                source_id: "src_00000002".to_owned(),
+                generation_seq: 1,
+                asset_kind: ChunkAssetKind::Preview2d,
+                lod: 0,
+                t: 1,
+                z: 1,
+                channel_block: 4,
+                y: 0,
+                x: 0,
+            }
+            .format_path(),
+        );
+        match result {
+            Err(DataPlaneError::NotFound { .. }) => {}
+            other => panic!("expected missing selected-slice preview, got {other:?}"),
+        }
 
         std::fs::remove_dir_all(cache_root).expect("fixture cleanup should succeed");
     }

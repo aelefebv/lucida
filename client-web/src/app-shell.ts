@@ -4,7 +4,7 @@ import {
   normalizeContrastWindow,
   type ContrastWindow,
 } from "./contrast-window";
-import { selectionBoundsFor } from "./client-store";
+import type { AxisSelectionBounds } from "./client-store";
 import { resolveRoute } from "./viewer-route";
 import { ViewerRuntime, type ViewerRuntimeState } from "./viewer-runtime";
 
@@ -45,12 +45,13 @@ export function bootstrapApp(
   mount.innerHTML = shellMarkup(resolved.route.kind);
   initializeContrastControls(mount);
   initializeViewportSizeControls(mount);
-  const runtime = new ViewerRuntime(resolved.route, (state) => {
-    renderRuntimeState(mount, state);
+  let runtime: ViewerRuntime | null = null;
+  runtime = new ViewerRuntime(resolved.route, (state) => {
+    renderRuntimeState(mount, state, runtime?.selectionBounds() ?? null);
   });
   runtime.start();
   const detachInteractionHandlers = attachInteractionHandlers(document, mount, runtime);
-  renderRuntimeState(mount, runtime.state());
+  renderRuntimeState(mount, runtime.state(), runtime.selectionBounds());
 
   return {
     dispose: () => {
@@ -302,9 +303,13 @@ function shellMarkup(routeKind: "viewer" | "jupyter-viewer"): string {
 </main>`;
 }
 
-function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void {
+function renderRuntimeState(
+  mount: HTMLElement,
+  state: ViewerRuntimeState,
+  selectionBounds: AxisSelectionBounds | null = null,
+): void {
   maybeAutoSetContrastFromFrame(mount, state);
-  syncSelectionInputsFromState(mount, state);
+  syncSelectionInputsFromState(mount, state, selectionBounds);
   const statusNode = mount.querySelector('[data-testid="attach-status"]');
   if (statusNode instanceof HTMLElement) {
     statusNode.textContent = `Attach phase: ${phaseLabel(state.connection.phase)}`;
@@ -338,6 +343,9 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
       const panY = state.clientState?.centerY ?? 0;
       frameNode.textContent = `Frame: gen ${state.renderFrame.generationSeq.toString()} (${state.renderFrame.frameKind}) min ${stats.min.toString()} max ${stats.max.toString()} nz ${(stats.nonZeroRatio * 100).toFixed(2)}%`;
       frameNode.textContent += ` zoom ${zoom.toFixed(2)} pan (${panX.toFixed(1)}, ${panY.toFixed(1)})`;
+      if (state.renderFrame.loadingNotice !== null) {
+        frameNode.textContent += " [LOADING TARGET SLICE]";
+      }
     }
   }
 
@@ -357,6 +365,10 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
 
   const warningNode = mount.querySelector('[data-testid="warning-state"]');
   if (warningNode instanceof HTMLElement) {
+    const loadingNotice =
+      state.renderFrame?.loadingNotice === null || state.renderFrame?.loadingNotice === undefined
+        ? null
+        : state.renderFrame.loadingNotice;
     const serverWarning =
       state.renderFrame?.warningNotice === null ||
       state.renderFrame?.warningNotice === undefined
@@ -369,6 +381,9 @@ function renderRuntimeState(mount: HTMLElement, state: ViewerRuntimeState): void
     const warnings = [serverWarning, emptyFrameWarning].filter(
       (value): value is string => value !== null,
     );
+    if (loadingNotice !== null) {
+      warnings.unshift(loadingNotice);
+    }
     warningNode.textContent =
       warnings.length === 0 ? "Warnings: none" : `Warnings: ${warnings.join(" | ")}`;
   }
@@ -405,7 +420,7 @@ function attachInteractionHandlers(
       fn(0, 0, [0], null, null, null);
       return;
     }
-    const bounds = selectionBoundsFor(state);
+    const bounds = runtime.selectionBounds();
     fn(
       state.zIndex,
       state.tIndex,
@@ -467,13 +482,13 @@ function attachInteractionHandlers(
       });
       return;
     }
-    if (event.key === ".") {
+    if (event.key === "." || event.key === "t") {
       withClientState((_, tIndex, __, ___, maxTIndex) => {
         runtime.setT(clampAxisIndex(tIndex + 1, maxTIndex));
       });
       return;
     }
-    if (event.key === ",") {
+    if (event.key === "," || event.key === "T") {
       withClientState((_, tIndex, __, ___, maxTIndex) => {
         runtime.setT(clampAxisIndex(tIndex - 1, maxTIndex));
       });
@@ -524,7 +539,7 @@ function attachInteractionHandlers(
   };
   registerInput("input-z-index", () => {
     const clientState = runtime.state().clientState;
-    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
+    const bounds = runtime.selectionBounds();
     const zIndex = readIndexInput(
       mount,
       "input-z-index",
@@ -539,7 +554,7 @@ function attachInteractionHandlers(
   });
   registerInput("input-t-index", () => {
     const clientState = runtime.state().clientState;
-    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
+    const bounds = runtime.selectionBounds();
     const tIndex = readIndexInput(
       mount,
       "input-t-index",
@@ -553,8 +568,7 @@ function attachInteractionHandlers(
     runtime.setT(tIndex);
   });
   registerClick("btn-channels-apply", () => {
-    const clientState = runtime.state().clientState;
-    const bounds = clientState === null ? null : selectionBoundsFor(clientState);
+    const bounds = runtime.selectionBounds();
     const channelInput = mount.querySelector('[data-testid="input-channel-list"]');
     if (!(channelInput instanceof HTMLInputElement)) {
       return;
@@ -579,11 +593,11 @@ function attachInteractionHandlers(
   });
   registerInput("slider-contrast-min", () => {
     applyUserContrastSelection(mount);
-    renderRuntimeState(mount, runtime.state());
+    renderRuntimeState(mount, runtime.state(), runtime.selectionBounds());
   });
   registerInput("slider-contrast-max", () => {
     applyUserContrastSelection(mount);
-    renderRuntimeState(mount, runtime.state());
+    renderRuntimeState(mount, runtime.state(), runtime.selectionBounds());
   });
   registerClick("btn-contrast-auto", () => {
     const frame = runtime.state().renderFrame;
@@ -606,7 +620,7 @@ function attachInteractionHandlers(
         userAdjusted: false,
       });
     }
-    renderRuntimeState(mount, runtime.state());
+    renderRuntimeState(mount, runtime.state(), runtime.selectionBounds());
   });
   let activeResize: {
     direction: ViewportResizeDirection;
@@ -653,7 +667,7 @@ function attachInteractionHandlers(
       deltaY,
     );
     setViewportDimensions(mount, nextDimensions, true);
-    renderRuntimeState(mount, runtime.state());
+    renderRuntimeState(mount, runtime.state(), runtime.selectionBounds());
     event.preventDefault();
   };
   const stopResize = (): void => {
@@ -893,12 +907,12 @@ function setOpenSourceStatus(mount: HTMLElement, message: string): void {
 function syncSelectionInputsFromState(
   mount: HTMLElement,
   state: ViewerRuntimeState,
+  bounds: AxisSelectionBounds | null,
 ): void {
   const clientState = state.clientState;
   if (clientState === null) {
     return;
   }
-  const bounds = selectionBoundsFor(clientState);
   const zInput = mount.querySelector('[data-testid="input-z-index"]');
   if (zInput instanceof HTMLInputElement) {
     const maxZIndex = bounds?.maxZIndex ?? DEFAULT_AXIS_SLIDER_MAX;

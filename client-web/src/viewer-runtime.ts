@@ -10,6 +10,7 @@ import {
   hydrateClientState,
   reconcileWithSnapshot,
   selectionBoundsFor,
+  type AxisSelectionBounds,
   type ClientState,
   type EventEnvelope,
   type SnapshotPayload,
@@ -61,6 +62,7 @@ const CLIENT_EVENT_TYPES = new Set<EventEnvelope["event_type"]>([
   "source_generation_detected",
   "source_generation_started",
   "source_generation_progress",
+  "source_generation_failed",
   "source_generation_ready",
 ]);
 
@@ -150,10 +152,7 @@ export class ViewerRuntime {
     if (this.interactionModel === null) {
       return;
     }
-    const bounds =
-      this.stateValue.clientState === null
-        ? null
-        : selectionBoundsFor(this.stateValue.clientState, this.preferredSourceId);
+    const bounds = this.selectionBounds();
     this.interactionModel.setZ(clampAxisIndex(zIndex, bounds?.maxZIndex ?? null));
     this.flushInteractionCommands();
   }
@@ -162,10 +161,7 @@ export class ViewerRuntime {
     if (this.interactionModel === null) {
       return;
     }
-    const bounds =
-      this.stateValue.clientState === null
-        ? null
-        : selectionBoundsFor(this.stateValue.clientState, this.preferredSourceId);
+    const bounds = this.selectionBounds();
     this.interactionModel.setT(clampAxisIndex(tIndex, bounds?.maxTIndex ?? null));
     this.flushInteractionCommands();
   }
@@ -174,10 +170,7 @@ export class ViewerRuntime {
     if (this.interactionModel === null) {
       return;
     }
-    const bounds =
-      this.stateValue.clientState === null
-        ? null
-        : selectionBoundsFor(this.stateValue.clientState, this.preferredSourceId);
+    const bounds = this.selectionBounds();
     this.interactionModel.setChannels(
       clampChannels(channels, bounds?.maxChannelIndex ?? null),
     );
@@ -289,6 +282,13 @@ export class ViewerRuntime {
     return this.stateValue.clientState?.zoom ?? 1;
   }
 
+  public selectionBounds(): AxisSelectionBounds | null {
+    if (this.stateValue.clientState === null) {
+      return null;
+    }
+    return selectionBoundsFor(this.stateValue.clientState, this.preferredSourceId);
+  }
+
   private handleFrame(rawFrame: unknown): void {
     if (typeof rawFrame !== "string") {
       return;
@@ -314,6 +314,9 @@ export class ViewerRuntime {
     }
     if (messageType === "error") {
       const error = parsed as RuntimeErrorMessage;
+      if (this.bootstrap.state().phase === "attached") {
+        return;
+      }
       this.bootstrap.fail(error.message);
       this.publish();
     }
@@ -488,7 +491,43 @@ export class ViewerRuntime {
     if (snapshotMessage === null) {
       return;
     }
-    this.handleSnapshot(snapshotMessage);
+    this.refreshSceneStateFromSnapshot(snapshotMessage.snapshot);
+  }
+
+  private refreshSceneStateFromSnapshot(snapshot: SnapshotPayload): void {
+    const sceneHydrated = hydrateClientState(snapshot);
+    const current = this.stateValue.clientState;
+    if (current === null) {
+      return;
+    }
+    if (sceneHydrated.sessionRev < current.sessionRev) {
+      return;
+    }
+    this.stateValue = {
+      ...this.stateValue,
+      snapshot,
+      clientState: {
+        ...current,
+        sessionId: sceneHydrated.sessionId,
+        sessionRev: sceneHydrated.sessionRev,
+        sceneRev: sceneHydrated.sceneRev,
+        sources: sceneHydrated.sources,
+        datasets: sceneHydrated.datasets,
+        layers: sceneHydrated.layers,
+        generations: sceneHydrated.generations,
+        warnings: sceneHydrated.warnings,
+      },
+    };
+    this.enforceSelectionBounds();
+    if (this.stateValue.clientState !== null) {
+      if (this.interactionModel !== null) {
+        this.interactionModel.reconcileAuthoritative(
+          viewportFromClientState(this.stateValue.clientState),
+        );
+      }
+      this.renderLoop.update(this.stateValue.clientState, this.preferredSourceId);
+    }
+    this.onUpdate(this.stateValue);
   }
 
   private flushInteractionCommands(): void {

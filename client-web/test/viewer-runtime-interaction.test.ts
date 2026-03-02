@@ -15,6 +15,10 @@ type InteractiveFixture = {
   closeClient: (clientId: string) => void;
 };
 
+type InteractiveFixtureOptions = {
+  rejectFirstSetTCommand?: boolean;
+};
+
 const fixtures: InteractiveFixture[] = [];
 const runtimes: ViewerRuntime[] = [];
 
@@ -114,13 +118,46 @@ describe("viewer runtime interaction + reconnect", () => {
     expect(runtime.state().clientState?.zIndex).toBe(5);
     expect(runtime.state().clientState?.tIndex).toBe(7);
   });
+
+  it("keeps attach phase stable when a command returns an error envelope", async () => {
+    const fixture = await startInteractiveFixture({
+      rejectFirstSetTCommand: true,
+    });
+    fixtures.push(fixture);
+
+    const route: ViewerRoute = {
+      kind: "viewer",
+      sessionId: "sess_runtime",
+      clientLabel: "client-command-error",
+      mode: "open_view",
+      token: undefined,
+      wsBase: fixture.url,
+      dataBase: "http://127.0.0.1:9",
+    };
+    const runtime = new ViewerRuntime(route, () => {});
+    runtimes.push(runtime);
+    runtime.start();
+
+    await waitFor(() => runtime.state().connection.phase === "attached", 2000);
+
+    runtime.setT(3);
+    await waitFor(() => runtime.state().clientState?.tIndex === 0, 2000);
+    expect(runtime.state().connection.phase).toBe("attached");
+
+    runtime.setZ(4);
+    await waitFor(() => runtime.state().clientState?.zIndex === 4, 2000);
+    expect(runtime.state().connection.phase).toBe("attached");
+  });
 });
 
-async function startInteractiveFixture(): Promise<InteractiveFixture> {
+async function startInteractiveFixture(
+  options: InteractiveFixtureOptions = {},
+): Promise<InteractiveFixture> {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   const sessionId = "sess_runtime";
   let sessionRev = 1;
   let nextClientCounter = 1;
+  let setTCommandRejectsRemaining = options.rejectFirstSetTCommand ? 1 : 0;
   const viewByClientId = new Map<string, ClientViewState>();
   const socketByClientId = new Map<string, WebSocket>();
   const clientIdBySocket = new Map<WebSocket, string>();
@@ -194,6 +231,32 @@ async function startInteractiveFixture(): Promise<InteractiveFixture> {
       }
       const view = viewByClientId.get(commandClientId);
       if (view === undefined) {
+        return;
+      }
+
+      if (parsed.op === "view.set_t" && setTCommandRejectsRemaining > 0) {
+        setTCommandRejectsRemaining -= 1;
+        socket.send(
+          JSON.stringify({
+            message_type: "error",
+            schema_version: "lucida-proto-0.1",
+            session_id: sessionId,
+            request_id: String(parsed.request_id ?? "req"),
+            client_id: commandClientId,
+            client_seq: Number(parsed.client_seq ?? 1),
+            op: "view.set_t",
+            code: "source_unavailable",
+            message: "source has no working generation yet",
+            retryable: false,
+            details: {
+              detail_type: "source_unavailable",
+              detail: {
+                source_uri: "/tmp/pending",
+              },
+            },
+            sent_at: new Date().toISOString(),
+          }),
+        );
         return;
       }
 

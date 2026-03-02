@@ -771,19 +771,70 @@ fn xml_attr_u64(text: &str, name: &str) -> Option<u64> {
 }
 
 fn xml_attr_value(text: &str, name: &str) -> Option<String> {
-    let needle_double = format!("{name}=\"");
-    if let Some(start) = text.find(&needle_double) {
-        let value_start = start + needle_double.len();
-        let value_end = text[value_start..].find('"')?;
-        return Some(text[value_start..(value_start + value_end)].to_owned());
+    let bytes = text.as_bytes();
+    let attr_name = name.as_bytes();
+    if attr_name.is_empty() || bytes.is_empty() {
+        return None;
     }
-    let needle_single = format!("{name}='");
-    if let Some(start) = text.find(&needle_single) {
-        let value_start = start + needle_single.len();
-        let value_end = text[value_start..].find('\'')?;
-        return Some(text[value_start..(value_start + value_end)].to_owned());
+
+    let mut cursor = 0usize;
+    while cursor + attr_name.len() <= bytes.len() {
+        if bytes[cursor..(cursor + attr_name.len())] != *attr_name {
+            cursor += 1;
+            continue;
+        }
+
+        if cursor > 0 && is_xml_name_byte(bytes[cursor - 1]) {
+            cursor += 1;
+            continue;
+        }
+
+        let mut value_cursor = cursor + attr_name.len();
+        if value_cursor < bytes.len() && is_xml_name_byte(bytes[value_cursor]) {
+            cursor += 1;
+            continue;
+        }
+
+        while value_cursor < bytes.len() && bytes[value_cursor].is_ascii_whitespace() {
+            value_cursor += 1;
+        }
+        if value_cursor >= bytes.len() || bytes[value_cursor] != b'=' {
+            cursor += 1;
+            continue;
+        }
+
+        value_cursor += 1;
+        while value_cursor < bytes.len() && bytes[value_cursor].is_ascii_whitespace() {
+            value_cursor += 1;
+        }
+        if value_cursor >= bytes.len() {
+            return None;
+        }
+
+        let quote = bytes[value_cursor];
+        if quote != b'"' && quote != b'\'' {
+            cursor += 1;
+            continue;
+        }
+
+        let value_start = value_cursor + 1;
+        let relative_end = bytes[value_start..]
+            .iter()
+            .position(|byte| *byte == quote)?;
+        let value_end = value_start + relative_end;
+        let raw_value = std::str::from_utf8(&bytes[value_start..value_end]).ok()?;
+        let trimmed = raw_value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        return Some(trimmed.to_owned());
     }
+
     None
+}
+
+fn is_xml_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b':' | b'.' | b'-')
 }
 
 fn normalize_ome_type(raw: &str) -> String {
@@ -875,7 +926,7 @@ fn read_u64(bytes: &[u8], offset: usize, endianness: Endianness) -> Option<u64> 
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::inspect_source;
+    use super::{inspect_source, xml_attr_value};
     use crate::model::{AxisName, SourceKind};
     use tiff::tags::Tag;
 
@@ -938,6 +989,30 @@ mod tests {
             .expect("image description write should succeed");
         image
             .write_data(&[100_u16, 110_u16, 120_u16, 130_u16])
+            .expect("pixel payload write should succeed");
+    }
+
+    fn write_ome_tiff_with_physical_sizes(path: &std::path::Path) {
+        let file = std::fs::File::create(path).expect("OME-TIFF fixture should be created");
+        let mut encoder =
+            tiff::encoder::TiffEncoder::new(file).expect("tiff encoder creation should succeed");
+        let mut image = encoder
+            .new_image::<tiff::encoder::colortype::Gray16>(279, 192)
+            .expect("tiff image creation should succeed");
+        image
+            .encoder()
+            .write_tag(
+                Tag::ImageDescription,
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<OME>
+  <Image ID="Image:0">
+    <Pixels DimensionOrder="XYCZT" PhysicalSizeX="0.0655" PhysicalSizeY="0.0655" PhysicalSizeZ="0.25" SizeT="30" SizeC="1" SizeZ="17" SizeY="192" SizeX="279" Type="uint16"/>
+  </Image>
+</OME>"#,
+            )
+            .expect("image description write should succeed");
+        image
+            .write_data(&vec![42_u16; (279 * 192) as usize])
             .expect("pixel payload write should succeed");
     }
 
@@ -1045,6 +1120,43 @@ mod tests {
         assert_eq!(inspected.source_metadata.shape.z, 17);
         assert_eq!(inspected.source_metadata.shape.y, 2);
         assert_eq!(inspected.source_metadata.shape.x, 2);
+        assert_eq!(inspected.source_metadata.dtype, "uint16");
+
+        std::fs::remove_file(file_path).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn xml_attr_value_requires_exact_attribute_name_match() {
+        let xml =
+            r#"<Pixels PhysicalSizeX="0.0655" SizeX="279" PhysicalSizeZ="0.25" SizeZ="17" />"#;
+        assert_eq!(xml_attr_value(xml, "SizeX").as_deref(), Some("279"));
+        assert_eq!(xml_attr_value(xml, "SizeZ").as_deref(), Some("17"));
+    }
+
+    #[test]
+    fn inspects_ome_tiff_with_physical_sizes_and_keeps_size_axes() {
+        let file_path = unique_path("ome_tiff_physical").with_extension("ome.tif");
+        write_ome_tiff_with_physical_sizes(&file_path);
+
+        let inspected = inspect_source(&file_path.display().to_string())
+            .expect("OME-TIFF source inspection should succeed");
+
+        assert_eq!(inspected.source_kind, SourceKind::Tiff);
+        assert_eq!(
+            inspected.source_metadata.original_axis_order,
+            vec![
+                AxisName::T,
+                AxisName::Z,
+                AxisName::C,
+                AxisName::Y,
+                AxisName::X
+            ]
+        );
+        assert_eq!(inspected.source_metadata.shape.t, 30);
+        assert_eq!(inspected.source_metadata.shape.c, 1);
+        assert_eq!(inspected.source_metadata.shape.z, 17);
+        assert_eq!(inspected.source_metadata.shape.y, 192);
+        assert_eq!(inspected.source_metadata.shape.x, 279);
         assert_eq!(inspected.source_metadata.dtype, "uint16");
 
         std::fs::remove_file(file_path).expect("fixture cleanup should succeed");

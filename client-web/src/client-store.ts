@@ -39,6 +39,22 @@ export type GenerationState = {
   previewReady: boolean;
   tile2dReadyLods: number[];
   brick3dReadyLods: number[];
+  tileLayout?: TileLayout | null;
+};
+
+export type TileLodLayout = {
+  lod: number;
+  width: number;
+  height: number;
+  tileWidth: number;
+  tileHeight: number;
+  rows: number;
+  cols: number;
+};
+
+export type TileLayout = {
+  defaultChannelBlockSize: number;
+  lods: TileLodLayout[];
 };
 
 export type SnapshotPayload = {
@@ -51,6 +67,7 @@ export type SnapshotPayload = {
     sources: Record<string, SourceState>;
     datasets: Record<string, DatasetState>;
     layers: Record<string, LayerState>;
+    source_generations?: Record<string, GenerationState>;
     warnings: WarningEntry[];
   };
   client_view: {
@@ -79,6 +96,7 @@ export type EventEnvelope = {
     | "source_generation_detected"
     | "source_generation_started"
     | "source_generation_progress"
+    | "source_generation_failed"
     | "source_generation_ready";
   payload: unknown;
 };
@@ -193,6 +211,18 @@ function sizeToMaxIndex(size: number | undefined): number | null {
 }
 
 export function hydrateClientState(snapshot: SnapshotPayload): ClientState {
+  const sourceGenerations = snapshot.shared_scene.source_generations ?? {};
+  const generations = Object.fromEntries(
+    Object.entries(sourceGenerations)
+      .map(([key, generation]) => {
+        const parsed = parseGenerationState(generation);
+        if (parsed === null) {
+          return null;
+        }
+        return [key, parsed] as const;
+      })
+      .filter((entry): entry is readonly [string, GenerationState] => entry !== null),
+  );
   return {
     sessionId: snapshot.session.session_id,
     sessionRev: snapshot.session.session_rev,
@@ -209,7 +239,7 @@ export function hydrateClientState(snapshot: SnapshotPayload): ClientState {
     sources: { ...snapshot.shared_scene.sources },
     datasets: { ...snapshot.shared_scene.datasets },
     layers: { ...snapshot.shared_scene.layers },
-    generations: {},
+    generations,
     warnings: [...snapshot.warnings],
     reconnectCount: 0,
   };
@@ -300,13 +330,171 @@ export function applyEvent(state: ClientState, event: EventEnvelope): ClientStat
     case "source_generation_detected":
     case "source_generation_started":
     case "source_generation_progress":
+    case "source_generation_failed":
     case "source_generation_ready": {
-      const payload = event.payload as GenerationState;
+      const payload = parseGenerationState(event.payload);
+      if (payload === null) {
+        return next;
+      }
       next.generations = {
         ...next.generations,
-        [generationKey(payload.sourceId, payload.generationSeq)]: payload,
+        [generationKey(payload.sourceId, payload.generationSeq)]:
+          cloneGenerationState(payload),
       };
       return next;
     }
   }
+}
+
+function cloneGenerationState(value: GenerationState): GenerationState {
+  return {
+    sourceId: value.sourceId,
+    generationSeq: value.generationSeq,
+    stage: value.stage,
+    progressPercent: value.progressPercent,
+    previewReady: value.previewReady,
+    tile2dReadyLods: [...value.tile2dReadyLods],
+    brick3dReadyLods: [...value.brick3dReadyLods],
+    tileLayout: cloneTileLayout(value.tileLayout),
+  };
+}
+
+function cloneTileLayout(value: TileLayout | null | undefined): TileLayout | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return {
+    defaultChannelBlockSize: value.defaultChannelBlockSize,
+    lods: value.lods.map((lod) => ({
+      lod: lod.lod,
+      width: lod.width,
+      height: lod.height,
+      tileWidth: lod.tileWidth,
+      tileHeight: lod.tileHeight,
+      rows: lod.rows,
+      cols: lod.cols,
+    })),
+  };
+}
+
+function parseGenerationState(value: unknown): GenerationState | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const sourceId = readString(value, "sourceId");
+  const generationSeq = readNumber(value, "generationSeq");
+  const stage = readString(value, "stage");
+  const progressPercent = readNumber(value, "progressPercent");
+  const previewReady = readBoolean(value, "previewReady");
+  const tile2dReadyLods = readNumberArray(value, "tile2dReadyLods");
+  const brick3dReadyLods = readNumberArray(value, "brick3dReadyLods");
+  if (
+    sourceId === null ||
+    generationSeq === null ||
+    stage === null ||
+    progressPercent === null ||
+    previewReady === null ||
+    tile2dReadyLods === null ||
+    brick3dReadyLods === null
+  ) {
+    return null;
+  }
+  return {
+    sourceId,
+    generationSeq,
+    stage,
+    progressPercent,
+    previewReady,
+    tile2dReadyLods,
+    brick3dReadyLods,
+    tileLayout: parseTileLayout(value.tileLayout),
+  };
+}
+
+function parseTileLayout(value: unknown): TileLayout | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+  const defaultChannelBlockSize = readNumber(value, "defaultChannelBlockSize");
+  const lodValues = value.lods;
+  if (defaultChannelBlockSize === null || !Array.isArray(lodValues)) {
+    return null;
+  }
+  const lods: TileLodLayout[] = [];
+  for (const lodValue of lodValues) {
+    if (!isRecord(lodValue)) {
+      return null;
+    }
+    const lod = readNumber(lodValue, "lod");
+    const width = readNumber(lodValue, "width");
+    const height = readNumber(lodValue, "height");
+    const tileWidth = readNumber(lodValue, "tileWidth");
+    const tileHeight = readNumber(lodValue, "tileHeight");
+    const rows = readNumber(lodValue, "rows");
+    const cols = readNumber(lodValue, "cols");
+    if (
+      lod === null ||
+      width === null ||
+      height === null ||
+      tileWidth === null ||
+      tileHeight === null ||
+      rows === null ||
+      cols === null
+    ) {
+      return null;
+    }
+    lods.push({
+      lod,
+      width,
+      height,
+      tileWidth,
+      tileHeight,
+      rows,
+      cols,
+    });
+  }
+  return {
+    defaultChannelBlockSize,
+    lods,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function readString(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+function readNumber(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return value;
+}
+
+function readBoolean(record: Record<string, unknown>, key: string): boolean | null {
+  const value = record[key];
+  return typeof value === "boolean" ? value : null;
+}
+
+function readNumberArray(record: Record<string, unknown>, key: string): number[] | null {
+  const value = record[key];
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const numbers: number[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "number" || !Number.isFinite(entry)) {
+      return null;
+    }
+    numbers.push(entry);
+  }
+  return numbers;
 }
