@@ -188,3 +188,7 @@ tmp/
 node_modules/
 client-web/dist/
 AGENTS.md
+
+# Added by cargo
+
+/target
