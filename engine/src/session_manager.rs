@@ -46,6 +46,12 @@ struct SessionRecord {
     source_watch_states: BTreeMap<String, SourceWatchController>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TilePreviewGenerationMode {
+    Full,
+    FirstPaint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeaseTransition {
     pub change_kind: LeaseChangeKind,
@@ -762,6 +768,35 @@ impl SessionManager {
         source_id: &str,
         generation_seq: u64,
     ) -> Result<GenerationRecord, SessionError> {
+        self.build_tile_preview_for_generation_with_mode(
+            session_id,
+            source_id,
+            generation_seq,
+            TilePreviewGenerationMode::Full,
+        )
+    }
+
+    pub fn build_first_paint_tile_preview_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        self.build_tile_preview_for_generation_with_mode(
+            session_id,
+            source_id,
+            generation_seq,
+            TilePreviewGenerationMode::FirstPaint,
+        )
+    }
+
+    fn build_tile_preview_for_generation_with_mode(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        mode: TilePreviewGenerationMode,
+    ) -> Result<GenerationRecord, SessionError> {
         let session = self.session_mut(session_id)?;
         let (
             source_shape,
@@ -812,40 +847,21 @@ impl SessionManager {
         };
 
         let builder = TilePreviewBuilder::new();
-        let build_result = builder
-            .build(&TilePreviewBuildRequest {
-                source_id: source_id.to_owned(),
-                source_uri,
-                source_kind,
-                source_dtype,
-                generation_seq,
-                generation_root,
-                shape: source_shape,
-                axis_order: source_axis_order,
-            })
-            .map_err(|error| match error {
-                TilePreviewBuildError::IoError { path, message } => {
-                    SessionError::TilePreviewBuildFailed {
-                        source_id: source_id.to_owned(),
-                        generation_seq,
-                        reason: format!("io error at `{path}`: {message}"),
-                    }
-                }
-                TilePreviewBuildError::SerializationError { message } => {
-                    SessionError::TilePreviewBuildFailed {
-                        source_id: source_id.to_owned(),
-                        generation_seq,
-                        reason: format!("serialization error: {message}"),
-                    }
-                }
-                TilePreviewBuildError::DecodeError { message } => {
-                    SessionError::TilePreviewBuildFailed {
-                        source_id: source_id.to_owned(),
-                        generation_seq,
-                        reason: format!("decode error: {message}"),
-                    }
-                }
-            })?;
+        let request = TilePreviewBuildRequest {
+            source_id: source_id.to_owned(),
+            source_uri,
+            source_kind,
+            source_dtype,
+            generation_seq,
+            generation_root,
+            shape: source_shape,
+            axis_order: source_axis_order,
+        };
+        let build_result = match mode {
+            TilePreviewGenerationMode::Full => builder.build(&request),
+            TilePreviewGenerationMode::FirstPaint => builder.build_first_paint(&request),
+        }
+        .map_err(|error| map_tile_preview_error(source_id, generation_seq, error))?;
 
         let source = session
             .shared_scene
@@ -867,6 +883,10 @@ impl SessionManager {
         if matches!(generation.stage, GenerationStage::Started) {
             generation.stage = GenerationStage::Partial;
         }
+        generation.progress_percent = match mode {
+            TilePreviewGenerationMode::FirstPaint => generation.progress_percent.max(25).min(90),
+            TilePreviewGenerationMode::Full => generation.progress_percent.max(95).min(99),
+        };
         generation.preview_path = Some(build_result.preview_path.display().to_string());
         generation.tile_manifest_path = Some(build_result.tile_manifest_path.display().to_string());
         generation.tile_layout = Some(build_result.tile_layout);
@@ -1861,6 +1881,32 @@ fn next_generation_seq(source: &SourceRecord) -> u64 {
         .copied()
         .unwrap_or(source.latest_working_generation_seq)
         .saturating_add(1)
+}
+
+fn map_tile_preview_error(
+    source_id: &str,
+    generation_seq: u64,
+    error: TilePreviewBuildError,
+) -> SessionError {
+    match error {
+        TilePreviewBuildError::IoError { path, message } => SessionError::TilePreviewBuildFailed {
+            source_id: source_id.to_owned(),
+            generation_seq,
+            reason: format!("io error at `{path}`: {message}"),
+        },
+        TilePreviewBuildError::SerializationError { message } => {
+            SessionError::TilePreviewBuildFailed {
+                source_id: source_id.to_owned(),
+                generation_seq,
+                reason: format!("serialization error: {message}"),
+            }
+        }
+        TilePreviewBuildError::DecodeError { message } => SessionError::TilePreviewBuildFailed {
+            source_id: source_id.to_owned(),
+            generation_seq,
+            reason: format!("decode error: {message}"),
+        },
+    }
 }
 
 fn ensure_generation_transition(

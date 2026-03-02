@@ -30,6 +30,12 @@ pub struct TilePreviewBuildResult {
     pub tile_layout: TileLayout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TilePreviewBuildMode {
+    Full,
+    FirstPaint,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TilePreviewBuildError {
     IoError { path: String, message: String },
@@ -66,6 +72,21 @@ impl TilePreviewBuilder {
         &self,
         request: &TilePreviewBuildRequest,
     ) -> Result<TilePreviewBuildResult, TilePreviewBuildError> {
+        self.build_with_mode(request, TilePreviewBuildMode::Full)
+    }
+
+    pub fn build_first_paint(
+        &self,
+        request: &TilePreviewBuildRequest,
+    ) -> Result<TilePreviewBuildResult, TilePreviewBuildError> {
+        self.build_with_mode(request, TilePreviewBuildMode::FirstPaint)
+    }
+
+    fn build_with_mode(
+        &self,
+        request: &TilePreviewBuildRequest,
+        mode: TilePreviewBuildMode,
+    ) -> Result<TilePreviewBuildResult, TilePreviewBuildError> {
         let tile_root = request.generation_root.join("tile2d");
         let preview_root = request.generation_root.join("preview2d");
         fs::create_dir_all(&tile_root).map_err(|error| TilePreviewBuildError::IoError {
@@ -83,8 +104,20 @@ impl TilePreviewBuilder {
             .copied()
             .map(|lod| lod_descriptor(lod, &request.shape, self.tile_width, self.tile_height))
             .collect::<Vec<_>>();
+        let mut prioritized_lod_descriptors = lod_descriptors.clone();
+        if matches!(mode, TilePreviewBuildMode::FirstPaint) {
+            prioritized_lod_descriptors.sort_by_key(|descriptor| std::cmp::Reverse(descriptor.lod));
+        }
         let default_channel_block_size = self.channel_packaging.default_block_size();
-        let selections = plane_selections(&request.shape);
+        let selections = match mode {
+            TilePreviewBuildMode::Full => plane_selections(&request.shape),
+            TilePreviewBuildMode::FirstPaint => vec![PlaneSelection {
+                t: 0,
+                z: 0,
+                channel_index: 0,
+                channel_block: 0,
+            }],
+        };
         write_manifest(
             &tile_root,
             &request.source_id,
@@ -109,7 +142,7 @@ impl TilePreviewBuilder {
             let lod_planes = build_lod_planes(&base_plane, &lods);
             write_tiles_for_selection(
                 &tile_root,
-                &lod_descriptors,
+                &prioritized_lod_descriptors,
                 &lod_planes,
                 request.shape.c.max(1).min(u64::from(u16::MAX)) as u16,
                 self.payload_codec,
@@ -120,14 +153,18 @@ impl TilePreviewBuilder {
             )?;
             write_preview_images_for_selection(
                 &preview_root,
-                &lod_descriptors,
+                &prioritized_lod_descriptors,
                 &lod_planes,
                 selection.t,
                 selection.z,
                 selection.channel_block,
             )?;
             if selection.t == 0 && selection.z == 0 && selection.channel_block == 0 {
-                write_legacy_preview_images(&preview_root, &lod_descriptors, &lod_planes)?;
+                write_legacy_preview_images(
+                    &preview_root,
+                    &prioritized_lod_descriptors,
+                    &lod_planes,
+                )?;
             }
         }
 
@@ -902,6 +939,82 @@ mod tests {
         assert_eq!((w01, h01), (88, 512));
         assert_eq!((w10, h10), (512, 88));
         assert_eq!((w11, h11), (88, 88));
+
+        std::fs::remove_dir_all(generation_root).expect("generation cleanup should succeed");
+        std::fs::remove_dir_all(fixture_root).expect("fixture cleanup should succeed");
+    }
+
+    #[test]
+    fn first_paint_build_only_materializes_initial_selection_assets() {
+        let generation_root = unique_path("generation_first_paint_only");
+        let fixture_root = unique_path("fixture_first_paint_only");
+        std::fs::create_dir_all(&generation_root).expect("generation root should be created");
+        std::fs::create_dir_all(&fixture_root).expect("fixture root should be created");
+
+        let source_path = fixture_root.join("source_first_paint_only.tiff");
+        let width = 8_u32;
+        let height = 8_u32;
+        let source_pixels = vec![42_u8; (width as usize) * (height as usize)];
+        write_test_tiff(&source_path, width, height, &source_pixels);
+
+        let builder = TilePreviewBuilder::new();
+        let _result = builder
+            .build_first_paint(&TilePreviewBuildRequest {
+                source_id: "src_first_paint".to_owned(),
+                source_uri: source_path.display().to_string(),
+                source_kind: SourceKind::Tiff,
+                source_dtype: "uint8".to_owned(),
+                generation_seq: 1,
+                generation_root: generation_root.clone(),
+                shape: AxisShape {
+                    t: 3,
+                    c: 2,
+                    z: 4,
+                    y: u64::from(height),
+                    x: u64::from(width),
+                    extra_axes: BTreeMap::new(),
+                },
+                axis_order: vec![
+                    AxisName::T,
+                    AxisName::C,
+                    AxisName::Z,
+                    AxisName::Y,
+                    AxisName::X,
+                ],
+            })
+            .expect("first paint tile/preview build should succeed");
+
+        let lod0_tile_root = generation_root.join("tile2d").join("lod0");
+        assert!(
+            lod0_tile_root.join("t0_z0_cb0_r0_c0.tileblk").exists(),
+            "first paint tile should exist for t0/z0/cb0"
+        );
+        assert!(
+            !lod0_tile_root.join("t1_z0_cb0_r0_c0.tileblk").exists(),
+            "non-visible t plane tiles should not be built in first paint mode"
+        );
+        assert!(
+            !lod0_tile_root.join("t0_z1_cb0_r0_c0.tileblk").exists(),
+            "non-visible z plane tiles should not be built in first paint mode"
+        );
+        assert!(
+            !lod0_tile_root.join("t0_z0_cb1_r0_c0.tileblk").exists(),
+            "non-primary channel block tiles should not be built in first paint mode"
+        );
+
+        let lod0_preview_root = generation_root.join("preview2d").join("lod0");
+        assert!(
+            lod0_preview_root.join("t0_z0_cb0.pgm").exists(),
+            "first paint preview should exist for t0/z0/cb0"
+        );
+        assert!(
+            !lod0_preview_root.join("t1_z0_cb0.pgm").exists(),
+            "non-visible t plane previews should not be built in first paint mode"
+        );
+        assert!(
+            !lod0_preview_root.join("t0_z1_cb0.pgm").exists(),
+            "non-visible z plane previews should not be built in first paint mode"
+        );
 
         std::fs::remove_dir_all(generation_root).expect("generation cleanup should succeed");
         std::fs::remove_dir_all(fixture_root).expect("fixture cleanup should succeed");

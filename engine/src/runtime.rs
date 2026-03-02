@@ -35,6 +35,7 @@ use crate::{DataPlaneService, IdAllocator, SessionManager};
 pub struct EngineRuntimeConfig {
     pub cache_root: PathBuf,
     pub generation_worker_startup_delay_ms: u64,
+    pub generation_worker_full_build_delay_ms: u64,
 }
 
 impl Default for EngineRuntimeConfig {
@@ -42,6 +43,7 @@ impl Default for EngineRuntimeConfig {
         Self {
             cache_root: PathBuf::from(".tmp/cache"),
             generation_worker_startup_delay_ms: 0,
+            generation_worker_full_build_delay_ms: 0,
         }
     }
 }
@@ -101,6 +103,7 @@ pub async fn run_runtime_server(
         state.clone(),
         generation_rx,
         Duration::from_millis(config.generation_worker_startup_delay_ms),
+        Duration::from_millis(config.generation_worker_full_build_delay_ms),
     ));
     let app = Router::new()
         .route("/v1/info", get(runtime_info).options(cors_preflight))
@@ -359,26 +362,40 @@ async fn generation_worker_loop(
     state: RuntimeState,
     mut receiver: mpsc::UnboundedReceiver<GenerationBuildRequest>,
     startup_delay: Duration,
+    full_build_delay: Duration,
 ) {
     while let Some(request) = receiver.recv().await {
         if !startup_delay.is_zero() {
             tokio::time::sleep(startup_delay).await;
         }
-        let events = {
+        let first_paint_events = {
             let mut manager = state.session_manager.lock().await;
-            execute_generation_build_pipeline(&mut manager, &request, state.cache_root.clone())
+            execute_generation_first_paint_phase(&mut manager, &request, state.cache_root.clone())
         };
-        if events.is_empty() {
+        if first_paint_events.is_empty() {
             continue;
         }
-        let event_bus = state.event_bus(&request.session_id).await;
-        for event in events {
-            let _ = event_bus.send(event);
+        send_generation_events(&state, &request.session_id, first_paint_events.clone()).await;
+        if has_generation_failed(&first_paint_events) {
+            continue;
         }
+
+        if !full_build_delay.is_zero() {
+            tokio::time::sleep(full_build_delay).await;
+        }
+
+        let completion_events = {
+            let mut manager = state.session_manager.lock().await;
+            execute_generation_completion_phase(&mut manager, &request)
+        };
+        if completion_events.is_empty() {
+            continue;
+        }
+        send_generation_events(&state, &request.session_id, completion_events).await;
     }
 }
 
-fn execute_generation_build_pipeline(
+fn execute_generation_first_paint_phase(
     manager: &mut SessionManager,
     request: &GenerationBuildRequest,
     cache_root: PathBuf,
@@ -392,6 +409,31 @@ fn execute_generation_build_pipeline(
         return generation_failure_events(manager, request, &error);
     }
 
+    let first_paint = match manager.build_first_paint_tile_preview_for_generation(
+        &request.session_id,
+        &request.source_id,
+        request.generation_seq,
+    ) {
+        Ok(value) => value,
+        Err(error) => return generation_failure_events(manager, request, &error),
+    };
+    let (session_rev_first_paint, _) =
+        match manager.session_and_scene_revisions(&request.session_id) {
+            Ok(value) => value,
+            Err(_) => return Vec::new(),
+        };
+    vec![EventEnvelope::source_generation_progress(
+        request.session_id.clone(),
+        session_rev_first_paint,
+        SourceGenerationPayload::from(&first_paint),
+        crate::clock::rfc3339_now(),
+    )]
+}
+
+fn execute_generation_completion_phase(
+    manager: &mut SessionManager,
+    request: &GenerationBuildRequest,
+) -> Vec<EventEnvelope> {
     let progressed = match manager.build_tile_preview_for_generation(
         &request.session_id,
         &request.source_id,
@@ -450,6 +492,23 @@ fn execute_generation_build_pipeline(
         crate::clock::rfc3339_now(),
     ));
     events
+}
+
+async fn send_generation_events(
+    state: &RuntimeState,
+    session_id: &str,
+    events: Vec<EventEnvelope>,
+) {
+    let event_bus = state.event_bus(session_id).await;
+    for event in events {
+        let _ = event_bus.send(event);
+    }
+}
+
+fn has_generation_failed(events: &[EventEnvelope]) -> bool {
+    events
+        .iter()
+        .any(|event| matches!(event.event_type, EventType::SourceGenerationFailed))
 }
 
 fn generation_failure_events(

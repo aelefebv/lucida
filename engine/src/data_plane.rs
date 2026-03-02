@@ -135,17 +135,9 @@ fn resolve_existing_payload_path(cache_root: &Path, key: &ChunkKey) -> PathBuf {
             }
         }
         ChunkAssetKind::Tile2d => {
-            if key.t != 0 || key.z != 0 || key.channel_block != 0 {
-                let base = cache_root
-                    .join(&key.source_id)
-                    .join(format!("gen_{:08}", key.generation_seq))
-                    .join("tile2d")
-                    .join(format!("lod{}", key.lod))
-                    .join(format!("t0_z0_cb0_r{}_c{}.tileblk", key.y, key.x));
-                if base.exists() {
-                    return base;
-                }
-            }
+            // Tile chunks are selection-specific. Missing non-zero T/Z/CB tiles should remain
+            // missing so callers can trigger on-demand generation instead of receiving
+            // mismatched fallback content.
         }
         ChunkAssetKind::Brick3d => {}
     }

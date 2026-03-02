@@ -975,6 +975,7 @@ async fn runtime_open_source_returns_before_background_generation_finishes() {
     let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
         cache_root: cache_root.clone(),
         generation_worker_startup_delay_ms: 250,
+        ..EngineRuntimeConfig::default()
     })
     .await;
     let client = reqwest::Client::new();
@@ -1100,6 +1101,7 @@ async fn runtime_background_generation_surfaces_failed_stage_event_on_build_erro
     let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
         cache_root: cache_root.clone(),
         generation_worker_startup_delay_ms: 250,
+        ..EngineRuntimeConfig::default()
     })
     .await;
     let client = reqwest::Client::new();
@@ -1200,6 +1202,201 @@ async fn runtime_background_generation_surfaces_failed_stage_event_on_build_erro
         saw_source_error_status,
         "source should transition to error status on generation failure"
     );
+
+    runtime.stop().await;
+    fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
+    fs::remove_dir_all(fixture_dir).expect("fixture cleanup should succeed");
+}
+
+#[tokio::test]
+async fn runtime_generation_emits_first_paint_before_deferred_full_completion() {
+    let cache_root = unique_path("first_paint_ordering_cache");
+    fs::create_dir_all(&cache_root).expect("cache root should be created");
+    let fixture_dir = unique_path("first_paint_ordering_fixture");
+    fs::create_dir_all(&fixture_dir).expect("fixture root should be created");
+    let source_path = fixture_dir.join("runtime-first-paint-ordering.ome.tif");
+    write_tczyx_ome_tiff(&source_path, 2, 1, 2, 32, 16);
+
+    let runtime = RuntimeFixture::start_with_config(EngineRuntimeConfig {
+        cache_root: cache_root.clone(),
+        generation_worker_startup_delay_ms: 0,
+        generation_worker_full_build_delay_ms: 350,
+    })
+    .await;
+    let client = reqwest::Client::new();
+
+    let create_response = client
+        .post(format!("{}/v1/sessions", runtime.http_base()))
+        .json(&json!({ "name": "runtime-first-paint-ordering" }))
+        .send()
+        .await
+        .expect("session creation request should succeed");
+    assert_eq!(create_response.status(), StatusCode::CREATED);
+    let created: serde_json::Value = create_response
+        .json()
+        .await
+        .expect("create response should parse as JSON");
+    let session_id = created["session_id"]
+        .as_str()
+        .expect("created session id should be present")
+        .to_owned();
+
+    let connect_url = format!("{}/v1/sessions/{session_id}/connect", runtime.ws_base());
+    let (mut socket, _) = tokio_tungstenite::connect_async(connect_url)
+        .await
+        .expect("websocket connect should succeed");
+    socket
+        .send(Message::Text(
+            json!({
+                "message_type": "attach",
+                "client_label": "browser-first-paint-ordering",
+                "requested_permission": "view",
+                "auth": {
+                    "mode": "open_view",
+                    "token": null
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("attach frame should send");
+    let _snapshot = recv_text_frame(&mut socket).await;
+
+    let open_source_response = client
+        .post(format!(
+            "{}/v1/sessions/{session_id}/sources",
+            runtime.http_base()
+        ))
+        .json(&json!({
+            "name": "runtime-first-paint-ordering-source",
+            "uri": source_path.display().to_string(),
+        }))
+        .send()
+        .await
+        .expect("open source request should succeed");
+    assert_eq!(open_source_response.status(), StatusCode::CREATED);
+    let open_source_body: serde_json::Value = open_source_response
+        .json()
+        .await
+        .expect("open source response should parse as JSON");
+    let source_id = open_source_body["source_id"]
+        .as_str()
+        .expect("source id should be returned")
+        .to_owned();
+    let generation_seq = open_source_body["generation_seq"]
+        .as_u64()
+        .expect("generation seq should be returned");
+
+    let first_progress = loop {
+        let frame = timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("websocket should receive first-paint progress event")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] != "event" {
+            continue;
+        }
+        if payload["event_type"] == "source_generation_progress" {
+            break payload;
+        }
+    };
+    assert_eq!(
+        first_progress["payload"]["stage"]
+            .as_str()
+            .expect("stage should be present"),
+        "partial"
+    );
+    assert_eq!(
+        first_progress["payload"]["previewReady"]
+            .as_bool()
+            .expect("previewReady should be present"),
+        true
+    );
+    assert!(
+        first_progress["payload"]["progressPercent"]
+            .as_u64()
+            .expect("progressPercent should be present")
+            < 100
+    );
+
+    let first_paint_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.clone(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 0,
+            z: 0,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+    let first_paint_tile_response = client
+        .get(&first_paint_tile_url)
+        .send()
+        .await
+        .expect("first paint tile request should succeed");
+    assert_eq!(first_paint_tile_response.status(), StatusCode::OK);
+
+    let deferred_tile_url = data_plane_url(
+        &runtime,
+        ChunkKey {
+            source_id: source_id.clone(),
+            generation_seq,
+            asset_kind: ChunkAssetKind::Tile2d,
+            lod: 0,
+            t: 1,
+            z: 1,
+            channel_block: 0,
+            y: 0,
+            x: 0,
+        },
+    );
+    let deferred_tile_response_before_ready = client
+        .get(&deferred_tile_url)
+        .send()
+        .await
+        .expect("deferred tile request should produce an HTTP response");
+    assert_eq!(
+        deferred_tile_response_before_ready.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let mut saw_ready = false;
+    let started_at = tokio::time::Instant::now();
+    while started_at.elapsed() < Duration::from_secs(5) {
+        let frame = timeout(Duration::from_millis(500), socket.next())
+            .await
+            .expect("websocket should eventually receive ready event")
+            .expect("websocket stream should stay open")
+            .expect("websocket frame should be valid");
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&text).expect("runtime should send valid JSON events");
+        if payload["message_type"] == "event" && payload["event_type"] == "source_generation_ready"
+        {
+            saw_ready = true;
+            break;
+        }
+    }
+    assert!(saw_ready, "generation should transition to ready");
+
+    let deferred_tile_response_after_ready = client
+        .get(&deferred_tile_url)
+        .send()
+        .await
+        .expect("deferred tile request should succeed after full build");
+    assert_eq!(deferred_tile_response_after_ready.status(), StatusCode::OK);
 
     runtime.stop().await;
     fs::remove_dir_all(cache_root).expect("cache root cleanup should succeed");
