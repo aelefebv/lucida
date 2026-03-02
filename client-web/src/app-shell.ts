@@ -467,13 +467,13 @@ function attachInteractionHandlers(
       });
       return;
     }
-    if (event.key === ".") {
+    if (event.key === "." || event.key === "t") {
       withClientState((_, tIndex, __, ___, maxTIndex) => {
         runtime.setT(clampAxisIndex(tIndex + 1, maxTIndex));
       });
       return;
     }
-    if (event.key === ",") {
+    if (event.key === "," || event.key === "T") {
       withClientState((_, tIndex, __, ___, maxTIndex) => {
         runtime.setT(clampAxisIndex(tIndex - 1, maxTIndex));
       });

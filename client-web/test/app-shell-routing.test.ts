@@ -250,7 +250,7 @@ describe("app shell routing", () => {
     expect((setChannels?.args as { channels?: unknown })?.channels).toEqual([1, 4]);
   });
 
-  it("maps keyboard shortcuts for zoom and t stepping with comma/period", async () => {
+  it("maps keyboard shortcuts for zoom and t stepping with comma/period and t/T aliases", async () => {
     const fixture = await startFixtureServer({
       permissionClass: "view",
       isLeaseHolder: false,
@@ -271,12 +271,14 @@ describe("app shell routing", () => {
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "_" }));
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "." }));
     document.dispatchEvent(new KeyboardEvent("keydown", { key: "," }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }));
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "T" }));
 
     await waitFor(() => {
       const commandCount = fixture.received.filter((value) => {
         return isRecord(value) && value.message_type === "command";
       }).length;
-      return commandCount >= 4;
+      return commandCount >= 6;
     }, 2000);
 
     const commands = fixture.received.filter((value): value is Record<string, unknown> => {
@@ -289,9 +291,11 @@ describe("app shell routing", () => {
     expect((zoomCommands[1]?.args as { zoom?: unknown })?.zoom).toBe(1);
 
     const setTCommands = commands.filter((command) => command.op === "view.set_t");
-    expect(setTCommands).toHaveLength(2);
+    expect(setTCommands).toHaveLength(4);
     expect((setTCommands[0]?.args as { t_index?: unknown })?.t_index).toBe(1);
     expect((setTCommands[1]?.args as { t_index?: unknown })?.t_index).toBe(0);
+    expect((setTCommands[2]?.args as { t_index?: unknown })?.t_index).toBe(1);
+    expect((setTCommands[3]?.args as { t_index?: unknown })?.t_index).toBe(0);
   });
 
   it("adjusts viewport width and height independently", async () => {
