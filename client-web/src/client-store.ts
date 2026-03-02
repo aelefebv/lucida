@@ -39,6 +39,22 @@ export type GenerationState = {
   previewReady: boolean;
   tile2dReadyLods: number[];
   brick3dReadyLods: number[];
+  tileLayout?: TileLayout | null;
+};
+
+export type TileLodLayout = {
+  lod: number;
+  width: number;
+  height: number;
+  tileWidth: number;
+  tileHeight: number;
+  rows: number;
+  cols: number;
+};
+
+export type TileLayout = {
+  defaultChannelBlockSize: number;
+  lods: TileLodLayout[];
 };
 
 export type SnapshotPayload = {
@@ -51,6 +67,7 @@ export type SnapshotPayload = {
     sources: Record<string, SourceState>;
     datasets: Record<string, DatasetState>;
     layers: Record<string, LayerState>;
+    source_generations?: Record<string, GenerationState>;
     warnings: WarningEntry[];
   };
   client_view: {
@@ -193,6 +210,12 @@ function sizeToMaxIndex(size: number | undefined): number | null {
 }
 
 export function hydrateClientState(snapshot: SnapshotPayload): ClientState {
+  const sourceGenerations = snapshot.shared_scene.source_generations ?? {};
+  const generations = Object.fromEntries(
+    Object.entries(sourceGenerations).map(
+      ([key, generation]) => [key, cloneGenerationState(generation)],
+    ),
+  );
   return {
     sessionId: snapshot.session.session_id,
     sessionRev: snapshot.session.session_rev,
@@ -209,7 +232,7 @@ export function hydrateClientState(snapshot: SnapshotPayload): ClientState {
     sources: { ...snapshot.shared_scene.sources },
     datasets: { ...snapshot.shared_scene.datasets },
     layers: { ...snapshot.shared_scene.layers },
-    generations: {},
+    generations,
     warnings: [...snapshot.warnings],
     reconnectCount: 0,
   };
@@ -304,9 +327,41 @@ export function applyEvent(state: ClientState, event: EventEnvelope): ClientStat
       const payload = event.payload as GenerationState;
       next.generations = {
         ...next.generations,
-        [generationKey(payload.sourceId, payload.generationSeq)]: payload,
+        [generationKey(payload.sourceId, payload.generationSeq)]:
+          cloneGenerationState(payload),
       };
       return next;
     }
   }
+}
+
+function cloneGenerationState(value: GenerationState): GenerationState {
+  return {
+    sourceId: value.sourceId,
+    generationSeq: value.generationSeq,
+    stage: value.stage,
+    progressPercent: value.progressPercent,
+    previewReady: value.previewReady,
+    tile2dReadyLods: [...value.tile2dReadyLods],
+    brick3dReadyLods: [...value.brick3dReadyLods],
+    tileLayout: cloneTileLayout(value.tileLayout),
+  };
+}
+
+function cloneTileLayout(value: TileLayout | null | undefined): TileLayout | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return {
+    defaultChannelBlockSize: value.defaultChannelBlockSize,
+    lods: value.lods.map((lod) => ({
+      lod: lod.lod,
+      width: lod.width,
+      height: lod.height,
+      tileWidth: lod.tileWidth,
+      tileHeight: lod.tileHeight,
+      rows: lod.rows,
+      cols: lod.cols,
+    })),
+  };
 }

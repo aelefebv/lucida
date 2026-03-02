@@ -41,6 +41,7 @@ function snapshot(): SnapshotPayload {
           writeRev: 0,
         },
       },
+      source_generations: {},
       warnings: [],
     },
     client_view: {
@@ -73,6 +74,20 @@ describe("client store", () => {
         previewReady: true,
         tile2dReadyLods: [4],
         brick3dReadyLods: [],
+        tileLayout: {
+          defaultChannelBlockSize: 4,
+          lods: [
+            {
+              lod: 0,
+              width: 64,
+              height: 32,
+              tileWidth: 512,
+              tileHeight: 512,
+              rows: 1,
+              cols: 1,
+            },
+          ],
+        },
       },
     });
     const withWarnings = applyEvent(withGeneration, {
@@ -92,7 +107,48 @@ describe("client store", () => {
 
     expect(withWarnings.sessionRev).toBe(5);
     expect(withWarnings.generations["src_00000001:2"]?.stage).toBe("partial");
+    expect(
+      withWarnings.generations["src_00000001:2"]?.tileLayout?.lods[0]?.width,
+    ).toBe(64);
     expect(withWarnings.warnings).toHaveLength(1);
+  });
+
+  it("hydrates source generation tile layout metadata from snapshot", () => {
+    const snap = snapshot();
+    snap.shared_scene.source_generations = {
+      ...(snap.shared_scene.source_generations ?? {}),
+      "src_00000001:3": {
+      sourceId: "src_00000001",
+      generationSeq: 3,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [2, 1, 0],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 279,
+            height: 192,
+            tileWidth: 512,
+            tileHeight: 512,
+            rows: 1,
+            cols: 1,
+          },
+        ],
+      },
+      },
+    };
+
+    const hydrated = hydrateClientState(snap);
+    expect(hydrated.generations["src_00000001:3"]?.tileLayout?.lods[0]?.height).toBe(
+      192,
+    );
+    expect(
+      hydrated.generations["src_00000001:3"]?.tileLayout?.defaultChannelBlockSize,
+    ).toBe(4);
   });
 
   it("reconciles authoritative snapshot on reconnect", () => {

@@ -135,6 +135,23 @@ pub struct LayerUpsertPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TileLodLayoutPayload {
+    pub lod: u8,
+    pub width: u64,
+    pub height: u64,
+    pub tile_width: u16,
+    pub tile_height: u16,
+    pub rows: u32,
+    pub cols: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TileLayoutPayload {
+    pub default_channel_block_size: u16,
+    pub lods: Vec<TileLodLayoutPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceGenerationPayload {
     pub generation_id: String,
     pub source_id: String,
@@ -144,6 +161,7 @@ pub struct SourceGenerationPayload {
     pub preview_ready: bool,
     pub tile2d_ready_lods: Vec<u8>,
     pub brick3d_ready_lods: Vec<u8>,
+    pub tile_layout: Option<TileLayoutPayload>,
     pub canonical_cache_path: Option<String>,
     pub preview_path: Option<String>,
     pub tile_manifest_path: Option<String>,
@@ -706,6 +724,22 @@ impl From<&GenerationRecord> for SourceGenerationPayload {
             preview_ready: value.availability.preview_ready,
             tile2d_ready_lods: value.availability.tile2d_ready_lods.clone(),
             brick3d_ready_lods: value.availability.brick3d_ready_lods.clone(),
+            tile_layout: value.tile_layout.as_ref().map(|layout| TileLayoutPayload {
+                default_channel_block_size: layout.default_channel_block_size,
+                lods: layout
+                    .lods
+                    .iter()
+                    .map(|lod| TileLodLayoutPayload {
+                        lod: lod.lod,
+                        width: lod.width,
+                        height: lod.height,
+                        tile_width: lod.tile_width,
+                        tile_height: lod.tile_height,
+                        rows: lod.rows,
+                        cols: lod.cols,
+                    })
+                    .collect::<Vec<_>>(),
+            }),
             canonical_cache_path: value.canonical_cache_path.clone(),
             preview_path: value.preview_path.clone(),
             tile_manifest_path: value.tile_manifest_path.clone(),
@@ -833,8 +867,8 @@ mod tests {
 
     use super::{
         EventBus, EventEnvelope, EventMessageSerializer, EventPayload, EventStreamError,
-        ProjectionState, SourceGenerationPayload, SourceUpsertPayload, ViewUpdatedPayload,
-        WarningPayloadEntry, WarningsUpdatedPayload,
+        ProjectionState, SourceGenerationPayload, SourceUpsertPayload, TileLayoutPayload,
+        TileLodLayoutPayload, ViewUpdatedPayload, WarningPayloadEntry, WarningsUpdatedPayload,
     };
 
     #[test]
@@ -978,6 +1012,7 @@ mod tests {
                 preview_ready: false,
                 tile2d_ready_lods: vec![],
                 brick3d_ready_lods: vec![],
+                tile_layout: None,
                 canonical_cache_path: None,
                 preview_path: None,
                 tile_manifest_path: None,
@@ -1001,6 +1036,7 @@ mod tests {
                 preview_ready: false,
                 tile2d_ready_lods: vec![],
                 brick3d_ready_lods: vec![],
+                tile_layout: None,
                 canonical_cache_path: None,
                 preview_path: None,
                 tile_manifest_path: None,
@@ -1024,6 +1060,18 @@ mod tests {
                 preview_ready: true,
                 tile2d_ready_lods: vec![4, 3],
                 brick3d_ready_lods: vec![],
+                tile_layout: Some(TileLayoutPayload {
+                    default_channel_block_size: 4,
+                    lods: vec![TileLodLayoutPayload {
+                        lod: 0,
+                        width: 512,
+                        height: 256,
+                        tile_width: 512,
+                        tile_height: 512,
+                        rows: 1,
+                        cols: 1,
+                    }],
+                }),
                 canonical_cache_path: None,
                 preview_path: Some(
                     "/tmp/cache/src_00000001/gen_00000001/preview2d/lod_3.pgm".to_owned(),
@@ -1053,6 +1101,18 @@ mod tests {
                 preview_ready: true,
                 tile2d_ready_lods: vec![4, 3, 2, 1, 0],
                 brick3d_ready_lods: vec![2, 1, 0],
+                tile_layout: Some(TileLayoutPayload {
+                    default_channel_block_size: 4,
+                    lods: vec![TileLodLayoutPayload {
+                        lod: 0,
+                        width: 512,
+                        height: 256,
+                        tile_width: 512,
+                        tile_height: 512,
+                        rows: 1,
+                        cols: 1,
+                    }],
+                }),
                 canonical_cache_path: Some("/tmp/cache/src_00000001/gen_00000001".to_owned()),
                 preview_path: Some(
                     "/tmp/cache/src_00000001/gen_00000001/preview2d/lod_3.pgm".to_owned(),

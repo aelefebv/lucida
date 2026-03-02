@@ -24,9 +24,9 @@ use crate::event_stream::{
     SourceUpsertPayload,
 };
 use crate::model::{
-    AddSourceRequest, AttachRequest, DatasetBinding, LayerState, PermissionClass, ReconnectRequest,
-    SessionSnapshotEnvelope, SourceRecord, SourceStatus, WarningCode, WarningEntry,
-    WarningSeverity,
+    AddSourceRequest, AttachRequest, DatasetBinding, GenerationRecord, LayerState, PermissionClass,
+    ReconnectRequest, SessionSnapshotEnvelope, SourceRecord, SourceStatus, WarningCode,
+    WarningEntry, WarningSeverity,
 };
 use crate::{DataPlaneService, IdAllocator, SessionManager};
 
@@ -958,6 +958,68 @@ impl From<&LayerState> for RuntimeLayerState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeTileLodLayout {
+    lod: u8,
+    width: u64,
+    height: u64,
+    tile_width: u16,
+    tile_height: u16,
+    rows: u32,
+    cols: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeTileLayout {
+    default_channel_block_size: u16,
+    lods: Vec<RuntimeTileLodLayout>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeSourceGenerationState {
+    source_id: String,
+    generation_seq: u64,
+    stage: String,
+    progress_percent: u8,
+    preview_ready: bool,
+    tile2d_ready_lods: Vec<u8>,
+    brick3d_ready_lods: Vec<u8>,
+    tile_layout: Option<RuntimeTileLayout>,
+}
+
+impl From<&GenerationRecord> for RuntimeSourceGenerationState {
+    fn from(value: &GenerationRecord) -> Self {
+        Self {
+            source_id: value.source_id.clone(),
+            generation_seq: value.generation_seq,
+            stage: generation_stage_name(value.stage).to_owned(),
+            progress_percent: value.progress_percent,
+            preview_ready: value.availability.preview_ready,
+            tile2d_ready_lods: value.availability.tile2d_ready_lods.clone(),
+            brick3d_ready_lods: value.availability.brick3d_ready_lods.clone(),
+            tile_layout: value.tile_layout.as_ref().map(|layout| RuntimeTileLayout {
+                default_channel_block_size: layout.default_channel_block_size,
+                lods: layout
+                    .lods
+                    .iter()
+                    .map(|lod| RuntimeTileLodLayout {
+                        lod: lod.lod,
+                        width: lod.width,
+                        height: lod.height,
+                        tile_width: lod.tile_width,
+                        tile_height: lod.tile_height,
+                        rows: lod.rows,
+                        cols: lod.cols,
+                    })
+                    .collect::<Vec<_>>(),
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 struct RuntimeSessionState {
     session_id: String,
@@ -970,6 +1032,7 @@ struct RuntimeSharedSceneState {
     sources: BTreeMap<String, RuntimeSourceState>,
     datasets: BTreeMap<String, RuntimeDatasetState>,
     layers: BTreeMap<String, RuntimeLayerState>,
+    source_generations: BTreeMap<String, RuntimeSourceGenerationState>,
     warnings: Vec<RuntimeWarningEntry>,
 }
 
@@ -1030,6 +1093,19 @@ impl RuntimeSnapshotEnvelope {
             .iter()
             .map(|(key, value)| (key.clone(), RuntimeLayerState::from(value)))
             .collect::<BTreeMap<_, _>>();
+        let source_generations = snapshot
+            .snapshot
+            .shared_scene
+            .sources
+            .values()
+            .flat_map(|source| source.generations.values())
+            .map(|generation| {
+                (
+                    format!("{}:{}", generation.source_id, generation.generation_seq),
+                    RuntimeSourceGenerationState::from(generation),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
 
         Self {
             message_type: snapshot.message_type.clone(),
@@ -1049,6 +1125,7 @@ impl RuntimeSnapshotEnvelope {
                     sources,
                     datasets,
                     layers,
+                    source_generations,
                     warnings: snapshot
                         .snapshot
                         .shared_scene
@@ -1187,7 +1264,19 @@ fn event_payload_json(payload: &EventPayload) -> serde_json::Value {
             "progressPercent": value.progress_percent,
             "previewReady": value.preview_ready,
             "tile2dReadyLods": value.tile2d_ready_lods,
-            "brick3dReadyLods": value.brick3d_ready_lods
+            "brick3dReadyLods": value.brick3d_ready_lods,
+            "tileLayout": value.tile_layout.as_ref().map(|layout| serde_json::json!({
+                "defaultChannelBlockSize": layout.default_channel_block_size,
+                "lods": layout.lods.iter().map(|lod| serde_json::json!({
+                    "lod": lod.lod,
+                    "width": lod.width,
+                    "height": lod.height,
+                    "tileWidth": lod.tile_width,
+                    "tileHeight": lod.tile_height,
+                    "rows": lod.rows,
+                    "cols": lod.cols
+                })).collect::<Vec<_>>()
+            }))
         }),
     }
 }
@@ -1383,6 +1472,18 @@ fn source_status_name(value: SourceStatus) -> &'static str {
         SourceStatus::Watching => "watching",
         SourceStatus::Building => "building",
         SourceStatus::Error => "error",
+    }
+}
+
+fn generation_stage_name(value: crate::model::GenerationStage) -> &'static str {
+    match value {
+        crate::model::GenerationStage::Detected => "detected",
+        crate::model::GenerationStage::Started => "started",
+        crate::model::GenerationStage::Partial => "partial",
+        crate::model::GenerationStage::Ready => "ready",
+        crate::model::GenerationStage::Pinned => "pinned",
+        crate::model::GenerationStage::GarbageCollected => "garbage_collected",
+        crate::model::GenerationStage::Failed => "failed",
     }
 }
 

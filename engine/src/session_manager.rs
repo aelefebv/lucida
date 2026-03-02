@@ -442,6 +442,7 @@ impl SessionManager {
                     canonical_cache_path: None,
                     preview_path: None,
                     tile_manifest_path: None,
+                    tile_layout: None,
                     brick_manifest_path: None,
                     detected_at: ready_at.clone(),
                     updated_at: ready_at.clone(),
@@ -496,6 +497,7 @@ impl SessionManager {
             canonical_cache_path: None,
             preview_path: None,
             tile_manifest_path: None,
+            tile_layout: None,
             brick_manifest_path: None,
             detected_at: detected_at.clone(),
             updated_at: detected_at,
@@ -836,6 +838,7 @@ impl SessionManager {
         }
         generation.preview_path = Some(build_result.preview_path.display().to_string());
         generation.tile_manifest_path = Some(build_result.tile_manifest_path.display().to_string());
+        generation.tile_layout = Some(build_result.tile_layout);
         generation.updated_at = rfc3339_now();
         let snapshot = generation.clone();
         bump_session_rev(session);

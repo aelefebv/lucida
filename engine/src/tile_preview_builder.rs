@@ -7,7 +7,7 @@ use serde_json::json;
 use crate::channel_block::{
     ChannelBlockPackaging, ChannelBlockWriteRequest, PayloadCodec, PayloadKind,
 };
-use crate::model::{AxisName, AxisShape, SourceKind};
+use crate::model::{AxisName, AxisShape, SourceKind, TileLayout, TileLodLayout};
 use crate::raster_plane::{RasterPlane, RasterPlaneLoadRequest, load_raster_plane};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +27,7 @@ pub struct TilePreviewBuildResult {
     pub preview_path: PathBuf,
     pub tile_manifest_path: PathBuf,
     pub available_lods: Vec<u8>,
+    pub tile_layout: TileLayout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,13 +83,14 @@ impl TilePreviewBuilder {
             .copied()
             .map(|lod| lod_descriptor(lod, &request.shape, self.tile_width, self.tile_height))
             .collect::<Vec<_>>();
+        let default_channel_block_size = self.channel_packaging.default_block_size();
         let selections = plane_selections(&request.shape);
         write_manifest(
             &tile_root,
             &request.source_id,
             request.generation_seq,
             &lod_descriptors,
-            self.channel_packaging.default_block_size(),
+            default_channel_block_size,
         )?;
         for selection in &selections {
             let base_plane = load_raster_plane(&RasterPlaneLoadRequest {
@@ -139,6 +141,21 @@ impl TilePreviewBuilder {
             preview_path,
             tile_manifest_path: tile_root.join("manifest.json"),
             available_lods: lods,
+            tile_layout: TileLayout {
+                default_channel_block_size,
+                lods: lod_descriptors
+                    .iter()
+                    .map(|descriptor| TileLodLayout {
+                        lod: descriptor.lod,
+                        width: descriptor.width,
+                        height: descriptor.height,
+                        tile_width: descriptor.tile_width,
+                        tile_height: descriptor.tile_height,
+                        rows: descriptor.rows,
+                        cols: descriptor.cols,
+                    })
+                    .collect::<Vec<_>>(),
+            },
         })
     }
 }

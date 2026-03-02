@@ -232,6 +232,23 @@ pub struct GenerationAvailability {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileLodLayout {
+    pub lod: u8,
+    pub width: u64,
+    pub height: u64,
+    pub tile_width: u16,
+    pub tile_height: u16,
+    pub rows: u32,
+    pub cols: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TileLayout {
+    pub default_channel_block_size: u16,
+    pub lods: Vec<TileLodLayout>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationRecord {
     pub generation_id: String,
     pub source_id: String,
@@ -242,6 +259,7 @@ pub struct GenerationRecord {
     pub canonical_cache_path: Option<String>,
     pub preview_path: Option<String>,
     pub tile_manifest_path: Option<String>,
+    pub tile_layout: Option<TileLayout>,
     pub brick_manifest_path: Option<String>,
     pub detected_at: String,
     pub updated_at: String,

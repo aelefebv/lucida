@@ -745,6 +745,7 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
     let mut event_types = Vec::<String>::new();
     let mut preview_available = false;
     let mut dataset_dtype: Option<String> = None;
+    let mut generation_tile_layout_lod0: Option<(u64, u64, u32, u32)> = None;
     let started_at = tokio::time::Instant::now();
     while started_at.elapsed() < Duration::from_secs(3) {
         let maybe_frame = timeout(Duration::from_millis(250), socket.next()).await;
@@ -771,6 +772,25 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
         }
         if event_type == "source_generation_progress" || event_type == "source_generation_ready" {
             preview_available = frame["payload"]["previewReady"].as_bool().unwrap_or(false);
+            let lod0 = frame["payload"]["tileLayout"]["lods"]
+                .as_array()
+                .and_then(|lods| lods.first())
+                .cloned();
+            if let Some(lod0) = lod0 {
+                let width = lod0["width"].as_u64();
+                let height = lod0["height"].as_u64();
+                let rows = lod0["rows"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok());
+                let cols = lod0["cols"]
+                    .as_u64()
+                    .and_then(|value| u32::try_from(value).ok());
+                if let (Some(width), Some(height), Some(rows), Some(cols)) =
+                    (width, height, rows, cols)
+                {
+                    generation_tile_layout_lod0 = Some((width, height, rows, cols));
+                }
+            }
         }
         event_types.push(event_type.clone());
         if event_type == "source_generation_ready" {
@@ -810,6 +830,40 @@ async fn runtime_open_source_emits_progress_and_serves_source_derived_preview_an
     );
     assert_eq!(dataset_dtype.as_deref(), Some("uint8"));
     assert!(preview_available);
+    assert_eq!(generation_tile_layout_lod0, Some((32, 16, 1, 1)));
+
+    let snapshot_response = client
+        .get(format!(
+            "{}/v1/sessions/{session_id}/snapshot",
+            runtime.http_base()
+        ))
+        .send()
+        .await
+        .expect("snapshot request should succeed");
+    assert_eq!(snapshot_response.status(), StatusCode::OK);
+    let snapshot_body: serde_json::Value = snapshot_response
+        .json()
+        .await
+        .expect("snapshot response should parse as JSON");
+    let source_generations = snapshot_body["snapshot"]["shared_scene"]["source_generations"]
+        .as_object()
+        .expect("snapshot should include source_generations map");
+    assert!(
+        !source_generations.is_empty(),
+        "source_generations should include at least one generation payload"
+    );
+    let first_generation = source_generations
+        .values()
+        .next()
+        .expect("source generation payload should be present");
+    assert_eq!(
+        first_generation["tileLayout"]["lods"][0]["width"].as_u64(),
+        Some(32)
+    );
+    assert_eq!(
+        first_generation["tileLayout"]["lods"][0]["height"].as_u64(),
+        Some(16)
+    );
 
     let expected_pixels = expected_tiff_fixture_luma(32, 16);
 
