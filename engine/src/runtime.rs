@@ -12,9 +12,10 @@ use axum::{Json, Router};
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex, Notify, broadcast, mpsc, oneshot};
 use tokio::time::Duration;
 
+use crate::chunk_key::{ChunkAssetKind, ChunkKey};
 use crate::command_router::{
     CommandArgs, CommandEnvelope, CommandRouter, CommandScope, command_error_to_envelope,
 };
@@ -36,6 +37,8 @@ pub struct EngineRuntimeConfig {
     pub cache_root: PathBuf,
     pub generation_worker_startup_delay_ms: u64,
     pub generation_worker_full_build_delay_ms: u64,
+    pub eager_full_build_on_open: bool,
+    pub generation_on_demand_build_delay_ms: u64,
 }
 
 impl Default for EngineRuntimeConfig {
@@ -44,6 +47,8 @@ impl Default for EngineRuntimeConfig {
             cache_root: PathBuf::from(".tmp/cache"),
             generation_worker_startup_delay_ms: 0,
             generation_worker_full_build_delay_ms: 0,
+            eager_full_build_on_open: false,
+            generation_on_demand_build_delay_ms: 0,
         }
     }
 }
@@ -62,6 +67,8 @@ struct RuntimeState {
     data_plane: DataPlaneService,
     cache_root: PathBuf,
     generation_queue: mpsc::UnboundedSender<GenerationBuildRequest>,
+    inflight_tile_builds: Arc<Mutex<BTreeMap<String, Arc<Notify>>>>,
+    on_demand_build_delay: Duration,
 }
 
 impl RuntimeState {
@@ -77,6 +84,10 @@ impl RuntimeState {
             data_plane: DataPlaneService::new(config.cache_root.clone()),
             cache_root: config.cache_root.clone(),
             generation_queue,
+            inflight_tile_builds: Arc::new(Mutex::new(BTreeMap::new())),
+            on_demand_build_delay: Duration::from_millis(
+                config.generation_on_demand_build_delay_ms,
+            ),
         }
     }
 
@@ -104,6 +115,7 @@ pub async fn run_runtime_server(
         generation_rx,
         Duration::from_millis(config.generation_worker_startup_delay_ms),
         Duration::from_millis(config.generation_worker_full_build_delay_ms),
+        config.eager_full_build_on_open,
     ));
     let app = Router::new()
         .route("/v1/info", get(runtime_info).options(cors_preflight))
@@ -363,6 +375,7 @@ async fn generation_worker_loop(
     mut receiver: mpsc::UnboundedReceiver<GenerationBuildRequest>,
     startup_delay: Duration,
     full_build_delay: Duration,
+    eager_full_build_on_open: bool,
 ) {
     while let Some(request) = receiver.recv().await {
         if !startup_delay.is_zero() {
@@ -377,6 +390,17 @@ async fn generation_worker_loop(
         }
         send_generation_events(&state, &request.session_id, first_paint_events.clone()).await;
         if has_generation_failed(&first_paint_events) {
+            continue;
+        }
+
+        if !eager_full_build_on_open {
+            let ready_events = {
+                let mut manager = state.session_manager.lock().await;
+                execute_generation_ready_phase(&mut manager, &request)
+            };
+            if !ready_events.is_empty() {
+                send_generation_events(&state, &request.session_id, ready_events).await;
+            }
             continue;
         }
 
@@ -492,6 +516,52 @@ fn execute_generation_completion_phase(
         crate::clock::rfc3339_now(),
     ));
     events
+}
+
+fn execute_generation_ready_phase(
+    manager: &mut SessionManager,
+    request: &GenerationBuildRequest,
+) -> Vec<EventEnvelope> {
+    let ready = match manager.mark_generation_ready(
+        &request.session_id,
+        &request.source_id,
+        request.generation_seq,
+    ) {
+        Ok(value) => value,
+        Err(error) => return generation_failure_events(manager, request, &error),
+    };
+    let source_state = match manager.source_state(&request.session_id, &request.source_id) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let dataset_state = match manager.dataset_for_source(&request.session_id, &request.source_id) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    let (session_rev_ready, _) = match manager.session_and_scene_revisions(&request.session_id) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    vec![
+        EventEnvelope::source_generation_ready(
+            request.session_id.clone(),
+            session_rev_ready,
+            SourceGenerationPayload::from(&ready),
+            crate::clock::rfc3339_now(),
+        ),
+        EventEnvelope::scene_source_upsert(
+            request.session_id.clone(),
+            session_rev_ready,
+            SourceUpsertPayload::from(&source_state),
+            crate::clock::rfc3339_now(),
+        ),
+        EventEnvelope::scene_dataset_upsert(
+            request.session_id.clone(),
+            session_rev_ready,
+            DatasetUpsertPayload::from(&dataset_state),
+            crate::clock::rfc3339_now(),
+        ),
+    ]
 }
 
 async fn send_generation_events(
@@ -1498,26 +1568,45 @@ async fn data_get(
     State(state): State<RuntimeState>,
     Path(chunk_path): Path<String>,
 ) -> Result<Response, (StatusCode, Json<RuntimeHttpError>)> {
-    data_response(state, chunk_path, false)
+    data_response(state, chunk_path, false).await
 }
 
 async fn data_head(
     State(state): State<RuntimeState>,
     Path(chunk_path): Path<String>,
 ) -> Result<Response, (StatusCode, Json<RuntimeHttpError>)> {
-    data_response(state, chunk_path, true)
+    data_response(state, chunk_path, true).await
 }
 
-fn data_response(
+async fn data_response(
     state: RuntimeState,
     chunk_path: String,
     head_only: bool,
 ) -> Result<Response, (StatusCode, Json<RuntimeHttpError>)> {
     let canonical_path = format!("/{chunk_path}");
-    let served = state
-        .data_plane
-        .serve_get(&canonical_path)
-        .map_err(data_plane_error)?;
+    let chunk_key = ChunkKey::parse_path(&canonical_path).map_err(|error| {
+        data_plane_error(DataPlaneError::InvalidPath {
+            message: error.to_string(),
+        })
+    })?;
+    let served = match state.data_plane.serve_get(&canonical_path) {
+        Ok(payload) => payload,
+        Err(DataPlaneError::NotFound { .. })
+            if matches!(chunk_key.asset_kind, ChunkAssetKind::Tile2d) =>
+        {
+            if ensure_tile_selection_ready_on_demand(&state, &chunk_key).await? {
+                state
+                    .data_plane
+                    .serve_get(&canonical_path)
+                    .map_err(data_plane_error)?
+            } else {
+                return Err(data_plane_error(DataPlaneError::NotFound {
+                    path: canonical_path,
+                }));
+            }
+        }
+        Err(error) => return Err(data_plane_error(error)),
+    };
 
     let mut response = Response::new(if head_only {
         axum::body::Body::empty()
@@ -1538,6 +1627,89 @@ fn data_response(
     }
 
     Ok(response)
+}
+
+async fn ensure_tile_selection_ready_on_demand(
+    state: &RuntimeState,
+    chunk_key: &ChunkKey,
+) -> Result<bool, (StatusCode, Json<RuntimeHttpError>)> {
+    if !matches!(chunk_key.asset_kind, ChunkAssetKind::Tile2d) {
+        return Ok(false);
+    }
+
+    let inflight_key = format!(
+        "{}:{}:{}:{}:{}",
+        chunk_key.source_id,
+        chunk_key.generation_seq,
+        chunk_key.t,
+        chunk_key.z,
+        chunk_key.channel_block
+    );
+    let (notify, should_build) = {
+        let mut inflight = state.inflight_tile_builds.lock().await;
+        if let Some(existing) = inflight.get(&inflight_key) {
+            (existing.clone(), false)
+        } else {
+            let created = Arc::new(Notify::new());
+            inflight.insert(inflight_key.clone(), created.clone());
+            (created, true)
+        }
+    };
+
+    if !should_build {
+        notify.notified().await;
+        return Ok(true);
+    }
+
+    let build_result = build_tile_selection_for_chunk(state, chunk_key).await;
+    {
+        let mut inflight = state.inflight_tile_builds.lock().await;
+        inflight.remove(&inflight_key);
+    }
+    notify.notify_waiters();
+    build_result
+}
+
+async fn build_tile_selection_for_chunk(
+    state: &RuntimeState,
+    chunk_key: &ChunkKey,
+) -> Result<bool, (StatusCode, Json<RuntimeHttpError>)> {
+    if !state.on_demand_build_delay.is_zero() {
+        tokio::time::sleep(state.on_demand_build_delay).await;
+    }
+    let (session_id, progress_event) = {
+        let mut manager = state.session_manager.lock().await;
+        let Some(session_id) =
+            manager.session_id_for_generation(&chunk_key.source_id, chunk_key.generation_seq)
+        else {
+            return Ok(false);
+        };
+        let progressed = manager
+            .build_tile_selection_for_generation(
+                &session_id,
+                &chunk_key.source_id,
+                chunk_key.generation_seq,
+                u64::from(chunk_key.t),
+                u64::from(chunk_key.z),
+                u64::from(chunk_key.channel_block),
+            )
+            .map_err(session_error)?;
+        let (session_rev_progress, _) = manager
+            .session_and_scene_revisions(&session_id)
+            .map_err(session_error)?;
+        (
+            session_id.clone(),
+            EventEnvelope::source_generation_progress(
+                session_id,
+                session_rev_progress,
+                SourceGenerationPayload::from(&progressed),
+                crate::clock::rfc3339_now(),
+            ),
+        )
+    };
+    let event_bus = state.event_bus(&session_id).await;
+    let _ = event_bus.send(progress_event);
+    Ok(true)
 }
 
 async fn add_cors_headers(mut response: Response) -> Response {

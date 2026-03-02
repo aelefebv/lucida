@@ -31,9 +31,18 @@ pub struct TilePreviewBuildResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TilePreviewSelection {
+    pub t_index: u64,
+    pub z_index: u64,
+    pub channel_index: u64,
+    pub channel_block: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TilePreviewBuildMode {
     Full,
     FirstPaint,
+    Selection(TilePreviewSelection),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +91,14 @@ impl TilePreviewBuilder {
         self.build_with_mode(request, TilePreviewBuildMode::FirstPaint)
     }
 
+    pub fn build_selection(
+        &self,
+        request: &TilePreviewBuildRequest,
+        selection: TilePreviewSelection,
+    ) -> Result<TilePreviewBuildResult, TilePreviewBuildError> {
+        self.build_with_mode(request, TilePreviewBuildMode::Selection(selection))
+    }
+
     fn build_with_mode(
         &self,
         request: &TilePreviewBuildRequest,
@@ -116,6 +133,12 @@ impl TilePreviewBuilder {
                 z: 0,
                 channel_index: 0,
                 channel_block: 0,
+            }],
+            TilePreviewBuildMode::Selection(selection) => vec![PlaneSelection {
+                t: selection.t_index,
+                z: selection.z_index,
+                channel_index: selection.channel_index,
+                channel_block: selection.channel_block,
             }],
         };
         write_manifest(

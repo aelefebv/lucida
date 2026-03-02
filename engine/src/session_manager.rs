@@ -25,7 +25,7 @@ use crate::revision_allocator::RevisionAllocator;
 use crate::source_inspector::{SourceInspectionError, inspect_source};
 use crate::source_watch::{SourceWatchController, WatchError};
 use crate::tile_preview_builder::{
-    TilePreviewBuildError, TilePreviewBuildRequest, TilePreviewBuilder,
+    TilePreviewBuildError, TilePreviewBuildRequest, TilePreviewBuilder, TilePreviewSelection,
 };
 use crate::warning_service::aggregate_warnings;
 
@@ -50,6 +50,11 @@ struct SessionRecord {
 enum TilePreviewGenerationMode {
     Full,
     FirstPaint,
+    Selection {
+        t_index: u64,
+        z_index: u64,
+        channel_block: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -790,6 +795,27 @@ impl SessionManager {
         )
     }
 
+    pub fn build_tile_selection_for_generation(
+        &mut self,
+        session_id: &str,
+        source_id: &str,
+        generation_seq: u64,
+        t_index: u64,
+        z_index: u64,
+        channel_block: u64,
+    ) -> Result<GenerationRecord, SessionError> {
+        self.build_tile_preview_for_generation_with_mode(
+            session_id,
+            source_id,
+            generation_seq,
+            TilePreviewGenerationMode::Selection {
+                t_index,
+                z_index,
+                channel_block,
+            },
+        )
+    }
+
     fn build_tile_preview_for_generation_with_mode(
         &mut self,
         session_id: &str,
@@ -860,6 +886,19 @@ impl SessionManager {
         let build_result = match mode {
             TilePreviewGenerationMode::Full => builder.build(&request),
             TilePreviewGenerationMode::FirstPaint => builder.build_first_paint(&request),
+            TilePreviewGenerationMode::Selection {
+                t_index,
+                z_index,
+                channel_block,
+            } => builder.build_selection(
+                &request,
+                TilePreviewSelection {
+                    t_index,
+                    z_index,
+                    channel_index: channel_block,
+                    channel_block,
+                },
+            ),
         }
         .map_err(|error| map_tile_preview_error(source_id, generation_seq, error))?;
 
@@ -883,10 +922,16 @@ impl SessionManager {
         if matches!(generation.stage, GenerationStage::Started) {
             generation.stage = GenerationStage::Partial;
         }
-        generation.progress_percent = match mode {
-            TilePreviewGenerationMode::FirstPaint => generation.progress_percent.max(25).min(90),
-            TilePreviewGenerationMode::Full => generation.progress_percent.max(95).min(99),
-        };
+        if generation.progress_percent < 100 {
+            generation.progress_percent = match mode {
+                TilePreviewGenerationMode::FirstPaint => {
+                    generation.progress_percent.max(25).min(90)
+                }
+                TilePreviewGenerationMode::Full | TilePreviewGenerationMode::Selection { .. } => {
+                    generation.progress_percent.max(95).min(99)
+                }
+            };
+        }
         generation.preview_path = Some(build_result.preview_path.display().to_string());
         generation.tile_manifest_path = Some(build_result.tile_manifest_path.display().to_string());
         generation.tile_layout = Some(build_result.tile_layout);
@@ -1821,6 +1866,22 @@ impl SessionManager {
                 session_id: session_id.to_owned(),
                 source_id: source_id.to_owned(),
             })
+    }
+
+    #[must_use]
+    pub fn session_id_for_generation(
+        &self,
+        source_id: &str,
+        generation_seq: u64,
+    ) -> Option<String> {
+        self.sessions.iter().find_map(|(session_id, session)| {
+            session
+                .shared_scene
+                .sources
+                .get(source_id)
+                .and_then(|source| source.generations.get(&generation_seq))
+                .map(|_| session_id.clone())
+        })
     }
 
     pub fn dataset_for_source(
