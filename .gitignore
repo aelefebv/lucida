@@ -187,3 +187,4 @@ tmp/
 # Node / frontend
 node_modules/
 client-web/dist/
+AGENTS.md
