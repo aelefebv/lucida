@@ -9,6 +9,7 @@ Lucida emphasizes:
 - A unified command/state model usable from Jupyter (`viewer.add_image…`), CLI (`lucida pan …`), and LLM agents.
 - Reproducible “what I saw” artifacts (Context Packages) and sharable Scene files.
 - A first‑class loop for targeted prototyping: **capture ROI chunks → compute → publish sparse derived layer chunks**.
+- 
 
 ---
 
@@ -680,3 +681,27 @@ Any plugin affecting state MUST integrate via canonical command schemas to prese
 - Cloud/CDN storage mapping and signed URL policies
 - Browser sandboxing and plugin security model
 
+---
+
+## 19. Stack
+- lucida-core in Rust
+    - state model
+    - command reducer
+    - ingest/build pipeline
+    - OME-Zarr cache + Lucida brick groups
+    - chunk key generation
+    - auth/leases/audit
+    - derived-layer publish pipeline
+    - CLI  
+- lucida-py in Rust + PyO3
+    - thin Python bindings for viewer.add_image(...), target/cutout/publish calls, and Jupyter helpers  ￼
+- lucida-web in TypeScript
+    - React for UI
+    - WebGPU renderer in a separate TS module
+    - WGSL shaders
+    - capability negotiation and local caches
+- lucida-desktop as Tauri 2
+    - wraps the same web client
+    - talks to the same Rust core
+    - gives you a desktop window without inventing a second UI stack
+    - Tauri explicitly supports bringing your own frontend framework and Rust backend logic. 
