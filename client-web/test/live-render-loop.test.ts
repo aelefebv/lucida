@@ -305,6 +305,65 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
+  it("does not refetch preview when panning with cached tile data", async () => {
+    const requestedUrls: string[] = [];
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        requestedUrls.push(url);
+        if (url.includes("/v1/preview2d/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [0, 255]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/")) {
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [150, 240])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    loop.update(state);
+
+    await waitFor(() => frames.some((frame) => frame.frameKind === "tile"), 2000);
+    expect(
+      requestedUrls.some((url) => url.includes("/v1/preview2d/")),
+    ).toBe(true);
+
+    requestedUrls.length = 0;
+    state.centerX = 64;
+    state.centerY = 32;
+    loop.update(state);
+
+    await waitFor(
+      () => requestedUrls.some((url) => url.includes("/v1/tile2d/")),
+      2000,
+    );
+    expect(
+      requestedUrls.some((url) => url.includes("/v1/preview2d/")),
+    ).toBe(false);
+    loop.dispose();
+  });
+
   it("cancels stale tile work during rapid viewport churn", async () => {
     const tileRequests: string[] = [];
     const frames: RenderFrameState[] = [];

@@ -56,6 +56,7 @@ export class LiveRenderLoop {
   private readonly onFrame: (state: RenderFrameState) => void;
   private readonly activeFetches: Set<string>;
   private currentSelectionKey: string | null;
+  private currentDataSelectionKey: string | null;
   private currentPreviewRequestKey: string | null;
   private currentTileRequestKeys: Set<string>;
   private currentPrefetchRequestKeys: Set<string>;
@@ -86,6 +87,7 @@ export class LiveRenderLoop {
     this.onFrame = onFrame;
     this.activeFetches = new Set();
     this.currentSelectionKey = null;
+    this.currentDataSelectionKey = null;
     this.currentPreviewRequestKey = null;
     this.currentTileRequestKeys = new Set();
     this.currentPrefetchRequestKeys = new Set();
@@ -118,16 +120,32 @@ export class LiveRenderLoop {
       latest.centerY,
       latest.zoom,
     );
+    const dataSelectionKey = frameDataSelectionKey(
+      latest.sourceId,
+      latest.generationSeq,
+      latest.tIndex,
+      latest.zIndex,
+      latest.selectedChannels,
+    );
 
     const isNewGeneration = latest.generationSeq > this.latestGenerationSeq;
     const selectionChanged = selectionKey !== this.currentSelectionKey;
+    const dataSelectionChanged = dataSelectionKey !== this.currentDataSelectionKey;
     const now = Date.now();
     if (isNewGeneration) {
       this.scheduler.invalidateOlderGenerations(latest.generationSeq);
       this.frameStore.pruneOlderThan(latest.sourceId, latest.generationSeq);
     }
+    const sourceGeneration = sourceGenerationKey(latest.sourceId, latest.generationSeq);
     const hasFrameForGeneration =
       this.frameStore.resolveFrame(latest.sourceId, latest.generationSeq) !== null;
+    const hasTileFrameForGeneration =
+      this.frameKindBySourceGeneration.get(sourceGeneration) === "tile";
+    const hasFrameMetadataForGeneration =
+      this.dimensionsBySourceGeneration.has(sourceGeneration) &&
+      this.grayscaleBySourceGeneration.has(sourceGeneration) &&
+      this.sampleMaxBySourceGeneration.has(sourceGeneration) &&
+      this.pixelStatsBySourceGeneration.has(sourceGeneration);
     if (selectionChanged) {
       if (this.currentPreviewRequestKey !== null) {
         this.scheduler.cancel(this.currentPreviewRequestKey);
@@ -142,6 +160,7 @@ export class LiveRenderLoop {
       this.currentPrefetchRequestKeys = new Set();
       this.recordSelectionChange(now);
       this.currentSelectionKey = selectionKey;
+      this.currentDataSelectionKey = dataSelectionKey;
       this.currentPreviewRequestKey = requestKey(
         "preview",
         latest.sourceId,
@@ -154,7 +173,16 @@ export class LiveRenderLoop {
         0,
       );
     }
+    const skipPreviewFetch =
+      selectionChanged &&
+      !isNewGeneration &&
+      !dataSelectionChanged &&
+      hasTileFrameForGeneration &&
+      hasFrameMetadataForGeneration;
     if (isNewGeneration || selectionChanged || !hasFrameForGeneration) {
+      if (skipPreviewFetch) {
+        this.currentPreviewRequestKey = null;
+      }
       const prefetchEnabled = !this.isInteractionChurnHigh(now);
       void this.fetchPreviewThenTiles(
         latest.sourceId,
@@ -168,6 +196,7 @@ export class LiveRenderLoop {
         latest.tileLayout,
         selectionKey,
         prefetchEnabled,
+        skipPreviewFetch,
       );
     }
   }
@@ -191,6 +220,7 @@ export class LiveRenderLoop {
     tileLayout: TileLayout | null,
     selectionKey: string,
     prefetchEnabled: boolean,
+    skipPreviewFetch: boolean,
   ): Promise<void> {
     const fetchKey = selectionKey;
     if (this.activeFetches.has(fetchKey)) {
@@ -232,63 +262,78 @@ export class LiveRenderLoop {
     );
     this.activeFetches.add(fetchKey);
     let tileCanvas: TileCanvasGeometry | null = null;
-    try {
-      const preview = await this.scheduler.schedule<DecodedFrame>({
-        key: previewRequestKey,
-        generationSeq,
-        priorityClass: "coarse_fallback",
-        execute: (signal) => {
-          return this.fetchFrame(
-            {
-              sourceId,
-              generationSeq,
-              assetKind: "preview2d",
-              lod: 0,
-              t: tIndex,
-              z: zIndex,
-              channelBlock,
-              y: 0,
-              x: 0,
-            },
-            signal,
-          );
-        },
-      });
-      if (this.currentSelectionKey !== selectionKey) {
-        this.activeFetches.delete(fetchKey);
-        return;
-      }
+    if (skipPreviewFetch) {
       if (generationSeq > this.latestGenerationSeq) {
         this.latestGenerationSeq = generationSeq;
       }
-      tileCanvas = resolveTileCanvasGeometry(tileLayout, preview.width, preview.height);
       const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
-      this.dimensionsBySourceGeneration.set(sourceGeneration, {
-        width: preview.width,
-        height: preview.height,
-      });
-      this.frameKindBySourceGeneration.set(sourceGeneration, "preview");
-      this.grayscaleBySourceGeneration.set(
-        sourceGeneration,
-        preview.grayscaleSamples,
-      );
-      this.sampleMaxBySourceGeneration.set(sourceGeneration, preview.sampleMax);
-      this.pixelStatsBySourceGeneration.set(sourceGeneration, preview.pixelStats);
-      this.frameStore.setPreview(
-        sourceId,
-        generationSeq,
-        preview.rgba,
-        preview.width,
-        preview.height,
-      );
-      this.emit(sourceId, generationSeq);
-    } catch (error) {
-      if (!isCancellationError(error) && this.currentSelectionKey === selectionKey) {
-        console.error("preview fetch failed", error);
-        this.scheduleRetry();
+      const dimensions = this.dimensionsBySourceGeneration.get(sourceGeneration);
+      if (dimensions !== undefined) {
+        tileCanvas = resolveTileCanvasGeometry(
+          tileLayout,
+          dimensions.width,
+          dimensions.height,
+        );
       }
-      this.activeFetches.delete(fetchKey);
-      return;
+    } else {
+      try {
+        const preview = await this.scheduler.schedule<DecodedFrame>({
+          key: previewRequestKey,
+          generationSeq,
+          priorityClass: "coarse_fallback",
+          execute: (signal) => {
+            return this.fetchFrame(
+              {
+                sourceId,
+                generationSeq,
+                assetKind: "preview2d",
+                lod: 0,
+                t: tIndex,
+                z: zIndex,
+                channelBlock,
+                y: 0,
+                x: 0,
+              },
+              signal,
+            );
+          },
+        });
+        if (this.currentSelectionKey !== selectionKey) {
+          this.activeFetches.delete(fetchKey);
+          return;
+        }
+        if (generationSeq > this.latestGenerationSeq) {
+          this.latestGenerationSeq = generationSeq;
+        }
+        tileCanvas = resolveTileCanvasGeometry(tileLayout, preview.width, preview.height);
+        const sourceGeneration = sourceGenerationKey(sourceId, generationSeq);
+        this.dimensionsBySourceGeneration.set(sourceGeneration, {
+          width: preview.width,
+          height: preview.height,
+        });
+        this.frameKindBySourceGeneration.set(sourceGeneration, "preview");
+        this.grayscaleBySourceGeneration.set(
+          sourceGeneration,
+          preview.grayscaleSamples,
+        );
+        this.sampleMaxBySourceGeneration.set(sourceGeneration, preview.sampleMax);
+        this.pixelStatsBySourceGeneration.set(sourceGeneration, preview.pixelStats);
+        this.frameStore.setPreview(
+          sourceId,
+          generationSeq,
+          preview.rgba,
+          preview.width,
+          preview.height,
+        );
+        this.emit(sourceId, generationSeq);
+      } catch (error) {
+        if (!isCancellationError(error) && this.currentSelectionKey === selectionKey) {
+          console.error("preview fetch failed", error);
+          this.scheduleRetry();
+        }
+        this.activeFetches.delete(fetchKey);
+        return;
+      }
     }
 
     let emittedTile = false;
@@ -1041,6 +1086,16 @@ function frameSelectionKey(
   zoom: number,
 ): string {
   return `${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:c${selectedChannels.join(",")}:cx${centerX.toFixed(3)}:cy${centerY.toFixed(3)}:zm${zoom.toFixed(3)}`;
+}
+
+function frameDataSelectionKey(
+  sourceId: string,
+  generationSeq: number,
+  tIndex: number,
+  zIndex: number,
+  selectedChannels: number[],
+): string {
+  return `${sourceId}:${generationSeq.toString()}:t${tIndex.toString()}:z${zIndex.toString()}:c${selectedChannels.join(",")}`;
 }
 
 function sourceGenerationKey(sourceId: string, generationSeq: number): string {
