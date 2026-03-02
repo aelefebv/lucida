@@ -184,6 +184,12 @@ export class ProgressiveFrameStore {
     }
   }
 
+  public clearGeneration(sourceId: string, generationSeq: number): void {
+    const key = frameKey(sourceId, generationSeq);
+    this.previewFrames.delete(key);
+    this.tileFrames.delete(key);
+  }
+
   private ensureTileFrame(
     key: string,
     sourceId: string,

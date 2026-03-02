@@ -215,6 +215,14 @@ export class LiveRenderLoop {
     ) {
       this.emit(latest.sourceId, latest.generationSeq);
     }
+    if (selectionChanged && dataSelectionChanged) {
+      this.frameStore.clearGeneration(latest.sourceId, latest.generationSeq);
+      this.frameKindBySourceGeneration.delete(sourceGeneration);
+      this.grayscaleBySourceGeneration.delete(sourceGeneration);
+      this.sampleMaxBySourceGeneration.delete(sourceGeneration);
+      this.pixelStatsBySourceGeneration.delete(sourceGeneration);
+      this.renderedSelectionBySourceGeneration.delete(sourceGeneration);
+    }
     if (isNewGeneration || selectionChanged || !hasFrameForGeneration) {
       if (skipPreviewFetch) {
         this.currentPreviewRequestKey = null;

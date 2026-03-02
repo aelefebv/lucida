@@ -607,6 +607,143 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
+  it("does not mix previous selection tiles into first patch of a new selection", async () => {
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/") && url.includes("/t/0/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(4, 1, [10, 10, 10, 10]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/preview2d/") && url.includes("/t/1/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(4, 1, [5, 5, 5, 5]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/") && url.includes("/t/0/")) {
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [10, 10])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/v1/tile2d/") && url.includes("/t/1/") && url.includes("/y/0/x/0")) {
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [200, 200])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/v1/tile2d/") && url.includes("/t/1/") && url.includes("/y/0/x/1")) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, 120);
+          });
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [220, 220])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    state.centerX = 0;
+    state.centerY = 0;
+    state.zoom = 1;
+    state.generations["src_fixture:1"] = {
+      sourceId: "src_fixture",
+      generationSeq: 1,
+      stage: "ready",
+      progressPercent: 100,
+      previewReady: true,
+      tile2dReadyLods: [0],
+      brick3dReadyLods: [],
+      tileLayout: {
+        defaultChannelBlockSize: 4,
+        lods: [
+          {
+            lod: 0,
+            width: 4,
+            height: 1,
+            tileWidth: 2,
+            tileHeight: 1,
+            rows: 1,
+            cols: 2,
+          },
+        ],
+      },
+    };
+
+    loop.update(state);
+    await waitFor(
+      () =>
+        frames.some(
+          (frame) =>
+            frame.frameKind === "tile" &&
+            frame.targetSelection.tIndex === 0 &&
+            sampleRedPixels(frame.rgba).join(",") === "10,10,10,10",
+        ),
+      2000,
+    );
+
+    state.tIndex = 1;
+    loop.update(state);
+
+    await waitFor(
+      () =>
+        frames.some(
+          (frame) =>
+            frame.frameKind === "tile" &&
+            frame.targetSelection.tIndex === 1 &&
+            sampleRedPixels(frame.rgba).join(",") === "200,200,5,5",
+        ),
+      2000,
+    );
+
+    await waitFor(
+      () =>
+        frames.some(
+          (frame) =>
+            frame.frameKind === "tile" &&
+            frame.targetSelection.tIndex === 1 &&
+            sampleRedPixels(frame.rgba).join(",") === "200,200,220,220",
+        ),
+      2000,
+    );
+    loop.dispose();
+  });
+
   it("keeps composed frames isolated by generation under overlap", async () => {
     const frames: RenderFrameState[] = [];
     const requestedUrls: string[] = [];
