@@ -744,6 +744,102 @@ describe("LiveRenderLoop", () => {
     loop.dispose();
   });
 
+  it("keeps previous slice visible until target-slice tile arrives", async () => {
+    const frames: RenderFrameState[] = [];
+    const loop = new LiveRenderLoop(
+      "http://127.0.0.1:8787/v1/data",
+      (frame) => {
+        frames.push(frame);
+      },
+      async (input) => {
+        const url = String(input);
+        if (url.includes("/v1/preview2d/") && url.includes("/t/0/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [10, 20]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/preview2d/") && url.includes("/t/1/")) {
+          return new Response(new Blob([toArrayBuffer(pgmPayload(2, 1, [120, 180]))]), {
+            status: 200,
+            headers: {
+              "content-type": "image/x-portable-graymap",
+              "content-encoding": "identity",
+            },
+          });
+        }
+        if (url.includes("/v1/tile2d/") && url.includes("/t/0/")) {
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [10, 20])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        if (url.includes("/v1/tile2d/") && url.includes("/t/1/")) {
+          await new Promise((resolve) => {
+            setTimeout(resolve, 120);
+          });
+          return new Response(
+            new Blob([toArrayBuffer(channelBlockRawPayload(pgmPayload(2, 1, [200, 220])))]),
+            {
+              status: 200,
+              headers: {
+                "content-type": "application/octet-stream",
+                "content-encoding": "identity",
+              },
+            },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    );
+
+    const state = fixtureClientState();
+    loop.update(state);
+    await waitFor(
+      () =>
+        frames.some(
+          (frame) =>
+            frame.frameKind === "tile" &&
+            frame.targetSelection.tIndex === 0,
+        ),
+      2000,
+    );
+    const beforeSwitchFrameCount = frames.length;
+
+    state.tIndex = 1;
+    loop.update(state);
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 60);
+    });
+    const postSwitchEarlyFrames = frames.slice(beforeSwitchFrameCount);
+    expect(
+      postSwitchEarlyFrames.some(
+        (frame) => frame.frameKind === "preview" && frame.targetSelection.tIndex === 1,
+      ),
+    ).toBe(false);
+
+    await waitFor(
+      () =>
+        frames.some(
+          (frame) =>
+            frame.frameKind === "tile" &&
+            frame.targetSelection.tIndex === 1,
+        ),
+      2000,
+    );
+    loop.dispose();
+  });
+
   it("keeps composed frames isolated by generation under overlap", async () => {
     const frames: RenderFrameState[] = [];
     const requestedUrls: string[] = [];

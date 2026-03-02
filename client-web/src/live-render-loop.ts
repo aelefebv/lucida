@@ -207,11 +207,13 @@ export class LiveRenderLoop {
       !dataSelectionChanged &&
       hasTileFrameForGeneration &&
       hasFrameMetadataForGeneration;
-    if (
+    const deferPreviewPresentation =
       selectionChanged &&
       dataSelectionChanged &&
       hasFrameForGeneration &&
-      hasFrameMetadataForGeneration
+      hasFrameMetadataForGeneration;
+    if (
+      deferPreviewPresentation
     ) {
       this.emit(latest.sourceId, latest.generationSeq);
     }
@@ -240,6 +242,7 @@ export class LiveRenderLoop {
         latest.tileLayout,
         previewLods,
         targetSelection,
+        !deferPreviewPresentation,
         selectionKey,
         prefetchEnabled,
         skipPreviewFetch,
@@ -266,6 +269,7 @@ export class LiveRenderLoop {
     tileLayout: TileLayout | null,
     previewLods: number[],
     targetSelection: RenderFrameSelection,
+    emitPreviewFrame: boolean,
     selectionKey: string,
     prefetchEnabled: boolean,
     skipPreviewFetch: boolean,
@@ -325,6 +329,7 @@ export class LiveRenderLoop {
         tileLayout,
         previewLods,
         targetSelection,
+        emitPreviewFrame,
         selectionKey,
       });
       if (previewResult.cancelled) {
@@ -455,6 +460,7 @@ export class LiveRenderLoop {
     tileLayout: TileLayout | null;
     previewLods: number[];
     targetSelection: RenderFrameSelection;
+    emitPreviewFrame: boolean;
     selectionKey: string;
   }): Promise<{ cancelled: boolean; previewRendered: boolean; tileCanvas: TileCanvasGeometry | null }> {
     const sourceGeneration = sourceGenerationKey(input.sourceId, input.generationSeq);
@@ -527,8 +533,11 @@ export class LiveRenderLoop {
           normalizedPreview.width,
           normalizedPreview.height,
         );
-        this.emit(input.sourceId, input.generationSeq);
-        return { cancelled: false, previewRendered: true, tileCanvas };
+        if (input.emitPreviewFrame) {
+          this.emit(input.sourceId, input.generationSeq);
+          return { cancelled: false, previewRendered: true, tileCanvas };
+        }
+        return { cancelled: false, previewRendered: false, tileCanvas };
       } catch (error) {
         if (this.currentSelectionKey !== input.selectionKey || isCancellationError(error)) {
           return { cancelled: true, previewRendered: false, tileCanvas };
