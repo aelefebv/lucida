@@ -113,6 +113,44 @@ describe("client store", () => {
     expect(withWarnings.warnings).toHaveLength(1);
   });
 
+  it("applies source_generation_failed payloads through the same generation contract", () => {
+    const hydrated = hydrateClientState(snapshot());
+    const failed = applyEvent(hydrated, {
+      session_rev: 4,
+      event_type: "source_generation_failed",
+      payload: {
+        sourceId: "src_00000001",
+        generationSeq: 2,
+        stage: "failed",
+        progressPercent: 33,
+        previewReady: true,
+        tile2dReadyLods: [0],
+        brick3dReadyLods: [],
+        tileLayout: null,
+      },
+    });
+    expect(failed.generations["src_00000001:2"]?.stage).toBe("failed");
+    expect(failed.generations["src_00000001:2"]?.progressPercent).toBe(33);
+  });
+
+  it("ignores malformed generation payloads instead of mutating state", () => {
+    const hydrated = hydrateClientState(snapshot());
+    const malformed = applyEvent(hydrated, {
+      session_rev: 4,
+      event_type: "source_generation_progress",
+      payload: {
+        sourceId: "src_00000001",
+        generationSeq: "2",
+        stage: "partial",
+        progressPercent: 55,
+        previewReady: true,
+        tile2dReadyLods: [0],
+        brick3dReadyLods: [],
+      },
+    });
+    expect(malformed.generations).toEqual(hydrated.generations);
+  });
+
   it("hydrates source generation tile layout metadata from snapshot", () => {
     const snap = snapshot();
     snap.shared_scene.source_generations = {

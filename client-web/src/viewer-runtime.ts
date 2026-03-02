@@ -61,6 +61,7 @@ const CLIENT_EVENT_TYPES = new Set<EventEnvelope["event_type"]>([
   "source_generation_detected",
   "source_generation_started",
   "source_generation_progress",
+  "source_generation_failed",
   "source_generation_ready",
 ]);
 
