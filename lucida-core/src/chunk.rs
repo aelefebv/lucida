@@ -1,9 +1,11 @@
 use std::ops::Range;
 
+use serde::Serialize;
+
 use crate::camera::Camera;
 
 /// A chunk coordinate in the multiscale grid.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct ChunkCoord {
     pub level: u32,
     pub x: u32,
@@ -14,7 +16,7 @@ pub struct ChunkCoord {
 }
 
 /// The result of chunk planning: what to fetch now and what to prefetch.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChunkRequestPlan {
     pub needed: Vec<ChunkCoord>,
     pub prefetch: Vec<ChunkCoord>,

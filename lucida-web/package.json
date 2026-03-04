@@ -6,10 +6,12 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:wasm": "cd ../lucida-core && wasm-pack build --target web --out-dir pkg",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "lucida-core": "file:../lucida-core/pkg",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

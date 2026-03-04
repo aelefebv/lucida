@@ -320,8 +320,8 @@ There should be exactly one authoritative implementation of:
 That is lucida-core.
 
 Everything else is an adapter around it:
-- lucida-web = human UI adapter
-- renderer = GPU adapter
-- lucida-store = storage adapter
-- lucida-py = Python adapter
-- lucida-cli = shell/script adapter
+- lucida-web = human UI adapter (via WASM)
+- renderer = GPU adapter (via lucida-web via post)
+- lucida-store = storage adapter (via optional server)
+- lucida-py = Python adapter (via PyO3)
+- lucida-cli = shell/script adapter (via native Rust)

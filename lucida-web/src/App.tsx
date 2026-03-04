@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import init, { WasmScene } from "lucida-core";
 import "./App.css";
 
 interface OpenedItem {
@@ -16,8 +17,38 @@ function formatBytes(bytes: number): string {
 
 function App() {
   const [item, setItem] = useState<OpenedItem | null>(null);
+  const [wasmReady, setWasmReady] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    init().then(() => setWasmReady(true));
+  }, []);
+
+  function handleTestChunkPlan() {
+    const scene = new WasmScene(800, 600);
+    scene.add_layer("test-layer", true, 5, 256, 256, 64);
+
+    console.log("=== Initial State ===");
+    console.log("Zoom:", scene.zoom());
+    console.log("World bounds:", JSON.parse(scene.world_bounds()));
+    console.log("Chunk plan:", JSON.parse(scene.chunk_plan()));
+
+    scene.pan(200, 150);
+    scene.zoom_by(0.5);
+
+    console.log("=== After pan(200,150) + zoom_by(0.5) ===");
+    console.log("Zoom:", scene.zoom());
+    console.log("World bounds:", JSON.parse(scene.world_bounds()));
+    console.log("Chunk plan:", JSON.parse(scene.chunk_plan()));
+
+    scene.set_z(3);
+    console.log("=== After set_z(3) ===");
+    console.log("Chunk plan:", JSON.parse(scene.chunk_plan()));
+
+    scene.free();
+    console.log("Scene freed.");
+  }
 
   function handleOpenFile() {
     fileInputRef.current?.click();
@@ -77,6 +108,9 @@ function App() {
       <div className="button-group">
         <button onClick={handleOpenFile}>Open File</button>
         <button onClick={handleOpenFolder}>Open Folder</button>
+        <button onClick={handleTestChunkPlan} disabled={!wasmReady}>
+          Test Chunk Plan
+        </button>
       </div>
       {item && (
         <div className="file-info">
