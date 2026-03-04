@@ -152,7 +152,7 @@ If the browser can access the store directly, then Lucida may skip the server fo
 - desktop packaging
 
 What lucida-store should do well:
-- read OME-Zarr metadata
+- read v0.5 OME-Zarr (zarr v3) metadata
 - map logical chunk coordinates to store keys
 - fetch compressed chunk payloads
 - possibly decode codecs
