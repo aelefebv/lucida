@@ -177,6 +177,34 @@ What it should not do by default:
 - own camera state
 - become a mandatory bottleneck for every use case
 
+### Ingestion: non-OME-Zarr file conversion
+
+When a user opens a file that is not already OME-Zarr (e.g. TIFF, CZI, ND2, LIF), lucida-store should detect this and convert it before handing it off to the rest of the system.
+
+The flow:
+1. User opens a non-OME-Zarr file.
+1. lucida-store inspects the file, recognizes it is not OME-Zarr.
+1. It starts an ingestion job that converts the file to OME-Zarr, written to a cache directory.
+1. It reports progress back through the normal event channel.
+1. On completion, the converted dataset is opened through the standard viewer path.
+
+lucida-core never needs to know the original format. It only ever sees OME-Zarr.
+
+An ingestion job is a long-running task with:
+- a job ID
+- progress reporting (bytes or chunks written)
+- a terminal state: success with the output path, or failure with an error
+
+Destination policy: converted files are written to a cache directory with content-addressed naming. This avoids re-converting the same file twice and keeps the output location predictable.
+
+Format detection should be a simple header/extension sniff at the start of the open path. If the file is already OME-Zarr, it passes through with no conversion step.
+
+What ingestion should not do:
+- stream unconverted data through a compatibility shim to avoid the conversion step
+- make lucida-core aware of non-Zarr formats
+- block the UI — conversion is async with progress reporting
+- live in lucida-py or any other adapter — conversion is a storage concern
+
 ## lucida-py via PyO3/maturin
 The "Python analysis/control bridge."
 
@@ -221,7 +249,7 @@ What it should not become:
 
 A good mental model is: lucida-py is the “analysis/control bridge.”
 
-### lucida-cli
+## lucida-cli
 The "automation handle."
 
 This is the command-line client that talks in the same command language as everything else.
