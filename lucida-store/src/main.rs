@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use lucida_store::tiff_reader::{DimensionHints, DimensionOrder};
+use lucida_store::ingest::tiff_reader::{DimensionHints, DimensionOrder};
 
 /// Convert a TIFF file to an OME-Zarr v2 multiscale store.
 #[derive(Parser)]
@@ -57,7 +57,7 @@ fn main() {
         order,
     };
 
-    if let Err(e) = lucida_store::convert_tiff_to_zarr(&args.input, &args.output, chunk_size, &hints) {
+    if let Err(e) = lucida_store::ingest::convert_tiff_to_zarr(&args.input, &args.output, chunk_size, &hints) {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }

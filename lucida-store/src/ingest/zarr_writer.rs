@@ -3,8 +3,8 @@ use std::path::Path;
 
 use serde_json::json;
 
-use crate::ome_metadata;
-use crate::pyramid::Level;
+use super::ome_metadata;
+use super::pyramid::Level;
 
 /// Write a complete OME-Zarr v0.5 (Zarr v3) store to disk.
 ///

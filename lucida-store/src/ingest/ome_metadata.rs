@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use crate::pyramid::Level;
+use super::pyramid::Level;
 
 /// Build the OME-Zarr v0.5 multiscales attributes for the root group.
 ///
