@@ -9,8 +9,8 @@ pub struct Layer {
     pub visible: bool,
     /// Number of multiscale levels available.
     pub num_levels: u32,
-    /// Chunk size in pixels (assumed square for now).
-    pub chunk_size: u32,
+    /// Chunk size in pixels: [x, y, z].
+    pub chunk_size: [u32; 3],
 }
 
 /// The complete viewer state.
@@ -45,9 +45,9 @@ impl Scene {
             let level = chunk::select_level(self.camera.zoom, layer.num_levels);
             let chunks = chunk::visible_chunks(
                 &self.camera,
-                layer.chunk_size,
+                &layer.chunk_size,
                 level,
-                self.view.z,
+                &self.view.z_range,
                 self.view.t,
                 self.view.c,
             );
@@ -70,7 +70,7 @@ mod tests {
             name: "test".into(),
             visible: true,
             num_levels: 5,
-            chunk_size: 256,
+            chunk_size: [256, 256, 64],
         }
     }
 
@@ -105,10 +105,23 @@ mod tests {
         scene.add_layer(test_layer());
 
         let plan_z0 = scene.chunk_plan();
-        scene.view.set_slice("z", 5).unwrap();
-        let plan_z5 = scene.chunk_plan();
+        // z=100 with chunk_size_z=64 → chunk z=1
+        scene.view.set_slice("z", 100).unwrap();
+        let plan_z100 = scene.chunk_plan();
 
         assert_eq!(plan_z0.needed[0].z, 0);
-        assert_eq!(plan_z5.needed[0].z, 5);
+        assert_eq!(plan_z100.needed[0].z, 1);
+    }
+
+    #[test]
+    fn z_slab_produces_chunks_across_z() {
+        let mut scene = Scene::new([512, 512]);
+        scene.add_layer(test_layer());
+        // Slab spanning 2 z-chunks: 0..128 with chunk_size_z=64
+        scene.view.set_z_range(0..128);
+        let plan = scene.chunk_plan();
+        let z_values: Vec<u32> = plan.needed.iter().map(|c| c.z).collect();
+        assert!(z_values.contains(&0));
+        assert!(z_values.contains(&1));
     }
 }
