@@ -13,6 +13,19 @@ pub struct ChunkCoord {
     pub c: u32,
 }
 
+impl ChunkCoord {
+    pub fn key(&self) -> String {
+        format!(
+            "{}/{}/{}/{}/{}/{}",
+            self.level, self.t, self.c, self.z, self.y, self.x
+        )
+    }
+}
+
+pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
+    format!("{level}/{t}/{c}/{z}/{y}/{x}")
+}
+
 /// The result of chunk planning: what to fetch now and what to prefetch.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChunkRequestPlan {
@@ -148,6 +161,20 @@ mod tests {
         let mut zs: Vec<u32> = chunks.iter().map(|c| c.z).collect();
         zs.sort();
         assert_eq!(zs, vec![0, 1]);
+    }
+
+    #[test]
+    fn chunk_key_format() {
+        let coord = ChunkCoord {
+            level: 2,
+            x: 3,
+            y: 1,
+            z: 0,
+            t: 0,
+            c: 0,
+        };
+        assert_eq!(coord.key(), "2/0/0/0/1/3");
+        assert_eq!(chunk_key(2, 0, 0, 0, 1, 3), "2/0/0/0/1/3");
     }
 
     #[test]
