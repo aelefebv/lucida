@@ -274,7 +274,7 @@ function App() {
         )}
       {volume && (
           <div className="dimension-controls">
-          <DimensionControls label="Z" value={z} max={dimZ} onChange={setZ} />
+          <DimensionControls label="Z" value={z} max={dimZ} onChange={setZ} disabled={viewMode === "3d"} />
           <DimensionControls label="C" value={c} max={dimC} onChange={setC} />
           <DimensionControls label="T" value={t} max={dimT} onChange={setT} />
         </div>

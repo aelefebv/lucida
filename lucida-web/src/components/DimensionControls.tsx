@@ -5,9 +5,10 @@ interface Props {
   value: number;
   max: number;
   onChange: (v: number) => void;
+  disabled?: boolean;
 }
 
-export function DimensionControls({ label, value, max, onChange }: Props) {
+export function DimensionControls({ label, value, max, onChange, disabled }: Props) {
   if (max <= 1) return null;
 
   return (
@@ -15,7 +16,7 @@ export function DimensionControls({ label, value, max, onChange }: Props) {
       <span className="dim-label">{label}</span>
       <button
         className="dim-btn"
-        disabled={value <= 0}
+        disabled={disabled || value <= 0}
         onClick={() => onChange(value - 1)}
       >
         −
@@ -26,11 +27,12 @@ export function DimensionControls({ label, value, max, onChange }: Props) {
         min={0}
         max={max - 1}
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(Number(e.target.value))}
       />
       <button
         className="dim-btn"
-        disabled={value >= max - 1}
+        disabled={disabled || value >= max - 1}
         onClick={() => onChange(value + 1)}
       >
         +

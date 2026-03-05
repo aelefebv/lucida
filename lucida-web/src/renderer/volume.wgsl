@@ -88,10 +88,10 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     if (alpha >= 0.98) { break; } // early termination
 
     let pos = ro + rd * t;
-    // Map [0,1] position to texel coordinates
+    // Map [0,1] position to texel coordinates (flip Y to match 2D image convention)
     let texCoord = vec3i(
       clamp(i32(pos.x * f32(dims.x)), 0, dims.x - 1),
-      clamp(i32(pos.y * f32(dims.y)), 0, dims.y - 1),
+      clamp(i32((1.0 - pos.y) * f32(dims.y)), 0, dims.y - 1),
       clamp(i32(pos.z * f32(dims.z)), 0, dims.z - 1),
     );
 
