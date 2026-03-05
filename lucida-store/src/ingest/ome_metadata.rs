@@ -4,19 +4,21 @@ use super::pyramid::Level;
 
 /// Build the OME-Zarr v0.5 multiscales attributes for the root group.
 ///
+/// `level_scales` provides per-level cumulative [x, y, z] scale factors.
 /// Always writes 5D TCZYX axes. Output is wrapped in `{"ome": {...}}`.
-pub fn build_multiscales_attrs(levels: &[Level]) -> Value {
+pub fn build_multiscales_attrs(levels: &[Level], level_scales: &[[f64; 3]]) -> Value {
     let datasets: Vec<Value> = levels
         .iter()
         .enumerate()
         .map(|(i, _)| {
-            let scale_factor = (1u32 << i) as f64;
+            let s = level_scales.get(i).copied().unwrap_or([1.0, 1.0, 1.0]);
             json!({
                 "path": i.to_string(),
                 "coordinateTransformations": [
                     {
                         "type": "scale",
-                        "scale": [1.0, 1.0, 1.0, scale_factor, scale_factor]
+                        // TCZYX order: [t, c, z, y, x]
+                        "scale": [1.0, 1.0, s[2], s[1], s[0]]
                     }
                 ]
             })
@@ -72,6 +74,12 @@ pub fn build_array_zarr_json(level: &Level, chunk_size: &[u32; 3]) -> Value {
                 "configuration": {
                     "endian": "little"
                 }
+            },
+            {
+                "name": "numcodecs/lz4",
+                "configuration": {
+                    "acceleration": 1
+                }
             }
         ],
         "dimension_names": ["t", "c", "z", "y", "x"],
@@ -104,6 +112,7 @@ mod tests {
         assert_eq!(za["data_type"], "uint16");
         assert_eq!(za["dimension_names"], json!(["t", "c", "z", "y", "x"]));
         assert_eq!(za["codecs"][0]["name"], "bytes");
+        assert_eq!(za["codecs"][1]["name"], "numcodecs/lz4");
     }
 
     #[test]
@@ -134,7 +143,8 @@ mod tests {
             channels: 1,
             timepoints: 1,
         }];
-        let attrs = build_multiscales_attrs(&levels);
+        let scales = vec![[1.0, 1.0, 1.0]];
+        let attrs = build_multiscales_attrs(&levels, &scales);
         let axes = attrs["ome"]["multiscales"][0]["axes"].as_array().unwrap();
         assert_eq!(axes.len(), 5);
         assert_eq!(axes[0]["name"], "t");
@@ -151,7 +161,8 @@ mod tests {
             channels: 1,
             timepoints: 1,
         }];
-        let attrs = build_multiscales_attrs(&levels);
+        let scales = vec![[1.0, 1.0, 1.0]];
+        let attrs = build_multiscales_attrs(&levels, &scales);
         assert_eq!(attrs["ome"]["version"], "0.5");
         assert_eq!(attrs["ome"]["multiscales"][0]["version"], "0.5");
     }
@@ -162,11 +173,28 @@ mod tests {
             Level { data: vec![], width: 512, height: 512, depth: 1, channels: 1, timepoints: 1 },
             Level { data: vec![], width: 256, height: 256, depth: 1, channels: 1, timepoints: 1 },
         ];
-        let attrs = build_multiscales_attrs(&levels);
+        let scales = vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0]];
+        let attrs = build_multiscales_attrs(&levels, &scales);
         let ds = &attrs["ome"]["multiscales"][0]["datasets"];
         assert_eq!(ds[0]["path"], "0");
         assert_eq!(ds[1]["path"], "1");
-        // Level 1 scale: [1, 1, 1, 2, 2]
+        // Level 1 scale: [1, 1, 1, 2, 2] (TCZYX)
         assert_eq!(ds[1]["coordinateTransformations"][0]["scale"], json!([1.0, 1.0, 1.0, 2.0, 2.0]));
+    }
+
+    #[test]
+    fn multiscales_anisotropic_scales() {
+        let levels = vec![
+            Level { data: vec![], width: 512, height: 512, depth: 100, channels: 1, timepoints: 1 },
+            Level { data: vec![], width: 256, height: 256, depth: 100, channels: 1, timepoints: 1 },
+            Level { data: vec![], width: 128, height: 128, depth: 50, channels: 1, timepoints: 1 },
+        ];
+        let scales = vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0], [4.0, 4.0, 2.0]];
+        let attrs = build_multiscales_attrs(&levels, &scales);
+        let ds = &attrs["ome"]["multiscales"][0]["datasets"];
+        // Level 1: XY only → z stays 1.0
+        assert_eq!(ds[1]["coordinateTransformations"][0]["scale"], json!([1.0, 1.0, 1.0, 2.0, 2.0]));
+        // Level 2: XY + Z → z=2.0
+        assert_eq!(ds[2]["coordinateTransformations"][0]["scale"], json!([1.0, 1.0, 2.0, 4.0, 4.0]));
     }
 }

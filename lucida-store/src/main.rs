@@ -14,11 +14,11 @@ struct Args {
     output: PathBuf,
 
     /// Chunk size in XY (pixels)
-    #[arg(long, default_value_t = 256)]
+    #[arg(long, default_value_t = 128)]
     chunk_xy: u32,
 
     /// Chunk size in Z (slices)
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 128)]
     chunk_z: u32,
 
     /// Number of timepoints (overrides OME-XML autodetection)
@@ -37,6 +37,18 @@ struct Args {
     /// (overrides OME-XML autodetection)
     #[arg(long)]
     dim_order: Option<String>,
+
+    /// Physical voxel size in X (overrides OME-XML)
+    #[arg(long)]
+    voxel_x: Option<f64>,
+
+    /// Physical voxel size in Y (overrides OME-XML)
+    #[arg(long)]
+    voxel_y: Option<f64>,
+
+    /// Physical voxel size in Z (overrides OME-XML)
+    #[arg(long)]
+    voxel_z: Option<f64>,
 }
 
 fn main() {
@@ -55,6 +67,9 @@ fn main() {
         size_c: args.size_c,
         size_z: args.size_z,
         order,
+        voxel_size_x: args.voxel_x,
+        voxel_size_y: args.voxel_y,
+        voxel_size_z: args.voxel_z,
     };
 
     if let Err(e) = lucida_store::ingest::convert_tiff_to_zarr(&args.input, &args.output, chunk_size, &hints) {

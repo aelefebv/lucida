@@ -31,7 +31,7 @@ export async function assembleVolume(
     for (let iy = 0; iy < ny; iy++) {
       for (let ix = 0; ix < nx; ix++) {
         tasks.push(
-          loadChunk(fileIndex, level, t, c, iz, iy, ix).then((buf) => {
+          loadChunk(fileIndex, level, t, c, iz, iy, ix, meta.codecs).then((buf) => {
             const chunk = new Uint16Array(buf);
             const zOff = iz * chunkZ;
             const yOff = iy * chunkY;

@@ -1,6 +1,9 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rayon::prelude::*;
 use serde_json::json;
 
 use super::ome_metadata;
@@ -15,29 +18,52 @@ pub fn write_zarr(
     levels: &[Level],
     chunk_size: &[u32; 3],
 ) -> Result<(), String> {
+    // Default: assume each level is 2x in XY only (legacy behavior)
+    let scales: Vec<[f64; 3]> = (0..levels.len())
+        .map(|i| {
+            let f = (1u32 << i) as f64;
+            [f, f, 1.0]
+        })
+        .collect();
+    write_root_metadata(output, levels, &scales)?;
+
+    for (i, level) in levels.iter().enumerate() {
+        write_zarr_level(output, i, level, chunk_size)?;
+    }
+
+    Ok(())
+}
+
+/// Write root group zarr.json with OME multiscales attributes.
+///
+/// Call this once before writing individual levels.
+/// `level_scales` provides per-level cumulative [x, y, z] scale factors.
+pub fn write_root_metadata(output: &Path, levels: &[Level], level_scales: &[[f64; 3]]) -> Result<(), String> {
     fs::create_dir_all(output).map_err(|e| format!("failed to create output dir: {e}"))?;
 
-    // Root group zarr.json: group metadata + OME multiscales attributes
-    let ome_attrs = ome_metadata::build_multiscales_attrs(levels);
+    let ome_attrs = ome_metadata::build_multiscales_attrs(levels, level_scales);
     let root_meta = json!({
         "zarr_format": 3,
         "node_type": "group",
         "attributes": ome_attrs
     });
-    write_json(output, "zarr.json", &root_meta)?;
+    write_json(output, "zarr.json", &root_meta)
+}
 
-    for (i, level) in levels.iter().enumerate() {
-        let level_dir = output.join(i.to_string());
-        fs::create_dir_all(&level_dir).map_err(|e| format!("failed to create level dir: {e}"))?;
+/// Write a single pyramid level (array metadata + chunks) to disk.
+pub fn write_zarr_level(
+    output: &Path,
+    level_index: usize,
+    level: &Level,
+    chunk_size: &[u32; 3],
+) -> Result<(), String> {
+    let level_dir = output.join(level_index.to_string());
+    fs::create_dir_all(&level_dir).map_err(|e| format!("failed to create level dir: {e}"))?;
 
-        // Level zarr.json: full Zarr v3 array metadata
-        let array_meta = ome_metadata::build_array_zarr_json(level, chunk_size);
-        write_json(&level_dir, "zarr.json", &array_meta)?;
+    let array_meta = ome_metadata::build_array_zarr_json(level, chunk_size);
+    write_json(&level_dir, "zarr.json", &array_meta)?;
 
-        write_chunks(&level_dir, level, chunk_size)?;
-    }
-
-    Ok(())
+    write_chunks(&level_dir, level_index, level, chunk_size)
 }
 
 /// Write chunk files for a single level.
@@ -45,6 +71,7 @@ pub fn write_zarr(
 /// Chunk path: `c/{t}/{c}/{z}/{y}/{x}`
 fn write_chunks(
     level_dir: &Path,
+    level_index: usize,
     level: &Level,
     chunk_size: &[u32; 3],
 ) -> Result<(), String> {
@@ -56,32 +83,68 @@ fn write_chunks(
     let ny = (level.height + cy - 1) / cy;
     let nz = (level.depth + cz - 1) / cz;
 
+    // Collect all chunk indices
+    let mut indices = Vec::new();
     for ti in 0..level.timepoints {
         for ci in 0..level.channels {
             for zi in 0..nz {
                 for yi in 0..ny {
                     for xi in 0..nx {
-                        let chunk_path = level_dir
-                            .join("c")
-                            .join(ti.to_string())
-                            .join(ci.to_string())
-                            .join(zi.to_string())
-                            .join(yi.to_string())
-                            .join(xi.to_string());
-
-                        if let Some(parent) = chunk_path.parent() {
-                            fs::create_dir_all(parent)
-                                .map_err(|e| format!("failed to create chunk dir: {e}"))?;
-                        }
-
-                        let bytes = extract_chunk(level, cx, cy, cz, xi, yi, zi, ti, ci);
-                        fs::write(&chunk_path, &bytes)
-                            .map_err(|e| format!("failed to write chunk: {e}"))?;
+                        indices.push((ti, ci, zi, yi, xi));
                     }
                 }
             }
         }
     }
+
+    let total = indices.len();
+    if total == 0 {
+        return Ok(());
+    }
+
+    // Pre-create all unique parent directories to avoid racing on create_dir_all
+    let mut dirs = HashSet::new();
+    for &(ti, ci, zi, yi, _xi) in &indices {
+        let parent = level_dir
+            .join("c")
+            .join(ti.to_string())
+            .join(ci.to_string())
+            .join(zi.to_string())
+            .join(yi.to_string());
+        dirs.insert(parent);
+    }
+    for dir in &dirs {
+        fs::create_dir_all(dir).map_err(|e| format!("failed to create chunk dir: {e}"))?;
+    }
+
+    // Progress counter
+    let completed = AtomicUsize::new(0);
+
+    // Write chunks in parallel
+    indices
+        .par_iter()
+        .try_for_each(|&(ti, ci, zi, yi, xi)| {
+            let chunk_path = level_dir
+                .join("c")
+                .join(ti.to_string())
+                .join(ci.to_string())
+                .join(zi.to_string())
+                .join(yi.to_string())
+                .join(xi.to_string());
+
+            let raw = extract_chunk(level, cx, cy, cz, xi, yi, zi, ti, ci);
+            let compressed = lz4_flex::compress_prepend_size(&raw);
+
+            fs::write(&chunk_path, &compressed)
+                .map_err(|e| format!("failed to write chunk: {e}"))?;
+
+            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            if done % 100 == 0 || done == total {
+                eprintln!("  level {level_index}: writing chunks {done}/{total}");
+            }
+
+            Ok::<(), String>(())
+        })?;
 
     Ok(())
 }
@@ -150,8 +213,10 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn temp_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lucida_test_{}", std::process::id()));
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("lucida_test_{}", std::process::id()))
+            .join(name);
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -193,7 +258,7 @@ mod tests {
 
     #[test]
     fn write_zarr_creates_expected_structure() {
-        let dir = temp_dir().join("zarr");
+        let dir = temp_dir("zarr");
         let levels = vec![Level {
             data: vec![0u16; 4 * 4],
             width: 4,
@@ -222,12 +287,15 @@ mod tests {
         assert_eq!(arr["node_type"], "array");
         assert_eq!(arr["data_type"], "uint16");
 
+        // Verify LZ4 codec in metadata
+        assert_eq!(arr["codecs"][1]["name"], "numcodecs/lz4");
+
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn write_zarr_multichannel() {
-        let dir = temp_dir().join("zarr_mc");
+        let dir = temp_dir("zarr_mc");
         let levels = vec![Level {
             data: vec![0u16; 2 * 2 * 4 * 4],
             width: 4,
@@ -240,6 +308,30 @@ mod tests {
 
         assert!(dir.join("0/c/0/0/0/0/0").exists()); // t=0, c=0
         assert!(dir.join("0/c/1/1/0/0/0").exists()); // t=1, c=1
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chunks_are_lz4_compressed() {
+        let dir = temp_dir("zarr_lz4");
+        let data: Vec<u16> = (0..16).collect();
+        let levels = vec![Level {
+            data,
+            width: 4,
+            height: 4,
+            depth: 1,
+            channels: 1,
+            timepoints: 1,
+        }];
+        write_zarr(&dir, &levels, &[4, 4, 1]).unwrap();
+
+        let chunk_bytes = fs::read(dir.join("0/c/0/0/0/0/0")).unwrap();
+        // Should be LZ4 compressed — decompress and verify
+        let decompressed = lz4_flex::decompress_size_prepended(&chunk_bytes).unwrap();
+        assert_eq!(decompressed.len(), 4 * 4 * 1 * 2); // 4x4x1 u16
+        assert_eq!(u16::from_le_bytes([decompressed[0], decompressed[1]]), 0);
+        assert_eq!(u16::from_le_bytes([decompressed[2], decompressed[3]]), 1);
 
         let _ = fs::remove_dir_all(&dir);
     }

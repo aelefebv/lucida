@@ -6,12 +6,18 @@ export interface AxisInfo {
   unit?: string;
 }
 
+export interface CodecMeta {
+  name: string;
+  configuration?: Record<string, unknown>;
+}
+
 export interface LevelMeta {
   path: string;
   shape: number[]; // [T, C, Z, Y, X]
   chunkShape: number[]; // [T, C, Z, Y, X]
   dataType: string;
   scale: number[]; // [T, C, Z, Y, X] physical spacing per voxel
+  codecs: CodecMeta[];
 }
 
 export interface DatasetInfo {
@@ -60,6 +66,7 @@ export async function parseDatasetInfo(
         chunkShape: levelJson.chunk_grid.configuration.chunk_shape,
         dataType: levelJson.data_type,
         scale,
+        codecs: levelJson.codecs ?? [],
       };
     }),
   );
