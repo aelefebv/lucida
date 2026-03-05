@@ -12,6 +12,8 @@ pub struct Layer {
     pub num_levels: u32,
     /// Chunk size in pixels: [x, y, z].
     pub chunk_size: [u32; 3],
+    /// Full-resolution data shape in voxels: [x, y, z].
+    pub data_shape: [u32; 3],
 }
 
 /// The complete viewer state.
@@ -84,6 +86,7 @@ impl Scene {
                 level,
                 self.view.t,
                 self.view.c,
+                &layer.data_shape,
             );
             needed.extend(chunks);
         }
@@ -105,6 +108,7 @@ mod tests {
             visible: true,
             num_levels: 5,
             chunk_size: [256, 256, 64],
+            data_shape: [4096, 4096, 256],
         }
     }
 
@@ -181,6 +185,7 @@ mod tests {
             visible: true,
             num_levels: 1,
             chunk_size: [64, 64, 64],
+            data_shape: [300, 200, 100],
         });
         let plan = scene.chunk_plan();
         // 3D mode should produce chunks — the frustum sees the volume

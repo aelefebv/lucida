@@ -52,12 +52,16 @@ impl WasmScene {
         chunk_x: u32,
         chunk_y: u32,
         chunk_z: u32,
+        shape_x: u32,
+        shape_y: u32,
+        shape_z: u32,
     ) {
         self.inner.add_layer(Layer {
             name: name.to_string(),
             visible,
             num_levels,
             chunk_size: [chunk_x, chunk_y, chunk_z],
+            data_shape: [shape_x, shape_y, shape_z],
         });
     }
 

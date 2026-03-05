@@ -65,12 +65,14 @@ pub fn select_level(zoom: f64, num_levels: u32) -> u32 {
 /// Compute which chunk grid cells intersect the visible region's bounds and z range.
 ///
 /// `chunk_size` is [x, y, z] in pixels per chunk at level 0.
+/// `data_shape` is the full-resolution data extent [x, y, z] in voxels.
 pub fn visible_chunks(
     region: &VisibleRegion,
     chunk_size: &[u32; 3],
     level: u32,
     t: u32,
     c: u32,
+    data_shape: &[u32; 3],
 ) -> Vec<ChunkCoord> {
     let [min_x, min_y, max_x, max_y] = region.xy_bounds;
     let scale = (1u32 << level) as f64;
@@ -79,13 +81,18 @@ pub fn visible_chunks(
     let chunk_world_y = chunk_size[1] as f64 * scale;
     let chunk_world_z = chunk_size[2] as f64 * scale;
 
+    // Max chunk index (exclusive) at this level
+    let max_col = ((data_shape[0] as f64 / scale) / chunk_size[0] as f64).ceil() as u32;
+    let max_row = ((data_shape[1] as f64 / scale) / chunk_size[1] as f64).ceil() as u32;
+    let max_z = ((data_shape[2] as f64 / scale) / chunk_size[2] as f64).ceil() as u32;
+
     let col_start = (min_x / chunk_world_x).floor().max(0.0) as u32;
-    let col_end = (max_x / chunk_world_x).ceil().max(0.0) as u32;
+    let col_end = ((max_x / chunk_world_x).ceil().max(0.0) as u32).min(max_col);
     let row_start = (min_y / chunk_world_y).floor().max(0.0) as u32;
-    let row_end = (max_y / chunk_world_y).ceil().max(0.0) as u32;
+    let row_end = ((max_y / chunk_world_y).ceil().max(0.0) as u32).min(max_row);
 
     let z_start = (region.z_range.start as f64 / chunk_world_z).floor() as u32;
-    let z_end = (region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32;
+    let z_end = ((region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32).min(max_z);
 
     let mut chunks = Vec::new();
     for z in z_start..z_end {
@@ -149,7 +156,8 @@ mod tests {
     fn visible_chunks_at_origin() {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..1), None, None);
-        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
+        let shape = [4096, 4096, 256];
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].x, 0);
         assert_eq!(chunks[0].y, 0);
@@ -163,7 +171,8 @@ mod tests {
             v.center = [512.0, 512.0];
         }
         let region = cam.visible_region(&(0..1), None, None);
-        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
+        let shape = [4096, 4096, 256];
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape);
         assert_eq!(chunks.len(), 4);
     }
 
@@ -171,7 +180,8 @@ mod tests {
     fn z_slab_spans_multiple_chunks() {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..128), None, None);
-        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
+        let shape = [4096, 4096, 256];
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape);
         assert_eq!(chunks.len(), 2);
         let mut zs: Vec<u32> = chunks.iter().map(|c| c.z).collect();
         zs.sort();
@@ -196,7 +206,8 @@ mod tests {
     fn single_z_slice_maps_to_correct_chunk() {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(100..101), None, None);
-        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
+        let shape = [4096, 4096, 256];
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].z, 1);
     }

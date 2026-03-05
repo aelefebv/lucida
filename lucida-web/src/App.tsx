@@ -148,7 +148,7 @@ function App() {
       const chunkX = fullRes.chunkShape[4];
       const chunkY = fullRes.chunkShape[3];
       const chunkZ = fullRes.chunkShape[2];
-      scene.add_layer("main", true, info.levels.length, chunkX, chunkY, chunkZ);
+      scene.add_layer("main", true, info.levels.length, chunkX, chunkY, chunkZ, shapeX, shapeY, shapeZ);
 
       // Center the Rust 2D camera on the image so world_bounds matches the TS viewer
       scene.set_center(shapeX / 2, shapeY / 2);
