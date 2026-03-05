@@ -1,5 +1,7 @@
 use crate::camera::Camera;
+use crate::camera3d::Camera3D;
 use crate::chunk::{self, ChunkRequestPlan};
+use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
 /// A single image layer in the scene.
@@ -17,17 +19,27 @@ pub struct Layer {
 #[derive(Debug)]
 pub struct Scene {
     pub camera: Camera,
+    pub camera_3d: Camera3D,
     pub view: ViewState,
     pub layers: Vec<Layer>,
+    pub volume_transform: Option<VolumeTransform>,
 }
 
 impl Scene {
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
             camera: Camera::new(viewport),
+            camera_3d: Camera3D::new(viewport),
             view: ViewState::new(),
             layers: Vec::new(),
+            volume_transform: None,
         }
+    }
+
+    /// Set the volume scale to account for anisotropic voxel spacing.
+    /// `shape` is [Z, Y, X], `scale` is [Z, Y, X].
+    pub fn set_volume_scale(&mut self, shape: [u32; 3], scale: [f64; 3]) {
+        self.volume_transform = Some(transform::compute_volume_transform(shape, scale));
     }
 
     pub fn add_layer(&mut self, layer: Layer) {
