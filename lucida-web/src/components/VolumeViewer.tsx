@@ -6,7 +6,7 @@ import type { DatasetInfo } from "../zarr/metadata.ts";
 import { ChunkStore } from "../zarr/chunkStore.ts";
 import { chunk_key } from "lucida-core";
 import type { ChunkCoord } from "../zarr/chunkStore.ts";
-import { initGPU, createVolumeTexture } from "../renderer/gpuContext.ts";
+import { initGPU, createEmptyVolumeTexture, writeVolumeChunk } from "../renderer/gpuContext.ts";
 import { VolumeRenderer } from "../renderer/volumeRenderer.ts";
 
 interface Props {
@@ -47,13 +47,24 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
 
       const renderer = new VolumeRenderer(gpu.device, gpu.context, gpu.format);
 
-      const texture = createVolumeTexture(
+      const texture = createEmptyVolumeTexture(
         gpu.device,
         volume.width,
         volume.height,
         volume.depth,
-        volume.data,
       );
+      for (let z = 0; z < volume.depth; z++) {
+        gpu.device.queue.writeTexture(
+          { texture, origin: [0, 0, z] },
+          volume.data.buffer,
+          {
+            offset: volume.data.byteOffset + z * volume.width * volume.height * 2,
+            bytesPerRow: volume.width * 2,
+            rowsPerImage: volume.height,
+          },
+          [volume.width, volume.height, 1],
+        );
+      }
       renderer.setVolume(texture, volume.width, volume.height, volume.depth);
 
       let min = 65535, max = 0;
@@ -118,15 +129,22 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
             );
 
             if (allReady && (targetLevel !== st.currentLevel || viewT !== st.currentT || viewC !== st.currentC)) {
-              // Assemble volume from store
               const levelMeta = datasetInfo.levels[targetLevel];
               const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
               const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-              const assembled = new Uint16Array(widthFull * heightFull * depthFull);
 
               const nz = Math.ceil(depthFull / chunkZ);
               const ny = Math.ceil(heightFull / chunkY);
               const nx = Math.ceil(widthFull / chunkX);
+
+              const newTexture = createEmptyVolumeTexture(
+                st.device,
+                widthFull,
+                heightFull,
+                depthFull,
+              );
+
+              let newMin = 65535, newMax = 0;
 
               for (let iz = 0; iz < nz; iz++) {
                 for (let iy = 0; iy < ny; iy++) {
@@ -143,34 +161,20 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
                     const ch = Math.min(chunkY, heightFull - yOff);
                     const cd = Math.min(chunkZ, depthFull - zOff);
 
-                    for (let dz = 0; dz < cd; dz++) {
-                      for (let dy = 0; dy < ch; dy++) {
-                        const srcStart = (dz * chunkY + dy) * chunkX;
-                        const dstStart =
-                          ((zOff + dz) * heightFull + (yOff + dy)) * widthFull + xOff;
-                        assembled.set(chunk.subarray(srcStart, srcStart + cw), dstStart);
-                      }
+                    writeVolumeChunk(st.device, newTexture, chunk, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+
+                    // Sample intensity range from this chunk
+                    const sampleStep = Math.max(1, Math.floor(chunk.length / (100000 / (nz * ny * nx))));
+                    for (let i = 0; i < chunk.length; i += sampleStep) {
+                      const v = chunk[i];
+                      if (v < newMin) newMin = v;
+                      if (v > newMax) newMax = v;
                     }
                   }
                 }
               }
 
-              const newTexture = createVolumeTexture(
-                st.device,
-                widthFull,
-                heightFull,
-                depthFull,
-                assembled,
-              );
               st.renderer.setVolume(newTexture, widthFull, heightFull, depthFull);
-
-              let newMin = 65535, newMax = 0;
-              const sampleStep = Math.max(1, Math.floor(assembled.length / 100000));
-              for (let i = 0; i < assembled.length; i += sampleStep) {
-                const v = assembled[i];
-                if (v < newMin) newMin = v;
-                if (v > newMax) newMax = v;
-              }
               st.renderer.setIntensityRange(newMin, newMax);
 
               st.currentLevel = targetLevel;

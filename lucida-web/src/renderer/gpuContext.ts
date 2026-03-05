@@ -16,7 +16,12 @@ export async function initGPU(canvas: HTMLCanvasElement): Promise<GPUContext> {
     throw new Error("Failed to get WebGPU adapter");
   }
 
-  const device = await adapter.requestDevice();
+  const device = await adapter.requestDevice({
+    requiredLimits: {
+      maxBufferSize: adapter.limits.maxBufferSize,
+      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+    },
+  });
   const context = canvas.getContext("webgpu");
   if (!context) {
     throw new Error("Failed to get WebGPU canvas context");
@@ -28,32 +33,39 @@ export async function initGPU(canvas: HTMLCanvasElement): Promise<GPUContext> {
   return { device, context, format };
 }
 
-export function createVolumeTexture(
+export function createEmptyVolumeTexture(
   device: GPUDevice,
   width: number,
   height: number,
   depth: number,
-  data: Uint16Array,
 ): GPUTexture {
-  const texture = device.createTexture({
+  return device.createTexture({
     size: [width, height, depth],
     format: "r16uint",
     dimension: "3d",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
+}
 
+export function writeVolumeChunk(
+  device: GPUDevice,
+  texture: GPUTexture,
+  data: Uint16Array,
+  chunkX: number,
+  chunkY: number,
+  cw: number,
+  ch: number,
+  cd: number,
+  xOff: number,
+  yOff: number,
+  zOff: number,
+): void {
   device.queue.writeTexture(
-    { texture },
+    { texture, origin: [xOff, yOff, zOff] },
     data.buffer,
-    {
-      offset: data.byteOffset,
-      bytesPerRow: width * 2,
-      rowsPerImage: height,
-    },
-    [width, height, depth],
+    { offset: data.byteOffset, bytesPerRow: chunkX * 2, rowsPerImage: chunkY },
+    [cw, ch, cd],
   );
-
-  return texture;
 }
 
 export function createSliceTexture(
