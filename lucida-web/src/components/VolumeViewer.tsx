@@ -102,11 +102,12 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
         const st = stateRef.current;
         if (!st) { st && (st.animId = requestAnimationFrame(frame)); return; }
 
-        // Check if store has new chunks
+        // Check if store has new chunks or camera moved
         const currentVersion = store.getVersion();
-        if (currentVersion !== st.lastStoreVersion) {
-          st.lastStoreVersion = currentVersion;
+        const storeChanged = currentVersion !== st.lastStoreVersion;
+        if (storeChanged) st.lastStoreVersion = currentVersion;
 
+        if (storeChanged || st.dirty) {
           // Get current view state from scene
           const viewT = scene.t();
           const viewC = scene.c();
@@ -121,6 +122,9 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
           }
 
           if (plan.needed.length > 0) {
+            // Ensure any uncached chunks are fetched
+            store.ensureFetched(plan.needed);
+
             const targetLevel = plan.needed[0].level;
 
             // Check if all chunks for this level are available
