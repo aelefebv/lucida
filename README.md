@@ -13,6 +13,7 @@ Vite hot-reloads automatically if npm run dev is running, so nothing extra neede
 ```bash
 cd lucida-core && cargo test
 cd ../lucida-web && npm run build:wasm
+cd ..
 ```
 
 Then refresh the browser (or restart npm run dev if the wasm dependency isn't picked up).
