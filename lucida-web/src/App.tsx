@@ -2,9 +2,12 @@ import { useEffect, useRef, useState } from "react";
 import init, { WasmScene } from "lucida-core";
 import { buildFileIndex } from "./zarr/fileIndex.ts";
 import { parseDatasetInfo } from "./zarr/metadata.ts";
+import type { DatasetInfo, LevelMeta } from "./zarr/metadata.ts";
 import { assembleVolume } from "./zarr/volumeAssembler.ts";
 import type { VolumeData } from "./zarr/volumeAssembler.ts";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
+import { SliceViewer } from "./components/SliceViewer.tsx";
+import { DimensionControls } from "./components/DimensionControls.tsx";
 import "./App.css";
 
 interface OpenedItem {
@@ -20,6 +23,8 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+type ViewMode = "2d" | "3d";
+
 function App() {
   const [item, setItem] = useState<OpenedItem | null>(null);
   const [wasmReady, setWasmReady] = useState(false);
@@ -27,12 +32,66 @@ function App() {
   const [wasmScene, setWasmScene] = useState<WasmScene | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>("2d");
+
+  // Dimension state
+  const [z, setZ] = useState(0);
+  const [c, setC] = useState(0);
+  const [t, setT] = useState(0);
+
+  // Keep dataset info and file index for re-assembling on C/T change
+  const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
+  const [levelMeta, setLevelMeta] = useState<LevelMeta | null>(null);
+  const fileIndexRef = useRef<Map<string, File> | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     init().then(() => setWasmReady(true));
   }, []);
+
+  // Sync Z to WASM scene
+  useEffect(() => {
+    if (wasmScene) wasmScene.set_z(z);
+  }, [z, wasmScene]);
+
+  // Re-assemble volume when C or T changes
+  useEffect(() => {
+    const fileIndex = fileIndexRef.current;
+    if (!fileIndex || !levelMeta) return;
+
+    let cancelled = false;
+    setLoading(true);
+
+    assembleVolume(fileIndex, levelMeta.path, t, c, levelMeta)
+      .then((vol) => {
+        if (cancelled) return;
+        setVolume(vol);
+        // Clamp z if it exceeds new depth
+        setZ((prev) => Math.min(prev, vol.depth - 1));
+
+        // Update WASM scene
+        if (wasmScene) {
+          wasmScene.set_c(c);
+          wasmScene.set_t(t);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error("Failed to reassemble volume:", err);
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [c, t, levelMeta]);
 
   function handleTestChunkPlan() {
     const scene = new WasmScene(800, 600);
@@ -77,7 +136,12 @@ function App() {
     });
     setVolume(null);
     setWasmScene(null);
+    setDatasetInfo(null);
+    setLevelMeta(null);
     setError(null);
+    setZ(0);
+    setC(0);
+    setT(0);
   }
 
   async function handleDirChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -98,29 +162,45 @@ function App() {
     });
     setVolume(null);
     setWasmScene(null);
+    setDatasetInfo(null);
+    setLevelMeta(null);
     setError(null);
+    setZ(0);
+    setC(0);
+    setT(0);
 
     // Try to load as OME-Zarr
     const fileIndex = buildFileIndex(files);
     if (!fileIndex.has("zarr.json")) return;
 
+    fileIndexRef.current = fileIndex;
     setLoading(true);
     try {
       const info = await parseDatasetInfo(fileIndex);
       console.log("OME-Zarr metadata:", info);
+      setDatasetInfo(info);
 
       // Use coarsest level for fast first load
       const level = info.levels[info.levels.length - 1];
+      setLevelMeta(level);
+
       const vol = await assembleVolume(fileIndex, level.path, 0, 0, level);
       console.log(`Volume loaded: ${vol.width}x${vol.height}x${vol.depth}`);
 
       // Create WasmScene and set volume scale from metadata
       const scene = new WasmScene(800, 600);
       // shape and scale are in [T, C, Z, Y, X] order; extract Z, Y, X
-      const shapeZ = level.shape[2], shapeY = level.shape[3], shapeX = level.shape[4];
-      const scaleZ = level.scale[2], scaleY = level.scale[3], scaleX = level.scale[4];
+      const shapeZ = level.shape[2],
+        shapeY = level.shape[3],
+        shapeX = level.shape[4];
+      const scaleZ = level.scale[2],
+        scaleY = level.scale[3],
+        scaleX = level.scale[4];
       scene.set_volume_scale(shapeZ, shapeY, shapeX, scaleZ, scaleY, scaleX);
-      scene.set_mode_3d();
+      scene.set_mode_2d();
+      scene.set_z(0);
+      scene.set_c(0);
+      scene.set_t(0);
 
       setVolume(vol);
       setWasmScene(scene);
@@ -131,6 +211,23 @@ function App() {
       setLoading(false);
     }
   }
+
+  function handleViewModeToggle() {
+    const next = viewMode === "2d" ? "3d" : "2d";
+    setViewMode(next);
+    if (wasmScene) {
+      if (next === "3d") {
+        wasmScene.set_mode_3d();
+      } else {
+        wasmScene.set_mode_2d();
+      }
+    }
+  }
+
+  // Dimension extents from the current level
+  const dimZ = levelMeta ? levelMeta.shape[2] : 1;
+  const dimC = levelMeta ? levelMeta.shape[1] : 1;
+  const dimT = levelMeta ? levelMeta.shape[0] : 1;
 
   return (
     <div className="app">
@@ -156,6 +253,11 @@ function App() {
         <button onClick={handleTestChunkPlan} disabled={!wasmReady}>
           Test Chunk Plan
         </button>
+        {volume && (
+          <button onClick={handleViewModeToggle}>
+            {viewMode === "2d" ? "3D View" : "2D View"}
+          </button>
+        )}
       </div>
       {item && (
         <div className="file-info">
@@ -166,9 +268,19 @@ function App() {
           </p>
         </div>
       )}
+      {volume && viewMode === "2d" && <SliceViewer volume={volume} z={z} />}
+      {volume && viewMode === "3d" && wasmScene && (
+          <VolumeViewer volume={volume} scene={wasmScene} />
+        )}
+      {volume && (
+          <div className="dimension-controls">
+          <DimensionControls label="Z" value={z} max={dimZ} onChange={setZ} />
+          <DimensionControls label="C" value={c} max={dimC} onChange={setC} />
+          <DimensionControls label="T" value={t} max={dimT} onChange={setT} />
+        </div>
+      )}
       {loading && <p className="secondary">Loading volume...</p>}
       {error && <p style={{ color: "#f44" }}>{error}</p>}
-      {volume && wasmScene && <VolumeViewer volume={volume} scene={wasmScene} />}
     </div>
   );
 }
