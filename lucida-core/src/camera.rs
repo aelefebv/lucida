@@ -293,10 +293,24 @@ impl View3D {
         let z_start = voxel_min[2].floor().max(0.0) as u32;
         let z_end = voxel_max[2].ceil().max(0.0) as u32;
 
+        // Convert effective_zoom from pixels-per-world-unit to pixels-per-voxel.
+        // The model matrix scales each axis: model[0]=sx, model[5]=sy, model[10]=sz.
+        // Voxels per world unit in each axis = shape[i] / model_scale[i].
+        // Use the max to get the most conservative (finest) LOD selection.
+        let (sx, sy, sz) = match volume_transform {
+            Some(t) => (t.model[0] as f64, t.model[5] as f64, t.model[10] as f64),
+            None => (1.0, 1.0, 1.0),
+        };
+        let vpw_x = shape[2] as f64 / sx.abs().max(1e-12);
+        let vpw_y = shape[1] as f64 / sy.abs().max(1e-12);
+        let vpw_z = shape[0] as f64 / sz.abs().max(1e-12);
+        let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
+        let zoom_per_voxel = self.effective_zoom() / max_vpw;
+
         VisibleRegion {
             xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
             z_range: z_start..z_end.max(z_start),
-            effective_zoom: self.effective_zoom(),
+            effective_zoom: zoom_per_voxel,
         }
     }
 }

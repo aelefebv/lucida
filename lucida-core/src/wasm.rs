@@ -94,6 +94,20 @@ impl WasmScene {
         self.inner.view.c = c;
     }
 
+    // --- View state getters ---
+
+    pub fn z(&self) -> u32 {
+        self.inner.view.z_range.start
+    }
+
+    pub fn t(&self) -> u32 {
+        self.inner.view.t
+    }
+
+    pub fn c(&self) -> u32 {
+        self.inner.view.c
+    }
+
     // --- Queries ---
 
     pub fn zoom(&self) -> f64 {

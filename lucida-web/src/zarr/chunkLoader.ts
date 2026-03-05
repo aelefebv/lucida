@@ -11,11 +11,17 @@ export async function loadChunk(
   y: number,
   x: number,
   codecs: CodecMeta[],
+  signal?: AbortSignal,
 ): Promise<ArrayBuffer> {
   const path = `${level}/c/${t}/${c}/${z}/${y}/${x}`;
   const file = fileIndex.get(path);
   if (!file) throw new Error(`Missing chunk: ${path}`);
+
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+
   let buf = await file.arrayBuffer();
+
+  if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
   const hasLz4 = codecs.some((c) => c.name === "numcodecs/lz4");
   if (hasLz4) {
