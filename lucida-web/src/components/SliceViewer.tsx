@@ -7,6 +7,7 @@ import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
 import type { ChunkCoord } from "../zarr/chunkStore.ts";
 import { initGPU, createSliceTexture, writeSliceRegion } from "../renderer/gpuContext.ts";
 import { SliceRenderer } from "../renderer/sliceRenderer.ts";
+import { evaluateChunkPlan, sampleIntensityRange } from "../zarr/chunkPlan.ts";
 
 interface Props {
   volume: VolumeData;
@@ -100,14 +101,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     const offset = clampedZ * sliceSize;
     const slice = data.subarray(offset, offset + sliceSize);
 
-    // Sample intensity range
-    let min = 65535, max = 0;
-    const step = Math.max(1, Math.floor(sliceSize / 100000));
-    for (let i = 0; i < sliceSize; i += step) {
-      const v = slice[i];
-      if (v < min) min = v;
-      if (v > max) max = v;
-    }
+    const { min, max } = sampleIntensityRange(slice);
 
     const texture = createSliceTexture(gpu.device, width, height, slice);
     gpu.renderer.setFallback(texture);
@@ -116,13 +110,8 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
 
   // Request chunks when view state changes
   useEffect(() => {
-    let plan: { needed: ChunkCoord[] };
-    try {
-      plan = JSON.parse(scene.chunk_plan());
-    } catch {
-      return;
-    }
-    if (plan.needed.length > 0) {
+    const plan = evaluateChunkPlan(scene);
+    if (plan && plan.needed.length > 0) {
       store.ensureFetched(plan.needed);
     }
   }, [scene, store, z, t, c, cameraVersion]);
@@ -134,12 +123,8 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     if (!canvas || !gpu) return;
 
     // Get current chunk plan
-    let plan: { needed: ChunkCoord[] };
-    try {
-      plan = JSON.parse(scene.chunk_plan());
-    } catch {
-      return;
-    }
+    const plan = evaluateChunkPlan(scene);
+    if (!plan) return;
 
     const needed = plan.needed;
     const level = needed[0]?.level;
@@ -182,13 +167,11 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
         if (availableChunks.length > 0) {
           // Auto-detect intensity range
           let min = 65535, max = 0;
+          const perChunkSamples = Math.floor(10000 / Math.max(1, availableChunks.length));
           for (const { data } of availableChunks) {
-            const sampleStep = Math.max(1, Math.floor(data.length / 10000));
-            for (let i = 0; i < data.length; i += sampleStep) {
-              const v = data[i];
-              if (v < min) min = v;
-              if (v > max) max = v;
-            }
+            const r = sampleIntensityRange(data, perChunkSamples);
+            if (r.min < min) min = r.min;
+            if (r.max > max) max = r.max;
           }
           gpu.renderer.setIntensityRange(min, max);
 
