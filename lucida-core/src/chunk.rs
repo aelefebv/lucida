@@ -74,6 +74,21 @@ pub fn visible_chunks(
             }
         }
     }
+
+    // Sort center-out so the viewport center loads first.
+    let center_col = (col_start + col_end) as f64 / 2.0;
+    let center_row = (row_start + row_end) as f64 / 2.0;
+    let center_z = (z_start + z_end) as f64 / 2.0;
+    chunks.sort_by(|a, b| {
+        let da = (a.x as f64 + 0.5 - center_col).powi(2)
+            + (a.y as f64 + 0.5 - center_row).powi(2)
+            + (a.z as f64 + 0.5 - center_z).powi(2);
+        let db = (b.x as f64 + 0.5 - center_col).powi(2)
+            + (b.y as f64 + 0.5 - center_row).powi(2)
+            + (b.z as f64 + 0.5 - center_z).powi(2);
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     chunks
 }
 
@@ -130,8 +145,9 @@ mod tests {
         let region = cam.visible_region(&(0..128), None, None);
         let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].z, 0);
-        assert_eq!(chunks[1].z, 1);
+        let mut zs: Vec<u32> = chunks.iter().map(|c| c.z).collect();
+        zs.sort();
+        assert_eq!(zs, vec![0, 1]);
     }
 
     #[test]
