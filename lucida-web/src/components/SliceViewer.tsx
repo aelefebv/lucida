@@ -111,6 +111,12 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
 
   // Request chunks when view state changes
   useEffect(() => {
+    // Sync dimension state to WASM scene before computing plan —
+    // child effects run before parent effects, so App's set_t/set_c/set_z
+    // may not have executed yet.
+    scene.set_z(z);
+    scene.set_t(t);
+    scene.set_c(c);
     const plan = evaluateChunkPlan(scene);
     planRef.current = plan;
     if (plan && plan.needed.length > 0) {

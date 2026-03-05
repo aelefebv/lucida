@@ -46,7 +46,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
   const bumpCamera = useCallback(() => setCameraVersion(v => v + 1), []);
 
   const [gpuReady, setGpuReady] = useState(0);
-  const planRef = useRef<{ needed: ChunkCoord[] } | null>(null);
+  const planRef = useRef<{ needed: ChunkCoord[]; t: number; c: number } | null>(null);
 
   // GPU init effect
   useEffect(() => {
@@ -118,7 +118,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
   // Chunk request effect — triggered by camera changes
   useEffect(() => {
     const plan = evaluateChunkPlan(scene);
-    planRef.current = plan;
+    planRef.current = plan ? { ...plan, t: scene.t(), c: scene.c() } : null;
     if (plan && plan.needed.length > 0) {
       store.ensureFetched(plan.needed);
     }
@@ -129,10 +129,20 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
     const gpu = gpuRef.current;
     if (!gpu) return;
 
-    const plan = planRef.current;
+    // Re-evaluate plan if scene t/c changed since last plan computation
+    // (parent effect may have updated scene.t/c after our request effect ran)
+    const viewT = scene.t();
+    const viewC = scene.c();
+    let plan = planRef.current;
+    if (plan && (plan.t !== viewT || plan.c !== viewC)) {
+      const freshPlan = evaluateChunkPlan(scene);
+      if (freshPlan) {
+        planRef.current = { ...freshPlan, t: viewT, c: viewC };
+        plan = planRef.current;
+        store.ensureFetched(freshPlan.needed);
+      }
+    }
     if (plan && plan.needed.length > 0) {
-      const viewT = scene.t();
-      const viewC = scene.c();
       const targetLevel = plan.needed[0].level;
       const levelMeta = datasetInfo.levels[targetLevel];
       const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
