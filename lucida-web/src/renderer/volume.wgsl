@@ -76,12 +76,15 @@ fn fs(input: VSOut) -> @location(0) vec4f {
 
   let range = intensityMax - intensityMin;
 
+  let rayLen = tEnd - tStart;
+  let adaptiveStep = max(stepSize, rayLen / 512.0);
+
   // Front-to-back compositing
   var color = vec3f(0.0);
   var alpha = 0.0;
   var t = tStart;
 
-  let maxSteps = i32(ceil((tEnd - tStart) / stepSize));
+  let maxSteps = i32(ceil(rayLen / adaptiveStep));
   let steps = min(maxSteps, 512);
 
   for (var i = 0; i < steps; i++) {
@@ -95,7 +98,9 @@ fn fs(input: VSOut) -> @location(0) vec4f {
       clamp(i32(pos.z * f32(dims.z)), 0, dims.z - 1),
     );
 
-    let rawVal = f32(textureLoad(volumeTex, texCoord, 0).r);
+    let raw = textureLoad(volumeTex, texCoord, 0).r;
+    if (raw == 0u) { t += adaptiveStep; continue; }
+    let rawVal = f32(raw);
     let normalized = clamp((rawVal - intensityMin) / range, 0.0, 1.0);
 
     // Simple linear transfer function
@@ -106,7 +111,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     color += (1.0 - alpha) * sampleAlpha * sampleColor;
     alpha += (1.0 - alpha) * sampleAlpha;
 
-    t += stepSize;
+    t += adaptiveStep;
   }
 
   // Blend with background
