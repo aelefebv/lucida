@@ -46,6 +46,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
   const bumpCamera = useCallback(() => setCameraVersion(v => v + 1), []);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
+  const planRef = useRef<{ needed: ChunkCoord[] } | null>(null);
 
   // Reset pan/zoom when the dataset dimensions change
   const prevDims = useRef({ w: volume.width, h: volume.height, d: volume.depth });
@@ -111,6 +112,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
   // Request chunks when view state changes
   useEffect(() => {
     const plan = evaluateChunkPlan(scene);
+    planRef.current = plan;
     if (plan && plan.needed.length > 0) {
       store.ensureFetched(plan.needed);
     }
@@ -122,8 +124,8 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     const gpu = gpuRef.current;
     if (!canvas || !gpu) return;
 
-    // Get current chunk plan
-    const plan = evaluateChunkPlan(scene);
+    // Use cached chunk plan from request effect
+    const plan = planRef.current;
     if (!plan) return;
 
     const needed = plan.needed;

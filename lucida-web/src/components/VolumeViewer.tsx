@@ -4,6 +4,7 @@ import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
+import type { ChunkCoord } from "../zarr/chunkStore.ts";
 import { initGPU, createEmptyVolumeTexture, writeVolumeChunk } from "../renderer/gpuContext.ts";
 import { VolumeRenderer } from "../renderer/volumeRenderer.ts";
 import { evaluateChunkPlan, sampleIntensityRange } from "../zarr/chunkPlan.ts";
@@ -45,6 +46,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
   const bumpCamera = useCallback(() => setCameraVersion(v => v + 1), []);
 
   const [gpuReady, setGpuReady] = useState(0);
+  const planRef = useRef<{ needed: ChunkCoord[] } | null>(null);
 
   // GPU init effect
   useEffect(() => {
@@ -116,6 +118,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
   // Chunk request effect — triggered by camera changes
   useEffect(() => {
     const plan = evaluateChunkPlan(scene);
+    planRef.current = plan;
     if (plan && plan.needed.length > 0) {
       store.ensureFetched(plan.needed);
     }
@@ -126,10 +129,8 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
     const gpu = gpuRef.current;
     if (!gpu) return;
 
-    const plan = evaluateChunkPlan(scene);
+    const plan = planRef.current;
     if (plan && plan.needed.length > 0) {
-      store.ensureFetched(plan.needed);
-
       const viewT = scene.t();
       const viewC = scene.c();
       const targetLevel = plan.needed[0].level;
