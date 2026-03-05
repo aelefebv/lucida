@@ -76,6 +76,20 @@ impl WasmScene {
         }
     }
 
+    pub fn center(&self) -> Vec<f64> {
+        if let Camera::View2D(ref v) = self.inner.camera {
+            vec![v.center[0], v.center[1]]
+        } else {
+            vec![0.0, 0.0]
+        }
+    }
+
+    pub fn set_zoom(&mut self, value: f64) {
+        if let Camera::View2D(ref mut v) = self.inner.camera {
+            v.zoom = value;
+        }
+    }
+
     // --- View state ---
 
     pub fn set_z(&mut self, z: u32) {

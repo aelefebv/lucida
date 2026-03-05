@@ -33,10 +33,10 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
   // Subscribe to store updates — triggers re-render when chunks arrive
   const storeVersion = useChunkStore(store);
 
-  // Use WasmScene as source of truth for zoom/offset
-  const [offsetX, setOffsetX] = useState(0);
-  const [offsetY, setOffsetY] = useState(0);
-  const [zoom, setZoom] = useState(1.0);
+  // Rust camera is the single source of truth for pan/zoom.
+  // Bump cameraVersion to trigger re-renders after mutating Rust state.
+  const [cameraVersion, setCameraVersion] = useState(0);
+  const bumpCamera = useCallback(() => setCameraVersion(v => v + 1), []);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
 
@@ -47,12 +47,14 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     const prev = prevDims.current;
     if (width !== prev.w || height !== prev.h || depth !== prev.d) {
       prevDims.current = { w: width, h: height, d: depth };
-      setOffsetX(0);
-      setOffsetY(0);
-      setZoom(1.0);
+      const fullResWidth = datasetInfo.levels[0].shape[4];
+      const fullResHeight = datasetInfo.levels[0].shape[3];
+      scene.set_center(fullResWidth / 2, fullResHeight / 2);
+      scene.set_zoom(1.0);
+      bumpCamera();
       tileStateRef.current = null;
     }
-  }, [volume]);
+  }, [volume, scene, datasetInfo, bumpCamera]);
 
   // Render the initial coarsest-level data to the fallback canvas
   useEffect(() => {
@@ -101,7 +103,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     if (plan.needed.length > 0) {
       store.ensureFetched(plan.needed);
     }
-  }, [scene, store, z, t, c, zoom, offsetX, offsetY]);
+  }, [scene, store, z, t, c, cameraVersion]);
 
   // Paint tiles from store + composite onto visible canvas
   useEffect(() => {
@@ -226,10 +228,14 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     const dataW = fullResWidth;
     const dataH = fullResHeight;
 
-    const dx = canvasW / 2 - (dataW / 2 - offsetX) * zoom;
-    const dy = canvasH / 2 - (dataH / 2 - offsetY) * zoom;
-    const dw = dataW * zoom;
-    const dh = dataH * zoom;
+    const currentZoom = scene.zoom();
+    const centerArr = scene.center();
+    const cx = centerArr[0];
+    const cy = centerArr[1];
+    const dx = canvasW / 2 - cx * currentZoom;
+    const dy = canvasH / 2 - cy * currentZoom;
+    const dw = dataW * currentZoom;
+    const dh = dataH * currentZoom;
 
     // Draw fallback first as a backdrop if we have a separate tile canvas
     if (tileStateRef.current?.canvas && fallbackRef.current) {
@@ -237,7 +243,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     }
 
     ctx.drawImage(source, 0, 0, source.width, source.height, dx, dy, dw, dh);
-  }, [volume, z, t, c, offsetX, offsetY, zoom, storeVersion, datasetInfo, scene, store]);
+  }, [volume, z, t, c, cameraVersion, storeVersion, datasetInfo, scene, store]);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -254,25 +260,15 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
       const dx = e.clientX - lastPos.current.x;
       const dy = e.clientY - lastPos.current.y;
       lastPos.current = { x: e.clientX, y: e.clientY };
-      setOffsetX((prev) => prev + dx / zoom);
-      setOffsetY((prev) => prev + dy / zoom);
-
-      // Sync pan to WasmScene
       scene.pan(-dx, -dy);
+      bumpCamera();
     },
-    [dragging, zoom, scene],
+    [dragging, scene, bumpCamera],
   );
 
   const onPointerUp = useCallback(() => {
     setDragging(false);
-    // Request chunks for newly visible area after drag
-    try {
-      const plan = JSON.parse(scene.chunk_plan());
-      if (plan.needed.length > 0) {
-        store.ensureFetched(plan.needed);
-      }
-    } catch { /* ignore */ }
-  }, [scene, store]);
+  }, []);
 
   const onWheel = useCallback(
     (e: WheelEvent) => {
@@ -283,34 +279,25 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
       const rect = canvas.getBoundingClientRect();
       const cursorX = e.clientX - rect.left;
       const cursorY = e.clientY - rect.top;
-
-      const factor = e.deltaY > 0 ? 0.9 : 1.1;
-      const newZoom = zoom * factor;
-
       const canvasW = canvas.clientWidth;
       const canvasH = canvas.clientHeight;
 
-      const fullResWidth = datasetInfo.levels[0].shape[4];
-      const fullResHeight = datasetInfo.levels[0].shape[3];
-      const dataW = fullResWidth;
-      const dataH = fullResHeight;
+      const oldZoom = scene.zoom();
+      const centerArr = scene.center();
+      const worldX = (cursorX - canvasW / 2) / oldZoom + centerArr[0];
+      const worldY = (cursorY - canvasH / 2) / oldZoom + centerArr[1];
 
-      const worldX = (cursorX - canvasW / 2) / zoom + dataW / 2 - offsetX;
-      const worldY = (cursorY - canvasH / 2) / zoom + dataH / 2 - offsetY;
-
-      const newOffsetX = dataW / 2 - worldX + (cursorX - canvasW / 2) / newZoom;
-      const newOffsetY = dataH / 2 - worldY + (cursorY - canvasH / 2) / newZoom;
-
-      setZoom(newZoom);
-      setOffsetX(newOffsetX);
-      setOffsetY(newOffsetY);
-
+      const factor = e.deltaY > 0 ? 0.9 : 1.1;
       scene.zoom_by(factor);
-      // Sync Rust camera center to match the JS viewport offset
-      scene.set_center(dataW / 2 - newOffsetX, dataH / 2 - newOffsetY);
-      // ensureFetched will be triggered by the state change via the effect
+      const newZoom = scene.zoom();
+
+      scene.set_center(
+        worldX - (cursorX - canvasW / 2) / newZoom,
+        worldY - (cursorY - canvasH / 2) / newZoom,
+      );
+      bumpCamera();
     },
-    [zoom, offsetX, offsetY, scene, datasetInfo],
+    [scene, bumpCamera],
   );
 
   // Attach wheel handler with { passive: false } to allow preventDefault
