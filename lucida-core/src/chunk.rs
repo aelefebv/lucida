@@ -1,8 +1,6 @@
-use std::ops::Range;
-
 use serde::Serialize;
 
-use crate::camera::Camera;
+use crate::camera::VisibleRegion;
 
 /// A chunk coordinate in the multiscale grid.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -36,19 +34,17 @@ pub fn select_level(zoom: f64, num_levels: u32) -> u32 {
     level.min(num_levels - 1)
 }
 
-/// Compute which chunk grid cells intersect the camera's visible region and z range.
+/// Compute which chunk grid cells intersect the visible region's bounds and z range.
 ///
 /// `chunk_size` is [x, y, z] in pixels per chunk at level 0.
-/// `z_range` is the visible z slab in full-resolution voxel coordinates.
 pub fn visible_chunks(
-    camera: &Camera,
+    region: &VisibleRegion,
     chunk_size: &[u32; 3],
     level: u32,
-    z_range: &Range<u32>,
     t: u32,
     c: u32,
 ) -> Vec<ChunkCoord> {
-    let [min_x, min_y, max_x, max_y] = camera.world_bounds();
+    let [min_x, min_y, max_x, max_y] = region.xy_bounds;
     let scale = (1u32 << level) as f64;
 
     let chunk_world_x = chunk_size[0] as f64 * scale;
@@ -60,8 +56,8 @@ pub fn visible_chunks(
     let row_start = (min_y / chunk_world_y).floor().max(0.0) as u32;
     let row_end = (max_y / chunk_world_y).ceil().max(0.0) as u32;
 
-    let z_start = (z_range.start as f64 / chunk_world_z).floor() as u32;
-    let z_end = (z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32;
+    let z_start = (region.z_range.start as f64 / chunk_world_z).floor() as u32;
+    let z_end = (region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32;
 
     let mut chunks = Vec::new();
     for z in z_start..z_end {
@@ -84,6 +80,7 @@ pub fn visible_chunks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::camera::Camera;
 
     #[test]
     fn level_0_at_full_zoom() {
@@ -107,11 +104,9 @@ mod tests {
 
     #[test]
     fn visible_chunks_at_origin() {
-        let cam = Camera::new([512, 512]);
-        // Camera centered at origin, zoom 1, viewport 512x512.
-        // With chunk_size=256, level=0, visible world is -256..256 in each axis.
-        // Negative coords clamp to 0, so x: 0..1, y: 0..1, z: single chunk.
-        let chunks = visible_chunks(&cam, &[256, 256, 64], 0, &(0..1), 0, 0);
+        let cam = Camera::new_2d([512, 512]);
+        let region = cam.visible_region(&(0..1), None, None);
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].x, 0);
         assert_eq!(chunks[0].y, 0);
@@ -120,20 +115,20 @@ mod tests {
 
     #[test]
     fn panning_reveals_more_chunks() {
-        let mut cam = Camera::new([512, 512]);
-        cam.center = [512.0, 512.0];
-        let chunks = visible_chunks(&cam, &[256, 256, 64], 0, &(0..1), 0, 0);
-        // Visible world: 256..768 in x and y.
-        // x chunks: 1..3, y chunks: 1..3 → 4 chunks, 1 z chunk.
+        let mut cam = Camera::new_2d([512, 512]);
+        if let Camera::View2D(ref mut v) = cam {
+            v.center = [512.0, 512.0];
+        }
+        let region = cam.visible_region(&(0..1), None, None);
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
         assert_eq!(chunks.len(), 4);
     }
 
     #[test]
     fn z_slab_spans_multiple_chunks() {
-        let cam = Camera::new([512, 512]);
-        // z_range 0..128 with chunk_size_z=64 → z chunks 0 and 1.
-        let chunks = visible_chunks(&cam, &[256, 256, 64], 0, &(0..128), 0, 0);
-        // 1 x chunk * 1 y chunk * 2 z chunks = 2
+        let cam = Camera::new_2d([512, 512]);
+        let region = cam.visible_region(&(0..128), None, None);
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].z, 0);
         assert_eq!(chunks[1].z, 1);
@@ -141,9 +136,9 @@ mod tests {
 
     #[test]
     fn single_z_slice_maps_to_correct_chunk() {
-        let cam = Camera::new([512, 512]);
-        // z=100 with chunk_size_z=64 → chunk z=1 (100/64 = 1.56, floor=1)
-        let chunks = visible_chunks(&cam, &[256, 256, 64], 0, &(100..101), 0, 0);
+        let cam = Camera::new_2d([512, 512]);
+        let region = cam.visible_region(&(100..101), None, None);
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].z, 1);
     }

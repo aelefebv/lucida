@@ -120,6 +120,7 @@ function App() {
       const shapeZ = level.shape[2], shapeY = level.shape[3], shapeX = level.shape[4];
       const scaleZ = level.scale[2], scaleY = level.scale[3], scaleX = level.scale[4];
       scene.set_volume_scale(shapeZ, shapeY, shapeX, scaleZ, scaleY, scaleX);
+      scene.set_mode_3d();
 
       setVolume(vol);
       setWasmScene(scene);

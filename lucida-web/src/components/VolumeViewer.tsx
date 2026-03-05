@@ -30,7 +30,7 @@ export function VolumeViewer({ volume, scene }: Props) {
       canvas.height = canvas.clientHeight * devicePixelRatio;
 
       // Update viewport in the WASM camera
-      scene.set_viewport_3d(canvas.width, canvas.height);
+      scene.set_viewport(canvas.width, canvas.height);
 
       const gpu = await initGPU(canvas);
       if (destroyed) return;

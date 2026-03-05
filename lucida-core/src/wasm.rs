@@ -1,5 +1,6 @@
 use wasm_bindgen::prelude::*;
 
+use crate::camera::Camera;
 use crate::scene::{Layer, Scene};
 
 #[wasm_bindgen]
@@ -15,6 +16,28 @@ impl WasmScene {
             inner: Scene::new([width, height]),
         }
     }
+
+    // --- Mode switching ---
+
+    pub fn set_mode_2d(&mut self) {
+        self.inner.set_mode_2d();
+    }
+
+    pub fn set_mode_3d(&mut self) {
+        self.inner.set_mode_3d();
+    }
+
+    pub fn is_3d(&self) -> bool {
+        matches!(self.inner.camera, Camera::View3D(_))
+    }
+
+    // --- Shared viewport ---
+
+    pub fn set_viewport(&mut self, width: u32, height: u32) {
+        self.inner.camera.set_viewport(width, height);
+    }
+
+    // --- Layer management ---
 
     pub fn add_layer(
         &mut self,
@@ -33,17 +56,27 @@ impl WasmScene {
         });
     }
 
+    // --- 2D camera methods ---
+
     pub fn pan(&mut self, dx: f64, dy: f64) {
-        self.inner.camera.pan(dx, dy);
+        if let Camera::View2D(ref mut v) = self.inner.camera {
+            v.pan(dx, dy);
+        }
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
-        self.inner.camera.zoom_by(factor);
+        if let Camera::View2D(ref mut v) = self.inner.camera {
+            v.zoom_by(factor);
+        }
     }
 
     pub fn set_center(&mut self, x: f64, y: f64) {
-        self.inner.camera.center = [x, y];
+        if let Camera::View2D(ref mut v) = self.inner.camera {
+            v.center = [x, y];
+        }
     }
+
+    // --- View state ---
 
     pub fn set_z(&mut self, z: u32) {
         self.inner.view.set_z(z);
@@ -61,13 +94,28 @@ impl WasmScene {
         self.inner.view.c = c;
     }
 
+    // --- Queries ---
+
     pub fn zoom(&self) -> f64 {
-        self.inner.camera.zoom
+        self.inner.camera.effective_zoom()
     }
 
     pub fn world_bounds(&self) -> String {
-        let bounds = self.inner.camera.world_bounds();
-        serde_json::to_string(&bounds).unwrap()
+        match &self.inner.camera {
+            Camera::View2D(v) => {
+                let bounds = v.world_bounds();
+                serde_json::to_string(&bounds).unwrap()
+            }
+            Camera::View3D(_) => {
+                // Return the visible region xy_bounds for 3D
+                let region = self.inner.camera.visible_region(
+                    &self.inner.view.z_range,
+                    self.inner.volume_transform.as_ref(),
+                    self.inner.volume_shape.as_ref(),
+                );
+                serde_json::to_string(&region.xy_bounds).unwrap()
+            }
+        }
     }
 
     pub fn chunk_plan(&self) -> String {
@@ -78,19 +126,21 @@ impl WasmScene {
     // --- 3D camera methods ---
 
     pub fn rotate_3d(&mut self, d_theta: f64, d_phi: f64) {
-        self.inner.camera_3d.rotate(d_theta, d_phi);
+        if let Camera::View3D(ref mut v) = self.inner.camera {
+            v.rotate(d_theta, d_phi);
+        }
     }
 
     pub fn zoom_3d(&mut self, delta: f64) {
-        self.inner.camera_3d.zoom(delta);
+        if let Camera::View3D(ref mut v) = self.inner.camera {
+            v.zoom(delta);
+        }
     }
 
     pub fn pan_3d(&mut self, dx: f64, dy: f64) {
-        self.inner.camera_3d.pan(dx, dy);
-    }
-
-    pub fn set_viewport_3d(&mut self, width: u32, height: u32) {
-        self.inner.camera_3d.viewport = [width, height];
+        if let Camera::View3D(ref mut v) = self.inner.camera {
+            v.pan(dx, dy);
+        }
     }
 
     pub fn set_volume_scale(
@@ -107,19 +157,31 @@ impl WasmScene {
     }
 
     pub fn inv_view_proj_3d(&self) -> Vec<f32> {
-        self.inner.camera_3d.inv_view_proj().to_vec()
+        if let Camera::View3D(ref v) = self.inner.camera {
+            v.inv_view_proj().to_vec()
+        } else {
+            vec![
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ]
+        }
     }
 
     pub fn eye_position_3d(&self) -> Vec<f32> {
-        let eye = self.inner.camera_3d.eye_position();
-        vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
+        if let Camera::View3D(ref v) = self.inner.camera {
+            let eye = v.eye_position();
+            vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
+        } else {
+            vec![0.0, 0.0, 1.0]
+        }
     }
 
     pub fn model_matrix(&self) -> Vec<f32> {
         match &self.inner.volume_transform {
             Some(t) => t.model.to_vec(),
             None => {
-                // Identity matrix
                 vec![
                     1.0, 0.0, 0.0, 0.0,
                     0.0, 1.0, 0.0, 0.0,

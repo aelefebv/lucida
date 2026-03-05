@@ -1,5 +1,4 @@
 use crate::camera::Camera;
-use crate::camera3d::Camera3D;
 use crate::chunk::{self, ChunkRequestPlan};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
@@ -19,26 +18,44 @@ pub struct Layer {
 #[derive(Debug)]
 pub struct Scene {
     pub camera: Camera,
-    pub camera_3d: Camera3D,
     pub view: ViewState,
     pub layers: Vec<Layer>,
     pub volume_transform: Option<VolumeTransform>,
+    /// Volume dimensions in voxels: [Z, Y, X]. Needed for 3D frustum → voxel mapping.
+    pub volume_shape: Option<[u32; 3]>,
 }
 
 impl Scene {
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
-            camera: Camera::new(viewport),
-            camera_3d: Camera3D::new(viewport),
+            camera: Camera::new_2d(viewport),
             view: ViewState::new(),
             layers: Vec::new(),
             volume_transform: None,
+            volume_shape: None,
+        }
+    }
+
+    /// Switch to 2D mode, preserving the current viewport.
+    pub fn set_mode_2d(&mut self) {
+        if !matches!(self.camera, Camera::View2D(_)) {
+            let vp = self.camera.viewport();
+            self.camera = Camera::new_2d(vp);
+        }
+    }
+
+    /// Switch to 3D mode, preserving the current viewport.
+    pub fn set_mode_3d(&mut self) {
+        if !matches!(self.camera, Camera::View3D(_)) {
+            let vp = self.camera.viewport();
+            self.camera = Camera::new_3d(vp);
         }
     }
 
     /// Set the volume scale to account for anisotropic voxel spacing.
     /// `shape` is [Z, Y, X], `scale` is [Z, Y, X].
     pub fn set_volume_scale(&mut self, shape: [u32; 3], scale: [f64; 3]) {
+        self.volume_shape = Some(shape);
         self.volume_transform = Some(transform::compute_volume_transform(shape, scale));
     }
 
@@ -48,18 +65,23 @@ impl Scene {
 
     /// Compute the chunk request plan for all visible layers.
     pub fn chunk_plan(&self) -> ChunkRequestPlan {
+        let region = self.camera.visible_region(
+            &self.view.z_range,
+            self.volume_transform.as_ref(),
+            self.volume_shape.as_ref(),
+        );
+
         let mut needed = Vec::new();
 
         for layer in &self.layers {
             if !layer.visible {
                 continue;
             }
-            let level = chunk::select_level(self.camera.zoom, layer.num_levels);
+            let level = chunk::select_level(region.effective_zoom, layer.num_levels);
             let chunks = chunk::visible_chunks(
-                &self.camera,
+                &region,
                 &layer.chunk_size,
                 level,
-                &self.view.z_range,
                 self.view.t,
                 self.view.c,
             );
@@ -117,7 +139,6 @@ mod tests {
         scene.add_layer(test_layer());
 
         let plan_z0 = scene.chunk_plan();
-        // z=100 with chunk_size_z=64 → chunk z=1
         scene.view.set_slice("z", 100).unwrap();
         let plan_z100 = scene.chunk_plan();
 
@@ -129,11 +150,41 @@ mod tests {
     fn z_slab_produces_chunks_across_z() {
         let mut scene = Scene::new([512, 512]);
         scene.add_layer(test_layer());
-        // Slab spanning 2 z-chunks: 0..128 with chunk_size_z=64
         scene.view.set_z_range(0..128);
         let plan = scene.chunk_plan();
         let z_values: Vec<u32> = plan.needed.iter().map(|c| c.z).collect();
         assert!(z_values.contains(&0));
         assert!(z_values.contains(&1));
+    }
+
+    #[test]
+    fn mode_switching_preserves_viewport() {
+        let mut scene = Scene::new([800, 600]);
+        assert!(matches!(scene.camera, Camera::View2D(_)));
+
+        scene.set_mode_3d();
+        assert!(matches!(scene.camera, Camera::View3D(_)));
+        assert_eq!(scene.camera.viewport(), [800, 600]);
+
+        scene.set_mode_2d();
+        assert!(matches!(scene.camera, Camera::View2D(_)));
+        assert_eq!(scene.camera.viewport(), [800, 600]);
+    }
+
+    #[test]
+    fn chunk_plan_3d_produces_chunks_spanning_z() {
+        let mut scene = Scene::new([800, 600]);
+        scene.set_mode_3d();
+        scene.set_volume_scale([100, 200, 300], [1.0, 1.0, 1.0]);
+        scene.add_layer(Layer {
+            name: "vol".into(),
+            visible: true,
+            num_levels: 1,
+            chunk_size: [64, 64, 64],
+        });
+        let plan = scene.chunk_plan();
+        // 3D mode should produce chunks — the frustum sees the volume
+        // With a default camera looking at the volume, we should get some chunks
+        assert!(!plan.needed.is_empty());
     }
 }
