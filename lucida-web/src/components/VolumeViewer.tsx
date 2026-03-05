@@ -4,7 +4,6 @@ import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
-import { chunk_key } from "lucida-core";
 import { initGPU, createEmptyVolumeTexture, writeVolumeChunk } from "../renderer/gpuContext.ts";
 import { VolumeRenderer } from "../renderer/volumeRenderer.ts";
 import { evaluateChunkPlan, sampleIntensityRange } from "../zarr/chunkPlan.ts";
@@ -28,6 +27,16 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
     level: number;
     t: number;
     c: number;
+  } | null>(null);
+
+  const volStateRef = useRef<{
+    texture: GPUTexture;
+    level: number;
+    t: number;
+    c: number;
+    uploaded: Set<string>;
+    intensityMin: number;
+    intensityMax: number;
   } | null>(null);
 
   const storeVersion = useChunkStore(store);
@@ -56,6 +65,10 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
 
     return () => {
       destroyed = true;
+      if (volStateRef.current) {
+        volStateRef.current.texture.destroy();
+        volStateRef.current = null;
+      }
       gpuRef.current = null;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -108,73 +121,70 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
     }
   }, [scene, store, cameraVersion]);
 
-  // LOD swap + render effect
+  // LOD swap + render effect (incremental chunk upload)
   useEffect(() => {
     const gpu = gpuRef.current;
-    const lod = lodRef.current;
     if (!gpu) return;
 
     const plan = evaluateChunkPlan(scene);
     if (plan && plan.needed.length > 0) {
-      // Ensure any uncached chunks are fetched
       store.ensureFetched(plan.needed);
 
       const viewT = scene.t();
       const viewC = scene.c();
       const targetLevel = plan.needed[0].level;
+      const levelMeta = datasetInfo.levels[targetLevel];
+      const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
+      const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
 
-      const allReady = plan.needed.every(
-        (coord) => store.has(coord.key),
-      );
-
-      if (allReady && lod && (targetLevel !== lod.level || viewT !== lod.t || viewC !== lod.c)) {
-        const levelMeta = datasetInfo.levels[targetLevel];
-        const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
-        const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-
-        const nz = Math.ceil(depthFull / chunkZ);
-        const ny = Math.ceil(heightFull / chunkY);
-        const nx = Math.ceil(widthFull / chunkX);
-
-        const newTexture = createEmptyVolumeTexture(
-          gpu.device,
-          widthFull,
-          heightFull,
-          depthFull,
-        );
-
-        let newMin = 65535, newMax = 0;
-
-        for (let iz = 0; iz < nz; iz++) {
-          for (let iy = 0; iy < ny; iy++) {
-            for (let ix = 0; ix < nx; ix++) {
-              const key = chunk_key(targetLevel, viewT, viewC, iz, iy, ix);
-              const buf = store.get(key);
-              if (!buf) continue;
-
-              const chunk = new Uint16Array(buf);
-              const zOff = iz * chunkZ;
-              const yOff = iy * chunkY;
-              const xOff = ix * chunkX;
-              const cw = Math.min(chunkX, widthFull - xOff);
-              const ch = Math.min(chunkY, heightFull - yOff);
-              const cd = Math.min(chunkZ, depthFull - zOff);
-
-              writeVolumeChunk(gpu.device, newTexture, chunk, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
-
-              const perChunkSamples = Math.floor(100000 / (nz * ny * nx));
-              const { min, max } = sampleIntensityRange(chunk, perChunkSamples);
-              if (min < newMin) newMin = min;
-              if (max > newMax) newMax = max;
-            }
-          }
-        }
-
-        gpu.renderer.setVolume(newTexture, widthFull, heightFull, depthFull);
-        gpu.renderer.setIntensityRange(newMin, newMax);
-
+      // Create new texture when target level/t/c changes
+      const vs = volStateRef.current;
+      if (!vs || vs.level !== targetLevel || vs.t !== viewT || vs.c !== viewC) {
+        if (vs) vs.texture.destroy();
+        const texture = createEmptyVolumeTexture(gpu.device, widthFull, heightFull, depthFull);
+        gpu.renderer.setVolume(texture, widthFull, heightFull, depthFull);
+        volStateRef.current = {
+          texture,
+          level: targetLevel,
+          t: viewT,
+          c: viewC,
+          uploaded: new Set(),
+          intensityMin: 65535,
+          intensityMax: 0,
+        };
         lodRef.current = { level: targetLevel, t: viewT, c: viewC };
-        console.log(`3D: swapped to level ${targetLevel} (${widthFull}x${heightFull}x${depthFull})`);
+        console.log(`3D: created texture for level ${targetLevel} (${widthFull}x${heightFull}x${depthFull})`);
+      }
+
+      // Incrementally upload newly-available chunks
+      const state = volStateRef.current!;
+      let intensityChanged = false;
+      const totalChunks = plan.needed.length;
+
+      for (const coord of plan.needed) {
+        if (state.uploaded.has(coord.key)) continue;
+        const buf = store.get(coord.key);
+        if (!buf) continue;
+
+        const chunk = new Uint16Array(buf);
+        const xOff = coord.x * chunkX;
+        const yOff = coord.y * chunkY;
+        const zOff = coord.z * chunkZ;
+        const cw = Math.min(chunkX, widthFull - xOff);
+        const ch = Math.min(chunkY, heightFull - yOff);
+        const cd = Math.min(chunkZ, depthFull - zOff);
+
+        writeVolumeChunk(gpu.device, state.texture, chunk, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+        state.uploaded.add(coord.key);
+
+        const perChunkSamples = Math.floor(100000 / totalChunks);
+        const { min, max } = sampleIntensityRange(chunk, perChunkSamples);
+        if (min < state.intensityMin) { state.intensityMin = min; intensityChanged = true; }
+        if (max > state.intensityMax) { state.intensityMax = max; intensityChanged = true; }
+      }
+
+      if (intensityChanged) {
+        gpu.renderer.setIntensityRange(state.intensityMin, state.intensityMax);
       }
     }
 
