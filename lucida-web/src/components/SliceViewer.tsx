@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
-import { ChunkStore, useChunkStore, chunkKeyFromCoord } from "../zarr/chunkStore.ts";
+import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
 import type { ChunkCoord } from "../zarr/chunkStore.ts";
 import { initGPU, createSliceTexture, writeSliceRegion } from "../renderer/gpuContext.ts";
 import { SliceRenderer } from "../renderer/sliceRenderer.ts";
@@ -173,7 +173,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
         const availableChunks: { coord: ChunkCoord; data: Uint16Array }[] = [];
         for (const coord of needed) {
           if (coord.level !== level) continue;
-          const buf = store.get(chunkKeyFromCoord(coord));
+          const buf = store.get(coord.key);
           if (buf) {
             availableChunks.push({ coord, data: new Uint16Array(buf) });
           }

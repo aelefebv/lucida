@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::camera::VisibleRegion;
 
 /// A chunk coordinate in the multiscale grid.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChunkCoord {
     pub level: u32,
     pub x: u32,
@@ -11,6 +11,21 @@ pub struct ChunkCoord {
     pub z: u32,
     pub t: u32,
     pub c: u32,
+}
+
+impl Serialize for ChunkCoord {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut s = serializer.serialize_struct("ChunkCoord", 7)?;
+        s.serialize_field("level", &self.level)?;
+        s.serialize_field("x", &self.x)?;
+        s.serialize_field("y", &self.y)?;
+        s.serialize_field("z", &self.z)?;
+        s.serialize_field("t", &self.t)?;
+        s.serialize_field("c", &self.c)?;
+        s.serialize_field("key", &self.key())?;
+        s.end()
+    }
 }
 
 impl ChunkCoord {

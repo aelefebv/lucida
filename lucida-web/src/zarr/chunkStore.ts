@@ -10,21 +10,7 @@ export interface ChunkCoord {
   z: number;
   t: number;
   c: number;
-}
-
-export function chunkKey(
-  level: number,
-  t: number,
-  c: number,
-  z: number,
-  y: number,
-  x: number,
-): string {
-  return `${level}/${t}/${c}/${z}/${y}/${x}`;
-}
-
-export function chunkKeyFromCoord(coord: ChunkCoord): string {
-  return chunkKey(coord.level, coord.t, coord.c, coord.z, coord.y, coord.x);
+  key: string;
 }
 
 const MAX_CONCURRENT = 6;
@@ -73,7 +59,7 @@ export class ChunkStore {
     // Filter by cache only — NOT by in-flight
     const uncached: ChunkCoord[] = [];
     for (const coord of coords) {
-      const key = chunkKeyFromCoord(coord);
+      const key = coord.key;
       if (!this.cache.has(key)) {
         uncached.push(coord);
       }
@@ -81,7 +67,7 @@ export class ChunkStore {
     if (uncached.length === 0) return;
 
     // If all uncached coords are already in-flight, no work needed
-    if (uncached.every(c => this.inFlight.has(chunkKeyFromCoord(c)))) return;
+    if (uncached.every(c => this.inFlight.has(c.key))) return;
 
     // New work needed — abort previous and start fresh with ALL uncached
     if (this.abortController) {
@@ -94,7 +80,7 @@ export class ChunkStore {
     const gen = ++this.generation;
 
     for (const coord of uncached) {
-      this.inFlight.add(chunkKeyFromCoord(coord));
+      this.inFlight.add(coord.key);
     }
 
     this.fetchWithConcurrency(uncached, signal, gen);
@@ -134,7 +120,7 @@ export class ChunkStore {
         if (signal.aborted || gen !== this.generation) return;
 
         const coord = queue.shift()!;
-        const key = chunkKeyFromCoord(coord);
+        const key = coord.key;
         const levelMeta = this.datasetInfo.levels[coord.level];
         if (!levelMeta) continue;
 

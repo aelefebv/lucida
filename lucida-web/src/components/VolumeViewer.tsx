@@ -3,7 +3,8 @@ import { useEffect, useRef } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
-import { ChunkStore, chunkKey } from "../zarr/chunkStore.ts";
+import { ChunkStore } from "../zarr/chunkStore.ts";
+import { chunk_key } from "lucida-core";
 import type { ChunkCoord } from "../zarr/chunkStore.ts";
 import { initGPU, createVolumeTexture } from "../renderer/gpuContext.ts";
 import { VolumeRenderer } from "../renderer/volumeRenderer.ts";
@@ -113,7 +114,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
 
             // Check if all chunks for this level are available
             const allReady = plan.needed.every(
-              (coord) => store.has(chunkKey(coord.level, coord.t, coord.c, coord.z, coord.y, coord.x)),
+              (coord) => store.has(coord.key),
             );
 
             if (allReady && (targetLevel !== st.currentLevel || viewT !== st.currentT || viewC !== st.currentC)) {
@@ -130,7 +131,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
               for (let iz = 0; iz < nz; iz++) {
                 for (let iy = 0; iy < ny; iy++) {
                   for (let ix = 0; ix < nx; ix++) {
-                    const key = chunkKey(targetLevel, viewT, viewC, iz, iy, ix);
+                    const key = chunk_key(targetLevel, viewT, viewC, iz, iy, ix);
                     const buf = store.get(key);
                     if (!buf) continue;
 
