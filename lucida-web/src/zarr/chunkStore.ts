@@ -117,7 +117,7 @@ export class ChunkStore {
   private bumpVersion(): void {
     if (this.bumpScheduled) return;
     this.bumpScheduled = true;
-    queueMicrotask(() => {
+    setTimeout(() => {
       this.bumpScheduled = false;
       this.version++;
       for (const listener of this.listeners) {

@@ -82,6 +82,7 @@ So lucida-web is mostly responsible for:
 - event handling
 - UI rendering
 - orchestration between core, store, and renderer
+- frame-rate coalescing of chunk uploads and render requests
 
 What it should not do:
 - decode chunk data itself unless absolutely necessary
@@ -116,10 +117,10 @@ Why WebGPU:
 
 Responsibilities inside the renderer usually include:
 - texture atlas or texture lifetime management
-- tile/chunk draw scheduling
+- texture upload and draw execution
 - view transform application
 - possibly partial redraw strategies
-- dropped-frame avoidance under heavy input
+- GPU-level tile/chunk compositing
 
 What it should not do:
 - decide which chunks to fetch

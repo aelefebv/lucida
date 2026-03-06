@@ -3,10 +3,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
-import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
-import type { ChunkCoord } from "../zarr/chunkStore.ts";
+import { ChunkStore } from "../zarr/chunkStore.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
-import { evaluateChunkPlan } from "../zarr/chunkPlan.ts";
+import { RenderLoop } from "../renderLoop.ts";
 import { applyAndSend } from "../applyAndSend.ts";
 
 interface Props {
@@ -24,15 +23,27 @@ interface Props {
 }
 
 export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand }: Props) {
-  const storeVersion = useChunkStore(store);
-
-  const [cameraVersion, setCameraVersion] = useState(0);
-  const bumpCamera = useCallback(() => setCameraVersion(v => v + 1), []);
+  const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
-  const planRef = useRef<{ needed: ChunkCoord[] } | null>(null);
-  const uploadedRef = useRef<Set<string>>(new Set());
-  const sliceLodRef = useRef<{ level: number; z: number; t: number; c: number } | null>(null);
+
+  // Create/start render loop
+  useEffect(() => {
+    const loop = new RenderLoop({ scene, store, datasetInfo, client, canvas, mode: "slice" });
+    loopRef.current = loop;
+    loop.start();
+    return () => loop.stop();
+  }, [scene, store, datasetInfo, client, canvas]);
+
+  // Update slice params on prop changes
+  useEffect(() => {
+    loopRef.current?.setSliceParams(z, t, c);
+  }, [z, t, c]);
+
+  // Mark dirty on remote camera updates
+  useEffect(() => {
+    loopRef.current?.markDirty();
+  }, [remoteCameraVersion]);
 
   // Reset pan/zoom when the dataset dimensions change
   const prevDims = useRef({ w: volume.width, h: volume.height, d: volume.depth });
@@ -45,9 +56,9 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       const fullResHeight = datasetInfo.levels[0].shape[3];
       applyAndSend(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 }, sendCommand);
       applyAndSend(scene, { type: "set_zoom", value: 1.0 }, sendCommand);
-      bumpCamera();
+      loopRef.current?.markDirty();
     }
-  }, [volume, scene, datasetInfo, bumpCamera, sendCommand]);
+  }, [volume, scene, datasetInfo, sendCommand]);
 
   // Set mode on mount
   useEffect(() => {
@@ -63,82 +74,6 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
     const slice = data.subarray(offset, offset + sliceSize);
     client.sliceSetFallback(slice, width, height);
   }, [volume, z, client]);
-
-  // Request chunks when view state changes
-  useEffect(() => {
-    scene.set_z(z);
-    scene.set_t(t);
-    scene.set_c(c);
-    const plan = evaluateChunkPlan(scene);
-    planRef.current = plan;
-    if (plan && plan.needed.length > 0) {
-      store.ensureFetched(plan.needed);
-    }
-  }, [scene, store, z, t, c, cameraVersion, remoteCameraVersion]);
-
-  // Upload tiles and render
-  useEffect(() => {
-    const plan = planRef.current;
-    if (!plan) return;
-
-    const needed = plan.needed;
-    const level = needed[0]?.level;
-
-    if (level !== undefined) {
-      const levelMeta = datasetInfo.levels[level];
-      if (levelMeta) {
-        const [, , , levelHeight, levelWidth] = levelMeta.shape;
-        const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-        const fullResDepth = datasetInfo.levels[0].shape[2];
-        const levelDepth = levelMeta.shape[2];
-
-        // Reset uploaded set when view params change
-        const lod = sliceLodRef.current;
-        if (!lod || lod.level !== level || lod.z !== z || lod.t !== t || lod.c !== c) {
-          uploadedRef.current = new Set();
-          sliceLodRef.current = { level, z, t, c };
-        }
-
-        // Collect only newly-available chunks
-        const availableChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-        for (const coord of needed) {
-          if (coord.level !== level) continue;
-          if (uploadedRef.current.has(coord.key)) continue;
-          const buf = store.get(coord.key);
-          if (buf) {
-            availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-            uploadedRef.current.add(coord.key);
-          }
-        }
-
-        if (availableChunks.length > 0) {
-          client.sliceUploadTiles(
-            availableChunks,
-            level, z, t, c,
-            levelWidth, levelHeight,
-            chunkX, chunkY, chunkZ,
-            fullResDepth, levelDepth, z,
-          );
-        }
-      }
-    }
-
-    // Render
-    const canvasW = canvas.clientWidth;
-    const canvasH = canvas.clientHeight;
-    scene.set_viewport(canvasW, canvasH);
-
-    const fullResWidth = datasetInfo.levels[0].shape[4];
-    const fullResHeight = datasetInfo.levels[0].shape[3];
-
-    const currentZoom = scene.zoom();
-    const centerArr = scene.center();
-    const cx = centerArr[0];
-    const cy = centerArr[1];
-
-    client.resize(canvasW, canvasH);
-    client.sliceRender(currentZoom, cx, cy, canvasW, canvasH, fullResWidth, fullResHeight);
-  }, [volume, z, t, c, cameraVersion, remoteCameraVersion, storeVersion, datasetInfo, scene, store, client, canvas]);
 
   const onPointerDown = useCallback(
     (e: PointerEvent) => {
@@ -158,9 +93,9 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       const pdx = -dx;
       const pdy = -dy;
       applyAndSend(scene, { type: "pan", dx: pdx, dy: pdy }, sendCommand);
-      bumpCamera();
+      loopRef.current?.markDirty();
     },
-    [dragging, scene, bumpCamera, sendCommand],
+    [dragging, scene, sendCommand],
   );
 
   const onPointerUp = useCallback(() => {
@@ -189,9 +124,9 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       const newCx = worldX - (cursorX - canvasW / 2) / newZoom;
       const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
       applyAndSend(scene, { type: "set_center", x: newCx, y: newCy }, sendCommand);
-      bumpCamera();
+      loopRef.current?.markDirty();
     },
-    [scene, bumpCamera, canvas, sendCommand],
+    [scene, canvas, sendCommand],
   );
 
   // Attach event handlers to the shared canvas
