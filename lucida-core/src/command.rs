@@ -7,7 +7,9 @@ use crate::scene::Scene;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
     // Mode
+    #[serde(rename = "set_mode_2d")]
     SetMode2D,
+    #[serde(rename = "set_mode_3d")]
     SetMode3D,
     // Viewport
     SetViewport { width: u32, height: u32 },

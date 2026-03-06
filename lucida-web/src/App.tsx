@@ -93,6 +93,15 @@ function App() {
           if (cmd.type === "set_z") setZ(cmd.z);
           if (cmd.type === "set_t") setT(cmd.t);
           if (cmd.type === "set_c") setC(cmd.c);
+          if (cmd.type === "set_mode_2d" || cmd.type === "set_mode_3d") {
+            const mode = cmd.type === "set_mode_3d" ? "3d" : "2d";
+            setViewMode(mode);
+            const client = clientRef.current;
+            if (client) {
+              if (mode === "2d") client.setModeSlice();
+              else client.setModeVolume();
+            }
+          }
           setRemoteCameraVersion((v) => v + 1);
         } catch (e) {
           console.warn("[Bridge] bad command:", e);
@@ -269,7 +278,13 @@ function App() {
         client.setModeVolume();
       }
     }
-  }, [viewMode, wasmScene, datasetInfo]);
+    sendCommand(JSON.stringify({ type: next === "3d" ? "set_mode_3d" : "set_mode_2d" }));
+    if (next === "2d" && datasetInfo) {
+      const shapeX = datasetInfo.levels[0].shape[4];
+      const shapeY = datasetInfo.levels[0].shape[3];
+      sendCommand(JSON.stringify({ type: "set_center", x: shapeX / 2, y: shapeY / 2 }));
+    }
+  }, [viewMode, wasmScene, datasetInfo, sendCommand]);
 
   // Dimension extents from full-res level (level 0) for accurate slider ranges
   const dimZ = datasetInfo ? datasetInfo.levels[0].shape[2] : 1;
