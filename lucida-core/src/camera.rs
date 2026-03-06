@@ -12,6 +12,9 @@ pub struct VisibleRegion {
     pub z_range: Range<u32>,
     /// For LOD selection: screen pixels per world unit at the focal plane.
     pub effective_zoom: f64,
+    /// Optional sort center in voxel coordinates [x, y, z] for center-out chunk loading.
+    /// When `Some`, chunks are sorted by distance to this point instead of the grid midpoint.
+    pub sort_center: Option<[f64; 3]>,
 }
 
 /// Unified camera: either 2D slice viewing or 3D volume rendering.
@@ -105,6 +108,7 @@ impl Camera {
                     xy_bounds: bounds,
                     z_range: view_z_range.clone(),
                     effective_zoom: v.zoom,
+                    sort_center: None,
                 }
             }
             Camera::View3D(v) => {
@@ -307,10 +311,20 @@ impl View3D {
         let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
         let zoom_per_voxel = self.effective_zoom() / max_vpw;
 
+        // Transform camera target through inv_model to get sort center in voxel coords.
+        // Flip Y to match the shader's `1.0 - pos.y` convention (image row 0 = top).
+        let target_unit = transform_point(self.target, &inv_model);
+        let sort_center = Some([
+            target_unit[0] * shape[2] as f64,
+            (1.0 - target_unit[1]) * shape[1] as f64,
+            target_unit[2] * shape[0] as f64,
+        ]);
+
         VisibleRegion {
             xy_bounds: [voxel_min[0], voxel_min[1], voxel_max[0], voxel_max[1]],
             z_range: z_start..z_end.max(z_start),
             effective_zoom: zoom_per_voxel,
+            sort_center,
         }
     }
 }

@@ -23,6 +23,7 @@ export class ChunkStore {
   private generation = 0;
   private abortController: AbortController | null = null;
   private bumpScheduled = false;
+  private pendingQueue: ChunkCoord[] = [];
 
   private fileIndex: Map<string, File>;
   private datasetInfo: DatasetInfo;
@@ -66,8 +67,24 @@ export class ChunkStore {
     }
     if (uncached.length === 0) return;
 
-    // If all uncached coords are already in-flight, no work needed
-    if (uncached.every(c => this.inFlight.has(c.key))) return;
+    // If all uncached coords are already in-flight, just reorder the pending queue
+    // so that future chunk fetches use the new priority order (e.g. after camera pan).
+    if (uncached.every(c => this.inFlight.has(c.key))) {
+      // Replace pending queue with new order, filtering out already-actively-loading items
+      const activelyLoading = new Set<string>();
+      for (const key of this.inFlight) {
+        if (!this.pendingQueue.some(c => c.key === key)) {
+          activelyLoading.add(key);
+        }
+      }
+      this.pendingQueue.length = 0;
+      for (const coord of uncached) {
+        if (!activelyLoading.has(coord.key)) {
+          this.pendingQueue.push(coord);
+        }
+      }
+      return;
+    }
 
     // New work needed — abort previous and start fresh with ALL uncached
     if (this.abortController) {
@@ -83,7 +100,8 @@ export class ChunkStore {
       this.inFlight.add(coord.key);
     }
 
-    this.fetchWithConcurrency(uncached, signal, gen);
+    this.pendingQueue = [...uncached];
+    this.fetchWithConcurrency(signal, gen);
   }
 
   destroy(): void {
@@ -109,17 +127,14 @@ export class ChunkStore {
   }
 
   private async fetchWithConcurrency(
-    coords: ChunkCoord[],
     signal: AbortSignal,
     gen: number,
   ): Promise<void> {
-    const queue = [...coords];
-
     const fetchOne = async (): Promise<void> => {
-      while (queue.length > 0) {
+      while (this.pendingQueue.length > 0) {
         if (signal.aborted || gen !== this.generation) return;
 
-        const coord = queue.shift()!;
+        const coord = this.pendingQueue.shift()!;
         const key = coord.key;
         const levelMeta = this.datasetInfo.levels[coord.level];
         if (!levelMeta) continue;
@@ -150,7 +165,7 @@ export class ChunkStore {
       }
     };
 
-    const workerCount = Math.min(MAX_CONCURRENT, coords.length);
+    const workerCount = Math.min(MAX_CONCURRENT, this.pendingQueue.length);
     const workers: Promise<void>[] = [];
     for (let i = 0; i < workerCount; i++) {
       workers.push(fetchOne());

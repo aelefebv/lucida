@@ -111,9 +111,15 @@ pub fn visible_chunks(
     }
 
     // Sort center-out so the viewport center loads first.
-    let center_col = (col_start + col_end) as f64 / 2.0;
-    let center_row = (row_start + row_end) as f64 / 2.0;
-    let center_z = (z_start + z_end) as f64 / 2.0;
+    // Use camera-derived sort center if available, otherwise fall back to grid midpoint.
+    let (center_col, center_row, center_z) = match region.sort_center {
+        Some([cx, cy, cz]) => (cx / chunk_world_x, cy / chunk_world_y, cz / chunk_world_z),
+        None => (
+            (col_start + col_end) as f64 / 2.0,
+            (row_start + row_end) as f64 / 2.0,
+            (z_start + z_end) as f64 / 2.0,
+        ),
+    };
     chunks.sort_by(|a, b| {
         let da = (a.x as f64 + 0.5 - center_col).powi(2)
             + (a.y as f64 + 0.5 - center_row).powi(2)
