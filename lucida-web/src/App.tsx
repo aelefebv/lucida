@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import init, { WasmScene } from "lucida-core";
 import { buildFileIndex } from "./zarr/fileIndex.ts";
 import { parseDatasetInfo } from "./zarr/metadata.ts";
@@ -6,6 +6,7 @@ import type { DatasetInfo } from "./zarr/metadata.ts";
 import { assembleVolume } from "./zarr/volumeAssembler.ts";
 import type { VolumeData } from "./zarr/volumeAssembler.ts";
 import { ChunkStore } from "./zarr/chunkStore.ts";
+import { RenderClient } from "./renderer/renderClient.ts";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
@@ -48,8 +49,30 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
 
+  // Single canvas + RenderClient persisting across mode switches
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const clientRef = useRef<RenderClient | null>(null);
+  const [clientReady, setClientReady] = useState(false);
+
   useEffect(() => {
     init().then(() => setWasmReady(true));
+  }, []);
+
+  // Create RenderClient once when canvas mounts.
+  // transferControlToOffscreen() can only be called once per canvas, so we
+  // must not destroy and recreate the client on StrictMode's double-mount.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || clientRef.current) return;
+
+    const client = new RenderClient(canvas);
+    clientRef.current = client;
+    client.ready().then(() => {
+      setClientReady(true);
+    }).catch(err => {
+      console.error("Render worker init failed:", err);
+      setError(err instanceof Error ? err.message : String(err));
+    });
   }, []);
 
   // Sync Z/T/C to WASM scene and request chunks
@@ -172,7 +195,7 @@ function App() {
     }
   }
 
-  function handleViewModeToggle() {
+  const handleViewModeToggle = useCallback(() => {
     const next = viewMode === "2d" ? "3d" : "2d";
     setViewMode(next);
     if (wasmScene) {
@@ -180,7 +203,6 @@ function App() {
         wasmScene.set_mode_3d();
       } else {
         wasmScene.set_mode_2d();
-        // Re-center the Rust 2D camera on the image (set_mode_2d resets center to [0,0])
         if (datasetInfo) {
           const shapeX = datasetInfo.levels[0].shape[4];
           const shapeY = datasetInfo.levels[0].shape[3];
@@ -188,12 +210,22 @@ function App() {
         }
       }
     }
-  }
+    const client = clientRef.current;
+    if (client) {
+      if (next === "2d") {
+        client.setModeSlice();
+      } else {
+        client.setModeVolume();
+      }
+    }
+  }, [viewMode, wasmScene, datasetInfo]);
 
   // Dimension extents from full-res level (level 0) for accurate slider ranges
   const dimZ = datasetInfo ? datasetInfo.levels[0].shape[2] : 1;
   const dimC = datasetInfo ? datasetInfo.levels[0].shape[1] : 1;
   const dimT = datasetInfo ? datasetInfo.levels[0].shape[0] : 1;
+
+  const client = clientReady ? clientRef.current : null;
 
   return (
     <div className="app">
@@ -231,7 +263,19 @@ function App() {
           </p>
         </div>
       )}
-      {volume && viewMode === "2d" && wasmScene && datasetInfo && storeRef.current && (
+      <canvas
+        ref={canvasRef}
+        style={{
+          width: "100%",
+          height: 600,
+          maxWidth: 800,
+          imageRendering: viewMode === "2d" ? "pixelated" : "auto",
+          borderRadius: 8,
+          backgroundColor: "black",
+          display: volume ? "block" : "none",
+        }}
+      />
+      {volume && viewMode === "2d" && wasmScene && datasetInfo && storeRef.current && client && (
         <SliceViewer
           volume={volume}
           z={z}
@@ -240,14 +284,18 @@ function App() {
           scene={wasmScene}
           store={storeRef.current}
           datasetInfo={datasetInfo}
+          client={client}
+          canvas={canvasRef.current!}
         />
       )}
-      {volume && viewMode === "3d" && wasmScene && datasetInfo && storeRef.current && (
+      {volume && viewMode === "3d" && wasmScene && datasetInfo && storeRef.current && client && (
         <VolumeViewer
           volume={volume}
           scene={wasmScene}
           store={storeRef.current}
           datasetInfo={datasetInfo}
+          client={client}
+          canvas={canvasRef.current!}
         />
       )}
       {volume && (

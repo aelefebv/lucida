@@ -6,7 +6,7 @@ export interface GPUContext {
   format: GPUTextureFormat;
 }
 
-export async function initGPU(canvas: HTMLCanvasElement): Promise<GPUContext> {
+export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Promise<GPUContext> {
   if (!navigator.gpu) {
     throw new Error("WebGPU is not supported in this browser");
   }

@@ -1,119 +1,53 @@
-/** 3D volume viewer component with WebGPU ray marching and pull-based chunk loading. */
+/** 3D volume viewer — delegates WebGPU rendering to a worker via RenderClient. */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
 import type { ChunkCoord } from "../zarr/chunkStore.ts";
-import { initGPU, createEmptyVolumeTexture, writeVolumeChunk } from "../renderer/gpuContext.ts";
-import { VolumeRenderer } from "../renderer/volumeRenderer.ts";
-import { evaluateChunkPlan, sampleIntensityRange } from "../zarr/chunkPlan.ts";
+import { RenderClient } from "../renderer/renderClient.ts";
+import { evaluateChunkPlan } from "../zarr/chunkPlan.ts";
 
 interface Props {
   volume: VolumeData;
   scene: WasmScene;
   store: ChunkStore;
   datasetInfo: DatasetInfo;
+  client: RenderClient;
+  canvas: HTMLCanvasElement;
 }
 
-export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  const gpuRef = useRef<{
-    device: GPUDevice;
-    renderer: VolumeRenderer;
-  } | null>(null);
-
-  const lodRef = useRef<{
-    level: number;
-    t: number;
-    c: number;
-  } | null>(null);
-
-  const volStateRef = useRef<{
-    texture: GPUTexture;
-    level: number;
-    t: number;
-    c: number;
-    uploaded: Set<string>;
-    intensityMin: number;
-    intensityMax: number;
-  } | null>(null);
-
+export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas }: Props) {
   const storeVersion = useChunkStore(store);
 
   const [cameraVersion, setCameraVersion] = useState(0);
   const bumpCamera = useCallback(() => setCameraVersion(v => v + 1), []);
 
-  const [gpuReady, setGpuReady] = useState(0);
   const planRef = useRef<{ needed: ChunkCoord[]; t: number; c: number } | null>(null);
+  const uploadedRef = useRef<Set<string>>(new Set());
+  const lodRef = useRef<{ level: number; t: number; c: number } | null>(null);
 
-  // GPU init effect
+  // Set mode on mount
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    let destroyed = false;
-
-    initGPU(canvas).then(({ device, context, format }) => {
-      if (destroyed) return;
-      const renderer = new VolumeRenderer(device, context, format);
-      gpuRef.current = { device, renderer };
-      setGpuReady(v => v + 1);
-      bumpCamera();
-    }).catch(err => {
-      console.error("WebGPU init failed:", err);
-    });
-
-    return () => {
-      destroyed = true;
-      if (volStateRef.current) {
-        volStateRef.current.texture.destroy();
-        volStateRef.current = null;
-      }
-      gpuRef.current = null;
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    client.setModeVolume();
+  }, [client]);
 
   // Initial volume upload effect
   useEffect(() => {
-    const gpu = gpuRef.current;
-    if (!gpu) return;
+    const canvasW = canvas.clientWidth * devicePixelRatio;
+    const canvasH = canvas.clientHeight * devicePixelRatio;
+    scene.set_viewport(canvasW, canvasH);
 
-    const canvas = canvasRef.current!;
-    canvas.width = canvas.clientWidth * devicePixelRatio;
-    canvas.height = canvas.clientHeight * devicePixelRatio;
-    scene.set_viewport(canvas.width, canvas.height);
-
-    const texture = createEmptyVolumeTexture(
-      gpu.device,
-      volume.width,
-      volume.height,
-      volume.depth,
-    );
-    for (let z = 0; z < volume.depth; z++) {
-      gpu.device.queue.writeTexture(
-        { texture, origin: [0, 0, z] },
-        volume.data.buffer,
-        {
-          offset: volume.data.byteOffset + z * volume.width * volume.height * 2,
-          bytesPerRow: volume.width * 2,
-          rowsPerImage: volume.height,
-        },
-        [volume.width, volume.height, 1],
-      );
-    }
-    gpu.renderer.setVolume(texture, volume.width, volume.height, volume.depth);
-
-    const { min, max } = sampleIntensityRange(volume.data);
-    gpu.renderer.setIntensityRange(min, max);
+    client.volumeSetInitial(volume.data, volume.width, volume.height, volume.depth);
 
     lodRef.current = {
       level: datasetInfo.levels.length - 1,
       t: 0,
       c: 0,
     };
-  }, [volume, scene, datasetInfo, gpuReady]);
+    uploadedRef.current = new Set();
+    bumpCamera();
+  }, [volume, scene, datasetInfo, client, canvas, bumpCamera]);
 
   // Chunk request effect — triggered by camera changes
   useEffect(() => {
@@ -126,11 +60,6 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
 
   // LOD swap + render effect (incremental chunk upload)
   useEffect(() => {
-    const gpu = gpuRef.current;
-    if (!gpu) return;
-
-    // Re-evaluate plan if scene t/c changed since last plan computation
-    // (parent effect may have updated scene.t/c after our request effect ran)
     const viewT = scene.t();
     const viewC = scene.c();
     let plan = planRef.current;
@@ -142,60 +71,37 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
         store.ensureFetched(freshPlan.needed);
       }
     }
+
     if (plan && plan.needed.length > 0) {
       const targetLevel = plan.needed[0].level;
       const levelMeta = datasetInfo.levels[targetLevel];
       const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
       const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
 
-      // Create new texture when target level/t/c changes
-      const vs = volStateRef.current;
-      if (!vs || vs.level !== targetLevel || vs.t !== viewT || vs.c !== viewC) {
-        if (vs) vs.texture.destroy();
-        const texture = createEmptyVolumeTexture(gpu.device, widthFull, heightFull, depthFull);
-        gpu.renderer.setVolume(texture, widthFull, heightFull, depthFull);
-        volStateRef.current = {
-          texture,
-          level: targetLevel,
-          t: viewT,
-          c: viewC,
-          uploaded: new Set(),
-          intensityMin: 65535,
-          intensityMax: 0,
-        };
+      // Reset uploaded set when target level/t/c changes
+      const lod = lodRef.current;
+      if (!lod || lod.level !== targetLevel || lod.t !== viewT || lod.c !== viewC) {
+        uploadedRef.current = new Set();
         lodRef.current = { level: targetLevel, t: viewT, c: viewC };
-        console.log(`3D: created texture for level ${targetLevel} (${widthFull}x${heightFull}x${depthFull})`);
       }
 
-      // Incrementally upload newly-available chunks
-      const state = volStateRef.current!;
-      let intensityChanged = false;
-      const totalChunks = plan.needed.length;
-
+      // Collect newly available chunks
+      const newChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
       for (const coord of plan.needed) {
-        if (state.uploaded.has(coord.key)) continue;
+        if (uploadedRef.current.has(coord.key)) continue;
         const buf = store.get(coord.key);
         if (!buf) continue;
-
-        const chunk = new Uint16Array(buf);
-        const xOff = coord.x * chunkX;
-        const yOff = coord.y * chunkY;
-        const zOff = coord.z * chunkZ;
-        const cw = Math.min(chunkX, widthFull - xOff);
-        const ch = Math.min(chunkY, heightFull - yOff);
-        const cd = Math.min(chunkZ, depthFull - zOff);
-
-        writeVolumeChunk(gpu.device, state.texture, chunk, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
-        state.uploaded.add(coord.key);
-
-        const perChunkSamples = Math.floor(100000 / totalChunks);
-        const { min, max } = sampleIntensityRange(chunk, perChunkSamples);
-        if (min < state.intensityMin) { state.intensityMin = min; intensityChanged = true; }
-        if (max > state.intensityMax) { state.intensityMax = max; intensityChanged = true; }
+        newChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+        uploadedRef.current.add(coord.key);
       }
 
-      if (intensityChanged) {
-        gpu.renderer.setIntensityRange(state.intensityMin, state.intensityMax);
+      if (newChunks.length > 0) {
+        client.volumeUploadChunks(
+          newChunks,
+          targetLevel, viewT, viewC,
+          widthFull, heightFull, depthFull,
+          chunkX, chunkY, chunkZ,
+        );
       }
     }
 
@@ -204,9 +110,11 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
     const model = new Float32Array(scene.model_matrix());
     const invModel = new Float32Array(scene.inv_model_matrix());
     const eye = new Float32Array(scene.eye_position_3d());
-    gpu.renderer.setMatrices(invVP, model, invModel, eye);
-    gpu.renderer.render();
-  }, [storeVersion, cameraVersion, scene, store, datasetInfo]);
+    const canvasW = canvas.clientWidth * devicePixelRatio;
+    const canvasH = canvas.clientHeight * devicePixelRatio;
+
+    client.volumeRender(invVP, model, invModel, eye, canvasW, canvasH);
+  }, [storeVersion, cameraVersion, scene, store, datasetInfo, client, canvas]);
 
   // Input handling
   const [dragging, setDragging] = useState(false);
@@ -214,17 +122,17 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
   const lastPos = useRef({ x: 0, y: 0 });
 
   const onPointerDown = useCallback(
-    (e: React.PointerEvent<HTMLCanvasElement>) => {
+    (e: PointerEvent) => {
       setDragging(true);
       shiftDragRef.current = e.shiftKey;
       lastPos.current = { x: e.clientX, y: e.clientY };
-      e.currentTarget.setPointerCapture(e.pointerId);
+      canvas.setPointerCapture(e.pointerId);
     },
-    [],
+    [canvas],
   );
 
   const onPointerMove = useCallback(
-    (e: React.PointerEvent<HTMLCanvasElement>) => {
+    (e: PointerEvent) => {
       if (!dragging) return;
       const dx = e.clientX - lastPos.current.x;
       const dy = e.clientY - lastPos.current.y;
@@ -253,27 +161,22 @@ export function VolumeViewer({ volume, scene, store, datasetInfo }: Props) {
     [scene, bumpCamera],
   );
 
+  // Attach event handlers to the shared canvas
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
     canvas.addEventListener("wheel", onWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", onWheel);
-  }, [onWheel]);
+    canvas.style.cursor = dragging ? "grabbing" : "grab";
+    return () => {
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointercancel", onPointerUp);
+      canvas.removeEventListener("wheel", onWheel);
+    };
+  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onWheel, dragging]);
 
-  return (
-    <canvas
-      ref={canvasRef}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
-      style={{
-        width: "100%",
-        maxWidth: 800,
-        height: 600,
-        borderRadius: 8,
-        cursor: dragging ? "grabbing" : "grab",
-      }}
-    />
-  );
+  return null;
 }

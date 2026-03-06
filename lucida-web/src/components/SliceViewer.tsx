@@ -1,13 +1,12 @@
-/** 2D slice viewer — WebGPU-accelerated tile rendering with pan/zoom. */
+/** 2D slice viewer — delegates WebGPU rendering to a worker via RenderClient. */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
 import type { ChunkCoord } from "../zarr/chunkStore.ts";
-import { initGPU, createSliceTexture, writeSliceRegion } from "../renderer/gpuContext.ts";
-import { SliceRenderer } from "../renderer/sliceRenderer.ts";
-import { evaluateChunkPlan, sampleIntensityRange } from "../zarr/chunkPlan.ts";
+import { RenderClient } from "../renderer/renderClient.ts";
+import { evaluateChunkPlan } from "../zarr/chunkPlan.ts";
 
 interface Props {
   volume: VolumeData;
@@ -17,31 +16,13 @@ interface Props {
   scene: WasmScene;
   store: ChunkStore;
   datasetInfo: DatasetInfo;
+  client: RenderClient;
+  canvas: HTMLCanvasElement;
 }
 
-export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  // GPU state refs
-  const gpuRef = useRef<{
-    device: GPUDevice;
-    context: GPUCanvasContext;
-    renderer: SliceRenderer;
-  } | null>(null);
-
-  // Track current tile texture state for invalidation
-  const tileStateRef = useRef<{
-    texture: GPUTexture;
-    level: number;
-    z: number;
-    t: number;
-    c: number;
-  } | null>(null);
-
-  // Subscribe to store updates — triggers re-render when chunks arrive
+export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas }: Props) {
   const storeVersion = useChunkStore(store);
 
-  // Rust camera is the single source of truth for pan/zoom.
   const [cameraVersion, setCameraVersion] = useState(0);
   const bumpCamera = useCallback(() => setCameraVersion(v => v + 1), []);
   const [dragging, setDragging] = useState(false);
@@ -60,60 +41,26 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
       scene.set_center(fullResWidth / 2, fullResHeight / 2);
       scene.set_zoom(1.0);
       bumpCamera();
-      tileStateRef.current = null;
     }
   }, [volume, scene, datasetInfo, bumpCamera]);
 
-  // Initialize WebGPU
+  // Set mode on mount
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    let destroyed = false;
-
-    initGPU(canvas).then(({ device, context, format }) => {
-      if (destroyed) return;
-      const renderer = new SliceRenderer(device, context, format);
-      gpuRef.current = { device, context, renderer };
-      // Trigger initial render
-      bumpCamera();
-    }).catch(err => {
-      console.error("WebGPU init failed:", err);
-    });
-
-    return () => {
-      destroyed = true;
-      if (tileStateRef.current) {
-        tileStateRef.current.texture.destroy();
-        tileStateRef.current = null;
-      }
-      gpuRef.current = null;
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+    client.setModeSlice();
+  }, [client]);
 
   // Upload fallback (coarsest-level) texture
   useEffect(() => {
-    const gpu = gpuRef.current;
-    if (!gpu) return;
-
     const { width, height, depth, data } = volume;
     const clampedZ = Math.max(0, Math.min(z, depth - 1));
     const sliceSize = width * height;
     const offset = clampedZ * sliceSize;
     const slice = data.subarray(offset, offset + sliceSize);
-
-    const { min, max } = sampleIntensityRange(slice);
-
-    const texture = createSliceTexture(gpu.device, width, height, slice);
-    gpu.renderer.setFallback(texture);
-    gpu.renderer.setIntensityRange(min, max);
-  }, [volume, z]);
+    client.sliceSetFallback(slice, width, height);
+  }, [volume, z, client]);
 
   // Request chunks when view state changes
   useEffect(() => {
-    // Sync dimension state to WASM scene before computing plan —
-    // child effects run before parent effects, so App's set_t/set_c/set_z
-    // may not have executed yet.
     scene.set_z(z);
     scene.set_t(t);
     scene.set_c(c);
@@ -126,11 +73,6 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
 
   // Upload tiles and render
   useEffect(() => {
-    const canvas = canvasRef.current;
-    const gpu = gpuRef.current;
-    if (!canvas || !gpu) return;
-
-    // Use cached chunk plan from request effect
     const plan = planRef.current;
     if (!plan) return;
 
@@ -142,62 +84,27 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
       if (levelMeta) {
         const [, , , levelHeight, levelWidth] = levelMeta.shape;
         const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-
-        // Invalidate tile texture if view params changed
-        const ts = tileStateRef.current;
-        if (!ts || ts.level !== level || ts.z !== z || ts.t !== t || ts.c !== c) {
-          if (ts) ts.texture.destroy();
-          const texture = createSliceTexture(gpu.device, levelWidth, levelHeight, null);
-          tileStateRef.current = { texture, level, z, t, c };
-          gpu.renderer.setTileTexture(texture);
-        }
-
-        // Map full-res Z index to this level's Z coordinate space
         const fullResDepth = datasetInfo.levels[0].shape[2];
         const levelDepth = levelMeta.shape[2];
-        const levelZ = Math.min(
-          Math.floor((z / Math.max(fullResDepth - 1, 1)) * Math.max(levelDepth - 1, 1)),
-          levelDepth - 1,
-        );
-        const targetChunkZ = Math.floor(levelZ / chunkZ);
-        const localZ = levelZ - targetChunkZ * chunkZ;
 
         // Collect available chunks
-        const availableChunks: { coord: ChunkCoord; data: Uint16Array }[] = [];
+        const availableChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
         for (const coord of needed) {
           if (coord.level !== level) continue;
           const buf = store.get(coord.key);
           if (buf) {
-            availableChunks.push({ coord, data: new Uint16Array(buf) });
+            availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
           }
         }
 
         if (availableChunks.length > 0) {
-          // Auto-detect intensity range
-          let min = 65535, max = 0;
-          const perChunkSamples = Math.floor(10000 / Math.max(1, availableChunks.length));
-          for (const { data } of availableChunks) {
-            const r = sampleIntensityRange(data, perChunkSamples);
-            if (r.min < min) min = r.min;
-            if (r.max > max) max = r.max;
-          }
-          gpu.renderer.setIntensityRange(min, max);
-
-          // Upload each chunk tile to the tile texture
-          const tileTexture = tileStateRef.current!.texture;
-          for (const { coord, data } of availableChunks) {
-            if (coord.z !== targetChunkZ) continue;
-
-            const xOff = coord.x * chunkX;
-            const yOff = coord.y * chunkY;
-            const tileW = Math.min(chunkX, levelWidth - xOff);
-            const tileH = Math.min(chunkY, levelHeight - yOff);
-
-            // Extract the z-slice from the chunk and upload
-            const sliceOffset = localZ * chunkY * chunkX;
-            const sliceData = data.subarray(sliceOffset, sliceOffset + chunkY * chunkX);
-            writeSliceRegion(gpu.device, tileTexture, sliceData, chunkX, xOff, yOff, tileW, tileH);
-          }
+          client.sliceUploadTiles(
+            availableChunks,
+            level, z, t, c,
+            levelWidth, levelHeight,
+            chunkX, chunkY, chunkZ,
+            fullResDepth, levelDepth, z,
+          );
         }
       }
     }
@@ -205,8 +112,6 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     // Render
     const canvasW = canvas.clientWidth;
     const canvasH = canvas.clientHeight;
-    canvas.width = canvasW;
-    canvas.height = canvasH;
     scene.set_viewport(canvasW, canvasH);
 
     const fullResWidth = datasetInfo.levels[0].shape[4];
@@ -217,20 +122,21 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
     const cx = centerArr[0];
     const cy = centerArr[1];
 
-    gpu.renderer.render(currentZoom, cx, cy, canvasW, canvasH, fullResWidth, fullResHeight);
-  }, [volume, z, t, c, cameraVersion, storeVersion, datasetInfo, scene, store]);
+    client.resize(canvasW, canvasH);
+    client.sliceRender(currentZoom, cx, cy, canvasW, canvasH, fullResWidth, fullResHeight);
+  }, [volume, z, t, c, cameraVersion, storeVersion, datasetInfo, scene, store, client, canvas]);
 
   const onPointerDown = useCallback(
-    (e: React.PointerEvent<HTMLCanvasElement>) => {
+    (e: PointerEvent) => {
       setDragging(true);
       lastPos.current = { x: e.clientX, y: e.clientY };
-      e.currentTarget.setPointerCapture(e.pointerId);
+      canvas.setPointerCapture(e.pointerId);
     },
-    [],
+    [canvas],
   );
 
   const onPointerMove = useCallback(
-    (e: React.PointerEvent<HTMLCanvasElement>) => {
+    (e: PointerEvent) => {
       if (!dragging) return;
       const dx = e.clientX - lastPos.current.x;
       const dy = e.clientY - lastPos.current.y;
@@ -248,8 +154,6 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
   const onWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
-      const canvas = canvasRef.current;
-      if (!canvas) return;
 
       const rect = canvas.getBoundingClientRect();
       const cursorX = e.clientX - rect.left;
@@ -272,33 +176,25 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo }: Prop
       );
       bumpCamera();
     },
-    [scene, bumpCamera],
+    [scene, bumpCamera, canvas],
   );
 
-  // Attach wheel handler with { passive: false } to allow preventDefault
+  // Attach event handlers to the shared canvas
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
+    canvas.addEventListener("pointerdown", onPointerDown);
+    canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerup", onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
     canvas.addEventListener("wheel", onWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", onWheel);
-  }, [onWheel]);
+    canvas.style.cursor = dragging ? "grabbing" : "grab";
+    return () => {
+      canvas.removeEventListener("pointerdown", onPointerDown);
+      canvas.removeEventListener("pointermove", onPointerMove);
+      canvas.removeEventListener("pointerup", onPointerUp);
+      canvas.removeEventListener("pointercancel", onPointerUp);
+      canvas.removeEventListener("wheel", onWheel);
+    };
+  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onWheel, dragging]);
 
-  return (
-    <canvas
-      ref={canvasRef}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
-      style={{
-        width: "100%",
-        height: 600,
-        maxWidth: 800,
-        imageRendering: "pixelated",
-        borderRadius: 8,
-        cursor: dragging ? "grabbing" : "grab",
-        backgroundColor: "black",
-      }}
-    />
-  );
+  return null;
 }
