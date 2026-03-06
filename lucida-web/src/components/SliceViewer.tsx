@@ -31,6 +31,8 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
   const planRef = useRef<{ needed: ChunkCoord[] } | null>(null);
+  const uploadedRef = useRef<Set<string>>(new Set());
+  const sliceLodRef = useRef<{ level: number; z: number; t: number; c: number } | null>(null);
 
   // Reset pan/zoom when the dataset dimensions change
   const prevDims = useRef({ w: volume.width, h: volume.height, d: volume.depth });
@@ -90,13 +92,22 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
         const fullResDepth = datasetInfo.levels[0].shape[2];
         const levelDepth = levelMeta.shape[2];
 
-        // Collect available chunks
+        // Reset uploaded set when view params change
+        const lod = sliceLodRef.current;
+        if (!lod || lod.level !== level || lod.z !== z || lod.t !== t || lod.c !== c) {
+          uploadedRef.current = new Set();
+          sliceLodRef.current = { level, z, t, c };
+        }
+
+        // Collect only newly-available chunks
         const availableChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
         for (const coord of needed) {
           if (coord.level !== level) continue;
+          if (uploadedRef.current.has(coord.key)) continue;
           const buf = store.get(coord.key);
           if (buf) {
             availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+            uploadedRef.current.add(coord.key);
           }
         }
 

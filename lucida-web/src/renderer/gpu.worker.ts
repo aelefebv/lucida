@@ -21,6 +21,9 @@ let tileState: {
   z: number;
   t: number;
   c: number;
+  uploaded: Set<string>;
+  intensityMin: number;
+  intensityMax: number;
 } | null = null;
 
 // Volume texture state
@@ -105,7 +108,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         if (!tileState || tileState.level !== level || tileState.z !== z || tileState.t !== t || tileState.c !== c) {
           if (tileState) tileState.texture.destroy();
           const texture = createSliceTexture(device, levelWidth, levelHeight, null);
-          tileState = { texture, level, z, t, c };
+          tileState = { texture, level, z, t, c, uploaded: new Set(), intensityMin: 65535, intensityMax: 0 };
           renderer.setTileTexture(texture);
         }
 
@@ -118,22 +121,19 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         const localZ = levelZ - targetChunkZ * chunkZ;
 
         if (msg.tiles.length > 0) {
-          // Auto-detect intensity range
-          let min = 65535, max = 0;
+          let intensityChanged = false;
           const perChunkSamples = Math.floor(10000 / Math.max(1, msg.tiles.length));
-          for (const tile of msg.tiles) {
-            const data = new Uint16Array(tile.data);
-            const r = sampleIntensityRange(data, perChunkSamples);
-            if (r.min < min) min = r.min;
-            if (r.max > max) max = r.max;
-          }
-          renderer.setIntensityRange(min, max);
-          post({ type: "intensityRange", min, max });
 
-          // Upload each chunk tile
           for (const tile of msg.tiles) {
+            if (tileState!.uploaded.has(tile.key)) continue;
             if (tile.z !== targetChunkZ) continue;
             const data = new Uint16Array(tile.data);
+
+            // Incremental intensity tracking
+            const r = sampleIntensityRange(data, perChunkSamples);
+            if (r.min < tileState!.intensityMin) { tileState!.intensityMin = r.min; intensityChanged = true; }
+            if (r.max > tileState!.intensityMax) { tileState!.intensityMax = r.max; intensityChanged = true; }
+
             const xOff = tile.x * chunkX;
             const yOff = tile.y * chunkY;
             const tileW = Math.min(chunkX, levelWidth - xOff);
@@ -141,6 +141,12 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
             const sliceOffset = localZ * chunkY * chunkX;
             const sliceData = data.subarray(sliceOffset, sliceOffset + chunkY * chunkX);
             writeSliceRegion(device, tileState!.texture, sliceData, chunkX, xOff, yOff, tileW, tileH);
+            tileState!.uploaded.add(tile.key);
+          }
+
+          if (intensityChanged) {
+            renderer.setIntensityRange(tileState!.intensityMin, tileState!.intensityMax);
+            post({ type: "intensityRange", min: tileState!.intensityMin, max: tileState!.intensityMax });
           }
         }
         break;
