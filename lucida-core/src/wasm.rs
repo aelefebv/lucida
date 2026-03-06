@@ -1,6 +1,7 @@
 use wasm_bindgen::prelude::*;
 
 use crate::camera::Camera;
+use crate::command::Command;
 use crate::scene::{Layer, Scene};
 
 #[wasm_bindgen]
@@ -20,6 +21,14 @@ impl WasmScene {
         Self {
             inner: Scene::new([width, height]),
         }
+    }
+
+    // --- Command protocol ---
+
+    pub fn apply_command(&mut self, json: &str) -> Result<(), JsError> {
+        let cmd: Command = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner.apply(cmd);
+        Ok(())
     }
 
     // --- Mode switching ---
