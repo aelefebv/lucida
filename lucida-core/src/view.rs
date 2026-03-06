@@ -1,7 +1,9 @@
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
 /// Selected indices for non-displayed dimensions.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ViewState {
     /// Z slab range. A single slice is a range of length 1 (e.g. 42..43).
     pub z_range: Range<u32>,

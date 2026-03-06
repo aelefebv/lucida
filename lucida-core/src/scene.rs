@@ -1,10 +1,12 @@
+use serde::{Deserialize, Serialize};
+
 use crate::camera::Camera;
 use crate::chunk::{self, ChunkRequestPlan};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
 /// A single image layer in the scene.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Layer {
     pub name: String,
     pub visible: bool,
@@ -17,7 +19,7 @@ pub struct Layer {
 }
 
 /// The complete viewer state.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
     pub camera: Camera,
     pub view: ViewState,
@@ -173,6 +175,40 @@ mod tests {
         scene.set_mode_2d();
         assert!(matches!(scene.camera, Camera::View2D(_)));
         assert_eq!(scene.camera.viewport(), [800, 600]);
+    }
+
+    #[test]
+    fn scene_2d_serialization_round_trip() {
+        let mut scene = Scene::new([800, 600]);
+        scene.view.set_z(5);
+        scene.view.t = 2;
+        scene.view.c = 1;
+        scene.add_layer(test_layer());
+        let json = serde_json::to_string(&scene).unwrap();
+        let parsed: Scene = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.view.z_range, 5..6);
+        assert_eq!(parsed.view.t, 2);
+        assert_eq!(parsed.view.c, 1);
+        assert_eq!(parsed.layers.len(), 1);
+        assert_eq!(parsed.layers[0].name, "test");
+        if let Camera::View2D(v) = &parsed.camera {
+            assert_eq!(v.viewport, [800, 600]);
+        } else {
+            panic!("expected View2D");
+        }
+    }
+
+    #[test]
+    fn scene_3d_serialization_round_trip() {
+        let mut scene = Scene::new([800, 600]);
+        scene.set_mode_3d();
+        scene.set_volume_scale([100, 200, 300], [1.0, 1.0, 1.0]);
+        scene.add_layer(test_layer());
+        let json = serde_json::to_string(&scene).unwrap();
+        let parsed: Scene = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed.camera, Camera::View3D(_)));
+        assert!(parsed.volume_transform.is_some());
+        assert_eq!(parsed.volume_shape, Some([100, 200, 300]));
     }
 
     #[test]

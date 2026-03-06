@@ -46,7 +46,14 @@ class Viewer:
                     self._connected.set()
                     async for message in ws:
                         try:
-                            self._scene.apply_command(message)
+                            msg = json.loads(message)
+                            msg_type = msg.get("type")
+                            if msg_type == "snapshot":
+                                self._scene.load_snapshot(json.dumps(msg["scene"]))
+                            elif msg_type == "command_broadcast":
+                                self._scene.apply_command(json.dumps(msg["command"]))
+                            elif msg_type == "ack":
+                                pass  # client already applied optimistically
                         except Exception:
                             pass
             except Exception:

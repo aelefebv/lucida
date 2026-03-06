@@ -1,15 +1,19 @@
-export type CommandHandler = (json: string) => void;
+export interface BridgeHandlers {
+  onSnapshot: (seq: number, sceneJson: string) => void;
+  onCommand: (seq: number, commandJson: string) => void;
+  onAck: (seq: number) => void;
+}
 
 export class Bridge {
   private ws: WebSocket | null = null;
   private url: string;
-  private handler: CommandHandler;
+  private handlers: BridgeHandlers;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
 
-  constructor(handler: CommandHandler, port = 9876) {
+  constructor(handlers: BridgeHandlers, port = 9876) {
     this.url = `ws://localhost:${port}`;
-    this.handler = handler;
+    this.handlers = handlers;
     this.connect();
   }
 
@@ -23,8 +27,22 @@ export class Bridge {
     };
 
     ws.onmessage = (event) => {
-      if (typeof event.data === "string") {
-        this.handler(event.data);
+      if (typeof event.data !== "string") return;
+      try {
+        const msg = JSON.parse(event.data);
+        switch (msg.type) {
+          case "snapshot":
+            this.handlers.onSnapshot(msg.seq, JSON.stringify(msg.scene));
+            break;
+          case "command_broadcast":
+            this.handlers.onCommand(msg.seq, JSON.stringify(msg.command));
+            break;
+          case "ack":
+            this.handlers.onAck(msg.seq);
+            break;
+        }
+      } catch (e) {
+        console.warn("[Bridge] failed to parse message:", e);
       }
     };
 

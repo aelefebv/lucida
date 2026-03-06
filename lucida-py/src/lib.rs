@@ -17,6 +17,13 @@ impl PyScene {
         }
     }
 
+    fn load_snapshot(&mut self, json: &str) -> PyResult<()> {
+        let scene: lucida_core::scene::Scene = serde_json::from_str(json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        self.inner = scene;
+        Ok(())
+    }
+
     fn apply_command(&mut self, json: &str) -> PyResult<()> {
         let cmd: Command =
             serde_json::from_str(json).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;

@@ -1,7 +1,9 @@
 /// Volume model transform that maps voxel space to normalized world space,
 /// accounting for anisotropic voxel spacing.
 
-#[derive(Debug, Clone)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VolumeTransform {
     pub model: [f32; 16],
     pub inv_model: [f32; 16],

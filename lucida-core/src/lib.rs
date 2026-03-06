@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod chunk;
 pub mod command;
+pub mod protocol;
 pub mod scene;
 pub mod transform;
 pub mod view;

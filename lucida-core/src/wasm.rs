@@ -25,6 +25,13 @@ impl WasmScene {
 
     // --- Command protocol ---
 
+    pub fn load_snapshot(&mut self, json: &str) -> Result<(), JsError> {
+        let scene: crate::scene::Scene =
+            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner = scene;
+        Ok(())
+    }
+
     pub fn apply_command(&mut self, json: &str) -> Result<(), JsError> {
         let cmd: Command = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
         self.inner.apply(cmd);

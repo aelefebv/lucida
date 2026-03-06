@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
 use crate::transform::VolumeTransform;
 
 /// Axis-aligned bounding box in voxel space, plus effective zoom for LOD selection.
@@ -18,14 +20,17 @@ pub struct VisibleRegion {
 }
 
 /// Unified camera: either 2D slice viewing or 3D volume rendering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "mode")]
 pub enum Camera {
+    #[serde(rename = "2d")]
     View2D(View2D),
+    #[serde(rename = "3d")]
     View3D(View3D),
 }
 
 /// 2D pan/zoom camera for slice viewing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct View2D {
     /// Center of the viewport in world coordinates.
     pub center: [f64; 2],
@@ -37,7 +42,7 @@ pub struct View2D {
 
 /// 3D arcball camera for volume rendering.
 /// Uses spherical coordinates (theta, phi, distance) around a target point.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct View3D {
     pub target: [f64; 3],
     pub theta: f64,

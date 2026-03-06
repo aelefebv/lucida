@@ -10,7 +10,7 @@ import { RenderClient } from "./renderer/renderClient.ts";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
-import { Bridge } from "./bridge.ts";
+import { Bridge, type BridgeHandlers } from "./bridge.ts";
 import "./App.css";
 
 interface OpenedItem {
@@ -62,28 +62,48 @@ function App() {
     init().then(() => setWasmReady(true));
   }, []);
 
-  // Bridge: receive commands from relay server over WebSocket
+  // Bridge: receive commands from relay server over WebSocket.
+  // Use a ref so the Bridge (and its WebSocket) persists across wasmScene changes.
   const bridgeRef = useRef<Bridge | null>(null);
+  const wasmSceneRef = useRef<WasmScene | null>(null);
+  wasmSceneRef.current = wasmScene;
+
   useEffect(() => {
-    const bridge = new Bridge((json: string) => {
-      if (!wasmScene) return;
-      try {
-        wasmScene.apply_command(json);
-        const cmd = JSON.parse(json);
-        if (cmd.type === "set_z") setZ(cmd.z);
-        if (cmd.type === "set_t") setT(cmd.t);
-        if (cmd.type === "set_c") setC(cmd.c);
-        setRemoteCameraVersion((v) => v + 1);
-      } catch (e) {
-        console.warn("[Bridge] bad command:", e);
-      }
-    });
-    bridgeRef.current = bridge;
-    return () => {
-      bridge.destroy();
-      bridgeRef.current = null;
+    if (bridgeRef.current) return;
+    const handlers: BridgeHandlers = {
+      onSnapshot: (_seq, sceneJson) => {
+        const scene = wasmSceneRef.current;
+        if (!scene) return;
+        try {
+          scene.load_snapshot(sceneJson);
+          setZ(scene.z());
+          setT(scene.t());
+          setC(scene.c());
+          setRemoteCameraVersion((v) => v + 1);
+        } catch (e) {
+          console.warn("[Bridge] bad snapshot:", e);
+        }
+      },
+      onCommand: (_seq, commandJson) => {
+        const scene = wasmSceneRef.current;
+        if (!scene) return;
+        try {
+          scene.apply_command(commandJson);
+          const cmd = JSON.parse(commandJson);
+          if (cmd.type === "set_z") setZ(cmd.z);
+          if (cmd.type === "set_t") setT(cmd.t);
+          if (cmd.type === "set_c") setC(cmd.c);
+          setRemoteCameraVersion((v) => v + 1);
+        } catch (e) {
+          console.warn("[Bridge] bad command:", e);
+        }
+      },
+      onAck: (_seq) => {
+        // Client already applied optimistically — no-op.
+      },
     };
-  }, [wasmScene]);
+    bridgeRef.current = new Bridge(handlers);
+  }, []);
 
   const sendCommand = useCallback((json: string) => {
     bridgeRef.current?.send(json);

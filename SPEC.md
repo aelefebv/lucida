@@ -210,7 +210,7 @@ What ingestion should not do:
 ## lucida-server in Rust (tokio)
 The “multi-user relay.”
 
-This is the central coordination server that keeps all clients in sync. It owns the single authoritative `Scene` and relays commands between all connected clients.
+This is the central coordination server that keeps all clients in sync. It owns the single authoritative `Scene` and relays commands between all connected clients via Operational Transformation (OT).
 
 All clients (browsers, Python, CLI) are WebSocket clients that connect to lucida-server on `ws://localhost:9876`.
 
