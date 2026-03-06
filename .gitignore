@@ -3,8 +3,11 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# C extensions
+# C/native extensions
 *.so
+*.dylib
+*.pyd
+*.dSYM/
 
 # Distribution / packaging
 .Python
@@ -190,6 +193,11 @@ client-web/dist/
 AGENTS.md
 
 # Added by cargo
-
 /target
 /example_files
+
+# WASM build output
+lucida-core/pkg/
+
+# Workspace lock file (library crates)
+/Cargo.lock

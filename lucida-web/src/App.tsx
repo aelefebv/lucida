@@ -10,6 +10,7 @@ import { RenderClient } from "./renderer/renderClient.ts";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
+import { Bridge } from "./bridge.ts";
 import "./App.css";
 
 interface OpenedItem {
@@ -41,6 +42,9 @@ function App() {
   const [c, setC] = useState(0);
   const [t, setT] = useState(0);
 
+  // Remote (Python bridge) camera version — bumped when a command arrives via WebSocket
+  const [remoteCameraVersion, setRemoteCameraVersion] = useState(0);
+
   // Keep dataset info and file index for re-assembling on C/T change
   const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
   const fileIndexRef = useRef<Map<string, File> | null>(null);
@@ -56,6 +60,33 @@ function App() {
 
   useEffect(() => {
     init().then(() => setWasmReady(true));
+  }, []);
+
+  // Bridge: receive commands from relay server over WebSocket
+  const bridgeRef = useRef<Bridge | null>(null);
+  useEffect(() => {
+    const bridge = new Bridge((json: string) => {
+      if (!wasmScene) return;
+      try {
+        wasmScene.apply_command(json);
+        const cmd = JSON.parse(json);
+        if (cmd.type === "set_z") setZ(cmd.z);
+        if (cmd.type === "set_t") setT(cmd.t);
+        if (cmd.type === "set_c") setC(cmd.c);
+        setRemoteCameraVersion((v) => v + 1);
+      } catch (e) {
+        console.warn("[Bridge] bad command:", e);
+      }
+    });
+    bridgeRef.current = bridge;
+    return () => {
+      bridge.destroy();
+      bridgeRef.current = null;
+    };
+  }, [wasmScene]);
+
+  const sendCommand = useCallback((json: string) => {
+    bridgeRef.current?.send(json);
   }, []);
 
   // Create RenderClient once when canvas mounts.
@@ -286,6 +317,8 @@ function App() {
           datasetInfo={datasetInfo}
           client={client}
           canvas={canvasRef.current!}
+          remoteCameraVersion={remoteCameraVersion}
+          sendCommand={sendCommand}
         />
       )}
       {volume && viewMode === "3d" && wasmScene && datasetInfo && storeRef.current && client && (
@@ -296,6 +329,8 @@ function App() {
           datasetInfo={datasetInfo}
           client={client}
           canvas={canvasRef.current!}
+          remoteCameraVersion={remoteCameraVersion}
+          sendCommand={sendCommand}
         />
       )}
       {volume && (

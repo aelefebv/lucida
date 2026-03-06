@@ -6,6 +6,7 @@ A fast and lightweight 5D image viewer.
 - **lucida-web** decides how the user interacts with it.
 - **The renderer** decides how pixels get drawn.
 - **lucida-store** decides where data comes from.
+- **lucida-server** keeps all clients in sync.
 - **lucida-py** and **lucida-cli** are just other ways to drive the same viewer model.
 
 ## lucida-core in Rust
@@ -71,7 +72,8 @@ It should be relatively thin. It should not contain custom logic for chunk plann
 Typical flow:
 1. User drags the mouse.
 1. lucida-web converts that into a command like pan(dx, dy).
-1. It sends that command to lucida-core.
+1. It applies the command to the local lucida-core Scene (optimistic).
+1. It sends the command JSON to lucida-server for relay to other clients.
 1. lucida-core returns updated state plus a new chunk request plan.
 1. lucida-web forwards that plan to the data/renderer pipeline.
 
@@ -205,8 +207,38 @@ What ingestion should not do:
 - block the UI — conversion is async with progress reporting
 - live in lucida-py or any other adapter — conversion is a storage concern
 
+## lucida-server in Rust (tokio)
+The “multi-user relay.”
+
+This is the central coordination server that keeps all clients in sync. It owns the single authoritative `Scene` and relays commands between all connected clients.
+
+All clients (browsers, Python, CLI) are WebSocket clients that connect to lucida-server on `ws://localhost:9876`.
+
+How it works:
+1. A client applies a command to its local Scene copy immediately (optimistic local apply).
+1. The client sends the command JSON to lucida-server.
+1. lucida-server parses the command, applies it to the authoritative Scene, and rebroadcasts to all other connected clients.
+1. The server skips echoing the command back to the sender, since the sender already applied it locally. This avoids double-applying relative commands like `pan`.
+
+Key design decisions:
+- Star topology, not peer-to-peer. Every client connects to the server; no client talks directly to another.
+- Each WebSocket connection spawns a tokio task. A `broadcast` channel handles fan-out, tagged with sender ID so each client's outbound loop skips its own messages.
+
+What it should do:
+- own the authoritative Scene
+- accept commands from any connected client
+- apply commands to the Scene
+- rebroadcast commands to all other clients
+- handle connect/disconnect gracefully
+
+What it should not do:
+- serve data or chunks (that is lucida-store's job)
+- render anything
+- implement viewer logic beyond applying commands (that is lucida-core's job)
+- require authentication for local use
+
 ## lucida-py via PyO3/maturin
-The "Python analysis/control bridge."
+The “Python analysis/control bridge.”
 
 This is the Python-facing interface to the same viewer logic.
 
@@ -232,16 +264,19 @@ The important design point is that lucida-py should expose the same semantics as
 
 For example:
 ```python
-viewer.open("gcs://bucket/sample.zarr")
-viewer.set_slice("z", 42)
+viewer.open(“gcs://bucket/sample.zarr”)
+viewer.set_slice(“z”, 42)
 viewer.pan(dx=200, dy=-100)
 chunks = viewer.visible_chunks()
 arrs = viewer.fetch_visible_arrays()
-viewer.add_image(process(arrs), name="filtered")
+viewer.add_image(process(arrs), name=”filtered”)
 ```
-Internally, lucida-py should probably wrap:
-- lucida-core directly for state, camera, planning
+Internally, lucida-py wraps:
+- lucida-core directly for state, camera, planning (via a local `PyScene`)
+- lucida-server for multi-user sync (as a WebSocket client)
 - lucida-store or another data layer for actual chunk retrieval
+
+When `viewer.start()` is called, the Python `Viewer` connects to lucida-server as a WebSocket client. Mutating methods apply optimistically to the local Scene and send the command to the server. Incoming commands from other clients are applied to the local Scene in a background receive loop. Read-only accessors read from the local Scene directly.
 
 What it should not become:
 - a second full codebase
@@ -265,7 +300,7 @@ It should support commands like:
 - lucida visible-chunks
 - lucida export-view
 
-The CLI sends commands to a live viewer session.
+The CLI connects to lucida-server as a WebSocket client and sends commands to the shared session. Any connected browser or Python client sees the effect immediately.
 
 Useful for:
 - remote control
@@ -273,11 +308,11 @@ Useful for:
 - scripting a browser or desktop viewer
 - debugging state transitions
 
-The second model is often more powerful if you define a stable command protocol, such as JSON messages:
+All clients use the same stable command protocol — JSON messages over WebSocket:
 ```
 { "type": "pan", "dx": 120, "dy": -40 }
 ```
-Then the web app, Python API, and CLI can all use the same command format.
+The web app, Python API, and CLI all use the same command format, relayed through lucida-server.
 
 What it should not do:
 - implement independent navigation logic
@@ -299,15 +334,22 @@ What it should not do:
 
 ### For Python:
 1. Python calls viewer.pan(...).
-1. lucida-py forwards that to lucida-core.
-1. lucida-core computes visible chunks.
-1. Python requests those chunks, processes them, and adds a derived layer.
-1. The renderer displays both source and derived layers.
+1. lucida-py applies the command to its local Scene (optimistic) and sends it to lucida-server.
+1. lucida-server applies the command to the authoritative Scene and rebroadcasts to all other clients.
+1. Connected browsers receive the command and update their local Scenes.
+1. Python reads from its local Scene for chunk planning, processing, etc.
 
 ### For CLI:
-1. CLI emits a command in the same protocol.
-1. The same state machinery updates.
-1. You can inspect or manipulate the viewer reproducibly.
+1. CLI sends a command to lucida-server.
+1. lucida-server applies it and rebroadcasts to all other clients.
+1. All connected viewers update.
+
+### Multi-user:
+1. User A pans in a browser tab.
+1. lucida-web applies locally and sends the command to lucida-server.
+1. lucida-server rebroadcasts to User B's browser, Python, and CLI.
+1. Each recipient applies the command to its local Scene.
+1. User A sees zero-latency feedback; everyone else sees the update within one network round-trip.
 
 ## Main Design Principles
 There should be exactly one authoritative implementation of:
@@ -320,8 +362,9 @@ There should be exactly one authoritative implementation of:
 That is lucida-core.
 
 Everything else is an adapter around it:
-- lucida-web = human UI adapter (via WASM)
+- lucida-web = human UI adapter (via WASM, connects to lucida-server)
 - renderer = GPU adapter (via lucida-web via post)
 - lucida-store = storage adapter (via optional server)
-- lucida-py = Python adapter (via PyO3)
-- lucida-cli = shell/script adapter (via native Rust)
+- lucida-server = multi-user relay (owns authoritative Scene via Rust, syncs all clients via WebSocket)
+- lucida-py = Python adapter (via PyO3, connects to lucida-server)
+- lucida-cli = shell/script adapter (via native Rust, connects to lucida-server)

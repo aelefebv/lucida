@@ -15,9 +15,11 @@ interface Props {
   datasetInfo: DatasetInfo;
   client: RenderClient;
   canvas: HTMLCanvasElement;
+  remoteCameraVersion: number;
+  sendCommand: (json: string) => void;
 }
 
-export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas }: Props) {
+export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand }: Props) {
   const storeVersion = useChunkStore(store);
 
   const [cameraVersion, setCameraVersion] = useState(0);
@@ -56,7 +58,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
     if (plan && plan.needed.length > 0) {
       store.ensureFetched(plan.needed);
     }
-  }, [scene, store, cameraVersion]);
+  }, [scene, store, cameraVersion, remoteCameraVersion]);
 
   // LOD swap + render effect (incremental chunk upload)
   useEffect(() => {
@@ -114,7 +116,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
     const canvasH = canvas.clientHeight * devicePixelRatio;
 
     client.volumeRender(invVP, model, invModel, eye, canvasW, canvasH);
-  }, [storeVersion, cameraVersion, scene, store, datasetInfo, client, canvas]);
+  }, [storeVersion, cameraVersion, remoteCameraVersion, scene, store, datasetInfo, client, canvas]);
 
   // Input handling
   const [dragging, setDragging] = useState(false);
@@ -140,12 +142,16 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
 
       if (shiftDragRef.current) {
         scene.pan_3d(dx, dy);
+        sendCommand(JSON.stringify({ type: "pan_3d", dx, dy }));
       } else {
-        scene.rotate_3d(-dx * 0.005, -dy * 0.005);
+        const dTheta = -dx * 0.005;
+        const dPhi = -dy * 0.005;
+        scene.rotate_3d(dTheta, dPhi);
+        sendCommand(JSON.stringify({ type: "rotate_3d", d_theta: dTheta, d_phi: dPhi }));
       }
       bumpCamera();
     },
-    [dragging, scene, bumpCamera],
+    [dragging, scene, bumpCamera, sendCommand],
   );
 
   const onPointerUp = useCallback(() => {
@@ -155,10 +161,12 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
   const onWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
-      scene.zoom_3d(e.deltaY * 0.001);
+      const delta = e.deltaY * 0.001;
+      scene.zoom_3d(delta);
+      sendCommand(JSON.stringify({ type: "zoom_3d", delta }));
       bumpCamera();
     },
-    [scene, bumpCamera],
+    [scene, bumpCamera, sendCommand],
   );
 
   // Attach event handlers to the shared canvas

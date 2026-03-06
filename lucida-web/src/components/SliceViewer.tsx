@@ -18,9 +18,11 @@ interface Props {
   datasetInfo: DatasetInfo;
   client: RenderClient;
   canvas: HTMLCanvasElement;
+  remoteCameraVersion: number;
+  sendCommand: (json: string) => void;
 }
 
-export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas }: Props) {
+export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand }: Props) {
   const storeVersion = useChunkStore(store);
 
   const [cameraVersion, setCameraVersion] = useState(0);
@@ -69,7 +71,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
     if (plan && plan.needed.length > 0) {
       store.ensureFetched(plan.needed);
     }
-  }, [scene, store, z, t, c, cameraVersion]);
+  }, [scene, store, z, t, c, cameraVersion, remoteCameraVersion]);
 
   // Upload tiles and render
   useEffect(() => {
@@ -124,7 +126,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
 
     client.resize(canvasW, canvasH);
     client.sliceRender(currentZoom, cx, cy, canvasW, canvasH, fullResWidth, fullResHeight);
-  }, [volume, z, t, c, cameraVersion, storeVersion, datasetInfo, scene, store, client, canvas]);
+  }, [volume, z, t, c, cameraVersion, remoteCameraVersion, storeVersion, datasetInfo, scene, store, client, canvas]);
 
   const onPointerDown = useCallback(
     (e: PointerEvent) => {
@@ -141,10 +143,13 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       const dx = e.clientX - lastPos.current.x;
       const dy = e.clientY - lastPos.current.y;
       lastPos.current = { x: e.clientX, y: e.clientY };
-      scene.pan(-dx, -dy);
+      const pdx = -dx;
+      const pdy = -dy;
+      scene.pan(pdx, pdy);
+      sendCommand(JSON.stringify({ type: "pan", dx: pdx, dy: pdy }));
       bumpCamera();
     },
-    [dragging, scene, bumpCamera],
+    [dragging, scene, bumpCamera, sendCommand],
   );
 
   const onPointerUp = useCallback(() => {
@@ -168,15 +173,16 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
 
       const factor = e.deltaY > 0 ? 0.9 : 1.1;
       scene.zoom_by(factor);
+      sendCommand(JSON.stringify({ type: "zoom_by", factor }));
       const newZoom = scene.zoom();
 
-      scene.set_center(
-        worldX - (cursorX - canvasW / 2) / newZoom,
-        worldY - (cursorY - canvasH / 2) / newZoom,
-      );
+      const newCx = worldX - (cursorX - canvasW / 2) / newZoom;
+      const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
+      scene.set_center(newCx, newCy);
+      sendCommand(JSON.stringify({ type: "set_center", x: newCx, y: newCy }));
       bumpCamera();
     },
-    [scene, bumpCamera, canvas],
+    [scene, bumpCamera, canvas, sendCommand],
   );
 
   // Attach event handlers to the shared canvas
