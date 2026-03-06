@@ -17,8 +17,11 @@ pub enum Command {
     SetCenter { x: f64, y: f64 },
     SetZoom { value: f64 },
     // 3D camera
+    #[serde(rename = "rotate_3d")]
     Rotate3D { d_theta: f64, d_phi: f64 },
+    #[serde(rename = "zoom_3d")]
     Zoom3D { delta: f64 },
+    #[serde(rename = "pan_3d")]
     Pan3D { dx: f64, dy: f64 },
     // View state
     SetZ { z: u32 },
