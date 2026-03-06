@@ -7,6 +7,7 @@ import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
 import type { ChunkCoord } from "../zarr/chunkStore.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { evaluateChunkPlan } from "../zarr/chunkPlan.ts";
+import { applyAndSend } from "../applyAndSend.ts";
 
 interface Props {
   volume: VolumeData;
@@ -40,11 +41,11 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       prevDims.current = { w: width, h: height, d: depth };
       const fullResWidth = datasetInfo.levels[0].shape[4];
       const fullResHeight = datasetInfo.levels[0].shape[3];
-      scene.set_center(fullResWidth / 2, fullResHeight / 2);
-      scene.set_zoom(1.0);
+      applyAndSend(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 }, sendCommand);
+      applyAndSend(scene, { type: "set_zoom", value: 1.0 }, sendCommand);
       bumpCamera();
     }
-  }, [volume, scene, datasetInfo, bumpCamera]);
+  }, [volume, scene, datasetInfo, bumpCamera, sendCommand]);
 
   // Set mode on mount
   useEffect(() => {
@@ -145,8 +146,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       lastPos.current = { x: e.clientX, y: e.clientY };
       const pdx = -dx;
       const pdy = -dy;
-      scene.pan(pdx, pdy);
-      sendCommand(JSON.stringify({ type: "pan", dx: pdx, dy: pdy }));
+      applyAndSend(scene, { type: "pan", dx: pdx, dy: pdy }, sendCommand);
       bumpCamera();
     },
     [dragging, scene, bumpCamera, sendCommand],
@@ -172,14 +172,12 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       const worldY = (cursorY - canvasH / 2) / oldZoom + centerArr[1];
 
       const factor = e.deltaY > 0 ? 0.9 : 1.1;
-      scene.zoom_by(factor);
-      sendCommand(JSON.stringify({ type: "zoom_by", factor }));
+      applyAndSend(scene, { type: "zoom_by", factor }, sendCommand);
       const newZoom = scene.zoom();
 
       const newCx = worldX - (cursorX - canvasW / 2) / newZoom;
       const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
-      scene.set_center(newCx, newCy);
-      sendCommand(JSON.stringify({ type: "set_center", x: newCx, y: newCy }));
+      applyAndSend(scene, { type: "set_center", x: newCx, y: newCy }, sendCommand);
       bumpCamera();
     },
     [scene, bumpCamera, canvas, sendCommand],

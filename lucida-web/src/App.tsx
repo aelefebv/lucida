@@ -11,6 +11,7 @@ import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
 import { Bridge, type BridgeHandlers } from "./bridge.ts";
+import { applyAndSend } from "./applyAndSend.ts";
 import "./App.css";
 
 interface OpenedItem {
@@ -259,15 +260,11 @@ function App() {
     const next = viewMode === "2d" ? "3d" : "2d";
     setViewMode(next);
     if (wasmScene) {
-      if (next === "3d") {
-        wasmScene.set_mode_3d();
-      } else {
-        wasmScene.set_mode_2d();
-        if (datasetInfo) {
-          const shapeX = datasetInfo.levels[0].shape[4];
-          const shapeY = datasetInfo.levels[0].shape[3];
-          wasmScene.set_center(shapeX / 2, shapeY / 2);
-        }
+      applyAndSend(wasmScene, { type: next === "3d" ? "set_mode_3d" : "set_mode_2d" }, sendCommand);
+      if (next === "2d" && datasetInfo) {
+        const shapeX = datasetInfo.levels[0].shape[4];
+        const shapeY = datasetInfo.levels[0].shape[3];
+        applyAndSend(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 }, sendCommand);
       }
     }
     const client = clientRef.current;
@@ -277,12 +274,6 @@ function App() {
       } else {
         client.setModeVolume();
       }
-    }
-    sendCommand(JSON.stringify({ type: next === "3d" ? "set_mode_3d" : "set_mode_2d" }));
-    if (next === "2d" && datasetInfo) {
-      const shapeX = datasetInfo.levels[0].shape[4];
-      const shapeY = datasetInfo.levels[0].shape[3];
-      sendCommand(JSON.stringify({ type: "set_center", x: shapeX / 2, y: shapeY / 2 }));
     }
   }, [viewMode, wasmScene, datasetInfo, sendCommand]);
 

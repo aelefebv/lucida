@@ -7,6 +7,7 @@ import { ChunkStore, useChunkStore } from "../zarr/chunkStore.ts";
 import type { ChunkCoord } from "../zarr/chunkStore.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { evaluateChunkPlan } from "../zarr/chunkPlan.ts";
+import { applyAndSend } from "../applyAndSend.ts";
 
 interface Props {
   volume: VolumeData;
@@ -141,13 +142,11 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
       lastPos.current = { x: e.clientX, y: e.clientY };
 
       if (shiftDragRef.current) {
-        scene.pan_3d(dx, dy);
-        sendCommand(JSON.stringify({ type: "pan_3d", dx, dy }));
+        applyAndSend(scene, { type: "pan_3d", dx, dy }, sendCommand);
       } else {
         const dTheta = -dx * 0.005;
         const dPhi = -dy * 0.005;
-        scene.rotate_3d(dTheta, dPhi);
-        sendCommand(JSON.stringify({ type: "rotate_3d", d_theta: dTheta, d_phi: dPhi }));
+        applyAndSend(scene, { type: "rotate_3d", d_theta: dTheta, d_phi: dPhi }, sendCommand);
       }
       bumpCamera();
     },
@@ -162,8 +161,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
     (e: WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY * 0.001;
-      scene.zoom_3d(delta);
-      sendCommand(JSON.stringify({ type: "zoom_3d", delta }));
+      applyAndSend(scene, { type: "zoom_3d", delta }, sendCommand);
       bumpCamera();
     },
     [scene, bumpCamera, sendCommand],
