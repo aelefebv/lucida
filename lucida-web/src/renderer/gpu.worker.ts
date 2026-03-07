@@ -13,8 +13,10 @@ let format: GPUTextureFormat;
 let sliceRenderer: SliceRenderer | null = null;
 let volumeRenderer: VolumeRenderer | null = null;
 
-let activeMode: "slice" | "volume" = "slice";
 let displayOverrideActive = false;
+let storedContrastMin = 0;
+let storedContrastMax = 65535;
+let storedGamma = 1.0;
 
 // Slice tile texture state
 let tileState: {
@@ -81,14 +83,18 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       }
 
       case "setModeSlice": {
-        activeMode = "slice";
-        getSliceRenderer();
+        const renderer = getSliceRenderer();
+        if (displayOverrideActive) {
+          renderer.setDisplayParams(storedContrastMin, storedContrastMax, storedGamma);
+        }
         break;
       }
 
       case "setModeVolume": {
-        activeMode = "volume";
-        getVolumeRenderer();
+        const renderer = getVolumeRenderer();
+        if (displayOverrideActive) {
+          renderer.setDisplayParams(storedContrastMin, storedContrastMax, storedGamma);
+        }
         break;
       }
 
@@ -283,6 +289,9 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
 
       case "setDisplayParams": {
         displayOverrideActive = true;
+        storedContrastMin = msg.contrastMin;
+        storedContrastMax = msg.contrastMax;
+        storedGamma = msg.gamma;
         if (sliceRenderer) sliceRenderer.setDisplayParams(msg.contrastMin, msg.contrastMax, msg.gamma);
         if (volumeRenderer) volumeRenderer.setDisplayParams(msg.contrastMin, msg.contrastMax, msg.gamma);
         break;
