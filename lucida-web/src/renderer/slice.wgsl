@@ -49,8 +49,10 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   );
   let tileVal = textureLoad(tileTex, tileCoord, 0).r;
 
+  let gamma = u.intensityRange.z;
+
   if (tileVal > 0u) {
-    let normalized = clamp((f32(tileVal) - intensityMin) / range, 0.0, 1.0);
+    let normalized = pow(clamp((f32(tileVal) - intensityMin) / range, 0.0, 1.0), gamma);
     return vec4f(vec3f(normalized), 1.0);
   }
 
@@ -61,6 +63,6 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     clamp(i32(texUV.y * f32(fbDims.y)), 0, i32(fbDims.y) - 1),
   );
   let fbVal = textureLoad(fallbackTex, fbCoord, 0).r;
-  let normalized = clamp((f32(fbVal) - intensityMin) / range, 0.0, 1.0);
+  let normalized = pow(clamp((f32(fbVal) - intensityMin) / range, 0.0, 1.0), gamma);
   return vec4f(vec3f(normalized), 1.0);
 }

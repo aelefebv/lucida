@@ -7,9 +7,11 @@ import { assembleVolume } from "./zarr/volumeAssembler.ts";
 import type { VolumeData } from "./zarr/volumeAssembler.ts";
 import { ChunkStore } from "./zarr/chunkStore.ts";
 import { RenderClient } from "./renderer/renderClient.ts";
+import { RenderLoop } from "./renderLoop.ts";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
+import { ContrastControls } from "./components/ContrastControls.tsx";
 import { Bridge, type BridgeHandlers } from "./bridge.ts";
 import { applyAndSend } from "./applyAndSend.ts";
 import "./App.css";
@@ -43,6 +45,13 @@ function App() {
   const [c, setC] = useState(0);
   const [t, setT] = useState(0);
 
+  // Contrast controls
+  const [dataRange, setDataRange] = useState<{ min: number; max: number } | null>(null);
+  const [contrastMin, setContrastMin] = useState(0);
+  const [contrastMax, setContrastMax] = useState(65535);
+  const [gamma, setGamma] = useState(1.0);
+  const [autoContrast, setAutoContrast] = useState(true);
+
   // Remote (Python bridge) camera version — bumped when a command arrives via WebSocket
   const [remoteCameraVersion, setRemoteCameraVersion] = useState(0);
 
@@ -58,6 +67,7 @@ function App() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const clientRef = useRef<RenderClient | null>(null);
   const [clientReady, setClientReady] = useState(false);
+  const loopRef = useRef<RenderLoop | null>(null);
 
   useEffect(() => {
     init().then(() => setWasmReady(true));
@@ -136,6 +146,30 @@ function App() {
     });
   }, []);
 
+  // Hook intensity range callback
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!client) return;
+    client.onIntensityRange = (min, max) => {
+      setDataRange({ min, max });
+      setAutoContrast(prev => {
+        if (prev) {
+          setContrastMin(min);
+          setContrastMax(max);
+        }
+        return prev;
+      });
+    };
+  }, [clientReady]);
+
+  // Push display params to worker
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!client || !clientReady) return;
+    client.setDisplayParams(contrastMin, contrastMax, gamma);
+    loopRef.current?.markDirty();
+  }, [contrastMin, contrastMax, gamma, clientReady]);
+
   // Sync Z/T/C to WASM scene and request chunks
   useEffect(() => {
     if (!wasmScene || !storeRef.current) return;
@@ -179,6 +213,11 @@ function App() {
     setZ(0);
     setC(0);
     setT(0);
+    setDataRange(null);
+    setContrastMin(0);
+    setContrastMax(65535);
+    setGamma(1.0);
+    setAutoContrast(true);
   }
 
   async function handleDirChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -282,6 +321,34 @@ function App() {
   const dimC = datasetInfo ? datasetInfo.levels[0].shape[1] : 1;
   const dimT = datasetInfo ? datasetInfo.levels[0].shape[0] : 1;
 
+  const handleContrastChange = useCallback((min: number, max: number) => {
+    setContrastMin(min);
+    setContrastMax(max);
+    setAutoContrast(false);
+  }, []);
+
+  const handleGammaChange = useCallback((g: number) => {
+    setGamma(g);
+  }, []);
+
+  const handleAutoContrast = useCallback(() => {
+    if (dataRange) {
+      setContrastMin(dataRange.min);
+      setContrastMax(dataRange.max);
+    }
+  }, [dataRange]);
+
+  const handleAutoContrastToggle = useCallback(() => {
+    setAutoContrast(prev => {
+      const next = !prev;
+      if (next && dataRange) {
+        setContrastMin(dataRange.min);
+        setContrastMax(dataRange.max);
+      }
+      return next;
+    });
+  }, [dataRange]);
+
   const client = clientReady ? clientRef.current : null;
 
   return (
@@ -345,6 +412,7 @@ function App() {
           canvas={canvasRef.current!}
           remoteCameraVersion={remoteCameraVersion}
           sendCommand={sendCommand}
+          loopRef={loopRef}
         />
       )}
       {volume && viewMode === "3d" && wasmScene && datasetInfo && storeRef.current && client && (
@@ -359,6 +427,21 @@ function App() {
           sendCommand={sendCommand}
           t={t}
           c={c}
+          loopRef={loopRef}
+        />
+      )}
+      {volume && dataRange && (
+        <ContrastControls
+          dataMin={dataRange.min}
+          dataMax={dataRange.max}
+          contrastMin={contrastMin}
+          contrastMax={contrastMax}
+          gamma={gamma}
+          autoContrast={autoContrast}
+          onContrastChange={handleContrastChange}
+          onGammaChange={handleGammaChange}
+          onAutoContrast={handleAutoContrast}
+          onAutoContrastToggle={handleAutoContrastToggle}
         />
       )}
       {volume && (

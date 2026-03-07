@@ -1,5 +1,5 @@
 /** 2D slice viewer — delegates WebGPU rendering to a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
@@ -20,9 +20,10 @@ interface Props {
   canvas: HTMLCanvasElement;
   remoteCameraVersion: number;
   sendCommand: (json: string) => void;
+  loopRef: MutableRefObject<RenderLoop | null>;
 }
 
-export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand }: Props) {
+export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand, loopRef: parentLoopRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -31,8 +32,12 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
   useEffect(() => {
     const loop = new RenderLoop({ scene, store, datasetInfo, client, canvas, mode: "slice" });
     loopRef.current = loop;
+    parentLoopRef.current = loop;
     loop.start();
-    return () => loop.stop();
+    return () => {
+      loop.stop();
+      parentLoopRef.current = null;
+    };
   }, [scene, store, datasetInfo, client, canvas]);
 
   // Update slice params on prop changes

@@ -7,7 +7,8 @@ import shaderSource from "./volume.wgsl?raw";
 //   offset 128: invModelMatrix  mat4x4f   (64B)
 //   offset 192: cameraPos       vec4f     (16B)
 //   offset 208: volumeDims      vec4f     (16B)
-//   offset 224: intensityRange  vec4f     (16B) = 240 total
+//   offset 224: intensityRange  vec4f     (16B)
+//   offset 240: displayParams  vec4f     (16B) = 256 total
 const UNIFORM_SIZE = 256;
 
 export class VolumeRenderer {
@@ -20,6 +21,7 @@ export class VolumeRenderer {
   private volumeDims = [1, 1, 1];
   private intensityMin = 0;
   private intensityMax = 65535;
+  private gamma = 1.0;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private modelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private invModelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
@@ -88,6 +90,12 @@ export class VolumeRenderer {
     this.intensityMax = max;
   }
 
+  setDisplayParams(min: number, max: number, gamma: number) {
+    this.intensityMin = min;
+    this.intensityMax = max;
+    this.gamma = gamma;
+  }
+
   setMatrices(
     invViewProj: Float32Array<ArrayBufferLike>,
     model: Float32Array<ArrayBufferLike>,
@@ -114,6 +122,7 @@ export class VolumeRenderer {
     uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], 48); // cameraPos at 192B = 48 floats
     uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 52); // volumeDims at 208B = 52 floats
     uniformData.set([this.intensityMin, this.intensityMax, 0.08, stepSize], 56); // intensityRange at 224B = 56 floats
+    uniformData.set([this.gamma, 0, 0, 0], 60); // displayParams at 240B = 60 floats
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

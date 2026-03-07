@@ -107,6 +107,13 @@ export interface VolumeRenderMessage {
   canvasH: number;
 }
 
+export interface SetDisplayParamsMessage {
+  type: "setDisplayParams";
+  contrastMin: number;
+  contrastMax: number;
+  gamma: number;
+}
+
 export interface DestroyMessage {
   type: "destroy";
 }
@@ -122,6 +129,7 @@ export type MainToWorkerMessage =
   | VolumeSetInitialMessage
   | VolumeUploadChunksMessage
   | VolumeRenderMessage
+  | SetDisplayParamsMessage
   | DestroyMessage;
 
 // --- Worker -> Main ---

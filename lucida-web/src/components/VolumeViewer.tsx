@@ -1,5 +1,5 @@
 /** 3D volume viewer — delegates WebGPU rendering to a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
@@ -19,17 +19,22 @@ interface Props {
   sendCommand: (json: string) => void;
   t: number;
   c: number;
+  loopRef: MutableRefObject<RenderLoop | null>;
 }
 
-export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand, t, c }: Props) {
+export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand, t, c, loopRef: parentLoopRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
 
   // Create/start render loop
   useEffect(() => {
     const loop = new RenderLoop({ scene, store, datasetInfo, client, canvas, mode: "volume" });
     loopRef.current = loop;
+    parentLoopRef.current = loop;
     loop.start();
-    return () => loop.stop();
+    return () => {
+      loop.stop();
+      parentLoopRef.current = null;
+    };
   }, [scene, store, datasetInfo, client, canvas]);
 
   // Mark dirty on remote camera updates

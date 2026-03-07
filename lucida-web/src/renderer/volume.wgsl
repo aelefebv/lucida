@@ -6,7 +6,8 @@ struct Uniforms {
   invModelMatrix: mat4x4f,   // offset 128 (64 bytes)
   cameraPos: vec4f,           // offset 192 (16 bytes)
   volumeDims: vec4f,          // offset 208 (16 bytes)
-  intensityRange: vec4f,      // offset 224 (16 bytes) = 240 total
+  intensityRange: vec4f,      // offset 224 (16 bytes)
+  displayParams: vec4f,       // offset 240 (16 bytes) — x=gamma = 256 total
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -101,7 +102,8 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     let raw = textureLoad(volumeTex, texCoord, 0).r;
     if (raw == 0u) { t += adaptiveStep; continue; }
     let rawVal = f32(raw);
-    let normalized = clamp((rawVal - intensityMin) / range, 0.0, 1.0);
+    let gamma = u.displayParams.x;
+    let normalized = pow(clamp((rawVal - intensityMin) / range, 0.0, 1.0), gamma);
 
     // Simple linear transfer function
     let sampleAlpha = normalized * opacityScale;

@@ -162,6 +162,10 @@ export class RenderClient {
     });
   }
 
+  setDisplayParams(contrastMin: number, contrastMax: number, gamma: number) {
+    this.worker.postMessage({ type: "setDisplayParams", contrastMin, contrastMax, gamma });
+  }
+
   destroy() {
     this.worker.postMessage({ type: "destroy" });
     this.worker.terminate();

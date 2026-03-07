@@ -20,6 +20,7 @@ export class SliceRenderer {
 
   private intensityMin = 0;
   private intensityMax = 65535;
+  private gamma = 1.0;
 
   constructor(device: GPUDevice, context: GPUCanvasContext, format: GPUTextureFormat) {
     this.device = device;
@@ -91,6 +92,12 @@ export class SliceRenderer {
     this.intensityMax = max;
   }
 
+  setDisplayParams(min: number, max: number, gamma: number) {
+    this.intensityMin = min;
+    this.intensityMax = max;
+    this.gamma = gamma;
+  }
+
   private rebuildBindGroup() {
     const fallback = this.fallbackTexture ?? this.dummyTexture;
     const tile = this.tileTexture ?? this.dummyTexture;
@@ -132,7 +139,7 @@ export class SliceRenderer {
 
     const uniformData = new Float32Array(UNIFORM_SIZE / 4);
     uniformData.set(transform, 0);
-    uniformData.set([this.intensityMin, this.intensityMax, 0, 0], 16);
+    uniformData.set([this.intensityMin, this.intensityMax, this.gamma, 0], 16);
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

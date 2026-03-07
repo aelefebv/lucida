@@ -14,6 +14,7 @@ let sliceRenderer: SliceRenderer | null = null;
 let volumeRenderer: VolumeRenderer | null = null;
 
 let activeMode: "slice" | "volume" = "slice";
+let displayOverrideActive = false;
 
 // Slice tile texture state
 let tileState: {
@@ -105,7 +106,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         const { min, max } = sampleIntensityRange(slice);
         const texture = createSliceTexture(device, msg.width, msg.height, slice);
         renderer.setFallback(texture);
-        renderer.setIntensityRange(min, max);
+        if (!displayOverrideActive) renderer.setIntensityRange(min, max);
         post({ type: "intensityRange", min, max });
         break;
       }
@@ -155,7 +156,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           }
 
           if (intensityChanged) {
-            renderer.setIntensityRange(tileState!.intensityMin, tileState!.intensityMax);
+            if (!displayOverrideActive) renderer.setIntensityRange(tileState!.intensityMin, tileState!.intensityMax);
             post({ type: "intensityRange", min: tileState!.intensityMin, max: tileState!.intensityMax });
           }
         }
@@ -186,7 +187,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         }
         renderer.setVolume(texture, msg.width, msg.height, msg.depth);
         const { min, max } = sampleIntensityRange(data);
-        renderer.setIntensityRange(min, max);
+        if (!displayOverrideActive) renderer.setIntensityRange(min, max);
         post({ type: "intensityRange", min, max });
         // Clear volume cache — dataset/mode changed
         for (const entry of volCache.values()) entry.texture.destroy();
@@ -236,7 +237,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           renderer.setVolume(entry.texture, entry.levelWidth, entry.levelHeight, entry.levelDepth);
           activeVolKey = key;
           if (entry.intensityMin <= entry.intensityMax) {
-            renderer.setIntensityRange(entry.intensityMin, entry.intensityMax);
+            if (!displayOverrideActive) renderer.setIntensityRange(entry.intensityMin, entry.intensityMax);
             post({ type: "intensityRange", min: entry.intensityMin, max: entry.intensityMax });
           }
         }
@@ -264,7 +265,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         }
 
         if (intensityChanged) {
-          renderer.setIntensityRange(entry.intensityMin, entry.intensityMax);
+          if (!displayOverrideActive) renderer.setIntensityRange(entry.intensityMin, entry.intensityMax);
           post({ type: "intensityRange", min: entry.intensityMin, max: entry.intensityMax });
         }
         break;
@@ -280,7 +281,15 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
+      case "setDisplayParams": {
+        displayOverrideActive = true;
+        if (sliceRenderer) sliceRenderer.setDisplayParams(msg.contrastMin, msg.contrastMax, msg.gamma);
+        if (volumeRenderer) volumeRenderer.setDisplayParams(msg.contrastMin, msg.contrastMax, msg.gamma);
+        break;
+      }
+
       case "destroy": {
+        displayOverrideActive = false;
         if (tileState) {
           tileState.texture.destroy();
           tileState = null;
