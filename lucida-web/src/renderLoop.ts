@@ -15,6 +15,9 @@ export interface RenderLoopOptions {
   mode: "slice" | "volume";
 }
 
+/** Max bytes of chunk data to upload to the GPU per RAF tick. */
+const UPLOAD_BUDGET_BYTES = 4 * 1024 * 1024; // 4 MB per frame
+
 export class RenderLoop {
   private scene: WasmScene;
   private store: ChunkStore;
@@ -124,15 +127,20 @@ export class RenderLoop {
           this.currentLod = { level, z, t, c };
         }
 
-        // Collect newly-available chunks
+        // Collect newly-available chunks (up to byte budget)
         const availableChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+        let budgetRemaining = UPLOAD_BUDGET_BYTES;
         for (const coord of plan.needed) {
           if (coord.level !== level) continue;
           if (this.uploaded.has(coord.key)) continue;
           const buf = store.get(coord.key);
-          if (buf) {
-            availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-            this.uploaded.add(coord.key);
+          if (!buf) continue;
+          availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+          this.uploaded.add(coord.key);
+          budgetRemaining -= buf.byteLength;
+          if (budgetRemaining <= 0) {
+            this.dirty = true; // more chunks remain — continue next frame
+            break;
           }
         }
 
@@ -189,14 +197,20 @@ export class RenderLoop {
         this.currentLod = { level: targetLevel, t: viewT, c: viewC };
       }
 
-      // Collect newly available chunks
+      // Collect newly available chunks (up to byte budget)
       const newChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+      let budgetRemaining = UPLOAD_BUDGET_BYTES;
       for (const coord of plan.needed) {
         if (this.uploaded.has(coord.key)) continue;
         const buf = store.get(coord.key);
         if (!buf) continue;
         newChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
         this.uploaded.add(coord.key);
+        budgetRemaining -= buf.byteLength;
+        if (budgetRemaining <= 0) {
+          this.dirty = true; // more chunks remain — continue next frame
+          break;
+        }
       }
 
       if (newChunks.length > 0) {
