@@ -285,6 +285,21 @@ function App() {
       const chunkZ = fullRes.chunkShape[2];
       scene.add_layer("main", true, info.levels.length, chunkX, chunkY, chunkZ, shapeX, shapeY, shapeZ);
 
+      // Set per-level shape/chunk metadata for anisotropic pyramids
+      const shapesFlat = new Uint32Array(info.levels.length * 3);
+      const chunksFlat = new Uint32Array(info.levels.length * 3);
+      for (let i = 0; i < info.levels.length; i++) {
+        const lvl = info.levels[i];
+        // metadata is [T,C,Z,Y,X] — extract spatial [X,Y,Z]
+        shapesFlat[i * 3 + 0] = lvl.shape[4];
+        shapesFlat[i * 3 + 1] = lvl.shape[3];
+        shapesFlat[i * 3 + 2] = lvl.shape[2];
+        chunksFlat[i * 3 + 0] = lvl.chunkShape[4];
+        chunksFlat[i * 3 + 1] = lvl.chunkShape[3];
+        chunksFlat[i * 3 + 2] = lvl.chunkShape[2];
+      }
+      scene.set_level_info(0, shapesFlat, chunksFlat);
+
       // Center the Rust 2D camera on the image so world_bounds matches the TS viewer
       scene.set_center(shapeX / 2, shapeY / 2);
 

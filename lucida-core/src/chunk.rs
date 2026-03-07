@@ -64,27 +64,33 @@ pub fn select_level(zoom: f64, num_levels: u32) -> u32 {
 
 /// Compute which chunk grid cells intersect the visible region's bounds and z range.
 ///
-/// `chunk_size` is [x, y, z] in pixels per chunk at level 0.
-/// `data_shape` is the full-resolution data extent [x, y, z] in voxels.
+/// `level_chunk_size` is [x, y, z] chunk size at the target level.
+/// `level_shape` is the data shape [x, y, z] at the target level.
+/// `full_shape` is the level-0 data shape [x, y, z] (for coord mapping to world space).
 pub fn visible_chunks(
     region: &VisibleRegion,
-    chunk_size: &[u32; 3],
+    level_chunk_size: &[u32; 3],
     level: u32,
     t: u32,
     c: u32,
-    data_shape: &[u32; 3],
+    level_shape: &[u32; 3],
+    full_shape: &[u32; 3],
 ) -> Vec<ChunkCoord> {
     let [min_x, min_y, max_x, max_y] = region.xy_bounds;
-    let scale = (1u32 << level) as f64;
 
-    let chunk_world_x = chunk_size[0] as f64 * scale;
-    let chunk_world_y = chunk_size[1] as f64 * scale;
-    let chunk_world_z = chunk_size[2] as f64 * scale;
+    // Per-axis scale: how many full-res voxels map to one level voxel
+    let scale_x = full_shape[0] as f64 / level_shape[0] as f64;
+    let scale_y = full_shape[1] as f64 / level_shape[1] as f64;
+    let scale_z = full_shape[2] as f64 / level_shape[2] as f64;
 
-    // Max chunk index (exclusive) at this level
-    let max_col = ((data_shape[0] as f64 / scale) / chunk_size[0] as f64).ceil() as u32;
-    let max_row = ((data_shape[1] as f64 / scale) / chunk_size[1] as f64).ceil() as u32;
-    let max_z = ((data_shape[2] as f64 / scale) / chunk_size[2] as f64).ceil() as u32;
+    let chunk_world_x = level_chunk_size[0] as f64 * scale_x;
+    let chunk_world_y = level_chunk_size[1] as f64 * scale_y;
+    let chunk_world_z = level_chunk_size[2] as f64 * scale_z;
+
+    // Max chunk index (exclusive) at this level — derived from actual level shape
+    let max_col = (level_shape[0] as f64 / level_chunk_size[0] as f64).ceil() as u32;
+    let max_row = (level_shape[1] as f64 / level_chunk_size[1] as f64).ceil() as u32;
+    let max_z = (level_shape[2] as f64 / level_chunk_size[2] as f64).ceil() as u32;
 
     let col_start = (min_x / chunk_world_x).floor().max(0.0) as u32;
     let col_end = ((max_x / chunk_world_x).ceil().max(0.0) as u32).min(max_col);
@@ -163,7 +169,7 @@ mod tests {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..1), None, None);
         let shape = [4096, 4096, 256];
-        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape);
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape, &shape);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].x, 0);
         assert_eq!(chunks[0].y, 0);
@@ -178,7 +184,7 @@ mod tests {
         }
         let region = cam.visible_region(&(0..1), None, None);
         let shape = [4096, 4096, 256];
-        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape);
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape, &shape);
         assert_eq!(chunks.len(), 4);
     }
 
@@ -187,7 +193,7 @@ mod tests {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..128), None, None);
         let shape = [4096, 4096, 256];
-        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape);
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape, &shape);
         assert_eq!(chunks.len(), 2);
         let mut zs: Vec<u32> = chunks.iter().map(|c| c.z).collect();
         zs.sort();
@@ -213,8 +219,35 @@ mod tests {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(100..101), None, None);
         let shape = [4096, 4096, 256];
-        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape);
+        let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape, &shape);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].z, 1);
+    }
+
+    #[test]
+    fn anisotropic_level1_preserves_z_chunks() {
+        // Simulates a dataset with shape 1024×1024×100, voxel spacing [1,1,10].
+        // At level 1, the pyramid generator only downsamples X/Y (not Z),
+        // so level_shape = [512, 512, 100], full_shape = [1024, 1024, 100].
+        let cam = Camera::new_2d([512, 512]);
+        // View full Z range
+        let region = cam.visible_region(&(0..100), None, None);
+        let full_shape = [1024, 1024, 100];
+        let level_shape = [512, 512, 100]; // Z unchanged at level 1
+        let level_chunk_size = [32, 32, 32];
+        let chunks = visible_chunks(
+            &region,
+            &level_chunk_size,
+            1,
+            0,
+            0,
+            &level_shape,
+            &full_shape,
+        );
+        // Z chunks at level 1: ceil(100/32) = 4
+        let max_z_chunk = chunks.iter().map(|c| c.z).max().unwrap();
+        assert_eq!(max_z_chunk, 3); // 0,1,2,3 = 4 chunks
+        let z_set: std::collections::HashSet<u32> = chunks.iter().map(|c| c.z).collect();
+        assert_eq!(z_set.len(), 4);
     }
 }

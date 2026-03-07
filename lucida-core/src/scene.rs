@@ -5,6 +5,15 @@ use crate::chunk::{self, ChunkRequestPlan};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
+/// Per-level shape and chunk size metadata for anisotropic pyramids.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LevelInfo {
+    /// Data shape at this level: [x, y, z].
+    pub shape: [u32; 3],
+    /// Chunk size at this level: [x, y, z].
+    pub chunk_size: [u32; 3],
+}
+
 /// A single image layer in the scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Layer {
@@ -16,6 +25,28 @@ pub struct Layer {
     pub chunk_size: [u32; 3],
     /// Full-resolution data shape in voxels: [x, y, z].
     pub data_shape: [u32; 3],
+    /// Per-level shape and chunk size. When empty, isotropic 2^level downsampling is assumed.
+    #[serde(default)]
+    pub level_info: Vec<LevelInfo>,
+}
+
+impl Layer {
+    /// Returns `(level_shape, level_chunk_size)` for the given level.
+    ///
+    /// Uses `level_info` when available; falls back to isotropic `data_shape / 2^level`.
+    pub fn shape_at_level(&self, level: u32) -> ([u32; 3], [u32; 3]) {
+        if let Some(info) = self.level_info.get(level as usize) {
+            (info.shape, info.chunk_size)
+        } else {
+            let scale = 1u32 << level;
+            let shape = [
+                (self.data_shape[0] + scale - 1) / scale,
+                (self.data_shape[1] + scale - 1) / scale,
+                (self.data_shape[2] + scale - 1) / scale,
+            ];
+            (shape, self.chunk_size)
+        }
+    }
 }
 
 /// The complete viewer state.
@@ -82,12 +113,14 @@ impl Scene {
                 continue;
             }
             let level = chunk::select_level(region.effective_zoom, layer.num_levels);
+            let (level_shape, level_chunk_size) = layer.shape_at_level(level);
             let chunks = chunk::visible_chunks(
                 &region,
-                &layer.chunk_size,
+                &level_chunk_size,
                 level,
                 self.view.t,
                 self.view.c,
+                &level_shape,
                 &layer.data_shape,
             );
             needed.extend(chunks);
@@ -111,6 +144,7 @@ mod tests {
             num_levels: 5,
             chunk_size: [256, 256, 64],
             data_shape: [4096, 4096, 256],
+            level_info: vec![],
         }
     }
 
@@ -222,10 +256,74 @@ mod tests {
             num_levels: 1,
             chunk_size: [64, 64, 64],
             data_shape: [300, 200, 100],
+            level_info: vec![],
         });
         let plan = scene.chunk_plan();
         // 3D mode should produce chunks — the frustum sees the volume
         // With a default camera looking at the volume, we should get some chunks
         assert!(!plan.needed.is_empty());
+    }
+
+    #[test]
+    fn shape_at_level_isotropic_fallback() {
+        let layer = Layer {
+            name: "test".into(),
+            visible: true,
+            num_levels: 3,
+            chunk_size: [256, 256, 64],
+            data_shape: [1024, 1024, 128],
+            level_info: vec![],
+        };
+        let (shape, cs) = layer.shape_at_level(0);
+        assert_eq!(shape, [1024, 1024, 128]);
+        assert_eq!(cs, [256, 256, 64]);
+
+        let (shape, cs) = layer.shape_at_level(1);
+        assert_eq!(shape, [512, 512, 64]);
+        assert_eq!(cs, [256, 256, 64]);
+
+        let (shape, cs) = layer.shape_at_level(2);
+        assert_eq!(shape, [256, 256, 32]);
+        assert_eq!(cs, [256, 256, 64]);
+    }
+
+    #[test]
+    fn shape_at_level_uses_level_info() {
+        let layer = Layer {
+            name: "test".into(),
+            visible: true,
+            num_levels: 3,
+            chunk_size: [256, 256, 64],
+            data_shape: [1024, 1024, 100],
+            level_info: vec![
+                LevelInfo { shape: [1024, 1024, 100], chunk_size: [256, 256, 64] },
+                LevelInfo { shape: [512, 512, 100], chunk_size: [256, 256, 64] },  // Z unchanged
+                LevelInfo { shape: [256, 256, 50], chunk_size: [256, 256, 50] },
+            ],
+        };
+        let (shape, cs) = layer.shape_at_level(1);
+        assert_eq!(shape, [512, 512, 100]); // Z not downsampled
+        assert_eq!(cs, [256, 256, 64]);
+
+        let (shape, cs) = layer.shape_at_level(2);
+        assert_eq!(shape, [256, 256, 50]);
+        assert_eq!(cs, [256, 256, 50]);
+    }
+
+    #[test]
+    fn backward_compat_deserialization_without_level_info() {
+        // JSON without "level_info" field should deserialize with empty vec
+        let json = r#"{
+            "name": "test",
+            "visible": true,
+            "num_levels": 3,
+            "chunk_size": [256, 256, 64],
+            "data_shape": [1024, 1024, 128]
+        }"#;
+        let layer: Layer = serde_json::from_str(json).unwrap();
+        assert!(layer.level_info.is_empty());
+        // Isotropic fallback should still work
+        let (shape, _) = layer.shape_at_level(1);
+        assert_eq!(shape, [512, 512, 64]);
     }
 }

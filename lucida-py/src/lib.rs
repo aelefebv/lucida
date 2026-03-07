@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 use lucida_core::command::Command;
-use lucida_core::scene::{Layer, Scene};
+use lucida_core::scene::{Layer, LevelInfo, Scene};
 
 #[pyclass]
 struct PyScene {
@@ -122,7 +122,32 @@ impl PyScene {
             num_levels,
             chunk_size: [chunk_x, chunk_y, chunk_z],
             data_shape: [shape_x, shape_y, shape_z],
+            level_info: Vec::new(),
         });
+    }
+
+    /// Set per-level shape and chunk size metadata for anisotropic pyramids.
+    ///
+    /// `shapes_flat` is `[x0,y0,z0, x1,y1,z1, ...]` — one [x,y,z] triple per level.
+    /// `chunks_flat` is the same layout for chunk sizes.
+    #[pyo3(signature = (layer_index, shapes_flat, chunks_flat))]
+    fn set_level_info(
+        &mut self,
+        layer_index: usize,
+        shapes_flat: Vec<u32>,
+        chunks_flat: Vec<u32>,
+    ) {
+        if let Some(layer) = self.inner.layers.get_mut(layer_index) {
+            let num_levels = shapes_flat.len() / 3;
+            let mut info = Vec::with_capacity(num_levels);
+            for i in 0..num_levels {
+                info.push(LevelInfo {
+                    shape: [shapes_flat[i * 3], shapes_flat[i * 3 + 1], shapes_flat[i * 3 + 2]],
+                    chunk_size: [chunks_flat[i * 3], chunks_flat[i * 3 + 1], chunks_flat[i * 3 + 2]],
+                });
+            }
+            layer.level_info = info;
+        }
     }
 }
 
