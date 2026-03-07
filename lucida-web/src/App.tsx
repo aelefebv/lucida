@@ -31,6 +31,16 @@ function formatBytes(bytes: number): string {
 
 type ViewMode = "2d" | "3d";
 
+function dtypeMax(dtype: string): number {
+  switch (dtype) {
+    case "uint8": return 255;
+    case "uint16": return 65535;
+    case "uint32": return 4294967295;
+    case "float32": return 1;
+    default: return 65535;
+  }
+}
+
 function App() {
   const [item, setItem] = useState<OpenedItem | null>(null);
   const [, setWasmReady] = useState(false);
@@ -51,6 +61,7 @@ function App() {
   const [contrastMax, setContrastMax] = useState(65535);
   const [gamma, setGamma] = useState(1.0);
   const [autoContrast, setAutoContrast] = useState(true);
+  const [fullRange, setFullRange] = useState(false);
 
   // Remote (Python bridge) camera version — bumped when a command arrives via WebSocket
   const [remoteCameraVersion, setRemoteCameraVersion] = useState(0);
@@ -218,6 +229,7 @@ function App() {
     setContrastMax(65535);
     setGamma(1.0);
     setAutoContrast(true);
+    setFullRange(false);
   }
 
   async function handleDirChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -349,6 +361,24 @@ function App() {
     });
   }, [dataRange]);
 
+  const fullRangeMax = datasetInfo ? dtypeMax(datasetInfo.levels[0].dataType) : 65535;
+
+  const handleFullRangeToggle = useCallback(() => {
+    setFullRange(prev => {
+      const next = !prev;
+      if (next) {
+        setContrastMin(0);
+        setContrastMax(fullRangeMax);
+        setAutoContrast(false);
+      } else if (dataRange) {
+        setContrastMin(dataRange.min);
+        setContrastMax(dataRange.max);
+        setAutoContrast(true);
+      }
+      return next;
+    });
+  }, [fullRangeMax, dataRange]);
+
   const client = clientReady ? clientRef.current : null;
 
   return (
@@ -442,6 +472,9 @@ function App() {
           onGammaChange={handleGammaChange}
           onAutoContrast={handleAutoContrast}
           onAutoContrastToggle={handleAutoContrastToggle}
+          fullRange={fullRange}
+          onFullRangeToggle={handleFullRangeToggle}
+          fullRangeMax={fullRangeMax}
         />
       )}
       {volume && (

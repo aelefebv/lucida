@@ -11,6 +11,9 @@ interface Props {
   onGammaChange: (gamma: number) => void;
   onAutoContrast: () => void;
   onAutoContrastToggle: () => void;
+  fullRange: boolean;
+  onFullRangeToggle: () => void;
+  fullRangeMax: number;
 }
 
 export function ContrastControls({
@@ -24,6 +27,9 @@ export function ContrastControls({
   onGammaChange,
   onAutoContrast,
   onAutoContrastToggle,
+  fullRange,
+  onFullRangeToggle,
+  fullRangeMax,
 }: Props) {
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wasLongPress = useRef(false);
@@ -53,9 +59,11 @@ export function ContrastControls({
     }
   }, []);
 
-  const range = dataMax - dataMin;
-  const fillLeft = range > 0 ? ((contrastMin - dataMin) / range) * 100 : 0;
-  const fillRight = range > 0 ? ((contrastMax - dataMin) / range) * 100 : 100;
+  const effectiveMin = fullRange ? 0 : dataMin;
+  const effectiveMax = fullRange ? fullRangeMax : dataMax;
+  const range = effectiveMax - effectiveMin;
+  const fillLeft = range > 0 ? ((contrastMin - effectiveMin) / range) * 100 : 0;
+  const fillRight = range > 0 ? ((contrastMax - effectiveMin) / range) * 100 : 100;
 
   return (
     <div className="contrast-controls">
@@ -70,8 +78,8 @@ export function ContrastControls({
           <input
             type="range"
             className="range-slider-input"
-            min={dataMin}
-            max={dataMax}
+            min={effectiveMin}
+            max={effectiveMax}
             value={contrastMin}
             onChange={(e) => {
               const v = Number(e.target.value);
@@ -81,8 +89,8 @@ export function ContrastControls({
           <input
             type="range"
             className="range-slider-input"
-            min={dataMin}
-            max={dataMax}
+            min={effectiveMin}
+            max={effectiveMax}
             value={contrastMax}
             onChange={(e) => {
               const v = Number(e.target.value);
@@ -114,6 +122,12 @@ export function ContrastControls({
           onPointerLeave={handlePointerLeave}
         >
           Auto
+        </button>
+        <button
+          className={`auto-btn${fullRange ? " auto-btn-active" : ""}`}
+          onClick={onFullRangeToggle}
+        >
+          Full
         </button>
       </div>
     </div>
