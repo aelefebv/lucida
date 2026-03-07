@@ -357,6 +357,8 @@ function App() {
           canvas={canvasRef.current!}
           remoteCameraVersion={remoteCameraVersion}
           sendCommand={sendCommand}
+          t={t}
+          c={c}
         />
       )}
       {volume && (

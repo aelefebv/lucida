@@ -1,5 +1,8 @@
 /** Discriminated-union message types for main <-> render worker communication. */
 
+/** Byte budget for the volume texture LRU cache (shared by main thread + GPU worker). */
+export const VOL_CACHE_BUDGET = 8 * 1024 * 1024 * 1024; // 8 GB
+
 // --- Main -> Worker ---
 
 export interface InitMessage {

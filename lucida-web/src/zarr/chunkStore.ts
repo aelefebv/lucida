@@ -24,7 +24,6 @@ export class ChunkStore {
   private abortController: AbortController | null = null;
   private bumpScheduled = false;
   private pendingQueue: ChunkCoord[] = [];
-
   private fileIndex: Map<string, File>;
   private datasetInfo: DatasetInfo;
 
@@ -92,7 +91,6 @@ export class ChunkStore {
     }
     this.abortController = new AbortController();
     this.inFlight.clear();
-
     const signal = this.abortController.signal;
     const gen = ++this.generation;
 
@@ -158,9 +156,12 @@ export class ChunkStore {
           this.inFlight.delete(key);
           this.bumpVersion();
         } catch (err) {
-          this.inFlight.delete(key);
           if (err instanceof DOMException && err.name === "AbortError") return;
-          console.warn(`Failed to load chunk ${key}:`, err);
+          if (signal.aborted || gen !== this.generation) return;
+
+          this.inFlight.delete(key);
+          console.error(`Chunk ${key} fetch failed, skipping.`, err);
+          this.bumpVersion();
         }
       }
     };

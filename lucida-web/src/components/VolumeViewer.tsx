@@ -17,9 +17,11 @@ interface Props {
   canvas: HTMLCanvasElement;
   remoteCameraVersion: number;
   sendCommand: (json: string) => void;
+  t: number;
+  c: number;
 }
 
-export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand }: Props) {
+export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand, t, c }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
 
   // Create/start render loop
@@ -35,6 +37,11 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
     loopRef.current?.markDirty();
   }, [remoteCameraVersion]);
 
+  // Mark dirty on T/C changes so the render loop re-evaluates chunks
+  useEffect(() => {
+    loopRef.current?.markDirty();
+  }, [t, c]);
+
   // Set mode on mount
   useEffect(() => {
     client.setModeVolume();
@@ -46,6 +53,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
     const canvasH = canvas.clientHeight * devicePixelRatio;
     scene.set_viewport(canvasW, canvasH);
 
+    loopRef.current?.resetVolumeCache();
     client.volumeSetInitial(volume.data, volume.width, volume.height, volume.depth);
     loopRef.current?.markDirty();
   }, [volume, scene, datasetInfo, client, canvas]);

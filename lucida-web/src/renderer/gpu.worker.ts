@@ -1,5 +1,6 @@
 /** WebGPU render worker — handles both slice and volume rendering off the main thread. */
 import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.ts";
+import { VOL_CACHE_BUDGET } from "./workerProtocol.ts";
 import { initGPU, createSliceTexture, writeSliceRegion, createEmptyVolumeTexture, writeVolumeChunk } from "./gpuContext.ts";
 import { SliceRenderer } from "./sliceRenderer.ts";
 import { VolumeRenderer } from "./volumeRenderer.ts";
@@ -26,16 +27,25 @@ let tileState: {
   intensityMax: number;
 } | null = null;
 
-// Volume texture state
-let volState: {
+// Volume texture LRU cache (byte-budget eviction, Map iteration order = insertion order)
+interface VolCacheEntry {
   texture: GPUTexture;
-  level: number;
-  t: number;
-  c: number;
   uploaded: Set<string>;
   intensityMin: number;
   intensityMax: number;
-} | null = null;
+  levelWidth: number;
+  levelHeight: number;
+  levelDepth: number;
+  byteSize: number;
+}
+// VOL_CACHE_BUDGET imported from workerProtocol.ts
+const volCache = new Map<string, VolCacheEntry>();
+let volCacheBytes = 0;
+let activeVolKey: string | null = null;
+
+function volTextureBytes(w: number, h: number, d: number): number {
+  return w * h * d * 2; // r16uint = 2 bytes per texel
+}
 
 function post(msg: WorkerToMainMessage) {
   self.postMessage(msg);
@@ -178,35 +188,64 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         const { min, max } = sampleIntensityRange(data);
         renderer.setIntensityRange(min, max);
         post({ type: "intensityRange", min, max });
-        volState = null; // Reset so next volumeUploadChunks starts fresh
+        // Clear volume cache — dataset/mode changed
+        for (const entry of volCache.values()) entry.texture.destroy();
+        volCache.clear();
+        volCacheBytes = 0;
+        activeVolKey = null;
         break;
       }
 
       case "volumeUploadChunks": {
         const renderer = getVolumeRenderer();
         const { level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+        const key = `${level}/${t}/${c}`;
 
-        // Create new texture when target level/t/c changes
-        if (!volState || volState.level !== level || volState.t !== t || volState.c !== c) {
-          if (volState) volState.texture.destroy();
+        let entry = volCache.get(key);
+        if (entry) {
+          // LRU touch: delete and re-insert so it becomes newest
+          volCache.delete(key);
+          volCache.set(key, entry);
+        } else {
+          const newBytes = volTextureBytes(levelWidth, levelHeight, levelDepth);
+          // Evict oldest entries until the new texture fits within budget
+          while (volCache.size > 0 && volCacheBytes + newBytes > VOL_CACHE_BUDGET) {
+            const oldestKey = volCache.keys().next().value!;
+            const oldest = volCache.get(oldestKey)!;
+            oldest.texture.destroy();
+            volCacheBytes -= oldest.byteSize;
+            volCache.delete(oldestKey);
+          }
           const texture = createEmptyVolumeTexture(device, levelWidth, levelHeight, levelDepth);
-          renderer.setVolume(texture, levelWidth, levelHeight, levelDepth);
-          volState = {
+          entry = {
             texture,
-            level,
-            t,
-            c,
             uploaded: new Set(),
             intensityMin: 65535,
             intensityMax: 0,
+            levelWidth,
+            levelHeight,
+            levelDepth,
+            byteSize: newBytes,
           };
+          volCache.set(key, entry);
+          volCacheBytes += newBytes;
+        }
+
+        // Activate this texture if it changed
+        if (activeVolKey !== key) {
+          renderer.setVolume(entry.texture, entry.levelWidth, entry.levelHeight, entry.levelDepth);
+          activeVolKey = key;
+          if (entry.intensityMin <= entry.intensityMax) {
+            renderer.setIntensityRange(entry.intensityMin, entry.intensityMax);
+            post({ type: "intensityRange", min: entry.intensityMin, max: entry.intensityMax });
+          }
         }
 
         let intensityChanged = false;
         const totalChunks = msg.chunks.length;
 
         for (const chunk of msg.chunks) {
-          if (volState.uploaded.has(chunk.key)) continue;
+          if (entry.uploaded.has(chunk.key)) continue;
           const data = new Uint16Array(chunk.data);
           const xOff = chunk.x * chunkX;
           const yOff = chunk.y * chunkY;
@@ -215,18 +254,18 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           const ch = Math.min(chunkY, levelHeight - yOff);
           const cd = Math.min(chunkZ, levelDepth - zOff);
 
-          writeVolumeChunk(device, volState.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
-          volState.uploaded.add(chunk.key);
+          writeVolumeChunk(device, entry.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+          entry.uploaded.add(chunk.key);
 
           const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
           const { min, max } = sampleIntensityRange(data, perChunkSamples);
-          if (min < volState.intensityMin) { volState.intensityMin = min; intensityChanged = true; }
-          if (max > volState.intensityMax) { volState.intensityMax = max; intensityChanged = true; }
+          if (min < entry.intensityMin) { entry.intensityMin = min; intensityChanged = true; }
+          if (max > entry.intensityMax) { entry.intensityMax = max; intensityChanged = true; }
         }
 
         if (intensityChanged) {
-          renderer.setIntensityRange(volState.intensityMin, volState.intensityMax);
-          post({ type: "intensityRange", min: volState.intensityMin, max: volState.intensityMax });
+          renderer.setIntensityRange(entry.intensityMin, entry.intensityMax);
+          post({ type: "intensityRange", min: entry.intensityMin, max: entry.intensityMax });
         }
         break;
       }
@@ -246,10 +285,10 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           tileState.texture.destroy();
           tileState = null;
         }
-        if (volState) {
-          volState.texture.destroy();
-          volState = null;
-        }
+        for (const entry of volCache.values()) entry.texture.destroy();
+        volCache.clear();
+        volCacheBytes = 0;
+        activeVolKey = null;
         sliceRenderer = null;
         volumeRenderer = null;
         self.close();

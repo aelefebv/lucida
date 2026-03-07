@@ -4,6 +4,7 @@ import type { DatasetInfo } from "./zarr/metadata.ts";
 import { ChunkStore } from "./zarr/chunkStore.ts";
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import { RenderClient } from "./renderer/renderClient.ts";
+import { VOL_CACHE_BUDGET } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlan } from "./zarr/chunkPlan.ts";
 
 export interface RenderLoopOptions {
@@ -33,6 +34,12 @@ export class RenderLoop {
   private uploaded = new Set<string>();
   private currentLod: { level: number; z?: number; t: number; c: number } | null = null;
 
+  // Volume-specific LRU cache of uploaded sets (byte-budget eviction, matches GPU worker)
+  // VOL_CACHE_BUDGET imported from workerProtocol.ts
+  private volumeUploaded = new Map<string, { uploaded: Set<string>; byteSize: number }>();
+  private volumeCacheBytes = 0;
+  private volumeLodKey: string | null = null;
+
   // Slice-specific params
   private sliceZ = 0;
   private sliceT = 0;
@@ -51,7 +58,7 @@ export class RenderLoop {
     this.unsub = this.store.subscribe(() => {
       this.dirty = true;
     });
-    this.tick();
+    this.rafId = requestAnimationFrame(this.tick);
   }
 
   stop(): void {
@@ -67,6 +74,12 @@ export class RenderLoop {
 
   markDirty(): void {
     this.dirty = true;
+  }
+
+  resetVolumeCache(): void {
+    this.volumeUploaded.clear();
+    this.volumeCacheBytes = 0;
+    this.volumeLodKey = null;
   }
 
   setSliceParams(z: number, t: number, c: number): void {
@@ -190,22 +203,39 @@ export class RenderLoop {
       const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
       const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
 
-      // Reset uploaded set when target level/t/c changes
-      const lod = this.currentLod;
-      if (!lod || lod.level !== targetLevel || lod.t !== viewT || lod.c !== viewC) {
-        this.uploaded = new Set();
-        this.currentLod = { level: targetLevel, t: viewT, c: viewC };
+      const lodKey = `${targetLevel}/${viewT}/${viewC}`;
+      const lodKeyChanged = this.volumeLodKey !== lodKey;
+      const texBytes = widthFull * heightFull * depthFull * 2; // r16uint
+
+      // Look up (or create) the uploaded set for this lodKey
+      let cached = this.volumeUploaded.get(lodKey);
+      if (cached) {
+        // LRU touch
+        this.volumeUploaded.delete(lodKey);
+        this.volumeUploaded.set(lodKey, cached);
+      } else {
+        // Evict oldest entries until new texture fits within budget
+        while (this.volumeUploaded.size > 0 && this.volumeCacheBytes + texBytes > VOL_CACHE_BUDGET) {
+          const oldestKey = this.volumeUploaded.keys().next().value!;
+          const oldest = this.volumeUploaded.get(oldestKey)!;
+          this.volumeCacheBytes -= oldest.byteSize;
+          this.volumeUploaded.delete(oldestKey);
+        }
+        cached = { uploaded: new Set(), byteSize: texBytes };
+        this.volumeUploaded.set(lodKey, cached);
+        this.volumeCacheBytes += texBytes;
       }
+      this.volumeLodKey = lodKey;
 
       // Collect newly available chunks (up to byte budget)
       const newChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
       let budgetRemaining = UPLOAD_BUDGET_BYTES;
       for (const coord of plan.needed) {
-        if (this.uploaded.has(coord.key)) continue;
+        if (cached.uploaded.has(coord.key)) continue;
         const buf = store.get(coord.key);
         if (!buf) continue;
         newChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-        this.uploaded.add(coord.key);
+        cached.uploaded.add(coord.key);
         budgetRemaining -= buf.byteLength;
         if (budgetRemaining <= 0) {
           this.dirty = true; // more chunks remain — continue next frame
@@ -213,7 +243,8 @@ export class RenderLoop {
         }
       }
 
-      if (newChunks.length > 0) {
+      // Send to GPU worker if there are new chunks OR if lodKey changed (to activate cached texture)
+      if (newChunks.length > 0 || lodKeyChanged) {
         client.volumeUploadChunks(
           newChunks,
           targetLevel, viewT, viewC,
