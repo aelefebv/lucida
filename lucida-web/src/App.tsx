@@ -59,7 +59,7 @@ interface PendingChunkResolve {
 
 function App() {
   const [item, setItem] = useState<OpenedItem | null>(null);
-  const [, setWasmReady] = useState(false);
+  const [wasmReady, setWasmReady] = useState(false);
   const [volume, setVolume] = useState<VolumeData | null>(null);
   const [wasmScene, setWasmScene] = useState<WasmScene | null>(null);
   const [loading, setLoading] = useState(false);
@@ -111,16 +111,25 @@ function App() {
   wasmSceneRef.current = wasmScene;
 
   useEffect(() => {
-    if (bridgeRef.current) return;
+    if (!wasmReady || bridgeRef.current) return;
     const handlers: BridgeHandlers = {
       onSnapshot: (_seq, sceneJson) => {
-        const scene = wasmSceneRef.current;
-        if (!scene) return;
         try {
+          let scene = wasmSceneRef.current;
+          // Create WasmScene if we don't have one yet
+          if (!scene) {
+            scene = new WasmScene(800, 600);
+            wasmSceneRef.current = scene;
+          }
           scene.load_snapshot(sceneJson);
           setZ(scene.z());
           setT(scene.t());
           setC(scene.c());
+
+          // Sync view mode from camera type
+          const is3d = scene.is_3d();
+          setViewMode(is3d ? "3d" : "2d");
+
           setRemoteCameraVersion((v) => v + 1);
 
           // Check for datasets in snapshot that we don't have locally
@@ -132,14 +141,25 @@ function App() {
               }
             }
           }
+
+          // Publish the scene so render gate passes
+          setWasmScene(scene);
         } catch (e) {
           console.warn("[Bridge] bad snapshot:", e);
         }
       },
       onCommand: (_seq, commandJson) => {
-        const scene = wasmSceneRef.current;
-        if (!scene) return;
         try {
+          let scene = wasmSceneRef.current;
+          if (!scene) {
+            const cmd = JSON.parse(commandJson);
+            if (cmd.type === "add_dataset" && cmd.client_metadata) {
+              scene = new WasmScene(800, 600);
+              wasmSceneRef.current = scene;
+            } else {
+              return; // Can't apply commands without a scene
+            }
+          }
           scene.apply_command(commandJson);
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "set_z") setZ(cmd.z);
@@ -158,6 +178,7 @@ function App() {
             if (!datasetsRef.current.has(cmd.id)) {
               setupRemoteDataset(cmd.id, cmd.client_metadata);
             }
+            setWasmScene(scene);
           }
           if (cmd.type === "remove_dataset") {
             const ds = datasetsRef.current.get(cmd.id);
@@ -188,7 +209,7 @@ function App() {
       },
     };
     bridgeRef.current = new Bridge(handlers);
-  }, []);
+  }, [wasmReady]);
 
   /** Set up a remote dataset from client_metadata received via command/snapshot. */
   function setupRemoteDataset(datasetId: string, clientMetadata: DatasetInfo) {
@@ -233,28 +254,16 @@ function App() {
       storeRef.current = store;
       setDatasetInfo(info);
 
-      // Load a coarse volume for initial display.
-      loadRemoteInitialVolume(info, store);
-    }
-  }
-
-  /** Load coarsest level for initial display of a remote dataset. */
-  async function loadRemoteInitialVolume(info: DatasetInfo, store: ChunkStore) {
-    setLoading(true);
-    try {
+      // Create placeholder volume from coarsest level dimensions.
+      // The RenderLoop will fetch real chunks and overwrite the fallback.
       const coarsest = info.levels[info.levels.length - 1];
-      // Request all chunks at coarsest level
-      const fullRes = info.levels[0];
-      const scene = wasmSceneRef.current;
-      if (!scene) return;
-
-      // The scene should already have the dataset from the command.
-      // Trigger chunk fetching via the render loop.
-      setLoading(false);
-    } catch (err) {
-      console.error("Failed to init remote dataset:", err);
-      setError(err instanceof Error ? err.message : String(err));
-      setLoading(false);
+      const [, , depth, height, width] = coarsest.shape;
+      setVolume({
+        data: new Uint16Array(width * height * depth),
+        width,
+        height,
+        depth,
+      });
     }
   }
 
@@ -471,12 +480,12 @@ function App() {
       // Apply locally and send to server
       applyAndSend(scene, addDatasetCmd, sendCommand);
 
-      // Center the Rust 2D camera on the image
-      scene.set_center(shapeX / 2, shapeY / 2);
-      scene.set_mode_2d();
-      scene.set_z(0);
-      scene.set_c(0);
-      scene.set_t(0);
+      // Center the Rust 2D camera on the image (synced via server)
+      applyAndSend(scene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 }, sendCommand);
+      applyAndSend(scene, { type: "set_mode_2d" }, sendCommand);
+      applyAndSend(scene, { type: "set_z", z: 0 }, sendCommand);
+      applyAndSend(scene, { type: "set_c", c: 0 }, sendCommand);
+      applyAndSend(scene, { type: "set_t", t: 0 }, sendCommand);
 
       // Create local ChunkStore with local fetcher
       const localFetcher: ChunkFetcher = (coord, signal) => {
