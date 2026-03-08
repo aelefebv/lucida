@@ -5,6 +5,24 @@ use crate::chunk::{self, ChunkRequestPlan};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
+/// Display settings (contrast window + gamma).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DisplayState {
+    pub contrast_min: f64,
+    pub contrast_max: f64,
+    pub gamma: f64,
+}
+
+impl Default for DisplayState {
+    fn default() -> Self {
+        Self {
+            contrast_min: 0.0,
+            contrast_max: 65535.0,
+            gamma: 1.0,
+        }
+    }
+}
+
 /// Per-level shape and chunk size metadata for anisotropic pyramids.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LevelInfo {
@@ -70,6 +88,9 @@ pub struct Scene {
     pub camera: Camera,
     pub view: ViewState,
     pub datasets: Vec<Dataset>,
+    /// Display settings (contrast window + gamma).
+    #[serde(default)]
+    pub display: DisplayState,
 }
 
 impl Scene {
@@ -78,6 +99,7 @@ impl Scene {
             camera: Camera::new_2d(viewport),
             view: ViewState::new(),
             datasets: Vec::new(),
+            display: DisplayState::default(),
         }
     }
 

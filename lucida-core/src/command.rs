@@ -46,6 +46,9 @@ pub enum Command {
     RemoveDataset {
         id: String,
     },
+    // Display
+    SetContrast { min: f64, max: f64 },
+    SetGamma { gamma: f64 },
 }
 
 impl Scene {
@@ -119,6 +122,13 @@ impl Scene {
             }
             Command::RemoveDataset { id } => {
                 self.remove_dataset(&id);
+            }
+            Command::SetContrast { min, max } => {
+                self.display.contrast_min = min;
+                self.display.contrast_max = max;
+            }
+            Command::SetGamma { gamma } => {
+                self.display.gamma = gamma;
             }
         }
     }

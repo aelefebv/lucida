@@ -161,6 +161,20 @@ impl WasmScene {
         self.inner.view.c = c;
     }
 
+    // --- Display state ---
+
+    pub fn contrast_min(&self) -> f64 {
+        self.inner.display.contrast_min
+    }
+
+    pub fn contrast_max(&self) -> f64 {
+        self.inner.display.contrast_max
+    }
+
+    pub fn gamma(&self) -> f64 {
+        self.inner.display.gamma
+    }
+
     // --- View state getters ---
 
     pub fn z(&self) -> u32 {

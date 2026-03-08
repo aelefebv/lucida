@@ -126,6 +126,17 @@ function App() {
           setT(scene.t());
           setC(scene.c());
 
+          // Restore display state (contrast/gamma) from snapshot
+          const sMin = scene.contrast_min();
+          const sMax = scene.contrast_max();
+          const sGamma = scene.gamma();
+          setContrastMin(sMin);
+          setContrastMax(sMax);
+          setGamma(sGamma);
+          if (sMin !== 0 || sMax !== 65535 || sGamma !== 1.0) {
+            setAutoContrast(false);
+          }
+
           // Sync view mode from camera type
           const is3d = scene.is_3d();
           setViewMode(is3d ? "3d" : "2d");
@@ -186,6 +197,14 @@ function App() {
               ds.store.destroy();
               datasetsRef.current.delete(cmd.id);
             }
+          }
+          if (cmd.type === "set_contrast") {
+            setContrastMin(cmd.min);
+            setContrastMax(cmd.max);
+            setAutoContrast(false);
+          }
+          if (cmd.type === "set_gamma") {
+            setGamma(cmd.gamma);
           }
           setRemoteCameraVersion((v) => v + 1);
         } catch (e) {
@@ -554,11 +573,13 @@ function App() {
     setContrastMin(min);
     setContrastMax(max);
     setAutoContrast(false);
-  }, []);
+    sendCommand(JSON.stringify({ type: "set_contrast", min, max }));
+  }, [sendCommand]);
 
   const handleGammaChange = useCallback((g: number) => {
     setGamma(g);
-  }, []);
+    sendCommand(JSON.stringify({ type: "set_gamma", gamma: g }));
+  }, [sendCommand]);
 
   const handleAutoContrast = useCallback(() => {
     if (dataRange) {
