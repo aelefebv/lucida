@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
-use crate::scene::Scene;
+use crate::scene::{Dataset, Layer, Scene};
+use crate::transform;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -32,6 +33,19 @@ pub enum Command {
     SetC { c: u32 },
     // Volume
     SetVolumeScale { shape: [u32; 3], scale: [f64; 3] },
+    // Dataset management
+    AddDataset {
+        id: String,
+        name: String,
+        layers: Vec<Layer>,
+        volume_shape: Option<[u32; 3]>,
+        volume_scale: Option<[f64; 3]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_metadata: Option<serde_json::Value>,
+    },
+    RemoveDataset {
+        id: String,
+    },
 }
 
 impl Scene {
@@ -80,6 +94,32 @@ impl Scene {
             Command::SetT { t } => self.view.t = t,
             Command::SetC { c } => self.view.c = c,
             Command::SetVolumeScale { shape, scale } => self.set_volume_scale(shape, scale),
+            Command::AddDataset {
+                id,
+                name,
+                layers,
+                volume_shape,
+                volume_scale,
+                client_metadata,
+            } => {
+                let volume_transform =
+                    if let (Some(shape), Some(scale)) = (volume_shape, volume_scale) {
+                        Some(transform::compute_volume_transform(shape, scale))
+                    } else {
+                        None
+                    };
+                self.add_dataset(Dataset {
+                    id,
+                    name,
+                    layers,
+                    volume_transform,
+                    volume_shape,
+                    client_metadata,
+                });
+            }
+            Command::RemoveDataset { id } => {
+                self.remove_dataset(&id);
+            }
         }
     }
 }
@@ -119,5 +159,70 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         scene.apply(Command::SetMode3D);
         assert!(matches!(scene.camera, Camera::View3D(_)));
+    }
+
+    #[test]
+    fn add_dataset_command_round_trips() {
+        let cmd = Command::AddDataset {
+            id: "ds1".into(),
+            name: "test dataset".into(),
+            layers: vec![],
+            volume_shape: Some([100, 200, 300]),
+            volume_scale: Some([1.0, 0.5, 0.5]),
+            client_metadata: Some(serde_json::json!({"dtype": "uint16"})),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"add_dataset\""));
+        let parsed: Command = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Command::AddDataset { id, name, volume_shape, client_metadata, .. } => {
+                assert_eq!(id, "ds1");
+                assert_eq!(name, "test dataset");
+                assert_eq!(volume_shape, Some([100, 200, 300]));
+                assert!(client_metadata.is_some());
+            }
+            _ => panic!("expected AddDataset"),
+        }
+    }
+
+    #[test]
+    fn remove_dataset_command_round_trips() {
+        let cmd = Command::RemoveDataset { id: "ds1".into() };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"remove_dataset\""));
+        let _parsed: Command = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn apply_add_dataset_populates_scene() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(Command::AddDataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            layers: vec![],
+            volume_shape: Some([100, 200, 300]),
+            volume_scale: Some([1.0, 1.0, 1.0]),
+            client_metadata: None,
+        });
+        assert_eq!(scene.datasets.len(), 1);
+        assert_eq!(scene.datasets[0].id, "ds1");
+        assert!(scene.datasets[0].volume_transform.is_some());
+        assert_eq!(scene.datasets[0].volume_shape, Some([100, 200, 300]));
+    }
+
+    #[test]
+    fn apply_remove_dataset_removes_from_scene() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(Command::AddDataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            layers: vec![],
+            volume_shape: None,
+            volume_scale: None,
+            client_metadata: None,
+        });
+        assert_eq!(scene.datasets.len(), 1);
+        scene.apply(Command::RemoveDataset { id: "ds1".into() });
+        assert!(scene.datasets.is_empty());
     }
 }

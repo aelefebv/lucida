@@ -137,7 +137,11 @@ impl PyScene {
         shapes_flat: Vec<u32>,
         chunks_flat: Vec<u32>,
     ) {
-        if let Some(layer) = self.inner.layers.get_mut(layer_index) {
+        let layers = match self.inner.datasets.first_mut() {
+            Some(ds) => &mut ds.layers,
+            None => return,
+        };
+        if let Some(layer) = layers.get_mut(layer_index) {
             let num_levels = shapes_flat.len() / 3;
             let mut info = Vec::with_capacity(num_levels);
             for i in 0..num_levels {

@@ -49,15 +49,27 @@ impl Layer {
     }
 }
 
+/// A single dataset in the scene, containing its layers and spatial metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Dataset {
+    pub id: String,
+    pub name: String,
+    pub layers: Vec<Layer>,
+    pub volume_transform: Option<VolumeTransform>,
+    /// Volume dimensions in voxels: [Z, Y, X].
+    pub volume_shape: Option<[u32; 3]>,
+    /// Opaque client metadata (dtype, codecs, level paths).
+    /// Server passes through without interpretation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_metadata: Option<serde_json::Value>,
+}
+
 /// The complete viewer state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
     pub camera: Camera,
     pub view: ViewState,
-    pub layers: Vec<Layer>,
-    pub volume_transform: Option<VolumeTransform>,
-    /// Volume dimensions in voxels: [Z, Y, X]. Needed for 3D frustum → voxel mapping.
-    pub volume_shape: Option<[u32; 3]>,
+    pub datasets: Vec<Dataset>,
 }
 
 impl Scene {
@@ -65,10 +77,22 @@ impl Scene {
         Self {
             camera: Camera::new_2d(viewport),
             view: ViewState::new(),
-            layers: Vec::new(),
-            volume_transform: None,
-            volume_shape: None,
+            datasets: Vec::new(),
         }
+    }
+
+    // --- Convenience accessors for first dataset ---
+
+    pub fn volume_transform(&self) -> Option<&VolumeTransform> {
+        self.datasets
+            .first()
+            .and_then(|d| d.volume_transform.as_ref())
+    }
+
+    pub fn volume_shape(&self) -> Option<&[u32; 3]> {
+        self.datasets
+            .first()
+            .and_then(|d| d.volume_shape.as_ref())
     }
 
     /// Switch to 2D mode, preserving the current viewport.
@@ -87,43 +111,77 @@ impl Scene {
         }
     }
 
-    /// Set the volume scale to account for anisotropic voxel spacing.
+    /// Ensure at least one dataset exists, creating a default if needed.
+    fn ensure_default_dataset(&mut self) {
+        if self.datasets.is_empty() {
+            self.datasets.push(Dataset {
+                id: "default".into(),
+                name: "default".into(),
+                layers: Vec::new(),
+                volume_transform: None,
+                volume_shape: None,
+                client_metadata: None,
+            });
+        }
+    }
+
+    /// Set the volume scale for the first dataset.
     /// `shape` is [Z, Y, X], `scale` is [Z, Y, X].
     pub fn set_volume_scale(&mut self, shape: [u32; 3], scale: [f64; 3]) {
-        self.volume_shape = Some(shape);
-        self.volume_transform = Some(transform::compute_volume_transform(shape, scale));
+        self.ensure_default_dataset();
+        let ds = &mut self.datasets[0];
+        ds.volume_shape = Some(shape);
+        ds.volume_transform = Some(transform::compute_volume_transform(shape, scale));
     }
 
+    /// Add a layer to the first dataset (convenience for single-dataset use).
     pub fn add_layer(&mut self, layer: Layer) {
-        self.layers.push(layer);
+        self.ensure_default_dataset();
+        self.datasets[0].layers.push(layer);
     }
 
-    /// Compute the chunk request plan for all visible layers.
+    /// Add or replace a dataset by id.
+    pub fn add_dataset(&mut self, dataset: Dataset) {
+        if let Some(existing) = self.datasets.iter_mut().find(|d| d.id == dataset.id) {
+            *existing = dataset;
+        } else {
+            self.datasets.push(dataset);
+        }
+    }
+
+    /// Remove a dataset by id.
+    pub fn remove_dataset(&mut self, id: &str) {
+        self.datasets.retain(|d| d.id != id);
+    }
+
+    /// Compute the chunk request plan for all visible layers across all datasets.
     pub fn chunk_plan(&self) -> ChunkRequestPlan {
         let region = self.camera.visible_region(
             &self.view.z_range,
-            self.volume_transform.as_ref(),
-            self.volume_shape.as_ref(),
+            self.volume_transform(),
+            self.volume_shape(),
         );
 
         let mut needed = Vec::new();
 
-        for layer in &self.layers {
-            if !layer.visible {
-                continue;
+        for dataset in &self.datasets {
+            for layer in &dataset.layers {
+                if !layer.visible {
+                    continue;
+                }
+                let level = chunk::select_level(region.effective_zoom, layer.num_levels);
+                let (level_shape, level_chunk_size) = layer.shape_at_level(level);
+                let chunks = chunk::visible_chunks(
+                    &region,
+                    &level_chunk_size,
+                    level,
+                    self.view.t,
+                    self.view.c,
+                    &level_shape,
+                    &layer.data_shape,
+                );
+                needed.extend(chunks);
             }
-            let level = chunk::select_level(region.effective_zoom, layer.num_levels);
-            let (level_shape, level_chunk_size) = layer.shape_at_level(level);
-            let chunks = chunk::visible_chunks(
-                &region,
-                &level_chunk_size,
-                level,
-                self.view.t,
-                self.view.c,
-                &level_shape,
-                &layer.data_shape,
-            );
-            needed.extend(chunks);
         }
 
         ChunkRequestPlan {
@@ -223,8 +281,9 @@ mod tests {
         assert_eq!(parsed.view.z_range, 5..6);
         assert_eq!(parsed.view.t, 2);
         assert_eq!(parsed.view.c, 1);
-        assert_eq!(parsed.layers.len(), 1);
-        assert_eq!(parsed.layers[0].name, "test");
+        assert_eq!(parsed.datasets.len(), 1);
+        assert_eq!(parsed.datasets[0].layers.len(), 1);
+        assert_eq!(parsed.datasets[0].layers[0].name, "test");
         if let Camera::View2D(v) = &parsed.camera {
             assert_eq!(v.viewport, [800, 600]);
         } else {
@@ -241,8 +300,8 @@ mod tests {
         let json = serde_json::to_string(&scene).unwrap();
         let parsed: Scene = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed.camera, Camera::View3D(_)));
-        assert!(parsed.volume_transform.is_some());
-        assert_eq!(parsed.volume_shape, Some([100, 200, 300]));
+        assert!(parsed.volume_transform().is_some());
+        assert_eq!(parsed.volume_shape().copied(), Some([100, 200, 300]));
     }
 
     #[test]
@@ -259,8 +318,6 @@ mod tests {
             level_info: vec![],
         });
         let plan = scene.chunk_plan();
-        // 3D mode should produce chunks — the frustum sees the volume
-        // With a default camera looking at the volume, we should get some chunks
         assert!(!plan.needed.is_empty());
     }
 
@@ -325,5 +382,54 @@ mod tests {
         // Isotropic fallback should still work
         let (shape, _) = layer.shape_at_level(1);
         assert_eq!(shape, [512, 512, 64]);
+    }
+
+    #[test]
+    fn add_dataset_deduplicates_by_id() {
+        let mut scene = Scene::new([800, 600]);
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "first".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        assert_eq!(scene.datasets.len(), 1);
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "updated".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        assert_eq!(scene.datasets.len(), 1);
+        assert_eq!(scene.datasets[0].name, "updated");
+    }
+
+    #[test]
+    fn remove_dataset_by_id() {
+        let mut scene = Scene::new([800, 600]);
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "first".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        scene.add_dataset(Dataset {
+            id: "ds2".into(),
+            name: "second".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        assert_eq!(scene.datasets.len(), 2);
+        scene.remove_dataset("ds1");
+        assert_eq!(scene.datasets.len(), 1);
+        assert_eq!(scene.datasets[0].id, "ds2");
     }
 }

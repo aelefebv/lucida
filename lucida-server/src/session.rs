@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 use lucida_core::command::Command;
 use lucida_core::protocol::ServerMessage;
@@ -10,6 +10,8 @@ pub struct Session {
     pub scene: Scene,
     pub seq: u64,
     history: VecDeque<(u64, Command)>,
+    /// Maps dataset_id → client_id of the data source.
+    pub data_sources: HashMap<String, u64>,
 }
 
 impl Session {
@@ -18,6 +20,7 @@ impl Session {
             scene: Scene::new(viewport),
             seq: 0,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
+            data_sources: HashMap::new(),
         }
     }
 

@@ -5,7 +5,9 @@ import { parseDatasetInfo } from "./zarr/metadata.ts";
 import type { DatasetInfo } from "./zarr/metadata.ts";
 import { assembleVolume } from "./zarr/volumeAssembler.ts";
 import type { VolumeData } from "./zarr/volumeAssembler.ts";
-import { ChunkStore } from "./zarr/chunkStore.ts";
+import { ChunkStore, type ChunkFetcher } from "./zarr/chunkStore.ts";
+import { loadChunk } from "./zarr/chunkLoader.ts";
+import { decompressLz4Async } from "./zarr/lz4Client.ts";
 import { RenderClient } from "./renderer/renderClient.ts";
 import { RenderLoop } from "./renderLoop.ts";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
@@ -41,6 +43,20 @@ function dtypeMax(dtype: string): number {
   }
 }
 
+/** State for a single dataset, either local or remote. */
+interface DatasetState {
+  id: string;
+  info: DatasetInfo;
+  store: ChunkStore;
+  fileIndex: Map<string, File> | null; // null for remote datasets
+}
+
+/** Pending chunk request from a remote viewer. */
+interface PendingChunkResolve {
+  resolve: (data: ArrayBuffer) => void;
+  reject: (err: Error) => void;
+}
+
 function App() {
   const [item, setItem] = useState<OpenedItem | null>(null);
   const [, setWasmReady] = useState(false);
@@ -71,6 +87,11 @@ function App() {
   const fileIndexRef = useRef<Map<string, File> | null>(null);
   const storeRef = useRef<ChunkStore | null>(null);
 
+  // Track all datasets (local and remote) by id
+  const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
+  // Pending chunk requests from remote viewers (keyed by chunk key)
+  const pendingChunkRequests = useRef<Map<string, PendingChunkResolve>>(new Map());
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
 
@@ -85,7 +106,6 @@ function App() {
   }, []);
 
   // Bridge: receive commands from relay server over WebSocket.
-  // Use a ref so the Bridge (and its WebSocket) persists across wasmScene changes.
   const bridgeRef = useRef<Bridge | null>(null);
   const wasmSceneRef = useRef<WasmScene | null>(null);
   wasmSceneRef.current = wasmScene;
@@ -102,6 +122,16 @@ function App() {
           setT(scene.t());
           setC(scene.c());
           setRemoteCameraVersion((v) => v + 1);
+
+          // Check for datasets in snapshot that we don't have locally
+          const snapshotScene = JSON.parse(sceneJson);
+          if (snapshotScene.datasets) {
+            for (const ds of snapshotScene.datasets) {
+              if (ds.client_metadata && !datasetsRef.current.has(ds.id)) {
+                setupRemoteDataset(ds.id, ds.client_metadata);
+              }
+            }
+          }
         } catch (e) {
           console.warn("[Bridge] bad snapshot:", e);
         }
@@ -124,6 +154,18 @@ function App() {
               else client.setModeVolume();
             }
           }
+          if (cmd.type === "add_dataset" && cmd.client_metadata) {
+            if (!datasetsRef.current.has(cmd.id)) {
+              setupRemoteDataset(cmd.id, cmd.client_metadata);
+            }
+          }
+          if (cmd.type === "remove_dataset") {
+            const ds = datasetsRef.current.get(cmd.id);
+            if (ds) {
+              ds.store.destroy();
+              datasetsRef.current.delete(cmd.id);
+            }
+          }
           setRemoteCameraVersion((v) => v + 1);
         } catch (e) {
           console.warn("[Bridge] bad command:", e);
@@ -132,17 +174,132 @@ function App() {
       onAck: (_seq) => {
         // Client already applied optimistically — no-op.
       },
+      onChunkFetch: (clientId, datasetId, key) => {
+        // We are the data source — serve chunk data from local files.
+        serveChunkFetch(clientId, datasetId, key);
+      },
+      onChunkData: (key, data) => {
+        // Chunk data arrived from a remote data source.
+        const pending = pendingChunkRequests.current.get(key);
+        if (pending) {
+          pendingChunkRequests.current.delete(key);
+          pending.resolve(data);
+        }
+      },
     };
     bridgeRef.current = new Bridge(handlers);
   }, []);
+
+  /** Set up a remote dataset from client_metadata received via command/snapshot. */
+  function setupRemoteDataset(datasetId: string, clientMetadata: DatasetInfo) {
+    const info = clientMetadata;
+
+    // Create a remote fetcher that requests chunks via the bridge.
+    const remoteFetcher: ChunkFetcher = async (coord, signal) => {
+      const rawBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
+        pendingChunkRequests.current.set(coord.key, { resolve, reject });
+        bridgeRef.current?.send(JSON.stringify({
+          type: "chunk_request",
+          dataset_id: datasetId,
+          key: coord.key,
+        }));
+        signal?.addEventListener("abort", () => {
+          pendingChunkRequests.current.delete(coord.key);
+          reject(new DOMException("Aborted", "AbortError"));
+        });
+      });
+
+      // Apply codec pipeline (same as loadChunk does for local files).
+      const levelMeta = info.levels[coord.level];
+      if (levelMeta) {
+        const hasLz4 = levelMeta.codecs.some(c => c.name === "numcodecs/lz4");
+        if (hasLz4) {
+          return decompressLz4Async(rawBytes);
+        }
+      }
+      return rawBytes;
+    };
+
+    const store = new ChunkStore(remoteFetcher);
+    datasetsRef.current.set(datasetId, {
+      id: datasetId,
+      info,
+      store,
+      fileIndex: null,
+    });
+
+    // If this is the first dataset and we don't have a local one, use it for rendering.
+    if (!storeRef.current) {
+      storeRef.current = store;
+      setDatasetInfo(info);
+
+      // Load a coarse volume for initial display.
+      loadRemoteInitialVolume(info, store);
+    }
+  }
+
+  /** Load coarsest level for initial display of a remote dataset. */
+  async function loadRemoteInitialVolume(info: DatasetInfo, store: ChunkStore) {
+    setLoading(true);
+    try {
+      const coarsest = info.levels[info.levels.length - 1];
+      // Request all chunks at coarsest level
+      const fullRes = info.levels[0];
+      const scene = wasmSceneRef.current;
+      if (!scene) return;
+
+      // The scene should already have the dataset from the command.
+      // Trigger chunk fetching via the render loop.
+      setLoading(false);
+    } catch (err) {
+      console.error("Failed to init remote dataset:", err);
+      setError(err instanceof Error ? err.message : String(err));
+      setLoading(false);
+    }
+  }
+
+  /** Serve a chunk_fetch request — read raw file bytes and send via binary. */
+  async function serveChunkFetch(clientId: number, datasetId: string, key: string) {
+    const ds = datasetsRef.current.get(datasetId);
+    if (!ds || !ds.fileIndex) return;
+
+    // Parse key: "level/t/c/z/y/x"
+    const parts = key.split("/").map(Number);
+    if (parts.length !== 6) return;
+    const [level, t, c, z, y, x] = parts;
+
+    const levelMeta = ds.info.levels[level];
+    if (!levelMeta) return;
+
+    // Read raw bytes (no decompression — let the receiver decompress).
+    const path = `${levelMeta.path}/c/${t}/${c}/${z}/${y}/${x}`;
+    const file = ds.fileIndex.get(path);
+    if (!file) return;
+
+    try {
+      const rawBytes = await file.arrayBuffer();
+
+      // Build binary message: [client_id: u32 LE][key_len: u16 LE][key: UTF-8][data]
+      const keyBytes = new TextEncoder().encode(key);
+      const headerSize = 4 + 2 + keyBytes.length;
+      const message = new Uint8Array(headerSize + rawBytes.byteLength);
+      const view = new DataView(message.buffer);
+      view.setUint32(0, clientId, true);
+      view.setUint16(4, keyBytes.length, true);
+      message.set(keyBytes, 6);
+      message.set(new Uint8Array(rawBytes), headerSize);
+
+      bridgeRef.current?.sendBinary(message);
+    } catch (err) {
+      console.error(`Failed to serve chunk ${key}:`, err);
+    }
+  }
 
   const sendCommand = useCallback((json: string) => {
     bridgeRef.current?.send(json);
   }, []);
 
   // Create RenderClient once when canvas mounts.
-  // transferControlToOffscreen() can only be called once per canvas, so we
-  // must not destroy and recreate the client on StrictMode's double-mount.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || clientRef.current) return;
@@ -270,47 +427,83 @@ function App() {
       const fullRes = info.levels[0];
       const scene = new WasmScene(800, 600);
 
-      // Set volume scale from full-res level
+      // Generate dataset ID
+      const datasetId = crypto.randomUUID();
+
+      // Build AddDataset command with layer metadata + client_metadata
       const shapeZ = fullRes.shape[2],
         shapeY = fullRes.shape[3],
         shapeX = fullRes.shape[4];
       const scaleZ = fullRes.scale[2],
         scaleY = fullRes.scale[3],
         scaleX = fullRes.scale[4];
-      scene.set_volume_scale(shapeZ, shapeY, shapeX, scaleZ, scaleY, scaleX);
 
-      // Add layer with real metadata so chunk_plan() can select levels
       const chunkX = fullRes.chunkShape[4];
       const chunkY = fullRes.chunkShape[3];
       const chunkZ = fullRes.chunkShape[2];
-      scene.add_layer("main", true, info.levels.length, chunkX, chunkY, chunkZ, shapeX, shapeY, shapeZ);
 
-      // Set per-level shape/chunk metadata for anisotropic pyramids
-      const shapesFlat = new Uint32Array(info.levels.length * 3);
-      const chunksFlat = new Uint32Array(info.levels.length * 3);
-      for (let i = 0; i < info.levels.length; i++) {
-        const lvl = info.levels[i];
-        // metadata is [T,C,Z,Y,X] — extract spatial [X,Y,Z]
-        shapesFlat[i * 3 + 0] = lvl.shape[4];
-        shapesFlat[i * 3 + 1] = lvl.shape[3];
-        shapesFlat[i * 3 + 2] = lvl.shape[2];
-        chunksFlat[i * 3 + 0] = lvl.chunkShape[4];
-        chunksFlat[i * 3 + 1] = lvl.chunkShape[3];
-        chunksFlat[i * 3 + 2] = lvl.chunkShape[2];
+      // Build per-level info for the layer
+      const levelInfoArray: { shape: [number, number, number]; chunk_size: [number, number, number] }[] = [];
+      for (const lvl of info.levels) {
+        levelInfoArray.push({
+          shape: [lvl.shape[4], lvl.shape[3], lvl.shape[2]],
+          chunk_size: [lvl.chunkShape[4], lvl.chunkShape[3], lvl.chunkShape[2]],
+        });
       }
-      scene.set_level_info(0, shapesFlat, chunksFlat);
 
-      // Center the Rust 2D camera on the image so world_bounds matches the TS viewer
+      const addDatasetCmd = {
+        type: "add_dataset",
+        id: datasetId,
+        name: dirName,
+        layers: [{
+          name: "main",
+          visible: true,
+          num_levels: info.levels.length,
+          chunk_size: [chunkX, chunkY, chunkZ],
+          data_shape: [shapeX, shapeY, shapeZ],
+          level_info: levelInfoArray,
+        }],
+        volume_shape: [shapeZ, shapeY, shapeX] as [number, number, number],
+        volume_scale: [scaleZ, scaleY, scaleX] as [number, number, number],
+        client_metadata: info, // Full DatasetInfo for remote clients
+      };
+
+      // Apply locally and send to server
+      applyAndSend(scene, addDatasetCmd, sendCommand);
+
+      // Center the Rust 2D camera on the image
       scene.set_center(shapeX / 2, shapeY / 2);
-
       scene.set_mode_2d();
       scene.set_z(0);
       scene.set_c(0);
       scene.set_t(0);
 
-      // Create ChunkStore
-      const store = new ChunkStore(fileIndex, info);
+      // Create local ChunkStore with local fetcher
+      const localFetcher: ChunkFetcher = (coord, signal) => {
+        const levelMeta = info.levels[coord.level];
+        if (!levelMeta) return Promise.reject(new Error(`No level ${coord.level}`));
+        return loadChunk(
+          fileIndex,
+          levelMeta.path,
+          coord.t,
+          coord.c,
+          coord.z,
+          coord.y,
+          coord.x,
+          levelMeta.codecs,
+          signal,
+        );
+      };
+      const store = new ChunkStore(localFetcher);
       storeRef.current = store;
+
+      // Track this dataset locally (so we can serve chunk requests)
+      datasetsRef.current.set(datasetId, {
+        id: datasetId,
+        info,
+        store,
+        fileIndex,
+      });
 
       setVolume(vol);
       setWasmScene(scene);

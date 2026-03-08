@@ -1,12 +1,13 @@
 mod session;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use lucida_core::command::Command;
-use lucida_core::protocol::ServerMessage;
+use lucida_core::protocol::{ChunkMessage, ServerMessage};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -21,11 +22,15 @@ struct BroadcastItem {
     ack_json: String,
 }
 
+/// Per-client targeted message channels for unicast (chunk routing).
+type ClientSenders = Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<Message>>>>;
+
 #[tokio::main]
 async fn main() {
     let session = Arc::new(Mutex::new(Session::new([800, 600])));
     let (tx, _) = broadcast::channel::<BroadcastItem>(256);
     let next_id = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let clients: ClientSenders = Arc::new(Mutex::new(HashMap::new()));
 
     let listener = TcpListener::bind("0.0.0.0:9876")
         .await
@@ -54,9 +59,14 @@ async fn main() {
 
         let session = Arc::clone(&session);
         let tx = tx.clone();
+        let clients = Arc::clone(&clients);
 
         tokio::spawn(async move {
             let (mut ws_tx, mut ws_rx) = ws.split();
+
+            // Per-client unicast channel for targeted messages (chunk routing).
+            let (unicast_tx, mut unicast_rx) = mpsc::unbounded_channel::<Message>();
+            clients.lock().await.insert(id, unicast_tx);
 
             // Lock session, subscribe (before unlock — no gap), snapshot, unlock.
             let (snapshot_json, mut rx) = {
@@ -74,42 +84,76 @@ async fn main() {
                 .is_err()
             {
                 eprintln!("client {id}: failed to send snapshot");
+                clients.lock().await.remove(&id);
                 return;
             }
 
-            // Outbound: forward broadcast messages to this client.
+            // Outbound: forward broadcast + unicast messages to this client.
             let outbound = tokio::spawn(async move {
                 loop {
-                    match rx.recv().await {
-                        Ok(item) => {
-                            let json = if item.sender == id {
-                                &item.ack_json
-                            } else {
-                                &item.broadcast_json
-                            };
-                            if ws_tx
-                                .send(Message::Text(json.clone().into()))
-                                .await
-                                .is_err()
-                            {
-                                break;
+                    tokio::select! {
+                        result = rx.recv() => {
+                            match result {
+                                Ok(item) => {
+                                    let json = if item.sender == id {
+                                        &item.ack_json
+                                    } else {
+                                        &item.broadcast_json
+                                    };
+                                    if ws_tx
+                                        .send(Message::Text(json.clone().into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    eprintln!("client {id} lagged by {n} messages");
+                                }
+                                Err(broadcast::error::RecvError::Closed) => break,
                             }
                         }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("client {id} lagged by {n} messages");
+                        msg = unicast_rx.recv() => {
+                            match msg {
+                                Some(msg) => {
+                                    if ws_tx.send(msg).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
                         }
-                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             });
 
-            // Inbound: parse commands, apply to session, broadcast.
+            // Inbound: parse commands / chunk messages, apply/route.
             while let Some(Ok(msg)) = ws_rx.next().await {
-                if let Message::Text(text) = msg {
-                    let json = text.to_string();
-                    match serde_json::from_str::<Command>(&json) {
-                        Ok(cmd) => {
-                            let seq = session.lock().await.apply(cmd.clone());
+                match msg {
+                    Message::Text(text) => {
+                        let json = text.to_string();
+
+                        // Try as Command first.
+                        if let Ok(cmd) = serde_json::from_str::<Command>(&json) {
+                            let seq = {
+                                let mut sess = session.lock().await;
+                                let seq = sess.apply(cmd.clone());
+                                // Track data sources for dataset commands.
+                                match &cmd {
+                                    Command::AddDataset {
+                                        id: dataset_id, ..
+                                    } => {
+                                        sess.data_sources
+                                            .insert(dataset_id.clone(), id);
+                                    }
+                                    Command::RemoveDataset { id: dataset_id } => {
+                                        sess.data_sources.remove(dataset_id);
+                                    }
+                                    _ => {}
+                                }
+                                seq
+                            };
 
                             let broadcast_msg = ServerMessage::CommandBroadcast {
                                 seq,
@@ -119,18 +163,77 @@ async fn main() {
 
                             let _ = tx.send(BroadcastItem {
                                 sender: id,
-                                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+                                broadcast_json: serde_json::to_string(&broadcast_msg)
+                                    .unwrap(),
                                 ack_json: serde_json::to_string(&ack_msg).unwrap(),
                             });
+                            continue;
                         }
-                        Err(e) => {
-                            eprintln!("client {id}: bad command: {e}");
+
+                        // Try as ChunkMessage.
+                        if let Ok(chunk_msg) = serde_json::from_str::<ChunkMessage>(&json) {
+                            match chunk_msg {
+                                ChunkMessage::ChunkRequest { dataset_id, key } => {
+                                    // Look up data source for this dataset.
+                                    let source_id = {
+                                        let sess = session.lock().await;
+                                        sess.data_sources.get(&dataset_id).copied()
+                                    };
+                                    if let Some(source_id) = source_id {
+                                        // Forward as ChunkFetch to the data source.
+                                        let fetch = ChunkMessage::ChunkFetch {
+                                            client_id: id,
+                                            dataset_id,
+                                            key,
+                                        };
+                                        let fetch_json =
+                                            serde_json::to_string(&fetch).unwrap();
+                                        let senders = clients.lock().await;
+                                        if let Some(sender) = senders.get(&source_id) {
+                                            let _ = sender.send(Message::Text(
+                                                fetch_json.into(),
+                                            ));
+                                        }
+                                    }
+                                }
+                                ChunkMessage::ChunkFetch { .. } => {
+                                    // Clients should not send ChunkFetch — ignore.
+                                }
+                            }
+                            continue;
+                        }
+
+                        eprintln!("client {id}: unrecognized message");
+                    }
+                    Message::Binary(data) => {
+                        // Binary chunk data: [client_id: u32 LE][key_len: u16 LE][key][data]
+                        if data.len() < 6 {
+                            continue;
+                        }
+                        let target_id = u32::from_le_bytes([
+                            data[0], data[1], data[2], data[3],
+                        ]) as u64;
+
+                        // Forward the entire binary message to the target client.
+                        let senders = clients.lock().await;
+                        if let Some(sender) = senders.get(&target_id) {
+                            let _ = sender.send(Message::Binary(data));
                         }
                     }
+                    _ => {}
                 }
             }
 
+            // Cleanup on disconnect.
             outbound.abort();
+            clients.lock().await.remove(&id);
+
+            // Remove data sources owned by this client.
+            {
+                let mut sess = session.lock().await;
+                sess.data_sources.retain(|_, &mut src| src != id);
+            }
+
             eprintln!("client {id} disconnected");
         });
     }

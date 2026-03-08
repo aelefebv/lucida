@@ -92,7 +92,11 @@ impl WasmScene {
         shapes_flat: &[u32],
         chunks_flat: &[u32],
     ) {
-        if let Some(layer) = self.inner.layers.get_mut(layer_index) {
+        let layers = match self.inner.datasets.first_mut() {
+            Some(ds) => &mut ds.layers,
+            None => return,
+        };
+        if let Some(layer) = layers.get_mut(layer_index) {
             let num_levels = shapes_flat.len() / 3;
             let mut info = Vec::with_capacity(num_levels);
             for i in 0..num_levels {
@@ -187,8 +191,8 @@ impl WasmScene {
                 // Return the visible region xy_bounds for 3D
                 let region = self.inner.camera.visible_region(
                     &self.inner.view.z_range,
-                    self.inner.volume_transform.as_ref(),
-                    self.inner.volume_shape.as_ref(),
+                    self.inner.volume_transform(),
+                    self.inner.volume_shape(),
                 );
                 serde_json::to_string(&region.xy_bounds).unwrap()
             }
@@ -256,7 +260,7 @@ impl WasmScene {
     }
 
     pub fn model_matrix(&self) -> Vec<f32> {
-        match &self.inner.volume_transform {
+        match self.inner.volume_transform() {
             Some(t) => t.model.to_vec(),
             None => {
                 vec![
@@ -270,7 +274,7 @@ impl WasmScene {
     }
 
     pub fn inv_model_matrix(&self) -> Vec<f32> {
-        match &self.inner.volume_transform {
+        match self.inner.volume_transform() {
             Some(t) => t.inv_model.to_vec(),
             None => {
                 vec![

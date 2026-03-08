@@ -1,7 +1,5 @@
 /** Reactive chunk cache + fetcher. Replaces ChunkCache + ChunkManager. */
 import { useSyncExternalStore } from "react";
-import type { DatasetInfo } from "./metadata.ts";
-import { loadChunk } from "./chunkLoader.ts";
 
 export interface ChunkCoord {
   level: number;
@@ -12,6 +10,9 @@ export interface ChunkCoord {
   c: number;
   key: string;
 }
+
+/** A function that fetches a single chunk's decompressed data. */
+export type ChunkFetcher = (coord: ChunkCoord, signal?: AbortSignal) => Promise<ArrayBuffer>;
 
 const MAX_CONCURRENT = 6;
 
@@ -24,12 +25,10 @@ export class ChunkStore {
   private abortController: AbortController | null = null;
   private bumpScheduled = false;
   private pendingQueue: ChunkCoord[] = [];
-  private fileIndex: Map<string, File>;
-  private datasetInfo: DatasetInfo;
+  private fetcher: ChunkFetcher;
 
-  constructor(fileIndex: Map<string, File>, datasetInfo: DatasetInfo) {
-    this.fileIndex = fileIndex;
-    this.datasetInfo = datasetInfo;
+  constructor(fetcher: ChunkFetcher) {
+    this.fetcher = fetcher;
   }
 
   // --- React subscription via useSyncExternalStore ---
@@ -134,21 +133,9 @@ export class ChunkStore {
 
         const coord = this.pendingQueue.shift()!;
         const key = coord.key;
-        const levelMeta = this.datasetInfo.levels[coord.level];
-        if (!levelMeta) continue;
 
         try {
-          const data = await loadChunk(
-            this.fileIndex,
-            levelMeta.path,
-            coord.t,
-            coord.c,
-            coord.z,
-            coord.y,
-            coord.x,
-            levelMeta.codecs,
-            signal,
-          );
+          const data = await this.fetcher(coord, signal);
 
           if (signal.aborted || gen !== this.generation) return;
 
