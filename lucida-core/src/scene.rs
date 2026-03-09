@@ -1,9 +1,48 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
 use crate::chunk::{self, ChunkRequestPlan};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    Alpha,
+    Additive,
+    Max,
+}
+
+impl Default for BlendMode {
+    fn default() -> Self {
+        BlendMode::Alpha
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerDisplaySettings {
+    pub visible: bool,
+    pub opacity: f32,
+    pub contrast_min: f64,
+    pub contrast_max: f64,
+    pub gamma: f64,
+    pub blend_mode: BlendMode,
+}
+
+impl Default for LayerDisplaySettings {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            opacity: 1.0,
+            contrast_min: 0.0,
+            contrast_max: 65535.0,
+            gamma: 1.0,
+            blend_mode: BlendMode::Alpha,
+        }
+    }
+}
 
 /// Display settings (contrast window + gamma).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -114,6 +153,10 @@ pub struct Scene {
     /// Display settings (contrast window + gamma). Per-client, not part of shared document.
     #[serde(default)]
     pub display: DisplayState,
+    #[serde(default)]
+    pub layer_order: Vec<String>,
+    #[serde(default)]
+    pub layer_settings: HashMap<String, LayerDisplaySettings>,
 }
 
 impl Scene {
@@ -125,6 +168,8 @@ impl Scene {
                 datasets: Vec::new(),
             },
             display: DisplayState::default(),
+            layer_order: Vec::new(),
+            layer_settings: HashMap::new(),
         }
     }
 
@@ -191,12 +236,23 @@ impl Scene {
 
     /// Add or replace a dataset by id.
     pub fn add_dataset(&mut self, dataset: Dataset) {
+        let id = dataset.id.clone();
         self.document.add_dataset(dataset);
+        if !self.layer_order.contains(&id) {
+            self.layer_order.push(id.clone());
+        }
+        self.layer_settings.entry(id).or_insert_with(Default::default);
     }
 
     /// Remove a dataset by id.
     pub fn remove_dataset(&mut self, id: &str) {
         self.document.remove_dataset(id);
+        self.layer_order.retain(|s| s != id);
+        self.layer_settings.remove(id);
+    }
+
+    pub fn dataset_by_id(&self, id: &str) -> Option<&Dataset> {
+        self.document.datasets.iter().find(|d| d.id == id)
     }
 
     /// Compute the chunk request plan for all visible layers across all datasets.
@@ -427,6 +483,90 @@ mod tests {
         // Isotropic fallback should still work
         let (shape, _) = layer.shape_at_level(1);
         assert_eq!(shape, [512, 512, 64]);
+    }
+
+    #[test]
+    fn add_dataset_populates_layer_order_and_settings() {
+        let mut scene = Scene::new([800, 600]);
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "first".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        assert_eq!(scene.layer_order, vec!["ds1"]);
+        assert!(scene.layer_settings.contains_key("ds1"));
+        let settings = &scene.layer_settings["ds1"];
+        assert!(settings.visible);
+        assert_eq!(settings.opacity, 1.0);
+    }
+
+    #[test]
+    fn add_dataset_replace_preserves_layer_settings() {
+        let mut scene = Scene::new([800, 600]);
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "first".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        // Modify the opacity
+        scene.layer_settings.get_mut("ds1").unwrap().opacity = 0.5;
+        // Re-add same ID
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "replaced".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        assert_eq!(scene.layer_order, vec!["ds1"]);
+        assert_eq!(scene.layer_settings["ds1"].opacity, 0.5);
+    }
+
+    #[test]
+    fn remove_dataset_cleans_up_layer_state() {
+        let mut scene = Scene::new([800, 600]);
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "first".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        scene.add_dataset(Dataset {
+            id: "ds2".into(),
+            name: "second".into(),
+            layers: vec![],
+            volume_transform: None,
+            volume_shape: None,
+            client_metadata: None,
+        });
+        scene.remove_dataset("ds1");
+        assert_eq!(scene.layer_order, vec!["ds2"]);
+        assert!(!scene.layer_settings.contains_key("ds1"));
+        assert!(scene.layer_settings.contains_key("ds2"));
+    }
+
+    #[test]
+    fn scene_backward_compat_deserialization_without_layer_fields() {
+        // JSON without layer_order/layer_settings should deserialize with defaults
+        let mut scene = Scene::new([800, 600]);
+        scene.add_layer(test_layer());
+        // Serialize, then strip layer fields and re-deserialize
+        let json = serde_json::to_string(&scene).unwrap();
+        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        val.as_object_mut().unwrap().remove("layer_order");
+        val.as_object_mut().unwrap().remove("layer_settings");
+        let parsed: Scene = serde_json::from_value(val).unwrap();
+        assert!(parsed.layer_order.is_empty());
+        assert!(parsed.layer_settings.is_empty());
     }
 
     #[test]

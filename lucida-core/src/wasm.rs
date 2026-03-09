@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::camera::Camera;
 use crate::command::Command;
-use crate::scene::{DisplayState, DocumentState, Layer, LevelInfo, Scene};
+use crate::scene::{DisplayState, DocumentState, Layer, LayerDisplaySettings, LevelInfo, Scene};
 use crate::view::ViewState;
 
 #[wasm_bindgen]
@@ -343,5 +343,81 @@ impl WasmScene {
                 ]
             }
         }
+    }
+
+    // --- Layer display settings ---
+
+    pub fn layer_order(&self) -> String {
+        serde_json::to_string(&self.inner.layer_order).unwrap()
+    }
+
+    pub fn layer_display_settings(&self, dataset_id: &str) -> String {
+        match self.inner.layer_settings.get(dataset_id) {
+            Some(s) => serde_json::to_string(s).unwrap(),
+            None => serde_json::to_string(&LayerDisplaySettings::default()).unwrap(),
+        }
+    }
+
+    pub fn all_layer_settings(&self) -> String {
+        serde_json::to_string(&self.inner.layer_settings).unwrap()
+    }
+
+    pub fn export_layer_presence(&self) -> String {
+        #[derive(serde::Serialize)]
+        struct LayerPresence<'a> {
+            layer_order: &'a Vec<String>,
+            layer_settings: &'a std::collections::HashMap<String, LayerDisplaySettings>,
+        }
+        let p = LayerPresence {
+            layer_order: &self.inner.layer_order,
+            layer_settings: &self.inner.layer_settings,
+        };
+        serde_json::to_string(&p).unwrap()
+    }
+
+    pub fn import_layer_presence(&mut self, json: &str) -> Result<(), JsError> {
+        #[derive(serde::Deserialize)]
+        struct LayerPresence {
+            layer_order: Vec<String>,
+            layer_settings: std::collections::HashMap<String, LayerDisplaySettings>,
+        }
+        let p: LayerPresence =
+            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner.layer_order = p.layer_order;
+        self.inner.layer_settings = p.layer_settings;
+        Ok(())
+    }
+
+    pub fn model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
+        match self.inner.dataset_by_id(dataset_id).and_then(|d| d.volume_transform.as_ref()) {
+            Some(t) => t.model.to_vec(),
+            None => {
+                vec![
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ]
+            }
+        }
+    }
+
+    pub fn inv_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
+        match self.inner.dataset_by_id(dataset_id).and_then(|d| d.volume_transform.as_ref()) {
+            Some(t) => t.inv_model.to_vec(),
+            None => {
+                vec![
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ]
+            }
+        }
+    }
+
+    pub fn dataset_ids(&self) -> String {
+        let ids: Vec<&str> = self.inner.document.datasets.iter().map(|d| d.id.as_str()).collect();
+        serde_json::to_string(&ids).unwrap()
     }
 }
