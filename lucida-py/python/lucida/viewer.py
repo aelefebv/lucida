@@ -100,6 +100,7 @@ class Viewer:
                                             "display": msg["display"],
                                         })
                                         self._scene.import_presence(presence)
+                                        self._send_presence()
                             elif msg_type == "follow_changed":
                                 cid = msg.get("client_id")
                                 target = msg.get("target")
@@ -197,6 +198,7 @@ class Viewer:
                 "display": peer["display"],
             })
             self._scene.import_presence(presence)
+            self._send_presence()
 
     def unfollow(self):
         """Stop following any client."""
@@ -212,6 +214,11 @@ class Viewer:
     def follow_target(self) -> int | None:
         """The client ID we are currently following, or None."""
         return self._follow_target
+
+    @property
+    def camera(self) -> dict:
+        """The local camera state as a dict."""
+        return json.loads(self._scene.camera_json())
 
     @property
     def peers(self) -> dict[int, dict]:

@@ -104,6 +104,22 @@ pub fn visible_chunks(
     for z in z_start..z_end {
         for row in row_start..row_end {
             for col in col_start..col_end {
+                // Per-chunk frustum culling: reject chunks fully outside any frustum plane
+                if let Some(ref planes) = region.frustum_planes {
+                    let cmin = [
+                        col as f64 * chunk_world_x,
+                        row as f64 * chunk_world_y,
+                        z as f64 * chunk_world_z,
+                    ];
+                    let cmax = [
+                        (col + 1) as f64 * chunk_world_x,
+                        (row + 1) as f64 * chunk_world_y,
+                        (z + 1) as f64 * chunk_world_z,
+                    ];
+                    if chunk_outside_frustum(&cmin, &cmax, planes) {
+                        continue;
+                    }
+                }
                 chunks.push(ChunkCoord {
                     level,
                     x: col,
@@ -137,6 +153,22 @@ pub fn visible_chunks(
     });
 
     chunks
+}
+
+/// Test whether a chunk AABB is fully outside any frustum plane.
+/// Uses the p-vertex method: for each plane, test the corner most in the direction
+/// of the plane normal. If that corner is outside, the entire chunk is outside.
+fn chunk_outside_frustum(min: &[f64; 3], max: &[f64; 3], planes: &[[f64; 4]; 6]) -> bool {
+    for plane in planes {
+        // p-vertex: the corner most in the direction of the plane normal
+        let px = if plane[0] >= 0.0 { max[0] } else { min[0] };
+        let py = if plane[1] >= 0.0 { max[1] } else { min[1] };
+        let pz = if plane[2] >= 0.0 { max[2] } else { min[2] };
+        if plane[0] * px + plane[1] * py + plane[2] * pz + plane[3] < 0.0 {
+            return true; // fully outside this plane
+        }
+    }
+    false
 }
 
 #[cfg(test)]

@@ -117,6 +117,10 @@ impl PyScene {
         Ok(())
     }
 
+    fn camera_json(&self) -> String {
+        serde_json::to_string(&self.inner.camera).unwrap()
+    }
+
     fn presence_json(&self) -> String {
         let msg = ClientMessage::Presence {
             camera: self.inner.camera.clone(),

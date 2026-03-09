@@ -17,6 +17,9 @@ pub struct VisibleRegion {
     /// Optional sort center in voxel coordinates [x, y, z] for center-out chunk loading.
     /// When `Some`, chunks are sorted by distance to this point instead of the grid midpoint.
     pub sort_center: Option<[f64; 3]>,
+    /// Optional frustum planes in full-resolution voxel coordinates for per-chunk culling.
+    /// Each plane is [a, b, c, d] where ax + by + cz + d >= 0 means inside.
+    pub frustum_planes: Option<[[f64; 4]; 6]>,
 }
 
 /// Unified camera: either 2D slice viewing or 3D volume rendering.
@@ -114,6 +117,7 @@ impl Camera {
                     z_range: view_z_range.clone(),
                     effective_zoom: v.zoom,
                     sort_center: None,
+                    frustum_planes: None,
                 }
             }
             Camera::View3D(v) => {
@@ -232,9 +236,26 @@ impl View3D {
         volume_shape: Option<&[u32; 3]>,
     ) -> VisibleRegion {
         let shape = volume_shape.copied().unwrap_or([1, 1, 1]);
+        // shape is [Z, Y, X]
+        let shape_x = shape[2] as f64;
+        let shape_y = shape[1] as f64;
+        let shape_z = shape[0] as f64;
+
         let inv_vp = invert4_f64(self.view_proj_f64());
 
-        // Unproject 8 NDC corners through inv_view_proj → world AABB
+        let inv_model: [f64; 16] = match volume_transform {
+            Some(t) => t.inv_model.map(|v| v as f64),
+            None => [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+
+        // Unproject 8 NDC corners → world → inv_model → voxel directly (single AABB step).
+        // This avoids the double-AABB expansion that occurs when computing an intermediate
+        // world-space AABB then transforming its corners to voxel space.
         let ndc_corners: [[f64; 3]; 8] = [
             [-1.0, -1.0, -1.0],
             [ 1.0, -1.0, -1.0],
@@ -246,20 +267,39 @@ impl View3D {
             [ 1.0,  1.0,  1.0],
         ];
 
-        let mut world_min = [f64::MAX; 3];
-        let mut world_max = [f64::MIN; 3];
+        let mut voxel_min = [f64::MAX; 3];
+        let mut voxel_max = [f64::MIN; 3];
 
         for corner in &ndc_corners {
             let world = unproject(corner, &inv_vp);
-            for i in 0..3 {
-                world_min[i] = world_min[i].min(world[i]);
-                world_max[i] = world_max[i].max(world[i]);
-            }
+            let unit = transform_point(world, &inv_model);
+            // unit is in [0,1]^3; scale to voxel coords
+            let vx = unit[0] * shape_x;
+            let vy = unit[1] * shape_y;
+            let vz = unit[2] * shape_z;
+            voxel_min[0] = voxel_min[0].min(vx);
+            voxel_min[1] = voxel_min[1].min(vy);
+            voxel_min[2] = voxel_min[2].min(vz);
+            voxel_max[0] = voxel_max[0].max(vx);
+            voxel_max[1] = voxel_max[1].max(vy);
+            voxel_max[2] = voxel_max[2].max(vz);
         }
 
-        // Transform world AABB corners through inv_model → voxel [0,1]^3 space
-        let inv_model: [f64; 16] = match volume_transform {
-            Some(t) => t.inv_model.map(|v| v as f64),
+        // Clamp to volume bounds
+        voxel_min[0] = voxel_min[0].max(0.0);
+        voxel_min[1] = voxel_min[1].max(0.0);
+        voxel_min[2] = voxel_min[2].max(0.0);
+        voxel_max[0] = voxel_max[0].min(shape_x);
+        voxel_max[1] = voxel_max[1].min(shape_y);
+        voxel_max[2] = voxel_max[2].min(shape_z);
+
+        let z_start = voxel_min[2].floor().max(0.0) as u32;
+        let z_end = voxel_max[2].ceil().max(0.0) as u32;
+
+        // Extract frustum planes in full-resolution voxel space using Gribb-Hartmann method.
+        // Build voxel-to-clip matrix: view_proj * model * Scale(1/shape_x, 1/shape_y, 1/shape_z)
+        let model_f64: [f64; 16] = match volume_transform {
+            Some(t) => t.model.map(|v| v as f64),
             None => [
                 1.0, 0.0, 0.0, 0.0,
                 0.0, 1.0, 0.0, 0.0,
@@ -267,40 +307,32 @@ impl View3D {
                 0.0, 0.0, 0.0, 1.0,
             ],
         };
-
-        // Build 8 corners of the world AABB and transform each
-        let mut voxel_min = [f64::MAX; 3];
-        let mut voxel_max = [f64::MIN; 3];
-
-        for &cx in &[world_min[0], world_max[0]] {
-            for &cy in &[world_min[1], world_max[1]] {
-                for &cz in &[world_min[2], world_max[2]] {
-                    let unit = transform_point([cx, cy, cz], &inv_model);
-                    // unit is in [0,1]^3; scale to voxel coords
-                    // shape is [Z, Y, X]
-                    let vx = unit[0] * shape[2] as f64;
-                    let vy = unit[1] * shape[1] as f64;
-                    let vz = unit[2] * shape[0] as f64;
-                    voxel_min[0] = voxel_min[0].min(vx);
-                    voxel_min[1] = voxel_min[1].min(vy);
-                    voxel_min[2] = voxel_min[2].min(vz);
-                    voxel_max[0] = voxel_max[0].max(vx);
-                    voxel_max[1] = voxel_max[1].max(vy);
-                    voxel_max[2] = voxel_max[2].max(vz);
-                }
-            }
+        let vp_model = mul4(self.view_proj_f64(), model_f64);
+        // Scale columns by 1/shape to convert from voxel coords to unit [0,1]^3
+        let mut m = vp_model;
+        for i in 0..4 {
+            m[i]     /= shape_x; // col 0 (X voxels)
+            m[4 + i] /= shape_y; // col 1 (Y voxels)
+            m[8 + i] /= shape_z; // col 2 (Z voxels)
+            // col 3 (translation) unchanged
         }
 
-        // Clamp to volume bounds
-        voxel_min[0] = voxel_min[0].max(0.0);
-        voxel_min[1] = voxel_min[1].max(0.0);
-        voxel_min[2] = voxel_min[2].max(0.0);
-        voxel_max[0] = voxel_max[0].min(shape[2] as f64);
-        voxel_max[1] = voxel_max[1].min(shape[1] as f64);
-        voxel_max[2] = voxel_max[2].min(shape[0] as f64);
-
-        let z_start = voxel_min[2].floor().max(0.0) as u32;
-        let z_end = voxel_max[2].ceil().max(0.0) as u32;
+        // Extract 6 frustum planes from column-major MVP matrix.
+        // Plane [a, b, c, d] where a*vx + b*vy + c*vz + d >= 0 means inside.
+        let frustum_planes = [
+            // Left:   row3 + row0
+            [m[3] + m[0], m[7] + m[4], m[11] + m[8],  m[15] + m[12]],
+            // Right:  row3 - row0
+            [m[3] - m[0], m[7] - m[4], m[11] - m[8],  m[15] - m[12]],
+            // Bottom: row3 + row1
+            [m[3] + m[1], m[7] + m[5], m[11] + m[9],  m[15] + m[13]],
+            // Top:    row3 - row1
+            [m[3] - m[1], m[7] - m[5], m[11] - m[9],  m[15] - m[13]],
+            // Near:   row3 + row2
+            [m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]],
+            // Far:    row3 - row2
+            [m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]],
+        ];
 
         // Convert effective_zoom from pixels-per-world-unit to pixels-per-voxel.
         // The model matrix scales each axis: model[0]=sx, model[5]=sy, model[10]=sz.
@@ -310,9 +342,9 @@ impl View3D {
             Some(t) => (t.model[0] as f64, t.model[5] as f64, t.model[10] as f64),
             None => (1.0, 1.0, 1.0),
         };
-        let vpw_x = shape[2] as f64 / sx.abs().max(1e-12);
-        let vpw_y = shape[1] as f64 / sy.abs().max(1e-12);
-        let vpw_z = shape[0] as f64 / sz.abs().max(1e-12);
+        let vpw_x = shape_x / sx.abs().max(1e-12);
+        let vpw_y = shape_y / sy.abs().max(1e-12);
+        let vpw_z = shape_z / sz.abs().max(1e-12);
         let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
         let zoom_per_voxel = self.effective_zoom() / max_vpw;
 
@@ -320,9 +352,9 @@ impl View3D {
         // Flip Y to match the shader's `1.0 - pos.y` convention (image row 0 = top).
         let target_unit = transform_point(self.target, &inv_model);
         let sort_center = Some([
-            target_unit[0] * shape[2] as f64,
-            (1.0 - target_unit[1]) * shape[1] as f64,
-            target_unit[2] * shape[0] as f64,
+            target_unit[0] * shape_x,
+            (1.0 - target_unit[1]) * shape_y,
+            target_unit[2] * shape_z,
         ]);
 
         VisibleRegion {
@@ -330,6 +362,7 @@ impl View3D {
             z_range: z_start..z_end.max(z_start),
             effective_zoom: zoom_per_voxel,
             sort_center,
+            frustum_planes: Some(frustum_planes),
         }
     }
 }

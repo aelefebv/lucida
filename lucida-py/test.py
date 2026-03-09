@@ -65,11 +65,13 @@ import numpy as np
 print(np.mean(vd.data))
 
 #%%
+from lucida import Viewer
 # Remote mode — data was loaded by another client (e.g. the web viewer):
 
 v = Viewer()
 v.start()
-v.follow(1)  # follow the peer viewing data
+#%%
+v.follow(3)  # follow the peer viewing data
 
 # No store_path → fetches chunks through the server
 vd = v.read_viewport()
