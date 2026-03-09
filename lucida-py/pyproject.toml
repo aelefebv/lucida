@@ -8,6 +8,8 @@ version = "0.1.0"
 requires-python = ">=3.9"
 dependencies = [
     "websockets",
+    "numpy",
+    "lz4",
 ]
 
 [tool.maturin]
