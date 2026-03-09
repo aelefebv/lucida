@@ -18,6 +18,10 @@ class Viewer:
         self._thread: threading.Thread | None = None
         self._ws = None
         self._connected = threading.Event()
+        self._snapshot_received = threading.Event()
+        self._client_id: int | None = None
+        self._peers: dict[int, dict] = {}
+        self._follow_target: int | None = None
 
     # -- WebSocket client --------------------------------------------------
 
@@ -31,7 +35,7 @@ class Viewer:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-        if not self._connected.wait(timeout):
+        if not self._snapshot_received.wait(timeout):
             print(f"warning: could not connect to {self._url} within {timeout}s")
 
     def _run_loop(self):
@@ -49,15 +53,55 @@ class Viewer:
                             msg = json.loads(message)
                             msg_type = msg.get("type")
                             if msg_type == "snapshot":
+                                self._client_id = msg.get("your_id")
                                 self._scene.load_document(json.dumps(msg["document"]))
+                                self._peers = {}
+                                for p in msg.get("peers", []):
+                                    cid = p.get("client_id")
+                                    if cid is not None:
+                                        self._peers[cid] = p
+                                self._follow_target = None
+                                self._snapshot_received.set()
                             elif msg_type == "command_broadcast":
                                 self._scene.apply_command(json.dumps(msg["command"]))
                             elif msg_type == "ack":
                                 pass  # client already applied optimistically
+                            elif msg_type == "presence_update":
+                                cid = msg.get("client_id")
+                                if cid is not None:
+                                    self._peers.setdefault(cid, {}).update({
+                                        "camera": msg["camera"],
+                                        "view": msg["view"],
+                                        "display": msg["display"],
+                                    })
+                                    if self._follow_target == cid:
+                                        presence = json.dumps({
+                                            "camera": msg["camera"],
+                                            "view": msg["view"],
+                                            "display": msg["display"],
+                                        })
+                                        self._scene.import_presence(presence)
+                            elif msg_type == "follow_changed":
+                                cid = msg.get("client_id")
+                                target = msg.get("target")
+                                if cid is not None and cid in self._peers:
+                                    self._peers[cid]["following"] = target
+                                if cid == self._client_id:
+                                    self._follow_target = target
+                            elif msg_type == "peer_joined":
+                                cid = msg.get("client_id")
+                                if cid is not None:
+                                    self._peers[cid] = msg.get("presence", {})
+                            elif msg_type == "peer_left":
+                                cid = msg.get("client_id")
+                                self._peers.pop(cid, None)
+                                if self._follow_target == cid:
+                                    self._follow_target = None
                         except Exception:
                             pass
             except Exception:
                 self._ws = None
+                self._snapshot_received.clear()
                 await asyncio.sleep(2)
 
     def _send(self, message: str):
@@ -82,33 +126,84 @@ class Viewer:
         cmd = json.loads(cmd_json)
         self._send(json.dumps({"type": "command", "command": cmd}))
 
+    # -- Follow mode --------------------------------------------------------
+
+    def _break_follow(self):
+        if self._follow_target is not None:
+            self._follow_target = None
+            self._send(json.dumps({"type": "follow", "target": None}))
+
+    def follow(self, target_id: int):
+        """Follow another client's viewport in real-time."""
+        self._follow_target = target_id
+        self._send(json.dumps({"type": "follow", "target": target_id}))
+        peer = self._peers.get(target_id)
+        if peer and "camera" in peer:
+            presence = json.dumps({
+                "camera": peer["camera"],
+                "view": peer["view"],
+                "display": peer["display"],
+            })
+            self._scene.import_presence(presence)
+
+    def unfollow(self):
+        """Stop following any client."""
+        self._follow_target = None
+        self._send(json.dumps({"type": "follow", "target": None}))
+
+    @property
+    def client_id(self) -> int | None:
+        """Our server-assigned client ID."""
+        return self._client_id
+
+    @property
+    def follow_target(self) -> int | None:
+        """The client ID we are currently following, or None."""
+        return self._follow_target
+
+    @property
+    def peers(self) -> dict[int, dict]:
+        """Copy of the current peer presence map."""
+        return dict(self._peers)
+
+    def peer_ids(self) -> list[int]:
+        """List of connected peer IDs."""
+        return list(self._peers.keys())
+
     # -- Viewport commands (local only + presence) -------------------------
 
     def pan(self, dx: float, dy: float):
+        self._break_follow()
         self._scene.pan(dx, dy)
         self._send_presence()
 
     def zoom_by(self, factor: float):
+        self._break_follow()
         self._scene.zoom_by(factor)
         self._send_presence()
 
     def set_center(self, x: float, y: float):
+        self._break_follow()
         self._scene.set_center(x, y)
         self._send_presence()
 
     def set_zoom(self, value: float):
+        self._break_follow()
         self._scene.set_zoom(value)
         self._send_presence()
 
     def set_z(self, z: int):
+        self._break_follow()
         self._scene.set_z(z)
         self._send_presence()
 
     def set_t(self, t: int):
+        self._break_follow()
         self._scene.set_t(t)
         self._send_presence()
 
     def set_c(self, c: int):
+        self._break_follow()
         self._scene.set_c(c)
         self._send_presence()
 

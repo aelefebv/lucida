@@ -1,8 +1,10 @@
 use pyo3::prelude::*;
 
+use lucida_core::camera::Camera;
 use lucida_core::command::Command;
 use lucida_core::protocol::ClientMessage;
-use lucida_core::scene::{Layer, LevelInfo, Scene};
+use lucida_core::scene::{DisplayState, Layer, LevelInfo, Scene};
+use lucida_core::view::ViewState;
 
 #[pyclass]
 struct PyScene {
@@ -79,7 +81,6 @@ impl PyScene {
     }
 
     fn center(&self) -> (f64, f64) {
-        use lucida_core::camera::Camera;
         if let Camera::View2D(ref v) = self.inner.camera {
             (v.center[0], v.center[1])
         } else {
@@ -97,6 +98,23 @@ impl PyScene {
 
     fn c(&self) -> u32 {
         self.inner.view.c
+    }
+
+    fn import_presence(&mut self, json: &str) -> PyResult<()> {
+        #[derive(serde::Deserialize)]
+        struct Presence {
+            camera: Camera,
+            view: ViewState,
+            display: DisplayState,
+        }
+        let p: Presence = serde_json::from_str(json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+        let viewport = self.inner.camera.viewport();
+        self.inner.camera = p.camera;
+        self.inner.camera.set_viewport(viewport[0], viewport[1]);
+        self.inner.view = p.view;
+        self.inner.display = p.display;
+        Ok(())
     }
 
     fn presence_json(&self) -> String {

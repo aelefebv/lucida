@@ -6,8 +6,15 @@ build-backend = "maturin"
 name = "lucida"
 version = "0.1.0"
 requires-python = ">=3.9"
-dependencies = ["websockets"]
+dependencies = [
+    "websockets",
+]
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
 python-source = "python"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=6.31.0",
+]
