@@ -2,7 +2,8 @@ use wasm_bindgen::prelude::*;
 
 use crate::camera::Camera;
 use crate::command::Command;
-use crate::scene::{Layer, LevelInfo, Scene};
+use crate::scene::{DisplayState, DocumentState, Layer, LevelInfo, Scene};
+use crate::view::ViewState;
 
 #[wasm_bindgen]
 pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
@@ -29,6 +30,49 @@ impl WasmScene {
         let scene: crate::scene::Scene =
             serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
         self.inner = scene;
+        Ok(())
+    }
+
+    /// Load only the document portion (datasets), preserving local camera/view/display.
+    pub fn load_document(&mut self, json: &str) -> Result<(), JsError> {
+        let doc: DocumentState =
+            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        self.inner.document = doc;
+        Ok(())
+    }
+
+    /// Export camera + view + display as JSON for presence updates.
+    pub fn export_presence(&self) -> String {
+        #[derive(serde::Serialize)]
+        struct Presence<'a> {
+            camera: &'a Camera,
+            view: &'a ViewState,
+            display: &'a DisplayState,
+        }
+        let p = Presence {
+            camera: &self.inner.camera,
+            view: &self.inner.view,
+            display: &self.inner.display,
+        };
+        serde_json::to_string(&p).unwrap()
+    }
+
+    /// Import another client's camera + view + display (for follow mode).
+    pub fn import_presence(&mut self, json: &str) -> Result<(), JsError> {
+        #[derive(serde::Deserialize)]
+        struct Presence {
+            camera: Camera,
+            view: ViewState,
+            display: DisplayState,
+        }
+        let p: Presence =
+            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        // Preserve local viewport size
+        let viewport = self.inner.camera.viewport();
+        self.inner.camera = p.camera;
+        self.inner.camera.set_viewport(viewport[0], viewport[1]);
+        self.inner.view = p.view;
+        self.inner.display = p.display;
         Ok(())
     }
 
@@ -92,7 +136,7 @@ impl WasmScene {
         shapes_flat: &[u32],
         chunks_flat: &[u32],
     ) {
-        let layers = match self.inner.datasets.first_mut() {
+        let layers = match self.inner.document.datasets.first_mut() {
             Some(ds) => &mut ds.layers,
             None => return,
         };

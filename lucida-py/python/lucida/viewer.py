@@ -49,7 +49,7 @@ class Viewer:
                             msg = json.loads(message)
                             msg_type = msg.get("type")
                             if msg_type == "snapshot":
-                                self._scene.load_snapshot(json.dumps(msg["scene"]))
+                                self._scene.load_document(json.dumps(msg["document"]))
                             elif msg_type == "command_broadcast":
                                 self._scene.apply_command(json.dumps(msg["command"]))
                             elif msg_type == "ack":
@@ -73,39 +73,50 @@ class Viewer:
             except Exception:
                 pass
 
-    # -- Mutating commands (update scene locally + send to server) ---------
+    def _send_presence(self):
+        """Send current viewport state as a presence update."""
+        self._send(self._scene.presence_json())
+
+    def _send_command(self, cmd_json: str):
+        """Wrap a document command in a ClientMessage envelope and send."""
+        cmd = json.loads(cmd_json)
+        self._send(json.dumps({"type": "command", "command": cmd}))
+
+    # -- Viewport commands (local only + presence) -------------------------
 
     def pan(self, dx: float, dy: float):
-        cmd_json = self._scene.pan(dx, dy)
-        self._send(cmd_json)
+        self._scene.pan(dx, dy)
+        self._send_presence()
 
     def zoom_by(self, factor: float):
-        cmd_json = self._scene.zoom_by(factor)
-        self._send(cmd_json)
+        self._scene.zoom_by(factor)
+        self._send_presence()
 
     def set_center(self, x: float, y: float):
-        cmd_json = self._scene.set_center(x, y)
-        self._send(cmd_json)
+        self._scene.set_center(x, y)
+        self._send_presence()
 
     def set_zoom(self, value: float):
-        cmd_json = self._scene.set_zoom(value)
-        self._send(cmd_json)
+        self._scene.set_zoom(value)
+        self._send_presence()
 
     def set_z(self, z: int):
-        cmd_json = self._scene.set_z(z)
-        self._send(cmd_json)
+        self._scene.set_z(z)
+        self._send_presence()
 
     def set_t(self, t: int):
-        cmd_json = self._scene.set_t(t)
-        self._send(cmd_json)
+        self._scene.set_t(t)
+        self._send_presence()
 
     def set_c(self, c: int):
-        cmd_json = self._scene.set_c(c)
-        self._send(cmd_json)
+        self._scene.set_c(c)
+        self._send_presence()
+
+    # -- Document commands (apply locally + send wrapped) ------------------
 
     def apply_command(self, cmd_json: str):
         self._scene.apply_command(cmd_json)
-        self._send(cmd_json)
+        self._send_command(cmd_json)
 
     # -- Read-only accessors -----------------------------------------------
 

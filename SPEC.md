@@ -25,11 +25,13 @@ Its job is to represent the viewer state and answer questions like:
 - In what order should chunk requests be prioritized?
 
 Concretely, it should define the core data structures:
-- **Scene**: all loaded layers, axis info, transforms, visibility, contrast settings, etc.
+- **Scene**: the local composite — camera, view, display, and document state. Each client holds a full Scene because chunk planning needs all of it together.
+- **DocumentState**: the shared portion of a Scene — datasets, layers, transforms. This is what the server owns and syncs.
 - **Camera**: center, zoom, viewport size, rotation if you want it.
 - **ViewState**: selected indices for z, t, c, and any other dimensions.
+- **DisplayState**: contrast window and gamma. Per-client, not part of the shared document.
 - **Layer**: image layer, labels layer, points layer later if you want.
-- **Command**: pan, zoom, set_slice, open_dataset, set_layer_visibility, and so on.
+- **Command**: pan, zoom, set_slice, open_dataset, set_layer_visibility, and so on. Commands are classified as document commands (synced) or viewport commands (local-only).
 - **ChunkRequestPlan**: the list of chunks needed now, plus prefetch candidates.
 
 It should also contain deterministic algorithms:
@@ -71,11 +73,15 @@ It should be relatively thin. It should not contain custom logic for chunk plann
 
 Typical flow:
 1. User drags the mouse.
-1. lucida-web converts that into a command like pan(dx, dy).
-1. It applies the command to the local lucida-core Scene (optimistic).
-1. It sends the command JSON to lucida-server for relay to other clients.
+1. lucida-web converts that into a viewport command like pan(dx, dy).
+1. It applies the command to the local lucida-core Scene.
+1. It emits the new camera/view/display as a presence update (throttled, ephemeral).
 1. lucida-core returns updated state plus a new chunk request plan.
 1. lucida-web forwards that plan to the data/renderer pipeline.
+
+For document commands (adding a dataset, changing volume scale):
+1. The command is applied locally and sent to lucida-server for sequenced broadcast.
+1. Other clients receive and apply it.
 
 So lucida-web is mostly responsible for:
 - app state wiring
@@ -211,31 +217,52 @@ What ingestion should not do:
 ## lucida-server in Rust (tokio)
 The “multi-user relay.”
 
-This is the central coordination server that keeps all clients in sync. It owns the single authoritative `Scene` and relays commands between all connected clients via Operational Transformation (OT).
+This is the central coordination server that keeps all clients in sync. It owns the authoritative `DocumentState` (the shared structural data — datasets, layers, transforms) and relays messages between all connected clients.
 
 All clients (browsers, Python, CLI) are WebSocket clients that connect to lucida-server on `ws://localhost:9876`.
 
-How it works:
-1. A client applies a command to its local Scene copy immediately (optimistic local apply).
-1. The client sends the command JSON to lucida-server.
-1. lucida-server parses the command, applies it to the authoritative Scene, and rebroadcasts to all other connected clients.
-1. The server skips echoing the command back to the sender, since the sender already applied it locally. This avoids double-applying relative commands like `pan`.
+### State separation
+
+Not all state is shared equally. The server distinguishes three categories:
+
+| Category | Examples | Synced? | Persisted? |
+|----------|---------|---------|------------|
+| **Document** | datasets, layers, transforms, visibility | Yes — sequenced, broadcast to all | Yes |
+| **Presence** | camera, view (z/t/c), display (contrast/gamma), cursor | Broadcast — ephemeral, latest-wins | No |
+| **Local-only** | viewport size, hover state, panel layout | Never leaves client | No |
+
+Document commands (add_dataset, remove_dataset, set_volume_scale) go through the server, get sequenced, and are broadcast to all clients. Viewport commands (pan, zoom, set_z, set_contrast) are applied locally and emitted as presence — fire-and-forget, not sequenced, no history.
+
+This means two users looking at the same dataset have independent viewports by default. One user panning does not move the other. Adding a dataset in one client does appear in both.
+
+### Follow mode
+
+Any client can opt in to following another client's viewport. When following, incoming presence updates from the followed client are applied to the follower's local Scene — camera, view, display, and view mode all sync. Any local viewport interaction breaks follow.
+
+Follow is peer-to-peer. There is no global presenter mode. If you want a presentation, you tell others to follow you. The server resolves transitive chains: if A follows C and C starts following B, A is redirected to follow B directly. A client that is following someone cannot itself be followed.
+
+### How it works:
+1. On connect, the server sends a snapshot containing the current DocumentState, all peer presence states, and the client's assigned ID.
+1. Document commands are applied optimistically by the sender, sent to the server, sequenced, and broadcast. The sender gets an ack; others get the command.
+1. Presence updates are sent by clients after any viewport change (throttled). The server stores the latest per-client and broadcasts to others.
+1. On disconnect, the server broadcasts peer_left and stops any followers of the disconnected client.
 
 Key design decisions:
 - Star topology, not peer-to-peer. Every client connects to the server; no client talks directly to another.
 - Each WebSocket connection spawns a tokio task. A `broadcast` channel handles fan-out, tagged with sender ID so each client's outbound loop skips its own messages.
+- The server accepts both the new `ClientMessage` envelope and raw `Command` JSON for backward compatibility.
 
 What it should do:
-- own the authoritative Scene
-- accept commands from any connected client
-- apply commands to the Scene
-- rebroadcast commands to all other clients
+- own the authoritative DocumentState
+- sequence and broadcast document commands
+- store and relay ephemeral client presence
+- manage peer join/leave and follow relationships
 - handle connect/disconnect gracefully
 
 What it should not do:
 - serve data or chunks (that is lucida-store's job)
 - render anything
-- implement viewer logic beyond applying commands (that is lucida-core's job)
+- implement viewer logic beyond applying document commands (that is lucida-core's job)
 - require authentication for local use
 
 ## lucida-py via PyO3/maturin
@@ -277,7 +304,7 @@ Internally, lucida-py wraps:
 - lucida-server for multi-user sync (as a WebSocket client)
 - lucida-store or another data layer for actual chunk retrieval
 
-When `viewer.start()` is called, the Python `Viewer` connects to lucida-server as a WebSocket client. Mutating methods apply optimistically to the local Scene and send the command to the server. Incoming commands from other clients are applied to the local Scene in a background receive loop. Read-only accessors read from the local Scene directly.
+When `viewer.start()` is called, the Python `Viewer` connects to lucida-server as a WebSocket client. Document mutations (open, add layer) apply optimistically to the local Scene and send the command to the server. Viewport mutations (pan, zoom, set_slice) apply locally and emit presence. Incoming document commands from other clients are applied to the local Scene in a background receive loop. Read-only accessors read from the local Scene directly.
 
 What it should not become:
 - a second full codebase
@@ -309,11 +336,15 @@ Useful for:
 - scripting a browser or desktop viewer
 - debugging state transitions
 
-All clients use the same stable command protocol — JSON messages over WebSocket:
+All clients use the same protocol — JSON messages over WebSocket. Document commands are wrapped in a `ClientMessage` envelope:
 ```
-{ "type": "pan", "dx": 120, "dy": -40 }
+{ "type": "command", "command": { "type": "add_dataset", ... } }
 ```
-The web app, Python API, and CLI all use the same command format, relayed through lucida-server.
+Viewport state is sent as presence:
+```
+{ "type": "presence", "camera": {...}, "view": {...}, "display": {...} }
+```
+Raw command JSON is still accepted for backward compatibility.
 
 What it should not do:
 - implement independent navigation logic
@@ -335,22 +366,19 @@ What it should not do:
 
 ### For Python:
 1. Python calls viewer.pan(...).
-1. lucida-py applies the command to its local Scene (optimistic) and sends it to lucida-server.
-1. lucida-server applies the command to the authoritative Scene and rebroadcasts to all other clients.
-1. Connected browsers receive the command and update their local Scenes.
+1. lucida-py applies the command to its local Scene and emits presence.
+1. If viewer.open_dataset(...) is called, that is a document command — it is sent to lucida-server for broadcast.
 1. Python reads from its local Scene for chunk planning, processing, etc.
 
 ### For CLI:
-1. CLI sends a command to lucida-server.
+1. CLI sends a document command to lucida-server.
 1. lucida-server applies it and rebroadcasts to all other clients.
-1. All connected viewers update.
+1. All connected viewers update their document state.
 
 ### Multi-user:
-1. User A pans in a browser tab.
-1. lucida-web applies locally and sends the command to lucida-server.
-1. lucida-server rebroadcasts to User B's browser, Python, and CLI.
-1. Each recipient applies the command to its local Scene.
-1. User A sees zero-latency feedback; everyone else sees the update within one network round-trip.
+1. User A adds a dataset → document command goes through the server → User B sees the dataset appear.
+1. User A pans → local only, emitted as presence → User B's viewport does not move.
+1. User B clicks "Follow" on User A → User B now sees what User A sees. User B pans → follow breaks, they are independent again.
 
 ## Main Design Principles
 There should be exactly one authoritative implementation of:
@@ -366,6 +394,6 @@ Everything else is an adapter around it:
 - lucida-web = human UI adapter (via WASM, connects to lucida-server)
 - renderer = GPU adapter (via lucida-web via post)
 - lucida-store = storage adapter (via optional server)
-- lucida-server = multi-user relay (owns authoritative Scene via Rust, syncs all clients via WebSocket)
+- lucida-server = multi-user relay (owns authoritative DocumentState, relays presence, syncs all clients via WebSocket)
 - lucida-py = Python adapter (via PyO3, connects to lucida-server)
 - lucida-cli = shell/script adapter (via native Rust, connects to lucida-server)

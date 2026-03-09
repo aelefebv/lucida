@@ -14,8 +14,8 @@ import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
 import { ContrastControls } from "./components/ContrastControls.tsx";
-import { Bridge, type BridgeHandlers } from "./bridge.ts";
-import { applyAndSend } from "./applyAndSend.ts";
+import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "./bridge.ts";
+import { applyDocumentCommand, applyViewportCommand } from "./applyAndSend.ts";
 import "./App.css";
 
 interface OpenedItem {
@@ -79,8 +79,13 @@ function App() {
   const [autoContrast, setAutoContrast] = useState(true);
   const [fullRange, setFullRange] = useState(false);
 
-  // Remote (Python bridge) camera version — bumped when a command arrives via WebSocket
-  const [remoteCameraVersion, setRemoteCameraVersion] = useState(0);
+  // Remote document version — bumped when a document command arrives via WebSocket
+  const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
+
+  // Peer presence state
+  const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
+  const [myId, setMyId] = useState<ClientId>(0);
+  const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
 
   // Keep dataset info and file index for re-assembling on C/T change
   const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
@@ -110,10 +115,14 @@ function App() {
   const wasmSceneRef = useRef<WasmScene | null>(null);
   wasmSceneRef.current = wasmScene;
 
+  // Ref to follow target so event handlers see latest value
+  const followTargetRef = useRef<ClientId | null>(null);
+  followTargetRef.current = followTarget;
+
   useEffect(() => {
     if (!wasmReady || bridgeRef.current) return;
     const handlers: BridgeHandlers = {
-      onSnapshot: (_seq, sceneJson) => {
+      onSnapshot: (_seq, documentJson, snapshotPeers, yourId) => {
         try {
           let scene = wasmSceneRef.current;
           // Create WasmScene if we don't have one yet
@@ -121,37 +130,31 @@ function App() {
             scene = new WasmScene(800, 600);
             wasmSceneRef.current = scene;
           }
-          scene.load_snapshot(sceneJson);
-          setZ(scene.z());
-          setT(scene.t());
-          setC(scene.c());
+          // Load only document state — preserve local camera/view/display
+          scene.load_document(documentJson);
 
-          // Restore display state (contrast/gamma) from snapshot
-          const sMin = scene.contrast_min();
-          const sMax = scene.contrast_max();
-          const sGamma = scene.gamma();
-          setContrastMin(sMin);
-          setContrastMax(sMax);
-          setGamma(sGamma);
-          if (sMin !== 0 || sMax !== 65535 || sGamma !== 1.0) {
-            setAutoContrast(false);
+          setMyId(yourId);
+
+          // Build peers map from snapshot
+          const peerMap = new Map<ClientId, PresenceState>();
+          for (const peer of snapshotPeers) {
+            if (peer.client_id !== yourId) {
+              peerMap.set(peer.client_id, peer);
+            }
           }
-
-          // Sync view mode from camera type
-          const is3d = scene.is_3d();
-          setViewMode(is3d ? "3d" : "2d");
-
-          setRemoteCameraVersion((v) => v + 1);
+          setPeers(peerMap);
 
           // Check for datasets in snapshot that we don't have locally
-          const snapshotScene = JSON.parse(sceneJson);
-          if (snapshotScene.datasets) {
-            for (const ds of snapshotScene.datasets) {
+          const doc = JSON.parse(documentJson);
+          if (doc.datasets) {
+            for (const ds of doc.datasets) {
               if (ds.client_metadata && !datasetsRef.current.has(ds.id)) {
                 setupRemoteDataset(ds.id, ds.client_metadata);
               }
             }
           }
+
+          setRemoteDocumentVersion((v) => v + 1);
 
           // Publish the scene so render gate passes
           setWasmScene(scene);
@@ -171,20 +174,9 @@ function App() {
               return; // Can't apply commands without a scene
             }
           }
+          // Only document commands arrive here now
           scene.apply_command(commandJson);
           const cmd = JSON.parse(commandJson);
-          if (cmd.type === "set_z") setZ(cmd.z);
-          if (cmd.type === "set_t") setT(cmd.t);
-          if (cmd.type === "set_c") setC(cmd.c);
-          if (cmd.type === "set_mode_2d" || cmd.type === "set_mode_3d") {
-            const mode = cmd.type === "set_mode_3d" ? "3d" : "2d";
-            setViewMode(mode);
-            const client = clientRef.current;
-            if (client) {
-              if (mode === "2d") client.setModeSlice();
-              else client.setModeVolume();
-            }
-          }
           if (cmd.type === "add_dataset" && cmd.client_metadata) {
             if (!datasetsRef.current.has(cmd.id)) {
               setupRemoteDataset(cmd.id, cmd.client_metadata);
@@ -198,15 +190,7 @@ function App() {
               datasetsRef.current.delete(cmd.id);
             }
           }
-          if (cmd.type === "set_contrast") {
-            setContrastMin(cmd.min);
-            setContrastMax(cmd.max);
-            setAutoContrast(false);
-          }
-          if (cmd.type === "set_gamma") {
-            setGamma(cmd.gamma);
-          }
-          setRemoteCameraVersion((v) => v + 1);
+          setRemoteDocumentVersion((v) => v + 1);
         } catch (e) {
           console.warn("[Bridge] bad command:", e);
         }
@@ -224,6 +208,87 @@ function App() {
         if (pending) {
           pendingChunkRequests.current.delete(key);
           pending.resolve(data);
+        }
+      },
+      onPeerJoined: (clientId, presence) => {
+        setPeers(prev => {
+          const next = new Map(prev);
+          next.set(clientId, presence);
+          return next;
+        });
+      },
+      onPeerLeft: (clientId) => {
+        setPeers(prev => {
+          const next = new Map(prev);
+          next.delete(clientId);
+          return next;
+        });
+        // If we were following this peer, stop
+        if (followTargetRef.current === clientId) {
+          setFollowTarget(null);
+        }
+      },
+      onPresenceUpdate: (clientId, camera, view, display) => {
+        // Update peer state
+        setPeers(prev => {
+          const next = new Map(prev);
+          const existing = next.get(clientId);
+          if (existing) {
+            next.set(clientId, { ...existing, camera, view, display });
+          }
+          return next;
+        });
+        // If following this client, import their presence
+        if (followTargetRef.current === clientId) {
+          const scene = wasmSceneRef.current;
+          if (scene) {
+            try {
+              const presenceJson = JSON.stringify({ camera, view, display });
+              scene.import_presence(presenceJson);
+              // Sync local state from imported presence
+              setZ(scene.z());
+              setT(scene.t());
+              setC(scene.c());
+              setContrastMin(scene.contrast_min());
+              setContrastMax(scene.contrast_max());
+              setGamma(scene.gamma());
+              const is3d = scene.is_3d();
+              setViewMode(is3d ? "3d" : "2d");
+              const client = clientRef.current;
+              if (client) {
+                if (is3d) client.setModeVolume();
+                else client.setModeSlice();
+              }
+              loopRef.current?.markDirty();
+            } catch (e) {
+              console.warn("[Bridge] failed to import presence:", e);
+            }
+          }
+        }
+      },
+      onCursorUpdate: (clientId, position) => {
+        setPeers(prev => {
+          const next = new Map(prev);
+          const existing = next.get(clientId);
+          if (existing) {
+            next.set(clientId, { ...existing, cursor: position });
+          }
+          return next;
+        });
+      },
+      onFollowChanged: (clientId, target) => {
+        setPeers(prev => {
+          const next = new Map(prev);
+          const existing = next.get(clientId);
+          if (existing) {
+            next.set(clientId, { ...existing, following: target });
+          }
+          return next;
+        });
+        // If this is us, update our follow target
+        // (server may have redirected us due to transitive chain)
+        if (clientId === myId) {
+          setFollowTarget(target);
         }
       },
     };
@@ -323,8 +388,25 @@ function App() {
     }
   }
 
+  /** Send a document command to server. */
   const sendCommand = useCallback((json: string) => {
-    bridgeRef.current?.send(json);
+    bridgeRef.current?.sendCommand(json);
+  }, []);
+
+  /** Emit current presence to server (throttled by bridge). */
+  const emitPresence = useCallback(() => {
+    const scene = wasmSceneRef.current;
+    if (!scene) return;
+    const presenceJson = scene.export_presence();
+    bridgeRef.current?.sendPresence(presenceJson);
+  }, []);
+
+  /** Break follow on local viewport interaction. */
+  const breakFollow = useCallback(() => {
+    if (followTargetRef.current !== null) {
+      setFollowTarget(null);
+      bridgeRef.current?.sendFollow(null);
+    }
   }, []);
 
   // Create RenderClient once when canvas mounts.
@@ -352,6 +434,10 @@ function App() {
         if (prev) {
           setContrastMin(min);
           setContrastMax(max);
+          const scene = wasmSceneRef.current;
+          if (scene) {
+            applyViewportCommand(scene, { type: "set_contrast", min, max });
+          }
         }
         return prev;
       });
@@ -493,18 +579,18 @@ function App() {
         }],
         volume_shape: [shapeZ, shapeY, shapeX] as [number, number, number],
         volume_scale: [scaleZ, scaleY, scaleX] as [number, number, number],
-        client_metadata: info, // Full DatasetInfo for remote clients
+        client_metadata: info,
       };
 
-      // Apply locally and send to server
-      applyAndSend(scene, addDatasetCmd, sendCommand);
+      // Apply document command locally and send to server
+      applyDocumentCommand(scene, addDatasetCmd, sendCommand);
 
-      // Center the Rust 2D camera on the image (synced via server)
-      applyAndSend(scene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 }, sendCommand);
-      applyAndSend(scene, { type: "set_mode_2d" }, sendCommand);
-      applyAndSend(scene, { type: "set_z", z: 0 }, sendCommand);
-      applyAndSend(scene, { type: "set_c", c: 0 }, sendCommand);
-      applyAndSend(scene, { type: "set_t", t: 0 }, sendCommand);
+      // Local viewport setup — not sent to server
+      applyViewportCommand(scene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
+      applyViewportCommand(scene, { type: "set_mode_2d" });
+      applyViewportCommand(scene, { type: "set_z", z: 0 });
+      applyViewportCommand(scene, { type: "set_c", c: 0 });
+      applyViewportCommand(scene, { type: "set_t", t: 0 });
 
       // Create local ChunkStore with local fetcher
       const localFetcher: ChunkFetcher = (coord, signal) => {
@@ -535,6 +621,9 @@ function App() {
 
       setVolume(vol);
       setWasmScene(scene);
+
+      // Emit initial presence after setup
+      setTimeout(() => emitPresence(), 0);
     } catch (err) {
       console.error("Failed to load OME-Zarr:", err);
       setError(err instanceof Error ? err.message : String(err));
@@ -546,13 +635,15 @@ function App() {
   const handleViewModeToggle = useCallback(() => {
     const next = viewMode === "2d" ? "3d" : "2d";
     setViewMode(next);
+    breakFollow();
     if (wasmScene) {
-      applyAndSend(wasmScene, { type: next === "3d" ? "set_mode_3d" : "set_mode_2d" }, sendCommand);
+      applyViewportCommand(wasmScene, { type: next === "3d" ? "set_mode_3d" : "set_mode_2d" });
       if (next === "2d" && datasetInfo) {
         const shapeX = datasetInfo.levels[0].shape[4];
         const shapeY = datasetInfo.levels[0].shape[3];
-        applyAndSend(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 }, sendCommand);
+        applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
       }
+      emitPresence();
     }
     const client = clientRef.current;
     if (client) {
@@ -562,7 +653,7 @@ function App() {
         client.setModeVolume();
       }
     }
-  }, [viewMode, wasmScene, datasetInfo, sendCommand]);
+  }, [viewMode, wasmScene, datasetInfo, emitPresence, breakFollow]);
 
   // Dimension extents from full-res level (level 0) for accurate slider ranges
   const dimZ = datasetInfo ? datasetInfo.levels[0].shape[2] : 1;
@@ -573,13 +664,22 @@ function App() {
     setContrastMin(min);
     setContrastMax(max);
     setAutoContrast(false);
-    sendCommand(JSON.stringify({ type: "set_contrast", min, max }));
-  }, [sendCommand]);
+    // Apply to WASM scene locally
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      applyViewportCommand(scene, { type: "set_contrast", min, max });
+      emitPresence();
+    }
+  }, [emitPresence]);
 
   const handleGammaChange = useCallback((g: number) => {
     setGamma(g);
-    sendCommand(JSON.stringify({ type: "set_gamma", gamma: g }));
-  }, [sendCommand]);
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      applyViewportCommand(scene, { type: "set_gamma", gamma: g });
+      emitPresence();
+    }
+  }, [emitPresence]);
 
   const handleAutoContrast = useCallback(() => {
     if (dataRange) {
@@ -617,7 +717,51 @@ function App() {
     });
   }, [fullRangeMax, dataRange]);
 
+  /** Handle follow button click for a peer. */
+  const handleFollow = useCallback((targetId: ClientId | null) => {
+    if (targetId === myId) return;
+    setFollowTarget(targetId);
+    bridgeRef.current?.sendFollow(targetId);
+    // If starting to follow, immediately import their latest presence
+    if (targetId !== null) {
+      const peer = peers.get(targetId);
+      if (peer) {
+        const scene = wasmSceneRef.current;
+        if (scene) {
+          try {
+            const presenceJson = JSON.stringify({
+              camera: peer.camera,
+              view: peer.view,
+              display: peer.display,
+            });
+            scene.import_presence(presenceJson);
+            setZ(scene.z());
+            setT(scene.t());
+            setC(scene.c());
+            setContrastMin(scene.contrast_min());
+            setContrastMax(scene.contrast_max());
+            setGamma(scene.gamma());
+            const is3d = scene.is_3d();
+            setViewMode(is3d ? "3d" : "2d");
+            const client = clientRef.current;
+            if (client) {
+              if (is3d) client.setModeVolume();
+              else client.setModeSlice();
+            }
+            loopRef.current?.markDirty();
+          } catch (e) {
+            console.warn("Failed to import peer presence:", e);
+          }
+        }
+      }
+    }
+  }, [peers, myId]);
+
   const client = clientReady ? clientRef.current : null;
+
+  // Build list of followable peers (not following anyone else)
+  const followablePeers = Array.from(peers.entries())
+    .filter(([, p]) => p.following === null || p.following === undefined);
 
   return (
     <div className="app">
@@ -655,6 +799,30 @@ function App() {
           </p>
         </div>
       )}
+      {/* Peer list / follow controls */}
+      {peers.size > 0 && (
+        <div className="peer-list" style={{ fontSize: "0.85em", margin: "8px 0" }}>
+          <strong>Peers ({peers.size}):</strong>
+          {followTarget !== null && (
+            <button onClick={() => handleFollow(null)} style={{ marginLeft: 8 }}>
+              Stop Following
+            </button>
+          )}
+          <ul style={{ listStyle: "none", padding: 0, margin: "4px 0" }}>
+            {followablePeers.map(([peerId]) => (
+              <li key={peerId} style={{ display: "inline", marginRight: 8 }}>
+                Client {peerId}
+                {followTarget !== peerId && (
+                  <button onClick={() => handleFollow(peerId)} style={{ marginLeft: 4 }}>
+                    Follow
+                  </button>
+                )}
+                {followTarget === peerId && " (following)"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <canvas
         ref={canvasRef}
         style={{
@@ -678,8 +846,9 @@ function App() {
           datasetInfo={datasetInfo}
           client={client}
           canvas={canvasRef.current!}
-          remoteCameraVersion={remoteCameraVersion}
-          sendCommand={sendCommand}
+          remoteDocumentVersion={remoteDocumentVersion}
+          emitPresence={emitPresence}
+          breakFollow={breakFollow}
           loopRef={loopRef}
         />
       )}
@@ -691,8 +860,9 @@ function App() {
           datasetInfo={datasetInfo}
           client={client}
           canvas={canvasRef.current!}
-          remoteCameraVersion={remoteCameraVersion}
-          sendCommand={sendCommand}
+          remoteDocumentVersion={remoteDocumentVersion}
+          emitPresence={emitPresence}
+          breakFollow={breakFollow}
           t={t}
           c={c}
           loopRef={loopRef}
@@ -717,9 +887,33 @@ function App() {
       )}
       {volume && (
         <div className="dimension-controls">
-          <DimensionControls label="Z" value={z} max={dimZ} onChange={(v) => { setZ(v); sendCommand(JSON.stringify({ type: "set_z", z: v })); }} disabled={viewMode === "3d"} />
-          <DimensionControls label="C" value={c} max={dimC} onChange={(v) => { setC(v); sendCommand(JSON.stringify({ type: "set_c", c: v })); }} />
-          <DimensionControls label="T" value={t} max={dimT} onChange={(v) => { setT(v); sendCommand(JSON.stringify({ type: "set_t", t: v })); }} />
+          <DimensionControls label="Z" value={z} max={dimZ} onChange={(v) => {
+            setZ(v);
+            breakFollow();
+            const scene = wasmSceneRef.current;
+            if (scene) {
+              applyViewportCommand(scene, { type: "set_z", z: v });
+              emitPresence();
+            }
+          }} disabled={viewMode === "3d"} />
+          <DimensionControls label="C" value={c} max={dimC} onChange={(v) => {
+            setC(v);
+            breakFollow();
+            const scene = wasmSceneRef.current;
+            if (scene) {
+              applyViewportCommand(scene, { type: "set_c", c: v });
+              emitPresence();
+            }
+          }} />
+          <DimensionControls label="T" value={t} max={dimT} onChange={(v) => {
+            setT(v);
+            breakFollow();
+            const scene = wasmSceneRef.current;
+            if (scene) {
+              applyViewportCommand(scene, { type: "set_t", t: v });
+              emitPresence();
+            }
+          }} />
         </div>
       )}
       {loading && <p className="secondary">Loading volume...</p>}

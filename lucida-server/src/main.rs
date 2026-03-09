@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use lucida_core::command::Command;
-use lucida_core::protocol::{ChunkMessage, ServerMessage};
+use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_tungstenite::accept_async;
@@ -13,13 +13,37 @@ use tokio_tungstenite::tungstenite::Message;
 
 use session::Session;
 
-type ClientId = u64;
-
 #[derive(Clone)]
-struct BroadcastItem {
-    sender: ClientId,
-    broadcast_json: String,
-    ack_json: String,
+enum BroadcastItem {
+    /// Document command broadcast (sequenced).
+    CommandBroadcast {
+        sender: ClientId,
+        broadcast_json: String,
+        ack_json: String,
+    },
+    /// Presence update from a client (ephemeral).
+    PresenceUpdate {
+        sender: ClientId,
+        json: String,
+    },
+    /// Cursor update from a client.
+    CursorUpdate {
+        sender: ClientId,
+        json: String,
+    },
+    /// Peer joined.
+    PeerJoined {
+        sender: ClientId,
+        json: String,
+    },
+    /// Peer left.
+    PeerLeft {
+        json: String,
+    },
+    /// Follow changed.
+    FollowChanged {
+        json: String,
+    },
 }
 
 /// Per-client targeted message channels for unicast (chunk routing).
@@ -27,7 +51,7 @@ type ClientSenders = Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<Message>>
 
 #[tokio::main]
 async fn main() {
-    let session = Arc::new(Mutex::new(Session::new([800, 600])));
+    let session = Arc::new(Mutex::new(Session::new()));
     let (tx, _) = broadcast::channel::<BroadcastItem>(256);
     let next_id = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let clients: ClientSenders = Arc::new(Mutex::new(HashMap::new()));
@@ -68,13 +92,19 @@ async fn main() {
             let (unicast_tx, mut unicast_rx) = mpsc::unbounded_channel::<Message>();
             clients.lock().await.insert(id, unicast_tx);
 
-            // Lock session, subscribe (before unlock — no gap), snapshot, unlock.
-            let (snapshot_json, mut rx) = {
-                let sess = session.lock().await;
+            // Lock session, subscribe (before unlock — no gap), add client, snapshot, unlock.
+            let (snapshot_json, mut rx, peer_joined_json) = {
+                let mut sess = session.lock().await;
                 let rx = tx.subscribe();
-                let snapshot = sess.snapshot();
-                let json = serde_json::to_string(&snapshot).unwrap();
-                (json, rx)
+                let presence = sess.add_client(id);
+                let snapshot = sess.snapshot(id);
+                let snapshot_json = serde_json::to_string(&snapshot).unwrap();
+                let peer_joined = ServerMessage::PeerJoined {
+                    client_id: id,
+                    presence,
+                };
+                let peer_joined_json = serde_json::to_string(&peer_joined).unwrap();
+                (snapshot_json, rx, peer_joined_json)
             };
 
             // Send snapshot as first message.
@@ -84,9 +114,17 @@ async fn main() {
                 .is_err()
             {
                 eprintln!("client {id}: failed to send snapshot");
+                let mut sess = session.lock().await;
+                sess.remove_client(id);
                 clients.lock().await.remove(&id);
                 return;
             }
+
+            // Broadcast PeerJoined to others.
+            let _ = tx.send(BroadcastItem::PeerJoined {
+                sender: id,
+                json: peer_joined_json,
+            });
 
             // Outbound: forward broadcast + unicast messages to this client.
             let outbound = tokio::spawn(async move {
@@ -95,10 +133,28 @@ async fn main() {
                         result = rx.recv() => {
                             match result {
                                 Ok(item) => {
-                                    let json = if item.sender == id {
-                                        &item.ack_json
-                                    } else {
-                                        &item.broadcast_json
+                                    let json = match &item {
+                                        BroadcastItem::CommandBroadcast { sender, broadcast_json, ack_json } => {
+                                            if *sender == id {
+                                                ack_json
+                                            } else {
+                                                broadcast_json
+                                            }
+                                        }
+                                        BroadcastItem::PresenceUpdate { sender, json } => {
+                                            if *sender == id { continue; }
+                                            json
+                                        }
+                                        BroadcastItem::CursorUpdate { sender, json } => {
+                                            if *sender == id { continue; }
+                                            json
+                                        }
+                                        BroadcastItem::PeerJoined { sender, json } => {
+                                            if *sender == id { continue; }
+                                            json
+                                        }
+                                        BroadcastItem::PeerLeft { json } => json,
+                                        BroadcastItem::FollowChanged { json } => json,
                                     };
                                     if ws_tx
                                         .send(Message::Text(json.clone().into()))
@@ -128,45 +184,105 @@ async fn main() {
                 }
             });
 
-            // Inbound: parse commands / chunk messages, apply/route.
+            // Inbound: parse client messages, apply/route.
             while let Some(Ok(msg)) = ws_rx.next().await {
                 match msg {
                     Message::Text(text) => {
                         let json = text.to_string();
 
-                        // Try as Command first.
-                        if let Ok(cmd) = serde_json::from_str::<Command>(&json) {
-                            let seq = {
-                                let mut sess = session.lock().await;
-                                let seq = sess.apply(cmd.clone());
-                                // Track data sources for dataset commands.
-                                match &cmd {
-                                    Command::AddDataset {
-                                        id: dataset_id, ..
-                                    } => {
-                                        sess.data_sources
-                                            .insert(dataset_id.clone(), id);
+                        // Try as ClientMessage (new protocol).
+                        if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&json) {
+                            match client_msg {
+                                ClientMessage::Command { command } => {
+                                    if command.is_document_command() {
+                                        // Document command — apply and broadcast.
+                                        let seq = {
+                                            let mut sess = session.lock().await;
+                                            let seq = sess.apply(command.clone());
+                                            match &command {
+                                                Command::AddDataset {
+                                                    id: dataset_id, ..
+                                                } => {
+                                                    sess.data_sources
+                                                        .insert(dataset_id.clone(), id);
+                                                }
+                                                Command::RemoveDataset { id: dataset_id } => {
+                                                    sess.data_sources.remove(dataset_id);
+                                                }
+                                                _ => {}
+                                            }
+                                            seq
+                                        };
+
+                                        let broadcast_msg = ServerMessage::CommandBroadcast {
+                                            seq,
+                                            command,
+                                        };
+                                        let ack_msg = ServerMessage::Ack { seq };
+
+                                        let _ = tx.send(BroadcastItem::CommandBroadcast {
+                                            sender: id,
+                                            broadcast_json: serde_json::to_string(&broadcast_msg)
+                                                .unwrap(),
+                                            ack_json: serde_json::to_string(&ack_msg).unwrap(),
+                                        });
                                     }
-                                    Command::RemoveDataset { id: dataset_id } => {
-                                        sess.data_sources.remove(dataset_id);
-                                    }
-                                    _ => {}
                                 }
-                                seq
-                            };
-
-                            let broadcast_msg = ServerMessage::CommandBroadcast {
-                                seq,
-                                command: cmd,
-                            };
-                            let ack_msg = ServerMessage::Ack { seq };
-
-                            let _ = tx.send(BroadcastItem {
-                                sender: id,
-                                broadcast_json: serde_json::to_string(&broadcast_msg)
-                                    .unwrap(),
-                                ack_json: serde_json::to_string(&ack_msg).unwrap(),
-                            });
+                                ClientMessage::Presence {
+                                    camera,
+                                    view,
+                                    display,
+                                } => {
+                                    {
+                                        let mut sess = session.lock().await;
+                                        sess.update_presence(
+                                            id,
+                                            camera.clone(),
+                                            view.clone(),
+                                            display.clone(),
+                                        );
+                                    }
+                                    let update = ServerMessage::PresenceUpdate {
+                                        client_id: id,
+                                        camera,
+                                        view,
+                                        display,
+                                    };
+                                    let _ = tx.send(BroadcastItem::PresenceUpdate {
+                                        sender: id,
+                                        json: serde_json::to_string(&update).unwrap(),
+                                    });
+                                }
+                                ClientMessage::Cursor { position } => {
+                                    {
+                                        let mut sess = session.lock().await;
+                                        sess.update_cursor(id, position);
+                                    }
+                                    let update = ServerMessage::CursorUpdate {
+                                        client_id: id,
+                                        position,
+                                    };
+                                    let _ = tx.send(BroadcastItem::CursorUpdate {
+                                        sender: id,
+                                        json: serde_json::to_string(&update).unwrap(),
+                                    });
+                                }
+                                ClientMessage::Follow { target } => {
+                                    let changes = {
+                                        let mut sess = session.lock().await;
+                                        sess.set_follow(id, target)
+                                    };
+                                    for (cid, new_target) in changes {
+                                        let msg = ServerMessage::FollowChanged {
+                                            client_id: cid,
+                                            target: new_target,
+                                        };
+                                        let _ = tx.send(BroadcastItem::FollowChanged {
+                                            json: serde_json::to_string(&msg).unwrap(),
+                                        });
+                                    }
+                                }
+                            }
                             continue;
                         }
 
@@ -174,13 +290,11 @@ async fn main() {
                         if let Ok(chunk_msg) = serde_json::from_str::<ChunkMessage>(&json) {
                             match chunk_msg {
                                 ChunkMessage::ChunkRequest { dataset_id, key } => {
-                                    // Look up data source for this dataset.
                                     let source_id = {
                                         let sess = session.lock().await;
                                         sess.data_sources.get(&dataset_id).copied()
                                     };
                                     if let Some(source_id) = source_id {
-                                        // Forward as ChunkFetch to the data source.
                                         let fetch = ChunkMessage::ChunkFetch {
                                             client_id: id,
                                             dataset_id,
@@ -214,7 +328,6 @@ async fn main() {
                             data[0], data[1], data[2], data[3],
                         ]) as u64;
 
-                        // Forward the entire binary message to the target client.
                         let senders = clients.lock().await;
                         if let Some(sender) = senders.get(&target_id) {
                             let _ = sender.send(Message::Binary(data));
@@ -228,10 +341,30 @@ async fn main() {
             outbound.abort();
             clients.lock().await.remove(&id);
 
-            // Remove data sources owned by this client.
-            {
+            // Remove client from session, get affected followers.
+            let (affected_followers, peer_left_json) = {
                 let mut sess = session.lock().await;
+                let affected = sess.remove_client(id);
                 sess.data_sources.retain(|_, &mut src| src != id);
+                let peer_left = ServerMessage::PeerLeft { client_id: id };
+                let json = serde_json::to_string(&peer_left).unwrap();
+                (affected, json)
+            };
+
+            // Broadcast PeerLeft.
+            let _ = tx.send(BroadcastItem::PeerLeft {
+                json: peer_left_json,
+            });
+
+            // Broadcast FollowChanged for any followers that were redirected.
+            for follower_id in affected_followers {
+                let msg = ServerMessage::FollowChanged {
+                    client_id: follower_id,
+                    target: None,
+                };
+                let _ = tx.send(BroadcastItem::FollowChanged {
+                    json: serde_json::to_string(&msg).unwrap(),
+                });
             }
 
             eprintln!("client {id} disconnected");

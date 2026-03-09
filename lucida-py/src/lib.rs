@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 
 use lucida_core::command::Command;
+use lucida_core::protocol::ClientMessage;
 use lucida_core::scene::{Layer, LevelInfo, Scene};
 
 #[pyclass]
@@ -17,10 +18,10 @@ impl PyScene {
         }
     }
 
-    fn load_snapshot(&mut self, json: &str) -> PyResult<()> {
-        let scene: lucida_core::scene::Scene = serde_json::from_str(json)
+    fn load_document(&mut self, json: &str) -> PyResult<()> {
+        let doc: lucida_core::scene::DocumentState = serde_json::from_str(json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-        self.inner = scene;
+        self.inner.document = doc;
         Ok(())
     }
 
@@ -98,6 +99,15 @@ impl PyScene {
         self.inner.view.c
     }
 
+    fn presence_json(&self) -> String {
+        let msg = ClientMessage::Presence {
+            camera: self.inner.camera.clone(),
+            view: self.inner.view.clone(),
+            display: self.inner.display.clone(),
+        };
+        serde_json::to_string(&msg).unwrap()
+    }
+
     fn chunk_plan(&self) -> String {
         let plan = self.inner.chunk_plan();
         serde_json::to_string(&plan).unwrap()
@@ -137,7 +147,7 @@ impl PyScene {
         shapes_flat: Vec<u32>,
         chunks_flat: Vec<u32>,
     ) {
-        let layers = match self.inner.datasets.first_mut() {
+        let layers = match self.inner.document.datasets.first_mut() {
             Some(ds) => &mut ds.layers,
             None => return,
         };

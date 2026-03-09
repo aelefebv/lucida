@@ -1,17 +1,81 @@
 use serde::{Deserialize, Serialize};
 
+use crate::camera::Camera;
 use crate::command::Command;
-use crate::scene::Scene;
+use crate::scene::{DisplayState, DocumentState};
+use crate::view::ViewState;
+
+pub type ClientId = u64;
+
+/// Per-client ephemeral state broadcast to other clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PresenceState {
+    pub client_id: ClientId,
+    pub camera: Camera,
+    pub view: ViewState,
+    pub display: DisplayState,
+    /// Who this client is following (`None` = independent).
+    pub following: Option<ClientId>,
+    pub cursor: Option<[f64; 2]>,
+}
+
+/// Messages sent from a client to the server.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ClientMessage {
+    /// A document command (shared, sequenced).
+    Command { command: Command },
+    /// Viewport presence update (ephemeral, latest-wins).
+    Presence {
+        camera: Camera,
+        view: ViewState,
+        display: DisplayState,
+    },
+    /// Cursor position update.
+    Cursor { position: [f64; 2] },
+    /// Follow another client (or stop following with `target: null`).
+    Follow { target: Option<ClientId> },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
-    /// First message on connect. Full authoritative state.
-    Snapshot { seq: u64, scene: Scene },
+    /// First message on connect. Full authoritative document state + peer presence.
+    Snapshot {
+        seq: u64,
+        document: DocumentState,
+        peers: Vec<PresenceState>,
+        your_id: ClientId,
+    },
     /// Command from another client, broadcast to all except sender.
     CommandBroadcast { seq: u64, command: Command },
     /// Sent only to the command's sender confirming application.
     Ack { seq: u64 },
+    /// A new client connected.
+    PeerJoined {
+        client_id: ClientId,
+        presence: PresenceState,
+    },
+    /// A client disconnected.
+    PeerLeft { client_id: ClientId },
+    /// A peer's viewport state changed.
+    PresenceUpdate {
+        client_id: ClientId,
+        camera: Camera,
+        view: ViewState,
+        display: DisplayState,
+    },
+    /// A peer's cursor moved.
+    CursorUpdate {
+        client_id: ClientId,
+        position: [f64; 2],
+    },
+    /// A peer's follow target changed.
+    FollowChanged {
+        client_id: ClientId,
+        target: Option<ClientId>,
+    },
+
 }
 
 /// Chunk-related messages exchanged between clients and server.
@@ -34,12 +98,22 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips() {
-        let scene = Scene::new([800, 600]);
-        let msg = ServerMessage::Snapshot { seq: 1, scene };
+        let doc = DocumentState {
+            datasets: Vec::new(),
+        };
+        let msg = ServerMessage::Snapshot {
+            seq: 1,
+            document: doc,
+            peers: Vec::new(),
+            your_id: 42,
+        };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ServerMessage::Snapshot { seq, .. } => assert_eq!(seq, 1),
+            ServerMessage::Snapshot { seq, your_id, .. } => {
+                assert_eq!(seq, 1);
+                assert_eq!(your_id, 42);
+            }
             _ => panic!("expected Snapshot"),
         }
     }
@@ -113,5 +187,85 @@ mod tests {
             }
             _ => panic!("expected CommandBroadcast"),
         }
+    }
+
+    #[test]
+    fn client_message_command_round_trips() {
+        let msg = ClientMessage::Command {
+            command: Command::AddDataset {
+                id: "ds1".into(),
+                name: "test".into(),
+                layers: vec![],
+                volume_shape: None,
+                volume_scale: None,
+                client_metadata: None,
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"command\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::Command { .. }));
+    }
+
+    #[test]
+    fn client_message_presence_round_trips() {
+        let msg = ClientMessage::Presence {
+            camera: Camera::new_2d([800, 600]),
+            view: ViewState::new(),
+            display: DisplayState::default(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"presence\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ClientMessage::Presence { .. }));
+    }
+
+    #[test]
+    fn client_message_follow_round_trips() {
+        let msg = ClientMessage::Follow { target: Some(5) };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"follow\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::Follow { target } => assert_eq!(target, Some(5)),
+            _ => panic!("expected Follow"),
+        }
+    }
+
+    #[test]
+    fn presence_state_round_trips() {
+        let ps = PresenceState {
+            client_id: 1,
+            camera: Camera::new_2d([800, 600]),
+            view: ViewState::new(),
+            display: DisplayState::default(),
+            following: None,
+            cursor: Some([100.0, 200.0]),
+        };
+        let json = serde_json::to_string(&ps).unwrap();
+        let parsed: PresenceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.client_id, 1);
+        assert_eq!(parsed.cursor, Some([100.0, 200.0]));
+        assert_eq!(parsed.following, None);
+    }
+
+    #[test]
+    fn peer_joined_round_trips() {
+        let presence = PresenceState {
+            client_id: 3,
+            camera: Camera::new_2d([800, 600]),
+            view: ViewState::new(),
+            display: DisplayState::default(),
+            following: None,
+            cursor: None,
+        };
+        let msg = ServerMessage::PeerJoined {
+            client_id: 3,
+            presence,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"peer_joined\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ServerMessage::PeerJoined { client_id: 3, .. }));
     }
 }

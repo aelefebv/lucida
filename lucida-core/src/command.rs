@@ -51,6 +51,20 @@ pub enum Command {
     SetGamma { gamma: f64 },
 }
 
+impl Command {
+    /// Returns `true` if this command mutates shared document state (datasets).
+    /// Document commands are sequenced, persisted, and broadcast to all clients.
+    /// Viewport/display commands are local-only and emitted as presence.
+    pub fn is_document_command(&self) -> bool {
+        matches!(
+            self,
+            Command::AddDataset { .. }
+                | Command::RemoveDataset { .. }
+                | Command::SetVolumeScale { .. }
+        )
+    }
+}
+
 impl Scene {
     pub fn apply(&mut self, cmd: Command) {
         match cmd {
@@ -214,10 +228,10 @@ mod tests {
             volume_scale: Some([1.0, 1.0, 1.0]),
             client_metadata: None,
         });
-        assert_eq!(scene.datasets.len(), 1);
-        assert_eq!(scene.datasets[0].id, "ds1");
-        assert!(scene.datasets[0].volume_transform.is_some());
-        assert_eq!(scene.datasets[0].volume_shape, Some([100, 200, 300]));
+        assert_eq!(scene.document.datasets.len(), 1);
+        assert_eq!(scene.document.datasets[0].id, "ds1");
+        assert!(scene.document.datasets[0].volume_transform.is_some());
+        assert_eq!(scene.document.datasets[0].volume_shape, Some([100, 200, 300]));
     }
 
     #[test]
@@ -231,8 +245,8 @@ mod tests {
             volume_scale: None,
             client_metadata: None,
         });
-        assert_eq!(scene.datasets.len(), 1);
+        assert_eq!(scene.document.datasets.len(), 1);
         scene.apply(Command::RemoveDataset { id: "ds1".into() });
-        assert!(scene.datasets.is_empty());
+        assert!(scene.document.datasets.is_empty());
     }
 }

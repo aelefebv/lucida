@@ -6,7 +6,7 @@ import type { DatasetInfo } from "../zarr/metadata.ts";
 import { ChunkStore } from "../zarr/chunkStore.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop } from "../renderLoop.ts";
-import { applyAndSend } from "../applyAndSend.ts";
+import { applyViewportCommand } from "../applyAndSend.ts";
 
 interface Props {
   volume: VolumeData;
@@ -15,14 +15,15 @@ interface Props {
   datasetInfo: DatasetInfo;
   client: RenderClient;
   canvas: HTMLCanvasElement;
-  remoteCameraVersion: number;
-  sendCommand: (json: string) => void;
+  remoteDocumentVersion: number;
+  emitPresence: () => void;
+  breakFollow: () => void;
   t: number;
   c: number;
   loopRef: MutableRefObject<RenderLoop | null>;
 }
 
-export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand, t, c, loopRef: parentLoopRef }: Props) {
+export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, t, c, loopRef: parentLoopRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
 
   // Create/start render loop
@@ -37,10 +38,10 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
     };
   }, [scene, store, datasetInfo, client, canvas]);
 
-  // Mark dirty on remote camera updates
+  // Mark dirty on remote document updates
   useEffect(() => {
     loopRef.current?.markDirty();
-  }, [remoteCameraVersion]);
+  }, [remoteDocumentVersion]);
 
   // Mark dirty on T/C changes so the render loop re-evaluates chunks
   useEffect(() => {
@@ -85,16 +86,18 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
       const dy = e.clientY - lastPos.current.y;
       lastPos.current = { x: e.clientX, y: e.clientY };
 
+      breakFollow();
       if (shiftDragRef.current) {
-        applyAndSend(scene, { type: "pan_3d", dx, dy }, sendCommand);
+        applyViewportCommand(scene, { type: "pan_3d", dx, dy });
       } else {
         const dTheta = -dx * 0.005;
         const dPhi = -dy * 0.005;
-        applyAndSend(scene, { type: "rotate_3d", d_theta: dTheta, d_phi: dPhi }, sendCommand);
+        applyViewportCommand(scene, { type: "rotate_3d", d_theta: dTheta, d_phi: dPhi });
       }
+      emitPresence();
       loopRef.current?.markDirty();
     },
-    [dragging, scene, sendCommand],
+    [dragging, scene, emitPresence, breakFollow],
   );
 
   const onPointerUp = useCallback(() => {
@@ -105,10 +108,12 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
     (e: WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY * 0.001;
-      applyAndSend(scene, { type: "zoom_3d", delta }, sendCommand);
+      breakFollow();
+      applyViewportCommand(scene, { type: "zoom_3d", delta });
+      emitPresence();
       loopRef.current?.markDirty();
     },
-    [scene, sendCommand],
+    [scene, emitPresence, breakFollow],
   );
 
   // Attach event handlers to the shared canvas

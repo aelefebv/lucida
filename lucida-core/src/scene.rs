@@ -23,6 +23,28 @@ impl Default for DisplayState {
     }
 }
 
+/// Shared document state — datasets and structural data that are synced across all clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentState {
+    pub datasets: Vec<Dataset>,
+}
+
+impl DocumentState {
+    /// Add or replace a dataset by id.
+    pub fn add_dataset(&mut self, dataset: Dataset) {
+        if let Some(existing) = self.datasets.iter_mut().find(|d| d.id == dataset.id) {
+            *existing = dataset;
+        } else {
+            self.datasets.push(dataset);
+        }
+    }
+
+    /// Remove a dataset by id.
+    pub fn remove_dataset(&mut self, id: &str) {
+        self.datasets.retain(|d| d.id != id);
+    }
+}
+
 /// Per-level shape and chunk size metadata for anisotropic pyramids.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LevelInfo {
@@ -87,8 +109,9 @@ pub struct Dataset {
 pub struct Scene {
     pub camera: Camera,
     pub view: ViewState,
-    pub datasets: Vec<Dataset>,
-    /// Display settings (contrast window + gamma).
+    /// Shared document state (datasets).
+    pub document: DocumentState,
+    /// Display settings (contrast window + gamma). Per-client, not part of shared document.
     #[serde(default)]
     pub display: DisplayState,
 }
@@ -98,7 +121,9 @@ impl Scene {
         Self {
             camera: Camera::new_2d(viewport),
             view: ViewState::new(),
-            datasets: Vec::new(),
+            document: DocumentState {
+                datasets: Vec::new(),
+            },
             display: DisplayState::default(),
         }
     }
@@ -106,13 +131,15 @@ impl Scene {
     // --- Convenience accessors for first dataset ---
 
     pub fn volume_transform(&self) -> Option<&VolumeTransform> {
-        self.datasets
+        self.document
+            .datasets
             .first()
             .and_then(|d| d.volume_transform.as_ref())
     }
 
     pub fn volume_shape(&self) -> Option<&[u32; 3]> {
-        self.datasets
+        self.document
+            .datasets
             .first()
             .and_then(|d| d.volume_shape.as_ref())
     }
@@ -135,8 +162,8 @@ impl Scene {
 
     /// Ensure at least one dataset exists, creating a default if needed.
     fn ensure_default_dataset(&mut self) {
-        if self.datasets.is_empty() {
-            self.datasets.push(Dataset {
+        if self.document.datasets.is_empty() {
+            self.document.datasets.push(Dataset {
                 id: "default".into(),
                 name: "default".into(),
                 layers: Vec::new(),
@@ -151,7 +178,7 @@ impl Scene {
     /// `shape` is [Z, Y, X], `scale` is [Z, Y, X].
     pub fn set_volume_scale(&mut self, shape: [u32; 3], scale: [f64; 3]) {
         self.ensure_default_dataset();
-        let ds = &mut self.datasets[0];
+        let ds = &mut self.document.datasets[0];
         ds.volume_shape = Some(shape);
         ds.volume_transform = Some(transform::compute_volume_transform(shape, scale));
     }
@@ -159,21 +186,17 @@ impl Scene {
     /// Add a layer to the first dataset (convenience for single-dataset use).
     pub fn add_layer(&mut self, layer: Layer) {
         self.ensure_default_dataset();
-        self.datasets[0].layers.push(layer);
+        self.document.datasets[0].layers.push(layer);
     }
 
     /// Add or replace a dataset by id.
     pub fn add_dataset(&mut self, dataset: Dataset) {
-        if let Some(existing) = self.datasets.iter_mut().find(|d| d.id == dataset.id) {
-            *existing = dataset;
-        } else {
-            self.datasets.push(dataset);
-        }
+        self.document.add_dataset(dataset);
     }
 
     /// Remove a dataset by id.
     pub fn remove_dataset(&mut self, id: &str) {
-        self.datasets.retain(|d| d.id != id);
+        self.document.remove_dataset(id);
     }
 
     /// Compute the chunk request plan for all visible layers across all datasets.
@@ -186,7 +209,7 @@ impl Scene {
 
         let mut needed = Vec::new();
 
-        for dataset in &self.datasets {
+        for dataset in &self.document.datasets {
             for layer in &dataset.layers {
                 if !layer.visible {
                     continue;
@@ -303,9 +326,9 @@ mod tests {
         assert_eq!(parsed.view.z_range, 5..6);
         assert_eq!(parsed.view.t, 2);
         assert_eq!(parsed.view.c, 1);
-        assert_eq!(parsed.datasets.len(), 1);
-        assert_eq!(parsed.datasets[0].layers.len(), 1);
-        assert_eq!(parsed.datasets[0].layers[0].name, "test");
+        assert_eq!(parsed.document.datasets.len(), 1);
+        assert_eq!(parsed.document.datasets[0].layers.len(), 1);
+        assert_eq!(parsed.document.datasets[0].layers[0].name, "test");
         if let Camera::View2D(v) = &parsed.camera {
             assert_eq!(v.viewport, [800, 600]);
         } else {
@@ -417,7 +440,7 @@ mod tests {
             volume_shape: None,
             client_metadata: None,
         });
-        assert_eq!(scene.datasets.len(), 1);
+        assert_eq!(scene.document.datasets.len(), 1);
         scene.add_dataset(Dataset {
             id: "ds1".into(),
             name: "updated".into(),
@@ -426,8 +449,8 @@ mod tests {
             volume_shape: None,
             client_metadata: None,
         });
-        assert_eq!(scene.datasets.len(), 1);
-        assert_eq!(scene.datasets[0].name, "updated");
+        assert_eq!(scene.document.datasets.len(), 1);
+        assert_eq!(scene.document.datasets[0].name, "updated");
     }
 
     #[test]
@@ -449,9 +472,9 @@ mod tests {
             volume_shape: None,
             client_metadata: None,
         });
-        assert_eq!(scene.datasets.len(), 2);
+        assert_eq!(scene.document.datasets.len(), 2);
         scene.remove_dataset("ds1");
-        assert_eq!(scene.datasets.len(), 1);
-        assert_eq!(scene.datasets[0].id, "ds2");
+        assert_eq!(scene.document.datasets.len(), 1);
+        assert_eq!(scene.document.datasets[0].id, "ds2");
     }
 }

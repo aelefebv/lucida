@@ -6,7 +6,7 @@ import type { DatasetInfo } from "../zarr/metadata.ts";
 import { ChunkStore } from "../zarr/chunkStore.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop } from "../renderLoop.ts";
-import { applyAndSend } from "../applyAndSend.ts";
+import { applyViewportCommand } from "../applyAndSend.ts";
 
 interface Props {
   volume: VolumeData;
@@ -18,12 +18,13 @@ interface Props {
   datasetInfo: DatasetInfo;
   client: RenderClient;
   canvas: HTMLCanvasElement;
-  remoteCameraVersion: number;
-  sendCommand: (json: string) => void;
+  remoteDocumentVersion: number;
+  emitPresence: () => void;
+  breakFollow: () => void;
   loopRef: MutableRefObject<RenderLoop | null>;
 }
 
-export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas, remoteCameraVersion, sendCommand, loopRef: parentLoopRef }: Props) {
+export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -45,10 +46,10 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
     loopRef.current?.setSliceParams(z, t, c);
   }, [z, t, c]);
 
-  // Mark dirty on remote camera updates
+  // Mark dirty on remote document updates
   useEffect(() => {
     loopRef.current?.markDirty();
-  }, [remoteCameraVersion]);
+  }, [remoteDocumentVersion]);
 
   // Reset pan/zoom when the dataset dimensions change
   const prevDims = useRef({ w: volume.width, h: volume.height, d: volume.depth });
@@ -59,11 +60,12 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       prevDims.current = { w: width, h: height, d: depth };
       const fullResWidth = datasetInfo.levels[0].shape[4];
       const fullResHeight = datasetInfo.levels[0].shape[3];
-      applyAndSend(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 }, sendCommand);
-      applyAndSend(scene, { type: "set_zoom", value: 1.0 }, sendCommand);
+      applyViewportCommand(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 });
+      applyViewportCommand(scene, { type: "set_zoom", value: 1.0 });
+      emitPresence();
       loopRef.current?.markDirty();
     }
-  }, [volume, scene, datasetInfo, sendCommand]);
+  }, [volume, scene, datasetInfo, emitPresence]);
 
   // Set mode on mount
   useEffect(() => {
@@ -97,10 +99,12 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       lastPos.current = { x: e.clientX, y: e.clientY };
       const pdx = -dx;
       const pdy = -dy;
-      applyAndSend(scene, { type: "pan", dx: pdx, dy: pdy }, sendCommand);
+      breakFollow();
+      applyViewportCommand(scene, { type: "pan", dx: pdx, dy: pdy });
+      emitPresence();
       loopRef.current?.markDirty();
     },
-    [dragging, scene, sendCommand],
+    [dragging, scene, emitPresence, breakFollow],
   );
 
   const onPointerUp = useCallback(() => {
@@ -123,15 +127,17 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       const worldY = (cursorY - canvasH / 2) / oldZoom + centerArr[1];
 
       const factor = e.deltaY > 0 ? 0.9 : 1.1;
-      applyAndSend(scene, { type: "zoom_by", factor }, sendCommand);
+      breakFollow();
+      applyViewportCommand(scene, { type: "zoom_by", factor });
       const newZoom = scene.zoom();
 
       const newCx = worldX - (cursorX - canvasW / 2) / newZoom;
       const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
-      applyAndSend(scene, { type: "set_center", x: newCx, y: newCy }, sendCommand);
+      applyViewportCommand(scene, { type: "set_center", x: newCx, y: newCy });
+      emitPresence();
       loopRef.current?.markDirty();
     },
-    [scene, canvas, sendCommand],
+    [scene, canvas, emitPresence, breakFollow],
   );
 
   // Attach event handlers to the shared canvas
