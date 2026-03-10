@@ -1,5 +1,6 @@
 /** WebGPU pipeline for volume ray marching. */
 import shaderSource from "./volume.wgsl?raw";
+import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
 // Uniform buffer layout (240 bytes used, padded to 256):
 //   offset 0:   invViewProj     mat4x4f   (64B)
@@ -13,7 +14,6 @@ const UNIFORM_SIZE = 256;
 
 export class VolumeRenderer {
   private device: GPUDevice;
-  private context: GPUCanvasContext;
   private pipeline: GPURenderPipeline;
   private uniformBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
@@ -22,14 +22,14 @@ export class VolumeRenderer {
   private intensityMin = 0;
   private intensityMax = 65535;
   private gamma = 1.0;
+  private opacity = 1.0;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private modelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private invModelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private eyePos: Float32Array<ArrayBufferLike> = new Float32Array(3);
 
-  constructor(device: GPUDevice, context: GPUCanvasContext, format: GPUTextureFormat) {
+  constructor(device: GPUDevice) {
     this.device = device;
-    this.context = context;
 
     const shaderModule = device.createShaderModule({ code: shaderSource });
 
@@ -59,21 +59,7 @@ export class VolumeRenderer {
       fragment: {
         module: shaderModule,
         entryPoint: "fs",
-        targets: [{
-          format,
-          blend: {
-            color: {
-              srcFactor: "one",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add",
-            },
-            alpha: {
-              srcFactor: "one",
-              dstFactor: "one-minus-src-alpha",
-              operation: "add",
-            },
-          },
-        }],
+        targets: [{ format: OFFSCREEN_FORMAT }],
       },
       primitive: { topology: "triangle-list" },
     });
@@ -110,6 +96,10 @@ export class VolumeRenderer {
     this.gamma = gamma;
   }
 
+  setOpacity(v: number) {
+    this.opacity = v;
+  }
+
   setMatrices(
     invViewProj: Float32Array<ArrayBufferLike>,
     model: Float32Array<ArrayBufferLike>,
@@ -122,7 +112,7 @@ export class VolumeRenderer {
     this.eyePos = eye;
   }
 
-  render() {
+  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder) {
     if (!this.bindGroup) return;
 
     // Compute step size based on volume dimensions
@@ -136,18 +126,17 @@ export class VolumeRenderer {
     uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], 48); // cameraPos at 192B = 48 floats
     uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 52); // volumeDims at 208B = 52 floats
     uniformData.set([this.intensityMin, this.intensityMax, 0.08, stepSize], 56); // intensityRange at 224B = 56 floats
-    uniformData.set([this.gamma, 0, 0, 0], 60); // displayParams at 240B = 60 floats
+    uniformData.set([this.gamma, this.opacity, 0, 0], 60); // displayParams at 240B = 60 floats
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 
-    const encoder = this.device.createCommandEncoder();
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.context.getCurrentTexture().createView(),
+          view: target,
           loadOp: "clear",
           storeOp: "store",
-          clearValue: { r: 0.05, g: 0.05, b: 0.08, a: 1 },
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
         },
       ],
     });
@@ -156,7 +145,5 @@ export class VolumeRenderer {
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3); // full-screen triangle
     pass.end();
-
-    this.device.queue.submit([encoder.finish()]);
   }
 }

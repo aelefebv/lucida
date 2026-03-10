@@ -71,8 +71,8 @@ function App() {
   const [c, setC] = useState(0);
   const [t, setT] = useState(0);
 
-  // Contrast controls
-  const [dataRange, setDataRange] = useState<{ min: number; max: number } | null>(null);
+  // Contrast controls — per-dataset intensity ranges
+  const [dataRangeMap, setDataRangeMap] = useState<Map<string, { min: number; max: number }>>(new Map());
   const [contrastMin, setContrastMin] = useState(0);
   const [contrastMax, setContrastMax] = useState(65535);
   const [gamma, setGamma] = useState(1.0);
@@ -89,6 +89,9 @@ function App() {
 
   // Selected dataset for rendering
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
+
+  // Derived: dataRange for the selected dataset (for ContrastControls compatibility)
+  const dataRange = selectedDatasetId ? dataRangeMap.get(selectedDatasetId) ?? null : null;
 
   // Keep dataset info and file index for re-assembling on C/T change
   const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
@@ -274,11 +277,6 @@ function App() {
               setGamma(scene.gamma());
               const is3d = scene.is_3d();
               setViewMode(is3d ? "3d" : "2d");
-              const client = clientRef.current;
-              if (client) {
-                if (is3d) client.setModeVolume();
-                else client.setModeSlice();
-              }
               loopRef.current?.markDirty();
             } catch (e) {
               console.warn("[Bridge] failed to import presence:", e);
@@ -497,33 +495,62 @@ function App() {
     });
   }, []);
 
-  // Hook intensity range callback
+  // Hook intensity range callback — per-dataset
   useEffect(() => {
     const client = clientRef.current;
     if (!client) return;
-    client.onIntensityRange = (min, max) => {
-      setDataRange({ min, max });
+    client.onIntensityRange = (datasetId, min, max) => {
+      setDataRangeMap(prev => {
+        const next = new Map(prev);
+        next.set(datasetId, { min, max });
+        return next;
+      });
       setAutoContrast(prev => {
         if (prev) {
-          setContrastMin(min);
-          setContrastMax(max);
+          // Apply contrast to the scene's per-layer settings
           const scene = wasmSceneRef.current;
           if (scene) {
-            applyViewportCommand(scene, { type: "set_contrast", min, max });
+            scene.apply_command(JSON.stringify({
+              type: "set_layer_contrast",
+              dataset_id: datasetId,
+              min,
+              max,
+            }));
           }
+          // Update UI state if this is the selected dataset
+          setSelectedDatasetId(currentSelected => {
+            if (currentSelected === datasetId) {
+              setContrastMin(min);
+              setContrastMax(max);
+            }
+            return currentSelected;
+          });
+          loopRef.current?.markDirty();
         }
         return prev;
       });
     };
   }, [clientReady]);
 
-  // Push display params to worker
+  // When contrast/gamma changes, update per-layer settings in scene and mark dirty
   useEffect(() => {
-    const client = clientRef.current;
-    if (!client || !clientReady) return;
-    client.setDisplayParams(contrastMin, contrastMax, gamma);
+    if (!clientReady || !selectedDatasetId) return;
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      scene.apply_command(JSON.stringify({
+        type: "set_layer_contrast",
+        dataset_id: selectedDatasetId,
+        min: contrastMin,
+        max: contrastMax,
+      }));
+      scene.apply_command(JSON.stringify({
+        type: "set_layer_gamma",
+        dataset_id: selectedDatasetId,
+        gamma,
+      }));
+    }
     loopRef.current?.markDirty();
-  }, [contrastMin, contrastMax, gamma, clientReady]);
+  }, [contrastMin, contrastMax, gamma, clientReady, selectedDatasetId]);
 
   // Sync Z/T/C to WASM scene and request chunks
   useEffect(() => {
@@ -571,7 +598,7 @@ function App() {
     setZ(0);
     setC(0);
     setT(0);
-    setDataRange(null);
+    setDataRangeMap(new Map());
     setContrastMin(0);
     setContrastMax(65535);
     setGamma(1.0);
@@ -727,14 +754,6 @@ function App() {
       }
       emitPresence();
     }
-    const client = clientRef.current;
-    if (client) {
-      if (next === "2d") {
-        client.setModeSlice();
-      } else {
-        client.setModeVolume();
-      }
-    }
   }, [viewMode, wasmScene, datasetInfo, emitPresence, breakFollow]);
 
   // Dimension extents from full-res level (level 0) for accurate slider ranges
@@ -825,11 +844,6 @@ function App() {
             setGamma(scene.gamma());
             const is3d = scene.is_3d();
             setViewMode(is3d ? "3d" : "2d");
-            const client = clientRef.current;
-            if (client) {
-              if (is3d) client.setModeVolume();
-              else client.setModeSlice();
-            }
             loopRef.current?.markDirty();
           } catch (e) {
             console.warn("Failed to import peer presence:", e);

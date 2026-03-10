@@ -46,11 +46,6 @@ export function VolumeViewer({ volume, scene, datasets, selectedDatasetId, clien
     loopRef.current?.markDirty();
   }, [t, c]);
 
-  // Set mode on mount
-  useEffect(() => {
-    client.setModeVolume();
-  }, [client]);
-
   // Initial volume upload effect
   useEffect(() => {
     const canvasW = canvas.clientWidth * devicePixelRatio;
@@ -58,7 +53,7 @@ export function VolumeViewer({ volume, scene, datasets, selectedDatasetId, clien
     scene.set_viewport(canvasW, canvasH);
 
     loopRef.current?.resetVolumeCache();
-    client.volumeSetInitial(volume.data, volume.width, volume.height, volume.depth);
+    client.volumeSetInitialForLayer(selectedDatasetId, volume.data, volume.width, volume.height, volume.depth);
     loopRef.current?.markDirty();
   }, [volume, scene, selectedDatasetId, client, canvas]);
 

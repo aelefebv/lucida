@@ -68,11 +68,6 @@ export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetI
     }
   }, [volume, scene, datasets, selectedDatasetId, emitPresence]);
 
-  // Set mode on mount
-  useEffect(() => {
-    client.setModeSlice();
-  }, [client]);
-
   // Upload fallback (coarsest-level) texture
   useEffect(() => {
     const { width, height, depth, data } = volume;
@@ -80,8 +75,8 @@ export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetI
     const sliceSize = width * height;
     const offset = clampedZ * sliceSize;
     const slice = data.subarray(offset, offset + sliceSize);
-    client.sliceSetFallback(slice, width, height);
-  }, [volume, z, client]);
+    client.sliceSetFallbackForLayer(selectedDatasetId, slice, width, height);
+  }, [volume, z, client, selectedDatasetId]);
 
   const onPointerDown = useCallback(
     (e: PointerEvent) => {

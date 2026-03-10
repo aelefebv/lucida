@@ -1,9 +1,10 @@
 /** WebGPU render worker — handles both slice and volume rendering off the main thread. */
 import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.ts";
 import { VOL_CACHE_BUDGET } from "./workerProtocol.ts";
-import { initGPU, createSliceTexture, writeSliceRegion, createEmptyVolumeTexture, writeVolumeChunk } from "./gpuContext.ts";
+import { initGPU, createSliceTexture, writeSliceRegion, createEmptyVolumeTexture, writeVolumeChunk, createOffscreenTarget } from "./gpuContext.ts";
 import { SliceRenderer } from "./sliceRenderer.ts";
 import { VolumeRenderer } from "./volumeRenderer.ts";
+import { LayerCompositor, type CompositeLayer } from "./layerCompositor.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 
 let device: GPUDevice;
@@ -12,14 +13,10 @@ let format: GPUTextureFormat;
 
 let sliceRenderer: SliceRenderer | null = null;
 let volumeRenderer: VolumeRenderer | null = null;
+let compositor: LayerCompositor | null = null;
 
-let displayOverrideActive = false;
-let storedContrastMin = 0;
-let storedContrastMax = 65535;
-let storedGamma = 1.0;
-
-// Slice tile texture state
-let tileState: {
+// Per-dataset slice tile state
+interface TileState {
   texture: GPUTexture;
   level: number;
   z: number;
@@ -28,9 +25,12 @@ let tileState: {
   uploaded: Set<string>;
   intensityMin: number;
   intensityMax: number;
-} | null = null;
+}
+const tileStatePerDataset = new Map<string, TileState>();
+const fallbackPerDataset = new Map<string, GPUTexture>();
 
 // Volume texture LRU cache (byte-budget eviction, Map iteration order = insertion order)
+// Key format: "${datasetId}/${level}/${t}/${c}"
 interface VolCacheEntry {
   texture: GPUTexture;
   uploaded: Set<string>;
@@ -41,10 +41,14 @@ interface VolCacheEntry {
   levelDepth: number;
   byteSize: number;
 }
-// VOL_CACHE_BUDGET imported from workerProtocol.ts
 const volCache = new Map<string, VolCacheEntry>();
 let volCacheBytes = 0;
-let activeVolKey: string | null = null;
+const activeVolKeyPerDataset = new Map<string, string>();
+
+// Offscreen texture pool
+let offscreenPool: GPUTexture[] = [];
+let poolWidth = 0;
+let poolHeight = 0;
 
 function volTextureBytes(w: number, h: number, d: number): number {
   return w * h * d * 2; // r16uint = 2 bytes per texel
@@ -56,16 +60,48 @@ function post(msg: WorkerToMainMessage) {
 
 function getSliceRenderer(): SliceRenderer {
   if (!sliceRenderer) {
-    sliceRenderer = new SliceRenderer(device, context, format);
+    sliceRenderer = new SliceRenderer(device);
   }
   return sliceRenderer;
 }
 
 function getVolumeRenderer(): VolumeRenderer {
   if (!volumeRenderer) {
-    volumeRenderer = new VolumeRenderer(device, context, format);
+    volumeRenderer = new VolumeRenderer(device);
   }
   return volumeRenderer;
+}
+
+function getCompositor(): LayerCompositor {
+  if (!compositor) {
+    compositor = new LayerCompositor(device, format);
+  }
+  return compositor;
+}
+
+function ensureOffscreenPool(count: number, w: number, h: number) {
+  if (w !== poolWidth || h !== poolHeight) {
+    for (const tex of offscreenPool) tex.destroy();
+    offscreenPool = [];
+    poolWidth = w;
+    poolHeight = h;
+  }
+  while (offscreenPool.length < count) {
+    offscreenPool.push(createOffscreenTarget(device, w, h));
+  }
+}
+
+// 1x1 dummy texture for unset bindings (slice renderer)
+let dummyTexture: GPUTexture | null = null;
+function getDummyTexture(): GPUTexture {
+  if (!dummyTexture) {
+    dummyTexture = device.createTexture({
+      size: [1, 1],
+      format: "r16uint",
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+  }
+  return dummyTexture;
 }
 
 self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
@@ -82,22 +118,6 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
-      case "setModeSlice": {
-        const renderer = getSliceRenderer();
-        if (displayOverrideActive) {
-          renderer.setDisplayParams(storedContrastMin, storedContrastMax, storedGamma);
-        }
-        break;
-      }
-
-      case "setModeVolume": {
-        const renderer = getVolumeRenderer();
-        if (displayOverrideActive) {
-          renderer.setDisplayParams(storedContrastMin, storedContrastMax, storedGamma);
-        }
-        break;
-      }
-
       case "resize": {
         // OffscreenCanvas dimensions are set directly
         const canvas = context.canvas as OffscreenCanvas;
@@ -106,27 +126,24 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
-      case "sliceSetFallback": {
-        const renderer = getSliceRenderer();
+      case "sliceSetFallbackForLayer": {
         const slice = new Uint16Array(msg.data);
         const { min, max } = sampleIntensityRange(slice);
         const texture = createSliceTexture(device, msg.width, msg.height, slice);
-        renderer.setFallback(texture);
-        if (!displayOverrideActive) renderer.setIntensityRange(min, max);
-        post({ type: "intensityRange", min, max });
+        fallbackPerDataset.set(msg.datasetId, texture);
+        post({ type: "intensityRange", datasetId: msg.datasetId, min, max });
         break;
       }
 
-      case "sliceUploadTiles": {
-        const renderer = getSliceRenderer();
-        const { level, z, t, c, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
+      case "sliceUploadTilesForLayer": {
+        const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
 
-        // Invalidate tile texture if view params changed
-        if (!tileState || tileState.level !== level || tileState.z !== z || tileState.t !== t || tileState.c !== c) {
-          if (tileState) tileState.texture.destroy();
+        let ts = tileStatePerDataset.get(datasetId);
+        if (!ts || ts.level !== level || ts.z !== z || ts.t !== t || ts.c !== c) {
+          if (ts) ts.texture.destroy();
           const texture = createSliceTexture(device, levelWidth, levelHeight, null);
-          tileState = { texture, level, z, t, c, uploaded: new Set(), intensityMin: 65535, intensityMax: 0 };
-          renderer.setTileTexture(texture);
+          ts = { texture, level, z, t, c, uploaded: new Set(), intensityMin: 65535, intensityMax: 0 };
+          tileStatePerDataset.set(datasetId, ts);
         }
 
         // Map full-res Z to level Z
@@ -142,14 +159,13 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           const perChunkSamples = Math.floor(10000 / Math.max(1, msg.tiles.length));
 
           for (const tile of msg.tiles) {
-            if (tileState!.uploaded.has(tile.key)) continue;
+            if (ts.uploaded.has(tile.key)) continue;
             if (tile.z !== targetChunkZ) continue;
             const data = new Uint16Array(tile.data);
 
-            // Incremental intensity tracking
             const r = sampleIntensityRange(data, perChunkSamples);
-            if (r.min < tileState!.intensityMin) { tileState!.intensityMin = r.min; intensityChanged = true; }
-            if (r.max > tileState!.intensityMax) { tileState!.intensityMax = r.max; intensityChanged = true; }
+            if (r.min < ts.intensityMin) { ts.intensityMin = r.min; intensityChanged = true; }
+            if (r.max > ts.intensityMax) { ts.intensityMax = r.max; intensityChanged = true; }
 
             const xOff = tile.x * chunkX;
             const yOff = tile.y * chunkY;
@@ -157,26 +173,18 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
             const tileH = Math.min(chunkY, levelHeight - yOff);
             const sliceOffset = localZ * chunkY * chunkX;
             const sliceData = data.subarray(sliceOffset, sliceOffset + chunkY * chunkX);
-            writeSliceRegion(device, tileState!.texture, sliceData, chunkX, xOff, yOff, tileW, tileH);
-            tileState!.uploaded.add(tile.key);
+            writeSliceRegion(device, ts.texture, sliceData, chunkX, xOff, yOff, tileW, tileH);
+            ts.uploaded.add(tile.key);
           }
 
           if (intensityChanged) {
-            if (!displayOverrideActive) renderer.setIntensityRange(tileState!.intensityMin, tileState!.intensityMax);
-            post({ type: "intensityRange", min: tileState!.intensityMin, max: tileState!.intensityMax });
+            post({ type: "intensityRange", datasetId, min: ts.intensityMin, max: ts.intensityMax });
           }
         }
         break;
       }
 
-      case "sliceRender": {
-        const renderer = getSliceRenderer();
-        renderer.render(msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, msg.dataW, msg.dataH);
-        break;
-      }
-
-      case "volumeSetInitial": {
-        const renderer = getVolumeRenderer();
+      case "volumeSetInitialForLayer": {
         const data = new Uint16Array(msg.data);
         const texture = createEmptyVolumeTexture(device, msg.width, msg.height, msg.depth);
         for (let z = 0; z < msg.depth; z++) {
@@ -191,22 +199,39 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
             [msg.width, msg.height, 1],
           );
         }
-        renderer.setVolume(texture, msg.width, msg.height, msg.depth);
         const { min, max } = sampleIntensityRange(data);
-        if (!displayOverrideActive) renderer.setIntensityRange(min, max);
-        post({ type: "intensityRange", min, max });
-        // Clear volume cache — dataset/mode changed
-        for (const entry of volCache.values()) entry.texture.destroy();
-        volCache.clear();
-        volCacheBytes = 0;
-        activeVolKey = null;
+        post({ type: "intensityRange", datasetId: msg.datasetId, min, max });
+
+        // Clear volume cache entries for this dataset only
+        for (const [key, entry] of volCache) {
+          if (key.startsWith(msg.datasetId + "/")) {
+            entry.texture.destroy();
+            volCacheBytes -= entry.byteSize;
+            volCache.delete(key);
+          }
+        }
+
+        // Store as a cache entry so renderMultiPass can find it
+        const byteSize = volTextureBytes(msg.width, msg.height, msg.depth);
+        const cacheKey = `${msg.datasetId}/initial`;
+        volCache.set(cacheKey, {
+          texture,
+          uploaded: new Set(["initial"]),
+          intensityMin: min,
+          intensityMax: max,
+          levelWidth: msg.width,
+          levelHeight: msg.height,
+          levelDepth: msg.depth,
+          byteSize,
+        });
+        volCacheBytes += byteSize;
+        activeVolKeyPerDataset.set(msg.datasetId, cacheKey);
         break;
       }
 
-      case "volumeUploadChunks": {
-        const renderer = getVolumeRenderer();
-        const { level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
-        const key = `${level}/${t}/${c}`;
+      case "volumeUploadChunksForLayer": {
+        const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+        const key = `${datasetId}/${level}/${t}/${c}`;
 
         let entry = volCache.get(key);
         if (entry) {
@@ -238,15 +263,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           volCacheBytes += newBytes;
         }
 
-        // Activate this texture if it changed
-        if (activeVolKey !== key) {
-          renderer.setVolume(entry.texture, entry.levelWidth, entry.levelHeight, entry.levelDepth);
-          activeVolKey = key;
-          if (entry.intensityMin <= entry.intensityMax) {
-            if (!displayOverrideActive) renderer.setIntensityRange(entry.intensityMin, entry.intensityMax);
-            post({ type: "intensityRange", min: entry.intensityMin, max: entry.intensityMax });
-          }
-        }
+        activeVolKeyPerDataset.set(datasetId, key);
 
         let intensityChanged = false;
         const totalChunks = msg.chunks.length;
@@ -271,44 +288,91 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         }
 
         if (intensityChanged) {
-          if (!displayOverrideActive) renderer.setIntensityRange(entry.intensityMin, entry.intensityMax);
-          post({ type: "intensityRange", min: entry.intensityMin, max: entry.intensityMax });
+          post({ type: "intensityRange", datasetId, min: entry.intensityMin, max: entry.intensityMax });
         }
         break;
       }
 
-      case "volumeRender": {
-        const renderer = getVolumeRenderer();
+      case "volumeRenderMultiPass": {
         const canvas = context.canvas as OffscreenCanvas;
         canvas.width = msg.canvasW;
         canvas.height = msg.canvasH;
-        renderer.setMatrices(msg.invViewProj, msg.modelMatrix, msg.invModelMatrix, msg.eye);
-        renderer.render();
+
+        const renderer = getVolumeRenderer();
+        const comp = getCompositor();
+        ensureOffscreenPool(msg.layers.length, msg.canvasW, msg.canvasH);
+
+        const encoder = device.createCommandEncoder();
+        const renderedLayers: CompositeLayer[] = [];
+
+        for (const layer of msg.layers) {
+          const volKey = activeVolKeyPerDataset.get(layer.datasetId);
+          if (!volKey) continue;
+          const entry = volCache.get(volKey);
+          if (!entry) continue;
+
+          const idx = renderedLayers.length;
+          renderer.setVolume(entry.texture, entry.levelWidth, entry.levelHeight, entry.levelDepth);
+          renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
+          renderer.setOpacity(layer.opacity);
+          renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye);
+          renderer.renderTo(offscreenPool[idx].createView(), encoder);
+          renderedLayers.push({ view: offscreenPool[idx].createView(), blendMode: layer.blendMode });
+        }
+
+        comp.composite(context.getCurrentTexture().createView(), renderedLayers, encoder);
+        device.queue.submit([encoder.finish()]);
         break;
       }
 
-      case "setDisplayParams": {
-        displayOverrideActive = true;
-        storedContrastMin = msg.contrastMin;
-        storedContrastMax = msg.contrastMax;
-        storedGamma = msg.gamma;
-        if (sliceRenderer) sliceRenderer.setDisplayParams(msg.contrastMin, msg.contrastMax, msg.gamma);
-        if (volumeRenderer) volumeRenderer.setDisplayParams(msg.contrastMin, msg.contrastMax, msg.gamma);
+      case "sliceRenderMultiPass": {
+        const canvas = context.canvas as OffscreenCanvas;
+        canvas.width = msg.canvasW;
+        canvas.height = msg.canvasH;
+
+        const renderer = getSliceRenderer();
+        const comp = getCompositor();
+        ensureOffscreenPool(msg.layers.length, msg.canvasW, msg.canvasH);
+
+        const encoder = device.createCommandEncoder();
+        const renderedLayers: CompositeLayer[] = [];
+
+        for (const layer of msg.layers) {
+          const fb = fallbackPerDataset.get(layer.datasetId);
+          const ts = tileStatePerDataset.get(layer.datasetId);
+          if (!fb && !ts) continue;
+
+          const idx = renderedLayers.length;
+          renderer.setFallback(fb ?? getDummyTexture());
+          renderer.setTileTexture(ts?.texture ?? getDummyTexture());
+          renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
+          renderer.setOpacity(layer.opacity);
+          renderer.setTransform(msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, layer.dataW, layer.dataH);
+          renderer.renderTo(offscreenPool[idx].createView(), encoder);
+          renderedLayers.push({ view: offscreenPool[idx].createView(), blendMode: layer.blendMode });
+        }
+
+        comp.composite(context.getCurrentTexture().createView(), renderedLayers, encoder);
+        device.queue.submit([encoder.finish()]);
         break;
       }
 
       case "destroy": {
-        displayOverrideActive = false;
-        if (tileState) {
-          tileState.texture.destroy();
-          tileState = null;
-        }
+        for (const ts of tileStatePerDataset.values()) ts.texture.destroy();
+        tileStatePerDataset.clear();
+        for (const fb of fallbackPerDataset.values()) fb.destroy();
+        fallbackPerDataset.clear();
         for (const entry of volCache.values()) entry.texture.destroy();
         volCache.clear();
         volCacheBytes = 0;
-        activeVolKey = null;
+        activeVolKeyPerDataset.clear();
+        for (const tex of offscreenPool) tex.destroy();
+        offscreenPool = [];
+        dummyTexture?.destroy();
+        dummyTexture = null;
         sliceRenderer = null;
         volumeRenderer = null;
+        compositor = null;
         self.close();
         break;
       }

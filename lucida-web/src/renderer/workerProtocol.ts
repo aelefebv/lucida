@@ -10,23 +10,8 @@ export interface InitMessage {
   canvas: OffscreenCanvas;
 }
 
-export interface SetModeSliceMessage {
-  type: "setModeSlice";
-}
-
-export interface SetModeVolumeMessage {
-  type: "setModeVolume";
-}
-
 export interface ResizeMessage {
   type: "resize";
-  width: number;
-  height: number;
-}
-
-export interface SliceSetFallbackMessage {
-  type: "sliceSetFallback";
-  data: ArrayBuffer;
   width: number;
   height: number;
 }
@@ -39,8 +24,17 @@ export interface SliceTile {
   key: string;
 }
 
-export interface SliceUploadTilesMessage {
-  type: "sliceUploadTiles";
+export interface SliceSetFallbackForLayerMessage {
+  type: "sliceSetFallbackForLayer";
+  datasetId: string;
+  data: ArrayBuffer;
+  width: number;
+  height: number;
+}
+
+export interface SliceUploadTilesForLayerMessage {
+  type: "sliceUploadTilesForLayer";
+  datasetId: string;
   tiles: SliceTile[];
   level: number;
   z: number;
@@ -56,25 +50,6 @@ export interface SliceUploadTilesMessage {
   fullResZ: number;
 }
 
-export interface SliceRenderMessage {
-  type: "sliceRender";
-  zoom: number;
-  cx: number;
-  cy: number;
-  canvasW: number;
-  canvasH: number;
-  dataW: number;
-  dataH: number;
-}
-
-export interface VolumeSetInitialMessage {
-  type: "volumeSetInitial";
-  data: ArrayBuffer;
-  width: number;
-  height: number;
-  depth: number;
-}
-
 export interface VolumeChunk {
   data: ArrayBuffer;
   x: number;
@@ -83,8 +58,18 @@ export interface VolumeChunk {
   key: string;
 }
 
-export interface VolumeUploadChunksMessage {
-  type: "volumeUploadChunks";
+export interface VolumeSetInitialForLayerMessage {
+  type: "volumeSetInitialForLayer";
+  datasetId: string;
+  data: ArrayBuffer;
+  width: number;
+  height: number;
+  depth: number;
+}
+
+export interface VolumeUploadChunksForLayerMessage {
+  type: "volumeUploadChunksForLayer";
+  datasetId: string;
   chunks: VolumeChunk[];
   level: number;
   t: number;
@@ -97,21 +82,47 @@ export interface VolumeUploadChunksMessage {
   chunkZ: number;
 }
 
-export interface VolumeRenderMessage {
-  type: "volumeRender";
-  invViewProj: Float32Array;
+// Multi-pass render messages
+
+export interface VolumeLayerParams {
+  datasetId: string;
   modelMatrix: Float32Array;
   invModelMatrix: Float32Array;
+  contrastMin: number;
+  contrastMax: number;
+  gamma: number;
+  opacity: number;
+  blendMode: "alpha" | "additive" | "max";
+}
+
+export interface VolumeRenderMultiPassMessage {
+  type: "volumeRenderMultiPass";
+  layers: VolumeLayerParams[];
+  invViewProj: Float32Array;
   eye: Float32Array;
   canvasW: number;
   canvasH: number;
 }
 
-export interface SetDisplayParamsMessage {
-  type: "setDisplayParams";
+export interface SliceLayerParams {
+  datasetId: string;
+  dataW: number;
+  dataH: number;
   contrastMin: number;
   contrastMax: number;
   gamma: number;
+  opacity: number;
+  blendMode: "alpha" | "additive" | "max";
+}
+
+export interface SliceRenderMultiPassMessage {
+  type: "sliceRenderMultiPass";
+  layers: SliceLayerParams[];
+  zoom: number;
+  cx: number;
+  cy: number;
+  canvasW: number;
+  canvasH: number;
 }
 
 export interface DestroyMessage {
@@ -120,16 +131,13 @@ export interface DestroyMessage {
 
 export type MainToWorkerMessage =
   | InitMessage
-  | SetModeSliceMessage
-  | SetModeVolumeMessage
   | ResizeMessage
-  | SliceSetFallbackMessage
-  | SliceUploadTilesMessage
-  | SliceRenderMessage
-  | VolumeSetInitialMessage
-  | VolumeUploadChunksMessage
-  | VolumeRenderMessage
-  | SetDisplayParamsMessage
+  | SliceSetFallbackForLayerMessage
+  | SliceUploadTilesForLayerMessage
+  | VolumeSetInitialForLayerMessage
+  | VolumeUploadChunksForLayerMessage
+  | VolumeRenderMultiPassMessage
+  | SliceRenderMultiPassMessage
   | DestroyMessage;
 
 // --- Worker -> Main ---
@@ -145,6 +153,7 @@ export interface ErrorMessage {
 
 export interface IntensityRangeMessage {
   type: "intensityRange";
+  datasetId: string;
   min: number;
   max: number;
 }

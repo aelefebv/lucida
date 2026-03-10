@@ -32,9 +32,9 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   let texUV4 = u.transform * vec4f(input.uv, 0.0, 1.0);
   let texUV = texUV4.xy;
 
-  // Bounds check
+  // Bounds check — transparent for compositing
   if (texUV.x < 0.0 || texUV.x > 1.0 || texUV.y < 0.0 || texUV.y > 1.0) {
-    return vec4f(0.0, 0.0, 0.0, 1.0);
+    return vec4f(0.0, 0.0, 0.0, 0.0);
   }
 
   let intensityMin = u.intensityRange.x;
@@ -51,9 +51,11 @@ fn fs(input: VSOut) -> @location(0) vec4f {
 
   let gamma = u.intensityRange.z;
 
+  let layerOpacity = u.intensityRange.w;
+
   if (tileVal > 0u) {
     let normalized = pow(clamp((f32(tileVal) - intensityMin) / range, 0.0, 1.0), gamma);
-    return vec4f(vec3f(normalized), 1.0);
+    return vec4f(vec3f(normalized) * layerOpacity, layerOpacity);
   }
 
   // Fall back to coarse texture
@@ -64,5 +66,5 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   );
   let fbVal = textureLoad(fallbackTex, fbCoord, 0).r;
   let normalized = pow(clamp((f32(fbVal) - intensityMin) / range, 0.0, 1.0), gamma);
-  return vec4f(vec3f(normalized), 1.0);
+  return vec4f(vec3f(normalized) * layerOpacity, layerOpacity);
 }

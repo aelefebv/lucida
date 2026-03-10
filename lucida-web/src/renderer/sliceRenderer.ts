@@ -1,14 +1,14 @@
 /** WebGPU pipeline for 2D slice rendering with GPU-side u16 normalization. */
 import shaderSource from "./slice.wgsl?raw";
+import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
 // Uniform buffer layout (80 bytes, padded to 96 for alignment):
 //   offset 0:   transform      mat4x4f   (64B) — screen UV → texture UV
-//   offset 64:  intensityRange vec4f     (16B) — x=min, y=max
+//   offset 64:  intensityRange vec4f     (16B) — x=min, y=max, z=gamma, w=opacity
 const UNIFORM_SIZE = 96;
 
 export class SliceRenderer {
   private device: GPUDevice;
-  private context: GPUCanvasContext;
   private pipeline: GPURenderPipeline;
   private uniformBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
@@ -21,10 +21,10 @@ export class SliceRenderer {
   private intensityMin = 0;
   private intensityMax = 65535;
   private gamma = 1.0;
+  private opacity = 1.0;
 
-  constructor(device: GPUDevice, context: GPUCanvasContext, format: GPUTextureFormat) {
+  constructor(device: GPUDevice) {
     this.device = device;
-    this.context = context;
 
     const shaderModule = device.createShaderModule({ code: shaderSource });
 
@@ -59,7 +59,7 @@ export class SliceRenderer {
       fragment: {
         module: shaderModule,
         entryPoint: "fs",
-        targets: [{ format }],
+        targets: [{ format: OFFSCREEN_FORMAT }],
       },
       primitive: { topology: "triangle-list" },
     });
@@ -98,6 +98,10 @@ export class SliceRenderer {
     this.gamma = gamma;
   }
 
+  setOpacity(v: number) {
+    this.opacity = v;
+  }
+
   private rebuildBindGroup() {
     const fallback = this.fallbackTexture ?? this.dummyTexture;
     const tile = this.tileTexture ?? this.dummyTexture;
@@ -111,18 +115,7 @@ export class SliceRenderer {
     });
   }
 
-  render(zoom: number, cx: number, cy: number, canvasW: number, canvasH: number, dataW: number, dataH: number) {
-    if (!this.bindGroup) return;
-
-    // Build inverse transform matrix (screen UV → texture UV)
-    // Forward: screenX = canvasW/2 - cx*zoom + texU*dataW*zoom
-    //          screenU = screenX / canvasW
-    // So:      screenU = 0.5 - cx*zoom/canvasW + texU * dataW*zoom/canvasW
-    // Inverse: texU = (screenU - 0.5 + cx*zoom/canvasW) / (dataW*zoom/canvasW)
-    //        = screenU * canvasW/(dataW*zoom) - 0.5*canvasW/(dataW*zoom) + cx/dataW
-    //
-    // Same logic for Y axis.
-
+  setTransform(zoom: number, cx: number, cy: number, canvasW: number, canvasH: number, dataW: number, dataH: number) {
     const sx = canvasW / (dataW * zoom);
     const sy = canvasH / (dataH * zoom);
     const tx = -0.5 * canvasW / (dataW * zoom) + cx / dataW;
@@ -139,18 +132,21 @@ export class SliceRenderer {
 
     const uniformData = new Float32Array(UNIFORM_SIZE / 4);
     uniformData.set(transform, 0);
-    uniformData.set([this.intensityMin, this.intensityMax, this.gamma, 0], 16);
+    uniformData.set([this.intensityMin, this.intensityMax, this.gamma, this.opacity], 16);
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
+  }
 
-    const encoder = this.device.createCommandEncoder();
+  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder) {
+    if (!this.bindGroup) return;
+
     const pass = encoder.beginRenderPass({
       colorAttachments: [
         {
-          view: this.context.getCurrentTexture().createView(),
+          view: target,
           loadOp: "clear",
           storeOp: "store",
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
         },
       ],
     });
@@ -159,7 +155,5 @@ export class SliceRenderer {
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3);
     pass.end();
-
-    this.device.queue.submit([encoder.finish()]);
   }
 }

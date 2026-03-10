@@ -116,8 +116,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     t += adaptiveStep;
   }
 
-  // Blend with background
-  let bg = vec3f(0.05, 0.05, 0.08);
-  let final_color = color + (1.0 - alpha) * bg;
-  return vec4f(final_color, 1.0);
+  // Pre-multiply by layer opacity for compositing
+  let layerOpacity = u.displayParams.y;
+  return vec4f(color * layerOpacity, alpha * layerOpacity);
 }

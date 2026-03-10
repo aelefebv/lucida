@@ -2,9 +2,9 @@
 import type { WasmScene } from "lucida-core";
 import type { DatasetInfo } from "./zarr/metadata.ts";
 import { ChunkStore } from "./zarr/chunkStore.ts";
-import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import { RenderClient } from "./renderer/renderClient.ts";
 import { VOL_CACHE_BUDGET } from "./renderer/workerProtocol.ts";
+import type { VolumeLayerParams, SliceLayerParams } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 
 export interface DatasetEntry {
@@ -36,14 +36,14 @@ export class RenderLoop {
   private rafId: number | null = null;
   private unsubs = new Map<string, () => void>();
 
-  private uploaded = new Set<string>();
-  private currentLod: { level: number; z?: number; t: number; c: number } | null = null;
+  // Per-dataset slice upload tracking
+  private sliceUploaded = new Map<string, Set<string>>();
+  private sliceCurrentLod = new Map<string, { level: number; z: number; t: number; c: number }>();
 
   // Volume-specific LRU cache of uploaded sets (byte-budget eviction, matches GPU worker)
-  // VOL_CACHE_BUDGET imported from workerProtocol.ts
   private volumeUploaded = new Map<string, { uploaded: Set<string>; byteSize: number }>();
   private volumeCacheBytes = 0;
-  private volumeLodKey: string | null = null;
+  private volumeLodKeys = new Map<string, string>(); // per-dataset lod key
 
   // Slice-specific params
   private sliceZ = 0;
@@ -106,9 +106,9 @@ export class RenderLoop {
         this.volumeUploaded.delete(key);
       }
     }
-    if (this.volumeLodKey?.startsWith(id + "/")) {
-      this.volumeLodKey = null;
-    }
+    this.volumeLodKeys.delete(id);
+    this.sliceUploaded.delete(id);
+    this.sliceCurrentLod.delete(id);
 
     this.dirty = true;
   }
@@ -127,7 +127,7 @@ export class RenderLoop {
   resetVolumeCache(): void {
     this.volumeUploaded.clear();
     this.volumeCacheBytes = 0;
-    this.volumeLodKey = null;
+    this.volumeLodKeys.clear();
   }
 
   setSliceParams(z: number, t: number, c: number): void {
@@ -168,118 +168,155 @@ export class RenderLoop {
     scene.set_t(t);
     scene.set_c(c);
 
-    // Warm chunks for all datasets
+    // Get layer ordering and settings from scene
+    const layerOrder: string[] = JSON.parse(scene.layer_order());
+    const allSettings: Record<string, {
+      visible: boolean;
+      opacity: number;
+      contrast_min: number;
+      contrast_max: number;
+      gamma: number;
+      blend_mode: string;
+    }> = JSON.parse(scene.all_layer_settings());
+
+    let budgetRemaining = UPLOAD_BUDGET_BYTES;
+
+    // Upload chunks for ALL datasets
     for (const [dsId, ds] of this.datasets) {
       const plan = evaluateChunkPlanFor(scene, dsId);
-      if (plan && plan.needed.length > 0) {
+      if (!plan) continue;
+      if (plan.needed.length > 0) {
         ds.store.ensureFetched(plan.needed);
       }
-    }
 
-    // Upload + render only the selected dataset
-    const plan = evaluateChunkPlanFor(scene, this.selectedDatasetId);
-    if (!plan) return;
+      const level = plan.needed[0]?.level;
+      if (level === undefined) continue;
 
-    const level = plan.needed[0]?.level;
-    if (level !== undefined) {
-      const levelMeta = selectedDs.info.levels[level];
-      if (levelMeta) {
-        const [, , , levelHeight, levelWidth] = levelMeta.shape;
-        const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-        const fullResDepth = selectedDs.info.levels[0].shape[2];
-        const levelDepth = levelMeta.shape[2];
+      const levelMeta = ds.info.levels[level];
+      if (!levelMeta) continue;
 
-        // Reset uploaded set when view params change
-        const lod = this.currentLod;
-        if (!lod || lod.level !== level || lod.z !== z || lod.t !== t || lod.c !== c) {
-          this.uploaded = new Set();
-          this.currentLod = { level, z, t, c };
-        }
+      const [, , , levelHeight, levelWidth] = levelMeta.shape;
+      const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+      const fullResDepth = ds.info.levels[0].shape[2];
+      const levelDepth = levelMeta.shape[2];
 
-        // Collect newly-available chunks (up to byte budget)
-        const availableChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-        let budgetRemaining = UPLOAD_BUDGET_BYTES;
-        for (const coord of plan.needed) {
-          if (coord.level !== level) continue;
-          if (this.uploaded.has(coord.key)) continue;
-          const buf = selectedDs.store.get(coord.key);
-          if (!buf) continue;
-          availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-          this.uploaded.add(coord.key);
-          budgetRemaining -= buf.byteLength;
-          if (budgetRemaining <= 0) {
-            this.dirty = true; // more chunks remain — continue next frame
-            break;
-          }
-        }
+      // Per-dataset LOD tracking
+      const lod = this.sliceCurrentLod.get(dsId);
+      if (!lod || lod.level !== level || lod.z !== z || lod.t !== t || lod.c !== c) {
+        this.sliceUploaded.set(dsId, new Set());
+        this.sliceCurrentLod.set(dsId, { level, z, t, c });
+      }
 
-        if (availableChunks.length > 0) {
-          client.sliceUploadTiles(
-            availableChunks,
-            level, z, t, c,
-            levelWidth, levelHeight,
-            chunkX, chunkY, chunkZ,
-            fullResDepth, levelDepth, z,
-          );
+      const uploaded = this.sliceUploaded.get(dsId)!;
+
+      const availableChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+      for (const coord of plan.needed) {
+        if (coord.level !== level) continue;
+        if (uploaded.has(coord.key)) continue;
+        const buf = ds.store.get(coord.key);
+        if (!buf) continue;
+        availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+        uploaded.add(coord.key);
+        budgetRemaining -= buf.byteLength;
+        if (budgetRemaining <= 0) {
+          this.dirty = true;
+          break;
         }
       }
+
+      if (availableChunks.length > 0) {
+        client.sliceUploadTilesForLayer(
+          dsId,
+          availableChunks,
+          level, z, t, c,
+          levelWidth, levelHeight,
+          chunkX, chunkY, chunkZ,
+          fullResDepth, levelDepth, z,
+        );
+      }
+
+      if (budgetRemaining <= 0) break;
     }
 
-    // Render
+    // Build layer params for visible layers in order
     const canvasW = canvas.clientWidth;
     const canvasH = canvas.clientHeight;
     scene.set_viewport(canvasW, canvasH);
-
-    const fullResWidth = selectedDs.info.levels[0].shape[4];
-    const fullResHeight = selectedDs.info.levels[0].shape[3];
 
     const currentZoom = scene.zoom();
     const centerArr = scene.center();
     const cx = centerArr[0];
     const cy = centerArr[1];
 
+    const layers: SliceLayerParams[] = [];
+    for (const dsId of layerOrder) {
+      const ds = this.datasets.get(dsId);
+      if (!ds) continue;
+      const settings = allSettings[dsId];
+      if (!settings || !settings.visible) continue;
+
+      const fullResWidth = ds.info.levels[0].shape[4];
+      const fullResHeight = ds.info.levels[0].shape[3];
+
+      layers.push({
+        datasetId: dsId,
+        dataW: fullResWidth,
+        dataH: fullResHeight,
+        contrastMin: settings.contrast_min,
+        contrastMax: settings.contrast_max,
+        gamma: settings.gamma,
+        opacity: settings.opacity,
+        blendMode: settings.blend_mode as "alpha" | "additive" | "max",
+      });
+    }
+
     client.resize(canvasW, canvasH);
-    client.sliceRender(currentZoom, cx, cy, canvasW, canvasH, fullResWidth, fullResHeight);
+    client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH);
   }
 
   private tickVolume(): void {
     const { scene, client, canvas } = this;
-    const selectedDs = this.datasets.get(this.selectedDatasetId);
-    if (!selectedDs) return;
 
     const viewT = scene.t();
     const viewC = scene.c();
 
-    // Warm chunks for all datasets
+    // Get layer ordering and settings from scene
+    const layerOrder: string[] = JSON.parse(scene.layer_order());
+    const allSettings: Record<string, {
+      visible: boolean;
+      opacity: number;
+      contrast_min: number;
+      contrast_max: number;
+      gamma: number;
+      blend_mode: string;
+    }> = JSON.parse(scene.all_layer_settings());
+
+    let budgetRemaining = UPLOAD_BUDGET_BYTES;
+
+    // Upload chunks for ALL datasets
     for (const [dsId, ds] of this.datasets) {
       const plan = evaluateChunkPlanFor(scene, dsId);
-      if (plan && plan.needed.length > 0) {
+      if (!plan) continue;
+      if (plan.needed.length > 0) {
         ds.store.ensureFetched(plan.needed);
       }
-    }
 
-    // Upload + render only the selected dataset
-    const plan = evaluateChunkPlanFor(scene, this.selectedDatasetId);
-    if (!plan) return;
+      if (plan.needed.length === 0) continue;
 
-    if (plan.needed.length > 0) {
       const targetLevel = plan.needed[0].level;
-      const levelMeta = selectedDs.info.levels[targetLevel];
+      const levelMeta = ds.info.levels[targetLevel];
       const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
       const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
 
-      const lodKey = `${this.selectedDatasetId}/${targetLevel}/${viewT}/${viewC}`;
-      const lodKeyChanged = this.volumeLodKey !== lodKey;
-      const texBytes = widthFull * heightFull * depthFull * 2; // r16uint
+      const lodKey = `${dsId}/${targetLevel}/${viewT}/${viewC}`;
+      const lodKeyChanged = this.volumeLodKeys.get(dsId) !== lodKey;
+      const texBytes = widthFull * heightFull * depthFull * 2;
 
-      // Look up (or create) the uploaded set for this lodKey
       let cached = this.volumeUploaded.get(lodKey);
       if (cached) {
-        // LRU touch
         this.volumeUploaded.delete(lodKey);
         this.volumeUploaded.set(lodKey, cached);
       } else {
-        // Evict oldest entries until new texture fits within budget
         while (this.volumeUploaded.size > 0 && this.volumeCacheBytes + texBytes > VOL_CACHE_BUDGET) {
           const oldestKey = this.volumeUploaded.keys().next().value!;
           const oldest = this.volumeUploaded.get(oldestKey)!;
@@ -290,43 +327,62 @@ export class RenderLoop {
         this.volumeUploaded.set(lodKey, cached);
         this.volumeCacheBytes += texBytes;
       }
-      this.volumeLodKey = lodKey;
+      this.volumeLodKeys.set(dsId, lodKey);
 
-      // Collect newly available chunks (up to byte budget)
       const newChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-      let budgetRemaining = UPLOAD_BUDGET_BYTES;
       for (const coord of plan.needed) {
         if (cached.uploaded.has(coord.key)) continue;
-        const buf = selectedDs.store.get(coord.key);
+        const buf = ds.store.get(coord.key);
         if (!buf) continue;
         newChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
         cached.uploaded.add(coord.key);
         budgetRemaining -= buf.byteLength;
         if (budgetRemaining <= 0) {
-          this.dirty = true; // more chunks remain — continue next frame
+          this.dirty = true;
           break;
         }
       }
 
-      // Send to GPU worker if there are new chunks OR if lodKey changed (to activate cached texture)
       if (newChunks.length > 0 || lodKeyChanged) {
-        client.volumeUploadChunks(
+        client.volumeUploadChunksForLayer(
+          dsId,
           newChunks,
           targetLevel, viewT, viewC,
           widthFull, heightFull, depthFull,
           chunkX, chunkY, chunkZ,
         );
       }
+
+      if (budgetRemaining <= 0) break;
     }
 
-    // Render
+    // Build layer params for visible layers in order
     const invVP = new Float32Array(scene.inv_view_proj_3d());
-    const model = new Float32Array(scene.model_matrix_for(this.selectedDatasetId));
-    const invModel = new Float32Array(scene.inv_model_matrix_for(this.selectedDatasetId));
     const eye = new Float32Array(scene.eye_position_3d());
     const canvasW = canvas.clientWidth * devicePixelRatio;
     const canvasH = canvas.clientHeight * devicePixelRatio;
 
-    client.volumeRender(invVP, model, invModel, eye, canvasW, canvasH);
+    const layers: VolumeLayerParams[] = [];
+    for (const dsId of layerOrder) {
+      if (!this.datasets.has(dsId)) continue;
+      const settings = allSettings[dsId];
+      if (!settings || !settings.visible) continue;
+
+      const model = new Float32Array(scene.model_matrix_for(dsId));
+      const invModel = new Float32Array(scene.inv_model_matrix_for(dsId));
+
+      layers.push({
+        datasetId: dsId,
+        modelMatrix: model,
+        invModelMatrix: invModel,
+        contrastMin: settings.contrast_min,
+        contrastMax: settings.contrast_max,
+        gamma: settings.gamma,
+        opacity: settings.opacity,
+        blendMode: settings.blend_mode as "alpha" | "additive" | "max",
+      });
+    }
+
+    client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH);
   }
 }

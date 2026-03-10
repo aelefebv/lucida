@@ -1,5 +1,15 @@
 /** WebGPU device/canvas initialization and texture helpers. */
 
+export const OFFSCREEN_FORMAT: GPUTextureFormat = "rgba16float";
+
+export function createOffscreenTarget(device: GPUDevice, w: number, h: number): GPUTexture {
+  return device.createTexture({
+    size: [w, h],
+    format: OFFSCREEN_FORMAT,
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+  });
+}
+
 export interface GPUContext {
   device: GPUDevice;
   context: GPUCanvasContext;
