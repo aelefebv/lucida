@@ -1,0 +1,142 @@
+.layer-panel {
+  width: 280px;
+  min-width: 280px;
+  background: #1a1a1a;
+  border-right: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.layer-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #333;
+}
+
+.layer-panel-header h3 {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.layer-panel-header-buttons {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.layer-panel-header button {
+  padding: 0.25rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+.layer-list {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.layer-row {
+  border-bottom: 1px solid #2a2a2a;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+}
+
+.layer-row.selected {
+  border-left-color: #646cff;
+  background: #252535;
+}
+
+.layer-row-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.5rem;
+}
+
+.layer-eye-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  font-size: 0.8rem;
+  line-height: 1;
+  flex-shrink: 0;
+  border-radius: 4px;
+}
+
+.layer-name {
+  flex: 1;
+  font-size: 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.layer-opacity-slider {
+  width: 60px;
+  flex-shrink: 0;
+}
+
+.layer-expand-btn {
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  font-size: 0.7rem;
+  line-height: 1;
+  flex-shrink: 0;
+  border-radius: 4px;
+}
+
+.layer-detail {
+  padding: 0.5rem 0.75rem;
+  border-top: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.layer-detail .contrast-controls {
+  max-width: none;
+}
+
+.layer-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+}
+
+.layer-detail-row label {
+  min-width: 3rem;
+  font-size: 0.75rem;
+  color: #aaa;
+}
+
+.layer-detail-row select {
+  flex: 1;
+  background: #2a2a2a;
+  color: #ddd;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 0.2rem 0.3rem;
+  font-size: 0.75rem;
+}
+
+.layer-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+}
+
+.layer-actions button {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+}
+
+.layer-empty {
+  padding: 1rem;
+  text-align: center;
+  color: #666;
+  font-size: 0.85rem;
+}

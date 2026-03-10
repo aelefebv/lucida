@@ -425,4 +425,11 @@ impl WasmScene {
         let ids: Vec<&str> = self.inner.document.datasets.iter().map(|d| d.id.as_str()).collect();
         serde_json::to_string(&ids).unwrap()
     }
+
+    pub fn dataset_name(&self, id: &str) -> String {
+        self.inner.document.datasets.iter()
+            .find(|d| d.id == id)
+            .map(|d| d.name.clone())
+            .unwrap_or_else(|| id.to_string())
+    }
 }

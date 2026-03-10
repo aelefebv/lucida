@@ -13,23 +13,10 @@ import { RenderLoop } from "./renderLoop.ts";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
-import { ContrastControls } from "./components/ContrastControls.tsx";
+import { LayerPanel, type LayerInfo } from "./components/LayerPanel.tsx";
 import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "./bridge.ts";
 import { applyDocumentCommand, applyViewportCommand } from "./applyAndSend.ts";
 import "./App.css";
-
-interface OpenedItem {
-  name: string;
-  size: number;
-  kind: "file" | "directory";
-  fileCount?: number;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 type ViewMode = "2d" | "3d";
 
@@ -46,6 +33,7 @@ function dtypeMax(dtype: string): number {
 /** State for a single dataset, either local or remote. */
 interface DatasetState {
   id: string;
+  name: string;
   info: DatasetInfo;
   store: ChunkStore;
   fileIndex: Map<string, File> | null; // null for remote datasets
@@ -58,7 +46,6 @@ interface PendingChunkResolve {
 }
 
 function App() {
-  const [item, setItem] = useState<OpenedItem | null>(null);
   const [wasmReady, setWasmReady] = useState(false);
   const [volume, setVolume] = useState<VolumeData | null>(null);
   const [wasmScene, setWasmScene] = useState<WasmScene | null>(null);
@@ -71,16 +58,26 @@ function App() {
   const [c, setC] = useState(0);
   const [t, setT] = useState(0);
 
-  // Contrast controls — per-dataset intensity ranges
+  // Per-dataset intensity ranges from GPU worker
   const [dataRangeMap, setDataRangeMap] = useState<Map<string, { min: number; max: number }>>(new Map());
-  const [contrastMin, setContrastMin] = useState(0);
-  const [contrastMax, setContrastMax] = useState(65535);
-  const [gamma, setGamma] = useState(1.0);
-  const [autoContrast, setAutoContrast] = useState(true);
-  const [fullRange, setFullRange] = useState(false);
+
+  // Per-layer auto-contrast and full-range flags
+  const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
+  const [fullRangeMap, setFullRangeMap] = useState<Map<string, boolean>>(new Map());
+  const autoContrastMapRef = useRef<Map<string, boolean>>(new Map());
+  autoContrastMapRef.current = autoContrastMap;
+
+  // Layer panel expand state
+  const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null);
+
+  // Bumped when WASM layer settings change to trigger re-render
+  const [layerSettingsVersion, setLayerSettingsVersion] = useState(0);
 
   // Remote document version — bumped when a document command arrives via WebSocket
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
+
+  // Bumped when datasetsRef changes to trigger re-renders
+  const [datasetsVersion, setDatasetsVersion] = useState(0);
 
   // Peer presence state
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
@@ -89,9 +86,6 @@ function App() {
 
   // Selected dataset for rendering
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
-
-  // Derived: dataRange for the selected dataset (for ContrastControls compatibility)
-  const dataRange = selectedDatasetId ? dataRangeMap.get(selectedDatasetId) ?? null : null;
 
   // Keep dataset info and file index for re-assembling on C/T change
   const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
@@ -103,7 +97,6 @@ function App() {
   // Pending chunk requests from remote viewers (keyed by chunk key)
   const pendingChunkRequests = useRef<Map<string, PendingChunkResolve>>(new Map());
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
 
   // Single canvas + RenderClient persisting across mode switches
@@ -155,12 +148,13 @@ function App() {
           if (doc.datasets) {
             for (const ds of doc.datasets) {
               if (ds.client_metadata && !datasetsRef.current.has(ds.id)) {
-                setupRemoteDataset(ds.id, ds.client_metadata);
+                setupRemoteDataset(ds.id, ds.name ?? ds.id, ds.client_metadata);
               }
             }
           }
 
           setRemoteDocumentVersion((v) => v + 1);
+          setDatasetsVersion((v) => v + 1);
 
           // Publish the scene so render gate passes
           setWasmScene(scene);
@@ -185,7 +179,7 @@ function App() {
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "add_dataset" && cmd.client_metadata) {
             if (!datasetsRef.current.has(cmd.id)) {
-              setupRemoteDataset(cmd.id, cmd.client_metadata);
+              setupRemoteDataset(cmd.id, cmd.name ?? cmd.id, cmd.client_metadata);
             }
             setWasmScene(scene);
           }
@@ -196,6 +190,10 @@ function App() {
               ds.store.destroy();
               datasetsRef.current.delete(cmd.id);
             }
+            // Clean up per-layer maps
+            setAutoContrastMap(prev => { const next = new Map(prev); next.delete(cmd.id); return next; });
+            setFullRangeMap(prev => { const next = new Map(prev); next.delete(cmd.id); return next; });
+            setDataRangeMap(prev => { const next = new Map(prev); next.delete(cmd.id); return next; });
             // If removed dataset was selected, select next available or null
             setSelectedDatasetId(prev => {
               if (prev === cmd.id) {
@@ -204,14 +202,18 @@ function App() {
                   const remainingDs = datasetsRef.current.get(remaining)!;
                   setDatasetInfo(remainingDs.info);
                   storeRef.current = remainingDs.store;
+                  fileIndexRef.current = remainingDs.fileIndex;
                 } else {
                   setDatasetInfo(null);
                   storeRef.current = null;
+                  fileIndexRef.current = null;
+                  setVolume(null);
                 }
                 return remaining;
               }
               return prev;
             });
+            setDatasetsVersion((v) => v + 1);
           }
           setRemoteDocumentVersion((v) => v + 1);
         } catch (e) {
@@ -272,9 +274,6 @@ function App() {
               setZ(scene.z());
               setT(scene.t());
               setC(scene.c());
-              setContrastMin(scene.contrast_min());
-              setContrastMax(scene.contrast_max());
-              setGamma(scene.gamma());
               const is3d = scene.is_3d();
               setViewMode(is3d ? "3d" : "2d");
               loopRef.current?.markDirty();
@@ -311,8 +310,8 @@ function App() {
       },
       onDisconnect: () => {
         // Reject all pending chunk requests so they don't hang forever
-        for (const [key, pending] of pendingChunkRequests.current) {
-          pending.reject(new Error(`Bridge disconnected, chunk ${key} dropped`));
+        for (const [, pending] of pendingChunkRequests.current) {
+          pending.reject(new Error("Bridge disconnected"));
         }
         pendingChunkRequests.current.clear();
       },
@@ -321,7 +320,7 @@ function App() {
   }, [wasmReady]);
 
   /** Set up a remote dataset from client_metadata received via command/snapshot. */
-  function setupRemoteDataset(datasetId: string, clientMetadata: DatasetInfo) {
+  function setupRemoteDataset(datasetId: string, name: string, clientMetadata: DatasetInfo) {
     const info = clientMetadata;
 
     const CHUNK_TIMEOUT_MS = 10_000;
@@ -370,10 +369,15 @@ function App() {
     const store = new ChunkStore(remoteFetcher);
     datasetsRef.current.set(datasetId, {
       id: datasetId,
+      name,
       info,
       store,
       fileIndex: null,
     });
+
+    // Init per-layer maps
+    setAutoContrastMap(prev => { const next = new Map(prev); next.set(datasetId, true); return next; });
+    setFullRangeMap(prev => { const next = new Map(prev); next.set(datasetId, false); return next; });
 
     // Add to render loop if it exists
     loopRef.current?.addDataset(datasetId, store, info);
@@ -385,7 +389,6 @@ function App() {
       setSelectedDatasetId(datasetId);
 
       // Create placeholder volume from coarsest level dimensions.
-      // The RenderLoop will fetch real chunks and overwrite the fallback.
       const coarsest = info.levels[info.levels.length - 1];
       const [, , depth, height, width] = coarsest.shape;
       setVolume({
@@ -395,6 +398,8 @@ function App() {
         depth,
       });
     }
+
+    setDatasetsVersion((v) => v + 1);
   }
 
   /** Send an empty-data binary response so the requester's promise resolves immediately. */
@@ -505,52 +510,22 @@ function App() {
         next.set(datasetId, { min, max });
         return next;
       });
-      setAutoContrast(prev => {
-        if (prev) {
-          // Apply contrast to the scene's per-layer settings
-          const scene = wasmSceneRef.current;
-          if (scene) {
-            scene.apply_command(JSON.stringify({
-              type: "set_layer_contrast",
-              dataset_id: datasetId,
-              min,
-              max,
-            }));
-          }
-          // Update UI state if this is the selected dataset
-          setSelectedDatasetId(currentSelected => {
-            if (currentSelected === datasetId) {
-              setContrastMin(min);
-              setContrastMax(max);
-            }
-            return currentSelected;
-          });
+      // Apply auto-contrast for this specific dataset if enabled
+      const isAuto = autoContrastMapRef.current.get(datasetId) ?? true;
+      if (isAuto) {
+        const scene = wasmSceneRef.current;
+        if (scene) {
+          scene.apply_command(JSON.stringify({
+            type: "set_layer_contrast",
+            dataset_id: datasetId,
+            min,
+            max,
+          }));
           loopRef.current?.markDirty();
         }
-        return prev;
-      });
+      }
     };
   }, [clientReady]);
-
-  // When contrast/gamma changes, update per-layer settings in scene and mark dirty
-  useEffect(() => {
-    if (!clientReady || !selectedDatasetId) return;
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      scene.apply_command(JSON.stringify({
-        type: "set_layer_contrast",
-        dataset_id: selectedDatasetId,
-        min: contrastMin,
-        max: contrastMax,
-      }));
-      scene.apply_command(JSON.stringify({
-        type: "set_layer_gamma",
-        dataset_id: selectedDatasetId,
-        gamma,
-      }));
-    }
-    loopRef.current?.markDirty();
-  }, [contrastMin, contrastMax, gamma, clientReady, selectedDatasetId]);
 
   // Sync Z/T/C to WASM scene and request chunks
   useEffect(() => {
@@ -568,86 +543,40 @@ function App() {
     } catch { /* ignore */ }
   }, [z, t, c, wasmScene, selectedDatasetId]);
 
-  function handleOpenFile() {
-    fileInputRef.current?.click();
-  }
-
-  function handleOpenFolder() {
-    dirInputRef.current?.click();
-  }
-
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const selected = e.target.files?.[0];
-    if (!selected) return;
-    setItem({
-      name: selected.name,
-      size: selected.size,
-      kind: "file",
-    });
-    cleanupState();
-  }
-
-  function cleanupState() {
-    storeRef.current?.destroy();
-    storeRef.current = null;
-    setSelectedDatasetId(null);
-    setVolume(null);
-    setWasmScene(null);
-    setDatasetInfo(null);
-    setError(null);
-    setZ(0);
-    setC(0);
-    setT(0);
-    setDataRangeMap(new Map());
-    setContrastMin(0);
-    setContrastMax(65535);
-    setGamma(1.0);
-    setAutoContrast(true);
-    setFullRange(false);
-  }
-
   async function handleDirChange(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
     const dirName = files[0].webkitRelativePath.split("/")[0];
-    let totalSize = 0;
-    for (let i = 0; i < files.length; i++) {
-      totalSize += files[i].size;
-    }
-
-    setItem({
-      name: dirName,
-      size: totalSize,
-      kind: "directory",
-      fileCount: files.length,
-    });
-    cleanupState();
 
     // Try to load as OME-Zarr
     const fileIndex = buildFileIndex(files);
     if (!fileIndex.has("zarr.json")) return;
 
-    fileIndexRef.current = fileIndex;
     setLoading(true);
+    setError(null);
     try {
       const info = await parseDatasetInfo(fileIndex);
       console.log("OME-Zarr metadata:", info);
-      setDatasetInfo(info);
 
       // Use coarsest level for fast first paint
       const coarsest = info.levels[info.levels.length - 1];
       const vol = await assembleVolume(fileIndex, coarsest.path, 0, 0, coarsest);
       console.log(`Volume loaded: ${vol.width}x${vol.height}x${vol.depth}`);
 
-      // Create WasmScene with full-res level metadata
-      const fullRes = info.levels[0];
-      const scene = new WasmScene(800, 600);
+      // Create or reuse WasmScene
+      let scene = wasmSceneRef.current;
+      const isFirstDataset = !scene;
+      if (!scene) {
+        scene = new WasmScene(800, 600);
+        wasmSceneRef.current = scene;
+      }
 
       // Generate dataset ID
       const datasetId = crypto.randomUUID();
 
       // Build AddDataset command with layer metadata + client_metadata
+      const fullRes = info.levels[0];
       const shapeZ = fullRes.shape[2],
         shapeY = fullRes.shape[3],
         shapeX = fullRes.shape[4];
@@ -688,12 +617,14 @@ function App() {
       // Apply document command locally and send to server
       applyDocumentCommand(scene, addDatasetCmd, sendCommand);
 
-      // Local viewport setup — not sent to server
-      applyViewportCommand(scene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
-      applyViewportCommand(scene, { type: "set_mode_2d" });
-      applyViewportCommand(scene, { type: "set_z", z: 0 });
-      applyViewportCommand(scene, { type: "set_c", c: 0 });
-      applyViewportCommand(scene, { type: "set_t", t: 0 });
+      // If first dataset, set up viewport
+      if (isFirstDataset) {
+        applyViewportCommand(scene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
+        applyViewportCommand(scene, { type: "set_mode_2d" });
+        applyViewportCommand(scene, { type: "set_z", z: 0 });
+        applyViewportCommand(scene, { type: "set_c", c: 0 });
+        applyViewportCommand(scene, { type: "set_t", t: 0 });
+      }
 
       // Create local ChunkStore with local fetcher
       const localFetcher: ChunkFetcher = (coord, signal) => {
@@ -712,21 +643,29 @@ function App() {
         );
       };
       const store = new ChunkStore(localFetcher);
-      storeRef.current = store;
 
       // Track this dataset locally (so we can serve chunk requests)
       datasetsRef.current.set(datasetId, {
         id: datasetId,
+        name: dirName,
         info,
         store,
         fileIndex,
       });
 
+      // Init per-layer maps
+      setAutoContrastMap(prev => { const next = new Map(prev); next.set(datasetId, true); return next; });
+      setFullRangeMap(prev => { const next = new Map(prev); next.set(datasetId, false); return next; });
+
       // Add to render loop if it exists
       loopRef.current?.addDataset(datasetId, store, info);
 
-      // Select this dataset for rendering
+      // Select this dataset
+      storeRef.current = store;
+      fileIndexRef.current = fileIndex;
+      setDatasetInfo(info);
       setSelectedDatasetId(datasetId);
+      setDatasetsVersion((v) => v + 1);
 
       setVolume(vol);
       setWasmScene(scene);
@@ -738,6 +677,8 @@ function App() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
+      // Reset input so same folder can be re-selected
+      e.target.value = "";
     }
   }
 
@@ -761,62 +702,189 @@ function App() {
   const dimC = datasetInfo ? datasetInfo.levels[0].shape[1] : 1;
   const dimT = datasetInfo ? datasetInfo.levels[0].shape[0] : 1;
 
-  const handleContrastChange = useCallback((min: number, max: number) => {
-    setContrastMin(min);
-    setContrastMax(max);
-    setAutoContrast(false);
-    // Apply to WASM scene locally
+  // --- Layer panel handlers ---
+
+  const handleLayerSelect = useCallback((id: string) => {
+    setSelectedDatasetId(id);
+    const ds = datasetsRef.current.get(id);
+    if (ds) {
+      setDatasetInfo(ds.info);
+      storeRef.current = ds.store;
+      fileIndexRef.current = ds.fileIndex;
+    }
+  }, []);
+
+  const handleLayerToggleExpand = useCallback((id: string) => {
+    setExpandedLayerId(prev => prev === id ? null : id);
+  }, []);
+
+  const handleLayerSetVisible = useCallback((id: string, visible: boolean) => {
     const scene = wasmSceneRef.current;
     if (scene) {
-      applyViewportCommand(scene, { type: "set_contrast", min, max });
+      scene.apply_command(JSON.stringify({ type: "set_layer_visible", dataset_id: id, visible }));
+      loopRef.current?.markDirty();
       emitPresence();
+      setLayerSettingsVersion((v) => v + 1);
     }
   }, [emitPresence]);
 
-  const handleGammaChange = useCallback((g: number) => {
-    setGamma(g);
+  const handleLayerSetOpacity = useCallback((id: string, opacity: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
-      applyViewportCommand(scene, { type: "set_gamma", gamma: g });
+      scene.apply_command(JSON.stringify({ type: "set_layer_opacity", dataset_id: id, opacity }));
+      loopRef.current?.markDirty();
       emitPresence();
+      setLayerSettingsVersion((v) => v + 1);
     }
   }, [emitPresence]);
 
-  const handleAutoContrast = useCallback(() => {
-    if (dataRange) {
-      setContrastMin(dataRange.min);
-      setContrastMax(dataRange.max);
+  const handleLayerSetContrast = useCallback((id: string, min: number, max: number) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min, max }));
+      loopRef.current?.markDirty();
+      emitPresence();
     }
-  }, [dataRange]);
+    setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
+  }, [emitPresence]);
 
-  const handleAutoContrastToggle = useCallback(() => {
-    setAutoContrast(prev => {
-      const next = !prev;
-      if (next && dataRange) {
-        setContrastMin(dataRange.min);
-        setContrastMax(dataRange.max);
+  const handleLayerSetGamma = useCallback((id: string, gamma: number) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      scene.apply_command(JSON.stringify({ type: "set_layer_gamma", dataset_id: id, gamma }));
+      loopRef.current?.markDirty();
+      emitPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [emitPresence]);
+
+  const handleLayerSetBlendMode = useCallback((id: string, mode: string) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      scene.apply_command(JSON.stringify({ type: "set_layer_blend_mode", dataset_id: id, blend_mode: mode }));
+      loopRef.current?.markDirty();
+      emitPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [emitPresence]);
+
+  const handleLayerAutoContrast = useCallback((id: string) => {
+    const dr = dataRangeMap.get(id);
+    if (dr) {
+      const scene = wasmSceneRef.current;
+      if (scene) {
+        scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+        loopRef.current?.markDirty();
+        emitPresence();
+      }
+    }
+    setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, true); return next; });
+  }, [dataRangeMap, emitPresence]);
+
+  const handleLayerAutoContrastToggle = useCallback((id: string) => {
+    setAutoContrastMap(prev => {
+      const next = new Map(prev);
+      const wasAuto = prev.get(id) ?? true;
+      next.set(id, !wasAuto);
+      if (!wasAuto) {
+        // Re-enabling auto: apply current data range
+        const dr = dataRangeMap.get(id);
+        if (dr) {
+          const scene = wasmSceneRef.current;
+          if (scene) {
+            scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+            loopRef.current?.markDirty();
+            emitPresence();
+          }
+        }
       }
       return next;
     });
-  }, [dataRange]);
+  }, [dataRangeMap, emitPresence]);
 
-  const fullRangeMax = datasetInfo ? dtypeMax(datasetInfo.levels[0].dataType) : 65535;
-
-  const handleFullRangeToggle = useCallback(() => {
-    setFullRange(prev => {
-      const next = !prev;
-      if (next) {
-        setContrastMin(0);
-        setContrastMax(fullRangeMax);
-        setAutoContrast(false);
-      } else if (dataRange) {
-        setContrastMin(dataRange.min);
-        setContrastMax(dataRange.max);
-        setAutoContrast(true);
+  const handleLayerFullRangeToggle = useCallback((id: string) => {
+    setFullRangeMap(prev => {
+      const next = new Map(prev);
+      const wasFull = prev.get(id) ?? false;
+      next.set(id, !wasFull);
+      const scene = wasmSceneRef.current;
+      if (scene) {
+        if (!wasFull) {
+          // Enabling full range
+          const ds = datasetsRef.current.get(id);
+          const frMax = ds ? dtypeMax(ds.info.levels[0].dataType) : 65535;
+          scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: 0, max: frMax }));
+          setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
+        } else {
+          // Disabling full range — apply data range
+          const dr = dataRangeMap.get(id);
+          if (dr) {
+            scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+          }
+          setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
+        }
+        loopRef.current?.markDirty();
+        emitPresence();
       }
       return next;
     });
-  }, [fullRangeMax, dataRange]);
+  }, [dataRangeMap, emitPresence]);
+
+  const handleLayerMove = useCallback((id: string, direction: "up" | "down") => {
+    const scene = wasmSceneRef.current;
+    if (!scene) return;
+    const order: string[] = JSON.parse(scene.layer_order());
+    const idx = order.indexOf(id);
+    if (idx < 0) return;
+    const swapIdx = direction === "up" ? idx + 1 : idx - 1;
+    if (swapIdx < 0 || swapIdx >= order.length) return;
+    [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
+    scene.apply_command(JSON.stringify({ type: "set_layer_order", order }));
+    loopRef.current?.markDirty();
+    emitPresence();
+    setLayerSettingsVersion((v) => v + 1);
+  }, [emitPresence]);
+
+  const handleRemoveLayer = useCallback((id: string) => {
+    if (!confirm(`Remove layer "${datasetsRef.current.get(id)?.name ?? id}"?`)) return;
+    const scene = wasmSceneRef.current;
+    if (!scene) return;
+
+    applyDocumentCommand(scene, { type: "remove_dataset", id }, sendCommand);
+
+    loopRef.current?.removeDataset(id);
+    const ds = datasetsRef.current.get(id);
+    if (ds) {
+      ds.store.destroy();
+      datasetsRef.current.delete(id);
+    }
+
+    // Clean up per-layer maps
+    setAutoContrastMap(prev => { const next = new Map(prev); next.delete(id); return next; });
+    setFullRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
+    setDataRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
+
+    // Select next layer
+    setSelectedDatasetId(prev => {
+      if (prev === id) {
+        const remaining = datasetsRef.current.keys().next().value ?? null;
+        if (remaining) {
+          const remainingDs = datasetsRef.current.get(remaining)!;
+          setDatasetInfo(remainingDs.info);
+          storeRef.current = remainingDs.store;
+          fileIndexRef.current = remainingDs.fileIndex;
+        } else {
+          setDatasetInfo(null);
+          storeRef.current = null;
+          fileIndexRef.current = null;
+          setVolume(null);
+        }
+        return remaining;
+      }
+      return prev;
+    });
+    setDatasetsVersion((v) => v + 1);
+  }, [sendCommand]);
 
   /** Handle follow button click for a peer. */
   const handleFollow = useCallback((targetId: ClientId | null) => {
@@ -839,9 +907,6 @@ function App() {
             setZ(scene.z());
             setT(scene.t());
             setC(scene.c());
-            setContrastMin(scene.contrast_min());
-            setContrastMax(scene.contrast_max());
-            setGamma(scene.gamma());
             const is3d = scene.is_3d();
             setViewMode(is3d ? "3d" : "2d");
             loopRef.current?.markDirty();
@@ -859,16 +924,61 @@ function App() {
   const followablePeers = Array.from(peers.entries())
     .filter(([, p]) => p.following === null || p.following === undefined);
 
+  // --- Build layer infos from WASM state ---
+  const buildLayerInfos = (): LayerInfo[] => {
+    const scene = wasmSceneRef.current;
+    if (!scene) return [];
+
+    let layerOrder: string[];
+    let allSettings: Record<string, {
+      visible: boolean;
+      opacity: number;
+      contrast_min: number;
+      contrast_max: number;
+      gamma: number;
+      blend_mode: string;
+    }>;
+    try {
+      layerOrder = JSON.parse(scene.layer_order());
+      allSettings = JSON.parse(scene.all_layer_settings());
+    } catch {
+      return [];
+    }
+
+    // Reverse so frontmost layer (rendered last) appears at top of panel
+    return layerOrder.slice().reverse().map(id => {
+      const settings = allSettings[id];
+      const ds = datasetsRef.current.get(id);
+      const dr = dataRangeMap.get(id) ?? null;
+      const frMax = ds ? dtypeMax(ds.info.levels[0].dataType) : 65535;
+
+      return {
+        id,
+        name: scene.dataset_name(id),
+        visible: settings?.visible ?? true,
+        opacity: settings?.opacity ?? 1,
+        contrastMin: settings?.contrast_min ?? 0,
+        contrastMax: settings?.contrast_max ?? 65535,
+        gamma: settings?.gamma ?? 1,
+        blendMode: settings?.blend_mode ?? "alpha",
+        autoContrast: autoContrastMap.get(id) ?? true,
+        fullRange: fullRangeMap.get(id) ?? false,
+        dataRange: dr,
+        fullRangeMax: frMax,
+      };
+    });
+  };
+
+  // Re-derive on relevant state changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const layerInfos = buildLayerInfos();
+  // Depend on datasetsVersion, autoContrastMap, fullRangeMap, dataRangeMap, wasmScene, remoteDocumentVersion
+  void datasetsVersion;
+  void remoteDocumentVersion;
+  void layerSettingsVersion;
+
   return (
     <div className="app">
-      <h1>Lucida</h1>
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".tif,.tiff,.ome.tif,.ome.tiff,.nd2,.czi,.lif"
-        onChange={handleFileChange}
-        hidden
-      />
       <input
         ref={dirInputRef}
         type="file"
@@ -877,143 +987,129 @@ function App() {
         onChange={handleDirChange}
         hidden
       />
-      <div className="button-group">
-        <button onClick={handleOpenFile}>Open File</button>
-        <button onClick={handleOpenFolder}>Open Folder</button>
-        {volume && (
-          <button onClick={handleViewModeToggle}>
-            {viewMode === "2d" ? "3D View" : "2D View"}
-          </button>
-        )}
-      </div>
-      {item && (
-        <div className="file-info">
-          <p>{item.name}</p>
-          <p className="secondary">
-            {formatBytes(item.size)}
-            {item.kind === "directory" && ` · ${item.fileCount} files`}
-          </p>
-        </div>
-      )}
-      {/* Peer list / follow controls */}
-      {peers.size > 0 && (
-        <div className="peer-list" style={{ fontSize: "0.85em", margin: "8px 0" }}>
-          <strong>Peers ({peers.size}):</strong>
-          {followTarget !== null && (
-            <button onClick={() => handleFollow(null)} style={{ marginLeft: 8 }}>
-              Stop Following
-            </button>
-          )}
-          <ul style={{ listStyle: "none", padding: 0, margin: "4px 0" }}>
-            {followablePeers.map(([peerId]) => (
-              <li key={peerId} style={{ display: "inline", marginRight: 8 }}>
-                Client {peerId}
-                {followTarget !== peerId && (
-                  <button onClick={() => handleFollow(peerId)} style={{ marginLeft: 4 }}>
-                    Follow
-                  </button>
-                )}
-                {followTarget === peerId && " (following)"}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-      <canvas
-        ref={canvasRef}
-        style={{
-          width: "100%",
-          height: 600,
-          maxWidth: 800,
-          imageRendering: viewMode === "2d" ? "pixelated" : "auto",
-          borderRadius: 8,
-          backgroundColor: "black",
-          display: volume ? "block" : "none",
-        }}
+      <LayerPanel
+        layers={layerInfos}
+        selectedLayerId={selectedDatasetId}
+        expandedLayerId={expandedLayerId}
+        onSelectLayer={handleLayerSelect}
+        onToggleExpand={handleLayerToggleExpand}
+        onSetVisible={handleLayerSetVisible}
+        onSetOpacity={handleLayerSetOpacity}
+        onSetContrast={handleLayerSetContrast}
+        onSetGamma={handleLayerSetGamma}
+        onSetBlendMode={handleLayerSetBlendMode}
+        onAutoContrast={handleLayerAutoContrast}
+        onAutoContrastToggle={handleLayerAutoContrastToggle}
+        onFullRangeToggle={handleLayerFullRangeToggle}
+        onMoveLayer={handleLayerMove}
+        onRemoveLayer={handleRemoveLayer}
+        onAddLayer={() => dirInputRef.current?.click()}
+        viewModeToggle={volume ? { label: viewMode === "2d" ? "3D" : "2D", onClick: handleViewModeToggle } : null}
       />
-      {volume && viewMode === "2d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
-        <SliceViewer
-          volume={volume}
-          z={z}
-          t={t}
-          c={c}
-          scene={wasmScene}
-          datasets={datasetsRef.current}
-          selectedDatasetId={selectedDatasetId}
-          client={client}
-          canvas={canvasRef.current!}
-          remoteDocumentVersion={remoteDocumentVersion}
-          emitPresence={emitPresence}
-          breakFollow={breakFollow}
-          loopRef={loopRef}
+      <div className="main-content">
+        {/* Peer list / follow controls */}
+        {peers.size > 0 && (
+          <div className="peer-list" style={{ fontSize: "0.85em", margin: "8px 0" }}>
+            <strong>Peers ({peers.size}):</strong>
+            {followTarget !== null && (
+              <button onClick={() => handleFollow(null)} style={{ marginLeft: 8 }}>
+                Stop Following
+              </button>
+            )}
+            <ul style={{ listStyle: "none", padding: 0, margin: "4px 0" }}>
+              {followablePeers.map(([peerId]) => (
+                <li key={peerId} style={{ display: "inline", marginRight: 8 }}>
+                  Client {peerId}
+                  {followTarget !== peerId && (
+                    <button onClick={() => handleFollow(peerId)} style={{ marginLeft: 4 }}>
+                      Follow
+                    </button>
+                  )}
+                  {followTarget === peerId && " (following)"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <canvas
+          ref={canvasRef}
+          style={{
+            width: "100%",
+            height: 600,
+            maxWidth: 800,
+            imageRendering: viewMode === "2d" ? "pixelated" : "auto",
+            borderRadius: 8,
+            backgroundColor: "black",
+            display: volume ? "block" : "none",
+          }}
         />
-      )}
-      {volume && viewMode === "3d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
-        <VolumeViewer
-          volume={volume}
-          scene={wasmScene}
-          datasets={datasetsRef.current}
-          selectedDatasetId={selectedDatasetId}
-          client={client}
-          canvas={canvasRef.current!}
-          remoteDocumentVersion={remoteDocumentVersion}
-          emitPresence={emitPresence}
-          breakFollow={breakFollow}
-          t={t}
-          c={c}
-          loopRef={loopRef}
-        />
-      )}
-      {volume && dataRange && (
-        <ContrastControls
-          dataMin={dataRange.min}
-          dataMax={dataRange.max}
-          contrastMin={contrastMin}
-          contrastMax={contrastMax}
-          gamma={gamma}
-          autoContrast={autoContrast}
-          onContrastChange={handleContrastChange}
-          onGammaChange={handleGammaChange}
-          onAutoContrast={handleAutoContrast}
-          onAutoContrastToggle={handleAutoContrastToggle}
-          fullRange={fullRange}
-          onFullRangeToggle={handleFullRangeToggle}
-          fullRangeMax={fullRangeMax}
-        />
-      )}
-      {volume && (
-        <div className="dimension-controls">
-          <DimensionControls label="Z" value={z} max={dimZ} onChange={(v) => {
-            setZ(v);
-            breakFollow();
-            const scene = wasmSceneRef.current;
-            if (scene) {
-              applyViewportCommand(scene, { type: "set_z", z: v });
-              emitPresence();
-            }
-          }} disabled={viewMode === "3d"} />
-          <DimensionControls label="C" value={c} max={dimC} onChange={(v) => {
-            setC(v);
-            breakFollow();
-            const scene = wasmSceneRef.current;
-            if (scene) {
-              applyViewportCommand(scene, { type: "set_c", c: v });
-              emitPresence();
-            }
-          }} />
-          <DimensionControls label="T" value={t} max={dimT} onChange={(v) => {
-            setT(v);
-            breakFollow();
-            const scene = wasmSceneRef.current;
-            if (scene) {
-              applyViewportCommand(scene, { type: "set_t", t: v });
-              emitPresence();
-            }
-          }} />
-        </div>
-      )}
-      {loading && <p className="secondary">Loading volume...</p>}
-      {error && <p style={{ color: "#f44" }}>{error}</p>}
+        {volume && viewMode === "2d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
+          <SliceViewer
+            volume={volume}
+            z={z}
+            t={t}
+            c={c}
+            scene={wasmScene}
+            datasets={datasetsRef.current}
+            selectedDatasetId={selectedDatasetId}
+            client={client}
+            canvas={canvasRef.current!}
+            remoteDocumentVersion={remoteDocumentVersion}
+            emitPresence={emitPresence}
+            breakFollow={breakFollow}
+            loopRef={loopRef}
+          />
+        )}
+        {volume && viewMode === "3d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
+          <VolumeViewer
+            volume={volume}
+            scene={wasmScene}
+            datasets={datasetsRef.current}
+            selectedDatasetId={selectedDatasetId}
+            client={client}
+            canvas={canvasRef.current!}
+            remoteDocumentVersion={remoteDocumentVersion}
+            emitPresence={emitPresence}
+            breakFollow={breakFollow}
+            t={t}
+            c={c}
+            loopRef={loopRef}
+          />
+        )}
+        {volume && (
+          <div className="dimension-controls">
+            <DimensionControls label="Z" value={z} max={dimZ} onChange={(v) => {
+              setZ(v);
+              breakFollow();
+              const scene = wasmSceneRef.current;
+              if (scene) {
+                applyViewportCommand(scene, { type: "set_z", z: v });
+                emitPresence();
+              }
+            }} disabled={viewMode === "3d"} />
+            <DimensionControls label="C" value={c} max={dimC} onChange={(v) => {
+              setC(v);
+              breakFollow();
+              const scene = wasmSceneRef.current;
+              if (scene) {
+                applyViewportCommand(scene, { type: "set_c", c: v });
+                emitPresence();
+              }
+            }} />
+            <DimensionControls label="T" value={t} max={dimT} onChange={(v) => {
+              setT(v);
+              breakFollow();
+              const scene = wasmSceneRef.current;
+              if (scene) {
+                applyViewportCommand(scene, { type: "set_t", t: v });
+                emitPresence();
+              }
+            }} />
+          </div>
+        )}
+        {loading && <p className="secondary">Loading volume...</p>}
+        {error && <p style={{ color: "#f44" }}>{error}</p>}
+      </div>
     </div>
   );
 }

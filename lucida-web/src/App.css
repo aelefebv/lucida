@@ -1,22 +1,19 @@
 .app {
   display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  height: 100vh;
+  width: 100%;
+}
+
+.main-content {
+  flex: 1;
+  display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1.5rem;
-}
-
-.button-group {
-  display: flex;
-  gap: 0.75rem;
-}
-
-.file-info {
-  margin-top: 1rem;
-  text-align: center;
-}
-
-.file-info p {
-  margin: 0.25rem 0;
+  gap: 1rem;
+  padding: 1rem;
+  overflow: auto;
 }
 
 .secondary {

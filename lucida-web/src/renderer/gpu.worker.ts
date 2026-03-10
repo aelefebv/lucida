@@ -302,9 +302,10 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         const comp = getCompositor();
         ensureOffscreenPool(msg.layers.length, msg.canvasW, msg.canvasH);
 
-        const encoder = device.createCommandEncoder();
         const renderedLayers: CompositeLayer[] = [];
 
+        // Submit each layer individually so writeBuffer + render pass execute
+        // together (writeBuffer is a queue op, not an encoder op).
         for (const layer of msg.layers) {
           const volKey = activeVolKeyPerDataset.get(layer.datasetId);
           if (!volKey) continue;
@@ -316,12 +317,15 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
           renderer.setOpacity(layer.opacity);
           renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye);
-          renderer.renderTo(offscreenPool[idx].createView(), encoder);
+          const layerEncoder = device.createCommandEncoder();
+          renderer.renderTo(offscreenPool[idx].createView(), layerEncoder);
+          device.queue.submit([layerEncoder.finish()]);
           renderedLayers.push({ view: offscreenPool[idx].createView(), blendMode: layer.blendMode });
         }
 
-        comp.composite(context.getCurrentTexture().createView(), renderedLayers, encoder);
-        device.queue.submit([encoder.finish()]);
+        const compEncoder = device.createCommandEncoder();
+        comp.composite(context.getCurrentTexture().createView(), renderedLayers, compEncoder);
+        device.queue.submit([compEncoder.finish()]);
         break;
       }
 
@@ -334,9 +338,10 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         const comp = getCompositor();
         ensureOffscreenPool(msg.layers.length, msg.canvasW, msg.canvasH);
 
-        const encoder = device.createCommandEncoder();
         const renderedLayers: CompositeLayer[] = [];
 
+        // Submit each layer individually so writeBuffer + render pass execute
+        // together (writeBuffer is a queue op, not an encoder op).
         for (const layer of msg.layers) {
           const fb = fallbackPerDataset.get(layer.datasetId);
           const ts = tileStatePerDataset.get(layer.datasetId);
@@ -348,12 +353,15 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
           renderer.setOpacity(layer.opacity);
           renderer.setTransform(msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, layer.dataW, layer.dataH);
-          renderer.renderTo(offscreenPool[idx].createView(), encoder);
+          const layerEncoder = device.createCommandEncoder();
+          renderer.renderTo(offscreenPool[idx].createView(), layerEncoder);
+          device.queue.submit([layerEncoder.finish()]);
           renderedLayers.push({ view: offscreenPool[idx].createView(), blendMode: layer.blendMode });
         }
 
-        comp.composite(context.getCurrentTexture().createView(), renderedLayers, encoder);
-        device.queue.submit([encoder.finish()]);
+        const compEncoder = device.createCommandEncoder();
+        comp.composite(context.getCurrentTexture().createView(), renderedLayers, compEncoder);
+        device.queue.submit([compEncoder.finish()]);
         break;
       }
 
