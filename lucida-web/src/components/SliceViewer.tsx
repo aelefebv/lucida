@@ -39,10 +39,10 @@ export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetI
     };
   }, [scene, selectedDatasetId, client, canvas]);
 
-  // Update slice params on prop changes
+  // Update slice params on prop changes and when loop is recreated
   useEffect(() => {
     loopRef.current?.setSliceParams(z, t, c);
-  }, [z, t, c]);
+  }, [z, t, c, scene, selectedDatasetId, client, canvas]);
 
   // Mark dirty on remote document updates
   useEffect(() => {
