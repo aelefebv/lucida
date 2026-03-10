@@ -716,7 +716,9 @@ function App() {
 
   const handleLayerToggleExpand = useCallback((id: string) => {
     setExpandedLayerId(prev => prev === id ? null : id);
-  }, []);
+    // Also select the layer so expanded controls always match the selected layer
+    handleLayerSelect(id);
+  }, [handleLayerSelect]);
 
   const handleLayerSetVisible = useCallback((id: string, visible: boolean) => {
     const scene = wasmSceneRef.current;
