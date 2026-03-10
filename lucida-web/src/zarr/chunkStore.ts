@@ -21,11 +21,13 @@ export class ChunkStore {
   private version = 0;
   private listeners = new Set<() => void>();
   private inFlight = new Set<string>();
-  private generation = 0;
+  private inFlightSince = 0;
   private abortController: AbortController | null = null;
   private bumpScheduled = false;
   private pendingQueue: ChunkCoord[] = [];
   private fetcher: ChunkFetcher;
+  private activeWorkerCount = 0;
+  private activeFetches = new Set<string>();
 
   constructor(fetcher: ChunkFetcher) {
     this.fetcher = fetcher;
@@ -52,61 +54,77 @@ export class ChunkStore {
     return this.cache.has(key);
   }
 
-  // --- Background fetching with abort/generation pattern ---
+  // --- Background fetching with incremental add/abort pattern ---
 
   ensureFetched(coords: ChunkCoord[]): void {
-    // Filter by cache only — NOT by in-flight
     const uncached: ChunkCoord[] = [];
     for (const coord of coords) {
-      const key = coord.key;
-      if (!this.cache.has(key)) {
-        uncached.push(coord);
-      }
+      if (!this.cache.has(coord.key)) uncached.push(coord);
     }
     if (uncached.length === 0) return;
 
-    // If all uncached coords are already in-flight, just reorder the pending queue
-    // so that future chunk fetches use the new priority order (e.g. after camera pan).
-    if (uncached.every(c => this.inFlight.has(c.key))) {
-      // Replace pending queue with new order, filtering out already-actively-loading items
-      const activelyLoading = new Set<string>();
-      for (const key of this.inFlight) {
-        if (!this.pendingQueue.some(c => c.key === key)) {
-          activelyLoading.add(key);
-        }
-      }
+    const newChunks = uncached.filter(c => !this.inFlight.has(c.key));
+    const isStale = this.inFlightSince > 0
+      && performance.now() - this.inFlightSince > 15_000;
+
+    // Path 1: all uncached already in-flight and not stale → reorder only
+    if (newChunks.length === 0 && !isStale) {
       this.pendingQueue.length = 0;
       for (const coord of uncached) {
-        if (!activelyLoading.has(coord.key)) {
+        if (!this.activeFetches.has(coord.key)) {
           this.pendingQueue.push(coord);
         }
       }
       return;
     }
 
-    // New work needed — abort previous and start fresh with ALL uncached
-    if (this.abortController) {
-      this.abortController.abort();
-    }
-    this.abortController = new AbortController();
-    this.inFlight.clear();
-    const signal = this.abortController.signal;
-    const gen = ++this.generation;
+    // Decide: abort everything or add incrementally
+    const shouldAbort = isStale
+      || (this.inFlight.size > 0 && !uncached.some(c => this.inFlight.has(c.key)));
 
+    if (shouldAbort) {
+      // Path 3: complete view change or stale — abort and restart
+      if (this.abortController) this.abortController.abort();
+      this.abortController = new AbortController();
+      this.activeWorkerCount = 0;
+      this.activeFetches.clear();
+      this.inFlight.clear();
+      this.inFlightSince = performance.now();
+      for (const coord of uncached) this.inFlight.add(coord.key);
+      this.pendingQueue = [...uncached];
+      this.launchWorkers();
+      return;
+    }
+
+    // Path 2: incremental — add new chunks, keep existing fetches running
+    for (const chunk of newChunks) this.inFlight.add(chunk.key);
+    this.inFlightSince = performance.now();
+
+    // Rebuild pending queue from new plan, excluding actively-fetching items
+    this.pendingQueue.length = 0;
     for (const coord of uncached) {
-      this.inFlight.add(coord.key);
+      if (!this.activeFetches.has(coord.key)) {
+        this.pendingQueue.push(coord);
+      }
     }
 
-    this.pendingQueue = [...uncached];
-    this.fetchWithConcurrency(signal, gen);
+    // Clean up inFlight: remove items no longer in plan and not being actively fetched
+    const newPlanKeys = new Set(uncached.map(c => c.key));
+    for (const key of this.inFlight) {
+      if (!newPlanKeys.has(key) && !this.activeFetches.has(key)) {
+        this.inFlight.delete(key);
+      }
+    }
+
+    this.launchWorkers();
   }
 
   destroy(): void {
-    if (this.abortController) {
-      this.abortController.abort();
-    }
+    if (this.abortController) this.abortController.abort();
     this.listeners.clear();
     this.inFlight.clear();
+    this.activeFetches.clear();
+    this.activeWorkerCount = 0;
   }
 
   // --- Internal ---
@@ -123,42 +141,51 @@ export class ChunkStore {
     });
   }
 
-  private async fetchWithConcurrency(
-    signal: AbortSignal,
-    gen: number,
-  ): Promise<void> {
-    const fetchOne = async (): Promise<void> => {
-      while (this.pendingQueue.length > 0) {
-        if (signal.aborted || gen !== this.generation) return;
+  private launchWorkers(): void {
+    if (!this.abortController) this.abortController = new AbortController();
+    const signal = this.abortController.signal;
+    const toStart = Math.min(
+      MAX_CONCURRENT - this.activeWorkerCount,
+      this.pendingQueue.length,
+    );
+    for (let i = 0; i < toStart; i++) {
+      this.activeWorkerCount++;
+      this.runWorker(signal);
+    }
+  }
 
+  private async runWorker(signal: AbortSignal): Promise<void> {
+    try {
+      while (this.pendingQueue.length > 0) {
+        if (signal.aborted) return;
         const coord = this.pendingQueue.shift()!;
         const key = coord.key;
 
+        if (this.cache.has(key)) {
+          this.inFlight.delete(key);
+          continue;
+        }
+
+        this.activeFetches.add(key);
         try {
           const data = await this.fetcher(coord, signal);
-
-          if (signal.aborted || gen !== this.generation) return;
-
+          if (signal.aborted) return;
           this.cache.set(key, data);
           this.inFlight.delete(key);
           this.bumpVersion();
         } catch (err) {
           if (err instanceof DOMException && err.name === "AbortError") return;
-          if (signal.aborted || gen !== this.generation) return;
-
+          if (signal.aborted) return;
           this.inFlight.delete(key);
           console.error(`Chunk ${key} fetch failed, skipping.`, err);
           this.bumpVersion();
+        } finally {
+          this.activeFetches.delete(key);
         }
       }
-    };
-
-    const workerCount = Math.min(MAX_CONCURRENT, this.pendingQueue.length);
-    const workers: Promise<void>[] = [];
-    for (let i = 0; i < workerCount; i++) {
-      workers.push(fetchOne());
+    } finally {
+      this.activeWorkerCount--;
     }
-    await Promise.all(workers);
   }
 }
 

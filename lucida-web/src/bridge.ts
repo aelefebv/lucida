@@ -20,6 +20,7 @@ export interface BridgeHandlers {
   onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: unknown, display: PresenceState["display"]) => void;
   onCursorUpdate?: (clientId: ClientId, position: [number, number]) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
+  onDisconnect?: () => void;
 }
 
 export class Bridge {
@@ -98,6 +99,7 @@ export class Bridge {
 
     ws.onclose = () => {
       this.ws = null;
+      this.handlers.onDisconnect?.();
       this.scheduleReconnect();
     };
 

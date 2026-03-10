@@ -291,6 +291,13 @@ function App() {
           setFollowTarget(target);
         }
       },
+      onDisconnect: () => {
+        // Reject all pending chunk requests so they don't hang forever
+        for (const [key, pending] of pendingChunkRequests.current) {
+          pending.reject(new Error(`Bridge disconnected, chunk ${key} dropped`));
+        }
+        pendingChunkRequests.current.clear();
+      },
     };
     bridgeRef.current = new Bridge(handlers);
   }, [wasmReady]);
@@ -299,20 +306,37 @@ function App() {
   function setupRemoteDataset(datasetId: string, clientMetadata: DatasetInfo) {
     const info = clientMetadata;
 
+    const CHUNK_TIMEOUT_MS = 10_000;
+
     // Create a remote fetcher that requests chunks via the bridge.
     const remoteFetcher: ChunkFetcher = async (coord, signal) => {
       const rawBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
-        pendingChunkRequests.current.set(coord.key, { resolve, reject });
+        const timeoutId = setTimeout(() => {
+          pendingChunkRequests.current.delete(coord.key);
+          reject(new Error(`Chunk ${coord.key} timed out`));
+        }, CHUNK_TIMEOUT_MS);
+
+        pendingChunkRequests.current.set(coord.key, {
+          resolve: (data) => { clearTimeout(timeoutId); resolve(data); },
+          reject: (err) => { clearTimeout(timeoutId); reject(err); },
+        });
+
         bridgeRef.current?.send(JSON.stringify({
           type: "chunk_request",
           dataset_id: datasetId,
           key: coord.key,
         }));
+
         signal?.addEventListener("abort", () => {
+          clearTimeout(timeoutId);
           pendingChunkRequests.current.delete(coord.key);
           reject(new DOMException("Aborted", "AbortError"));
         });
       });
+
+      if (rawBytes.byteLength === 0) {
+        throw new Error(`Remote chunk ${coord.key} returned empty`);
+      }
 
       // Apply codec pipeline (same as loadChunk does for local files).
       const levelMeta = info.levels[coord.level];
@@ -351,23 +375,47 @@ function App() {
     }
   }
 
+  /** Send an empty-data binary response so the requester's promise resolves immediately. */
+  function sendEmptyChunkResponse(clientId: number, key: string) {
+    const keyBytes = new TextEncoder().encode(key);
+    const headerSize = 4 + 2 + keyBytes.length;
+    const message = new Uint8Array(headerSize); // zero-length data
+    const view = new DataView(message.buffer);
+    view.setUint32(0, clientId, true);
+    view.setUint16(4, keyBytes.length, true);
+    message.set(keyBytes, 6);
+    bridgeRef.current?.sendBinary(message);
+  }
+
   /** Serve a chunk_fetch request — read raw file bytes and send via binary. */
   async function serveChunkFetch(clientId: number, datasetId: string, key: string) {
     const ds = datasetsRef.current.get(datasetId);
-    if (!ds || !ds.fileIndex) return;
+    if (!ds || !ds.fileIndex) {
+      sendEmptyChunkResponse(clientId, key);
+      return;
+    }
 
     // Parse key: "level/t/c/z/y/x"
     const parts = key.split("/").map(Number);
-    if (parts.length !== 6) return;
+    if (parts.length !== 6) {
+      sendEmptyChunkResponse(clientId, key);
+      return;
+    }
     const [level, t, c, z, y, x] = parts;
 
     const levelMeta = ds.info.levels[level];
-    if (!levelMeta) return;
+    if (!levelMeta) {
+      sendEmptyChunkResponse(clientId, key);
+      return;
+    }
 
     // Read raw bytes (no decompression — let the receiver decompress).
     const path = `${levelMeta.path}/c/${t}/${c}/${z}/${y}/${x}`;
     const file = ds.fileIndex.get(path);
-    if (!file) return;
+    if (!file) {
+      sendEmptyChunkResponse(clientId, key);
+      return;
+    }
 
     try {
       const rawBytes = await file.arrayBuffer();
@@ -385,6 +433,7 @@ function App() {
       bridgeRef.current?.sendBinary(message);
     } catch (err) {
       console.error(`Failed to serve chunk ${key}:`, err);
+      sendEmptyChunkResponse(clientId, key);
     }
   }
 
