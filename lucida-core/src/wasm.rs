@@ -262,6 +262,11 @@ impl WasmScene {
         serde_json::to_string(&plan).unwrap()
     }
 
+    pub fn chunk_plan_for(&self, dataset_id: &str) -> String {
+        let plan = self.inner.chunk_plan_for(dataset_id);
+        serde_json::to_string(&plan).unwrap()
+    }
+
     // --- 3D camera methods ---
 
     pub fn rotate_3d(&mut self, d_theta: f64, d_phi: f64) {

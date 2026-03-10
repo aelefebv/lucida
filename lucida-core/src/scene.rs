@@ -290,6 +290,45 @@ impl Scene {
             prefetch: Vec::new(),
         }
     }
+
+    /// Compute the chunk request plan for a specific dataset by ID.
+    pub fn chunk_plan_for(&self, dataset_id: &str) -> ChunkRequestPlan {
+        let dataset = match self.dataset_by_id(dataset_id) {
+            Some(ds) => ds,
+            None => return ChunkRequestPlan { needed: Vec::new(), prefetch: Vec::new() },
+        };
+
+        let region = self.camera.visible_region(
+            &self.view.z_range,
+            dataset.volume_transform.as_ref(),
+            dataset.volume_shape.as_ref(),
+        );
+
+        let mut needed = Vec::new();
+
+        for layer in &dataset.layers {
+            if !layer.visible {
+                continue;
+            }
+            let level = chunk::select_level(region.effective_zoom, layer.num_levels);
+            let (level_shape, level_chunk_size) = layer.shape_at_level(level);
+            let chunks = chunk::visible_chunks(
+                &region,
+                &level_chunk_size,
+                level,
+                self.view.t,
+                self.view.c,
+                &level_shape,
+                &layer.data_shape,
+            );
+            needed.extend(chunks);
+        }
+
+        ChunkRequestPlan {
+            needed,
+            prefetch: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

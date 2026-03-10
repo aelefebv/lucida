@@ -11,4 +11,13 @@ export function evaluateChunkPlan(scene: WasmScene): { needed: ChunkCoord[] } | 
   }
 }
 
+/** Parse the chunk plan for a specific dataset. Returns null on error. */
+export function evaluateChunkPlanFor(scene: WasmScene, datasetId: string): { needed: ChunkCoord[] } | null {
+  try {
+    return JSON.parse(scene.chunk_plan_for(datasetId));
+  } catch {
+    return null;
+  }
+}
+
 export { sampleIntensityRange } from "./intensitySampler.ts";

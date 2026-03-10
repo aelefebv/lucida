@@ -2,17 +2,15 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
-import type { DatasetInfo } from "../zarr/metadata.ts";
-import { ChunkStore } from "../zarr/chunkStore.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
-import { RenderLoop } from "../renderLoop.ts";
+import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 
 interface Props {
   volume: VolumeData;
   scene: WasmScene;
-  store: ChunkStore;
-  datasetInfo: DatasetInfo;
+  datasets: Map<string, DatasetEntry>;
+  selectedDatasetId: string;
   client: RenderClient;
   canvas: HTMLCanvasElement;
   remoteDocumentVersion: number;
@@ -23,12 +21,12 @@ interface Props {
   loopRef: MutableRefObject<RenderLoop | null>;
 }
 
-export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, t, c, loopRef: parentLoopRef }: Props) {
+export function VolumeViewer({ volume, scene, datasets, selectedDatasetId, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, t, c, loopRef: parentLoopRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
 
   // Create/start render loop
   useEffect(() => {
-    const loop = new RenderLoop({ scene, store, datasetInfo, client, canvas, mode: "volume" });
+    const loop = new RenderLoop({ scene, datasets, selectedDatasetId, client, canvas, mode: "volume" });
     loopRef.current = loop;
     parentLoopRef.current = loop;
     loop.start();
@@ -36,7 +34,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
       loop.stop();
       parentLoopRef.current = null;
     };
-  }, [scene, store, datasetInfo, client, canvas]);
+  }, [scene, selectedDatasetId, client, canvas]);
 
   // Mark dirty on remote document updates
   useEffect(() => {
@@ -62,7 +60,7 @@ export function VolumeViewer({ volume, scene, store, datasetInfo, client, canvas
     loopRef.current?.resetVolumeCache();
     client.volumeSetInitial(volume.data, volume.width, volume.height, volume.depth);
     loopRef.current?.markDirty();
-  }, [volume, scene, datasetInfo, client, canvas]);
+  }, [volume, scene, selectedDatasetId, client, canvas]);
 
   // Input handling
   const [dragging, setDragging] = useState(false);

@@ -2,10 +2,8 @@
 import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
-import type { DatasetInfo } from "../zarr/metadata.ts";
-import { ChunkStore } from "../zarr/chunkStore.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
-import { RenderLoop } from "../renderLoop.ts";
+import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 
 interface Props {
@@ -14,8 +12,8 @@ interface Props {
   t: number;
   c: number;
   scene: WasmScene;
-  store: ChunkStore;
-  datasetInfo: DatasetInfo;
+  datasets: Map<string, DatasetEntry>;
+  selectedDatasetId: string;
   client: RenderClient;
   canvas: HTMLCanvasElement;
   remoteDocumentVersion: number;
@@ -24,14 +22,14 @@ interface Props {
   loopRef: MutableRefObject<RenderLoop | null>;
 }
 
-export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef }: Props) {
+export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetId, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
 
   // Create/start render loop
   useEffect(() => {
-    const loop = new RenderLoop({ scene, store, datasetInfo, client, canvas, mode: "slice" });
+    const loop = new RenderLoop({ scene, datasets, selectedDatasetId, client, canvas, mode: "slice" });
     loopRef.current = loop;
     parentLoopRef.current = loop;
     loop.start();
@@ -39,7 +37,7 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
       loop.stop();
       parentLoopRef.current = null;
     };
-  }, [scene, store, datasetInfo, client, canvas]);
+  }, [scene, selectedDatasetId, client, canvas]);
 
   // Update slice params on prop changes
   useEffect(() => {
@@ -58,14 +56,17 @@ export function SliceViewer({ volume, z, t, c, scene, store, datasetInfo, client
     const prev = prevDims.current;
     if (width !== prev.w || height !== prev.h || depth !== prev.d) {
       prevDims.current = { w: width, h: height, d: depth };
-      const fullResWidth = datasetInfo.levels[0].shape[4];
-      const fullResHeight = datasetInfo.levels[0].shape[3];
-      applyViewportCommand(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 });
-      applyViewportCommand(scene, { type: "set_zoom", value: 1.0 });
-      emitPresence();
-      loopRef.current?.markDirty();
+      const selectedDs = datasets.get(selectedDatasetId);
+      if (selectedDs) {
+        const fullResWidth = selectedDs.info.levels[0].shape[4];
+        const fullResHeight = selectedDs.info.levels[0].shape[3];
+        applyViewportCommand(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 });
+        applyViewportCommand(scene, { type: "set_zoom", value: 1.0 });
+        emitPresence();
+        loopRef.current?.markDirty();
+      }
     }
-  }, [volume, scene, datasetInfo, emitPresence]);
+  }, [volume, scene, datasets, selectedDatasetId, emitPresence]);
 
   // Set mode on mount
   useEffect(() => {

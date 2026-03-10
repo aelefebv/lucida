@@ -87,6 +87,9 @@ function App() {
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
 
+  // Selected dataset for rendering
+  const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
+
   // Keep dataset info and file index for re-assembling on C/T change
   const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
   const fileIndexRef = useRef<Map<string, File> | null>(null);
@@ -184,11 +187,28 @@ function App() {
             setWasmScene(scene);
           }
           if (cmd.type === "remove_dataset") {
+            loopRef.current?.removeDataset(cmd.id);
             const ds = datasetsRef.current.get(cmd.id);
             if (ds) {
               ds.store.destroy();
               datasetsRef.current.delete(cmd.id);
             }
+            // If removed dataset was selected, select next available or null
+            setSelectedDatasetId(prev => {
+              if (prev === cmd.id) {
+                const remaining = datasetsRef.current.keys().next().value ?? null;
+                if (remaining) {
+                  const remainingDs = datasetsRef.current.get(remaining)!;
+                  setDatasetInfo(remainingDs.info);
+                  storeRef.current = remainingDs.store;
+                } else {
+                  setDatasetInfo(null);
+                  storeRef.current = null;
+                }
+                return remaining;
+              }
+              return prev;
+            });
           }
           setRemoteDocumentVersion((v) => v + 1);
         } catch (e) {
@@ -357,10 +377,14 @@ function App() {
       fileIndex: null,
     });
 
+    // Add to render loop if it exists
+    loopRef.current?.addDataset(datasetId, store, info);
+
     // If this is the first dataset and we don't have a local one, use it for rendering.
     if (!storeRef.current) {
       storeRef.current = store;
       setDatasetInfo(info);
+      setSelectedDatasetId(datasetId);
 
       // Create placeholder volume from coarsest level dimensions.
       // The RenderLoop will fetch real chunks and overwrite the fallback.
@@ -503,17 +527,19 @@ function App() {
 
   // Sync Z/T/C to WASM scene and request chunks
   useEffect(() => {
-    if (!wasmScene || !storeRef.current) return;
+    if (!wasmScene || !selectedDatasetId) return;
+    const ds = datasetsRef.current.get(selectedDatasetId);
+    if (!ds) return;
     wasmScene.set_z(z);
     wasmScene.set_t(t);
     wasmScene.set_c(c);
     try {
-      const plan = JSON.parse(wasmScene.chunk_plan());
+      const plan = JSON.parse(wasmScene.chunk_plan_for(selectedDatasetId));
       if (plan.needed.length > 0) {
-        storeRef.current.ensureFetched(plan.needed);
+        ds.store.ensureFetched(plan.needed);
       }
     } catch { /* ignore */ }
-  }, [z, t, c, wasmScene]);
+  }, [z, t, c, wasmScene, selectedDatasetId]);
 
   function handleOpenFile() {
     fileInputRef.current?.click();
@@ -537,6 +563,7 @@ function App() {
   function cleanupState() {
     storeRef.current?.destroy();
     storeRef.current = null;
+    setSelectedDatasetId(null);
     setVolume(null);
     setWasmScene(null);
     setDatasetInfo(null);
@@ -667,6 +694,12 @@ function App() {
         store,
         fileIndex,
       });
+
+      // Add to render loop if it exists
+      loopRef.current?.addDataset(datasetId, store, info);
+
+      // Select this dataset for rendering
+      setSelectedDatasetId(datasetId);
 
       setVolume(vol);
       setWasmScene(scene);
@@ -884,15 +917,15 @@ function App() {
           display: volume ? "block" : "none",
         }}
       />
-      {volume && viewMode === "2d" && wasmScene && datasetInfo && storeRef.current && client && (
+      {volume && viewMode === "2d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
         <SliceViewer
           volume={volume}
           z={z}
           t={t}
           c={c}
           scene={wasmScene}
-          store={storeRef.current}
-          datasetInfo={datasetInfo}
+          datasets={datasetsRef.current}
+          selectedDatasetId={selectedDatasetId}
           client={client}
           canvas={canvasRef.current!}
           remoteDocumentVersion={remoteDocumentVersion}
@@ -901,12 +934,12 @@ function App() {
           loopRef={loopRef}
         />
       )}
-      {volume && viewMode === "3d" && wasmScene && datasetInfo && storeRef.current && client && (
+      {volume && viewMode === "3d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
         <VolumeViewer
           volume={volume}
           scene={wasmScene}
-          store={storeRef.current}
-          datasetInfo={datasetInfo}
+          datasets={datasetsRef.current}
+          selectedDatasetId={selectedDatasetId}
           client={client}
           canvas={canvasRef.current!}
           remoteDocumentVersion={remoteDocumentVersion}
