@@ -165,7 +165,7 @@ impl View2D {
 impl View3D {
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
-            target: [0.0, 0.0, 0.0],
+            target: [0.5, 0.5, 0.5],
             theta: 0.5,
             phi: 0.8,
             distance: 1.8,
@@ -556,7 +556,10 @@ mod tests {
     fn default_eye_position() {
         let cam = View3D::new([800, 600]);
         let eye = cam.eye_position();
-        let dist = (eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]).sqrt();
+        let dx = eye[0] - cam.target[0];
+        let dy = eye[1] - cam.target[1];
+        let dz = eye[2] - cam.target[2];
+        let dist = (dx * dx + dy * dy + dz * dz).sqrt();
         assert!((dist - 1.8).abs() < 1e-10);
     }
 

@@ -59,7 +59,21 @@ export class VolumeRenderer {
       fragment: {
         module: shaderModule,
         entryPoint: "fs",
-        targets: [{ format }],
+        targets: [{
+          format,
+          blend: {
+            color: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+            alpha: {
+              srcFactor: "one",
+              dstFactor: "one-minus-src-alpha",
+              operation: "add",
+            },
+          },
+        }],
       },
       primitive: { topology: "triangle-list" },
     });

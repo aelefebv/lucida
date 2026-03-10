@@ -63,7 +63,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   // Intersect unit cube [0,1]^3 representing the volume in local space
   let tt = intersectAABB(ro, rd);
   if (tt.x >= tt.y || tt.y < 0.0) {
-    return vec4f(0.05, 0.05, 0.08, 1.0); // background
+    return vec4f(0.0, 0.0, 0.0, 0.0);
   }
 
   let tStart = max(tt.x, 0.0);

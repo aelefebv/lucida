@@ -10,7 +10,7 @@ pub struct VolumeTransform {
 }
 
 /// Compute a model matrix that maps the volume into a normalized coordinate space
-/// where the longest physical axis has length 1.0, centered at the origin.
+/// where the longest physical axis has length 1.0, with corner at the origin.
 ///
 /// `shape` is [Z, Y, X] in voxels.
 /// `scale` is [Z, Y, X] physical spacing per voxel.
@@ -30,24 +30,24 @@ pub fn compute_volume_transform(shape: [u32; 3], scale: [f64; 3]) -> VolumeTrans
     let sy = (phys[1] / norm) as f32; // Y
     let sz = (phys[0] / norm) as f32; // Z
 
-    // Model = Translate(-sx/2, -sy/2, -sz/2) * Scale(sx, sy, sz)
+    // Model = Scale(sx, sy, sz) with corner at origin
     // In column-major:
-    //   [sx  0   0   -sx/2]
-    //   [0   sy  0   -sy/2]
-    //   [0   0   sz  -sz/2]
-    //   [0   0   0    1   ]
+    //   [sx  0   0   0]
+    //   [0   sy  0   0]
+    //   [0   0   sz  0]
+    //   [0   0   0   1]
     let model = [
         sx,  0.0, 0.0, 0.0,
         0.0, sy,  0.0, 0.0,
         0.0, 0.0, sz,  0.0,
-        -sx / 2.0, -sy / 2.0, -sz / 2.0, 1.0,
+        0.0, 0.0, 0.0, 1.0,
     ];
 
-    // Inverse: Scale(1/sx, 1/sy, 1/sz) * Translate(sx/2, sy/2, sz/2)
-    //   [1/sx  0     0     0.5]
-    //   [0     1/sy  0     0.5]
-    //   [0     0     1/sz  0.5]
-    //   [0     0     0     1  ]
+    // Inverse: Scale(1/sx, 1/sy, 1/sz), corner at origin
+    //   [1/sx  0     0     0]
+    //   [0     1/sy  0     0]
+    //   [0     0     1/sz  0]
+    //   [0     0     0     1]
     let isx = if sx.abs() > 1e-12 { 1.0 / sx } else { 0.0 };
     let isy = if sy.abs() > 1e-12 { 1.0 / sy } else { 0.0 };
     let isz = if sz.abs() > 1e-12 { 1.0 / sz } else { 0.0 };
@@ -56,7 +56,7 @@ pub fn compute_volume_transform(shape: [u32; 3], scale: [f64; 3]) -> VolumeTrans
         isx, 0.0, 0.0, 0.0,
         0.0, isy, 0.0, 0.0,
         0.0, 0.0, isz, 0.0,
-        0.5, 0.5, 0.5, 1.0,
+        0.0, 0.0, 0.0, 1.0,
     ];
 
     VolumeTransform { model, inv_model }
@@ -73,6 +73,10 @@ mod tests {
         assert!((t.model[0] - 1.0).abs() < 1e-5);
         assert!((t.model[5] - 1.0).abs() < 1e-5);
         assert!((t.model[10] - 1.0).abs() < 1e-5);
+        // Corner at origin — no translation
+        assert!((t.model[12]).abs() < 1e-5);
+        assert!((t.model[13]).abs() < 1e-5);
+        assert!((t.model[14]).abs() < 1e-5);
     }
 
     #[test]
@@ -85,20 +89,21 @@ mod tests {
         assert!((t.model[5] - 192.0 / 279.0).abs() < 1e-4);
         // Z = 17/279 — much smaller, slab shape
         assert!((t.model[10] - 17.0 / 279.0).abs() < 1e-4);
+        // Corner at origin — no translation
+        assert!((t.model[12]).abs() < 1e-5);
+        assert!((t.model[13]).abs() < 1e-5);
+        assert!((t.model[14]).abs() < 1e-5);
     }
 
     #[test]
     fn inv_model_round_trip() {
         let t = compute_volume_transform([17, 192, 279], [0.5, 0.3, 0.1]);
-        // Multiplying model * inv_model should give identity
-        // Test: model * inv_model applied to [0.5, 0.5, 0.5] should give [0.5, 0.5, 0.5]
-        // Because model maps [0,1]^3 center to origin, inv_model maps back
-        // inv_model maps [0,0,0] (origin) to [0.5, 0.5, 0.5] (unit cube center)
+        // Corner at origin: inv_model has no translation
         let ox = t.inv_model[12];
         let oy = t.inv_model[13];
         let oz = t.inv_model[14];
-        assert!((ox - 0.5).abs() < 1e-5);
-        assert!((oy - 0.5).abs() < 1e-5);
-        assert!((oz - 0.5).abs() < 1e-5);
+        assert!((ox).abs() < 1e-5);
+        assert!((oy).abs() < 1e-5);
+        assert!((oz).abs() < 1e-5);
     }
 }
