@@ -186,6 +186,10 @@ export class RenderLoop {
 
     // Upload chunks for ALL datasets
     for (const [dsId, ds] of this.datasets) {
+      // Skip datasets whose dimensions are exceeded by the current slice position
+      const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+      if (z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0]) continue;
+
       const plan = evaluateChunkPlanFor(scene, dsId);
       if (!plan) continue;
       if (plan.needed.length > 0) {
@@ -258,6 +262,10 @@ export class RenderLoop {
       const settings = allSettings[dsId];
       if (!settings || !settings.visible) continue;
 
+      // Skip layers whose dimensions are exceeded by the current slice position
+      const dsShapeL = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+      if (z >= dsShapeL[2] || c >= dsShapeL[1] || t >= dsShapeL[0]) continue;
+
       const fullResWidth = ds.info.levels[0].shape[4];
       const fullResHeight = ds.info.levels[0].shape[3];
 
@@ -298,6 +306,10 @@ export class RenderLoop {
 
     // Upload chunks for ALL datasets
     for (const [dsId, ds] of this.datasets) {
+      // Skip datasets whose C/T are exceeded (volume renders all Z slices)
+      const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+      if (viewC >= dsShape[1] || viewT >= dsShape[0]) continue;
+
       const plan = evaluateChunkPlanFor(scene, dsId);
       if (!plan) continue;
       if (plan.needed.length > 0) {
@@ -367,9 +379,14 @@ export class RenderLoop {
 
     const layers: VolumeLayerParams[] = [];
     for (const dsId of layerOrder) {
-      if (!this.datasets.has(dsId)) continue;
+      const dsVol = this.datasets.get(dsId);
+      if (!dsVol) continue;
       const settings = allSettings[dsId];
       if (!settings || !settings.visible) continue;
+
+      // Skip layers whose C/T are exceeded (volume renders all Z slices)
+      const dsShapeV = dsVol.info.levels[0].shape; // [T, C, Z, Y, X]
+      if (viewC >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
 
       const model = new Float32Array(scene.model_matrix_for(dsId));
       const invModel = new Float32Array(scene.inv_model_matrix_for(dsId));

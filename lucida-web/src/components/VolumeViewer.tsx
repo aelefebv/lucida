@@ -34,7 +34,12 @@ export function VolumeViewer({ volume, scene, datasets, selectedDatasetId, clien
       loop.stop();
       parentLoopRef.current = null;
     };
-  }, [scene, selectedDatasetId, client, canvas]);
+  }, [scene, client, canvas]);
+
+  // Update selected dataset without recreating the loop
+  useEffect(() => {
+    loopRef.current?.setSelectedDataset(selectedDatasetId);
+  }, [selectedDatasetId]);
 
   // Mark dirty on remote document updates
   useEffect(() => {
@@ -46,13 +51,21 @@ export function VolumeViewer({ volume, scene, datasets, selectedDatasetId, clien
     loopRef.current?.markDirty();
   }, [t, c]);
 
-  // Initial volume upload effect
+  // Initial volume upload effect — per-dataset tracking to avoid redundant uploads
+  const uploadedVolumes = useRef(new Map<string, { w: number; h: number; d: number }>());
   useEffect(() => {
+    const { width, height, depth } = volume;
+    const prev = uploadedVolumes.current.get(selectedDatasetId);
+    if (prev && prev.w === width && prev.h === height && prev.d === depth) {
+      // Already uploaded this exact volume for this dataset — skip
+      return;
+    }
+    uploadedVolumes.current.set(selectedDatasetId, { w: width, h: height, d: depth });
+
     const canvasW = canvas.clientWidth * devicePixelRatio;
     const canvasH = canvas.clientHeight * devicePixelRatio;
     scene.set_viewport(canvasW, canvasH);
 
-    loopRef.current?.resetVolumeCache();
     client.volumeSetInitialForLayer(selectedDatasetId, volume.data, volume.width, volume.height, volume.depth);
     loopRef.current?.markDirty();
   }, [volume, scene, selectedDatasetId, client, canvas]);

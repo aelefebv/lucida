@@ -37,25 +37,30 @@ export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetI
       loop.stop();
       parentLoopRef.current = null;
     };
-  }, [scene, selectedDatasetId, client, canvas]);
+  }, [scene, client, canvas]);
+
+  // Update selected dataset without recreating the loop
+  useEffect(() => {
+    loopRef.current?.setSelectedDataset(selectedDatasetId);
+  }, [selectedDatasetId]);
 
   // Update slice params on prop changes and when loop is recreated
   useEffect(() => {
     loopRef.current?.setSliceParams(z, t, c);
-  }, [z, t, c, scene, selectedDatasetId, client, canvas]);
+  }, [z, t, c, scene, client, canvas]);
 
   // Mark dirty on remote document updates
   useEffect(() => {
     loopRef.current?.markDirty();
   }, [remoteDocumentVersion]);
 
-  // Reset pan/zoom when the dataset dimensions change
-  const prevDims = useRef({ w: volume.width, h: volume.height, d: volume.depth });
+  // Reset pan/zoom when the dataset dimensions change (LOD upgrades),
+  // but NOT when merely switching the selected layer.
+  const prevDimsMap = useRef(new Map<string, { w: number; h: number; d: number }>());
   useEffect(() => {
     const { width, height, depth } = volume;
-    const prev = prevDims.current;
-    if (width !== prev.w || height !== prev.h || depth !== prev.d) {
-      prevDims.current = { w: width, h: height, d: depth };
+    const prev = prevDimsMap.current.get(selectedDatasetId);
+    if (prev && (width !== prev.w || height !== prev.h || depth !== prev.d)) {
       const selectedDs = datasets.get(selectedDatasetId);
       if (selectedDs) {
         const fullResWidth = selectedDs.info.levels[0].shape[4];
@@ -66,12 +71,22 @@ export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetI
         loopRef.current?.markDirty();
       }
     }
+    prevDimsMap.current.set(selectedDatasetId, { w: width, h: height, d: depth });
   }, [volume, scene, datasets, selectedDatasetId, emitPresence]);
 
-  // Upload fallback (coarsest-level) texture
+  // Upload fallback (coarsest-level) texture — per-dataset tracking to avoid
+  // redundant re-uploads (and the cascading intensityRange re-render) on selection change.
+  const uploadedFallbacks = useRef(new Map<string, { z: number; w: number; h: number; d: number }>());
   useEffect(() => {
     const { width, height, depth, data } = volume;
+    // Skip fallback upload if current Z exceeds this dataset's depth
+    if (z >= depth) return;
     const clampedZ = Math.max(0, Math.min(z, depth - 1));
+    const prev = uploadedFallbacks.current.get(selectedDatasetId);
+    if (prev && prev.z === clampedZ && prev.w === width && prev.h === height && prev.d === depth) {
+      return;
+    }
+    uploadedFallbacks.current.set(selectedDatasetId, { z: clampedZ, w: width, h: height, d: depth });
     const sliceSize = width * height;
     const offset = clampedZ * sliceSize;
     const slice = data.subarray(offset, offset + sliceSize);

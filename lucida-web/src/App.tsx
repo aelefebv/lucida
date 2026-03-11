@@ -743,10 +743,23 @@ function App() {
     }
   }, [viewMode, wasmScene, datasetInfo, emitPresence, breakFollow]);
 
-  // Dimension extents from full-res level (level 0) for accurate slider ranges
-  const dimZ = datasetInfo ? datasetInfo.levels[0].shape[2] : 1;
-  const dimC = datasetInfo ? datasetInfo.levels[0].shape[1] : 1;
-  const dimT = datasetInfo ? datasetInfo.levels[0].shape[0] : 1;
+  // Union dimension extents across ALL datasets for slider ranges.
+  // Reference datasetsVersion so this recomputes when datasets are added/removed.
+  let dimZ = 1, dimC = 1, dimT = 1;
+  void datasetsVersion;
+  for (const ds of datasetsRef.current.values()) {
+    const shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+    dimZ = Math.max(dimZ, shape[2]);
+    dimC = Math.max(dimC, shape[1]);
+    dimT = Math.max(dimT, shape[0]);
+  }
+
+  // Clamp slider values when union dimensions shrink (e.g. removing a large dataset)
+  useEffect(() => {
+    if (z >= dimZ) setZ(dimZ - 1);
+    if (c >= dimC) setC(dimC - 1);
+    if (t >= dimT) setT(dimT - 1);
+  }, [dimZ, dimC, dimT]);
 
   // --- Layer panel handlers ---
 
