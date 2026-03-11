@@ -255,6 +255,30 @@ impl Scene {
         self.document.datasets.iter().find(|d| d.id == id)
     }
 
+    /// Returns the maximum `max_physical_extent` across all datasets.
+    /// Used to apply a global normalization correction so multi-dataset
+    /// scenes preserve relative physical sizes in 3D.
+    pub fn global_max_physical_extent(&self) -> f64 {
+        let max = self.document.datasets.iter()
+            .filter_map(|d| d.volume_transform.as_ref())
+            .map(|t| if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 })
+            .fold(0.0_f64, f64::max);
+        if max > 0.0 { max } else { 1.0 }
+    }
+
+    /// Returns the maximum physical Y extent across all datasets.
+    /// Used to top-align datasets in 3D mode.
+    pub fn global_max_physical_y(&self) -> f64 {
+        let max = self.document.datasets.iter()
+            .filter_map(|d| d.volume_transform.as_ref())
+            .map(|t| {
+                let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+                t.model[5] as f64 * ds_max // phys_y = base_sy * max_physical_extent
+            })
+            .fold(0.0_f64, f64::max);
+        if max > 0.0 { max } else { 1.0 }
+    }
+
     /// Compute the chunk request plan for all visible layers across all datasets.
     pub fn chunk_plan(&self) -> ChunkRequestPlan {
         let region = self.camera.visible_region(

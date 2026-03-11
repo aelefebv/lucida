@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 pub struct VolumeTransform {
     pub model: [f32; 16],
     pub inv_model: [f32; 16],
+    /// The dataset's largest physical axis extent (before normalization).
+    #[serde(default)]
+    pub max_physical_extent: f64,
 }
 
 /// Compute a model matrix that maps the volume into a normalized coordinate space
@@ -59,7 +62,7 @@ pub fn compute_volume_transform(shape: [u32; 3], scale: [f64; 3]) -> VolumeTrans
         0.0, 0.0, 0.0, 1.0,
     ];
 
-    VolumeTransform { model, inv_model }
+    VolumeTransform { model, inv_model, max_physical_extent: max_phys }
 }
 
 #[cfg(test)]
@@ -77,6 +80,8 @@ mod tests {
         assert!((t.model[12]).abs() < 1e-5);
         assert!((t.model[13]).abs() < 1e-5);
         assert!((t.model[14]).abs() < 1e-5);
+        // max_physical_extent = 100
+        assert!((t.max_physical_extent - 100.0).abs() < 1e-5);
     }
 
     #[test]
@@ -93,6 +98,8 @@ mod tests {
         assert!((t.model[12]).abs() < 1e-5);
         assert!((t.model[13]).abs() < 1e-5);
         assert!((t.model[14]).abs() < 1e-5);
+        // max_physical_extent = 279
+        assert!((t.max_physical_extent - 279.0).abs() < 1e-5);
     }
 
     #[test]

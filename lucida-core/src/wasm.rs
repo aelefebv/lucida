@@ -395,7 +395,20 @@ impl WasmScene {
 
     pub fn model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
         match self.inner.dataset_by_id(dataset_id).and_then(|d| d.volume_transform.as_ref()) {
-            Some(t) => t.model.to_vec(),
+            Some(t) => {
+                let global_max = self.inner.global_max_physical_extent();
+                let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+                let correction = (ds_max / global_max) as f32;
+                let mut m = t.model;
+                m[0] *= correction;
+                m[5] *= correction;
+                m[10] *= correction;
+                // Top-align: shift smaller datasets up so top edges match
+                let phys_y = t.model[5] as f64 * ds_max;
+                let global_max_y = self.inner.global_max_physical_y();
+                m[13] = ((global_max_y - phys_y) / global_max) as f32;
+                m.to_vec()
+            }
             None => {
                 vec![
                     1.0, 0.0, 0.0, 0.0,
@@ -409,7 +422,21 @@ impl WasmScene {
 
     pub fn inv_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
         match self.inner.dataset_by_id(dataset_id).and_then(|d| d.volume_transform.as_ref()) {
-            Some(t) => t.inv_model.to_vec(),
+            Some(t) => {
+                let global_max = self.inner.global_max_physical_extent();
+                let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+                let inv_correction = (global_max / ds_max) as f32;
+                let mut m = t.inv_model;
+                m[0] *= inv_correction;
+                m[5] *= inv_correction;
+                m[10] *= inv_correction;
+                // Inverse of Y-translation: -ty * corrected_inv_sy
+                let phys_y = t.model[5] as f64 * ds_max;
+                let global_max_y = self.inner.global_max_physical_y();
+                let ty = ((global_max_y - phys_y) / global_max) as f32;
+                m[13] = -ty * m[5];
+                m.to_vec()
+            }
             None => {
                 vec![
                     1.0, 0.0, 0.0, 0.0,
