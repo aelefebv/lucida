@@ -3,7 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use lucida_core::camera::Camera;
 use lucida_core::command::Command;
 use lucida_core::protocol::{ClientId, PresenceState, ServerMessage};
-use lucida_core::scene::{DisplayState, DocumentState, Scene};
+use lucida_core::scene::{DisplayState, DocumentState, LayerDisplaySettings, Scene};
 use lucida_core::view::ViewState;
 
 const HISTORY_CAPACITY: usize = 256;
@@ -67,6 +67,8 @@ impl Session {
             display: DisplayState::default(),
             following: None,
             cursor: None,
+            layer_order: Vec::new(),
+            layer_settings: HashMap::new(),
         };
         self.clients.insert(id, presence.clone());
         presence
@@ -106,6 +108,19 @@ impl Session {
     pub fn update_cursor(&mut self, id: ClientId, position: [f64; 2]) {
         if let Some(presence) = self.clients.get_mut(&id) {
             presence.cursor = Some(position);
+        }
+    }
+
+    /// Update a client's layer presence.
+    pub fn update_layer_presence(
+        &mut self,
+        id: ClientId,
+        layer_order: Vec<String>,
+        layer_settings: HashMap<String, LayerDisplaySettings>,
+    ) {
+        if let Some(presence) = self.clients.get_mut(&id) {
+            presence.layer_order = layer_order;
+            presence.layer_settings = layer_settings;
         }
     }
 

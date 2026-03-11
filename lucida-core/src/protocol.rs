@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
 use crate::command::Command;
-use crate::scene::{DisplayState, DocumentState};
+use crate::scene::{DisplayState, DocumentState, LayerDisplaySettings};
 use crate::view::ViewState;
 
 pub type ClientId = u64;
@@ -17,6 +19,10 @@ pub struct PresenceState {
     /// Who this client is following (`None` = independent).
     pub following: Option<ClientId>,
     pub cursor: Option<[f64; 2]>,
+    #[serde(default)]
+    pub layer_order: Vec<String>,
+    #[serde(default)]
+    pub layer_settings: HashMap<String, LayerDisplaySettings>,
 }
 
 /// Messages sent from a client to the server.
@@ -35,6 +41,11 @@ pub enum ClientMessage {
     Cursor { position: [f64; 2] },
     /// Follow another client (or stop following with `target: null`).
     Follow { target: Option<ClientId> },
+    /// Layer presence update (ephemeral, latest-wins).
+    LayerPresence {
+        layer_order: Vec<String>,
+        layer_settings: HashMap<String, LayerDisplaySettings>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,7 +86,12 @@ pub enum ServerMessage {
         client_id: ClientId,
         target: Option<ClientId>,
     },
-
+    /// A peer's layer presence changed.
+    LayerPresenceUpdate {
+        client_id: ClientId,
+        layer_order: Vec<String>,
+        layer_settings: HashMap<String, LayerDisplaySettings>,
+    },
 }
 
 /// Chunk-related messages exchanged between clients and server.
@@ -241,6 +257,8 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: Some([100.0, 200.0]),
+            layer_order: vec![],
+            layer_settings: HashMap::new(),
         };
         let json = serde_json::to_string(&ps).unwrap();
         let parsed: PresenceState = serde_json::from_str(&json).unwrap();
@@ -258,6 +276,8 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: None,
+            layer_order: vec![],
+            layer_settings: HashMap::new(),
         };
         let msg = ServerMessage::PeerJoined {
             client_id: 3,

@@ -52,7 +52,10 @@ export class RenderLoop {
 
   constructor(opts: RenderLoopOptions) {
     this.scene = opts.scene;
-    this.datasets = opts.datasets;
+    this.datasets = new Map();
+    for (const [id, entry] of opts.datasets) {
+      this.datasets.set(id, { store: entry.store, info: entry.info });
+    }
     this.selectedDatasetId = opts.selectedDatasetId;
     this.client = opts.client;
     this.canvas = opts.canvas;
@@ -214,7 +217,7 @@ export class RenderLoop {
         if (coord.level !== level) continue;
         if (uploaded.has(coord.key)) continue;
         const buf = ds.store.get(coord.key);
-        if (!buf) continue;
+        if (!buf || buf.byteLength === 0) continue;
         availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
         uploaded.add(coord.key);
         budgetRemaining -= buf.byteLength;
@@ -333,7 +336,7 @@ export class RenderLoop {
       for (const coord of plan.needed) {
         if (cached.uploaded.has(coord.key)) continue;
         const buf = ds.store.get(coord.key);
-        if (!buf) continue;
+        if (!buf || buf.byteLength === 0) continue;
         newChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
         cached.uploaded.add(coord.key);
         budgetRemaining -= buf.byteLength;

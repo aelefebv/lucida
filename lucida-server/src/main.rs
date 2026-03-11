@@ -44,6 +44,11 @@ enum BroadcastItem {
     FollowChanged {
         json: String,
     },
+    /// Layer presence update from a client.
+    LayerPresenceUpdate {
+        sender: ClientId,
+        json: String,
+    },
 }
 
 /// Per-client targeted message channels for unicast (chunk routing).
@@ -155,6 +160,10 @@ async fn main() {
                                         }
                                         BroadcastItem::PeerLeft { json } => json,
                                         BroadcastItem::FollowChanged { json } => json,
+                                        BroadcastItem::LayerPresenceUpdate { sender, json } => {
+                                            if *sender == id { continue; }
+                                            json
+                                        }
                                     };
                                     if ws_tx
                                         .send(Message::Text(json.clone().into()))
@@ -281,6 +290,28 @@ async fn main() {
                                             json: serde_json::to_string(&msg).unwrap(),
                                         });
                                     }
+                                }
+                                ClientMessage::LayerPresence {
+                                    layer_order,
+                                    layer_settings,
+                                } => {
+                                    {
+                                        let mut sess = session.lock().await;
+                                        sess.update_layer_presence(
+                                            id,
+                                            layer_order.clone(),
+                                            layer_settings.clone(),
+                                        );
+                                    }
+                                    let update = ServerMessage::LayerPresenceUpdate {
+                                        client_id: id,
+                                        layer_order,
+                                        layer_settings,
+                                    };
+                                    let _ = tx.send(BroadcastItem::LayerPresenceUpdate {
+                                        sender: id,
+                                        json: serde_json::to_string(&update).unwrap(),
+                                    });
                                 }
                             }
                             continue;

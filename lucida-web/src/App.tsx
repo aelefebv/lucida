@@ -47,7 +47,7 @@ interface PendingChunkResolve {
 
 function App() {
   const [wasmReady, setWasmReady] = useState(false);
-  const [volume, setVolume] = useState<VolumeData | null>(null);
+  const [volumeMap, setVolumeMap] = useState<Map<string, VolumeData>>(new Map());
   const [wasmScene, setWasmScene] = useState<WasmScene | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -207,12 +207,19 @@ function App() {
                   setDatasetInfo(null);
                   storeRef.current = null;
                   fileIndexRef.current = null;
-                  setVolume(null);
                 }
                 return remaining;
               }
               return prev;
             });
+            setVolumeMap(prev => { const next = new Map(prev); next.delete(cmd.id); return next; });
+            // Reject pending chunk requests for the removed dataset
+            for (const [key, pending] of pendingChunkRequests.current) {
+              if (key.startsWith(cmd.id + "/")) {
+                pending.reject(new Error("Dataset removed"));
+                pendingChunkRequests.current.delete(key);
+              }
+            }
             setDatasetsVersion((v) => v + 1);
           }
           setRemoteDocumentVersion((v) => v + 1);
@@ -308,6 +315,31 @@ function App() {
           setFollowTarget(target);
         }
       },
+      onLayerPresenceUpdate: (clientId, layerOrder, layerSettings) => {
+        // Update peer state
+        setPeers(prev => {
+          const next = new Map(prev);
+          const existing = next.get(clientId);
+          if (existing) {
+            next.set(clientId, { ...existing, layer_order: layerOrder, layer_settings: layerSettings });
+          }
+          return next;
+        });
+        // If following this peer, import their layer presence
+        if (followTargetRef.current === clientId) {
+          const scene = wasmSceneRef.current;
+          if (scene) {
+            try {
+              const json = JSON.stringify({ layer_order: layerOrder, layer_settings: layerSettings });
+              scene.import_layer_presence(json);
+              setLayerSettingsVersion((v) => v + 1);
+              loopRef.current?.markDirty();
+            } catch (e) {
+              console.warn("[Bridge] failed to import layer presence:", e);
+            }
+          }
+        }
+      },
       onDisconnect: () => {
         // Reject all pending chunk requests so they don't hang forever
         for (const [, pending] of pendingChunkRequests.current) {
@@ -327,13 +359,14 @@ function App() {
 
     // Create a remote fetcher that requests chunks via the bridge.
     const remoteFetcher: ChunkFetcher = async (coord, signal) => {
+      const compositeKey = `${datasetId}/${coord.key}`;
       const rawBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
         const timeoutId = setTimeout(() => {
-          pendingChunkRequests.current.delete(coord.key);
+          pendingChunkRequests.current.delete(compositeKey);
           reject(new Error(`Chunk ${coord.key} timed out`));
         }, CHUNK_TIMEOUT_MS);
 
-        pendingChunkRequests.current.set(coord.key, {
+        pendingChunkRequests.current.set(compositeKey, {
           resolve: (data) => { clearTimeout(timeoutId); resolve(data); },
           reject: (err) => { clearTimeout(timeoutId); reject(err); },
         });
@@ -346,13 +379,15 @@ function App() {
 
         signal?.addEventListener("abort", () => {
           clearTimeout(timeoutId);
-          pendingChunkRequests.current.delete(coord.key);
+          pendingChunkRequests.current.delete(compositeKey);
           reject(new DOMException("Aborted", "AbortError"));
         });
       });
 
+      // Empty response means chunk doesn't exist — return as-is so ChunkStore
+      // caches the result and doesn't retry.
       if (rawBytes.byteLength === 0) {
-        throw new Error(`Remote chunk ${coord.key} returned empty`);
+        return rawBytes;
       }
 
       // Apply codec pipeline (same as loadChunk does for local files).
@@ -382,29 +417,29 @@ function App() {
     // Add to render loop if it exists
     loopRef.current?.addDataset(datasetId, store, info);
 
-    // If this is the first dataset and we don't have a local one, use it for rendering.
+    // Always create placeholder volume for remote datasets
+    const coarsest = info.levels[info.levels.length - 1];
+    const [, , depth, height, width] = coarsest.shape;
+    setVolumeMap(prev => {
+      const next = new Map(prev);
+      next.set(datasetId, { data: new Uint16Array(width * height * depth), width, height, depth });
+      return next;
+    });
+
+    // If this is the first dataset and we don't have a local one, select it.
     if (!storeRef.current) {
       storeRef.current = store;
       setDatasetInfo(info);
       setSelectedDatasetId(datasetId);
-
-      // Create placeholder volume from coarsest level dimensions.
-      const coarsest = info.levels[info.levels.length - 1];
-      const [, , depth, height, width] = coarsest.shape;
-      setVolume({
-        data: new Uint16Array(width * height * depth),
-        width,
-        height,
-        depth,
-      });
     }
 
     setDatasetsVersion((v) => v + 1);
   }
 
   /** Send an empty-data binary response so the requester's promise resolves immediately. */
-  function sendEmptyChunkResponse(clientId: number, key: string) {
-    const keyBytes = new TextEncoder().encode(key);
+  function sendEmptyChunkResponse(clientId: number, datasetId: string, key: string) {
+    const compositeKey = `${datasetId}/${key}`;
+    const keyBytes = new TextEncoder().encode(compositeKey);
     const headerSize = 4 + 2 + keyBytes.length;
     const message = new Uint8Array(headerSize); // zero-length data
     const view = new DataView(message.buffer);
@@ -418,21 +453,21 @@ function App() {
   async function serveChunkFetch(clientId: number, datasetId: string, key: string) {
     const ds = datasetsRef.current.get(datasetId);
     if (!ds || !ds.fileIndex) {
-      sendEmptyChunkResponse(clientId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key);
       return;
     }
 
     // Parse key: "level/t/c/z/y/x"
     const parts = key.split("/").map(Number);
     if (parts.length !== 6) {
-      sendEmptyChunkResponse(clientId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key);
       return;
     }
     const [level, t, c, z, y, x] = parts;
 
     const levelMeta = ds.info.levels[level];
     if (!levelMeta) {
-      sendEmptyChunkResponse(clientId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key);
       return;
     }
 
@@ -440,7 +475,7 @@ function App() {
     const path = `${levelMeta.path}/c/${t}/${c}/${z}/${y}/${x}`;
     const file = ds.fileIndex.get(path);
     if (!file) {
-      sendEmptyChunkResponse(clientId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key);
       return;
     }
 
@@ -448,7 +483,8 @@ function App() {
       const rawBytes = await file.arrayBuffer();
 
       // Build binary message: [client_id: u32 LE][key_len: u16 LE][key: UTF-8][data]
-      const keyBytes = new TextEncoder().encode(key);
+      const compositeKey = `${datasetId}/${key}`;
+      const keyBytes = new TextEncoder().encode(compositeKey);
       const headerSize = 4 + 2 + keyBytes.length;
       const message = new Uint8Array(headerSize + rawBytes.byteLength);
       const view = new DataView(message.buffer);
@@ -460,7 +496,7 @@ function App() {
       bridgeRef.current?.sendBinary(message);
     } catch (err) {
       console.error(`Failed to serve chunk ${key}:`, err);
-      sendEmptyChunkResponse(clientId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key);
     }
   }
 
@@ -475,6 +511,13 @@ function App() {
     if (!scene) return;
     const presenceJson = scene.export_presence();
     bridgeRef.current?.sendPresence(presenceJson);
+  }, []);
+
+  /** Emit current layer presence to server (throttled by bridge). */
+  const emitLayerPresence = useCallback(() => {
+    const scene = wasmSceneRef.current;
+    if (!scene) return;
+    bridgeRef.current?.sendLayerPresence(scene.export_layer_presence());
   }, []);
 
   /** Break follow on local viewport interaction. */
@@ -522,6 +565,8 @@ function App() {
             max,
           }));
           loopRef.current?.markDirty();
+          // Emit updated layer presence so followers see correct contrast
+          bridgeRef.current?.sendLayerPresence(scene.export_layer_presence());
         }
       }
     };
@@ -667,11 +712,12 @@ function App() {
       setSelectedDatasetId(datasetId);
       setDatasetsVersion((v) => v + 1);
 
-      setVolume(vol);
+      setVolumeMap(prev => { const next = new Map(prev); next.set(datasetId, vol); return next; });
       setWasmScene(scene);
 
       // Emit initial presence after setup
       setTimeout(() => emitPresence(), 0);
+      setTimeout(() => emitLayerPresence(), 0);
     } catch (err) {
       console.error("Failed to load OME-Zarr:", err);
       setError(err instanceof Error ? err.message : String(err));
@@ -723,65 +769,71 @@ function App() {
   const handleLayerSetVisible = useCallback((id: string, visible: boolean) => {
     const scene = wasmSceneRef.current;
     if (scene) {
+      breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_layer_visible", dataset_id: id, visible }));
       loopRef.current?.markDirty();
-      emitPresence();
+      emitLayerPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [emitPresence]);
+  }, [emitLayerPresence, breakFollow]);
 
   const handleLayerSetOpacity = useCallback((id: string, opacity: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
+      breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_layer_opacity", dataset_id: id, opacity }));
       loopRef.current?.markDirty();
-      emitPresence();
+      emitLayerPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [emitPresence]);
+  }, [emitLayerPresence, breakFollow]);
 
   const handleLayerSetContrast = useCallback((id: string, min: number, max: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
+      breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min, max }));
       loopRef.current?.markDirty();
-      emitPresence();
+      emitLayerPresence();
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
-  }, [emitPresence]);
+  }, [emitLayerPresence, breakFollow]);
 
   const handleLayerSetGamma = useCallback((id: string, gamma: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
+      breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_layer_gamma", dataset_id: id, gamma }));
       loopRef.current?.markDirty();
-      emitPresence();
+      emitLayerPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [emitPresence]);
+  }, [emitLayerPresence, breakFollow]);
 
   const handleLayerSetBlendMode = useCallback((id: string, mode: string) => {
     const scene = wasmSceneRef.current;
     if (scene) {
+      breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_layer_blend_mode", dataset_id: id, blend_mode: mode }));
       loopRef.current?.markDirty();
-      emitPresence();
+      emitLayerPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
-  }, [emitPresence]);
+  }, [emitLayerPresence, breakFollow]);
 
   const handleLayerAutoContrast = useCallback((id: string) => {
     const dr = dataRangeMap.get(id);
     if (dr) {
       const scene = wasmSceneRef.current;
       if (scene) {
+        breakFollow();
         scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: dr.min, max: dr.max }));
         loopRef.current?.markDirty();
-        emitPresence();
+        emitLayerPresence();
       }
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, true); return next; });
-  }, [dataRangeMap, emitPresence]);
+  }, [dataRangeMap, emitLayerPresence, breakFollow]);
 
   const handleLayerAutoContrastToggle = useCallback((id: string) => {
     setAutoContrastMap(prev => {
@@ -794,15 +846,16 @@ function App() {
         if (dr) {
           const scene = wasmSceneRef.current;
           if (scene) {
+            breakFollow();
             scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: dr.min, max: dr.max }));
             loopRef.current?.markDirty();
-            emitPresence();
+            emitLayerPresence();
           }
         }
       }
       return next;
     });
-  }, [dataRangeMap, emitPresence]);
+  }, [dataRangeMap, emitLayerPresence, breakFollow]);
 
   const handleLayerFullRangeToggle = useCallback((id: string) => {
     setFullRangeMap(prev => {
@@ -811,6 +864,7 @@ function App() {
       next.set(id, !wasFull);
       const scene = wasmSceneRef.current;
       if (scene) {
+        breakFollow();
         if (!wasFull) {
           // Enabling full range
           const ds = datasetsRef.current.get(id);
@@ -826,15 +880,16 @@ function App() {
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
         }
         loopRef.current?.markDirty();
-        emitPresence();
+        emitLayerPresence();
       }
       return next;
     });
-  }, [dataRangeMap, emitPresence]);
+  }, [dataRangeMap, emitLayerPresence, breakFollow]);
 
   const handleLayerMove = useCallback((id: string, direction: "up" | "down") => {
     const scene = wasmSceneRef.current;
     if (!scene) return;
+    breakFollow();
     const order: string[] = JSON.parse(scene.layer_order());
     const idx = order.indexOf(id);
     if (idx < 0) return;
@@ -843,9 +898,9 @@ function App() {
     [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
     scene.apply_command(JSON.stringify({ type: "set_layer_order", order }));
     loopRef.current?.markDirty();
-    emitPresence();
+    emitLayerPresence();
     setLayerSettingsVersion((v) => v + 1);
-  }, [emitPresence]);
+  }, [emitLayerPresence, breakFollow]);
 
   const handleRemoveLayer = useCallback((id: string) => {
     if (!confirm(`Remove layer "${datasetsRef.current.get(id)?.name ?? id}"?`)) return;
@@ -879,12 +934,19 @@ function App() {
           setDatasetInfo(null);
           storeRef.current = null;
           fileIndexRef.current = null;
-          setVolume(null);
         }
         return remaining;
       }
       return prev;
     });
+    setVolumeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
+    // Reject pending chunk requests for the removed dataset
+    for (const [key, pending] of pendingChunkRequests.current) {
+      if (key.startsWith(id + "/")) {
+        pending.reject(new Error("Dataset removed"));
+        pendingChunkRequests.current.delete(key);
+      }
+    }
     setDatasetsVersion((v) => v + 1);
   }, [sendCommand]);
 
@@ -906,6 +968,19 @@ function App() {
               display: peer.display,
             });
             scene.import_presence(presenceJson);
+            // Also import layer presence if available
+            if (peer.layer_order && peer.layer_settings) {
+              try {
+                const layerJson = JSON.stringify({
+                  layer_order: peer.layer_order,
+                  layer_settings: peer.layer_settings,
+                });
+                scene.import_layer_presence(layerJson);
+                setLayerSettingsVersion((v) => v + 1);
+              } catch (e) {
+                console.warn("Failed to import peer layer presence:", e);
+              }
+            }
             setZ(scene.z());
             setT(scene.t());
             setC(scene.c());
@@ -921,6 +996,7 @@ function App() {
   }, [peers, myId]);
 
   const client = clientReady ? clientRef.current : null;
+  const selectedVolume = selectedDatasetId ? volumeMap.get(selectedDatasetId) ?? null : null;
 
   // Build list of followable peers (not following anyone else)
   const followablePeers = Array.from(peers.entries())
@@ -1006,7 +1082,7 @@ function App() {
         onMoveLayer={handleLayerMove}
         onRemoveLayer={handleRemoveLayer}
         onAddLayer={() => dirInputRef.current?.click()}
-        viewModeToggle={volume ? { label: viewMode === "2d" ? "3D" : "2D", onClick: handleViewModeToggle } : null}
+        viewModeToggle={selectedVolume ? { label: viewMode === "2d" ? "3D" : "2D", onClick: handleViewModeToggle } : null}
       />
       <div className="main-content">
         {/* Peer list / follow controls */}
@@ -1042,12 +1118,12 @@ function App() {
             imageRendering: viewMode === "2d" ? "pixelated" : "auto",
             borderRadius: 8,
             backgroundColor: "black",
-            display: volume ? "block" : "none",
+            display: selectedVolume ? "block" : "none",
           }}
         />
-        {volume && viewMode === "2d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
+        {selectedVolume && viewMode === "2d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
           <SliceViewer
-            volume={volume}
+            volume={selectedVolume}
             z={z}
             t={t}
             c={c}
@@ -1062,9 +1138,9 @@ function App() {
             loopRef={loopRef}
           />
         )}
-        {volume && viewMode === "3d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
+        {selectedVolume && viewMode === "3d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
           <VolumeViewer
-            volume={volume}
+            volume={selectedVolume}
             scene={wasmScene}
             datasets={datasetsRef.current}
             selectedDatasetId={selectedDatasetId}
@@ -1078,7 +1154,7 @@ function App() {
             loopRef={loopRef}
           />
         )}
-        {volume && (
+        {selectedVolume && (
           <div className="dimension-controls">
             <DimensionControls label="Z" value={z} max={dimZ} onChange={(v) => {
               setZ(v);

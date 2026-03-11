@@ -7,6 +7,8 @@ export interface PresenceState {
   display: { contrast_min: number; contrast_max: number; gamma: number };
   following: ClientId | null;
   cursor: [number, number] | null;
+  layer_order: string[];
+  layer_settings: Record<string, unknown>;
 }
 
 export interface BridgeHandlers {
@@ -20,6 +22,7 @@ export interface BridgeHandlers {
   onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: unknown, display: PresenceState["display"]) => void;
   onCursorUpdate?: (clientId: ClientId, position: [number, number]) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
+  onLayerPresenceUpdate?: (clientId: ClientId, layerOrder: string[], layerSettings: Record<string, unknown>) => void;
   onDisconnect?: () => void;
 }
 
@@ -31,6 +34,8 @@ export class Bridge {
   private destroyed = false;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPresence: string | null = null;
+  private layerPresenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingLayerPresence: string | null = null;
 
   constructor(handlers: BridgeHandlers, port = 9876) {
     this.url = `ws://localhost:${port}`;
@@ -91,6 +96,9 @@ export class Bridge {
           case "follow_changed":
             this.handlers.onFollowChanged?.(msg.client_id, msg.target);
             break;
+          case "layer_presence_update":
+            this.handlers.onLayerPresenceUpdate?.(msg.client_id, msg.layer_order, msg.layer_settings);
+            break;
         }
       } catch (e) {
         console.warn("[Bridge] failed to parse message:", e);
@@ -149,6 +157,21 @@ export class Bridge {
     }
   }
 
+  /** Send layer presence update, throttled to ~200ms. */
+  sendLayerPresence(json: string) {
+    const obj = JSON.parse(json);
+    this.pendingLayerPresence = JSON.stringify({ type: "layer_presence", ...obj });
+    if (!this.layerPresenceTimer) {
+      this.layerPresenceTimer = setTimeout(() => {
+        this.layerPresenceTimer = null;
+        if (this.pendingLayerPresence) {
+          this.send(this.pendingLayerPresence);
+          this.pendingLayerPresence = null;
+        }
+      }, 200);
+    }
+  }
+
   /** Send a follow request. */
   sendFollow(target: ClientId | null) {
     this.send(JSON.stringify({ type: "follow", target }));
@@ -179,6 +202,9 @@ export class Bridge {
     }
     if (this.presenceTimer !== null) {
       clearTimeout(this.presenceTimer);
+    }
+    if (this.layerPresenceTimer !== null) {
+      clearTimeout(this.layerPresenceTimer);
     }
     this.ws?.close();
     this.ws = null;
