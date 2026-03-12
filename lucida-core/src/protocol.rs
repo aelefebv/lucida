@@ -46,6 +46,8 @@ pub enum ClientMessage {
         layer_order: Vec<String>,
         layer_settings: HashMap<String, LayerDisplaySettings>,
     },
+    /// Remote-control another client by making them follow the sender.
+    Steer { client: ClientId },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +236,18 @@ mod tests {
         assert!(json.contains("\"type\":\"presence\""));
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, ClientMessage::Presence { .. }));
+    }
+
+    #[test]
+    fn client_message_steer_round_trips() {
+        let msg = ClientMessage::Steer { client: 3 };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"steer\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::Steer { client } => assert_eq!(client, 3),
+            _ => panic!("expected Steer"),
+        }
     }
 
     #[test]

@@ -271,6 +271,8 @@ function App() {
               const is3d = scene.is_3d();
               setViewMode(is3d ? "3d" : "2d");
               loopRef.current?.markDirty();
+              // Re-emit so the server has our updated state
+              bridgeRef.current?.sendPresence(scene.export_presence());
             } catch (e) {
               console.warn("[Bridge] failed to import presence:", e);
             }

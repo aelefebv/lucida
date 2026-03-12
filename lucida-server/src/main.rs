@@ -291,6 +291,21 @@ async fn main() {
                                         });
                                     }
                                 }
+                                ClientMessage::Steer { client } => {
+                                    let changes = {
+                                        let mut sess = session.lock().await;
+                                        sess.set_follow(client, Some(id))
+                                    };
+                                    for (cid, new_target) in changes {
+                                        let msg = ServerMessage::FollowChanged {
+                                            client_id: cid,
+                                            target: new_target,
+                                        };
+                                        let _ = tx.send(BroadcastItem::FollowChanged {
+                                            json: serde_json::to_string(&msg).unwrap(),
+                                        });
+                                    }
+                                }
                                 ClientMessage::LayerPresence {
                                     layer_order,
                                     layer_settings,

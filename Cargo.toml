@@ -1,4 +1,4 @@
 [workspace]
-members = ["lucida-core", "lucida-server", "lucida-store"]
+members = ["lucida-core", "lucida-server", "lucida-store", "lucida-cli"]
 exclude = ["lucida-py"]
 resolver = "3"
