@@ -1,6 +1,7 @@
 /** Assemble all chunks for one timepoint/channel into a contiguous 3D array. */
 import type { LevelMeta } from "./metadata.ts";
 import { loadChunk } from "./chunkLoader.ts";
+import { bufferToUint16 } from "./dtypeConvert.ts";
 
 export interface VolumeData {
   data: Uint16Array;
@@ -32,7 +33,7 @@ export async function assembleVolume(
       for (let ix = 0; ix < nx; ix++) {
         tasks.push(
           loadChunk(fileIndex, level, t, c, iz, iy, ix, meta.codecs).then((buf) => {
-            const chunk = new Uint16Array(buf);
+            const chunk = bufferToUint16(buf, meta.dataType);
             const zOff = iz * chunkZ;
             const yOff = iy * chunkY;
             const xOff = ix * chunkX;

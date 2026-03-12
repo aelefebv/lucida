@@ -86,7 +86,7 @@ v = Viewer()
 v.start()        
 v.peers
 #%%
-v.follow(2)                                                                                     
+v.follow(0)                                                                                     
 # List datasets                                                                                 
 print(v.datasets)  # [{id: "abc", name: "CT", ...}, {id: "def", name: "MR", ...}]               
 
@@ -120,7 +120,7 @@ ds_id = v.write_viewport(vd0, name="filtered2")
 # %%
 import numpy as np
 masked = filtered > 102
-vd0.data = masked.astype(np.uint16) * 255
+vd0.data = masked
 ds_id = v.write_viewport(vd0, name="masked")
 # TODO: bug where only uint16 works. uint8 and bool both break.
 

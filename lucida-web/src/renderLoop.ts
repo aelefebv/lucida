@@ -6,6 +6,7 @@ import { RenderClient } from "./renderer/renderClient.ts";
 import { VOL_CACHE_BUDGET } from "./renderer/workerProtocol.ts";
 import type { VolumeLayerParams, SliceLayerParams } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
+import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 
 export interface DatasetEntry {
   store: ChunkStore;
@@ -211,7 +212,7 @@ export class RenderLoop {
         if (uploaded.has(coord.key)) continue;
         const buf = ds.store.get(coord.key);
         if (!buf || buf.byteLength === 0) continue;
-        availableChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+        availableChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
         uploaded.add(coord.key);
         budgetRemaining -= buf.byteLength;
         if (budgetRemaining <= 0) {
@@ -338,7 +339,7 @@ export class RenderLoop {
         if (cached.uploaded.has(coord.key)) continue;
         const buf = ds.store.get(coord.key);
         if (!buf || buf.byteLength === 0) continue;
-        newChunks.push({ data: new Uint16Array(buf), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+        newChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
         cached.uploaded.add(coord.key);
         budgetRemaining -= buf.byteLength;
         if (budgetRemaining <= 0) {
