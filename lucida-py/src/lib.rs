@@ -135,6 +135,23 @@ impl PyScene {
         serde_json::to_string(&plan).unwrap()
     }
 
+    fn chunk_plan_for(&self, dataset_id: &str) -> String {
+        let plan = self.inner.chunk_plan_for(dataset_id);
+        serde_json::to_string(&plan).unwrap()
+    }
+
+    fn dataset_ids(&self) -> String {
+        let ids: Vec<&str> = self.inner.document.datasets.iter().map(|d| d.id.as_str()).collect();
+        serde_json::to_string(&ids).unwrap()
+    }
+
+    fn dataset_name(&self, id: &str) -> String {
+        self.inner.document.datasets.iter()
+            .find(|d| d.id == id)
+            .map(|d| d.name.clone())
+            .unwrap_or_default()
+    }
+
     #[pyo3(signature = (name, visible, num_levels, chunk_x, chunk_y, chunk_z, shape_x, shape_y, shape_z))]
     fn add_layer(
         &mut self,

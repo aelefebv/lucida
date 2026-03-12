@@ -81,3 +81,33 @@ import matplotlib.pyplot as plt
 plt.imshow(vd.data[50])  # show the first Z-slice
 # %%
 # %%
+from lucida import Viewer                                                                       
+v = Viewer()
+v.start()        
+
+#%%
+v.follow(5)                                                                                     
+# List datasets                                                                                 
+print(v.datasets)  # [{id: "abc", name: "CT", ...}, {id: "def", name: "MR", ...}]               
+
+#%%
+# Read by index                                                                                 
+vd0 = v.read_viewport(dataset='yeast_3d_mitochondria.ome.zarr')      
+
+#%%
+import matplotlib.pyplot as plt
+plt.imshow(vd.data[10])  # show the first Z-slice
+
+#%%                                                          
+vd0 = v.read_viewport(dataset=0)                                                                
+vd1 = v.read_viewport(dataset=1)                                                                
+
+# Read by name                                                                                  
+vd = v.read_viewport(dataset="CT")                                                              
+
+# Read by id                                                                                    
+vd = v.read_viewport(dataset="abc")                                                             
+
+# Per-dataset chunk plan                                                                        
+plan = v.chunk_plan_for("CT")
+# %%

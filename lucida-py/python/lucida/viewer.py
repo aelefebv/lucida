@@ -290,9 +290,35 @@ class Viewer:
     def c(self) -> int:
         return self._scene.c()
 
+    @property
+    def datasets(self) -> list[dict]:
+        """List of datasets in the document."""
+        if self._document is None:
+            return []
+        return self._document.get("datasets", [])
+
+    def _resolve_dataset(self, dataset: int | str) -> dict:
+        """Resolve a dataset specifier (id str, name str, or int index) to its document dict."""
+        datasets = self.datasets
+        if isinstance(dataset, int):
+            if dataset >= len(datasets):
+                raise IndexError(f"Dataset index {dataset} out of range (have {len(datasets)})")
+            return datasets[dataset]
+        for ds in datasets:
+            if ds["id"] == dataset:
+                return ds
+        for ds in datasets:
+            if ds.get("name") == dataset:
+                return ds
+        raise KeyError(f"No dataset matching {dataset!r}")
+
     def chunk_plan(self) -> dict:
-        print("chunk_plan:", self._scene.chunk_plan())
         return json.loads(self._scene.chunk_plan())
+
+    def chunk_plan_for(self, dataset: int | str = 0) -> dict:
+        """Chunk plan for a specific dataset (by index, id, or name)."""
+        ds = self._resolve_dataset(dataset)
+        return json.loads(self._scene.chunk_plan_for(ds["id"]))
 
     def add_layer(
         self,
@@ -315,23 +341,26 @@ class Viewer:
     # -- Viewport data reading ------------------------------------------------
 
     def read_viewport(
-        self, store_path: str | None = None, *, dataset: int = 0, timeout: float = 30.0
+        self, store_path: str | None = None, *, dataset: int | str = 0, timeout: float = 30.0
     ) -> ViewportData:
         """Read all chunks in the current viewport and assemble as a numpy array.
 
         Args:
             store_path: Path to the ``.ome.zarr`` store on disk (local mode).
                 If ``None``, chunks are fetched through the server (remote mode).
-            dataset: Dataset index when using remote mode.
+            dataset: Dataset index, id, or name.
             timeout: Seconds to wait for each remote chunk response.
 
         Returns:
             A :class:`ViewportData` with the assembled volume.
         """
-        plan = self.chunk_plan()
+        ds = self._resolve_dataset(dataset)
+        dataset_id = ds["id"]
+
+        plan = json.loads(self._scene.chunk_plan_for(dataset_id))
         needed = plan.get("needed", [])
         if not needed:
-            raise ValueError("No chunks in viewport")
+            raise ValueError(f"No chunks in viewport for dataset {dataset!r}")
 
         level = needed[0]["level"]
         t_val = needed[0]["t"]
@@ -340,7 +369,7 @@ class Viewer:
         if store_path is not None:
             return self._read_viewport_local(store_path, needed, level, t_val, c_val)
         else:
-            return self._read_viewport_remote(needed, level, t_val, c_val, dataset, timeout)
+            return self._read_viewport_remote(needed, level, t_val, c_val, ds, timeout)
 
     def _read_viewport_local(
         self,
@@ -377,16 +406,9 @@ class Viewer:
         level: int,
         t_val: int,
         c_val: int,
-        dataset_idx: int,
+        ds: dict,
         timeout: float,
     ) -> ViewportData:
-        if self._document is None:
-            raise RuntimeError("No document state — not connected or no snapshot received")
-        datasets = self._document.get("datasets", [])
-        if dataset_idx >= len(datasets):
-            raise IndexError(f"Dataset index {dataset_idx} out of range (have {len(datasets)})")
-
-        ds = datasets[dataset_idx]
         dataset_id = ds["id"]
         client_meta = ds.get("client_metadata")
         if client_meta is None:
