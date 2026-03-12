@@ -1,7 +1,9 @@
 import asyncio
 import json
+import math
 import struct
 import threading
+import uuid
 
 import numpy as np
 import websockets
@@ -35,6 +37,8 @@ class Viewer:
         self._document: dict | None = None
         self._pending_chunks: dict[str, threading.Event] = {}
         self._chunk_data: dict[str, bytes] = {}
+        self._served_chunks: dict[str, dict[str, bytes]] = {}
+        self._served_meta: dict[str, dict] = {}
 
     # -- WebSocket client --------------------------------------------------
 
@@ -117,6 +121,8 @@ class Viewer:
                                 self._peers.pop(cid, None)
                                 if self._follow_target == cid:
                                     self._follow_target = None
+                            elif msg_type == "chunk_fetch":
+                                self._serve_chunk(msg["client_id"], msg["dataset_id"], msg["key"])
                         except Exception:
                             pass
             except Exception:
@@ -169,6 +175,33 @@ class Viewer:
                 await ws.send(message)
             except Exception:
                 pass
+
+    def _send_bytes(self, data: bytes):
+        if self._loop is None or self._ws is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._do_send_bytes(data), self._loop)
+
+    async def _do_send_bytes(self, data: bytes):
+        ws = self._ws
+        if ws is not None:
+            try:
+                await ws.send(data)
+            except Exception:
+                pass
+
+    def _serve_chunk(self, client_id: int, dataset_id: str, key: str):
+        ds_chunks = self._served_chunks.get(dataset_id)
+        if ds_chunks is None:
+            return
+        raw = ds_chunks.get(key)
+        if raw is None:
+            meta = self._served_meta[dataset_id]
+            cz, cy, cx = meta["chunk_shape"]
+            raw = np.zeros((cz, cy, cx), dtype=meta["dtype"]).tobytes()
+        composite = f"{dataset_id}/{key}"
+        key_bytes = composite.encode("utf-8")
+        header = struct.pack("<IH", client_id, len(key_bytes))
+        self._send_bytes(header + key_bytes + raw)
 
     def _send_presence(self):
         """Send current viewport state as a presence update."""
@@ -458,6 +491,10 @@ class Viewer:
             arr = np.frombuffer(decompressed, dtype=dtype).reshape((cz, cy, cx))
             chunks_dict[ch["key"]] = arr
 
+        # Extract physical scale (Z, Y, X) from level metadata
+        level_scale = level_meta.get("scale", [1.0, 1.0, 1.0, 1.0, 1.0])
+        scale_zyx = (level_scale[2], level_scale[3], level_scale[4])
+
         data, origin = assemble_chunks(
             chunks_dict, needed, chunk_shape_zyx, shape_zyx, dtype
         )
@@ -469,4 +506,103 @@ class Viewer:
             chunk_shape=chunk_shape_zyx,
             t=t_val,
             c=c_val,
+            scale=scale_zyx,
         )
+
+    # -- Write viewport data as a new dataset ---------------------------------
+
+    def write_viewport(self, viewport_data: ViewportData, *, name: str = "Python Result") -> str:
+        """Upload modified viewport data as a new dataset visible to all clients.
+
+        Args:
+            viewport_data: A :class:`ViewportData` (e.g. from :meth:`read_viewport`).
+            name: Human-readable name for the new dataset.
+
+        Returns:
+            The generated dataset ID.
+        """
+        dataset_id = uuid.uuid4().hex[:12]
+        data = viewport_data.data
+        oz, oy, ox = viewport_data.origin
+        cz, cy, cx = viewport_data.chunk_shape
+        level = viewport_data.level
+        t_val = viewport_data.t
+        c_val = viewport_data.c
+        dz, dy, dx = data.shape
+        dtype = data.dtype
+
+        # Compute chunk grid coordinates
+        gz0 = oz // cz
+        gy0 = oy // cy
+        gx0 = ox // cx
+
+        nz = math.ceil(dz / cz)
+        ny = math.ceil(dy / cy)
+        nx = math.ceil(dx / cx)
+
+        chunks: dict[str, bytes] = {}
+        for iz in range(nz):
+            for iy in range(ny):
+                for ix in range(nx):
+                    # Slice from data
+                    sz = iz * cz
+                    sy = iy * cy
+                    sx = ix * cx
+                    ez = min(sz + cz, dz)
+                    ey = min(sy + cy, dy)
+                    ex = min(sx + cx, dx)
+                    block = data[sz:ez, sy:ey, sx:ex]
+
+                    # Zero-pad to full chunk size if needed
+                    if block.shape != (cz, cy, cx):
+                        padded = np.zeros((cz, cy, cx), dtype=dtype)
+                        padded[:block.shape[0], :block.shape[1], :block.shape[2]] = block
+                        block = padded
+
+                    key = f"{level}/{t_val}/{c_val}/{gz0 + iz}/{gy0 + iy}/{gx0 + ix}"
+                    chunks[key] = block.tobytes()
+
+        self._served_chunks[dataset_id] = chunks
+        self._served_meta[dataset_id] = {
+            "chunk_shape": (cz, cy, cx),
+            "dtype": dtype,
+        }
+
+        # Build level shape from viewport_data
+        lz, ly, lx = viewport_data.level_shape
+        sz, sy, sx = viewport_data.scale
+
+        add_dataset_cmd = {
+            "type": "add_dataset",
+            "id": dataset_id,
+            "name": name,
+            "layers": [{
+                "name": "main",
+                "visible": True,
+                "num_levels": 1,
+                "chunk_size": [int(cx), int(cy), int(cz)],
+                "data_shape": [int(lx), int(ly), int(lz)],
+            }],
+            "volume_shape": [int(lz), int(ly), int(lx)],
+            "volume_scale": [sz, sy, sx],
+            "client_metadata": {
+                "axes": [
+                    {"name": "t", "type": "time"},
+                    {"name": "c", "type": "channel"},
+                    {"name": "z", "type": "space"},
+                    {"name": "y", "type": "space"},
+                    {"name": "x", "type": "space"},
+                ],
+                "levels": [{
+                    "path": "0",
+                    "shape": [1, 1, int(lz), int(ly), int(lx)],
+                    "chunkShape": [1, 1, int(cz), int(cy), int(cx)],
+                    "dataType": str(dtype),
+                    "scale": [1.0, 1.0, sz, sy, sx],
+                    "codecs": [],
+                }],
+            },
+        }
+
+        self.apply_command(json.dumps(add_dataset_cmd))
+        return dataset_id

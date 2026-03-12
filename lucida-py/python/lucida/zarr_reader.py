@@ -22,6 +22,7 @@ class ViewportData:
     chunk_shape: tuple[int, int, int]  # (Z, Y, X) chunk size
     t: int
     c: int
+    scale: tuple[float, float, float] = (1.0, 1.0, 1.0)  # (Z, Y, X) physical spacing
 
 
 @dataclass

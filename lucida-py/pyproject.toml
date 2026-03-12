@@ -20,4 +20,5 @@ python-source = "python"
 [dependency-groups]
 dev = [
     "ipykernel>=6.31.0",
+    "scipy>=1.13.1",
 ]

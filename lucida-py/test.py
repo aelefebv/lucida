@@ -96,7 +96,7 @@ vd0 = v.read_viewport(dataset='yeast_3d_mitochondria_large.ome.zarr')
 
 #%%
 import matplotlib.pyplot as plt
-plt.imshow(vd0.data[8])  # show the first Z-slice
+plt.imshow(vd0.data[12])  # show the first Z-slice
 
 #%%                                                          
 vd0 = v.read_viewport(dataset=0)                                                                
@@ -110,4 +110,18 @@ vd1 = v.read_viewport(dataset=1)
 
 # Per-dataset chunk plan                                                                        
 plan = v.chunk_plan_for(dataset=0)
+# %%
+import scipy.ndimage as ndi
+# Apply a Gaussian filter to the data
+filtered = ndi.gaussian_filter(vd0.data, sigma=3)
+vd0.data = filtered
+# %%
+ds_id = v.write_viewport(vd0, name="filtered2")
+# %%
+import numpy as np
+masked = filtered > 102
+vd0.data = masked.astype(np.uint16) * 255
+ds_id = v.write_viewport(vd0, name="masked")
+# TODO: bug where only uint16 works. uint8 and bool both break.
+
 # %%
