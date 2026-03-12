@@ -58,6 +58,12 @@ lucida-cli contrast --min 100 --max 5000
 # Set gamma
 lucida-cli gamma --gamma 0.8
 
+# Rotate 3D camera (degrees by default)
+lucida-cli rotate --theta 45 --phi 30
+
+# Or use radians
+lucida-cli rotate --theta 0.5 --phi 0.3 --radians
+
 # Switch to 2D/3D mode
 lucida-cli set-mode-2d
 lucida-cli set-mode-3d

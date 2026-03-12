@@ -75,6 +75,18 @@ enum Sub {
         #[arg(long)]
         value: f64,
     },
+    /// Rotate the 3D camera
+    Rotate {
+        /// Horizontal rotation in degrees
+        #[arg(long, default_value_t = 0.0)]
+        theta: f64,
+        /// Vertical rotation in degrees
+        #[arg(long, default_value_t = 0.0)]
+        phi: f64,
+        /// Interpret angles as radians instead of degrees
+        #[arg(long, default_value_t = false)]
+        radians: bool,
+    },
     /// Switch to 2D mode
     #[command(name = "set-mode-2d")]
     SetMode2d,
@@ -137,6 +149,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Camera::View2D(_) => Command::SetZoom { value },
                     Camera::View3D(_) => return Err("set-zoom is only supported in 2D mode".into()),
                 },
+                Sub::Rotate { theta, phi, radians } => {
+                    let (t, p) = if radians {
+                        (theta, phi)
+                    } else {
+                        (theta.to_radians(), phi.to_radians())
+                    };
+                    Command::Rotate3D { d_theta: t, d_phi: p }
+                }
                 Sub::SetMode2d => Command::SetMode2D,
                 Sub::SetMode3d => Command::SetMode3D,
                 Sub::State | Sub::VisibleChunks | Sub::Steer { .. } => unreachable!(),

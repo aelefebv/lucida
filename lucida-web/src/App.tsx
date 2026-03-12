@@ -296,6 +296,31 @@ function App() {
           if (existing) {
             next.set(clientId, { ...existing, following: target });
           }
+          // If this is us being steered to follow someone, immediately import their presence
+          if (clientId === myId && target !== null) {
+            const peer = next.get(target);
+            if (peer) {
+              const scene = wasmSceneRef.current;
+              if (scene && peer.camera && peer.view && peer.display) {
+                try {
+                  const presenceJson = JSON.stringify({
+                    camera: peer.camera,
+                    view: peer.view,
+                    display: peer.display,
+                  });
+                  scene.import_presence(presenceJson);
+                  setZ(scene.z());
+                  setT(scene.t());
+                  setC(scene.c());
+                  setViewMode(scene.is_3d() ? "3d" : "2d");
+                  loopRef.current?.markDirty();
+                  bridgeRef.current?.sendPresence(scene.export_presence());
+                } catch (e) {
+                  console.warn("[Bridge] failed to import presence on steer:", e);
+                }
+              }
+            }
+          }
           return next;
         });
         // If this is us, update our follow target

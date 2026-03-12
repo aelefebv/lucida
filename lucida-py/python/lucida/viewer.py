@@ -212,6 +212,12 @@ class Viewer:
         cmd = json.loads(cmd_json)
         self._send(json.dumps({"type": "command", "command": cmd}))
 
+    # -- Steer --------------------------------------------------------------
+
+    def steer(self, client_id: int):
+        """Make another client follow this viewer (remote-control their viewport)."""
+        self._send(json.dumps({"type": "steer", "client": client_id}))
+
     # -- Follow mode --------------------------------------------------------
 
     def _break_follow(self):
@@ -298,6 +304,35 @@ class Viewer:
         self._break_follow()
         self._scene.set_c(c)
         self._send_presence()
+
+    def set_mode_2d(self):
+        self._break_follow()
+        self._scene.set_mode_2d()
+        self._send_presence()
+
+    def set_mode_3d(self):
+        self._break_follow()
+        self._scene.set_mode_3d()
+        self._send_presence()
+
+    def rotate(self, theta: float = 0.0, phi: float = 0.0, *, degrees: bool = True):
+        """Rotate the 3D camera.
+
+        Args:
+            theta: Horizontal rotation.
+            phi: Vertical rotation.
+            degrees: If True (default), angles are in degrees. If False, radians.
+        """
+        if degrees:
+            theta = math.radians(theta)
+            phi = math.radians(phi)
+        self._break_follow()
+        self._scene.rotate_3d(theta, phi)
+        self._send_presence()
+
+    @property
+    def is_3d(self) -> bool:
+        return self._scene.is_3d()
 
     # -- Document commands (apply locally + send wrapped) ------------------
 

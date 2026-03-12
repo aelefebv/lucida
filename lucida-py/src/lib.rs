@@ -76,6 +76,24 @@ impl PyScene {
         serde_json::to_string(&cmd).unwrap()
     }
 
+    fn set_mode_2d(&mut self) {
+        self.inner.apply(Command::SetMode2D);
+    }
+
+    fn set_mode_3d(&mut self) {
+        self.inner.apply(Command::SetMode3D);
+    }
+
+    fn is_3d(&self) -> bool {
+        matches!(self.inner.camera, Camera::View3D(_))
+    }
+
+    fn rotate_3d(&mut self, d_theta: f64, d_phi: f64) -> String {
+        let cmd = Command::Rotate3D { d_theta, d_phi };
+        self.inner.apply(cmd.clone());
+        serde_json::to_string(&cmd).unwrap()
+    }
+
     fn zoom(&self) -> f64 {
         self.inner.camera.effective_zoom()
     }

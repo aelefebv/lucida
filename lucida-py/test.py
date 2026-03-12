@@ -125,3 +125,20 @@ ds_id = v.write_viewport(vd0, name="masked")
 # TODO: bug where only uint16 works. uint8 and bool both break.
 
 # %%
+from lucida import Viewer                                                                       
+v = Viewer()
+v.start()        
+v.peers
+# %%
+v.steer(0)
+# %%
+v.pan(10, 0)
+# %%
+v.zoom_by(0.5)
+#%%
+v.set_mode_3d()
+#%%
+v.rotate(45, 0)
+#%%
+v.rotate(0, 45)
+# %%
