@@ -16,6 +16,7 @@ import { DimensionControls } from "./components/DimensionControls.tsx";
 import { LayerPanel, type LayerInfo } from "./components/LayerPanel.tsx";
 import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "./bridge.ts";
 import { applyDocumentCommand, applyViewportCommand } from "./applyAndSend.ts";
+import { Minimap } from "./components/Minimap.tsx";
 import "./App.css";
 
 type ViewMode = "2d" | "3d";
@@ -99,6 +100,7 @@ function App() {
   const clientRef = useRef<RenderClient | null>(null);
   const [clientReady, setClientReady] = useState(false);
   const loopRef = useRef<RenderLoop | null>(null);
+  const [activeLoop, setActiveLoop] = useState<RenderLoop | null>(null);
 
   // Track which datasets have been pre-uploaded to the GPU worker
   const preUploadedRef = useRef(new Set<string>());
@@ -183,6 +185,7 @@ function App() {
           }
           if (cmd.type === "remove_dataset") {
             loopRef.current?.removeDataset(cmd.id);
+            clientRef.current?.removeLayerResources(cmd.id);
             const ds = datasetsRef.current.get(cmd.id);
             if (ds) {
               ds.store.destroy();
@@ -992,6 +995,7 @@ function App() {
     applyDocumentCommand(scene, { type: "remove_dataset", id }, sendCommand);
 
     loopRef.current?.removeDataset(id);
+    clientRef.current?.removeLayerResources(id);
     const ds = datasetsRef.current.get(id);
     if (ds) {
       ds.store.destroy();
@@ -1180,47 +1184,53 @@ function App() {
             </ul>
           </div>
         )}
-        <canvas
-          ref={canvasRef}
-          style={{
-            width: "100%",
-            height: 600,
-            maxWidth: 800,
-            imageRendering: viewMode === "2d" ? "pixelated" : "auto",
-            borderRadius: 8,
-            backgroundColor: "black",
-            display: volumeMap.size > 0 ? "block" : "none",
-          }}
-        />
-        {volumeMap.size > 0 && viewMode === "2d" && wasmScene && client && (
-          <SliceViewer
-            z={z}
-            t={t}
-            c={c}
-            scene={wasmScene}
-            datasets={datasetsRef.current}
-            client={client}
-            canvas={canvasRef.current!}
-            remoteDocumentVersion={remoteDocumentVersion}
-            emitPresence={emitPresence}
-            breakFollow={breakFollow}
-            loopRef={loopRef}
+        <div style={{ position: "relative", display: volumeMap.size > 0 ? "block" : "none", maxWidth: 800 }}>
+          <canvas
+            ref={canvasRef}
+            style={{
+              width: "100%",
+              height: 600,
+              imageRendering: viewMode === "2d" ? "pixelated" : "auto",
+              borderRadius: 8,
+              backgroundColor: "black",
+              display: "block",
+            }}
           />
-        )}
-        {volumeMap.size > 0 && viewMode === "3d" && wasmScene && client && (
-          <VolumeViewer
-            scene={wasmScene}
-            datasets={datasetsRef.current}
-            client={client}
-            canvas={canvasRef.current!}
-            remoteDocumentVersion={remoteDocumentVersion}
-            emitPresence={emitPresence}
-            breakFollow={breakFollow}
-            t={t}
-            c={c}
-            loopRef={loopRef}
-          />
-        )}
+          {volumeMap.size > 0 && viewMode === "2d" && wasmScene && client && (
+            <SliceViewer
+              z={z}
+              t={t}
+              c={c}
+              scene={wasmScene}
+              datasets={datasetsRef.current}
+              client={client}
+              canvas={canvasRef.current!}
+              remoteDocumentVersion={remoteDocumentVersion}
+              emitPresence={emitPresence}
+              breakFollow={breakFollow}
+              loopRef={loopRef}
+              onLoopChange={setActiveLoop}
+            />
+          )}
+          {volumeMap.size > 0 && viewMode === "3d" && wasmScene && client && (
+            <VolumeViewer
+              scene={wasmScene}
+              datasets={datasetsRef.current}
+              client={client}
+              canvas={canvasRef.current!}
+              remoteDocumentVersion={remoteDocumentVersion}
+              emitPresence={emitPresence}
+              breakFollow={breakFollow}
+              t={t}
+              c={c}
+              loopRef={loopRef}
+              onLoopChange={setActiveLoop}
+            />
+          )}
+          {clientReady && clientRef.current && (
+            <Minimap client={clientRef.current} activeLoop={activeLoop} />
+          )}
+        </div>
         {volumeMap.size > 0 && (
           <div className="dimension-controls">
             <DimensionControls label="Z" value={z} max={dimZ} onChange={(v) => {

@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 
-use crate::camera::Camera;
+use crate::camera::{Camera, View3D};
 use crate::command::Command;
 use crate::scene::{DisplayState, DocumentState, Layer, LayerDisplaySettings, LevelInfo, Scene};
 use crate::view::ViewState;
@@ -484,5 +484,37 @@ impl WasmScene {
             .find(|d| d.id == id)
             .map(|d| d.name.clone())
             .unwrap_or_else(|| id.to_string())
+    }
+
+    // --- Minimap camera ---
+
+    pub fn camera_theta(&self) -> f64 {
+        if let Camera::View3D(ref v) = self.inner.camera { v.theta } else { 0.5 }
+    }
+
+    pub fn camera_phi(&self) -> f64 {
+        if let Camera::View3D(ref v) = self.inner.camera { v.phi } else { 0.8 }
+    }
+
+    /// Returns 35 floats: invViewProj[16] + eye[3] + viewProj[16]
+    pub fn minimap_camera(&self, theta: f64, phi: f64, w: f64, h: f64) -> Vec<f32> {
+        let cam = View3D {
+            target: [0.5, 0.5, 0.5],
+            theta,
+            phi,
+            distance: 1.8,
+            fov: std::f64::consts::FRAC_PI_4,
+            viewport: [w as u32, h as u32],
+            near: 0.01,
+            far: 100.0,
+        };
+        let mut out = Vec::with_capacity(35);
+        out.extend_from_slice(&cam.inv_view_proj());
+        let eye = cam.eye_position();
+        out.push(eye[0] as f32);
+        out.push(eye[1] as f32);
+        out.push(eye[2] as f32);
+        out.extend_from_slice(&cam.view_proj());
+        out
     }
 }

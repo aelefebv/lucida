@@ -230,6 +230,16 @@ impl View3D {
         invert4_f32(vp)
     }
 
+    /// View-projection matrix as f32 for the GPU.
+    pub fn view_proj(&self) -> [f32; 16] {
+        let vp = self.view_proj_f64();
+        let mut out = [0.0f32; 16];
+        for i in 0..16 {
+            out[i] = vp[i] as f32;
+        }
+        out
+    }
+
     /// View-projection matrix in f64 for internal use.
     fn view_proj_f64(&self) -> [f64; 16] {
         let aspect = self.viewport[0] as f64 / self.viewport[1] as f64;

@@ -4,7 +4,7 @@ import type { DatasetInfo } from "./zarr/metadata.ts";
 import { ChunkStore } from "./zarr/chunkStore.ts";
 import { RenderClient } from "./renderer/renderClient.ts";
 import { VOL_CACHE_BUDGET } from "./renderer/workerProtocol.ts";
-import type { VolumeLayerParams, SliceLayerParams } from "./renderer/workerProtocol.ts";
+import type { VolumeLayerParams, SliceLayerParams, MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 
@@ -19,6 +19,16 @@ export interface RenderLoopOptions {
   client: RenderClient;
   canvas: HTMLCanvasElement;
   mode: "slice" | "volume";
+}
+
+export interface MinimapOverlayData {
+  viewProj: Float32Array;
+  layers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[];
+  mode: "slice" | "volume";
+  theta: number;
+  phi: number;
+  canvasW: number;
+  canvasH: number;
 }
 
 /** Max bytes of chunk data to upload to the GPU per RAF tick. */
@@ -43,6 +53,11 @@ export class RenderLoop {
   private volumeUploaded = new Map<string, { uploaded: Set<string>; byteSize: number }>();
   private volumeCacheBytes = 0;
   private volumeLodKeys = new Map<string, string>(); // per-dataset lod key
+
+  // Minimap
+  private minimapEnabled = false;
+  private minimapSize = 200;
+  private minimapOverlayCallback: ((data: MinimapOverlayData) => void) | null = null;
 
   // Slice-specific params
   private sliceZ = 0;
@@ -133,6 +148,13 @@ export class RenderLoop {
     }
   }
 
+  setMinimap(enabled: boolean, size?: number, overlayCallback?: ((data: MinimapOverlayData) => void) | null): void {
+    this.minimapEnabled = enabled;
+    if (size !== undefined) this.minimapSize = size;
+    this.minimapOverlayCallback = overlayCallback ?? null;
+    if (enabled) this.dirty = true;
+  }
+
   private tick = (): void => {
     if (!this.dirty) {
       this.rafId = requestAnimationFrame(this.tick);
@@ -145,6 +167,8 @@ export class RenderLoop {
     } else {
       this.tickVolume();
     }
+
+    this.tickMinimap();
 
     this.rafId = requestAnimationFrame(this.tick);
   };
@@ -394,5 +418,70 @@ export class RenderLoop {
     }
 
     client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH);
+  }
+
+  private tickMinimap(): void {
+    if (!this.minimapEnabled) return;
+
+    const { scene, client } = this;
+
+    const theta = scene.camera_theta();
+    const phi = scene.camera_phi();
+    const cssSize = this.minimapSize;
+    const backingSize = Math.round(cssSize * devicePixelRatio);
+
+    const camData = new Float32Array(scene.minimap_camera(theta, phi, backingSize, backingSize));
+    const invViewProj = camData.subarray(0, 16);
+    const eye = camData.subarray(16, 19);
+    const viewProj = camData.subarray(19, 35);
+
+    const layerOrder: string[] = JSON.parse(scene.layer_order());
+    const allSettings: Record<string, {
+      visible: boolean;
+      opacity: number;
+      contrast_min: number;
+      contrast_max: number;
+      gamma: number;
+      blend_mode: string;
+    }> = JSON.parse(scene.all_layer_settings());
+
+    const layers: MinimapLayerParams[] = [];
+    const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];
+
+    for (const dsId of layerOrder) {
+      if (!this.datasets.has(dsId)) continue;
+      const settings = allSettings[dsId];
+      if (!settings || !settings.visible) continue;
+
+      const model = new Float32Array(scene.model_matrix_for(dsId));
+      const invModel = new Float32Array(scene.inv_model_matrix_for(dsId));
+
+      layers.push({
+        datasetId: dsId,
+        modelMatrix: model,
+        invModelMatrix: invModel,
+        contrastMin: settings.contrast_min,
+        contrastMax: settings.contrast_max,
+        gamma: settings.gamma,
+      });
+
+      overlayLayers.push({ datasetId: dsId, modelMatrix: model, invModelMatrix: invModel });
+    }
+
+    if (layers.length > 0) {
+      client.minimapRender(layers, invViewProj, eye, backingSize, backingSize);
+    }
+
+    if (this.minimapOverlayCallback) {
+      this.minimapOverlayCallback({
+        viewProj,
+        layers: overlayLayers,
+        mode: this.mode,
+        theta,
+        phi,
+        canvasW: backingSize,
+        canvasH: backingSize,
+      });
+    }
   }
 }

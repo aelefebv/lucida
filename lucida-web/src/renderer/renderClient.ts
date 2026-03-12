@@ -4,6 +4,7 @@ import type {
   VolumeChunk,
   VolumeLayerParams,
   SliceLayerParams,
+  MinimapLayerParams,
   WorkerToMainMessage,
 } from "./workerProtocol.ts";
 
@@ -165,6 +166,23 @@ export class RenderClient {
       layers, zoom, cx, cy,
       canvasW, canvasH,
     });
+  }
+
+  minimapInit(canvas: HTMLCanvasElement) {
+    const offscreen = canvas.transferControlToOffscreen();
+    this.worker.postMessage({ type: "minimapInit", canvas: offscreen }, [offscreen]);
+  }
+
+  minimapRender(layers: MinimapLayerParams[], invViewProj: Float32Array, eye: Float32Array, canvasW: number, canvasH: number) {
+    this.worker.postMessage({ type: "minimapRender", layers, invViewProj, eye, canvasW, canvasH });
+  }
+
+  minimapDestroy() {
+    this.worker.postMessage({ type: "minimapDestroy" });
+  }
+
+  removeLayerResources(datasetId: string) {
+    this.worker.postMessage({ type: "removeLayerResources", datasetId });
   }
 
   destroy() {

@@ -17,9 +17,10 @@ interface Props {
   emitPresence: () => void;
   breakFollow: () => void;
   loopRef: RefObject<RenderLoop | null>;
+  onLoopChange: (loop: RenderLoop | null) => void;
 }
 
-export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef }: Props) {
+export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef, onLoopChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -30,9 +31,11 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
     loopRef.current = loop;
     parentLoopRef.current = loop;
     loop.start();
+    onLoopChange(loop);
     return () => {
       loop.stop();
       parentLoopRef.current = null;
+      onLoopChange(null);
     };
   }, [scene, client, canvas]);
 

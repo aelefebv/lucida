@@ -16,9 +16,10 @@ interface Props {
   t: number;
   c: number;
   loopRef: RefObject<RenderLoop | null>;
+  onLoopChange: (loop: RenderLoop | null) => void;
 }
 
-export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, t, c, loopRef: parentLoopRef }: Props) {
+export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, t, c, loopRef: parentLoopRef, onLoopChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
 
   // Create/start render loop
@@ -27,9 +28,11 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     loopRef.current = loop;
     parentLoopRef.current = loop;
     loop.start();
+    onLoopChange(loop);
     return () => {
       loop.stop();
       parentLoopRef.current = null;
+      onLoopChange(null);
     };
   }, [scene, client, canvas]);
 

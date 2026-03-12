@@ -125,6 +125,38 @@ export interface SliceRenderMultiPassMessage {
   canvasH: number;
 }
 
+export interface MinimapLayerParams {
+  datasetId: string;
+  modelMatrix: Float32Array;
+  invModelMatrix: Float32Array;
+  contrastMin: number;
+  contrastMax: number;
+  gamma: number;
+}
+
+export interface MinimapInitMessage {
+  type: "minimapInit";
+  canvas: OffscreenCanvas;
+}
+
+export interface MinimapRenderMessage {
+  type: "minimapRender";
+  layers: MinimapLayerParams[];
+  invViewProj: Float32Array;
+  eye: Float32Array;
+  canvasW: number;
+  canvasH: number;
+}
+
+export interface MinimapDestroyMessage {
+  type: "minimapDestroy";
+}
+
+export interface RemoveLayerResourcesMessage {
+  type: "removeLayerResources";
+  datasetId: string;
+}
+
 export interface DestroyMessage {
   type: "destroy";
 }
@@ -138,6 +170,10 @@ export type MainToWorkerMessage =
   | VolumeUploadChunksForLayerMessage
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage
+  | MinimapInitMessage
+  | MinimapRenderMessage
+  | MinimapDestroyMessage
+  | RemoveLayerResourcesMessage
   | DestroyMessage;
 
 // --- Worker -> Main ---

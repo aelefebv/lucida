@@ -50,6 +50,12 @@ let offscreenPool: GPUTexture[] = [];
 let poolWidth = 0;
 let poolHeight = 0;
 
+// Minimap state
+let minimapContext: GPUCanvasContext | null = null;
+let minimapOffscreenPool: GPUTexture[] = [];
+let minimapPoolWidth = 0;
+let minimapPoolHeight = 0;
+
 function volTextureBytes(w: number, h: number, d: number): number {
   return w * h * d * 2; // r16uint = 2 bytes per texel
 }
@@ -77,6 +83,18 @@ function getCompositor(): LayerCompositor {
     compositor = new LayerCompositor(device, format);
   }
   return compositor;
+}
+
+function ensureMinimapOffscreenPool(count: number, w: number, h: number) {
+  if (w !== minimapPoolWidth || h !== minimapPoolHeight) {
+    for (const tex of minimapOffscreenPool) tex.destroy();
+    minimapOffscreenPool = [];
+    minimapPoolWidth = w;
+    minimapPoolHeight = h;
+  }
+  while (minimapOffscreenPool.length < count) {
+    minimapOffscreenPool.push(createOffscreenTarget(device, w, h));
+  }
 }
 
 function ensureOffscreenPool(count: number, w: number, h: number) {
@@ -365,6 +383,85 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
+      case "minimapInit": {
+        const canvas = msg.canvas;
+        minimapContext = canvas.getContext("webgpu") as GPUCanvasContext;
+        minimapContext.configure({ device, format, alphaMode: "opaque" });
+        break;
+      }
+
+      case "minimapRender": {
+        if (!minimapContext) break;
+        const mmCanvas = minimapContext.canvas as OffscreenCanvas;
+        mmCanvas.width = msg.canvasW;
+        mmCanvas.height = msg.canvasH;
+
+        const renderer = getVolumeRenderer();
+        const comp = getCompositor();
+        ensureMinimapOffscreenPool(msg.layers.length, msg.canvasW, msg.canvasH);
+
+        const renderedLayers: CompositeLayer[] = [];
+
+        for (const layer of msg.layers) {
+          const volKey = activeVolKeyPerDataset.get(layer.datasetId);
+          if (!volKey) continue;
+          const entry = volCache.get(volKey);
+          if (!entry) continue;
+
+          const idx = renderedLayers.length;
+          renderer.setVolume(entry.texture, entry.levelWidth, entry.levelHeight, entry.levelDepth);
+          renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
+          renderer.setOpacity(1.0);
+          renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye);
+          const layerEncoder = device.createCommandEncoder();
+          renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder);
+          device.queue.submit([layerEncoder.finish()]);
+          renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: "alpha" });
+        }
+
+        if (renderedLayers.length > 0) {
+          const compEncoder = device.createCommandEncoder();
+          comp.composite(minimapContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
+          device.queue.submit([compEncoder.finish()]);
+        }
+        break;
+      }
+
+      case "minimapDestroy": {
+        for (const tex of minimapOffscreenPool) tex.destroy();
+        minimapOffscreenPool = [];
+        minimapPoolWidth = 0;
+        minimapPoolHeight = 0;
+        if (minimapContext) {
+          minimapContext.unconfigure();
+          minimapContext = null;
+        }
+        break;
+      }
+
+      case "removeLayerResources": {
+        const dsId = msg.datasetId;
+        const ts = tileStatePerDataset.get(dsId);
+        if (ts) {
+          ts.texture.destroy();
+          tileStatePerDataset.delete(dsId);
+        }
+        const fb = fallbackPerDataset.get(dsId);
+        if (fb) {
+          fb.destroy();
+          fallbackPerDataset.delete(dsId);
+        }
+        for (const [key, entry] of volCache) {
+          if (key.startsWith(dsId + "/")) {
+            entry.texture.destroy();
+            volCacheBytes -= entry.byteSize;
+            volCache.delete(key);
+          }
+        }
+        activeVolKeyPerDataset.delete(dsId);
+        break;
+      }
+
       case "destroy": {
         for (const ts of tileStatePerDataset.values()) ts.texture.destroy();
         tileStatePerDataset.clear();
@@ -376,6 +473,14 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         activeVolKeyPerDataset.clear();
         for (const tex of offscreenPool) tex.destroy();
         offscreenPool = [];
+        for (const tex of minimapOffscreenPool) tex.destroy();
+        minimapOffscreenPool = [];
+        minimapPoolWidth = 0;
+        minimapPoolHeight = 0;
+        if (minimapContext) {
+          minimapContext.unconfigure();
+          minimapContext = null;
+        }
         dummyTexture?.destroy();
         dummyTexture = null;
         sliceRenderer = null;
