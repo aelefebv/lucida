@@ -38,6 +38,32 @@ impl WasmScene {
         let doc: DocumentState =
             serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
         self.inner.document = doc;
+        // Ensure layer_order and layer_settings are consistent with loaded datasets.
+        // add_dataset() does this automatically, but load_document() bypasses it.
+        for ds in &self.inner.document.datasets {
+            let id = ds.id.clone();
+            if !self.inner.layer_order.contains(&id) {
+                self.inner.layer_order.push(id.clone());
+            }
+            self.inner
+                .layer_settings
+                .entry(id)
+                .or_insert_with(Default::default);
+        }
+        // Remove stale entries for datasets no longer in the document.
+        let dataset_ids: std::collections::HashSet<&str> = self
+            .inner
+            .document
+            .datasets
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        self.inner
+            .layer_order
+            .retain(|id| dataset_ids.contains(id.as_str()));
+        self.inner
+            .layer_settings
+            .retain(|id, _| dataset_ids.contains(id.as_str()));
         Ok(())
     }
 
