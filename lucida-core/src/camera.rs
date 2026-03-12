@@ -178,7 +178,7 @@ impl View3D {
 
     pub fn rotate(&mut self, d_theta: f64, d_phi: f64) {
         self.theta += d_theta;
-        self.phi = (self.phi + d_phi).clamp(0.01, std::f64::consts::PI - 0.01);
+        self.phi += d_phi;
     }
 
     pub fn zoom(&mut self, delta: f64) {
@@ -192,7 +192,7 @@ impl View3D {
             self.target[1] - eye[1],
             self.target[2] - eye[2],
         ]);
-        let right = normalize3(cross3(forward, [0.0, 1.0, 0.0]));
+        let right = normalize3(cross3(forward, self.up_vector()));
         let up = cross3(right, forward);
         let scale = self.distance * 0.002;
         for i in 0..3 {
@@ -206,6 +206,16 @@ impl View3D {
             self.target[0] + self.distance * sin_phi * self.theta.sin(),
             self.target[1] + self.distance * self.phi.cos(),
             self.target[2] + self.distance * sin_phi * self.theta.cos(),
+        ]
+    }
+
+    /// Up vector derived from spherical coordinates (tangent along phi meridian).
+    /// Always perpendicular to the view direction at any phi value.
+    pub fn up_vector(&self) -> [f64; 3] {
+        [
+            -self.phi.cos() * self.theta.sin(),
+            self.phi.sin(),
+            -self.phi.cos() * self.theta.cos(),
         ]
     }
 
@@ -225,7 +235,7 @@ impl View3D {
         let aspect = self.viewport[0] as f64 / self.viewport[1] as f64;
         let proj = perspective(self.fov, aspect, self.near, self.far);
         let eye = self.eye_position();
-        let view = look_at(eye, self.target, [0.0, 1.0, 0.0]);
+        let view = look_at(eye, self.target, self.up_vector());
         mul4(proj, view)
     }
 
@@ -564,12 +574,18 @@ mod tests {
     }
 
     #[test]
-    fn rotate_clamps_phi() {
+    fn rotate_phi_unconstrained() {
         let mut cam = View3D::new([800, 600]);
+        let initial_phi = cam.phi;
         cam.rotate(0.0, 100.0);
-        assert!(cam.phi < std::f64::consts::PI);
+        assert!((cam.phi - (initial_phi + 100.0)).abs() < 1e-10);
         cam.rotate(0.0, -200.0);
-        assert!(cam.phi > 0.0);
+        assert!((cam.phi - (initial_phi - 100.0)).abs() < 1e-10);
+        // Verify view matrix is still valid at extreme phi values
+        let m = cam.inv_view_proj();
+        for val in &m {
+            assert!(val.is_finite(), "Matrix contains non-finite value at extreme phi: {}", val);
+        }
     }
 
     #[test]

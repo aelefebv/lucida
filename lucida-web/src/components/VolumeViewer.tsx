@@ -69,8 +69,8 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
       if (shiftDragRef.current) {
         applyViewportCommand(scene, { type: "pan_3d", dx, dy });
       } else {
-        const dTheta = -dx * 0.005;
-        const dPhi = -dy * 0.005;
+        const dTheta = dx * 0.005;
+        const dPhi = dy * 0.005;
         applyViewportCommand(scene, { type: "rotate_3d", d_theta: dTheta, d_phi: dPhi });
       }
       emitPresence();

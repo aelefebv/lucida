@@ -124,7 +124,7 @@ vd0.data = masked
 ds_id = v.write_viewport(vd0, name="masked")
 # TODO: bug where only uint16 works. uint8 and bool both break.
 
-# %%
+# %%|
 from lucida import Viewer                                                                       
 v = Viewer()
 v.start()        
