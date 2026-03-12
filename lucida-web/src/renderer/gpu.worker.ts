@@ -50,6 +50,20 @@ let offscreenPool: GPUTexture[] = [];
 let poolWidth = 0;
 let poolHeight = 0;
 
+// Per-dataset minimap overview texture (independent of main view's volCache)
+interface MinimapOverviewEntry {
+  texture: GPUTexture;
+  uploaded: Set<string>;
+  t: number;
+  c: number;
+  width: number;
+  height: number;
+  depth: number;
+  intensityMin: number;
+  intensityMax: number;
+}
+const minimapOverviewPerDataset = new Map<string, MinimapOverviewEntry>();
+
 // Minimap state
 let minimapContext: GPUCanvasContext | null = null;
 let minimapOffscreenPool: GPUTexture[] = [];
@@ -403,13 +417,11 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         const renderedLayers: CompositeLayer[] = [];
 
         for (const layer of msg.layers) {
-          const volKey = activeVolKeyPerDataset.get(layer.datasetId);
-          if (!volKey) continue;
-          const entry = volCache.get(volKey);
-          if (!entry) continue;
+          const overview = minimapOverviewPerDataset.get(layer.datasetId);
+          if (!overview) continue;
 
           const idx = renderedLayers.length;
-          renderer.setVolume(entry.texture, entry.levelWidth, entry.levelHeight, entry.levelDepth);
+          renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
           renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
           renderer.setOpacity(1.0);
           renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye);
@@ -423,6 +435,82 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           const compEncoder = device.createCommandEncoder();
           comp.composite(minimapContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
           device.queue.submit([compEncoder.finish()]);
+        }
+        break;
+      }
+
+      case "minimapSetOverviewForLayer": {
+        const existing = minimapOverviewPerDataset.get(msg.datasetId);
+        if (existing) existing.texture.destroy();
+
+        const texture = createEmptyVolumeTexture(device, msg.width, msg.height, msg.depth);
+        for (let z = 0; z < msg.depth; z++) {
+          device.queue.writeTexture(
+            { texture, origin: [0, 0, z] },
+            msg.data,
+            {
+              offset: z * msg.width * msg.height * 2,
+              bytesPerRow: msg.width * 2,
+              rowsPerImage: msg.height,
+            },
+            [msg.width, msg.height, 1],
+          );
+        }
+        const data = new Uint16Array(msg.data);
+        const { min, max } = sampleIntensityRange(data);
+        minimapOverviewPerDataset.set(msg.datasetId, {
+          texture, uploaded: new Set(["full"]),
+          t: msg.t, c: msg.c,
+          width: msg.width, height: msg.height, depth: msg.depth,
+          intensityMin: min, intensityMax: max,
+        });
+        break;
+      }
+
+      case "minimapUploadOverviewChunksForLayer": {
+        const { datasetId, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+        let entry = minimapOverviewPerDataset.get(datasetId);
+
+        if (entry && (entry.t !== t || entry.c !== c)) {
+          entry.texture.destroy();
+          entry = undefined;
+          minimapOverviewPerDataset.delete(datasetId);
+        }
+
+        if (!entry) {
+          const texture = createEmptyVolumeTexture(device, levelWidth, levelHeight, levelDepth);
+          entry = {
+            texture, uploaded: new Set(),
+            t, c,
+            width: levelWidth, height: levelHeight, depth: levelDepth,
+            intensityMin: 65535, intensityMax: 0,
+          };
+          minimapOverviewPerDataset.set(datasetId, entry);
+        }
+
+        let intensityChanged = false;
+        const totalChunks = msg.chunks.length;
+        for (const chunk of msg.chunks) {
+          if (entry.uploaded.has(chunk.key)) continue;
+          const data = new Uint16Array(chunk.data);
+          const xOff = chunk.x * chunkX;
+          const yOff = chunk.y * chunkY;
+          const zOff = chunk.z * chunkZ;
+          const cw = Math.min(chunkX, levelWidth - xOff);
+          const ch = Math.min(chunkY, levelHeight - yOff);
+          const cd = Math.min(chunkZ, levelDepth - zOff);
+
+          writeVolumeChunk(device, entry.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+          entry.uploaded.add(chunk.key);
+
+          const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
+          const { min, max } = sampleIntensityRange(data, perChunkSamples);
+          if (min < entry.intensityMin) { entry.intensityMin = min; intensityChanged = true; }
+          if (max > entry.intensityMax) { entry.intensityMax = max; intensityChanged = true; }
+        }
+
+        if (intensityChanged) {
+          post({ type: "intensityRange", datasetId, min: entry.intensityMin, max: entry.intensityMax });
         }
         break;
       }
@@ -459,6 +547,11 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           }
         }
         activeVolKeyPerDataset.delete(dsId);
+        const mmEntry = minimapOverviewPerDataset.get(dsId);
+        if (mmEntry) {
+          mmEntry.texture.destroy();
+          minimapOverviewPerDataset.delete(dsId);
+        }
         break;
       }
 
@@ -471,6 +564,8 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         volCache.clear();
         volCacheBytes = 0;
         activeVolKeyPerDataset.clear();
+        for (const mmE of minimapOverviewPerDataset.values()) mmE.texture.destroy();
+        minimapOverviewPerDataset.clear();
         for (const tex of offscreenPool) tex.destroy();
         offscreenPool = [];
         for (const tex of minimapOffscreenPool) tex.destroy();

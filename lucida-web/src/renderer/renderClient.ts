@@ -177,6 +177,45 @@ export class RenderClient {
     this.worker.postMessage({ type: "minimapRender", layers, invViewProj, eye, canvasW, canvasH });
   }
 
+  minimapSetOverviewForLayer(datasetId: string, data: Uint16Array, width: number, height: number, depth: number, t: number, c: number) {
+    const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+    this.worker.postMessage(
+      { type: "minimapSetOverviewForLayer", datasetId, data: buf, width, height, depth, t, c },
+      [buf],
+    );
+  }
+
+  minimapUploadOverviewChunksForLayer(
+    datasetId: string,
+    chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
+    t: number,
+    c: number,
+    levelWidth: number,
+    levelHeight: number,
+    levelDepth: number,
+    chunkX: number,
+    chunkY: number,
+    chunkZ: number,
+  ) {
+    const transferList: ArrayBuffer[] = [];
+    const workerChunks: VolumeChunk[] = chunks.map(chunk => {
+      const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength);
+      transferList.push(buf);
+      return { data: buf, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
+    });
+    this.worker.postMessage(
+      {
+        type: "minimapUploadOverviewChunksForLayer",
+        datasetId,
+        chunks: workerChunks,
+        t, c,
+        levelWidth, levelHeight, levelDepth,
+        chunkX, chunkY, chunkZ,
+      },
+      transferList,
+    );
+  }
+
   minimapDestroy() {
     this.worker.postMessage({ type: "minimapDestroy" });
   }

@@ -1,7 +1,7 @@
 /** Pull-based render loop: coalesces chunk arrivals into a single RAF tick. */
 import type { WasmScene } from "lucida-core";
 import type { DatasetInfo } from "./zarr/metadata.ts";
-import { ChunkStore } from "./zarr/chunkStore.ts";
+import { ChunkStore, type ChunkCoord } from "./zarr/chunkStore.ts";
 import { RenderClient } from "./renderer/renderClient.ts";
 import { VOL_CACHE_BUDGET } from "./renderer/workerProtocol.ts";
 import type { VolumeLayerParams, SliceLayerParams, MinimapLayerParams } from "./renderer/workerProtocol.ts";
@@ -34,6 +34,9 @@ export interface MinimapOverlayData {
 /** Max bytes of chunk data to upload to the GPU per RAF tick. */
 const UPLOAD_BUDGET_BYTES = 4 * 1024 * 1024; // 4 MB per frame
 
+/** Separate budget for minimap overview uploads (independent from main view). */
+const MINIMAP_UPLOAD_BUDGET_BYTES = 2 * 1024 * 1024; // 2 MB per frame
+
 export class RenderLoop {
   private scene: WasmScene;
   private datasets: Map<string, DatasetEntry>;
@@ -53,6 +56,12 @@ export class RenderLoop {
   private volumeUploaded = new Map<string, { uploaded: Set<string>; byteSize: number }>();
   private volumeCacheBytes = 0;
   private volumeLodKeys = new Map<string, string>(); // per-dataset lod key
+
+  // Minimap overview tracking
+  private minimapOverviewKey = new Map<string, string>();           // dsId -> "dsId/level/t/c"
+  private minimapOverviewUploaded = new Map<string, Set<string>>(); // dsId -> uploaded chunk keys
+  private minimapOverviewSeeded = new Set<string>();                // dsIds with full upload done
+  private minimapPendingFetch = new Map<string, ChunkCoord[]>();    // deferred to next frame's main fetch
 
   // Minimap
   private minimapEnabled = false;
@@ -125,6 +134,10 @@ export class RenderLoop {
     this.volumeLodKeys.delete(id);
     this.sliceUploaded.delete(id);
     this.sliceCurrentLod.delete(id);
+    this.minimapOverviewKey.delete(id);
+    this.minimapOverviewUploaded.delete(id);
+    this.minimapOverviewSeeded.delete(id);
+    this.minimapPendingFetch.delete(id);
 
     this.dirty = true;
   }
@@ -155,6 +168,31 @@ export class RenderLoop {
     if (enabled) this.dirty = true;
   }
 
+  markMinimapOverviewSeeded(datasetId: string, t: number, c: number): void {
+    const ds = this.datasets.get(datasetId);
+    if (!ds) return;
+    const coarsestIdx = ds.info.levels.length - 1;
+    const key = `${datasetId}/${coarsestIdx}/${t}/${c}`;
+    this.minimapOverviewKey.set(datasetId, key);
+    this.minimapOverviewSeeded.add(datasetId);
+    // Mark all chunks as uploaded so progressive path skips
+    const levelMeta = ds.info.levels[coarsestIdx];
+    const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
+    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+    const nz = Math.ceil(levelDepth / chunkZ);
+    const ny = Math.ceil(levelHeight / chunkY);
+    const nx = Math.ceil(levelWidth / chunkX);
+    const uploadedSet = new Set<string>();
+    for (let iz = 0; iz < nz; iz++) {
+      for (let iy = 0; iy < ny; iy++) {
+        for (let ix = 0; ix < nx; ix++) {
+          uploadedSet.add(`${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`);
+        }
+      }
+    }
+    this.minimapOverviewUploaded.set(datasetId, uploadedSet);
+  }
+
   private tick = (): void => {
     if (!this.dirty) {
       this.rafId = requestAnimationFrame(this.tick);
@@ -168,6 +206,7 @@ export class RenderLoop {
       this.tickVolume();
     }
 
+    this.tickMinimapOverview();
     this.tickMinimap();
 
     this.rafId = requestAnimationFrame(this.tick);
@@ -206,8 +245,10 @@ export class RenderLoop {
 
       const plan = evaluateChunkPlanFor(scene, dsId);
       if (!plan) continue;
-      if (plan.needed.length > 0) {
-        ds.store.ensureFetched(plan.needed);
+      const mmPending = this.minimapPendingFetch.get(dsId);
+      const fetchList = mmPending?.length ? [...plan.needed, ...mmPending] : plan.needed;
+      if (fetchList.length > 0) {
+        ds.store.ensureFetched(fetchList);
       }
 
       const level = plan.needed[0]?.level;
@@ -326,8 +367,10 @@ export class RenderLoop {
 
       const plan = evaluateChunkPlanFor(scene, dsId);
       if (!plan) continue;
-      if (plan.needed.length > 0) {
-        ds.store.ensureFetched(plan.needed);
+      const mmPending = this.minimapPendingFetch.get(dsId);
+      const fetchList = mmPending?.length ? [...plan.needed, ...mmPending] : plan.needed;
+      if (fetchList.length > 0) {
+        ds.store.ensureFetched(fetchList);
       }
 
       if (plan.needed.length === 0) continue;
@@ -418,6 +461,89 @@ export class RenderLoop {
     }
 
     client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH);
+  }
+
+  private tickMinimapOverview(): void {
+    if (!this.minimapEnabled) return;
+
+    const { scene, client } = this;
+    const t = scene.t();
+    const c = scene.c();
+
+    let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
+
+    for (const [dsId, ds] of this.datasets) {
+      const coarsestIdx = ds.info.levels.length - 1;
+      const overviewKey = `${dsId}/${coarsestIdx}/${t}/${c}`;
+
+      // If key changed, reset tracking
+      if (this.minimapOverviewKey.get(dsId) !== overviewKey) {
+        this.minimapOverviewUploaded.set(dsId, new Set());
+        this.minimapOverviewSeeded.delete(dsId);
+        this.minimapOverviewKey.set(dsId, overviewKey);
+      }
+
+      // Already fully seeded at matching key
+      if (this.minimapOverviewSeeded.has(dsId)) continue;
+
+      const levelMeta = ds.info.levels[coarsestIdx];
+      const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
+      const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+      const nz = Math.ceil(levelDepth / chunkZ);
+      const ny = Math.ceil(levelHeight / chunkY);
+      const nx = Math.ceil(levelWidth / chunkX);
+
+      const uploaded = this.minimapOverviewUploaded.get(dsId)!;
+      const missing: { level: number; x: number; y: number; z: number; t: number; c: number; key: string }[] = [];
+      const available: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+
+      for (let iz = 0; iz < nz; iz++) {
+        for (let iy = 0; iy < ny; iy++) {
+          for (let ix = 0; ix < nx; ix++) {
+            const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
+            if (uploaded.has(chunkKey)) continue;
+
+            const buf = ds.store.get(chunkKey);
+            if (buf && buf.byteLength > 0) {
+              available.push({
+                data: bufferToUint16(buf, levelMeta.dataType),
+                x: ix, y: iy, z: iz, key: chunkKey,
+              });
+              uploaded.add(chunkKey);
+              budgetRemaining -= buf.byteLength;
+              if (budgetRemaining <= 0) break;
+            } else {
+              missing.push({ level: coarsestIdx, x: ix, y: iy, z: iz, t, c, key: chunkKey });
+            }
+          }
+          if (budgetRemaining <= 0) break;
+        }
+        if (budgetRemaining <= 0) break;
+      }
+
+      if (missing.length > 0) {
+        this.minimapPendingFetch.set(dsId, missing);
+        this.dirty = true; // retry next frame
+      } else {
+        this.minimapPendingFetch.delete(dsId);
+      }
+
+      if (available.length > 0) {
+        client.minimapUploadOverviewChunksForLayer(
+          dsId, available, t, c,
+          levelWidth, levelHeight, levelDepth,
+          chunkX, chunkY, chunkZ,
+        );
+      }
+
+      // Check if all chunks are now uploaded
+      const totalChunks = nz * ny * nx;
+      if (uploaded.size >= totalChunks) {
+        this.minimapOverviewSeeded.add(dsId);
+      }
+
+      if (budgetRemaining <= 0) break;
+    }
   }
 
   private tickMinimap(): void {

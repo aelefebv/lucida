@@ -638,6 +638,13 @@ function App() {
       const sliceSize = vol.width * vol.height;
       const slice = vol.data.subarray(0, sliceSize);
       client.sliceSetFallbackForLayer(id, slice, vol.width, vol.height);
+
+      // Seed minimap overview for local datasets (skip remote zero-filled placeholders)
+      const ds = datasetsRef.current.get(id);
+      if (ds && ds.fileIndex !== null) {
+        client.minimapSetOverviewForLayer(id, vol.data, vol.width, vol.height, vol.depth, 0, 0);
+        loopRef.current?.markMinimapOverviewSeeded(id, 0, 0);
+      }
     }
   }, [volumeMap, clientReady]);
 
