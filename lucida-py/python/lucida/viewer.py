@@ -421,13 +421,14 @@ class Viewer:
         dtype = np.dtype(level_meta["dataType"])
         codecs = level_meta.get("codecs", [])
 
-        # Set up events for each chunk
+        # Set up events for each chunk using composite keys (datasetId/key)
+        # to match the key format the web data source encodes in binary responses.
         events: dict[str, threading.Event] = {}
         for ch in needed:
-            key = ch["key"]
+            composite = f"{dataset_id}/{ch['key']}"
             event = threading.Event()
-            events[key] = event
-            self._pending_chunks[key] = event
+            events[composite] = event
+            self._pending_chunks[composite] = event
 
         # Send chunk requests
         for ch in needed:
@@ -438,24 +439,24 @@ class Viewer:
             }))
 
         # Wait for all responses
-        for key, event in events.items():
+        for composite, event in events.items():
             if not event.wait(timeout):
                 # Clean up
                 for k in events:
                     self._pending_chunks.pop(k, None)
                     self._chunk_data.pop(k, None)
-                raise TimeoutError(f"Timed out waiting for chunk {key!r}")
+                raise TimeoutError(f"Timed out waiting for chunk {composite!r}")
 
         # Decompress and reshape
         chunks_dict: dict[str, np.ndarray] = {}
         cz, cy, cx = chunk_shape_zyx
         for ch in needed:
-            key = ch["key"]
-            raw = self._chunk_data.pop(key)
-            self._pending_chunks.pop(key, None)
+            composite = f"{dataset_id}/{ch['key']}"
+            raw = self._chunk_data.pop(composite)
+            self._pending_chunks.pop(composite, None)
             decompressed = decompress_chunk(raw, codecs)
             arr = np.frombuffer(decompressed, dtype=dtype).reshape((cz, cy, cx))
-            chunks_dict[key] = arr
+            chunks_dict[ch["key"]] = arr
 
         data, origin = assemble_chunks(
             chunks_dict, needed, chunk_shape_zyx, shape_zyx, dtype
