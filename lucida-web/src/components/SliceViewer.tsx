@@ -1,35 +1,32 @@
 /** 2D slice viewer — delegates WebGPU rendering to a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 
 interface Props {
-  volume: VolumeData;
   z: number;
   t: number;
   c: number;
   scene: WasmScene;
   datasets: Map<string, DatasetEntry>;
-  selectedDatasetId: string;
   client: RenderClient;
   canvas: HTMLCanvasElement;
   remoteDocumentVersion: number;
   emitPresence: () => void;
   breakFollow: () => void;
-  loopRef: MutableRefObject<RenderLoop | null>;
+  loopRef: RefObject<RenderLoop | null>;
 }
 
-export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetId, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef }: Props) {
+export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
 
   // Create/start render loop
   useEffect(() => {
-    const loop = new RenderLoop({ scene, datasets, selectedDatasetId, client, canvas, mode: "slice" });
+    const loop = new RenderLoop({ scene, datasets, client, canvas, mode: "slice" });
     loopRef.current = loop;
     parentLoopRef.current = loop;
     loop.start();
@@ -38,11 +35,6 @@ export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetI
       parentLoopRef.current = null;
     };
   }, [scene, client, canvas]);
-
-  // Update selected dataset without recreating the loop
-  useEffect(() => {
-    loopRef.current?.setSelectedDataset(selectedDatasetId);
-  }, [selectedDatasetId]);
 
   // Update slice params on prop changes and when loop is recreated
   useEffect(() => {
@@ -53,45 +45,6 @@ export function SliceViewer({ volume, z, t, c, scene, datasets, selectedDatasetI
   useEffect(() => {
     loopRef.current?.markDirty();
   }, [remoteDocumentVersion]);
-
-  // Reset pan/zoom when the dataset dimensions change (LOD upgrades),
-  // but NOT when merely switching the selected layer.
-  const prevDimsMap = useRef(new Map<string, { w: number; h: number; d: number }>());
-  useEffect(() => {
-    const { width, height, depth } = volume;
-    const prev = prevDimsMap.current.get(selectedDatasetId);
-    if (prev && (width !== prev.w || height !== prev.h || depth !== prev.d)) {
-      const selectedDs = datasets.get(selectedDatasetId);
-      if (selectedDs) {
-        const fullResWidth = selectedDs.info.levels[0].shape[4];
-        const fullResHeight = selectedDs.info.levels[0].shape[3];
-        applyViewportCommand(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 });
-        applyViewportCommand(scene, { type: "set_zoom", value: 1.0 });
-        emitPresence();
-        loopRef.current?.markDirty();
-      }
-    }
-    prevDimsMap.current.set(selectedDatasetId, { w: width, h: height, d: depth });
-  }, [volume, scene, datasets, selectedDatasetId, emitPresence]);
-
-  // Upload fallback (coarsest-level) texture — per-dataset tracking to avoid
-  // redundant re-uploads (and the cascading intensityRange re-render) on selection change.
-  const uploadedFallbacks = useRef(new Map<string, { z: number; w: number; h: number; d: number }>());
-  useEffect(() => {
-    const { width, height, depth, data } = volume;
-    // Skip fallback upload if current Z exceeds this dataset's depth
-    if (z >= depth) return;
-    const clampedZ = Math.max(0, Math.min(z, depth - 1));
-    const prev = uploadedFallbacks.current.get(selectedDatasetId);
-    if (prev && prev.z === clampedZ && prev.w === width && prev.h === height && prev.d === depth) {
-      return;
-    }
-    uploadedFallbacks.current.set(selectedDatasetId, { z: clampedZ, w: width, h: height, d: depth });
-    const sliceSize = width * height;
-    const offset = clampedZ * sliceSize;
-    const slice = data.subarray(offset, offset + sliceSize);
-    client.sliceSetFallbackForLayer(selectedDatasetId, slice, width, height);
-  }, [volume, z, client, selectedDatasetId]);
 
   const onPointerDown = useCallback(
     (e: PointerEvent) => {

@@ -1,16 +1,13 @@
 /** 3D volume viewer — delegates WebGPU rendering to a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import type { VolumeData } from "../zarr/volumeAssembler.ts";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 
 interface Props {
-  volume: VolumeData;
   scene: WasmScene;
   datasets: Map<string, DatasetEntry>;
-  selectedDatasetId: string;
   client: RenderClient;
   canvas: HTMLCanvasElement;
   remoteDocumentVersion: number;
@@ -18,15 +15,15 @@ interface Props {
   breakFollow: () => void;
   t: number;
   c: number;
-  loopRef: MutableRefObject<RenderLoop | null>;
+  loopRef: RefObject<RenderLoop | null>;
 }
 
-export function VolumeViewer({ volume, scene, datasets, selectedDatasetId, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, t, c, loopRef: parentLoopRef }: Props) {
+export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, t, c, loopRef: parentLoopRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
 
   // Create/start render loop
   useEffect(() => {
-    const loop = new RenderLoop({ scene, datasets, selectedDatasetId, client, canvas, mode: "volume" });
+    const loop = new RenderLoop({ scene, datasets, client, canvas, mode: "volume" });
     loopRef.current = loop;
     parentLoopRef.current = loop;
     loop.start();
@@ -35,11 +32,6 @@ export function VolumeViewer({ volume, scene, datasets, selectedDatasetId, clien
       parentLoopRef.current = null;
     };
   }, [scene, client, canvas]);
-
-  // Update selected dataset without recreating the loop
-  useEffect(() => {
-    loopRef.current?.setSelectedDataset(selectedDatasetId);
-  }, [selectedDatasetId]);
 
   // Mark dirty on remote document updates
   useEffect(() => {
@@ -50,25 +42,6 @@ export function VolumeViewer({ volume, scene, datasets, selectedDatasetId, clien
   useEffect(() => {
     loopRef.current?.markDirty();
   }, [t, c]);
-
-  // Initial volume upload effect — per-dataset tracking to avoid redundant uploads
-  const uploadedVolumes = useRef(new Map<string, { w: number; h: number; d: number }>());
-  useEffect(() => {
-    const { width, height, depth } = volume;
-    const prev = uploadedVolumes.current.get(selectedDatasetId);
-    if (prev && prev.w === width && prev.h === height && prev.d === depth) {
-      // Already uploaded this exact volume for this dataset — skip
-      return;
-    }
-    uploadedVolumes.current.set(selectedDatasetId, { w: width, h: height, d: depth });
-
-    const canvasW = canvas.clientWidth * devicePixelRatio;
-    const canvasH = canvas.clientHeight * devicePixelRatio;
-    scene.set_viewport(canvasW, canvasH);
-
-    client.volumeSetInitialForLayer(selectedDatasetId, volume.data, volume.width, volume.height, volume.depth);
-    loopRef.current?.markDirty();
-  }, [volume, scene, selectedDatasetId, client, canvas]);
 
   // Input handling
   const [dragging, setDragging] = useState(false);

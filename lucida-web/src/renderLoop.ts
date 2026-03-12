@@ -15,7 +15,6 @@ export interface DatasetEntry {
 export interface RenderLoopOptions {
   scene: WasmScene;
   datasets: Map<string, DatasetEntry>;
-  selectedDatasetId: string;
   client: RenderClient;
   canvas: HTMLCanvasElement;
   mode: "slice" | "volume";
@@ -27,7 +26,6 @@ const UPLOAD_BUDGET_BYTES = 4 * 1024 * 1024; // 4 MB per frame
 export class RenderLoop {
   private scene: WasmScene;
   private datasets: Map<string, DatasetEntry>;
-  private selectedDatasetId: string;
   private client: RenderClient;
   private canvas: HTMLCanvasElement;
   private mode: "slice" | "volume";
@@ -56,7 +54,6 @@ export class RenderLoop {
     for (const [id, entry] of opts.datasets) {
       this.datasets.set(id, { store: entry.store, info: entry.info });
     }
-    this.selectedDatasetId = opts.selectedDatasetId;
     this.client = opts.client;
     this.canvas = opts.canvas;
     this.mode = opts.mode;
@@ -116,13 +113,6 @@ export class RenderLoop {
     this.dirty = true;
   }
 
-  setSelectedDataset(id: string): void {
-    if (this.selectedDatasetId !== id) {
-      this.selectedDatasetId = id;
-      this.dirty = true;
-    }
-  }
-
   markDirty(): void {
     this.dirty = true;
   }
@@ -160,8 +150,7 @@ export class RenderLoop {
 
   private tickSlice(): void {
     const { scene, client, canvas } = this;
-    const selectedDs = this.datasets.get(this.selectedDatasetId);
-    if (!selectedDs) return;
+    if (this.datasets.size === 0) return;
 
     const z = this.sliceZ;
     const t = this.sliceT;

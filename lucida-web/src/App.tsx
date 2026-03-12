@@ -87,11 +87,6 @@ function App() {
   // Selected dataset for rendering
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
 
-  // Keep dataset info and file index for re-assembling on C/T change
-  const [datasetInfo, setDatasetInfo] = useState<DatasetInfo | null>(null);
-  const fileIndexRef = useRef<Map<string, File> | null>(null);
-  const storeRef = useRef<ChunkStore | null>(null);
-
   // Track all datasets (local and remote) by id
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
   // Pending chunk requests from remote viewers (keyed by chunk key)
@@ -104,6 +99,9 @@ function App() {
   const clientRef = useRef<RenderClient | null>(null);
   const [clientReady, setClientReady] = useState(false);
   const loopRef = useRef<RenderLoop | null>(null);
+
+  // Track which datasets have been pre-uploaded to the GPU worker
+  const preUploadedRef = useRef(new Set<string>());
 
   useEffect(() => {
     init().then(() => setWasmReady(true));
@@ -197,18 +195,7 @@ function App() {
             // If removed dataset was selected, select next available or null
             setSelectedDatasetId(prev => {
               if (prev === cmd.id) {
-                const remaining = datasetsRef.current.keys().next().value ?? null;
-                if (remaining) {
-                  const remainingDs = datasetsRef.current.get(remaining)!;
-                  setDatasetInfo(remainingDs.info);
-                  storeRef.current = remainingDs.store;
-                  fileIndexRef.current = remainingDs.fileIndex;
-                } else {
-                  setDatasetInfo(null);
-                  storeRef.current = null;
-                  fileIndexRef.current = null;
-                }
-                return remaining;
+                return datasetsRef.current.keys().next().value ?? null;
               }
               return prev;
             });
@@ -426,10 +413,8 @@ function App() {
       return next;
     });
 
-    // If this is the first dataset and we don't have a local one, select it.
-    if (!storeRef.current) {
-      storeRef.current = store;
-      setDatasetInfo(info);
+    // If this is the first dataset, select it.
+    if (datasetsRef.current.size === 1) {
       setSelectedDatasetId(datasetId);
     }
 
@@ -543,17 +528,19 @@ function App() {
     });
   }, []);
 
-  // Hook intensity range callback — per-dataset
+  // Hook intensity range callback — per-dataset.
+  // Worker messages arrive as separate browser tasks. During progressive chunk loading,
+  // many intensityRange messages can queue up. Each setDataRangeMap call triggers a
+  // React re-render, so unbatched updates cause cascading re-renders that block the
+  // main thread. We batch them into a single RAF update.
+  const pendingIntensityRef = useRef(new Map<string, { min: number; max: number }>());
+  const intensityRafRef = useRef(0);
   useEffect(() => {
     const client = clientRef.current;
     if (!client) return;
     client.onIntensityRange = (datasetId, min, max) => {
-      setDataRangeMap(prev => {
-        const next = new Map(prev);
-        next.set(datasetId, { min, max });
-        return next;
-      });
-      // Apply auto-contrast for this specific dataset if enabled
+      // Apply auto-contrast immediately via WASM (no React state) so the
+      // render loop picks up correct contrast on the next tick.
       const isAuto = autoContrastMapRef.current.get(datasetId) ?? true;
       if (isAuto) {
         const scene = wasmSceneRef.current;
@@ -565,28 +552,89 @@ function App() {
             max,
           }));
           loopRef.current?.markDirty();
-          // Emit updated layer presence so followers see correct contrast
           bridgeRef.current?.sendLayerPresence(scene.export_layer_presence());
         }
+      }
+
+      // Batch the React state update to one per animation frame.
+      pendingIntensityRef.current.set(datasetId, { min, max });
+      if (!intensityRafRef.current) {
+        intensityRafRef.current = requestAnimationFrame(() => {
+          intensityRafRef.current = 0;
+          const pending = pendingIntensityRef.current;
+          if (pending.size === 0) return;
+          const batch = new Map(pending);
+          pending.clear();
+          setDataRangeMap(prev => {
+            const next = new Map(prev);
+            for (const [id, range] of batch) {
+              next.set(id, range);
+            }
+            return next;
+          });
+        });
+      }
+    };
+    return () => {
+      if (intensityRafRef.current) {
+        cancelAnimationFrame(intensityRafRef.current);
+        intensityRafRef.current = 0;
       }
     };
   }, [clientReady]);
 
-  // Sync Z/T/C to WASM scene and request chunks
+  // Eagerly pre-upload initial volumes/fallbacks for all datasets at load time,
+  // so switching layers doesn't trigger expensive synchronous uploads.
   useEffect(() => {
-    if (!wasmScene || !selectedDatasetId) return;
-    const ds = datasetsRef.current.get(selectedDatasetId);
-    if (!ds) return;
-    wasmScene.set_z(z);
-    wasmScene.set_t(t);
-    wasmScene.set_c(c);
-    try {
-      const plan = JSON.parse(wasmScene.chunk_plan_for(selectedDatasetId));
-      if (plan.needed.length > 0) {
-        ds.store.ensureFetched(plan.needed);
+    const client = clientRef.current;
+    if (!client || !clientReady) return;
+
+    // Clean up removed datasets
+    for (const id of preUploadedRef.current) {
+      if (!volumeMap.has(id)) {
+        preUploadedRef.current.delete(id);
       }
-    } catch { /* ignore */ }
-  }, [z, t, c, wasmScene, selectedDatasetId]);
+    }
+
+    // Upload new datasets
+    for (const [id, vol] of volumeMap) {
+      if (preUploadedRef.current.has(id)) continue;
+      preUploadedRef.current.add(id);
+
+      // Upload 3D volume for volume rendering
+      client.volumeSetInitialForLayer(id, vol.data, vol.width, vol.height, vol.depth);
+
+      // Upload 2D fallback slice for slice rendering (z=0)
+      const sliceSize = vol.width * vol.height;
+      const slice = vol.data.subarray(0, sliceSize);
+      client.sliceSetFallbackForLayer(id, slice, vol.width, vol.height);
+    }
+  }, [volumeMap, clientReady]);
+
+  // Reset pan/zoom when dataset dimensions change (LOD upgrades),
+  // but NOT when merely switching the selected layer.
+  const prevDimsMapRef = useRef(new Map<string, { w: number; h: number; d: number }>());
+  useEffect(() => {
+    for (const [id, vol] of volumeMap) {
+      const prev = prevDimsMapRef.current.get(id);
+      if (prev && (vol.width !== prev.w || vol.height !== prev.h || vol.depth !== prev.d)) {
+        const ds = datasetsRef.current.get(id);
+        const scene = wasmSceneRef.current;
+        if (ds && scene) {
+          const fullResWidth = ds.info.levels[0].shape[4];
+          const fullResHeight = ds.info.levels[0].shape[3];
+          applyViewportCommand(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 });
+          applyViewportCommand(scene, { type: "set_zoom", value: 1.0 });
+          emitPresence();
+          loopRef.current?.markDirty();
+        }
+      }
+      prevDimsMapRef.current.set(id, { w: vol.width, h: vol.height, d: vol.depth });
+    }
+    for (const id of prevDimsMapRef.current.keys()) {
+      if (!volumeMap.has(id)) prevDimsMapRef.current.delete(id);
+    }
+  }, [volumeMap, emitPresence]);
 
   async function handleDirChange(e: React.ChangeEvent<HTMLInputElement>) {
     const files = e.target.files;
@@ -706,9 +754,6 @@ function App() {
       loopRef.current?.addDataset(datasetId, store, info);
 
       // Select this dataset
-      storeRef.current = store;
-      fileIndexRef.current = fileIndex;
-      setDatasetInfo(info);
       setSelectedDatasetId(datasetId);
       setDatasetsVersion((v) => v + 1);
 
@@ -734,14 +779,17 @@ function App() {
     breakFollow();
     if (wasmScene) {
       applyViewportCommand(wasmScene, { type: next === "3d" ? "set_mode_3d" : "set_mode_2d" });
-      if (next === "2d" && datasetInfo) {
-        const shapeX = datasetInfo.levels[0].shape[4];
-        const shapeY = datasetInfo.levels[0].shape[3];
-        applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
+      if (next === "2d" && selectedDatasetId) {
+        const dsInfo = datasetsRef.current.get(selectedDatasetId)?.info;
+        if (dsInfo) {
+          const shapeX = dsInfo.levels[0].shape[4];
+          const shapeY = dsInfo.levels[0].shape[3];
+          applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
+        }
       }
       emitPresence();
     }
-  }, [viewMode, wasmScene, datasetInfo, emitPresence, breakFollow]);
+  }, [viewMode, wasmScene, selectedDatasetId, emitPresence, breakFollow]);
 
   // Union dimension extents across ALL datasets for slider ranges.
   // Reference datasetsVersion so this recomputes when datasets are added/removed.
@@ -765,12 +813,6 @@ function App() {
 
   const handleLayerSelect = useCallback((id: string) => {
     setSelectedDatasetId(id);
-    const ds = datasetsRef.current.get(id);
-    if (ds) {
-      setDatasetInfo(ds.info);
-      storeRef.current = ds.store;
-      fileIndexRef.current = ds.fileIndex;
-    }
   }, []);
 
   const handleLayerToggleExpand = useCallback((id: string) => {
@@ -937,18 +979,7 @@ function App() {
     // Select next layer
     setSelectedDatasetId(prev => {
       if (prev === id) {
-        const remaining = datasetsRef.current.keys().next().value ?? null;
-        if (remaining) {
-          const remainingDs = datasetsRef.current.get(remaining)!;
-          setDatasetInfo(remainingDs.info);
-          storeRef.current = remainingDs.store;
-          fileIndexRef.current = remainingDs.fileIndex;
-        } else {
-          setDatasetInfo(null);
-          storeRef.current = null;
-          fileIndexRef.current = null;
-        }
-        return remaining;
+        return datasetsRef.current.keys().next().value ?? null;
       }
       return prev;
     });
@@ -1009,7 +1040,6 @@ function App() {
   }, [peers, myId]);
 
   const client = clientReady ? clientRef.current : null;
-  const selectedVolume = selectedDatasetId ? volumeMap.get(selectedDatasetId) ?? null : null;
 
   // Build list of followable peers (not following anyone else)
   const followablePeers = Array.from(peers.entries())
@@ -1037,7 +1067,7 @@ function App() {
     }
 
     // Reverse so frontmost layer (rendered last) appears at top of panel
-    return layerOrder.slice().reverse().map(id => {
+    const result = layerOrder.slice().reverse().map(id => {
       const settings = allSettings[id];
       const ds = datasetsRef.current.get(id);
       const dr = dataRangeMap.get(id) ?? null;
@@ -1058,6 +1088,7 @@ function App() {
         fullRangeMax: frMax,
       };
     });
+    return result;
   };
 
   // Re-derive on relevant state changes
@@ -1095,7 +1126,7 @@ function App() {
         onMoveLayer={handleLayerMove}
         onRemoveLayer={handleRemoveLayer}
         onAddLayer={() => dirInputRef.current?.click()}
-        viewModeToggle={selectedVolume ? { label: viewMode === "2d" ? "3D" : "2D", onClick: handleViewModeToggle } : null}
+        viewModeToggle={volumeMap.size > 0 ? { label: viewMode === "2d" ? "3D" : "2D", onClick: handleViewModeToggle } : null}
       />
       <div className="main-content">
         {/* Peer list / follow controls */}
@@ -1131,18 +1162,16 @@ function App() {
             imageRendering: viewMode === "2d" ? "pixelated" : "auto",
             borderRadius: 8,
             backgroundColor: "black",
-            display: selectedVolume ? "block" : "none",
+            display: volumeMap.size > 0 ? "block" : "none",
           }}
         />
-        {selectedVolume && viewMode === "2d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
+        {volumeMap.size > 0 && viewMode === "2d" && wasmScene && client && (
           <SliceViewer
-            volume={selectedVolume}
             z={z}
             t={t}
             c={c}
             scene={wasmScene}
             datasets={datasetsRef.current}
-            selectedDatasetId={selectedDatasetId}
             client={client}
             canvas={canvasRef.current!}
             remoteDocumentVersion={remoteDocumentVersion}
@@ -1151,12 +1180,10 @@ function App() {
             loopRef={loopRef}
           />
         )}
-        {selectedVolume && viewMode === "3d" && wasmScene && selectedDatasetId && datasetsRef.current.has(selectedDatasetId) && client && (
+        {volumeMap.size > 0 && viewMode === "3d" && wasmScene && client && (
           <VolumeViewer
-            volume={selectedVolume}
             scene={wasmScene}
             datasets={datasetsRef.current}
-            selectedDatasetId={selectedDatasetId}
             client={client}
             canvas={canvasRef.current!}
             remoteDocumentVersion={remoteDocumentVersion}
@@ -1167,7 +1194,7 @@ function App() {
             loopRef={loopRef}
           />
         )}
-        {selectedVolume && (
+        {volumeMap.size > 0 && (
           <div className="dimension-controls">
             <DimensionControls label="Z" value={z} max={dimZ} onChange={(v) => {
               setZ(v);
