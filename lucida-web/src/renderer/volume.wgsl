@@ -76,6 +76,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   let stepSize = u.intensityRange.w;
 
   let range = intensityMax - intensityMin;
+  let renderMode = i32(u.displayParams.z);
 
   let rayLen = tEnd - tStart;
   let adaptiveStep = max(stepSize, rayLen / 512.0);
@@ -83,13 +84,14 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   // Front-to-back compositing
   var color = vec3f(0.0);
   var alpha = 0.0;
+  var maxVal = 0.0;
   var t = tStart;
 
   let maxSteps = i32(ceil(rayLen / adaptiveStep));
   let steps = min(maxSteps, 512);
 
   for (var i = 0; i < steps; i++) {
-    if (alpha >= 0.98) { break; } // early termination
+    if (renderMode == 0 && alpha >= 0.98) { break; } // early termination (translucent only)
 
     let pos = ro + rd * t;
     // Map [0,1] position to texel coordinates (flip Y to match 2D image convention)
@@ -105,18 +107,24 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     let gamma = u.displayParams.x;
     let normalized = pow(clamp((rawVal - intensityMin) / range, 0.0, 1.0), gamma);
 
-    // Simple linear transfer function
-    let sampleAlpha = normalized * opacityScale;
-    let sampleColor = vec3f(normalized); // grayscale
-
-    // Front-to-back blending
-    color += (1.0 - alpha) * sampleAlpha * sampleColor;
-    alpha += (1.0 - alpha) * sampleAlpha;
+    if (renderMode == 1) {
+      // MIP: track maximum intensity
+      maxVal = max(maxVal, normalized);
+    } else {
+      // Translucent: front-to-back blending
+      let sampleAlpha = normalized * opacityScale;
+      let sampleColor = vec3f(normalized);
+      color += (1.0 - alpha) * sampleAlpha * sampleColor;
+      alpha += (1.0 - alpha) * sampleAlpha;
+    }
 
     t += adaptiveStep;
   }
 
   // Pre-multiply by layer opacity for compositing
   let layerOpacity = u.displayParams.y;
+  if (renderMode == 1) {
+    return vec4f(maxVal, maxVal, maxVal, 1.0) * layerOpacity;
+  }
   return vec4f(color * layerOpacity, alpha * layerOpacity);
 }

@@ -127,6 +127,17 @@ export function useLayerSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
+  const handleLayerSetRenderMode = useCallback((id: string, mode: string) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      scene.apply_command(JSON.stringify({ type: "set_layer_render_mode", dataset_id: id, render_mode: mode }));
+      loopRef.current?.markDirty();
+      bridgeCallbacksRef.current.emitLayerPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
   const handleLayerAutoContrast = useCallback((id: string) => {
     const dr = dataRangeMap.get(id);
     if (dr) {
@@ -226,6 +237,7 @@ export function useLayerSettings({
       contrast_max: number;
       gamma: number;
       blend_mode: string;
+      render_mode: string;
     }>;
     try {
       layerOrder = JSON.parse(scene.layer_order());
@@ -249,6 +261,7 @@ export function useLayerSettings({
         contrastMax: settings?.contrast_max ?? 65535,
         gamma: settings?.gamma ?? 1,
         blendMode: settings?.blend_mode ?? "alpha",
+        renderMode: settings?.render_mode ?? "translucent",
         autoContrast: autoContrastMap.get(id) ?? true,
         fullRange: fullRangeMap.get(id) ?? false,
         dataRange: dr,
@@ -285,6 +298,7 @@ export function useLayerSettings({
     handleLayerSetContrast,
     handleLayerSetGamma,
     handleLayerSetBlendMode,
+    handleLayerSetRenderMode,
     handleLayerAutoContrast,
     handleLayerAutoContrastToggle,
     handleLayerFullRangeToggle,

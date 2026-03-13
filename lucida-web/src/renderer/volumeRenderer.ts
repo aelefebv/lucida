@@ -23,6 +23,7 @@ export class VolumeRenderer {
   private intensityMax = 65535;
   private gamma = 1.0;
   private opacity = 1.0;
+  private renderMode = 0;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private modelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private invModelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
@@ -100,6 +101,10 @@ export class VolumeRenderer {
     this.opacity = v;
   }
 
+  setRenderMode(mode: number) {
+    this.renderMode = mode;
+  }
+
   setMatrices(
     invViewProj: Float32Array<ArrayBufferLike>,
     model: Float32Array<ArrayBufferLike>,
@@ -126,7 +131,7 @@ export class VolumeRenderer {
     uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], 48); // cameraPos at 192B = 48 floats
     uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 52); // volumeDims at 208B = 52 floats
     uniformData.set([this.intensityMin, this.intensityMax, 0.08, stepSize], 56); // intensityRange at 224B = 56 floats
-    uniformData.set([this.gamma, this.opacity, 0, 0], 60); // displayParams at 240B = 60 floats
+    uniformData.set([this.gamma, this.opacity, this.renderMode, 0], 60); // displayParams at 240B = 60 floats
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

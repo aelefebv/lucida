@@ -44,6 +44,7 @@ export function tickVolume(
     contrast_max: number;
     gamma: number;
     blend_mode: string;
+    render_mode: string;
   }> = JSON.parse(scene.all_layer_settings());
 
   let budgetRemaining = UPLOAD_BUDGET_BYTES;
@@ -147,6 +148,7 @@ export function tickVolume(
       gamma: settings.gamma,
       opacity: settings.opacity,
       blendMode: settings.blend_mode as "alpha" | "additive" | "max",
+      renderMode: (settings.render_mode || "translucent") as "translucent" | "max_intensity",
     });
   }
 

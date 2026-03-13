@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
-use crate::scene::{BlendMode, Dataset, Layer, Scene};
+use crate::scene::{BlendMode, Dataset, Layer, RenderMode, Scene};
 use crate::transform;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +56,7 @@ pub enum Command {
     SetLayerContrast { dataset_id: String, min: f64, max: f64 },
     SetLayerGamma { dataset_id: String, gamma: f64 },
     SetLayerBlendMode { dataset_id: String, blend_mode: BlendMode },
+    SetLayerRenderMode { dataset_id: String, render_mode: RenderMode },
 }
 
 impl Command {
@@ -178,6 +179,11 @@ impl Scene {
             Command::SetLayerBlendMode { dataset_id, blend_mode } => {
                 if let Some(s) = self.layer_settings.get_mut(&dataset_id) {
                     s.blend_mode = blend_mode;
+                }
+            }
+            Command::SetLayerRenderMode { dataset_id, render_mode } => {
+                if let Some(s) = self.layer_settings.get_mut(&dataset_id) {
+                    s.render_mode = render_mode;
                 }
             }
         }
@@ -316,9 +322,27 @@ mod tests {
             Command::SetLayerContrast { dataset_id: "x".into(), min: 0.0, max: 1.0 },
             Command::SetLayerGamma { dataset_id: "x".into(), gamma: 1.0 },
             Command::SetLayerBlendMode { dataset_id: "x".into(), blend_mode: crate::scene::BlendMode::Max },
+            Command::SetLayerRenderMode { dataset_id: "x".into(), render_mode: crate::scene::RenderMode::MaxIntensity },
         ];
         for cmd in cmds {
             assert!(!cmd.is_document_command(), "expected not document command: {:?}", cmd);
+        }
+    }
+
+    #[test]
+    fn set_layer_render_mode_round_trips() {
+        let cmd = Command::SetLayerRenderMode {
+            dataset_id: "ds1".into(),
+            render_mode: crate::scene::RenderMode::MaxIntensity,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"max_intensity\""));
+        let parsed: Command = serde_json::from_str(&json).unwrap();
+        match parsed {
+            Command::SetLayerRenderMode { render_mode, .. } => {
+                assert_eq!(render_mode, crate::scene::RenderMode::MaxIntensity);
+            }
+            _ => panic!("expected SetLayerRenderMode"),
         }
     }
 

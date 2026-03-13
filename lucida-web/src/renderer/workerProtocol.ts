@@ -93,6 +93,7 @@ export interface VolumeLayerParams {
   gamma: number;
   opacity: number;
   blendMode: "alpha" | "additive" | "max";
+  renderMode: "translucent" | "max_intensity";
 }
 
 export interface VolumeRenderMultiPassMessage {

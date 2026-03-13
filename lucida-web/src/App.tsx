@@ -185,6 +185,7 @@ function App() {
         onSetContrast={layers.handleLayerSetContrast}
         onSetGamma={layers.handleLayerSetGamma}
         onSetBlendMode={layers.handleLayerSetBlendMode}
+        onSetRenderMode={layers.handleLayerSetRenderMode}
         onAutoContrast={layers.handleLayerAutoContrast}
         onAutoContrastToggle={layers.handleLayerAutoContrastToggle}
         onFullRangeToggle={layers.handleLayerFullRangeToggle}

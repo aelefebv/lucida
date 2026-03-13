@@ -156,6 +156,7 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     renderer.setVolume(entry.texture, entry.levelWidth, entry.levelHeight, entry.levelDepth);
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(layer.opacity);
+    renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
     renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye);
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(pool[idx].createView(), layerEncoder);

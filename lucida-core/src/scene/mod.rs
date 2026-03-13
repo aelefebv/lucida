@@ -2,6 +2,7 @@ mod types;
 
 pub use types::{
     BlendMode, Dataset, DisplayState, DocumentState, Layer, LayerDisplaySettings, LevelInfo,
+    RenderMode,
 };
 
 use std::collections::HashMap;

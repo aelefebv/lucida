@@ -10,6 +10,7 @@ export interface LayerInfo {
   contrastMax: number;
   gamma: number;
   blendMode: string;
+  renderMode: string;
   autoContrast: boolean;
   fullRange: boolean;
   dataRange: { min: number; max: number } | null;
@@ -27,6 +28,7 @@ interface Props {
   onSetContrast: (id: string, min: number, max: number) => void;
   onSetGamma: (id: string, gamma: number) => void;
   onSetBlendMode: (id: string, mode: string) => void;
+  onSetRenderMode: (id: string, mode: string) => void;
   onAutoContrast: (id: string) => void;
   onAutoContrastToggle: (id: string) => void;
   onFullRangeToggle: (id: string) => void;
@@ -48,6 +50,7 @@ export function LayerPanel({
   onSetContrast,
   onSetGamma,
   onSetBlendMode,
+  onSetRenderMode,
   onAutoContrast,
   onAutoContrastToggle,
   onFullRangeToggle,
@@ -135,6 +138,16 @@ export function LayerPanel({
                       <option value="alpha">Alpha</option>
                       <option value="additive">Additive</option>
                       <option value="max">Max</option>
+                    </select>
+                  </div>
+                  <div className="layer-detail-row">
+                    <label>Rendering</label>
+                    <select
+                      value={layer.renderMode}
+                      onChange={(e) => onSetRenderMode(layer.id, e.target.value)}
+                    >
+                      <option value="translucent">Translucent</option>
+                      <option value="max_intensity">Max Intensity</option>
                     </select>
                   </div>
                   <div className="layer-actions">

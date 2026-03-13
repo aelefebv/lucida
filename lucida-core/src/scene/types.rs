@@ -16,6 +16,19 @@ impl Default for BlendMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderMode {
+    Translucent,
+    MaxIntensity,
+}
+
+impl Default for RenderMode {
+    fn default() -> Self {
+        RenderMode::Translucent
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayerDisplaySettings {
     pub visible: bool,
@@ -24,6 +37,8 @@ pub struct LayerDisplaySettings {
     pub contrast_max: f64,
     pub gamma: f64,
     pub blend_mode: BlendMode,
+    #[serde(default)]
+    pub render_mode: RenderMode,
 }
 
 impl Default for LayerDisplaySettings {
@@ -35,6 +50,7 @@ impl Default for LayerDisplaySettings {
             contrast_max: 65535.0,
             gamma: 1.0,
             blend_mode: BlendMode::Alpha,
+            render_mode: RenderMode::Translucent,
         }
     }
 }
