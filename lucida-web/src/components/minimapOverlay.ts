@@ -90,8 +90,8 @@ function drawAxisArrows(
   viewProj: Float32Array,
   canvasW: number, canvasH: number,
 ) {
-  const origin: [number, number, number] = [0.12, 0.12, 0.12];
-  const len = 0.16;
+  const origin: [number, number, number] = [-0.12, -0.12, -0.12];
+  const len = 0.18;
   const axes: { dir: [number, number, number]; color: string; label: string }[] = [
     { dir: [len, 0, 0], color: "#ff4444", label: "X" },
     { dir: [0, len, 0], color: "#44cc44", label: "Y" },
