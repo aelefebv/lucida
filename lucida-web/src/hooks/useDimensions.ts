@@ -1,0 +1,101 @@
+import { useCallback, useEffect, useState } from "react";
+import type { WasmScene } from "lucida-core";
+import { applyViewportCommand } from "../applyAndSend.ts";
+import type { DatasetState, ViewMode } from "../types.ts";
+import type { BridgeCallbacks } from "./useLayerSettings.ts";
+
+interface Params {
+  wasmSceneRef: React.RefObject<WasmScene | null>;
+  wasmScene: WasmScene | null;
+  selectedDatasetId: string | null;
+  datasetsRef: React.RefObject<Map<string, DatasetState>>;
+  datasetsVersion: number;
+  bridgeCallbacksRef: React.RefObject<BridgeCallbacks>;
+}
+
+export function useDimensions({
+  wasmSceneRef,
+  wasmScene,
+  selectedDatasetId,
+  datasetsRef,
+  datasetsVersion,
+  bridgeCallbacksRef,
+}: Params) {
+  const [z, setZ] = useState(0);
+  const [c, setC] = useState(0);
+  const [t, setT] = useState(0);
+  const [viewMode, setViewMode] = useState<ViewMode>("2d");
+
+  // Union dimension extents across ALL datasets for slider ranges
+  let dimZ = 1, dimC = 1, dimT = 1;
+  void datasetsVersion;
+  for (const ds of datasetsRef.current.values()) {
+    const shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+    dimZ = Math.max(dimZ, shape[2]);
+    dimC = Math.max(dimC, shape[1]);
+    dimT = Math.max(dimT, shape[0]);
+  }
+
+  // Clamp slider values when union dimensions shrink
+  useEffect(() => {
+    if (z >= dimZ) setZ(dimZ - 1);
+    if (c >= dimC) setC(dimC - 1);
+    if (t >= dimT) setT(dimT - 1);
+  }, [dimZ, dimC, dimT]);
+
+  const handleViewModeToggle = useCallback(() => {
+    const next = viewMode === "2d" ? "3d" : "2d";
+    setViewMode(next);
+    bridgeCallbacksRef.current.breakFollow();
+    if (wasmScene) {
+      applyViewportCommand(wasmScene, { type: next === "3d" ? "set_mode_3d" : "set_mode_2d" });
+      if (next === "2d" && selectedDatasetId) {
+        const dsInfo = datasetsRef.current.get(selectedDatasetId)?.info;
+        if (dsInfo) {
+          const shapeX = dsInfo.levels[0].shape[4];
+          const shapeY = dsInfo.levels[0].shape[3];
+          applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
+        }
+      }
+      bridgeCallbacksRef.current.emitPresence();
+    }
+  }, [viewMode, wasmScene, selectedDatasetId, datasetsRef, bridgeCallbacksRef]);
+
+  const handleZChange = useCallback((v: number) => {
+    setZ(v);
+    bridgeCallbacksRef.current.breakFollow();
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      applyViewportCommand(scene, { type: "set_z", z: v });
+      bridgeCallbacksRef.current.emitPresence();
+    }
+  }, [wasmSceneRef, bridgeCallbacksRef]);
+
+  const handleCChange = useCallback((v: number) => {
+    setC(v);
+    bridgeCallbacksRef.current.breakFollow();
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      applyViewportCommand(scene, { type: "set_c", c: v });
+      bridgeCallbacksRef.current.emitPresence();
+    }
+  }, [wasmSceneRef, bridgeCallbacksRef]);
+
+  const handleTChange = useCallback((v: number) => {
+    setT(v);
+    bridgeCallbacksRef.current.breakFollow();
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      applyViewportCommand(scene, { type: "set_t", t: v });
+      bridgeCallbacksRef.current.emitPresence();
+    }
+  }, [wasmSceneRef, bridgeCallbacksRef]);
+
+  return {
+    z, c, t, setZ, setC, setT,
+    viewMode, setViewMode,
+    dimZ, dimC, dimT,
+    handleViewModeToggle,
+    handleZChange, handleCChange, handleTChange,
+  };
+}
