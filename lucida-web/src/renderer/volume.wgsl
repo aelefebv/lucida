@@ -88,10 +88,11 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   var t = tStart;
 
   let maxSteps = i32(ceil(rayLen / adaptiveStep));
-  let steps = min(maxSteps, 512);
+  let steps = select(min(maxSteps, 512), min(maxSteps, 256), renderMode == 1);
 
   for (var i = 0; i < steps; i++) {
-    if (renderMode == 0 && alpha >= 0.98) { break; } // early termination (translucent only)
+    if (renderMode == 0 && alpha >= 0.98) { break; } // early termination (translucent)
+    if (renderMode == 1 && maxVal >= 0.98) { break; } // early termination (MIP)
 
     let pos = ro + rd * t;
     // Map [0,1] position to texel coordinates (flip Y to match 2D image convention)

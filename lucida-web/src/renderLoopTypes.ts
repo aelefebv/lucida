@@ -44,4 +44,5 @@ export interface TickContext {
   client: RenderClient;
   canvas: HTMLCanvasElement;
   mode: "slice" | "volume";
+  renderScale: number;
 }

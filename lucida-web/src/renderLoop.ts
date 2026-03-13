@@ -24,6 +24,8 @@ export class RenderLoop {
   private volumeState: VolumeState = createVolumeState();
   private minimapState: MinimapState = createMinimapState();
 
+  private _renderScale = 1.0;
+
   // Slice-specific params
   private sliceZ = 0;
   private sliceT = 0;
@@ -103,6 +105,11 @@ export class RenderLoop {
     }
   }
 
+  setRenderScale(s: number): void {
+    this._renderScale = s;
+    this.dirty = true;
+  }
+
   setMinimap(enabled: boolean, size?: number, overlayCallback?: ((data: MinimapOverlayData) => void) | null): void {
     this.minimapState.enabled = enabled;
     if (size !== undefined) this.minimapState.size = size;
@@ -122,6 +129,7 @@ export class RenderLoop {
       client: this.client,
       canvas: this.canvas,
       mode: this.mode,
+      renderScale: this._renderScale,
     };
   }
 

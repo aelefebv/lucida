@@ -46,6 +46,20 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     loopRef.current?.markDirty();
   }, [t, c]);
 
+  // Resolution scaling during interaction
+  const scaleTimerRef = useRef<number>(0);
+  const setLowRes = useCallback(() => {
+    clearTimeout(scaleTimerRef.current);
+    loopRef.current?.setRenderScale(0.25);
+  }, []);
+  const scheduleFullRes = useCallback(() => {
+    clearTimeout(scaleTimerRef.current);
+    scaleTimerRef.current = window.setTimeout(() => {
+      loopRef.current?.setRenderScale(1.0);
+    }, 50);
+  }, []);
+  useEffect(() => () => clearTimeout(scaleTimerRef.current), []);
+
   // Input handling
   const [dragging, setDragging] = useState(false);
   const shiftDragRef = useRef(false);
@@ -57,8 +71,9 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
       shiftDragRef.current = e.shiftKey;
       lastPos.current = { x: e.clientX, y: e.clientY };
       canvas.setPointerCapture(e.pointerId);
+      setLowRes();
     },
-    [canvas],
+    [canvas, setLowRes],
   );
 
   const onPointerMove = useCallback(
@@ -84,7 +99,8 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
 
   const onPointerUp = useCallback(() => {
     setDragging(false);
-  }, []);
+    scheduleFullRes();
+  }, [scheduleFullRes]);
 
   const onWheel = useCallback(
     (e: WheelEvent) => {
@@ -94,8 +110,10 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
       applyViewportCommand(scene, { type: "zoom_3d", delta });
       emitPresence();
       loopRef.current?.markDirty();
+      setLowRes();
+      scheduleFullRes();
     },
-    [scene, emitPresence, breakFollow],
+    [scene, emitPresence, breakFollow, setLowRes, scheduleFullRes],
   );
 
   // Attach event handlers to the shared canvas

@@ -120,10 +120,11 @@ export function tickVolume(
   }
 
   // Build layer params for visible layers in order
+  const canvasW = Math.round(canvas.clientWidth * devicePixelRatio * ctx.renderScale);
+  const canvasH = Math.round(canvas.clientHeight * devicePixelRatio * ctx.renderScale);
+  scene.set_viewport(canvasW, canvasH);
   const invVP = new Float32Array(scene.inv_view_proj_3d());
   const eye = new Float32Array(scene.eye_position_3d());
-  const canvasW = canvas.clientWidth * devicePixelRatio;
-  const canvasH = canvas.clientHeight * devicePixelRatio;
 
   const layers: VolumeLayerParams[] = [];
   for (const dsId of layerOrder) {
