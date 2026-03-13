@@ -34,6 +34,7 @@ interface Props {
   onRemoveLayer: (id: string) => void;
   onAddLayer: () => void;
   viewModeToggle: { label: string; onClick: () => void } | null;
+  style?: React.CSSProperties;
 }
 
 export function LayerPanel({
@@ -54,9 +55,10 @@ export function LayerPanel({
   onRemoveLayer,
   onAddLayer,
   viewModeToggle,
+  style,
 }: Props) {
   return (
-    <div className="layer-panel">
+    <div className="layer-panel" style={style}>
       <div className="layer-panel-header">
         <h3>Layers</h3>
         <div className="layer-panel-header-buttons">

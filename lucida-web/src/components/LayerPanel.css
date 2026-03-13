@@ -1,6 +1,4 @@
 .layer-panel {
-  width: 280px;
-  min-width: 280px;
   background: #1a1a1a;
   border-right: 1px solid #333;
   display: flex;

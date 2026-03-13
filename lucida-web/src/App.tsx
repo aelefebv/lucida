@@ -54,6 +54,11 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("2d");
 
+  // Resizable sidebar and canvas
+  const [sidebarWidth, setSidebarWidth] = useState(280);
+  const [canvasWidth, setCanvasWidth] = useState(800);
+  const [canvasHeight, setCanvasHeight] = useState(600);
+
   // Dimension state
   const [z, setZ] = useState(0);
   const [c, setC] = useState(0);
@@ -542,6 +547,53 @@ function App() {
       bridgeRef.current?.sendFollow(null);
     }
   }, []);
+
+  // --- Sidebar resize handler ---
+  const handleSidebarResizeDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidth;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: PointerEvent) => {
+      const newWidth = Math.min(600, Math.max(180, startWidth + ev.clientX - startX));
+      setSidebarWidth(newWidth);
+      loopRef.current?.markDirty();
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  }, [sidebarWidth]);
+
+  // --- Canvas resize handler ---
+  const handleCanvasResizeDown = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const startW = canvasWidth;
+    const startH = canvasHeight;
+    document.body.style.cursor = "nwse-resize";
+    document.body.style.userSelect = "none";
+    const onMove = (ev: PointerEvent) => {
+      setCanvasWidth(Math.max(320, startW + ev.clientX - startX));
+      setCanvasHeight(Math.max(200, startH + ev.clientY - startY));
+      loopRef.current?.markDirty();
+    };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  }, [canvasWidth, canvasHeight]);
 
   // Create RenderClient once when canvas mounts.
   useEffect(() => {
@@ -1165,7 +1217,9 @@ function App() {
         onRemoveLayer={handleRemoveLayer}
         onAddLayer={() => dirInputRef.current?.click()}
         viewModeToggle={volumeMap.size > 0 ? { label: viewMode === "2d" ? "3D" : "2D", onClick: handleViewModeToggle } : null}
+        style={{ width: sidebarWidth, minWidth: sidebarWidth }}
       />
+      <div className="sidebar-resize-handle" onPointerDown={handleSidebarResizeDown} />
       <div className="main-content">
         {/* Peer list / follow controls */}
         {peers.size > 0 && (
@@ -1191,12 +1245,12 @@ function App() {
             </ul>
           </div>
         )}
-        <div style={{ position: "relative", display: volumeMap.size > 0 ? "block" : "none", maxWidth: 800 }}>
+        <div style={{ position: "relative", display: volumeMap.size > 0 ? "block" : "none", width: canvasWidth }}>
           <canvas
             ref={canvasRef}
             style={{
-              width: "100%",
-              height: 600,
+              width: canvasWidth,
+              height: canvasHeight,
               imageRendering: viewMode === "2d" ? "pixelated" : "auto",
               borderRadius: 8,
               backgroundColor: "black",
@@ -1237,9 +1291,10 @@ function App() {
           {clientReady && clientRef.current && (
             <Minimap client={clientRef.current} activeLoop={activeLoop} />
           )}
+          <div className="canvas-resize-handle" onPointerDown={handleCanvasResizeDown} />
         </div>
         {volumeMap.size > 0 && (
-          <div className="dimension-controls">
+          <div className="dimension-controls" style={{ maxWidth: canvasWidth }}>
             <DimensionControls label="Z" value={z} max={dimZ} onChange={(v) => {
               setZ(v);
               breakFollow();
