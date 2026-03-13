@@ -28,6 +28,7 @@ export class ChunkStore {
   private fetcher: ChunkFetcher;
   private activeWorkerCount = 0;
   private activeFetches = new Set<string>();
+  private workerGeneration = 0;
 
   constructor(fetcher: ChunkFetcher) {
     this.fetcher = fetcher;
@@ -75,6 +76,7 @@ export class ChunkStore {
           this.pendingQueue.push(coord);
         }
       }
+      this.inFlightSince = performance.now();
       return;
     }
 
@@ -86,6 +88,7 @@ export class ChunkStore {
       // Path 3: complete view change or stale — abort and restart
       if (this.abortController) this.abortController.abort();
       this.abortController = new AbortController();
+      this.workerGeneration++;
       this.activeWorkerCount = 0;
       this.activeFetches.clear();
       this.inFlight.clear();
@@ -144,17 +147,18 @@ export class ChunkStore {
   private launchWorkers(): void {
     if (!this.abortController) this.abortController = new AbortController();
     const signal = this.abortController.signal;
+    const gen = this.workerGeneration;
     const toStart = Math.min(
       MAX_CONCURRENT - this.activeWorkerCount,
       this.pendingQueue.length,
     );
     for (let i = 0; i < toStart; i++) {
       this.activeWorkerCount++;
-      this.runWorker(signal);
+      this.runWorker(signal, gen);
     }
   }
 
-  private async runWorker(signal: AbortSignal): Promise<void> {
+  private async runWorker(signal: AbortSignal, gen: number): Promise<void> {
     try {
       while (this.pendingQueue.length > 0) {
         if (signal.aborted) return;
@@ -184,7 +188,9 @@ export class ChunkStore {
         }
       }
     } finally {
-      this.activeWorkerCount--;
+      if (gen === this.workerGeneration) {
+        this.activeWorkerCount--;
+      }
     }
   }
 }

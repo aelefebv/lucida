@@ -41,6 +41,10 @@ export function tickSlice(
   scene.set_t(t);
   scene.set_c(c);
 
+  const canvasW = canvas.clientWidth;
+  const canvasH = canvas.clientHeight;
+  scene.set_viewport(canvasW, canvasH);
+
   // Get layer ordering and settings from scene
   const layerOrder: string[] = JSON.parse(scene.layer_order());
   const allSettings: Record<string, {
@@ -54,6 +58,7 @@ export function tickSlice(
 
   let budgetRemaining = UPLOAD_BUDGET_BYTES;
   let exhausted = false;
+  let hasPending = false;
 
   // Upload chunks for ALL datasets
   for (const [dsId, ds] of datasets) {
@@ -94,7 +99,7 @@ export function tickSlice(
       if (coord.level !== level) continue;
       if (uploaded.has(coord.key)) continue;
       const buf = ds.store.get(coord.key);
-      if (!buf || buf.byteLength === 0) continue;
+      if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
       availableChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
       uploaded.add(coord.key);
       budgetRemaining -= buf.byteLength;
@@ -119,10 +124,6 @@ export function tickSlice(
   }
 
   // Build layer params for visible layers in order
-  const canvasW = canvas.clientWidth;
-  const canvasH = canvas.clientHeight;
-  scene.set_viewport(canvasW, canvasH);
-
   const currentZoom = scene.zoom();
   const centerArr = scene.center();
   const cx = centerArr[0];
@@ -157,7 +158,7 @@ export function tickSlice(
   client.resize(canvasW, canvasH);
   client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH);
 
-  return exhausted;
+  return exhausted || hasPending;
 }
 
 export function clearSliceForDataset(state: SliceState, dsId: string): void {

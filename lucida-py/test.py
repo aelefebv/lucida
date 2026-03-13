@@ -84,6 +84,7 @@ plt.imshow(vd.data[50])  # show the first Z-slice
 from lucida import Viewer                                                                       
 v = Viewer()
 v.start()        
+#%%
 v.peers
 #%%
 v.follow(0)                                                                                     
@@ -100,7 +101,7 @@ plt.imshow(vd0.data[12])  # show the first Z-slice
 
 #%%                                                          
 vd0 = v.read_viewport(dataset=0)                                                                
-vd1 = v.read_viewport(dataset=1)                                                                
+# vd1 = v.read_viewport(dataset=1)                                                                
 
 # Read by name                                                                                  
 # vd = v.read_viewport(dataset="CT")                                                              

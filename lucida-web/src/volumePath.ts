@@ -32,6 +32,10 @@ export function tickVolume(
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
 
+  const canvasW = Math.round(canvas.clientWidth * devicePixelRatio * ctx.renderScale);
+  const canvasH = Math.round(canvas.clientHeight * devicePixelRatio * ctx.renderScale);
+  scene.set_viewport(canvasW, canvasH);
+
   const viewT = scene.t();
   const viewC = scene.c();
 
@@ -49,6 +53,7 @@ export function tickVolume(
 
   let budgetRemaining = UPLOAD_BUDGET_BYTES;
   let exhausted = false;
+  let hasPending = false;
 
   // Upload chunks for ALL datasets
   for (const [dsId, ds] of datasets) {
@@ -96,7 +101,7 @@ export function tickVolume(
     for (const coord of plan.needed) {
       if (cached.uploaded.has(coord.key)) continue;
       const buf = ds.store.get(coord.key);
-      if (!buf || buf.byteLength === 0) continue;
+      if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
       newChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
       cached.uploaded.add(coord.key);
       budgetRemaining -= buf.byteLength;
@@ -120,9 +125,6 @@ export function tickVolume(
   }
 
   // Build layer params for visible layers in order
-  const canvasW = Math.round(canvas.clientWidth * devicePixelRatio * ctx.renderScale);
-  const canvasH = Math.round(canvas.clientHeight * devicePixelRatio * ctx.renderScale);
-  scene.set_viewport(canvasW, canvasH);
   const invVP = new Float32Array(scene.inv_view_proj_3d());
   const eye = new Float32Array(scene.eye_position_3d());
 
@@ -155,7 +157,7 @@ export function tickVolume(
 
   client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH);
 
-  return exhausted;
+  return exhausted || hasPending;
 }
 
 export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
