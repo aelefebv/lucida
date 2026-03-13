@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop, MinimapOverlayData } from "../renderLoop.ts";
+import { drawMinimapOverlays } from "./minimapOverlay.ts";
 import "./Minimap.css";
 
 const MINIMAP_SIZE = 200;
@@ -29,13 +30,12 @@ export function Minimap({ client, activeLoop }: Props) {
   useEffect(() => {
     if (!activeLoop) return;
 
-    const overlayCallback = (_data: MinimapOverlayData) => {
+    const overlayCallback = (data: MinimapOverlayData) => {
       const overlayCanvas = overlayCanvasRef.current;
       if (!overlayCanvas) return;
       const ctx = overlayCanvas.getContext("2d");
-      if (ctx) {
-        ctx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
-      }
+      if (!ctx) return;
+      drawMinimapOverlays(ctx, data);
     };
 
     activeLoop.setMinimap(true, MINIMAP_SIZE, overlayCallback);

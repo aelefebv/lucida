@@ -29,6 +29,10 @@ export interface MinimapOverlayData {
   phi: number;
   canvasW: number;
   canvasH: number;
+  currentZ: number;
+  datasetDims: Map<string, { width: number; height: number; depth: number }>;
+  sliceViewBounds: { minX: number; minY: number; maxX: number; maxY: number } | null;
+  mainInvViewProj: Float32Array | null;
 }
 
 /** Max bytes of chunk data to upload to the GPU per RAF tick. */
@@ -599,6 +603,32 @@ export class RenderLoop {
     }
 
     if (this.minimapOverlayCallback) {
+      // Dataset dimensions
+      const datasetDims = new Map<string, { width: number; height: number; depth: number }>();
+      for (const layer of overlayLayers) {
+        const ds = this.datasets.get(layer.datasetId);
+        if (ds) {
+          const shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+          datasetDims.set(layer.datasetId, { width: shape[4], height: shape[3], depth: shape[2] });
+        }
+      }
+
+      // Slice view bounds (2D only)
+      let sliceViewBounds: MinimapOverlayData["sliceViewBounds"] = null;
+      if (this.mode === "slice") {
+        const mainW = this.canvas.clientWidth;
+        const mainH = this.canvas.clientHeight;
+        const z = scene.zoom();
+        const c = scene.center();
+        const halfW = mainW / (2 * z);
+        const halfH = mainH / (2 * z);
+        sliceViewBounds = { minX: c[0] - halfW, minY: c[1] - halfH, maxX: c[0] + halfW, maxY: c[1] + halfH };
+      }
+
+      // Main camera inv view-proj (3D only)
+      const mainInvViewProj = this.mode === "volume" ? new Float32Array(scene.inv_view_proj_3d()) : null;
+      const currentZ = this.mode === "slice" ? this.sliceZ : scene.z();
+
       this.minimapOverlayCallback({
         viewProj,
         layers: overlayLayers,
@@ -607,6 +637,10 @@ export class RenderLoop {
         phi,
         canvasW: backingSize,
         canvasH: backingSize,
+        currentZ,
+        datasetDims,
+        sliceViewBounds,
+        mainInvViewProj,
       });
     }
   }
