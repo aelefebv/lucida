@@ -4,6 +4,7 @@ import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
+import { FpsCounter } from "./components/FpsCounter.tsx";
 import type { VolumeData } from "./zarr/volumeAssembler.ts";
 import type { DatasetState, PendingChunkResolve } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
@@ -266,6 +267,7 @@ function App() {
           {render.clientReady && render.clientRef.current && (
             <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
           )}
+          <FpsCounter />
           <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
         </div>
         {volumeMap.size > 0 && (
