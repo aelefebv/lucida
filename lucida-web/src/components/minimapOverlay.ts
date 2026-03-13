@@ -287,8 +287,10 @@ function drawSlicePlane(
   color: string,
 ) {
   const nz = currentZ / Math.max(depth - 1, 1);
+  const overhang = 0.1;
   const corners: [number, number, number][] = [
-    [0, 0, nz], [1, 0, nz], [1, 1, nz], [0, 1, nz],
+    [-overhang, -overhang, nz], [1 + overhang, -overhang, nz],
+    [1 + overhang, 1 + overhang, nz], [-overhang, 1 + overhang, nz],
   ];
 
   const projected = corners.map(([ux, uy, uz]) => {
@@ -326,12 +328,12 @@ function drawSliceViewportRect(
   color: string,
 ) {
   const nz = currentZ / Math.max(depth - 1, 1);
-  // Normalize voxel bounds to [0,1] unit space, clamped.
+  // Normalize voxel bounds to unit space (unbounded).
   // Y is flipped: voxel Y=0 is image-top, but unit Y=0 is 3D-bottom (Y-up convention).
-  const uMinX = Math.max(0, Math.min(1, sliceViewBounds.minX / width));
-  const uMaxX = Math.max(0, Math.min(1, sliceViewBounds.maxX / width));
-  const uMinY = Math.max(0, Math.min(1, 1 - sliceViewBounds.maxY / height));
-  const uMaxY = Math.max(0, Math.min(1, 1 - sliceViewBounds.minY / height));
+  const uMinX = sliceViewBounds.minX / width;
+  const uMaxX = sliceViewBounds.maxX / width;
+  const uMinY = 1 - sliceViewBounds.maxY / height;
+  const uMaxY = 1 - sliceViewBounds.minY / height;
 
   const corners: [number, number, number][] = [
     [uMinX, uMinY, nz], [uMaxX, uMinY, nz], [uMaxX, uMaxY, nz], [uMinX, uMaxY, nz],

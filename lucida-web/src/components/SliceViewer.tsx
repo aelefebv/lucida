@@ -20,6 +20,29 @@ interface Props {
   onLoopChange: (loop: RenderLoop | null) => void;
 }
 
+function clampCenterToBounds(scene: WasmScene, canvas: HTMLCanvasElement, datasets: Map<string, DatasetEntry>) {
+  const zoom = scene.zoom();
+  const center = scene.center();
+  const halfW = canvas.clientWidth / (2 * zoom);
+  const halfH = canvas.clientHeight / (2 * zoom);
+
+  // Find max dataset dimensions (voxel space)
+  let maxW = 0, maxH = 0;
+  for (const [, ds] of datasets) {
+    const shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+    maxW = Math.max(maxW, shape[4]);
+    maxH = Math.max(maxH, shape[3]);
+  }
+  if (maxW === 0 || maxH === 0) return;
+
+  // Clamp: left side of camera ≤ right side of volume, right side ≥ left side, etc.
+  const cx = Math.max(-halfW, Math.min(maxW + halfW, center[0]));
+  const cy = Math.max(-halfH, Math.min(maxH + halfH, center[1]));
+  if (cx !== center[0] || cy !== center[1]) {
+    scene.set_center(cx, cy);
+  }
+}
+
 export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef, onLoopChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -68,10 +91,11 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
       const pdy = -dy;
       breakFollow();
       applyViewportCommand(scene, { type: "pan", dx: pdx, dy: pdy });
+      clampCenterToBounds(scene, canvas, datasets);
       emitPresence();
       loopRef.current?.markDirty();
     },
-    [dragging, scene, emitPresence, breakFollow],
+    [dragging, scene, canvas, datasets, emitPresence, breakFollow],
   );
 
   const onPointerUp = useCallback(() => {
@@ -101,10 +125,11 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
       const newCx = worldX - (cursorX - canvasW / 2) / newZoom;
       const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
       applyViewportCommand(scene, { type: "set_center", x: newCx, y: newCy });
+      clampCenterToBounds(scene, canvas, datasets);
       emitPresence();
       loopRef.current?.markDirty();
     },
-    [scene, canvas, emitPresence, breakFollow],
+    [scene, canvas, datasets, emitPresence, breakFollow],
   );
 
   // Attach event handlers to the shared canvas
