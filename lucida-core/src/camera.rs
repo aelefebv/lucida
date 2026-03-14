@@ -299,7 +299,7 @@ impl View3D {
             let unit = transform_point(world, &inv_model);
             // unit is in [0,1]^3; scale to voxel coords
             let vx = unit[0] * shape_x;
-            let vy = unit[1] * shape_y;
+            let vy = (1.0 - unit[1]) * shape_y;
             let vz = unit[2] * shape_z;
             voxel_min[0] = voxel_min[0].min(vx);
             voxel_min[1] = voxel_min[1].min(vy);
@@ -332,13 +332,15 @@ impl View3D {
             ],
         };
         let vp_model = mul4(self.view_proj_f64(), model_f64);
-        // Scale columns by 1/shape to convert from voxel coords to unit [0,1]^3
+        // Scale columns to convert from image-convention voxel coords to unit [0,1]^3,
+        // with Y flipped (image row 0 = top = unit Y 1.0).
         let mut m = vp_model;
         for i in 0..4 {
-            m[i]     /= shape_x; // col 0 (X voxels)
-            m[4 + i] /= shape_y; // col 1 (Y voxels)
-            m[8 + i] /= shape_z; // col 2 (Z voxels)
-            // col 3 (translation) unchanged
+            let c1 = m[4 + i]; // save col 1 before modification
+            m[i]      /= shape_x;  // col 0 (X voxels)
+            m[4 + i]  /= -shape_y; // col 1 (Y voxels, negated for flip)
+            m[8 + i]  /= shape_z;  // col 2 (Z voxels)
+            m[12 + i] += c1;       // col 3 (translation from Y flip)
         }
 
         // Extract 6 frustum planes from column-major MVP matrix.
@@ -361,7 +363,7 @@ impl View3D {
         // Convert effective_zoom from pixels-per-world-unit to pixels-per-voxel.
         // The model matrix scales each axis: model[0]=sx, model[5]=sy, model[10]=sz.
         // Voxels per world unit in each axis = shape[i] / model_scale[i].
-        // Use the max to get the most conservative (finest) LOD selection.
+        // Use the max to get the most conservative (coarsest) LOD selection.
         let (sx, sy, sz) = match volume_transform {
             Some(t) => (t.model[0] as f64, t.model[5] as f64, t.model[10] as f64),
             None => (1.0, 1.0, 1.0),
