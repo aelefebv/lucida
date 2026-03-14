@@ -48,6 +48,20 @@ function getDummyTexture(): GPUTexture {
   return dummyTexture;
 }
 
+// 1x1x1 dummy 3D texture for unset fallback bindings (volume renderer)
+let dummy3DTexture: GPUTexture | null = null;
+function getDummy3DTexture(): GPUTexture {
+  if (!dummy3DTexture) {
+    dummy3DTexture = device.createTexture({
+      size: [1, 1, 1],
+      format: "r16uint",
+      dimension: "3d",
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+  }
+  return dummy3DTexture;
+}
+
 function post(msg: WorkerToMainMessage) {
   self.postMessage(msg);
 }
@@ -73,7 +87,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
             return sliceRenderer;
           },
           getVolumeRenderer() {
-            if (!volumeRenderer) volumeRenderer = new VolumeRenderer(device);
+            if (!volumeRenderer) volumeRenderer = new VolumeRenderer(device, getDummy3DTexture());
             return volumeRenderer;
           },
           getCompositor() {
@@ -82,6 +96,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           },
           ensureOffscreenPool,
           getDummyTexture,
+          getDummy3DTexture,
           post,
         };
         post({ type: "ready" });
@@ -145,6 +160,8 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         offscreenPool = [];
         dummyTexture?.destroy();
         dummyTexture = null;
+        dummy3DTexture?.destroy();
+        dummy3DTexture = null;
         sliceRenderer = null;
         volumeRenderer = null;
         compositor = null;

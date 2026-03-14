@@ -7,11 +7,13 @@ struct Uniforms {
   cameraPos: vec4f,           // offset 192 (16 bytes)
   volumeDims: vec4f,          // offset 208 (16 bytes)
   intensityRange: vec4f,      // offset 224 (16 bytes)
-  displayParams: vec4f,       // offset 240 (16 bytes) — x=gamma = 256 total
+  displayParams: vec4f,       // offset 240 (16 bytes) — x=gamma
+  fallbackDims: vec4f,        // offset 256 (16 bytes) — xyz=dims, w=hasFallback = 272 total
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var volumeTex: texture_3d<u32>;
+@group(0) @binding(2) var fallbackTex: texture_3d<u32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -102,9 +104,18 @@ fn fs(input: VSOut) -> @location(0) vec4f {
       clamp(i32(pos.z * f32(dims.z)), 0, dims.z - 1),
     );
 
-    let raw = textureLoad(volumeTex, texCoord, 0).r;
-    if (raw == 0u) { t += adaptiveStep; continue; }
-    let rawVal = f32(raw);
+    var val = textureLoad(volumeTex, texCoord, 0).r;
+    if (val == 0u && u.fallbackDims.w > 0.5) {
+      let fbDims = vec3i(u.fallbackDims.xyz);
+      let fbCoord = vec3i(
+        clamp(i32(pos.x * u.fallbackDims.x), 0, fbDims.x - 1),
+        clamp(i32((1.0 - pos.y) * u.fallbackDims.y), 0, fbDims.y - 1),
+        clamp(i32(pos.z * u.fallbackDims.z), 0, fbDims.z - 1),
+      );
+      val = textureLoad(fallbackTex, fbCoord, 0).r;
+    }
+    if (val == 0u) { t += adaptiveStep; continue; }
+    let rawVal = f32(val);
     let gamma = u.displayParams.x;
     let normalized = pow(clamp((rawVal - intensityMin) / range, 0.0, 1.0), gamma);
 

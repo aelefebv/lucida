@@ -152,6 +152,25 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     const entry = volCache.get(volKey);
     if (!entry) continue;
 
+    // Find fallback: any other volCache entry for same dataset with uploaded chunks
+    let fallbackEntry: VolCacheEntry | null = null;
+    const dsPrefix = layer.datasetId + "/";
+    for (const [key, cacheEntry] of volCache) {
+      if (key === volKey) continue;
+      if (!key.startsWith(dsPrefix)) continue;
+      if (cacheEntry.uploaded.size === 0) continue;
+      if (!fallbackEntry || cacheEntry.uploaded.size > fallbackEntry.uploaded.size) {
+        fallbackEntry = cacheEntry;
+      }
+    }
+
+    if (fallbackEntry) {
+      renderer.setFallbackVolume(fallbackEntry.texture,
+        fallbackEntry.levelWidth, fallbackEntry.levelHeight, fallbackEntry.levelDepth);
+    } else {
+      renderer.clearFallback();
+    }
+
     const idx = renderedLayers.length;
     renderer.setVolume(entry.texture, entry.levelWidth, entry.levelHeight, entry.levelDepth);
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);

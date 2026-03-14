@@ -12,5 +12,6 @@ export interface WorkerCtx {
   getCompositor(): LayerCompositor;
   ensureOffscreenPool(count: number, w: number, h: number): GPUTexture[];
   getDummyTexture(): GPUTexture;
+  getDummy3DTexture(): GPUTexture;
   post(msg: WorkerToMainMessage): void;
 }
