@@ -25,6 +25,8 @@ const fallbackPerDataset = new Map<string, GPUTexture>();
 export function handleSliceSetFallback(ctx: WorkerCtx, msg: SliceSetFallbackForLayerMessage): void {
   const slice = new Uint16Array(msg.data);
   const { min, max } = sampleIntensityRange(slice);
+  const old = fallbackPerDataset.get(msg.datasetId);
+  if (old) old.destroy();
   const texture = createSliceTexture(ctx.device, msg.width, msg.height, slice);
   fallbackPerDataset.set(msg.datasetId, texture);
   ctx.post({ type: "intensityRange", datasetId: msg.datasetId, min, max });

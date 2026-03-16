@@ -9,12 +9,16 @@ import { UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 export interface SliceState {
   uploaded: Map<string, Set<string>>;
   currentLod: Map<string, { level: number; z: number; t: number; c: number }>;
+  prevTCZ: Map<string, string>;
+  seedPending: Map<string, { level: number; coords: ChunkCoord[]; z: number }>;
 }
 
 export function createSliceState(): SliceState {
   return {
     uploaded: new Map(),
     currentLod: new Map(),
+    prevTCZ: new Map(),
+    seedPending: new Map(),
   };
 }
 
@@ -68,13 +72,92 @@ export function tickSlice(
 
     const plan = evaluateChunkPlanFor(scene, dsId);
     if (!plan) continue;
+
+    const targetLevel = plan.needed[0]?.level;
+
+    // Detect T/C/Z change and compute coarse seed coords
+    const tczKey = `${t}/${c}/${z}`;
+    const prevTCZKey = state.prevTCZ.get(dsId);
+    const tczChanged = prevTCZKey !== undefined && prevTCZKey !== tczKey;
+    state.prevTCZ.set(dsId, tczKey);
+
+    if (tczChanged && targetLevel !== undefined) {
+      const seedLevel = ds.info.levels.length - 1;
+      if (seedLevel > targetLevel) {
+        const seedMeta = ds.info.levels[seedLevel];
+        const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
+        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+        const fullResDepthS = ds.info.levels[0].shape[2];
+        const seedLevelZ = Math.min(
+          Math.floor((z / Math.max(fullResDepthS - 1, 1)) * Math.max(sDepth - 1, 1)),
+          sDepth - 1,
+        );
+        const targetChunkZ = Math.floor(seedLevelZ / sChunkZ);
+        const ny = Math.ceil(sHeight / sChunkY);
+        const nx = Math.ceil(sWidth / sChunkX);
+        const seedCoords: ChunkCoord[] = [];
+        for (let iy = 0; iy < ny; iy++) {
+          for (let ix = 0; ix < nx; ix++) {
+            seedCoords.push({
+              level: seedLevel,
+              x: ix, y: iy, z: targetChunkZ,
+              t, c,
+              key: `${seedLevel}/${t}/${c}/${targetChunkZ}/${iy}/${ix}`,
+            });
+          }
+        }
+        state.seedPending.set(dsId, { level: seedLevel, coords: seedCoords, z: seedLevelZ });
+      } else {
+        state.seedPending.delete(dsId);
+      }
+    }
+
+    // Build fetch list with seed coords prepended for priority
     const mmPending = minimapPendingFetch.get(dsId);
-    const fetchList = [...plan.needed, ...plan.prefetch, ...(mmPending ?? [])];
+    let fetchList: ChunkCoord[] = [...plan.needed, ...plan.prefetch, ...(mmPending ?? [])];
+    const seedInfo = state.seedPending.get(dsId);
+    if (seedInfo) {
+      const seedFetchCoords = seedInfo.coords.filter(sc => !ds.store.has(sc.key));
+      if (seedFetchCoords.length > 0) {
+        fetchList = [...seedFetchCoords, ...fetchList];
+      }
+    }
     if (fetchList.length > 0) {
       ds.store.ensureFetched(fetchList);
     }
 
-    const level = plan.needed[0]?.level;
+    // Check if all seed chunks are available and assemble fallback
+    if (seedInfo) {
+      const allReady = seedInfo.coords.every(sc => {
+        const buf = ds.store.get(sc.key);
+        return buf && buf.byteLength > 0;
+      });
+      if (allReady) {
+        const seedMeta = ds.info.levels[seedInfo.level];
+        const [, , , sHeight, sWidth] = seedMeta.shape;
+        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+        const localZ = seedInfo.z - seedInfo.coords[0].z * sChunkZ;
+        const assembled = new Uint16Array(sWidth * sHeight);
+        for (const sc of seedInfo.coords) {
+          const buf = ds.store.get(sc.key)!;
+          const data = bufferToUint16(buf, seedMeta.dataType);
+          const xOff = sc.x * sChunkX;
+          const yOff = sc.y * sChunkY;
+          const tileW = Math.min(sChunkX, sWidth - xOff);
+          const tileH = Math.min(sChunkY, sHeight - yOff);
+          const sliceOffset = localZ * sChunkY * sChunkX;
+          for (let row = 0; row < tileH; row++) {
+            const srcStart = sliceOffset + row * sChunkX;
+            const dstStart = (yOff + row) * sWidth + xOff;
+            assembled.set(data.subarray(srcStart, srcStart + tileW), dstStart);
+          }
+        }
+        client.sliceSetFallbackForLayer(dsId, assembled, sWidth, sHeight);
+        state.seedPending.delete(dsId);
+      }
+    }
+
+    const level = targetLevel;
     if (level === undefined) continue;
 
     const levelMeta = ds.info.levels[level];
@@ -164,4 +247,6 @@ export function tickSlice(
 export function clearSliceForDataset(state: SliceState, dsId: string): void {
   state.uploaded.delete(dsId);
   state.currentLod.delete(dsId);
+  state.prevTCZ.delete(dsId);
+  state.seedPending.delete(dsId);
 }
