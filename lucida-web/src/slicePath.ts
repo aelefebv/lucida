@@ -69,7 +69,7 @@ export function tickSlice(
     const plan = evaluateChunkPlanFor(scene, dsId);
     if (!plan) continue;
     const mmPending = minimapPendingFetch.get(dsId);
-    const fetchList = mmPending?.length ? [...plan.needed, ...mmPending] : plan.needed;
+    const fetchList = [...plan.needed, ...plan.prefetch, ...(mmPending ?? [])];
     if (fetchList.length > 0) {
       ds.store.ensureFetched(fetchList);
     }

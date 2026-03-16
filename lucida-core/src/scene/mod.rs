@@ -158,7 +158,9 @@ impl Scene {
             self.volume_shape(),
         );
 
+        let is_2d = matches!(self.camera, Camera::View2D(_));
         let mut needed = Vec::new();
+        let mut prefetch = Vec::new();
 
         for dataset in &self.document.datasets {
             for layer in &dataset.layers {
@@ -167,23 +169,26 @@ impl Scene {
                 }
                 let level = chunk::select_level(region.effective_zoom, layer.num_levels);
                 let (level_shape, level_chunk_size) = layer.shape_at_level(level);
-                let chunks = chunk::visible_chunks(
-                    &region,
-                    &level_chunk_size,
-                    level,
-                    self.view.t,
-                    self.view.c,
-                    &level_shape,
-                    &layer.data_shape,
-                );
-                needed.extend(chunks);
+                if is_2d {
+                    let (n, p) = chunk::visible_and_prefetch_chunks(
+                        &region, &level_chunk_size, level,
+                        self.view.t, self.view.c,
+                        &level_shape, &layer.data_shape,
+                    );
+                    needed.extend(n);
+                    prefetch.extend(p);
+                } else {
+                    let chunks = chunk::visible_chunks(
+                        &region, &level_chunk_size, level,
+                        self.view.t, self.view.c,
+                        &level_shape, &layer.data_shape,
+                    );
+                    needed.extend(chunks);
+                }
             }
         }
 
-        ChunkRequestPlan {
-            needed,
-            prefetch: Vec::new(),
-        }
+        ChunkRequestPlan { needed, prefetch }
     }
 
     /// Compute the chunk request plan for a specific dataset by ID.
@@ -199,7 +204,9 @@ impl Scene {
             dataset.volume_shape.as_ref(),
         );
 
+        let is_2d = matches!(self.camera, Camera::View2D(_));
         let mut needed = Vec::new();
+        let mut prefetch = Vec::new();
 
         for layer in &dataset.layers {
             if !layer.visible {
@@ -207,22 +214,25 @@ impl Scene {
             }
             let level = chunk::select_level(region.effective_zoom, layer.num_levels);
             let (level_shape, level_chunk_size) = layer.shape_at_level(level);
-            let chunks = chunk::visible_chunks(
-                &region,
-                &level_chunk_size,
-                level,
-                self.view.t,
-                self.view.c,
-                &level_shape,
-                &layer.data_shape,
-            );
-            needed.extend(chunks);
+            if is_2d {
+                let (n, p) = chunk::visible_and_prefetch_chunks(
+                    &region, &level_chunk_size, level,
+                    self.view.t, self.view.c,
+                    &level_shape, &layer.data_shape,
+                );
+                needed.extend(n);
+                prefetch.extend(p);
+            } else {
+                let chunks = chunk::visible_chunks(
+                    &region, &level_chunk_size, level,
+                    self.view.t, self.view.c,
+                    &level_shape, &layer.data_shape,
+                );
+                needed.extend(chunks);
+            }
         }
 
-        ChunkRequestPlan {
-            needed,
-            prefetch: Vec::new(),
-        }
+        ChunkRequestPlan { needed, prefetch }
     }
 }
 

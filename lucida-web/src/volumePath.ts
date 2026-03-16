@@ -115,7 +115,7 @@ export function tickVolume(
 
     // Build fetch list with seed coords prepended for priority
     const mmPending = minimapPendingFetch.get(dsId);
-    let fetchList: ChunkCoord[] = mmPending?.length ? [...plan.needed, ...mmPending] : [...plan.needed];
+    let fetchList: ChunkCoord[] = [...plan.needed, ...plan.prefetch, ...(mmPending ?? [])];
     const seedInfo = state.seedPending.get(dsId);
     if (seedInfo) {
       const seedFetchCoords = seedInfo.coords.filter(c => !ds.store.has(c.key));

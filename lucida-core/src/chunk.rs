@@ -155,6 +155,105 @@ pub fn visible_chunks(
     chunks
 }
 
+/// Like `visible_chunks()`, but also returns a 1-chunk XY border for prefetching.
+///
+/// Returns `(needed, prefetch)` where `needed` contains strictly visible chunks
+/// and `prefetch` contains the surrounding border chunks (XY only, Z unchanged).
+pub fn visible_and_prefetch_chunks(
+    region: &VisibleRegion,
+    level_chunk_size: &[u32; 3],
+    level: u32,
+    t: u32,
+    c: u32,
+    level_shape: &[u32; 3],
+    full_shape: &[u32; 3],
+) -> (Vec<ChunkCoord>, Vec<ChunkCoord>) {
+    let [min_x, min_y, max_x, max_y] = region.xy_bounds;
+
+    let scale_x = full_shape[0] as f64 / level_shape[0] as f64;
+    let scale_y = full_shape[1] as f64 / level_shape[1] as f64;
+    let scale_z = full_shape[2] as f64 / level_shape[2] as f64;
+
+    let chunk_world_x = level_chunk_size[0] as f64 * scale_x;
+    let chunk_world_y = level_chunk_size[1] as f64 * scale_y;
+    let chunk_world_z = level_chunk_size[2] as f64 * scale_z;
+
+    let max_col = (level_shape[0] as f64 / level_chunk_size[0] as f64).ceil() as u32;
+    let max_row = (level_shape[1] as f64 / level_chunk_size[1] as f64).ceil() as u32;
+    let max_z = (level_shape[2] as f64 / level_chunk_size[2] as f64).ceil() as u32;
+
+    // Visible bounds (same as visible_chunks)
+    let col_start = (min_x / chunk_world_x).floor().max(0.0) as u32;
+    let col_end = ((max_x / chunk_world_x).ceil().max(0.0) as u32).min(max_col);
+    let row_start = (min_y / chunk_world_y).floor().max(0.0) as u32;
+    let row_end = ((max_y / chunk_world_y).ceil().max(0.0) as u32).min(max_row);
+
+    let z_start = (region.z_range.start as f64 / chunk_world_z).floor() as u32;
+    let z_end = ((region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32).min(max_z);
+
+    // Expanded XY bounds (1-chunk border)
+    let exp_col_start = col_start.saturating_sub(1);
+    let exp_col_end = (col_end + 1).min(max_col);
+    let exp_row_start = row_start.saturating_sub(1);
+    let exp_row_end = (row_end + 1).min(max_row);
+
+    let mut needed = Vec::new();
+    let mut prefetch = Vec::new();
+
+    for z in z_start..z_end {
+        for row in exp_row_start..exp_row_end {
+            for col in exp_col_start..exp_col_end {
+                if let Some(ref planes) = region.frustum_planes {
+                    let cmin = [
+                        col as f64 * chunk_world_x,
+                        row as f64 * chunk_world_y,
+                        z as f64 * chunk_world_z,
+                    ];
+                    let cmax = [
+                        (col + 1) as f64 * chunk_world_x,
+                        (row + 1) as f64 * chunk_world_y,
+                        (z + 1) as f64 * chunk_world_z,
+                    ];
+                    if chunk_outside_frustum(&cmin, &cmax, planes) {
+                        continue;
+                    }
+                }
+                let coord = ChunkCoord { level, x: col, y: row, z, t, c };
+                let in_visible = col >= col_start && col < col_end
+                    && row >= row_start && row < row_end;
+                if in_visible {
+                    needed.push(coord);
+                } else {
+                    prefetch.push(coord);
+                }
+            }
+        }
+    }
+
+    // Sort both sets center-out
+    let (center_col, center_row, center_z) = match region.sort_center {
+        Some([cx, cy, cz]) => (cx / chunk_world_x, cy / chunk_world_y, cz / chunk_world_z),
+        None => (
+            (col_start + col_end) as f64 / 2.0,
+            (row_start + row_end) as f64 / 2.0,
+            (z_start + z_end) as f64 / 2.0,
+        ),
+    };
+    let sort_fn = |a: &ChunkCoord, b: &ChunkCoord| {
+        let da = (a.x as f64 + 0.5 - center_col).powi(2)
+            + (a.y as f64 + 0.5 - center_row).powi(2)
+            + (a.z as f64 + 0.5 - center_z).powi(2);
+        let db = (b.x as f64 + 0.5 - center_col).powi(2)
+            + (b.y as f64 + 0.5 - center_row).powi(2)
+            + (b.z as f64 + 0.5 - center_z).powi(2);
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+    };
+    needed.sort_by(sort_fn);
+    prefetch.sort_by(sort_fn);
+
+    (needed, prefetch)
+}
+
 /// Test whether a chunk AABB is fully outside any frustum plane.
 /// Uses the p-vertex method: for each plane, test the corner most in the direction
 /// of the plane normal. If that corner is outside, the entire chunk is outside.
@@ -254,6 +353,98 @@ mod tests {
         let chunks = visible_chunks(&region, &[256, 256, 64], 0, 0, 0, &shape, &shape);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].z, 1);
+    }
+
+    #[test]
+    fn prefetch_excludes_needed() {
+        let mut cam = Camera::new_2d([512, 512]);
+        if let Camera::View2D(ref mut v) = cam {
+            v.center = [512.0, 512.0];
+        }
+        let region = cam.visible_region(&(0..1), None, None);
+        let shape = [4096, 4096, 256];
+        let (needed, prefetch) = visible_and_prefetch_chunks(
+            &region, &[256, 256, 64], 0, 0, 0, &shape, &shape,
+        );
+        let needed_set: std::collections::HashSet<_> =
+            needed.iter().map(|c| (c.x, c.y, c.z)).collect();
+        for c in &prefetch {
+            assert!(
+                !needed_set.contains(&(c.x, c.y, c.z)),
+                "prefetch chunk ({},{},{}) overlaps with needed",
+                c.x, c.y, c.z,
+            );
+        }
+    }
+
+    #[test]
+    fn prefetch_expands_xy() {
+        let cam = Camera::new_2d([512, 512]);
+        let region = cam.visible_region(&(0..1), None, None);
+        let shape = [4096, 4096, 256];
+        let (needed, prefetch) = visible_and_prefetch_chunks(
+            &region, &[256, 256, 64], 0, 0, 0, &shape, &shape,
+        );
+        assert!(!prefetch.is_empty(), "prefetch should not be empty");
+        // All prefetch chunks must have x or y outside the needed bounds
+        let min_nx = needed.iter().map(|c| c.x).min().unwrap();
+        let max_nx = needed.iter().map(|c| c.x).max().unwrap();
+        let min_ny = needed.iter().map(|c| c.y).min().unwrap();
+        let max_ny = needed.iter().map(|c| c.y).max().unwrap();
+        for c in &prefetch {
+            assert!(
+                c.x < min_nx || c.x > max_nx || c.y < min_ny || c.y > max_ny,
+                "prefetch chunk ({},{}) is inside needed XY bounds",
+                c.x, c.y,
+            );
+        }
+    }
+
+    #[test]
+    fn prefetch_does_not_expand_z() {
+        let cam = Camera::new_2d([512, 512]);
+        let region = cam.visible_region(&(0..64), None, None);
+        let shape = [4096, 4096, 256];
+        let (needed, prefetch) = visible_and_prefetch_chunks(
+            &region, &[256, 256, 64], 0, 0, 0, &shape, &shape,
+        );
+        let needed_zs: std::collections::HashSet<u32> = needed.iter().map(|c| c.z).collect();
+        for c in &prefetch {
+            assert!(
+                needed_zs.contains(&c.z),
+                "prefetch chunk z={} is outside needed z range",
+                c.z,
+            );
+        }
+    }
+
+    #[test]
+    fn prefetch_edge_clamping() {
+        // Camera at origin — prefetch shouldn't go negative
+        let cam = Camera::new_2d([512, 512]);
+        let region = cam.visible_region(&(0..1), None, None);
+        let shape = [4096, 4096, 256];
+        let (_, prefetch) = visible_and_prefetch_chunks(
+            &region, &[256, 256, 64], 0, 0, 0, &shape, &shape,
+        );
+        for c in &prefetch {
+            assert!(c.x < 16); // max_col = ceil(4096/256) = 16
+            assert!(c.y < 16);
+        }
+
+        // Camera near data edge — prefetch shouldn't exceed max_col/max_row
+        let mut cam2 = Camera::new_2d([512, 512]);
+        if let Camera::View2D(ref mut v) = cam2 {
+            v.center = [4000.0, 4000.0];
+        }
+        let region2 = cam2.visible_region(&(0..1), None, None);
+        let (_, prefetch2) = visible_and_prefetch_chunks(
+            &region2, &[256, 256, 64], 0, 0, 0, &shape, &shape,
+        );
+        for c in &prefetch2 {
+            assert!(c.x < 16, "prefetch x={} exceeds max_col", c.x);
+            assert!(c.y < 16, "prefetch y={} exceeds max_row", c.y);
+        }
     }
 
     #[test]
