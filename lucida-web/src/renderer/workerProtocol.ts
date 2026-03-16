@@ -1,7 +1,10 @@
 /** Discriminated-union message types for main <-> render worker communication. */
 
-/** Byte budget for the volume texture LRU cache (shared by main thread + GPU worker). */
-export const VOL_CACHE_BUDGET = 8 * 1024 * 1024 * 1024; // 8 GB
+/** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
+export const VOLUME_ATLAS_BUDGET = 512 * 1024 * 1024; // 512 MB
+
+/** Atlas budget for the fixed-size 2D slice atlas (per dataset). */
+export const SLICE_ATLAS_BUDGET = 64 * 1024 * 1024; // 64 MB
 
 // --- Main -> Worker ---
 

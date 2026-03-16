@@ -1,28 +1,24 @@
-/** Volume render path: upload chunks with LRU eviction + render multi-pass. */
+/** Volume render path: upload chunks with atlas-based tracking + render multi-pass. */
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
-import { VOL_CACHE_BUDGET } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 
 export interface VolumeState {
-  uploaded: Map<string, { uploaded: Set<string>; byteSize: number }>;
-  cacheBytes: number;
+  uploaded: Map<string, Map<string, true>>;  // dsId → chunkKey → true (ordered for LRU)
   lodKeys: Map<string, string>;
   prevTC: Map<string, string>;
   seedPending: Map<string, {
     level: number;
     coords: ChunkCoord[];
-    lodKey: string;
   }>;
 }
 
 export function createVolumeState(): VolumeState {
   return {
     uploaded: new Map(),
-    cacheBytes: 0,
     lodKeys: new Map(),
     prevTC: new Map(),
     seedPending: new Map(),
@@ -103,11 +99,7 @@ export function tickVolume(
             }
           }
         }
-        state.seedPending.set(dsId, {
-          level: seedLevel,
-          coords: seedCoords,
-          lodKey: `${dsId}/${seedLevel}/${viewT}/${viewC}`,
-        });
+        state.seedPending.set(dsId, { level: seedLevel, coords: seedCoords });
       } else {
         state.seedPending.delete(dsId);
       }
@@ -132,82 +124,62 @@ export function tickVolume(
 
     const lodKey = `${dsId}/${targetLevel}/${viewT}/${viewC}`;
     const lodKeyChanged = state.lodKeys.get(dsId) !== lodKey;
-    const texBytes = widthFull * heightFull * depthFull * 2;
 
-    let cached = state.uploaded.get(lodKey);
-    if (cached) {
-      state.uploaded.delete(lodKey);
-      state.uploaded.set(lodKey, cached);
-    } else {
-      while (state.uploaded.size > 0 && state.cacheBytes + texBytes > VOL_CACHE_BUDGET) {
-        const oldestKey = state.uploaded.keys().next().value!;
-        const oldest = state.uploaded.get(oldestKey)!;
-        state.cacheBytes -= oldest.byteSize;
-        state.uploaded.delete(oldestKey);
-      }
-      cached = { uploaded: new Set(), byteSize: texBytes };
-      state.uploaded.set(lodKey, cached);
-      state.cacheBytes += texBytes;
+    // On LOD key change, clear the uploaded set for this dataset
+    if (lodKeyChanged) {
+      state.uploaded.set(dsId, new Map());
+      state.lodKeys.set(dsId, lodKey);
     }
-    state.lodKeys.set(dsId, lodKey);
 
-    // --- Seed upload (coarse new-T data) ---
-    if (seedInfo && budgetRemaining > 0) {
-      const seedMeta = ds.info.levels[seedInfo.level];
-      const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
-      const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-      const seedTexBytes = sWidth * sHeight * sDepth * 2;
+    let uploaded = state.uploaded.get(dsId);
+    if (!uploaded) {
+      uploaded = new Map();
+      state.uploaded.set(dsId, uploaded);
+    }
 
-      let seedCached = state.uploaded.get(seedInfo.lodKey);
-      if (seedCached) {
-        state.uploaded.delete(seedInfo.lodKey);
-        state.uploaded.set(seedInfo.lodKey, seedCached);
-      } else {
-        while (state.uploaded.size > 0 && state.cacheBytes + seedTexBytes > VOL_CACHE_BUDGET) {
-          const oldestKey = state.uploaded.keys().next().value!;
-          const oldest = state.uploaded.get(oldestKey)!;
-          state.cacheBytes -= oldest.byteSize;
-          state.uploaded.delete(oldestKey);
+    // --- Seed upload (assemble coarse new-T/C data as fallback) ---
+    if (seedInfo) {
+      const allReady = seedInfo.coords.every(sc => {
+        const buf = ds.store.get(sc.key);
+        return buf && buf.byteLength > 0;
+      });
+      if (allReady) {
+        const seedMeta = ds.info.levels[seedInfo.level];
+        const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
+        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+        const assembled = new Uint16Array(sWidth * sHeight * sDepth);
+        for (const sc of seedInfo.coords) {
+          const buf = ds.store.get(sc.key)!;
+          const data = bufferToUint16(buf, seedMeta.dataType);
+          const xOff = sc.x * sChunkX;
+          const yOff = sc.y * sChunkY;
+          const zOff = sc.z * sChunkZ;
+          const cw = Math.min(sChunkX, sWidth - xOff);
+          const ch = Math.min(sChunkY, sHeight - yOff);
+          const cd = Math.min(sChunkZ, sDepth - zOff);
+          for (let iz = 0; iz < cd; iz++) {
+            for (let iy = 0; iy < ch; iy++) {
+              const srcStart = iz * sChunkY * sChunkX + iy * sChunkX;
+              const dstStart = (zOff + iz) * sHeight * sWidth + (yOff + iy) * sWidth + xOff;
+              assembled.set(data.subarray(srcStart, srcStart + cw), dstStart);
+            }
+          }
         }
-        seedCached = { uploaded: new Set(), byteSize: seedTexBytes };
-        state.uploaded.set(seedInfo.lodKey, seedCached);
-        state.cacheBytes += seedTexBytes;
-      }
-
-      const seedChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-      for (const coord of seedInfo.coords) {
-        if (seedCached.uploaded.has(coord.key)) continue;
-        const buf = ds.store.get(coord.key);
-        if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
-        seedChunks.push({ data: bufferToUint16(buf, seedMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-        seedCached.uploaded.add(coord.key);
-        budgetRemaining -= buf.byteLength;
-        if (budgetRemaining <= 0) { exhausted = true; break; }
-      }
-
-      if (seedChunks.length > 0) {
-        client.volumeUploadChunksForLayer(
-          dsId, seedChunks,
-          seedInfo.level, viewT, viewC,
-          sWidth, sHeight, sDepth,
-          sChunkX, sChunkY, sChunkZ,
-        );
-      }
-
-      // Remove seed once all coords are uploaded
-      if (seedInfo.coords.every(c => seedCached!.uploaded.has(c.key))) {
+        client.volumeSetInitialForLayer(dsId, assembled, sWidth, sHeight, sDepth);
         state.seedPending.delete(dsId);
+      } else {
+        hasPending = true;
       }
     }
 
     // --- Fine-level upload ---
     const newChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
     for (const coord of plan.needed) {
-      if (cached.uploaded.has(coord.key)) continue;
+      if (uploaded.has(coord.key)) continue;
       const buf = ds.store.get(coord.key);
       if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
       newChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-      cached.uploaded.add(coord.key);
+      uploaded.set(coord.key, true as const);
       budgetRemaining -= buf.byteLength;
       if (budgetRemaining <= 0) {
         exhausted = true;
@@ -265,13 +237,7 @@ export function tickVolume(
 }
 
 export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
-  for (const key of [...state.uploaded.keys()]) {
-    if (key.startsWith(dsId + "/")) {
-      const entry = state.uploaded.get(key)!;
-      state.cacheBytes -= entry.byteSize;
-      state.uploaded.delete(key);
-    }
-  }
+  state.uploaded.delete(dsId);
   state.lodKeys.delete(dsId);
   state.prevTC.delete(dsId);
   state.seedPending.delete(dsId);
@@ -279,7 +245,6 @@ export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
 
 export function resetVolumeState(state: VolumeState): void {
   state.uploaded.clear();
-  state.cacheBytes = 0;
   state.lodKeys.clear();
   state.prevTC.clear();
   state.seedPending.clear();

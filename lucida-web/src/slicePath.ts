@@ -7,7 +7,7 @@ import type { TickContext } from "./renderLoopTypes.ts";
 import { UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 
 export interface SliceState {
-  uploaded: Map<string, Set<string>>;
+  uploaded: Map<string, Map<string, true>>;  // dsId → tileKey → true (ordered for LRU)
   currentLod: Map<string, { level: number; z: number; t: number; c: number }>;
   prevTCZ: Map<string, string>;
   seedPending: Map<string, { level: number; coords: ChunkCoord[]; z: number }>;
@@ -168,14 +168,18 @@ export function tickSlice(
     const fullResDepth = ds.info.levels[0].shape[2];
     const levelDepth = levelMeta.shape[2];
 
-    // Per-dataset LOD tracking
+    // Per-dataset LOD tracking — clear uploaded set on change
     const lod = state.currentLod.get(dsId);
     if (!lod || lod.level !== level || lod.z !== z || lod.t !== t || lod.c !== c) {
-      state.uploaded.set(dsId, new Set());
+      state.uploaded.set(dsId, new Map());
       state.currentLod.set(dsId, { level, z, t, c });
     }
 
-    const uploaded = state.uploaded.get(dsId)!;
+    let uploaded = state.uploaded.get(dsId);
+    if (!uploaded) {
+      uploaded = new Map();
+      state.uploaded.set(dsId, uploaded);
+    }
 
     const availableChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
     for (const coord of plan.needed) {
@@ -184,7 +188,7 @@ export function tickSlice(
       const buf = ds.store.get(coord.key);
       if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
       availableChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-      uploaded.add(coord.key);
+      uploaded.set(coord.key, true as const);
       budgetRemaining -= buf.byteLength;
       if (budgetRemaining <= 0) {
         exhausted = true;

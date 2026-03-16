@@ -8,12 +8,16 @@ struct Uniforms {
   volumeDims: vec4f,          // offset 208 (16 bytes)
   intensityRange: vec4f,      // offset 224 (16 bytes)
   displayParams: vec4f,       // offset 240 (16 bytes) — x=gamma
-  fallbackDims: vec4f,        // offset 256 (16 bytes) — xyz=dims, w=hasFallback = 272 total
+  fallbackDims: vec4f,        // offset 256 (16 bytes) — xyz=dims, w=hasFallback
+  chunkDims: vec4u,           // offset 272 (16 bytes) — xyz=chunk dimensions
+  gridDims: vec4u,            // offset 288 (16 bytes) — xyz=grid dimensions
+  atlasSlotDims: vec4u,       // offset 304 (16 bytes) — xyz=slots per axis = 320 total
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var volumeTex: texture_3d<u32>;
 @group(0) @binding(2) var fallbackTex: texture_3d<u32>;
+@group(0) @binding(3) var<storage, read> indirection: array<u32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -41,6 +45,41 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
   let tNear = max(max(tmin.x, tmin.y), tmin.z);
   let tFar = min(min(tmax.x, tmax.y), tmax.z);
   return vec2f(tNear, tFar);
+}
+
+fn sampleVolume(texCoord: vec3i) -> u32 {
+  // Compute chunk grid coordinate
+  let chunkCoord = vec3u(
+    u32(texCoord.x) / u.chunkDims.x,
+    u32(texCoord.y) / u.chunkDims.y,
+    u32(texCoord.z) / u.chunkDims.z,
+  );
+  let gridIdx = chunkCoord.z * u.gridDims.y * u.gridDims.x
+              + chunkCoord.y * u.gridDims.x
+              + chunkCoord.x;
+  let slot = indirection[gridIdx];
+
+  if (slot == 0xFFFFFFFFu) {
+    return 0u; // chunk not loaded — caller handles fallback
+  }
+
+  // Decode slot index to atlas grid position
+  let slotCoord = vec3u(
+    slot % u.atlasSlotDims.x,
+    (slot / u.atlasSlotDims.x) % u.atlasSlotDims.y,
+    slot / (u.atlasSlotDims.x * u.atlasSlotDims.y),
+  );
+  let localTexel = vec3u(
+    u32(texCoord.x) % u.chunkDims.x,
+    u32(texCoord.y) % u.chunkDims.y,
+    u32(texCoord.z) % u.chunkDims.z,
+  );
+  let atlasCoord = vec3i(
+    i32(slotCoord.x * u.chunkDims.x + localTexel.x),
+    i32(slotCoord.y * u.chunkDims.y + localTexel.y),
+    i32(slotCoord.z * u.chunkDims.z + localTexel.z),
+  );
+  return textureLoad(volumeTex, atlasCoord, 0).r;
 }
 
 @fragment
@@ -104,7 +143,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
       clamp(i32(pos.z * f32(dims.z)), 0, dims.z - 1),
     );
 
-    var val = textureLoad(volumeTex, texCoord, 0).r;
+    var val = sampleVolume(texCoord);
     if (val == 0u && u.fallbackDims.w > 0.5) {
       let fbDims = vec3i(u.fallbackDims.xyz);
       let fbCoord = vec3i(

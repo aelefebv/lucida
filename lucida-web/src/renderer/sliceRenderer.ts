@@ -2,10 +2,13 @@
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
-// Uniform buffer layout (80 bytes, padded to 96 for alignment):
+// Uniform buffer layout (128 bytes):
 //   offset 0:   transform      mat4x4f   (64B) — screen UV → texture UV
 //   offset 64:  intensityRange vec4f     (16B) — x=min, y=max, z=gamma, w=opacity
-const UNIFORM_SIZE = 96;
+//   offset 80:  chunkDims      vec4u     (16B) — x=chunkX, y=chunkY, z=levelWidth, w=levelHeight
+//   offset 96:  gridDims       vec4u     (16B) — x=gridX, y=gridY
+//   offset 112: atlasSlotDims  vec4u     (16B) — x=slotsX, y=slotsY
+const UNIFORM_SIZE = 128;
 
 export class SliceRenderer {
   private device: GPUDevice;
@@ -15,13 +18,19 @@ export class SliceRenderer {
   private bindGroup: GPUBindGroup | null = null;
 
   private fallbackTexture: GPUTexture | null = null;
-  private tileTexture: GPUTexture | null = null;
+  private atlasTexture: GPUTexture | null = null;
+  private indirectionBuffer: GPUBuffer | null = null;
   private dummyTexture: GPUTexture;
+  private dummyIndirectionBuffer: GPUBuffer;
 
   private intensityMin = 0;
   private intensityMax = 65535;
   private gamma = 1.0;
   private opacity = 1.0;
+  private chunkDims = [1, 1];
+  private gridDims = [1, 1];
+  private atlasSlotDims = [1, 1];
+  private levelDims = [1, 1];
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -44,6 +53,11 @@ export class SliceRenderer {
           binding: 2,
           visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "2d" },
+        },
+        {
+          binding: 3,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "read-only-storage" },
         },
       ],
     });
@@ -75,6 +89,14 @@ export class SliceRenderer {
       format: "r16uint",
       usage: GPUTextureUsage.TEXTURE_BINDING,
     });
+
+    // Dummy indirection buffer (single sentinel entry)
+    const dummyData = new Uint32Array([0xFFFFFFFF]);
+    this.dummyIndirectionBuffer = device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this.dummyIndirectionBuffer, 0, dummyData);
   }
 
   setFallback(texture: GPUTexture) {
@@ -82,8 +104,20 @@ export class SliceRenderer {
     this.rebuildBindGroup();
   }
 
-  setTileTexture(texture: GPUTexture) {
-    this.tileTexture = texture;
+  setAtlas(
+    texture: GPUTexture,
+    indirectionBuf: GPUBuffer,
+    chunkDims: [number, number],
+    gridDims: [number, number],
+    atlasSlotDims: [number, number],
+    levelDims: [number, number],
+  ) {
+    this.atlasTexture = texture;
+    this.indirectionBuffer = indirectionBuf;
+    this.chunkDims = chunkDims;
+    this.gridDims = gridDims;
+    this.atlasSlotDims = atlasSlotDims;
+    this.levelDims = levelDims;
     this.rebuildBindGroup();
   }
 
@@ -104,13 +138,15 @@ export class SliceRenderer {
 
   private rebuildBindGroup() {
     const fallback = this.fallbackTexture ?? this.dummyTexture;
-    const tile = this.tileTexture ?? this.dummyTexture;
+    const tile = this.atlasTexture ?? this.dummyTexture;
+    const indirection = this.indirectionBuffer ?? this.dummyIndirectionBuffer;
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: fallback.createView() },
         { binding: 2, resource: tile.createView() },
+        { binding: 3, resource: { buffer: indirection } },
       ],
     });
   }
@@ -133,6 +169,12 @@ export class SliceRenderer {
     const uniformData = new Float32Array(UNIFORM_SIZE / 4);
     uniformData.set(transform, 0);
     uniformData.set([this.intensityMin, this.intensityMax, this.gamma, this.opacity], 16);
+
+    // Atlas params (u32 written via Uint32Array view)
+    const u32View = new Uint32Array(uniformData.buffer);
+    u32View.set([this.chunkDims[0], this.chunkDims[1], this.levelDims[0], this.levelDims[1]], 20); // chunkDims at 80B = 20 u32s
+    u32View.set([this.gridDims[0], this.gridDims[1], 0, 0], 24);      // gridDims at 96B = 24 u32s
+    u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], 0, 0], 28); // atlasSlotDims at 112B = 28 u32s
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
