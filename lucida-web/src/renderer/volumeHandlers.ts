@@ -152,15 +152,31 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     const entry = volCache.get(volKey);
     if (!entry) continue;
 
-    // Find fallback: any other volCache entry for same dataset with uploaded chunks
+    // Find fallback: prefer same-T/C entries over stale old-T data
     let fallbackEntry: VolCacheEntry | null = null;
     const dsPrefix = layer.datasetId + "/";
+    const activeSuffix = volKey.substring(dsPrefix.length);
+    const activeParts = activeSuffix.split('/');
+    const activeTC = activeParts.length === 3 ? activeParts[1] + '/' + activeParts[2] : null;
+    let fallbackMatchesTC = false;
+
     for (const [key, cacheEntry] of volCache) {
       if (key === volKey) continue;
       if (!key.startsWith(dsPrefix)) continue;
       if (cacheEntry.uploaded.size === 0) continue;
-      if (!fallbackEntry || cacheEntry.uploaded.size > fallbackEntry.uploaded.size) {
+
+      const suffix = key.substring(dsPrefix.length);
+      const parts = suffix.split('/');
+      const entryTC = parts.length === 3 ? parts[1] + '/' + parts[2] : null;
+      const matchesTC = activeTC !== null && entryTC === activeTC;
+
+      if (matchesTC && !fallbackMatchesTC) {
         fallbackEntry = cacheEntry;
+        fallbackMatchesTC = true;
+      } else if (matchesTC === fallbackMatchesTC) {
+        if (!fallbackEntry || cacheEntry.uploaded.size > fallbackEntry.uploaded.size) {
+          fallbackEntry = cacheEntry;
+        }
       }
     }
 
