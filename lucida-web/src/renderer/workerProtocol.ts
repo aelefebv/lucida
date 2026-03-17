@@ -83,6 +83,7 @@ export interface VolumeUploadChunksForLayerMessage {
   chunkX: number;
   chunkY: number;
   chunkZ: number;
+  cameraLocal: [number, number, number];
 }
 
 // Multi-pass render messages

@@ -1,19 +1,36 @@
 /** Volume render path: upload chunks with atlas-based tracking + render multi-pass. */
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
+import { VOLUME_ATLAS_BUDGET } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 
 export interface VolumeState {
-  uploaded: Map<string, Map<string, true>>;  // dsId → chunkKey → true (ordered for LRU)
+  uploaded: Map<string, Map<string, { x: number; y: number; z: number }>>;  // dsId → chunkKey → position
   lodKeys: Map<string, string>;
   prevTC: Map<string, string>;
   seedPending: Map<string, {
     level: number;
     coords: ChunkCoord[];
   }>;
+}
+
+/** Squared distance from a chunk grid coordinate to the camera in [0,1] volume space. */
+function chunkDistSqLocal(
+  cx: number, cy: number, cz: number,
+  chunkX: number, chunkY: number, chunkZ: number,
+  levelW: number, levelH: number, levelD: number,
+  cam: [number, number, number],
+): number {
+  const px = (cx + 0.5) * chunkX / levelW;
+  const py = (cy + 0.5) * chunkY / levelH;
+  const pz = (cz + 0.5) * chunkZ / levelD;
+  const dx = px - cam[0];
+  const dy = py - cam[1];
+  const dz = pz - cam[2];
+  return dx * dx + dy * dy + dz * dz;
 }
 
 export function createVolumeState(): VolumeState {
@@ -36,9 +53,16 @@ export function tickVolume(
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
 
-  const canvasW = Math.round(canvas.clientWidth * devicePixelRatio * ctx.renderScale);
-  const canvasH = Math.round(canvas.clientHeight * devicePixelRatio * ctx.renderScale);
-  scene.set_viewport(canvasW, canvasH);
+  // Use full-res viewport for chunk planning so LOD selection isn't affected
+  // by renderScale (which drops to 0.25 during interaction). This prevents
+  // the level from flip-flopping and clearing the chunk cache on every drag.
+  const fullW = Math.round(canvas.clientWidth * devicePixelRatio);
+  const fullH = Math.round(canvas.clientHeight * devicePixelRatio);
+  scene.set_viewport(fullW, fullH);
+
+  // Scaled dimensions for the actual render target
+  const canvasW = Math.round(fullW * ctx.renderScale);
+  const canvasH = Math.round(fullH * ctx.renderScale);
 
   const viewT = scene.t();
   const viewC = scene.c();
@@ -58,6 +82,8 @@ export function tickVolume(
   let budgetRemaining = UPLOAD_BUDGET_BYTES;
   let exhausted = false;
   let hasPending = false;
+
+  const eye = new Float32Array(scene.eye_position_3d());
 
   // Upload chunks for ALL datasets
   for (const [dsId, ds] of datasets) {
@@ -122,6 +148,23 @@ export function tickVolume(
     const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
     const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
 
+    // Compute atlas capacity (mirrors createVolumeAtlas in volumeHandlers.ts)
+    const chunkTexels = chunkX * chunkY * chunkZ;
+    const maxSlots = Math.floor(VOLUME_ATLAS_BUDGET / (chunkTexels * 2));
+    const slotsPerAxis = Math.floor(Math.cbrt(maxSlots));
+    const totalSlots =
+      Math.min(slotsPerAxis, Math.floor(2048 / chunkX)) *
+      Math.min(slotsPerAxis, Math.floor(2048 / chunkY)) *
+      Math.min(slotsPerAxis, Math.floor(2048 / chunkZ));
+
+    // Camera position in local [0,1]³ space for distance-based eviction
+    const im = new Float32Array(scene.inv_model_matrix_for(dsId));
+    const camLocal: [number, number, number] = [
+      im[0] * eye[0] + im[4] * eye[1] + im[8] * eye[2] + im[12],
+      im[1] * eye[0] + im[5] * eye[1] + im[9] * eye[2] + im[13],
+      im[2] * eye[0] + im[6] * eye[1] + im[10] * eye[2] + im[14],
+    ];
+
     const lodKey = `${dsId}/${targetLevel}/${viewT}/${viewC}`;
     const lodKeyChanged = state.lodKeys.get(dsId) !== lodKey;
 
@@ -178,8 +221,23 @@ export function tickVolume(
       if (uploaded.has(coord.key)) continue;
       const buf = ds.store.get(coord.key);
       if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
+      if (uploaded.size >= totalSlots) {
+        // Evict the farthest uploaded chunk if incoming chunk is closer
+        let farthestKey = "";
+        let farthestDist = -1;
+        for (const [key, pos] of uploaded) {
+          const d = chunkDistSqLocal(pos.x, pos.y, pos.z, chunkX, chunkY, chunkZ, widthFull, heightFull, depthFull, camLocal);
+          if (d > farthestDist) { farthestDist = d; farthestKey = key; }
+        }
+        const incomingDist = chunkDistSqLocal(coord.x, coord.y, coord.z, chunkX, chunkY, chunkZ, widthFull, heightFull, depthFull, camLocal);
+        if (incomingDist < farthestDist) {
+          uploaded.delete(farthestKey);
+        } else {
+          break; // plan is sorted center-out; remaining chunks are all farther
+        }
+      }
       newChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-      uploaded.set(coord.key, true as const);
+      uploaded.set(coord.key, { x: coord.x, y: coord.y, z: coord.z });
       budgetRemaining -= buf.byteLength;
       if (budgetRemaining <= 0) {
         exhausted = true;
@@ -194,6 +252,7 @@ export function tickVolume(
         targetLevel, viewT, viewC,
         widthFull, heightFull, depthFull,
         chunkX, chunkY, chunkZ,
+        camLocal,
       );
     }
 
@@ -202,7 +261,6 @@ export function tickVolume(
 
   // Build layer params for visible layers in order
   const invVP = new Float32Array(scene.inv_view_proj_3d());
-  const eye = new Float32Array(scene.eye_position_3d());
 
   const layers: VolumeLayerParams[] = [];
   for (const dsId of layerOrder) {

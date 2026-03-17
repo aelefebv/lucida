@@ -112,9 +112,22 @@ function destroyAtlas(atlas: AtlasState): void {
   atlas.indirectionBuf.destroy();
 }
 
+/** Squared distance from a chunk grid coordinate to the camera in [0,1] volume space. */
+function chunkDistSq(
+  atlas: AtlasState, cx: number, cy: number, cz: number,
+  cam: [number, number, number],
+): number {
+  const px = (cx + 0.5) * atlas.chunkX / atlas.levelWidth;
+  const py = (cy + 0.5) * atlas.chunkY / atlas.levelHeight;
+  const pz = (cz + 0.5) * atlas.chunkZ / atlas.levelDepth;
+  const dx = px - cam[0];
+  const dy = py - cam[1];
+  const dz = pz - cam[2];
+  return dx * dx + dy * dy + dz * dz;
+}
+
 /** Find the occupied slot whose chunk center is farthest from the camera. */
-function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): string {
-  const [camX, camY, camZ] = cam;
+function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): { key: string; dist: number } {
   let farthestKey = "";
   let maxDist = -1;
 
@@ -122,20 +135,11 @@ function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): str
     const gridIdx = atlas.slotGridIdx[slotIdx];
     if (gridIdx < 0) continue;
 
-    // Decode grid index to chunk grid coordinates
     const cx = gridIdx % atlas.gridX;
     const cy = Math.floor(gridIdx / atlas.gridX) % atlas.gridY;
     const cz = Math.floor(gridIdx / (atlas.gridX * atlas.gridY));
 
-    // Chunk center in [0,1] volume space
-    const px = (cx + 0.5) * atlas.chunkX / atlas.levelWidth;
-    const py = (cy + 0.5) * atlas.chunkY / atlas.levelHeight;
-    const pz = (cz + 0.5) * atlas.chunkZ / atlas.levelDepth;
-
-    const dx = px - camX;
-    const dy = py - camY;
-    const dz = pz - camZ;
-    const dist = dx * dx + dy * dy + dz * dz;
+    const dist = chunkDistSq(atlas, cx, cy, cz, cam);
 
     if (dist > maxDist) {
       maxDist = dist;
@@ -143,7 +147,7 @@ function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): str
     }
   }
 
-  return farthestKey;
+  return { key: farthestKey, dist: maxDist };
 }
 
 export function handleVolumeSetInitial(ctx: WorkerCtx, msg: VolumeSetInitialForLayerMessage): void {
@@ -182,6 +186,9 @@ export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunks
     atlasPerDataset.set(datasetId, atlas);
   }
 
+  // Update camera position so eviction uses the current view
+  cameraLocalPerDataset.set(datasetId, msg.cameraLocal);
+
   let intensityChanged = false;
   const totalChunks = msg.chunks.length;
 
@@ -195,9 +202,11 @@ export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunks
     if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;
     } else {
-      // Evict the chunk farthest from the camera
+      // Evict the chunk farthest from the camera — the main thread already
+      // ensured the incoming chunk is closer via distance-based eviction.
       const cam = cameraLocalPerDataset.get(datasetId) ?? [0.5, 0.5, 0.5];
-      const evictKey = findFarthestSlot(atlas, cam);
+      const { key: evictKey } = findFarthestSlot(atlas, cam);
+      if (!evictKey) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       // Clear old indirection entry

@@ -75,6 +75,7 @@ export class RenderClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
+    cameraLocal: [number, number, number],
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: VolumeChunk[] = chunks.map(chunk => {
@@ -90,6 +91,7 @@ export class RenderClient {
         level, t, c,
         levelWidth, levelHeight, levelDepth,
         chunkX, chunkY, chunkZ,
+        cameraLocal,
       },
       transferList,
     );
