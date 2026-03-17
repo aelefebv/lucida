@@ -17,7 +17,7 @@ export interface VolumeState {
   }>;
 }
 
-/** Squared distance from a chunk grid coordinate to the camera in [0,1] volume space. */
+/** Squared distance from a chunk grid coordinate to a reference point in [0,1] volume space. */
 function chunkDistSqLocal(
   cx: number, cy: number, cz: number,
   chunkX: number, chunkY: number, chunkZ: number,
@@ -84,6 +84,7 @@ export function tickVolume(
   let hasPending = false;
 
   const eye = new Float32Array(scene.eye_position_3d());
+  const hitLocals = new Map<string, [number, number, number]>();
 
   // Upload chunks for ALL datasets
   for (const [dsId, ds] of datasets) {
@@ -157,13 +158,10 @@ export function tickVolume(
       Math.min(slotsPerAxis, Math.floor(2048 / chunkY)) *
       Math.min(slotsPerAxis, Math.floor(2048 / chunkZ));
 
-    // Camera position in local [0,1]³ space for distance-based eviction
-    const im = new Float32Array(scene.inv_model_matrix_for(dsId));
-    const camLocal: [number, number, number] = [
-      im[0] * eye[0] + im[4] * eye[1] + im[8] * eye[2] + im[12],
-      im[1] * eye[0] + im[5] * eye[1] + im[9] * eye[2] + im[13],
-      im[2] * eye[0] + im[6] * eye[1] + im[10] * eye[2] + im[14],
-    ];
+    // Ray-volume intersection point in local [0,1]³ space for distance-based eviction.
+    // Chunks closest to where the camera ray hits the volume surface are prioritized.
+    const hitLocal = Array.from(scene.ray_hit_local_3d(dsId)) as [number, number, number];
+    hitLocals.set(dsId, hitLocal);
 
     const lodKey = `${dsId}/${targetLevel}/${viewT}/${viewC}`;
     const lodKeyChanged = state.lodKeys.get(dsId) !== lodKey;
@@ -226,10 +224,10 @@ export function tickVolume(
         let farthestKey = "";
         let farthestDist = -1;
         for (const [key, pos] of uploaded) {
-          const d = chunkDistSqLocal(pos.x, pos.y, pos.z, chunkX, chunkY, chunkZ, widthFull, heightFull, depthFull, camLocal);
+          const d = chunkDistSqLocal(pos.x, pos.y, pos.z, chunkX, chunkY, chunkZ, widthFull, heightFull, depthFull, hitLocal);
           if (d > farthestDist) { farthestDist = d; farthestKey = key; }
         }
-        const incomingDist = chunkDistSqLocal(coord.x, coord.y, coord.z, chunkX, chunkY, chunkZ, widthFull, heightFull, depthFull, camLocal);
+        const incomingDist = chunkDistSqLocal(coord.x, coord.y, coord.z, chunkX, chunkY, chunkZ, widthFull, heightFull, depthFull, hitLocal);
         if (incomingDist < farthestDist) {
           uploaded.delete(farthestKey);
         } else {
@@ -252,7 +250,7 @@ export function tickVolume(
         targetLevel, viewT, viewC,
         widthFull, heightFull, depthFull,
         chunkX, chunkY, chunkZ,
-        camLocal,
+        hitLocal,
       );
     }
 
@@ -280,6 +278,7 @@ export function tickVolume(
       datasetId: dsId,
       modelMatrix: model,
       invModelMatrix: invModel,
+      rayHitLocal: hitLocals.get(dsId) ?? Array.from(scene.ray_hit_local_3d(dsId)) as [number, number, number],
       contrastMin: settings.contrast_min,
       contrastMax: settings.contrast_max,
       gamma: settings.gamma,

@@ -92,6 +92,7 @@ export interface VolumeLayerParams {
   datasetId: string;
   modelMatrix: Float32Array;
   invModelMatrix: Float32Array;
+  rayHitLocal: [number, number, number];
   contrastMin: number;
   contrastMax: number;
   gamma: number;

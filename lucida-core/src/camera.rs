@@ -223,6 +223,20 @@ impl View3D {
         ]
     }
 
+    /// Compute where the center-screen ray hits the unit [0,1]^3 volume box.
+    /// Returns the intersection point in unit space, or the eye position if the ray misses.
+    pub fn ray_hit_local(&self, inv_model: &[f64; 16]) -> [f64; 3] {
+        let eye_unit = transform_point(self.eye_position(), inv_model);
+        let target_unit = transform_point(self.target, inv_model);
+        let dir = [
+            target_unit[0] - eye_unit[0],
+            target_unit[1] - eye_unit[1],
+            target_unit[2] - eye_unit[2],
+        ];
+        ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+            .unwrap_or(eye_unit)
+    }
+
     /// Effective zoom: screen pixels per world unit at the target plane.
     pub fn effective_zoom(&self) -> f64 {
         self.viewport[1] as f64 / (2.0 * self.distance * (self.fov / 2.0).tan())
@@ -374,13 +388,15 @@ impl View3D {
         let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
         let zoom_per_voxel = self.effective_zoom() / max_vpw;
 
-        // Transform camera target through inv_model to get sort center in voxel coords.
-        // Flip Y to match the shader's `1.0 - pos.y` convention (image row 0 = top).
-        let target_unit = transform_point(self.target, &inv_model);
+        // Cast a ray from the eye toward the target to find where it hits the
+        // volume surface. Use this intersection point as the sort center so the
+        // chunk the camera is looking at loads first and surrounding chunks are
+        // prioritized by distance from that point.
+        let hit_unit = self.ray_hit_local(&inv_model);
         let sort_center = Some([
-            target_unit[0] * shape_x,
-            (1.0 - target_unit[1]) * shape_y,
-            target_unit[2] * shape_z,
+            hit_unit[0] * shape_x,
+            (1.0 - hit_unit[1]) * shape_y,
+            hit_unit[2] * shape_z,
         ]);
 
         VisibleRegion {
@@ -391,6 +407,46 @@ impl View3D {
             frustum_planes: Some(frustum_planes),
         }
     }
+}
+
+/// Ray-AABB intersection using the slab method.
+/// Returns the hit point if the ray intersects the box, or None.
+/// If the ray origin is inside the box, returns the origin.
+fn ray_aabb_hit(
+    origin: [f64; 3],
+    dir: [f64; 3],
+    box_min: [f64; 3],
+    box_max: [f64; 3],
+) -> Option<[f64; 3]> {
+    let mut t_near = f64::NEG_INFINITY;
+    let mut t_far = f64::INFINITY;
+    for i in 0..3 {
+        if dir[i].abs() < 1e-12 {
+            if origin[i] < box_min[i] || origin[i] > box_max[i] {
+                return None;
+            }
+        } else {
+            let mut t1 = (box_min[i] - origin[i]) / dir[i];
+            let mut t2 = (box_max[i] - origin[i]) / dir[i];
+            if t1 > t2 {
+                std::mem::swap(&mut t1, &mut t2);
+            }
+            t_near = t_near.max(t1);
+            t_far = t_far.min(t2);
+            if t_near > t_far {
+                return None;
+            }
+        }
+    }
+    if t_far < 0.0 {
+        return None;
+    }
+    let t = t_near.max(0.0);
+    Some([
+        origin[0] + t * dir[0],
+        origin[1] + t * dir[1],
+        origin[2] + t * dir[2],
+    ])
 }
 
 #[cfg(test)]

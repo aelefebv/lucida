@@ -34,8 +34,9 @@ interface FallbackState {
 
 const atlasPerDataset = new Map<string, AtlasState>();
 const fallbackPerDataset = new Map<string, FallbackState>();
-// Last known camera position in local [0,1]³ space per dataset (persists across atlas recreations)
-const cameraLocalPerDataset = new Map<string, [number, number, number]>();
+// Last known ray-volume hit point in local [0,1]³ space per dataset (persists across atlas recreations).
+// Chunks closest to this point are kept; farthest are evicted first.
+const rayHitPerDataset = new Map<string, [number, number, number]>();
 
 let dummyIndirectionBuf: GPUBuffer | null = null;
 function getDummyIndirectionBuf(device: GPUDevice): GPUBuffer {
@@ -112,7 +113,7 @@ function destroyAtlas(atlas: AtlasState): void {
   atlas.indirectionBuf.destroy();
 }
 
-/** Squared distance from a chunk grid coordinate to the camera in [0,1] volume space. */
+/** Squared distance from a chunk grid coordinate to a reference point in [0,1] volume space. */
 function chunkDistSq(
   atlas: AtlasState, cx: number, cy: number, cz: number,
   cam: [number, number, number],
@@ -126,7 +127,7 @@ function chunkDistSq(
   return dx * dx + dy * dy + dz * dz;
 }
 
-/** Find the occupied slot whose chunk center is farthest from the camera. */
+/** Find the occupied slot whose chunk center is farthest from the ray hit point. */
 function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): { key: string; dist: number } {
   let farthestKey = "";
   let maxDist = -1;
@@ -186,8 +187,8 @@ export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunks
     atlasPerDataset.set(datasetId, atlas);
   }
 
-  // Update camera position so eviction uses the current view
-  cameraLocalPerDataset.set(datasetId, msg.cameraLocal);
+  // Update ray-volume hit point so eviction uses the current view
+  rayHitPerDataset.set(datasetId, msg.cameraLocal);
 
   let intensityChanged = false;
   const totalChunks = msg.chunks.length;
@@ -204,7 +205,7 @@ export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunks
     } else {
       // Evict the chunk farthest from the camera — the main thread already
       // ensured the incoming chunk is closer via distance-based eviction.
-      const cam = cameraLocalPerDataset.get(datasetId) ?? [0.5, 0.5, 0.5];
+      const cam = rayHitPerDataset.get(datasetId) ?? [0.5, 0.5, 0.5];
       const { key: evictKey } = findFarthestSlot(atlas, cam);
       if (!evictKey) continue;
       slotIndex = atlas.slots.get(evictKey)!;
@@ -266,14 +267,8 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     const fb = fallbackPerDataset.get(layer.datasetId);
     if (!atlas && !fb) continue;
 
-    // Update camera position in local [0,1]³ space for distance-based eviction
-    const im = layer.invModelMatrix;
-    const e = msg.eye;
-    cameraLocalPerDataset.set(layer.datasetId, [
-      im[0] * e[0] + im[4] * e[1] + im[8] * e[2] + im[12],
-      im[1] * e[0] + im[5] * e[1] + im[9] * e[2] + im[13],
-      im[2] * e[0] + im[6] * e[1] + im[10] * e[2] + im[14],
-    ]);
+    // Update ray-volume hit point in local [0,1]³ space for distance-based eviction
+    rayHitPerDataset.set(layer.datasetId, layer.rayHitLocal);
 
     // Set fallback
     if (fb) {
@@ -328,7 +323,7 @@ export function removeVolumeResources(datasetId: string): void {
     fb.texture.destroy();
     fallbackPerDataset.delete(datasetId);
   }
-  cameraLocalPerDataset.delete(datasetId);
+  rayHitPerDataset.delete(datasetId);
 }
 
 export function destroyAllVolumeResources(): void {
@@ -336,7 +331,7 @@ export function destroyAllVolumeResources(): void {
   atlasPerDataset.clear();
   for (const fb of fallbackPerDataset.values()) fb.texture.destroy();
   fallbackPerDataset.clear();
-  cameraLocalPerDataset.clear();
+  rayHitPerDataset.clear();
   dummyIndirectionBuf?.destroy();
   dummyIndirectionBuf = null;
 }

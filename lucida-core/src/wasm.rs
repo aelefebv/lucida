@@ -348,6 +348,22 @@ impl WasmScene {
         }
     }
 
+    /// Returns the ray-volume intersection point in [0,1]^3 local space for a dataset.
+    /// This is where the center-screen ray hits the volume bounding box.
+    pub fn ray_hit_local_3d(&self, dataset_id: &str) -> Vec<f32> {
+        if let Camera::View3D(ref v) = self.inner.camera {
+            let inv_model_vec = self.inv_model_matrix_for(dataset_id);
+            let mut im = [0.0f64; 16];
+            for (i, val) in inv_model_vec.iter().enumerate() {
+                im[i] = *val as f64;
+            }
+            let hit = v.ray_hit_local(&im);
+            vec![hit[0] as f32, hit[1] as f32, hit[2] as f32]
+        } else {
+            vec![0.5, 0.5, 0.5]
+        }
+    }
+
     pub fn model_matrix(&self) -> Vec<f32> {
         match self.inner.volume_transform() {
             Some(t) => t.model.to_vec(),
