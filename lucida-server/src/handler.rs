@@ -9,20 +9,20 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
 use crate::session::Session;
-use crate::{BroadcastItem, ClientSenders};
+use crate::{BroadcastItem, UnicastRoutes};
 
 pub async fn handle_client(
     id: ClientId,
     ws: WebSocketStream<TcpStream>,
     session: Arc<Mutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
-    clients: ClientSenders,
+    unicast_routes: UnicastRoutes,
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
     // Per-client unicast channel for targeted messages (chunk routing).
     let (unicast_tx, mut unicast_rx) = mpsc::unbounded_channel::<Message>();
-    clients.lock().await.insert(id, unicast_tx);
+    unicast_routes.lock().await.insert(id, unicast_tx);
 
     // Lock session, subscribe (before unlock — no gap), add client, snapshot, unlock.
     let (snapshot_json, mut rx, peer_joined_json) = {
@@ -48,7 +48,7 @@ pub async fn handle_client(
         eprintln!("client {id}: failed to send snapshot");
         let mut sess = session.lock().await;
         sess.remove_client(id);
-        clients.lock().await.remove(&id);
+        unicast_routes.lock().await.remove(&id);
         return;
     }
 
@@ -274,7 +274,7 @@ pub async fn handle_client(
                                 };
                                 let fetch_json =
                                     serde_json::to_string(&fetch).unwrap();
-                                let senders = clients.lock().await;
+                                let senders = unicast_routes.lock().await;
                                 if let Some(sender) = senders.get(&source_id) {
                                     let _ = sender.send(Message::Text(
                                         fetch_json.into(),
@@ -300,7 +300,7 @@ pub async fn handle_client(
                     data[0], data[1], data[2], data[3],
                 ]) as u64;
 
-                let senders = clients.lock().await;
+                let senders = unicast_routes.lock().await;
                 if let Some(sender) = senders.get(&target_id) {
                     let _ = sender.send(Message::Binary(data));
                 }
@@ -311,7 +311,7 @@ pub async fn handle_client(
 
     // Cleanup on disconnect.
     outbound.abort();
-    clients.lock().await.remove(&id);
+    unicast_routes.lock().await.remove(&id);
 
     // Remove client from session, get affected followers.
     let (affected_followers, peer_left_json) = {

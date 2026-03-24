@@ -51,14 +51,14 @@ pub(crate) enum BroadcastItem {
 }
 
 /// Per-client targeted message channels for unicast (chunk routing).
-pub(crate) type ClientSenders = Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<Message>>>>;
+pub(crate) type UnicastRoutes = Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<Message>>>>;
 
 #[tokio::main]
 async fn main() {
     let session = Arc::new(Mutex::new(Session::new()));
     let (tx, _) = broadcast::channel::<BroadcastItem>(256);
     let next_id = Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let clients: ClientSenders = Arc::new(Mutex::new(HashMap::new()));
+    let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
 
     let listener = TcpListener::bind("0.0.0.0:9876")
         .await
@@ -87,8 +87,8 @@ async fn main() {
 
         let session = Arc::clone(&session);
         let tx = tx.clone();
-        let clients = Arc::clone(&clients);
+        let unicast_routes = Arc::clone(&unicast_routes);
 
-        tokio::spawn(handler::handle_client(id, ws, session, tx, clients));
+        tokio::spawn(handler::handle_client(id, ws, session, tx, unicast_routes));
     }
 }
