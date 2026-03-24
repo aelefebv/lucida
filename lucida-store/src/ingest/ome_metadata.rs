@@ -1,12 +1,12 @@
 use serde_json::{json, Value};
 
-use super::pyramid::Level;
+use super::pyramid::LevelData;
 
 /// Build the OME-Zarr v0.5 multiscales attributes for the root group.
 ///
 /// `level_scales` provides per-level cumulative [x, y, z] scale factors.
 /// Always writes 5D TCZYX axes. Output is wrapped in `{"ome": {...}}`.
-pub fn build_multiscales_attrs(levels: &[Level], level_scales: &[[f64; 3]]) -> Value {
+pub fn build_multiscales_attrs(levels: &[LevelData], level_scales: &[[f64; 3]]) -> Value {
     let datasets: Vec<Value> = levels
         .iter()
         .enumerate()
@@ -49,7 +49,7 @@ pub fn build_multiscales_attrs(levels: &[Level], level_scales: &[[f64; 3]]) -> V
 ///
 /// `chunk_size` is [Z, Y, X] matching lucida-core convention.
 /// Output shape is always 5D: [T, C, Z, Y, X].
-pub fn build_array_zarr_json(level: &Level, chunk_size: &[u32; 3]) -> Value {
+pub fn build_array_zarr_json(level: &LevelData, chunk_size: &[u32; 3]) -> Value {
     json!({
         "zarr_format": 3,
         "node_type": "array",
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn array_zarr_json_shape_and_chunks() {
-        let level = Level {
+        let level = LevelData {
             data: vec![],
             width: 512,
             height: 512,
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn array_zarr_json_single_frame() {
-        let level = Level {
+        let level = LevelData {
             data: vec![],
             width: 1024,
             height: 768,
@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn multiscales_has_5_axes() {
-        let levels = vec![Level {
+        let levels = vec![LevelData {
             data: vec![],
             width: 512,
             height: 512,
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn multiscales_ome_wrapper() {
-        let levels = vec![Level {
+        let levels = vec![LevelData {
             data: vec![],
             width: 512,
             height: 512,
@@ -170,8 +170,8 @@ mod tests {
     #[test]
     fn multiscales_scale_factors() {
         let levels = vec![
-            Level { data: vec![], width: 512, height: 512, depth: 1, channels: 1, timepoints: 1 },
-            Level { data: vec![], width: 256, height: 256, depth: 1, channels: 1, timepoints: 1 },
+            LevelData { data: vec![], width: 512, height: 512, depth: 1, channels: 1, timepoints: 1 },
+            LevelData { data: vec![], width: 256, height: 256, depth: 1, channels: 1, timepoints: 1 },
         ];
         let scales = vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0]];
         let attrs = build_multiscales_attrs(&levels, &scales);
@@ -185,9 +185,9 @@ mod tests {
     #[test]
     fn multiscales_anisotropic_scales() {
         let levels = vec![
-            Level { data: vec![], width: 512, height: 512, depth: 100, channels: 1, timepoints: 1 },
-            Level { data: vec![], width: 256, height: 256, depth: 100, channels: 1, timepoints: 1 },
-            Level { data: vec![], width: 128, height: 128, depth: 50, channels: 1, timepoints: 1 },
+            LevelData { data: vec![], width: 512, height: 512, depth: 100, channels: 1, timepoints: 1 },
+            LevelData { data: vec![], width: 256, height: 256, depth: 100, channels: 1, timepoints: 1 },
+            LevelData { data: vec![], width: 128, height: 128, depth: 50, channels: 1, timepoints: 1 },
         ];
         let scales = vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0], [4.0, 4.0, 2.0]];
         let attrs = build_multiscales_attrs(&levels, &scales);

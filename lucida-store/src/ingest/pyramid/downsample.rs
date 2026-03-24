@@ -3,7 +3,7 @@ use rayon::prelude::*;
 /// A single resolution level of the image pyramid.
 ///
 /// Data is stored in TCZYX order (T outermost, X innermost).
-pub struct Level {
+pub struct LevelData {
     pub data: Vec<u16>,
     pub width: u32,
     pub height: u32,
@@ -13,7 +13,7 @@ pub struct Level {
 }
 
 /// Generalized downsample dispatcher.
-pub fn downsample(src: &Level, do_xy: bool, do_z: bool) -> Level {
+pub fn downsample(src: &LevelData, do_xy: bool, do_z: bool) -> LevelData {
     match (do_xy, do_z) {
         (true, false) => downsample_xy(src),
         (false, true) => downsample_z_only(src),
@@ -23,7 +23,7 @@ pub fn downsample(src: &Level, do_xy: bool, do_z: bool) -> Level {
 }
 
 /// Downsample a level by 2x in XY using box averaging. T, C, Z stay the same.
-pub fn downsample_xy(src: &Level) -> Level {
+pub fn downsample_xy(src: &LevelData) -> LevelData {
     let dst_w = (src.width + 1) / 2;
     let dst_h = (src.height + 1) / 2;
     let src_plane = (src.width * src.height) as usize;
@@ -81,7 +81,7 @@ pub fn downsample_xy(src: &Level) -> Level {
             }
         });
 
-    Level {
+    LevelData {
         data,
         width: dst_w,
         height: dst_h,
@@ -93,7 +93,7 @@ pub fn downsample_xy(src: &Level) -> Level {
 
 /// Downsample a level by 2x in Z only, averaging pairs of z-planes.
 /// T, C, XY stay the same.
-pub fn downsample_z_only(src: &Level) -> Level {
+pub fn downsample_z_only(src: &LevelData) -> LevelData {
     let dst_d = (src.depth + 1) / 2;
     let plane_size = (src.width * src.height) as usize;
     let tc_count = (src.timepoints * src.channels) as usize;
@@ -127,7 +127,7 @@ pub fn downsample_z_only(src: &Level) -> Level {
 
     let _ = dst_planes; // used implicitly above
 
-    Level {
+    LevelData {
         data,
         width: src.width,
         height: src.height,
@@ -138,7 +138,7 @@ pub fn downsample_z_only(src: &Level) -> Level {
 }
 
 /// Downsample a level by 2x in all three spatial axes (XYZ) using 2x2x2 box averaging.
-pub fn downsample_xyz(src: &Level) -> Level {
+pub fn downsample_xyz(src: &LevelData) -> LevelData {
     let dst_w = (src.width + 1) / 2;
     let dst_h = (src.height + 1) / 2;
     let dst_d = (src.depth + 1) / 2;
@@ -253,7 +253,7 @@ pub fn downsample_xyz(src: &Level) -> Level {
             }
         });
 
-    Level {
+    LevelData {
         data,
         width: dst_w,
         height: dst_h,
@@ -273,8 +273,8 @@ pub fn build_pyramid(
     channels: u32,
     timepoints: u32,
     min_size: u32,
-) -> Vec<Level> {
-    let mut levels = vec![Level {
+) -> Vec<LevelData> {
+    let mut levels = vec![LevelData {
         data,
         width,
         height,
@@ -301,7 +301,7 @@ mod tests {
 
     #[test]
     fn downsample_2x2_to_1x1() {
-        let src = Level {
+        let src = LevelData {
             data: vec![10, 20, 30, 40],
             width: 2,
             height: 2,
@@ -318,7 +318,7 @@ mod tests {
     #[test]
     fn downsample_odd_dimensions() {
         // 3x3 → 2x2
-        let src = Level {
+        let src = LevelData {
             data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
             width: 3,
             height: 3,
@@ -337,7 +337,7 @@ mod tests {
 
     #[test]
     fn downsample_preserves_depth() {
-        let src = Level {
+        let src = LevelData {
             data: vec![10, 20, 30, 40, 50, 60, 70, 80],
             width: 2,
             height: 2,
@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn downsample_preserves_channels_and_timepoints() {
         // T=1, C=2, Z=1, 2x2 each
-        let src = Level {
+        let src = LevelData {
             data: vec![10, 20, 30, 40, 100, 200, 300, 400],
             width: 2,
             height: 2,
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn downsample_z_even_depth() {
         // 2x2, depth=2 → depth=1, averaging z-planes
-        let src = Level {
+        let src = LevelData {
             data: vec![10, 20, 30, 40, 50, 60, 70, 80],
             width: 2,
             height: 2,
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn downsample_z_odd_depth() {
         // depth=3 → depth=2: first pair averaged, last plane copied
-        let src = Level {
+        let src = LevelData {
             data: vec![
                 10, 20,  // z=0
                 30, 40,  // z=1
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn downsample_z_preserves_tc() {
         // T=1, C=2, Z=2, 1x1 each
-        let src = Level {
+        let src = LevelData {
             data: vec![10, 20, 100, 200],
             width: 1,
             height: 1,
@@ -446,7 +446,7 @@ mod tests {
     #[test]
     fn downsample_xyz_2x2x2() {
         // 2x2x2 → 1x1x1: 8-voxel box average
-        let src = Level {
+        let src = LevelData {
             data: vec![10, 20, 30, 40, 50, 60, 70, 80],
             width: 2,
             height: 2,
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn downsample_xyz_odd_z() {
         // 2x2x3 → 1x1x2: first pair uses 2x2x2, last plane uses 2x2 XY-only
-        let src = Level {
+        let src = LevelData {
             data: vec![
                 10, 20, 30, 40,  // z=0 (2x2)
                 50, 60, 70, 80,  // z=1 (2x2)
@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn downsample_xyz_preserves_tc() {
         // T=1, C=2, Z=2, 2x2
-        let src = Level {
+        let src = LevelData {
             data: vec![
                 // C=0: z=0, z=1
                 10, 20, 30, 40, 50, 60, 70, 80,
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn downsample_dispatcher() {
-        let src = Level {
+        let src = LevelData {
             data: vec![10, 20, 30, 40, 50, 60, 70, 80],
             width: 2,
             height: 2,

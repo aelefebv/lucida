@@ -39,10 +39,10 @@ pub fn convert_tiff_to_zarr(
         min_size,
     );
 
-    // Build lightweight Level structs (no data) for root metadata.
-    let meta_levels: Vec<pyramid::Level> = schedule
+    // Build lightweight LevelData structs (no data) for root metadata.
+    let meta_levels: Vec<pyramid::LevelData> = schedule
         .iter()
-        .map(|spec| pyramid::Level {
+        .map(|spec| pyramid::LevelData {
             data: vec![],
             width: spec.width,
             height: spec.height,
@@ -76,7 +76,7 @@ pub fn convert_tiff_to_zarr(
 
     // Level-by-level pipeline: write current level (possibly in background)
     // while downsampling to the next level.
-    let mut current = pyramid::Level {
+    let mut current = pyramid::LevelData {
         data: volume.data,
         width: volume.width,
         height: volume.height,

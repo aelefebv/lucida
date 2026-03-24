@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use serde_json::json;
 
 use super::ome_metadata;
-use super::pyramid::Level;
+use super::pyramid::LevelData;
 
 /// Write a complete OME-Zarr v0.5 (Zarr v3) store to disk.
 ///
@@ -15,7 +15,7 @@ use super::pyramid::Level;
 /// Always writes 5D TCZYX with chunk paths `t/c/z/y/x`.
 pub fn write_zarr(
     output: &Path,
-    levels: &[Level],
+    levels: &[LevelData],
     chunk_size: &[u32; 3],
 ) -> Result<(), String> {
     // Default: assume each level is 2x in XY only (legacy behavior)
@@ -38,7 +38,7 @@ pub fn write_zarr(
 ///
 /// Call this once before writing individual levels.
 /// `level_scales` provides per-level cumulative [x, y, z] scale factors.
-pub fn write_root_metadata(output: &Path, levels: &[Level], level_scales: &[[f64; 3]]) -> Result<(), String> {
+pub fn write_root_metadata(output: &Path, levels: &[LevelData], level_scales: &[[f64; 3]]) -> Result<(), String> {
     fs::create_dir_all(output).map_err(|e| format!("failed to create output dir: {e}"))?;
 
     let ome_attrs = ome_metadata::build_multiscales_attrs(levels, level_scales);
@@ -54,7 +54,7 @@ pub fn write_root_metadata(output: &Path, levels: &[Level], level_scales: &[[f64
 pub fn write_zarr_level(
     output: &Path,
     level_index: usize,
-    level: &Level,
+    level: &LevelData,
     chunk_size: &[u32; 3],
 ) -> Result<(), String> {
     let level_dir = output.join(level_index.to_string());
@@ -72,7 +72,7 @@ pub fn write_zarr_level(
 fn write_chunks(
     level_dir: &Path,
     level_index: usize,
-    level: &Level,
+    level: &LevelData,
     chunk_size: &[u32; 3],
 ) -> Result<(), String> {
     // chunk_size is [Z, Y, X]
@@ -154,7 +154,7 @@ fn write_chunks(
 ///
 /// Data is indexed in TCZYX order.
 fn extract_chunk(
-    level: &Level,
+    level: &LevelData,
     cx: u32,
     cy: u32,
     cz: u32,
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn extract_chunk_zero_pads_edges() {
-        let level = Level {
+        let level = LevelData {
             data: vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
             width: 3,
             height: 3,
@@ -242,7 +242,7 @@ mod tests {
     #[test]
     fn extract_chunk_selects_correct_tc() {
         // T=1, C=2, Z=1, 2x2 each
-        let level = Level {
+        let level = LevelData {
             data: vec![1, 2, 3, 4, 10, 20, 30, 40],
             width: 2,
             height: 2,
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn write_zarr_creates_expected_structure() {
         let dir = temp_dir("zarr");
-        let levels = vec![Level {
+        let levels = vec![LevelData {
             data: vec![0u16; 4 * 4],
             width: 4,
             height: 4,
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn write_zarr_multichannel() {
         let dir = temp_dir("zarr_mc");
-        let levels = vec![Level {
+        let levels = vec![LevelData {
             data: vec![0u16; 2 * 2 * 4 * 4],
             width: 4,
             height: 4,
@@ -317,7 +317,7 @@ mod tests {
     fn chunks_are_lz4_compressed() {
         let dir = temp_dir("zarr_lz4");
         let data: Vec<u16> = (0..16).collect();
-        let levels = vec![Level {
+        let levels = vec![LevelData {
             data,
             width: 4,
             height: 4,
