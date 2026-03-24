@@ -1,6 +1,6 @@
 /** Main-thread API wrapping the GPU render worker. */
 import type {
-  SliceTile,
+  SliceChunk,
   VolumeChunk,
   VolumeLayerParams,
   SliceLayerParams,
@@ -105,9 +105,9 @@ export class RenderClient {
     );
   }
 
-  sliceUploadTilesForLayer(
+  sliceUploadChunksForLayer(
     datasetId: string,
-    tiles: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
+    chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
     level: number,
     z: number,
     t: number,
@@ -122,16 +122,16 @@ export class RenderClient {
     fullResZ: number,
   ) {
     const transferList: ArrayBuffer[] = [];
-    const workerTiles: SliceTile[] = tiles.map(tile => {
-      const buf = tile.data.buffer.slice(tile.data.byteOffset, tile.data.byteOffset + tile.data.byteLength);
+    const workerChunks: SliceChunk[] = chunks.map(chunk => {
+      const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength);
       transferList.push(buf);
-      return { data: buf, x: tile.x, y: tile.y, z: tile.z, key: tile.key };
+      return { data: buf, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
     });
     this.worker.postMessage(
       {
-        type: "sliceUploadTilesForLayer",
+        type: "sliceUploadChunksForLayer",
         datasetId,
-        tiles: workerTiles,
+        chunks: workerChunks,
         level, z, t, c,
         levelWidth, levelHeight,
         chunkX, chunkY, chunkZ,

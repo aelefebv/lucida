@@ -10,7 +10,7 @@ struct Uniforms {
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var fallbackTex: texture_2d<u32>;
-@group(0) @binding(2) var tileTex: texture_2d<u32>;
+@group(0) @binding(2) var chunkTex: texture_2d<u32>;
 @group(0) @binding(3) var<storage, read> indirection: array<u32>;
 
 struct VSOut {
@@ -47,11 +47,11 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   let gamma = u.intensityRange.z;
   let layerOpacity = u.intensityRange.w;
 
-  // Compute virtual texel coordinate from UV and tile texture dimensions
-  let tileDims = vec2u(u.chunkDims.z, u.chunkDims.w); // volumeDims packed in chunkDims.zw
+  // Compute virtual texel coordinate from UV and level texture dimensions
+  let levelDims = vec2u(u.chunkDims.z, u.chunkDims.w); // levelDims packed in chunkDims.zw
   let texCoord = vec2i(
-    clamp(i32(texUV.x * f32(tileDims.x)), 0, i32(tileDims.x) - 1),
-    clamp(i32(texUV.y * f32(tileDims.y)), 0, i32(tileDims.y) - 1),
+    clamp(i32(texUV.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
+    clamp(i32(texUV.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
   );
 
   // Atlas lookup
@@ -76,8 +76,8 @@ fn fs(input: VSOut) -> @location(0) vec4f {
       i32(slotCoord.x * u.chunkDims.x + localTexel.x),
       i32(slotCoord.y * u.chunkDims.y + localTexel.y),
     );
-    let tileVal = textureLoad(tileTex, atlasCoord, 0).r;
-    let normalized = pow(clamp((f32(tileVal) - intensityMin) / range, 0.0, 1.0), gamma);
+    let chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
+    let normalized = pow(clamp((f32(chunkVal) - intensityMin) / range, 0.0, 1.0), gamma);
     return vec4f(vec3f(normalized) * layerOpacity, layerOpacity);
   }
 

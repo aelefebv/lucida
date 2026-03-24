@@ -1,4 +1,4 @@
-/** Slice render path: upload tiles + render multi-pass. */
+/** Slice render path: upload chunks + render multi-pass. */
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
@@ -7,7 +7,7 @@ import type { TickContext } from "./renderLoopTypes.ts";
 import { UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 
 export interface SliceState {
-  uploaded: Map<string, Map<string, true>>;  // dsId → tileKey → true (ordered for LRU)
+  uploaded: Map<string, Map<string, true>>;  // dsId → chunkKey → true (ordered for LRU)
   currentLod: Map<string, { level: number; z: number; t: number; c: number }>;
   prevTCZ: Map<string, string>;
   seedPending: Map<string, { level: number; coords: ChunkCoord[]; z: number }>;
@@ -143,13 +143,13 @@ export function tickSlice(
           const data = bufferToUint16(buf, seedMeta.dataType);
           const xOff = sc.x * sChunkX;
           const yOff = sc.y * sChunkY;
-          const tileW = Math.min(sChunkX, sWidth - xOff);
-          const tileH = Math.min(sChunkY, sHeight - yOff);
+          const chunkW = Math.min(sChunkX, sWidth - xOff);
+          const chunkH = Math.min(sChunkY, sHeight - yOff);
           const sliceOffset = localZ * sChunkY * sChunkX;
-          for (let row = 0; row < tileH; row++) {
+          for (let row = 0; row < chunkH; row++) {
             const srcStart = sliceOffset + row * sChunkX;
             const dstStart = (yOff + row) * sWidth + xOff;
-            assembled.set(data.subarray(srcStart, srcStart + tileW), dstStart);
+            assembled.set(data.subarray(srcStart, srcStart + chunkW), dstStart);
           }
         }
         client.sliceSetFallbackForLayer(dsId, assembled, sWidth, sHeight);
@@ -197,7 +197,7 @@ export function tickSlice(
     }
 
     if (availableChunks.length > 0) {
-      client.sliceUploadTilesForLayer(
+      client.sliceUploadChunksForLayer(
         dsId,
         availableChunks,
         level, z, t, c,

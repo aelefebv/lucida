@@ -138,14 +138,14 @@ export class SliceRenderer {
 
   private rebuildBindGroup() {
     const fallback = this.fallbackTexture ?? this.dummyTexture;
-    const tile = this.atlasTexture ?? this.dummyTexture;
+    const atlas = this.atlasTexture ?? this.dummyTexture;
     const indirection = this.indirectionBuffer ?? this.dummyIndirectionBuffer;
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: fallback.createView() },
-        { binding: 2, resource: tile.createView() },
+        { binding: 2, resource: atlas.createView() },
         { binding: 3, resource: { buffer: indirection } },
       ],
     });

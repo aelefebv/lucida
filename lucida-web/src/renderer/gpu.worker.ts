@@ -5,7 +5,7 @@ import { SliceRenderer } from "./sliceRenderer.ts";
 import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import { handleSliceSetFallback, handleSliceUploadTiles, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
+import { handleSliceSetFallback, handleSliceUploadChunks, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
 import { handleVolumeSetInitial, handleVolumeUploadChunks, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 
@@ -113,8 +113,8 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       case "sliceSetFallbackForLayer":
         handleSliceSetFallback(ctx, msg);
         break;
-      case "sliceUploadTilesForLayer":
-        handleSliceUploadTiles(ctx, msg);
+      case "sliceUploadChunksForLayer":
+        handleSliceUploadChunks(ctx, msg);
         break;
       case "sliceRenderMultiPass":
         handleSliceRenderMultiPass(ctx, msg);

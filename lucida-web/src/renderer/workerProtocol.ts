@@ -19,7 +19,7 @@ export interface ResizeMessage {
   height: number;
 }
 
-export interface SliceTile {
+export interface SliceChunk {
   data: ArrayBuffer;
   x: number;
   y: number;
@@ -35,10 +35,10 @@ export interface SliceSetFallbackForLayerMessage {
   height: number;
 }
 
-export interface SliceUploadTilesForLayerMessage {
-  type: "sliceUploadTilesForLayer";
+export interface SliceUploadChunksForLayerMessage {
+  type: "sliceUploadChunksForLayer";
   datasetId: string;
-  tiles: SliceTile[];
+  chunks: SliceChunk[];
   level: number;
   z: number;
   t: number;
@@ -196,7 +196,7 @@ export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
   | SliceSetFallbackForLayerMessage
-  | SliceUploadTilesForLayerMessage
+  | SliceUploadChunksForLayerMessage
   | VolumeSetInitialForLayerMessage
   | VolumeUploadChunksForLayerMessage
   | VolumeRenderMultiPassMessage

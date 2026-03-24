@@ -127,14 +127,14 @@ export function writeSliceRegion(
   srcRowStride: number,
   dstX: number,
   dstY: number,
-  tileW: number,
-  tileH: number,
+  chunkW: number,
+  chunkH: number,
 ): void {
-  const bytesPerRow = tileW * 2;
+  const bytesPerRow = chunkW * 2;
   const alignedBytesPerRow = Math.ceil(bytesPerRow / 256) * 256;
 
-  // Extract tile rows from source data (which may have a different stride)
-  const needsStrideCopy = srcRowStride !== tileW;
+  // Extract chunk rows from source data (which may have a different stride)
+  const needsStrideCopy = srcRowStride !== chunkW;
   const needsAlignment = alignedBytesPerRow !== bytesPerRow;
 
   if (!needsStrideCopy && !needsAlignment) {
@@ -142,20 +142,20 @@ export function writeSliceRegion(
       { texture, origin: [dstX, dstY, 0] },
       data.buffer,
       { offset: data.byteOffset, bytesPerRow },
-      [tileW, tileH],
+      [chunkW, chunkH],
     );
     return;
   }
 
   const paddedWidth = alignedBytesPerRow / 2;
-  const padded = new Uint16Array(paddedWidth * tileH);
-  for (let y = 0; y < tileH; y++) {
-    padded.set(data.subarray(y * srcRowStride, y * srcRowStride + tileW), y * paddedWidth);
+  const padded = new Uint16Array(paddedWidth * chunkH);
+  for (let y = 0; y < chunkH; y++) {
+    padded.set(data.subarray(y * srcRowStride, y * srcRowStride + chunkW), y * paddedWidth);
   }
   device.queue.writeTexture(
     { texture, origin: [dstX, dstY, 0] },
     padded.buffer,
     { bytesPerRow: alignedBytesPerRow },
-    [tileW, tileH],
+    [chunkW, chunkH],
   );
 }

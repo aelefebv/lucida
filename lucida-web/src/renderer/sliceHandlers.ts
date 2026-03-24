@@ -1,7 +1,7 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
   SliceSetFallbackForLayerMessage,
-  SliceUploadTilesForLayerMessage,
+  SliceUploadChunksForLayerMessage,
   SliceRenderMultiPassMessage,
 } from "./workerProtocol.ts";
 import { SLICE_ATLAS_BUDGET } from "./workerProtocol.ts";
@@ -13,7 +13,7 @@ interface SliceAtlasState {
   texture: GPUTexture;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
-  slots: Map<string, number>;     // tileKey → slotIndex (insertion-order = LRU)
+  slots: Map<string, number>;     // chunkKey → slotIndex (insertion-order = LRU)
   slotGridIdx: Int32Array<ArrayBuffer>;        // slotIndex → gridIdx (for eviction cleanup)
   freeSlots: number[];
   totalSlots: number;
@@ -97,7 +97,7 @@ function destroySliceAtlas(atlas: SliceAtlasState): void {
   atlas.indirectionBuf.destroy();
 }
 
-/** Find the occupied slot whose tile center is farthest from the viewport center. */
+/** Find the occupied slot whose chunk center is farthest from the viewport center. */
 function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): string {
   const [camX, camY] = cam;
   let farthestKey = "";
@@ -110,7 +110,7 @@ function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): stri
     const cx = gridIdx % atlas.gridX;
     const cy = Math.floor(gridIdx / atlas.gridX);
 
-    // Tile center in [0,1] UV space
+    // Chunk center in [0,1] UV space
     const px = (cx + 0.5) * atlas.chunkX / atlas.levelWidth;
     const py = (cy + 0.5) * atlas.chunkY / atlas.levelHeight;
 
@@ -137,7 +137,7 @@ export function handleSliceSetFallback(ctx: WorkerCtx, msg: SliceSetFallbackForL
   ctx.post({ type: "intensityRange", datasetId: msg.datasetId, min, max });
 }
 
-export function handleSliceUploadTiles(ctx: WorkerCtx, msg: SliceUploadTilesForLayerMessage): void {
+export function handleSliceUploadChunks(ctx: WorkerCtx, msg: SliceUploadChunksForLayerMessage): void {
   const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
 
   let atlas = atlasPerDataset.get(datasetId);
@@ -156,14 +156,14 @@ export function handleSliceUploadTiles(ctx: WorkerCtx, msg: SliceUploadTilesForL
   const targetChunkZ = Math.floor(levelZ / chunkZ);
   const localZ = levelZ - targetChunkZ * chunkZ;
 
-  if (msg.tiles.length > 0) {
+  if (msg.chunks.length > 0) {
     let intensityChanged = false;
-    const perChunkSamples = Math.floor(10000 / Math.max(1, msg.tiles.length));
+    const perChunkSamples = Math.floor(10000 / Math.max(1, msg.chunks.length));
 
-    for (const tile of msg.tiles) {
-      if (atlas.slots.has(tile.key)) continue;
-      if (tile.z !== targetChunkZ) continue;
-      const data = new Uint16Array(tile.data);
+    for (const chunk of msg.chunks) {
+      if (atlas.slots.has(chunk.key)) continue;
+      if (chunk.z !== targetChunkZ) continue;
+      const data = new Uint16Array(chunk.data);
 
       const r = sampleIntensityRange(data, perChunkSamples);
       if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
@@ -174,7 +174,7 @@ export function handleSliceUploadTiles(ctx: WorkerCtx, msg: SliceUploadTilesForL
       if (atlas.freeSlots.length > 0) {
         slotIndex = atlas.freeSlots.pop()!;
       } else {
-        // Evict the tile farthest from the viewport center
+        // Evict the chunk farthest from the viewport center
         const cam = cameraUVPerDataset.get(datasetId) ?? [0.5, 0.5];
         const evictKey = findFarthestSlot2D(atlas, cam);
         slotIndex = atlas.slots.get(evictKey)!;
@@ -189,20 +189,20 @@ export function handleSliceUploadTiles(ctx: WorkerCtx, msg: SliceUploadTilesForL
       const sx = slotIndex % atlas.slotsX;
       const sy = Math.floor(slotIndex / atlas.slotsX);
 
-      const tileW = Math.min(chunkX, levelWidth - tile.x * chunkX);
-      const tileH = Math.min(chunkY, levelHeight - tile.y * chunkY);
+      const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
+      const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
       const sliceOffset = localZ * chunkY * chunkX;
       const sliceData = data.subarray(sliceOffset, sliceOffset + chunkY * chunkX);
 
       const xOff = sx * chunkX;
       const yOff = sy * chunkY;
-      writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, tileW, tileH);
+      writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
 
       // Update indirection
-      const gridIdx = tile.y * atlas.gridX + tile.x;
+      const gridIdx = chunk.y * atlas.gridX + chunk.x;
       atlas.indirectionData[gridIdx] = slotIndex;
       atlas.slotGridIdx[slotIndex] = gridIdx;
-      atlas.slots.set(tile.key, slotIndex);
+      atlas.slots.set(chunk.key, slotIndex);
     }
 
     if (intensityChanged) {
