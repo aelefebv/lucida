@@ -46,7 +46,8 @@
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Pyramid** | An ordered sequence of Levels representing the same Volume at progressively coarser resolutions | Multiscale (use for the Zarr metadata spec), mipmap |
+| **Pyramid** | An ordered sequence of LevelData instances representing the same Volume at progressively coarser resolutions | Multiscale (use for the Zarr metadata spec), mipmap |
+| **LevelData** | A data-bearing struct in `lucida-store` holding the `Vec<u16>` voxel data, width, height, depth, channels, and timepoints for one resolution tier of the Pyramid | Level (old name, ambiguous with tier index) |
 | **Level Spec** | A metadata-only description of a Level's dimensions, cumulative scale factors, and which axes were downsampled to produce it | Schedule entry |
 | **Downsample Schedule** | The complete sequence of Level Specs computed before any pixel work begins, determining the shape of the entire Pyramid | Plan, level plan |
 | **Downsample** | Reduce a Level's resolution by 2x along selected axes using Box Average to produce the next coarser Level | Resize, decimate, scale down |
@@ -93,9 +94,9 @@
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Command** | A tagged enum representing a single atomic mutation to scene state | Action, event, message, operation |
-| **Document command** | A command that mutates shared DocumentState (AddDataset, RemoveDataset, SetVolumeScale) -- sequenced, persisted, and broadcast to all clients | Shared command, sync command |
-| **Viewport command** | A command that mutates local-only state (camera, display, view, layer settings) -- applied locally and emitted as presence | Local command, ephemeral command |
+| **Command** | A wrapper enum (`Command::Document` / `Command::Viewport`) used for serde-compatible deserialization of both command types | Action, event, message, operation |
+| **DocumentCommand** | A command enum (3 variants) that mutates shared DocumentState (AddDataset, RemoveDataset, SetVolumeScale) -- sequenced, persisted, and broadcast to all clients. `ClientMessage::Command` and `ServerMessage::CommandBroadcast` carry this type. | Shared command, sync command, Command (ambiguous) |
+| **ViewportCommand** | A command enum (~27 variants) that mutates local-only state (camera, display, view, dataset display settings) -- applied locally and emitted as presence | Local command, ephemeral command, Command (ambiguous) |
 | **ClientMessage** | A tagged message sent from a client to the server: Command, Presence, Cursor, Follow, LayerPresence, or Steer | Client event, upstream message |
 | **ServerMessage** | A tagged message sent from the server to clients: Snapshot, CommandBroadcast, Ack, PeerJoined/Left, PresenceUpdate, CursorUpdate, FollowChanged, LayerPresenceUpdate | Server event, downstream message |
 | **Snapshot** | The first ServerMessage on connect, containing the full authoritative DocumentState, all peer PresenceStates, and the connecting client's ID | Initial state, sync, handshake |
@@ -119,7 +120,7 @@
 | **Broadcast** | Fan-out delivery of a message to all connected clients via a tokio broadcast channel; the sender may receive a different payload (Ack vs CommandBroadcast) or be excluded (Presence, Cursor) | Multicast, publish, fan-out |
 | **Unicast** | Targeted delivery of a message to a single specific client via a per-client mpsc channel; used exclusively for chunk data routing | Direct message, point-to-point |
 | **BroadcastItem** | The internal enum carried on the broadcast channel, wrapping all fan-out message types with sender metadata for self-exclusion logic | Broadcast event, channel item |
-| **ClientSenders** | The shared map of ClientId to per-client unbounded mpsc senders, used for unicast chunk routing | Unicast map, client channels |
+| **UnicastRoutes** | The shared map of ClientId to per-client unbounded mpsc senders, used for unicast chunk routing | ClientSenders (old name), unicast map, client channels |
 | **ChunkRequest** | A message from a viewing client to the server asking for a specific chunk by dataset ID and chunk key | Fetch request, data request |
 | **ChunkFetch** | A message from the server to a data source client instructing it to read a specific chunk and send the binary data to a specified viewing client | Fetch directive, source request |
 | **Chunk Data** | A binary WebSocket message containing raw chunk bytes, prefixed with the target client ID (u32 LE) and key; the server reads the target ID and routes via unicast | Payload, blob, binary chunk |
@@ -270,40 +271,30 @@
 > **Dev:** "Why does the 3D view get blocky when I drag?"
 > **Domain expert:** "That's the **Render scale**. During interaction it drops to 0.25 — rendering at quarter resolution — so the **GPU worker** can keep up with the ray marching. After 50ms of no input, it snaps back to 1.0 and re-renders at full resolution. The **Render loop** uses the full-res viewport for **Level** selection though, so you don't get LOD flip-flopping during drags."
 
-## Flagged ambiguities
+## Overloaded terms
 
-- **"Zoom"** means different things by context. In **View2D**, zoom is a direct scale factor (1.0 = native). In **View3D**, **Effective zoom** is derived from distance, FOV, and voxel density. The chunk planner normalizes both into pixels-per-voxel, but the raw values are not comparable.
+These terms have multiple meanings depending on context. The glossary tables above define each precisely — this section provides quick disambiguation guidance.
 
-- **"Model matrix"** has two flavors. The raw `VolumeTransform.model` maps unit space to world space for a single dataset. The **Corrected model matrix** (in `WasmScene::scene_model_matrix_for`) applies a global normalization factor and Y-translation for multi-dataset alignment. GPU code receives the corrected version; the raw version is only used internally.
+- **"Zoom"**: In **View2D**, a direct scale factor. In **View3D**, **Effective zoom** is derived from distance, FOV, and voxel density. The chunk planner normalizes both into pixels-per-voxel.
 
-- **"clients"** is used for two different maps in the server. `Session.clients` maps ClientId to **PresenceState** (tracking what each client is viewing). `ClientSenders` in `main.rs` maps ClientId to mpsc senders (routing **Unicast** messages). These serve entirely different purposes — consider renaming `ClientSenders` to **UnicastRoutes** or **ChunkRouters** to disambiguate.
+- **"Plane" vs "Page"**: A **Page** is a TIFF container concept (one IFD entry); a **Plane** is a logical 2D cross-section of a Volume at a given Z. Avoid "slice" — it's ambiguous between both.
 
-- **"Command"** enum contains both **Document commands** and **Viewport commands**, but the server only processes the document subset. The discriminator `is_document_command()` is the only thing preventing viewport commands from being broadcast. If a new command variant is added to the enum and `is_document_command()` isn't updated, it will silently be ignored by the server. Consider splitting into separate enums.
+- **"Chunk Size" axis order**: Code passes `[x, y, z]` (lucida-core convention); Zarr metadata stores `[t, c, z, y, x]`. Always state which convention.
 
-- **"Scene"** is used as a throwaway wrapper in `Session::apply()` — the server constructs a `Scene` just to call `scene.apply(cmd)` and then extracts the mutated `DocumentState` back. The server has no use for `Scene` as a concept; it only cares about **DocumentState**. Consider adding `DocumentState::apply(cmd)` directly to avoid this indirection.
+- **"Scale"**: Use **Cumulative Scale** for per-Level `[x, y, z]` factors, **Voxel Size** for physical spacing, and "scale" for UI/rendering contexts only.
 
-- **"Level"** is used for both the data-bearing struct (`Level` with `Vec<u16>` in `lucida-store`) and the metadata-only schedule entry (`LevelSpec`). In the viewer, **Level** is a resolution tier index. In conversation, "level" can mean any of these. Use **Level** for data-bearing instances, **Level Spec** for schedule/metadata-only entries, and qualify with a number when referring to a tier.
+- **"Store" vs "Dataset"**: A **Store** is the on-disk Zarr directory tree (producer). A **Dataset** is the same artifact loaded in the viewer (consumer).
 
-- **"Plane" vs "Page"**: a **Page** is a TIFF container concept (one IFD entry); a **Plane** is a logical 2D cross-section of a Volume at a given Z. A Page contains exactly one Plane's worth of pixels, but the terms should not be interchanged — Pages exist in TIFF-land, Planes exist in Volume-land. Avoid "slice" as it's ambiguous between both.
+- **"Volume"**: In `lucida-store`, the in-memory 5D u16 array struct. In the viewer, the proper term is **Dataset**.
 
-- **"Chunk Size" axis order**: the codebase passes Chunk Size as `[x, y, z]` (matching lucida-core convention), but Zarr metadata stores chunk shape as `[t, c, z, y, x]`. Always state which convention when discussing Chunk Size to avoid transposition bugs.
+- **"Channel"**: In `lucida-store`, the C dimension (fluorescence wavelength). In `lucida-core`, a **Layer** represents the same concept.
 
-- **"Scale"** is overloaded: it can mean the **Cumulative Scale** array `[x, y, z]` on a Level Spec, the `SetVolumeScale` command in lucida-core, the **Voxel Size** itself, or the UI zoom. Use **Cumulative Scale** for per-Level factors, **Voxel Size** for physical spacing, and reserve "scale" for UI/rendering contexts.
+- **"Viewer" vs "Client"**: **Viewer** for the Python SDK API, **Client** for server-side protocol. Same entity, different perspective.
 
-- **"Store" vs "Dataset"**: a **Store** is the on-disk Zarr directory tree produced by `lucida-store`. A **Dataset** is a loaded volume in the viewer. They represent the same data artifact from producer and consumer perspectives respectively.
+- **"Viewport"**: Use **viewport** for pixel dimensions, **VisibleRegion** for computed voxel bounds, **ViewportData** for the assembled numpy result.
 
-- **"Volume"** is overloaded: in `lucida-store`, **Volume** is the in-memory 5D u16 array read from a TIFF (a struct). In the viewer, "volume" loosely refers to the 3D data being rendered. In the data model, the proper viewer-side term is **Dataset**.
+- **"Seed"/"seeding"**: Both view seeding and minimap seeding fetch the coarsest level into a texture. Distinguish as "view seeding" vs "minimap seeding" in conversation.
 
-- **"Channel"** is overloaded: in `lucida-store`, a **Channel** is the C dimension of a Volume (e.g. fluorescence wavelength). In `lucida-core`, a **Layer** represents the same concept. The data pipeline calls it a Channel; the viewer calls it a Layer.
+- **"Bridge"**: `Bridge` is the WebSocket client class. `useBridge` is the React hook that adds state management on top.
 
-- **"Viewer" vs "Client"**: the Python SDK class is called `Viewer`, but from the server's perspective it is a **Client** with a **ClientId**. In conversation, use **Viewer** when discussing the Python API and user-facing behavior, **Client** when discussing server-side routing and protocol. A Viewer IS a Client — the distinction is perspective, not type.
-
-- **"Viewport"** is used loosely to mean several things: the Camera's visible screen region (pixel dimensions), the visible voxel region (**VisibleRegion**), and the assembled data result (**ViewportData**). The Python API compounds this by naming the data read/write methods `read_viewport`/`write_viewport`. Use **viewport** only for the pixel dimensions (width, height), **VisibleRegion** for the computed voxel bounds, and **ViewportData** for the assembled numpy result.
-
-- **"Worker"** is overloaded in lucida-web: it can mean the **GPU worker** (WebGPU rendering), an **LZ4 worker** (decompression), or the internal concurrent fetch tasks in **ChunkStore** (also named `runFetchTask` in code). Always use the qualified form: **GPU worker**, **LZ4 worker**, or "fetch task" for ChunkStore internals.
-
-- **"Seed"/"seeding"** is used for both **Fallback texture** assembly (uploading the coarsest level to the main view on T/C/Z change) and **Minimap** overview loading (uploading the coarsest level to the minimap). Both involve the same data source (coarsest **Level**) but target different GPU textures. Consider distinguishing as "view seeding" vs "minimap seeding" in conversation.
-
-- **"Tile"** appears in slice rendering code (`SliceTile`, `sliceUploadTilesForLayer`) as a synonym for a 2D chunk. The domain term is **Chunk** regardless of dimensionality — avoid "tile" to prevent confusion with the unrelated concept of screen tiling.
-
-- **"Bridge"** has a naming collision potential: `bridge.ts` is the WebSocket client class, but `useBridge` hook adds React state management on top. In code, `Bridge` (capitalized) is the WebSocket class; the hook wraps it with presence tracking, follow mode, and remote dataset setup. In conversation, **Bridge** refers to the WebSocket connection layer, not the React hook.
+- **"Worker"**: Always qualify — **GPU worker**, **LZ4 worker**, or **fetch task** (for ChunkStore internals).
