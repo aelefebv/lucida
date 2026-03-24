@@ -95,7 +95,7 @@ export class ChunkStore {
       this.inFlightSince = performance.now();
       for (const coord of uncached) this.inFlight.add(coord.key);
       this.pendingQueue = [...uncached];
-      this.launchWorkers();
+      this.launchFetchTasks();
       return;
     }
 
@@ -119,7 +119,7 @@ export class ChunkStore {
       }
     }
 
-    this.launchWorkers();
+    this.launchFetchTasks();
   }
 
   destroy(): void {
@@ -144,7 +144,7 @@ export class ChunkStore {
     });
   }
 
-  private launchWorkers(): void {
+  private launchFetchTasks(): void {
     if (!this.abortController) this.abortController = new AbortController();
     const signal = this.abortController.signal;
     const gen = this.workerGeneration;
@@ -154,11 +154,11 @@ export class ChunkStore {
     );
     for (let i = 0; i < toStart; i++) {
       this.activeWorkerCount++;
-      this.runWorker(signal, gen);
+      this.runFetchTask(signal, gen);
     }
   }
 
-  private async runWorker(signal: AbortSignal, gen: number): Promise<void> {
+  private async runFetchTask(signal: AbortSignal, gen: number): Promise<void> {
     try {
       while (this.pendingQueue.length > 0) {
         if (signal.aborted) return;

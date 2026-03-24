@@ -274,7 +274,7 @@
 
 - **"Zoom"** means different things by context. In **View2D**, zoom is a direct scale factor (1.0 = native). In **View3D**, **Effective zoom** is derived from distance, FOV, and voxel density. The chunk planner normalizes both into pixels-per-voxel, but the raw values are not comparable.
 
-- **"Model matrix"** has two flavors. The raw `VolumeTransform.model` maps unit space to world space for a single dataset. The **Corrected model matrix** (in `WasmScene::model_matrix_for`) applies a global normalization factor and Y-translation for multi-dataset alignment. GPU code receives the corrected version; the raw version is only used internally.
+- **"Model matrix"** has two flavors. The raw `VolumeTransform.model` maps unit space to world space for a single dataset. The **Corrected model matrix** (in `WasmScene::scene_model_matrix_for`) applies a global normalization factor and Y-translation for multi-dataset alignment. GPU code receives the corrected version; the raw version is only used internally.
 
 - **"clients"** is used for two different maps in the server. `Session.clients` maps ClientId to **PresenceState** (tracking what each client is viewing). `ClientSenders` in `main.rs` maps ClientId to mpsc senders (routing **Unicast** messages). These serve entirely different purposes — consider renaming `ClientSenders` to **UnicastRoutes** or **ChunkRouters** to disambiguate.
 
@@ -300,7 +300,7 @@
 
 - **"Viewport"** is used loosely to mean several things: the Camera's visible screen region (pixel dimensions), the visible voxel region (**VisibleRegion**), and the assembled data result (**ViewportData**). The Python API compounds this by naming the data read/write methods `read_viewport`/`write_viewport`. Use **viewport** only for the pixel dimensions (width, height), **VisibleRegion** for the computed voxel bounds, and **ViewportData** for the assembled numpy result.
 
-- **"Worker"** is overloaded in lucida-web: it can mean the **GPU worker** (WebGPU rendering), an **LZ4 worker** (decompression), or the internal concurrent fetch tasks in **ChunkStore** (also named `runWorker` in code). Always use the qualified form: **GPU worker**, **LZ4 worker**, or "fetch task" for ChunkStore internals.
+- **"Worker"** is overloaded in lucida-web: it can mean the **GPU worker** (WebGPU rendering), an **LZ4 worker** (decompression), or the internal concurrent fetch tasks in **ChunkStore** (also named `runFetchTask` in code). Always use the qualified form: **GPU worker**, **LZ4 worker**, or "fetch task" for ChunkStore internals.
 
 - **"Seed"/"seeding"** is used for both **Fallback texture** assembly (uploading the coarsest level to the main view on T/C/Z change) and **Minimap** overview loading (uploading the coarsest level to the minimap). Both involve the same data source (coarsest **Level**) but target different GPU textures. Consider distinguishing as "view seeding" vs "minimap seeding" in conversation.
 

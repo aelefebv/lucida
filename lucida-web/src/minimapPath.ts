@@ -186,8 +186,8 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     const settings = allSettings[dsId];
     if (!settings || !settings.visible) continue;
 
-    const model = new Float32Array(scene.model_matrix_for(dsId));
-    const invModel = new Float32Array(scene.inv_model_matrix_for(dsId));
+    const model = new Float32Array(scene.scene_model_matrix_for(dsId));
+    const invModel = new Float32Array(scene.inv_scene_model_matrix_for(dsId));
 
     layers.push({
       datasetId: dsId,

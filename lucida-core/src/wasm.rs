@@ -353,7 +353,7 @@ impl WasmScene {
     /// This is where the center-screen ray hits the volume bounding box.
     pub fn ray_hit_local_3d(&self, dataset_id: &str) -> Vec<f32> {
         if let Camera::View3D(ref v) = self.inner.camera {
-            let inv_model_vec = self.inv_model_matrix_for(dataset_id);
+            let inv_model_vec = self.inv_scene_model_matrix_for(dataset_id);
             let mut im = [0.0f64; 16];
             for (i, val) in inv_model_vec.iter().enumerate() {
                 im[i] = *val as f64;
@@ -408,7 +408,7 @@ impl WasmScene {
         Ok(())
     }
 
-    pub fn model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
+    pub fn scene_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
         match self.inner.dataset_by_id(dataset_id).and_then(|d| d.volume_transform.as_ref()) {
             Some(t) => {
                 let global_max = self.inner.global_max_physical_extent();
@@ -435,7 +435,7 @@ impl WasmScene {
         }
     }
 
-    pub fn inv_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
+    pub fn inv_scene_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
         match self.inner.dataset_by_id(dataset_id).and_then(|d| d.volume_transform.as_ref()) {
             Some(t) => {
                 let global_max = self.inner.global_max_physical_extent();

@@ -271,8 +271,8 @@ export function tickVolume(
     const dsShapeV = dsVol.info.levels[0].shape; // [T, C, Z, Y, X]
     if (viewC >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
 
-    const model = new Float32Array(scene.model_matrix_for(dsId));
-    const invModel = new Float32Array(scene.inv_model_matrix_for(dsId));
+    const model = new Float32Array(scene.scene_model_matrix_for(dsId));
+    const invModel = new Float32Array(scene.inv_scene_model_matrix_for(dsId));
 
     layers.push({
       datasetId: dsId,
