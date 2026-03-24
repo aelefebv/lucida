@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
 use lucida_core::camera::Camera;
-use lucida_core::command::Command;
+use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
 use lucida_core::scene::{DisplayState, Layer, LevelInfo, Scene};
 use lucida_core::view::ViewState;
@@ -35,53 +35,53 @@ impl PyScene {
     }
 
     fn pan(&mut self, dx: f64, dy: f64) -> String {
-        let cmd = Command::Pan { dx, dy };
-        self.inner.apply(cmd.clone());
+        let cmd = ViewportCommand::Pan { dx, dy };
+        self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
 
     fn zoom_by(&mut self, factor: f64) -> String {
-        let cmd = Command::ZoomBy { factor };
-        self.inner.apply(cmd.clone());
+        let cmd = ViewportCommand::ZoomBy { factor };
+        self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
 
     fn set_center(&mut self, x: f64, y: f64) -> String {
-        let cmd = Command::SetCenter { x, y };
-        self.inner.apply(cmd.clone());
+        let cmd = ViewportCommand::SetCenter { x, y };
+        self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
 
     fn set_zoom(&mut self, value: f64) -> String {
-        let cmd = Command::SetZoom { value };
-        self.inner.apply(cmd.clone());
+        let cmd = ViewportCommand::SetZoom { value };
+        self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
 
     fn set_z(&mut self, z: u32) -> String {
-        let cmd = Command::SetZ { z };
-        self.inner.apply(cmd.clone());
+        let cmd = ViewportCommand::SetZ { z };
+        self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
 
     fn set_t(&mut self, t: u32) -> String {
-        let cmd = Command::SetT { t };
-        self.inner.apply(cmd.clone());
+        let cmd = ViewportCommand::SetT { t };
+        self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
 
     fn set_c(&mut self, c: u32) -> String {
-        let cmd = Command::SetC { c };
-        self.inner.apply(cmd.clone());
+        let cmd = ViewportCommand::SetC { c };
+        self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
 
     fn set_mode_2d(&mut self) {
-        self.inner.apply(Command::SetMode2D);
+        self.inner.apply(ViewportCommand::SetMode2D.into());
     }
 
     fn set_mode_3d(&mut self) {
-        self.inner.apply(Command::SetMode3D);
+        self.inner.apply(ViewportCommand::SetMode3D.into());
     }
 
     fn is_3d(&self) -> bool {
@@ -89,8 +89,8 @@ impl PyScene {
     }
 
     fn rotate_3d(&mut self, d_theta: f64, d_phi: f64) -> String {
-        let cmd = Command::Rotate3D { d_theta, d_phi };
-        self.inner.apply(cmd.clone());
+        let cmd = ViewportCommand::Rotate3D { d_theta, d_phi };
+        self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
 

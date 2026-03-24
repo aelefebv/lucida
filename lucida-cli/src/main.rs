@@ -3,7 +3,7 @@ mod connection;
 use clap::{Parser, Subcommand};
 
 use lucida_core::camera::Camera;
-use lucida_core::command::Command;
+use lucida_core::command::ViewportCommand;
 use lucida_core::protocol::ClientId;
 use lucida_core::scene::Scene;
 
@@ -131,22 +131,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cmd => {
             let mut scene = build_scene(&snapshot, cli.peer);
             let command = match cmd {
-                Sub::Pan { dx, dy } => Command::Pan { dx, dy },
+                Sub::Pan { dx, dy } => ViewportCommand::Pan { dx, dy },
                 Sub::Zoom { factor } => match scene.camera {
-                    Camera::View2D(_) => Command::ZoomBy { factor },
-                    Camera::View3D(_) => Command::Zoom3D { delta: 1.0 / factor - 1.0 },
+                    Camera::View2D(_) => ViewportCommand::ZoomBy { factor },
+                    Camera::View3D(_) => ViewportCommand::Zoom3D { delta: 1.0 / factor - 1.0 },
                 },
                 Sub::Slice { axis, index } => match axis.as_str() {
-                    "z" => Command::SetZ { z: index },
-                    "t" => Command::SetT { t: index },
-                    "c" => Command::SetC { c: index },
+                    "z" => ViewportCommand::SetZ { z: index },
+                    "t" => ViewportCommand::SetT { t: index },
+                    "c" => ViewportCommand::SetC { c: index },
                     _ => return Err(format!("unknown axis: {axis}").into()),
                 },
-                Sub::Contrast { min, max } => Command::SetContrast { min, max },
-                Sub::Gamma { gamma } => Command::SetGamma { gamma },
-                Sub::Center { x, y } => Command::SetCenter { x, y },
+                Sub::Contrast { min, max } => ViewportCommand::SetContrast { min, max },
+                Sub::Gamma { gamma } => ViewportCommand::SetGamma { gamma },
+                Sub::Center { x, y } => ViewportCommand::SetCenter { x, y },
                 Sub::SetZoom { value } => match scene.camera {
-                    Camera::View2D(_) => Command::SetZoom { value },
+                    Camera::View2D(_) => ViewportCommand::SetZoom { value },
                     Camera::View3D(_) => return Err("set-zoom is only supported in 2D mode".into()),
                 },
                 Sub::Rotate { theta, phi, radians } => {
@@ -155,14 +155,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         (theta.to_radians(), phi.to_radians())
                     };
-                    Command::Rotate3D { d_theta: t, d_phi: p }
+                    ViewportCommand::Rotate3D { d_theta: t, d_phi: p }
                 }
-                Sub::SetMode2d => Command::SetMode2D,
-                Sub::SetMode3d => Command::SetMode3D,
+                Sub::SetMode2d => ViewportCommand::SetMode2D,
+                Sub::SetMode3d => ViewportCommand::SetMode3D,
                 Sub::State | Sub::VisibleChunks | Sub::Steer { .. } => unreachable!(),
             };
 
-            scene.apply(command);
+            scene.apply(command.into());
             connection::send_presence(&mut sink, &scene.camera, &scene.view, &scene.display)
                 .await?;
         }

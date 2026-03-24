@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
-use crate::command::Command;
+use crate::command::DocumentCommand;
 use crate::scene::{DisplayState, DocumentState, DatasetDisplaySettings};
 use crate::view::ViewState;
 
@@ -30,7 +30,7 @@ pub struct PresenceState {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
     /// A document command (shared, sequenced).
-    Command { command: Command },
+    Command { command: DocumentCommand },
     /// Viewport presence update (ephemeral, latest-wins).
     Presence {
         camera: Camera,
@@ -61,7 +61,7 @@ pub enum ServerMessage {
         your_id: ClientId,
     },
     /// Command from another client, broadcast to all except sender.
-    CommandBroadcast { seq: u64, command: Command },
+    CommandBroadcast { seq: u64, command: DocumentCommand },
     /// Sent only to the command's sender confirming application.
     Ack { seq: u64 },
     /// A new client connected.
@@ -188,7 +188,7 @@ mod tests {
 
     #[test]
     fn command_broadcast_round_trips() {
-        let cmd = Command::Pan { dx: 1.0, dy: 2.0 };
+        let cmd = DocumentCommand::RemoveDataset { id: "ds1".into() };
         let msg = ServerMessage::CommandBroadcast { seq: 5, command: cmd };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -196,11 +196,10 @@ mod tests {
             ServerMessage::CommandBroadcast { seq, command } => {
                 assert_eq!(seq, 5);
                 match command {
-                    Command::Pan { dx, dy } => {
-                        assert_eq!(dx, 1.0);
-                        assert_eq!(dy, 2.0);
+                    DocumentCommand::RemoveDataset { id } => {
+                        assert_eq!(id, "ds1");
                     }
-                    _ => panic!("expected Pan command"),
+                    _ => panic!("expected RemoveDataset command"),
                 }
             }
             _ => panic!("expected CommandBroadcast"),
@@ -210,7 +209,7 @@ mod tests {
     #[test]
     fn client_message_command_round_trips() {
         let msg = ClientMessage::Command {
-            command: Command::AddDataset {
+            command: DocumentCommand::AddDataset {
                 id: "ds1".into(),
                 name: "test".into(),
                 layers: vec![],

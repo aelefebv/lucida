@@ -1,9 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 
 use lucida_core::camera::Camera;
-use lucida_core::command::Command;
+use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, PresenceState, ServerMessage};
-use lucida_core::scene::{DisplayState, DocumentState, DatasetDisplaySettings, Scene};
+use lucida_core::scene::{DisplayState, DocumentState, DatasetDisplaySettings};
 use lucida_core::view::ViewState;
 
 const HISTORY_CAPACITY: usize = 256;
@@ -11,7 +11,7 @@ const HISTORY_CAPACITY: usize = 256;
 pub struct Session {
     pub document: DocumentState,
     pub seq: u64,
-    history: VecDeque<(u64, Command)>,
+    history: VecDeque<(u64, DocumentCommand)>,
     /// Maps dataset_id → client_id of the data source.
     pub data_sources: HashMap<String, ClientId>,
     /// Per-client ephemeral presence state.
@@ -41,14 +41,8 @@ impl Session {
     }
 
     /// Apply a document command. Returns the new seq number.
-    /// Only document commands (AddDataset, RemoveDataset, SetVolumeScale) should be passed here.
-    pub fn apply(&mut self, cmd: Command) -> u64 {
-        // Apply document commands to a temporary Scene to reuse the existing apply logic.
-        // We only need dataset mutations — build a minimal scene.
-        let mut scene = Scene::new([1, 1]);
-        scene.document = self.document.clone();
-        scene.apply(cmd.clone());
-        self.document = scene.document;
+    pub fn apply(&mut self, cmd: DocumentCommand) -> u64 {
+        self.document.apply(cmd.clone());
 
         self.seq += 1;
         if self.history.len() == HISTORY_CAPACITY {
@@ -192,7 +186,7 @@ mod tests {
     #[test]
     fn apply_increments_seq() {
         let mut session = Session::new();
-        let seq = session.apply(Command::AddDataset {
+        let seq = session.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
             layers: vec![],
@@ -206,7 +200,7 @@ mod tests {
     #[test]
     fn apply_mutates_document() {
         let mut session = Session::new();
-        session.apply(Command::AddDataset {
+        session.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
             layers: vec![],
@@ -221,7 +215,7 @@ mod tests {
     #[test]
     fn snapshot_contains_current_state() {
         let mut session = Session::new();
-        session.apply(Command::AddDataset {
+        session.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
             layers: vec![],
@@ -249,7 +243,7 @@ mod tests {
     fn history_ring_buffer_caps_at_256() {
         let mut session = Session::new();
         for _ in 0..300 {
-            session.apply(Command::SetVolumeScale {
+            session.apply(DocumentCommand::SetVolumeScale {
                 shape: [1, 1, 1],
                 scale: [1.0, 1.0, 1.0],
             });

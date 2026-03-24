@@ -1,12 +1,36 @@
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
-use crate::scene::{BlendMode, Dataset, Layer, RenderMode, Scene};
-use crate::transform;
+use crate::scene::{BlendMode, Layer, RenderMode, Scene};
 
+/// Commands that mutate shared document state (datasets).
+/// These are sequenced, persisted, and broadcast to all clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum Command {
+pub enum DocumentCommand {
+    AddDataset {
+        id: String,
+        name: String,
+        layers: Vec<Layer>,
+        volume_shape: Option<[u32; 3]>,
+        volume_scale: Option<[f64; 3]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_metadata: Option<serde_json::Value>,
+    },
+    RemoveDataset {
+        id: String,
+    },
+    SetVolumeScale {
+        shape: [u32; 3],
+        scale: [f64; 3],
+    },
+}
+
+/// Commands that mutate local-only viewport/display state.
+/// These are applied locally and emitted as presence updates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ViewportCommand {
     // Mode
     #[serde(rename = "set_mode_2d")]
     SetMode2D,
@@ -31,25 +55,10 @@ pub enum Command {
     SetZRange { start: u32, end: u32 },
     SetT { t: u32 },
     SetC { c: u32 },
-    // Volume
-    SetVolumeScale { shape: [u32; 3], scale: [f64; 3] },
-    // Dataset management
-    AddDataset {
-        id: String,
-        name: String,
-        layers: Vec<Layer>,
-        volume_shape: Option<[u32; 3]>,
-        volume_scale: Option<[f64; 3]>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_metadata: Option<serde_json::Value>,
-    },
-    RemoveDataset {
-        id: String,
-    },
     // Display
     SetContrast { min: f64, max: f64 },
     SetGamma { gamma: f64 },
-    // Per-layer display
+    // Per-dataset display
     SetDatasetOrder { order: Vec<String> },
     SetDatasetVisible { dataset_id: String, visible: bool },
     SetDatasetOpacity { dataset_id: String, opacity: f32 },
@@ -59,129 +68,142 @@ pub enum Command {
     SetDatasetRenderMode { dataset_id: String, render_mode: RenderMode },
 }
 
-impl Command {
-    /// Returns `true` if this command mutates shared document state (datasets).
-    /// Document commands are sequenced, persisted, and broadcast to all clients.
-    /// Viewport/display commands are local-only and emitted as presence.
-    pub fn is_document_command(&self) -> bool {
-        matches!(
-            self,
-            Command::AddDataset { .. }
-                | Command::RemoveDataset { .. }
-                | Command::SetVolumeScale { .. }
-        )
+/// Wrapper enum for serde compatibility. Deserializes from the same
+/// JSON format as before (e.g. `{"type":"pan","dx":10.0,"dy":-5.0}`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Command {
+    Document(DocumentCommand),
+    Viewport(ViewportCommand),
+}
+
+impl From<DocumentCommand> for Command {
+    fn from(cmd: DocumentCommand) -> Self {
+        Command::Document(cmd)
+    }
+}
+
+impl From<ViewportCommand> for Command {
+    fn from(cmd: ViewportCommand) -> Self {
+        Command::Viewport(cmd)
     }
 }
 
 impl Scene {
     pub fn apply(&mut self, cmd: Command) {
         match cmd {
-            Command::SetMode2D => self.set_mode_2d(),
-            Command::SetMode3D => self.set_mode_3d(),
-            Command::SetViewport { width, height } => self.camera.set_viewport(width, height),
-            Command::Pan { dx, dy } => {
+            Command::Document(doc_cmd) => {
+                // Handle Scene-level side effects for document commands.
+                match &doc_cmd {
+                    DocumentCommand::AddDataset { id, .. } => {
+                        if !self.dataset_order.contains(id) {
+                            self.dataset_order.push(id.clone());
+                        }
+                        self.dataset_settings
+                            .entry(id.clone())
+                            .or_insert_with(Default::default);
+                    }
+                    DocumentCommand::RemoveDataset { id } => {
+                        self.dataset_order.retain(|s| s != id);
+                        self.dataset_settings.remove(id);
+                    }
+                    DocumentCommand::SetVolumeScale { .. } => {}
+                }
+                self.document.apply(doc_cmd);
+            }
+            Command::Viewport(vp_cmd) => self.apply_viewport(vp_cmd),
+        }
+    }
+
+    fn apply_viewport(&mut self, cmd: ViewportCommand) {
+        match cmd {
+            ViewportCommand::SetMode2D => self.set_mode_2d(),
+            ViewportCommand::SetMode3D => self.set_mode_3d(),
+            ViewportCommand::SetViewport { width, height } => {
+                self.camera.set_viewport(width, height)
+            }
+            ViewportCommand::Pan { dx, dy } => {
                 if let Camera::View2D(ref mut v) = self.camera {
                     v.pan(dx, dy);
                 }
             }
-            Command::ZoomBy { factor } => {
+            ViewportCommand::ZoomBy { factor } => {
                 if let Camera::View2D(ref mut v) = self.camera {
                     v.zoom_by(factor);
                 }
             }
-            Command::SetCenter { x, y } => {
+            ViewportCommand::SetCenter { x, y } => {
                 if let Camera::View2D(ref mut v) = self.camera {
                     v.center = [x, y];
                 }
             }
-            Command::SetZoom { value } => {
+            ViewportCommand::SetZoom { value } => {
                 if let Camera::View2D(ref mut v) = self.camera {
                     v.zoom = value;
                 }
             }
-            Command::Rotate3D { d_theta, d_phi } => {
+            ViewportCommand::Rotate3D { d_theta, d_phi } => {
                 if let Camera::View3D(ref mut v) = self.camera {
                     v.rotate(d_theta, d_phi);
                 }
             }
-            Command::Zoom3D { delta } => {
+            ViewportCommand::Zoom3D { delta } => {
                 if let Camera::View3D(ref mut v) = self.camera {
                     v.zoom(delta);
                 }
             }
-            Command::Pan3D { dx, dy } => {
+            ViewportCommand::Pan3D { dx, dy } => {
                 if let Camera::View3D(ref mut v) = self.camera {
                     v.pan(dx, dy);
                 }
             }
-            Command::SetZ { z } => self.view.set_z(z),
-            Command::SetZRange { start, end } => self.view.set_z_range(start..end),
-            Command::SetT { t } => self.view.t = t,
-            Command::SetC { c } => self.view.c = c,
-            Command::SetVolumeScale { shape, scale } => self.set_volume_scale(shape, scale),
-            Command::AddDataset {
-                id,
-                name,
-                layers,
-                volume_shape,
-                volume_scale,
-                client_metadata,
-            } => {
-                let volume_transform =
-                    if let (Some(shape), Some(scale)) = (volume_shape, volume_scale) {
-                        Some(transform::compute_volume_transform(shape, scale))
-                    } else {
-                        None
-                    };
-                self.add_dataset(Dataset {
-                    id,
-                    name,
-                    layers,
-                    volume_transform,
-                    volume_shape,
-                    client_metadata,
-                });
-            }
-            Command::RemoveDataset { id } => {
-                self.remove_dataset(&id);
-            }
-            Command::SetContrast { min, max } => {
+            ViewportCommand::SetZ { z } => self.view.set_z(z),
+            ViewportCommand::SetZRange { start, end } => self.view.set_z_range(start..end),
+            ViewportCommand::SetT { t } => self.view.t = t,
+            ViewportCommand::SetC { c } => self.view.c = c,
+            ViewportCommand::SetContrast { min, max } => {
                 self.display.contrast_min = min;
                 self.display.contrast_max = max;
             }
-            Command::SetGamma { gamma } => {
+            ViewportCommand::SetGamma { gamma } => {
                 self.display.gamma = gamma;
             }
-            Command::SetDatasetOrder { order } => {
+            ViewportCommand::SetDatasetOrder { order } => {
                 self.dataset_order = order;
             }
-            Command::SetDatasetVisible { dataset_id, visible } => {
+            ViewportCommand::SetDatasetVisible { dataset_id, visible } => {
                 if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.visible = visible;
                 }
             }
-            Command::SetDatasetOpacity { dataset_id, opacity } => {
+            ViewportCommand::SetDatasetOpacity { dataset_id, opacity } => {
                 if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.opacity = opacity;
                 }
             }
-            Command::SetDatasetContrast { dataset_id, min, max } => {
+            ViewportCommand::SetDatasetContrast { dataset_id, min, max } => {
                 if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.contrast_min = min;
                     s.contrast_max = max;
                 }
             }
-            Command::SetDatasetGamma { dataset_id, gamma } => {
+            ViewportCommand::SetDatasetGamma { dataset_id, gamma } => {
                 if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.gamma = gamma;
                 }
             }
-            Command::SetDatasetBlendMode { dataset_id, blend_mode } => {
+            ViewportCommand::SetDatasetBlendMode {
+                dataset_id,
+                blend_mode,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.blend_mode = blend_mode;
                 }
             }
-            Command::SetDatasetRenderMode { dataset_id, render_mode } => {
+            ViewportCommand::SetDatasetRenderMode {
+                dataset_id,
+                render_mode,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.render_mode = render_mode;
                 }
@@ -195,17 +217,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn command_round_trips_through_json() {
-        let cmd = Command::Pan { dx: 10.0, dy: -5.0 };
+    fn viewport_command_round_trips_through_json() {
+        let cmd = ViewportCommand::Pan { dx: 10.0, dy: -5.0 };
         let json = serde_json::to_string(&cmd).unwrap();
         assert_eq!(json, r#"{"type":"pan","dx":10.0,"dy":-5.0}"#);
-        let _parsed: Command = serde_json::from_str(&json).unwrap();
+        let _parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn command_wrapper_round_trips_viewport() {
+        let cmd = Command::Viewport(ViewportCommand::Pan { dx: 10.0, dy: -5.0 });
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert_eq!(json, r#"{"type":"pan","dx":10.0,"dy":-5.0}"#);
+        let parsed: Command = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, Command::Viewport(ViewportCommand::Pan { .. })));
+    }
+
+    #[test]
+    fn command_wrapper_round_trips_document() {
+        let cmd = Command::Document(DocumentCommand::AddDataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            layers: vec![],
+            volume_shape: None,
+            volume_scale: None,
+            client_metadata: None,
+        });
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"add_dataset\""));
+        let parsed: Command = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, Command::Document(DocumentCommand::AddDataset { .. })));
     }
 
     #[test]
     fn apply_pan_updates_center() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(Command::Pan { dx: 100.0, dy: 0.0 });
+        scene.apply(ViewportCommand::Pan { dx: 100.0, dy: 0.0 }.into());
         if let Camera::View2D(ref v) = scene.camera {
             assert_eq!(v.center, [100.0, 0.0]);
         } else {
@@ -216,20 +263,20 @@ mod tests {
     #[test]
     fn apply_set_z_updates_view() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(Command::SetZ { z: 42 });
+        scene.apply(ViewportCommand::SetZ { z: 42 }.into());
         assert_eq!(scene.view.z_range, 42..43);
     }
 
     #[test]
     fn apply_set_mode_3d_switches_camera() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(Command::SetMode3D);
+        scene.apply(ViewportCommand::SetMode3D.into());
         assert!(matches!(scene.camera, Camera::View3D(_)));
     }
 
     #[test]
     fn add_dataset_command_round_trips() {
-        let cmd = Command::AddDataset {
+        let cmd = DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test dataset".into(),
             layers: vec![],
@@ -239,9 +286,9 @@ mod tests {
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"add_dataset\""));
-        let parsed: Command = serde_json::from_str(&json).unwrap();
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::AddDataset { id, name, volume_shape, client_metadata, .. } => {
+            DocumentCommand::AddDataset { id, name, volume_shape, client_metadata, .. } => {
                 assert_eq!(id, "ds1");
                 assert_eq!(name, "test dataset");
                 assert_eq!(volume_shape, Some([100, 200, 300]));
@@ -253,23 +300,23 @@ mod tests {
 
     #[test]
     fn remove_dataset_command_round_trips() {
-        let cmd = Command::RemoveDataset { id: "ds1".into() };
+        let cmd = DocumentCommand::RemoveDataset { id: "ds1".into() };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"remove_dataset\""));
-        let _parsed: Command = serde_json::from_str(&json).unwrap();
+        let _parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
     }
 
     #[test]
     fn apply_add_dataset_populates_scene() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(Command::AddDataset {
+        scene.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
             layers: vec![],
             volume_shape: Some([100, 200, 300]),
             volume_scale: Some([1.0, 1.0, 1.0]),
             client_metadata: None,
-        });
+        }.into());
         assert_eq!(scene.document.datasets.len(), 1);
         assert_eq!(scene.document.datasets[0].id, "ds1");
         assert!(scene.document.datasets[0].volume_transform.is_some());
@@ -278,35 +325,35 @@ mod tests {
 
     #[test]
     fn set_dataset_order_round_trips() {
-        let cmd = Command::SetDatasetOrder { order: vec!["a".into(), "b".into()] };
+        let cmd = ViewportCommand::SetDatasetOrder { order: vec!["a".into(), "b".into()] };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"set_dataset_order\""));
-        let parsed: Command = serde_json::from_str(&json).unwrap();
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::SetDatasetOrder { order } => assert_eq!(order, vec!["a", "b"]),
+            ViewportCommand::SetDatasetOrder { order } => assert_eq!(order, vec!["a", "b"]),
             _ => panic!("expected SetDatasetOrder"),
         }
     }
 
     #[test]
     fn set_dataset_visible_round_trips() {
-        let cmd = Command::SetDatasetVisible { dataset_id: "ds1".into(), visible: false };
+        let cmd = ViewportCommand::SetDatasetVisible { dataset_id: "ds1".into(), visible: false };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"set_dataset_visible\""));
-        let _parsed: Command = serde_json::from_str(&json).unwrap();
+        let _parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
     }
 
     #[test]
     fn set_dataset_blend_mode_round_trips() {
-        let cmd = Command::SetDatasetBlendMode {
+        let cmd = ViewportCommand::SetDatasetBlendMode {
             dataset_id: "ds1".into(),
             blend_mode: crate::scene::BlendMode::Additive,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"additive\""));
-        let parsed: Command = serde_json::from_str(&json).unwrap();
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::SetDatasetBlendMode { blend_mode, .. } => {
+            ViewportCommand::SetDatasetBlendMode { blend_mode, .. } => {
                 assert_eq!(blend_mode, crate::scene::BlendMode::Additive);
             }
             _ => panic!("expected SetDatasetBlendMode"),
@@ -314,32 +361,16 @@ mod tests {
     }
 
     #[test]
-    fn dataset_commands_are_not_document_commands() {
-        let cmds: Vec<Command> = vec![
-            Command::SetDatasetOrder { order: vec![] },
-            Command::SetDatasetVisible { dataset_id: "x".into(), visible: true },
-            Command::SetDatasetOpacity { dataset_id: "x".into(), opacity: 0.5 },
-            Command::SetDatasetContrast { dataset_id: "x".into(), min: 0.0, max: 1.0 },
-            Command::SetDatasetGamma { dataset_id: "x".into(), gamma: 1.0 },
-            Command::SetDatasetBlendMode { dataset_id: "x".into(), blend_mode: crate::scene::BlendMode::Max },
-            Command::SetDatasetRenderMode { dataset_id: "x".into(), render_mode: crate::scene::RenderMode::MaxIntensity },
-        ];
-        for cmd in cmds {
-            assert!(!cmd.is_document_command(), "expected not document command: {:?}", cmd);
-        }
-    }
-
-    #[test]
     fn set_dataset_render_mode_round_trips() {
-        let cmd = Command::SetDatasetRenderMode {
+        let cmd = ViewportCommand::SetDatasetRenderMode {
             dataset_id: "ds1".into(),
             render_mode: crate::scene::RenderMode::MaxIntensity,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"max_intensity\""));
-        let parsed: Command = serde_json::from_str(&json).unwrap();
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::SetDatasetRenderMode { render_mode, .. } => {
+            ViewportCommand::SetDatasetRenderMode { render_mode, .. } => {
                 assert_eq!(render_mode, crate::scene::RenderMode::MaxIntensity);
             }
             _ => panic!("expected SetDatasetRenderMode"),
@@ -349,39 +380,71 @@ mod tests {
     #[test]
     fn apply_set_dataset_visible_updates_settings() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(Command::AddDataset {
+        scene.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
             client_metadata: None,
-        });
+        }.into());
         assert!(scene.dataset_settings["ds1"].visible);
-        scene.apply(Command::SetDatasetVisible { dataset_id: "ds1".into(), visible: false });
+        scene.apply(ViewportCommand::SetDatasetVisible { dataset_id: "ds1".into(), visible: false }.into());
         assert!(!scene.dataset_settings["ds1"].visible);
     }
 
     #[test]
     fn apply_set_dataset_opacity_updates_settings() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(Command::AddDataset {
+        scene.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
             client_metadata: None,
-        });
+        }.into());
         assert_eq!(scene.dataset_settings["ds1"].opacity, 1.0);
-        scene.apply(Command::SetDatasetOpacity { dataset_id: "ds1".into(), opacity: 0.5 });
+        scene.apply(ViewportCommand::SetDatasetOpacity { dataset_id: "ds1".into(), opacity: 0.5 }.into());
         assert_eq!(scene.dataset_settings["ds1"].opacity, 0.5);
     }
 
     #[test]
     fn apply_remove_dataset_removes_from_scene() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(Command::AddDataset {
+        scene.apply(DocumentCommand::AddDataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            layers: vec![],
+            volume_shape: None,
+            volume_scale: None,
+            client_metadata: None,
+        }.into());
+        assert_eq!(scene.document.datasets.len(), 1);
+        scene.apply(DocumentCommand::RemoveDataset { id: "ds1".into() }.into());
+        assert!(scene.document.datasets.is_empty());
+    }
+
+    #[test]
+    fn document_state_apply_add_dataset() {
+        let mut doc = crate::scene::DocumentState { datasets: Vec::new() };
+        doc.apply(DocumentCommand::AddDataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            layers: vec![],
+            volume_shape: Some([100, 200, 300]),
+            volume_scale: Some([1.0, 1.0, 1.0]),
+            client_metadata: None,
+        });
+        assert_eq!(doc.datasets.len(), 1);
+        assert_eq!(doc.datasets[0].id, "ds1");
+        assert!(doc.datasets[0].volume_transform.is_some());
+    }
+
+    #[test]
+    fn document_state_apply_remove_dataset() {
+        let mut doc = crate::scene::DocumentState { datasets: Vec::new() };
+        doc.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
             layers: vec![],
@@ -389,8 +452,36 @@ mod tests {
             volume_scale: None,
             client_metadata: None,
         });
-        assert_eq!(scene.document.datasets.len(), 1);
-        scene.apply(Command::RemoveDataset { id: "ds1".into() });
-        assert!(scene.document.datasets.is_empty());
+        assert_eq!(doc.datasets.len(), 1);
+        doc.apply(DocumentCommand::RemoveDataset { id: "ds1".into() });
+        assert!(doc.datasets.is_empty());
+    }
+
+    #[test]
+    fn document_state_apply_set_volume_scale() {
+        let mut doc = crate::scene::DocumentState { datasets: Vec::new() };
+        doc.apply(DocumentCommand::SetVolumeScale {
+            shape: [100, 200, 300],
+            scale: [1.0, 0.5, 0.5],
+        });
+        assert_eq!(doc.datasets.len(), 1);
+        assert_eq!(doc.datasets[0].volume_shape, Some([100, 200, 300]));
+        assert!(doc.datasets[0].volume_transform.is_some());
+    }
+
+    #[test]
+    fn viewport_commands_are_not_document_commands() {
+        // These should all deserialize as ViewportCommand, not DocumentCommand
+        let cmds = vec![
+            r#"{"type":"set_dataset_order","order":[]}"#,
+            r#"{"type":"set_dataset_visible","dataset_id":"x","visible":true}"#,
+            r#"{"type":"pan","dx":1.0,"dy":2.0}"#,
+        ];
+        for json in cmds {
+            assert!(serde_json::from_str::<DocumentCommand>(json).is_err(),
+                "should not parse as DocumentCommand: {}", json);
+            assert!(serde_json::from_str::<ViewportCommand>(json).is_ok(),
+                "should parse as ViewportCommand: {}", json);
+        }
     }
 }

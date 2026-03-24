@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::transform::VolumeTransform;
+use crate::command::DocumentCommand;
+use crate::transform::{self, VolumeTransform};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -92,6 +93,54 @@ impl DocumentState {
     /// Remove a dataset by id.
     pub fn remove_dataset(&mut self, id: &str) {
         self.datasets.retain(|d| d.id != id);
+    }
+
+    /// Apply a document command directly. Used by the server to avoid
+    /// constructing a full Scene for document mutations.
+    pub fn apply(&mut self, cmd: DocumentCommand) {
+        match cmd {
+            DocumentCommand::AddDataset {
+                id,
+                name,
+                layers,
+                volume_shape,
+                volume_scale,
+                client_metadata,
+            } => {
+                let volume_transform =
+                    if let (Some(shape), Some(scale)) = (volume_shape, volume_scale) {
+                        Some(transform::compute_volume_transform(shape, scale))
+                    } else {
+                        None
+                    };
+                self.add_dataset(Dataset {
+                    id,
+                    name,
+                    layers,
+                    volume_transform,
+                    volume_shape,
+                    client_metadata,
+                });
+            }
+            DocumentCommand::RemoveDataset { id } => {
+                self.remove_dataset(&id);
+            }
+            DocumentCommand::SetVolumeScale { shape, scale } => {
+                if self.datasets.is_empty() {
+                    self.datasets.push(Dataset {
+                        id: "default".into(),
+                        name: "default".into(),
+                        layers: Vec::new(),
+                        volume_transform: None,
+                        volume_shape: None,
+                        client_metadata: None,
+                    });
+                }
+                let ds = &mut self.datasets[0];
+                ds.volume_shape = Some(shape);
+                ds.volume_transform = Some(transform::compute_volume_transform(shape, scale));
+            }
+        }
     }
 }
 

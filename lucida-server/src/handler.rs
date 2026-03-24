@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
-use lucida_core::command::Command;
+use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, Mutex};
@@ -130,39 +130,38 @@ pub async fn handle_client(
                 if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&json) {
                     match client_msg {
                         ClientMessage::Command { command } => {
-                            if command.is_document_command() {
-                                // Document command — apply and broadcast.
-                                let seq = {
-                                    let mut sess = session.lock().await;
-                                    let seq = sess.apply(command.clone());
-                                    match &command {
-                                        Command::AddDataset {
-                                            id: dataset_id, ..
-                                        } => {
-                                            sess.data_sources
-                                                .insert(dataset_id.clone(), id);
-                                        }
-                                        Command::RemoveDataset { id: dataset_id } => {
-                                            sess.data_sources.remove(dataset_id);
-                                        }
-                                        _ => {}
+                            // All commands in ClientMessage are DocumentCommands
+                            // by construction — no runtime guard needed.
+                            let seq = {
+                                let mut sess = session.lock().await;
+                                let seq = sess.apply(command.clone());
+                                match &command {
+                                    DocumentCommand::AddDataset {
+                                        id: dataset_id, ..
+                                    } => {
+                                        sess.data_sources
+                                            .insert(dataset_id.clone(), id);
                                     }
-                                    seq
-                                };
+                                    DocumentCommand::RemoveDataset { id: dataset_id } => {
+                                        sess.data_sources.remove(dataset_id);
+                                    }
+                                    DocumentCommand::SetVolumeScale { .. } => {}
+                                }
+                                seq
+                            };
 
-                                let broadcast_msg = ServerMessage::CommandBroadcast {
-                                    seq,
-                                    command,
-                                };
-                                let ack_msg = ServerMessage::Ack { seq };
+                            let broadcast_msg = ServerMessage::CommandBroadcast {
+                                seq,
+                                command,
+                            };
+                            let ack_msg = ServerMessage::Ack { seq };
 
-                                let _ = tx.send(BroadcastItem::CommandBroadcast {
-                                    sender: id,
-                                    broadcast_json: serde_json::to_string(&broadcast_msg)
-                                        .unwrap(),
-                                    ack_json: serde_json::to_string(&ack_msg).unwrap(),
-                                });
-                            }
+                            let _ = tx.send(BroadcastItem::CommandBroadcast {
+                                sender: id,
+                                broadcast_json: serde_json::to_string(&broadcast_msg)
+                                    .unwrap(),
+                                ack_json: serde_json::to_string(&ack_msg).unwrap(),
+                            });
                         }
                         ClientMessage::Presence {
                             camera,
