@@ -9,7 +9,7 @@ import { applyDocumentCommand } from "../applyAndSend.ts";
 export interface BridgeCallbacks {
   sendCommand: (json: string) => void;
   emitPresence: () => void;
-  emitLayerPresence: () => void;
+  emitDatasetPresence: () => void;
   breakFollow: () => void;
 }
 
@@ -29,7 +29,7 @@ interface Params {
   remoteDocumentVersion: number;
 }
 
-export function useLayerSettings({
+export function useDatasetSettings({
   wasmSceneRef,
   datasetsRef,
   loopRef,
@@ -76,9 +76,9 @@ export function useLayerSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_layer_visible", dataset_id: id, visible }));
+      scene.apply_command(JSON.stringify({ type: "set_dataset_visible", dataset_id: id, visible }));
       loopRef.current?.markDirty();
-      bridgeCallbacksRef.current.emitLayerPresence();
+      bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
@@ -87,9 +87,9 @@ export function useLayerSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_layer_opacity", dataset_id: id, opacity }));
+      scene.apply_command(JSON.stringify({ type: "set_dataset_opacity", dataset_id: id, opacity }));
       loopRef.current?.markDirty();
-      bridgeCallbacksRef.current.emitLayerPresence();
+      bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
@@ -98,9 +98,9 @@ export function useLayerSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min, max }));
+      scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min, max }));
       loopRef.current?.markDirty();
-      bridgeCallbacksRef.current.emitLayerPresence();
+      bridgeCallbacksRef.current.emitDatasetPresence();
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
@@ -109,9 +109,9 @@ export function useLayerSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_layer_gamma", dataset_id: id, gamma }));
+      scene.apply_command(JSON.stringify({ type: "set_dataset_gamma", dataset_id: id, gamma }));
       loopRef.current?.markDirty();
-      bridgeCallbacksRef.current.emitLayerPresence();
+      bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
@@ -120,9 +120,9 @@ export function useLayerSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_layer_blend_mode", dataset_id: id, blend_mode: mode }));
+      scene.apply_command(JSON.stringify({ type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode }));
       loopRef.current?.markDirty();
-      bridgeCallbacksRef.current.emitLayerPresence();
+      bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
@@ -131,9 +131,9 @@ export function useLayerSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_layer_render_mode", dataset_id: id, render_mode: mode }));
+      scene.apply_command(JSON.stringify({ type: "set_dataset_render_mode", dataset_id: id, render_mode: mode }));
       loopRef.current?.markDirty();
-      bridgeCallbacksRef.current.emitLayerPresence();
+      bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
@@ -144,9 +144,9 @@ export function useLayerSettings({
       const scene = wasmSceneRef.current;
       if (scene) {
         bridgeCallbacksRef.current.breakFollow();
-        scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+        scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max }));
         loopRef.current?.markDirty();
-        bridgeCallbacksRef.current.emitLayerPresence();
+        bridgeCallbacksRef.current.emitDatasetPresence();
       }
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, true); return next; });
@@ -163,9 +163,9 @@ export function useLayerSettings({
           const scene = wasmSceneRef.current;
           if (scene) {
             bridgeCallbacksRef.current.breakFollow();
-            scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+            scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max }));
             loopRef.current?.markDirty();
-            bridgeCallbacksRef.current.emitLayerPresence();
+            bridgeCallbacksRef.current.emitDatasetPresence();
           }
         }
       }
@@ -184,17 +184,17 @@ export function useLayerSettings({
         if (!wasFull) {
           const ds = datasetsRef.current.get(id);
           const frMax = ds ? dtypeMax(ds.info.levels[0].dataType) : 65535;
-          scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: 0, max: frMax }));
+          scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: 0, max: frMax }));
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
         } else {
           const dr = dataRangeMap.get(id);
           if (dr) {
-            scene.apply_command(JSON.stringify({ type: "set_layer_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+            scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max }));
           }
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
         }
         loopRef.current?.markDirty();
-        bridgeCallbacksRef.current.emitLayerPresence();
+        bridgeCallbacksRef.current.emitDatasetPresence();
       }
       return next;
     });
@@ -204,15 +204,15 @@ export function useLayerSettings({
     const scene = wasmSceneRef.current;
     if (!scene) return;
     bridgeCallbacksRef.current.breakFollow();
-    const order: string[] = JSON.parse(scene.layer_order());
+    const order: string[] = JSON.parse(scene.dataset_order());
     const idx = order.indexOf(id);
     if (idx < 0) return;
     const swapIdx = direction === "up" ? idx + 1 : idx - 1;
     if (swapIdx < 0 || swapIdx >= order.length) return;
     [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
-    scene.apply_command(JSON.stringify({ type: "set_layer_order", order }));
+    scene.apply_command(JSON.stringify({ type: "set_dataset_order", order }));
     loopRef.current?.markDirty();
-    bridgeCallbacksRef.current.emitLayerPresence();
+    bridgeCallbacksRef.current.emitDatasetPresence();
     setLayerSettingsVersion((v) => v + 1);
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
@@ -240,8 +240,8 @@ export function useLayerSettings({
       render_mode: string;
     }>;
     try {
-      layerOrder = JSON.parse(scene.layer_order());
-      allSettings = JSON.parse(scene.all_layer_settings());
+      layerOrder = JSON.parse(scene.dataset_order());
+      allSettings = JSON.parse(scene.all_dataset_settings());
     } catch {
       return [];
     }

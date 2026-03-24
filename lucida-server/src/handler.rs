@@ -87,7 +87,7 @@ pub async fn handle_client(
                                 }
                                 BroadcastItem::PeerLeft { json } => json,
                                 BroadcastItem::FollowChanged { json } => json,
-                                BroadcastItem::LayerPresenceUpdate { sender, json } => {
+                                BroadcastItem::DatasetPresenceUpdate { sender, json } => {
                                     if *sender == id { continue; }
                                     json
                                 }
@@ -233,24 +233,24 @@ pub async fn handle_client(
                                 });
                             }
                         }
-                        ClientMessage::LayerPresence {
-                            layer_order,
-                            layer_settings,
+                        ClientMessage::DatasetPresence {
+                            dataset_order,
+                            dataset_settings,
                         } => {
                             {
                                 let mut sess = session.lock().await;
-                                sess.update_layer_presence(
+                                sess.update_dataset_presence(
                                     id,
-                                    layer_order.clone(),
-                                    layer_settings.clone(),
+                                    dataset_order.clone(),
+                                    dataset_settings.clone(),
                                 );
                             }
-                            let update = ServerMessage::LayerPresenceUpdate {
+                            let update = ServerMessage::DatasetPresenceUpdate {
                                 client_id: id,
-                                layer_order,
-                                layer_settings,
+                                dataset_order,
+                                dataset_settings,
                             };
-                            let _ = tx.send(BroadcastItem::LayerPresenceUpdate {
+                            let _ = tx.send(BroadcastItem::DatasetPresenceUpdate {
                                 sender: id,
                                 json: serde_json::to_string(&update).unwrap(),
                             });

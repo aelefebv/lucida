@@ -8,7 +8,7 @@ import type { DatasetState, PendingChunkResolve } from "../types.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
-import type { DatasetCallbacks } from "./useLayerSettings.ts";
+import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 
 interface Params {
   wasmReady: boolean;
@@ -19,7 +19,7 @@ interface Params {
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   pendingChunkRequests: React.RefObject<Map<string, PendingChunkResolve>>;
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
-  // From useLayerSettings (called before)
+  // From useDatasetSettings (called before)
   bumpLayerSettingsVersion: () => void;
   initLayerMaps: (id: string) => void;
   // From useDimensions (called before)
@@ -224,12 +224,12 @@ export function useBridge({
           setFollowTarget(target);
         }
       },
-      onLayerPresenceUpdate: (clientId, layerOrder, layerSettings) => {
+      onDatasetPresenceUpdate: (clientId, datasetOrder, datasetSettings) => {
         setPeers(prev => {
           const next = new Map(prev);
           const existing = next.get(clientId);
           if (existing) {
-            next.set(clientId, { ...existing, layer_order: layerOrder, layer_settings: layerSettings });
+            next.set(clientId, { ...existing, dataset_order: datasetOrder, dataset_settings: datasetSettings });
           }
           return next;
         });
@@ -237,12 +237,12 @@ export function useBridge({
           const scene = wasmSceneRef.current;
           if (scene) {
             try {
-              const json = JSON.stringify({ layer_order: layerOrder, layer_settings: layerSettings });
-              scene.import_layer_presence(json);
+              const json = JSON.stringify({ dataset_order: datasetOrder, dataset_settings: datasetSettings });
+              scene.import_dataset_presence(json);
               bumpLayerSettingsVersion();
               loopRef.current?.markDirty();
             } catch (e) {
-              console.warn("[Bridge] failed to import layer presence:", e);
+              console.warn("[Bridge] failed to import dataset presence:", e);
             }
           }
         }
@@ -395,10 +395,10 @@ export function useBridge({
     bridgeRef.current?.sendPresence(scene.export_presence());
   }, [wasmSceneRef]);
 
-  const emitLayerPresence = useCallback(() => {
+  const emitDatasetPresence = useCallback(() => {
     const scene = wasmSceneRef.current;
     if (!scene) return;
-    bridgeRef.current?.sendLayerPresence(scene.export_layer_presence());
+    bridgeRef.current?.sendDatasetPresence(scene.export_dataset_presence());
   }, [wasmSceneRef]);
 
   const breakFollow = useCallback(() => {
@@ -424,16 +424,16 @@ export function useBridge({
               display: peer.display,
             });
             scene.import_presence(presenceJson);
-            if (peer.layer_order && peer.layer_settings) {
+            if (peer.dataset_order && peer.dataset_settings) {
               try {
                 const layerJson = JSON.stringify({
-                  layer_order: peer.layer_order,
-                  layer_settings: peer.layer_settings,
+                  dataset_order: peer.dataset_order,
+                  dataset_settings: peer.dataset_settings,
                 });
-                scene.import_layer_presence(layerJson);
+                scene.import_dataset_presence(layerJson);
                 bumpLayerSettingsVersion();
               } catch (e) {
-                console.warn("Failed to import peer layer presence:", e);
+                console.warn("Failed to import peer dataset presence:", e);
               }
             }
             setZ(scene.z());
@@ -460,7 +460,7 @@ export function useBridge({
     followTargetRef,
     sendCommand,
     emitPresence,
-    emitLayerPresence,
+    emitDatasetPresence,
     breakFollow,
     handleFollow,
     followablePeers,

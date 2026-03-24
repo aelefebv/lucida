@@ -10,7 +10,7 @@ import type { DatasetState, PendingChunkResolve } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
 import { useLayout } from "./hooks/useLayout.ts";
-import { useLayerSettings, type BridgeCallbacks, type DatasetCallbacks } from "./hooks/useLayerSettings.ts";
+import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from "./hooks/useDatasetSettings.ts";
 import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
@@ -41,7 +41,7 @@ function App() {
   const bridgeCallbacksRef = useRef<BridgeCallbacks>({
     sendCommand: () => {},
     emitPresence: () => {},
-    emitLayerPresence: () => {},
+    emitDatasetPresence: () => {},
     breakFollow: () => {},
   });
   const datasetCallbacksRef = useRef<DatasetCallbacks>({
@@ -59,7 +59,7 @@ function App() {
     bridgeCallbacksRef,
   });
 
-  const layers = useLayerSettings({
+  const layers = useDatasetSettings({
     wasmSceneRef: scene.wasmSceneRef,
     datasetsRef,
     loopRef: render.loopRef,
@@ -100,7 +100,7 @@ function App() {
     datasetsRef,
     sendCommand: bridge.sendCommand,
     emitPresence: bridge.emitPresence,
-    emitLayerPresence: bridge.emitLayerPresence,
+    emitDatasetPresence: bridge.emitDatasetPresence,
     initLayerMaps: layers.initLayerMaps,
     setSelectedDatasetId,
     setVolumeMap,
@@ -111,7 +111,7 @@ function App() {
   bridgeCallbacksRef.current = {
     sendCommand: bridge.sendCommand,
     emitPresence: bridge.emitPresence,
-    emitLayerPresence: bridge.emitLayerPresence,
+    emitDatasetPresence: bridge.emitDatasetPresence,
     breakFollow: bridge.breakFollow,
   };
   datasetCallbacksRef.current = {

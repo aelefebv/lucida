@@ -35,13 +35,13 @@ export function useIntensityBatcher({
         const scene = wasmSceneRef.current;
         if (scene) {
           scene.apply_command(JSON.stringify({
-            type: "set_layer_contrast",
+            type: "set_dataset_contrast",
             dataset_id: datasetId,
             min,
             max,
           }));
           loopRef.current?.markDirty();
-          bridgeRef.current?.sendLayerPresence(scene.export_layer_presence());
+          bridgeRef.current?.sendDatasetPresence(scene.export_dataset_presence());
         }
       }
 

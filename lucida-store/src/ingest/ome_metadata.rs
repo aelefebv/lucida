@@ -47,7 +47,7 @@ pub fn build_multiscales_attrs(levels: &[Level], level_scales: &[[f64; 3]]) -> V
 
 /// Build the Zarr v3 `zarr.json` for a single resolution level array.
 ///
-/// `chunk_size` is [x, y, z] matching lucida-core convention.
+/// `chunk_size` is [Z, Y, X] matching lucida-core convention.
 /// Output shape is always 5D: [T, C, Z, Y, X].
 pub fn build_array_zarr_json(level: &Level, chunk_size: &[u32; 3]) -> Value {
     json!({
@@ -58,7 +58,7 @@ pub fn build_array_zarr_json(level: &Level, chunk_size: &[u32; 3]) -> Value {
         "chunk_grid": {
             "name": "regular",
             "configuration": {
-                "chunk_shape": [1, 1, chunk_size[2], chunk_size[1], chunk_size[0]]
+                "chunk_shape": [1, 1, chunk_size[0], chunk_size[1], chunk_size[2]]
             }
         },
         "chunk_key_encoding": {
@@ -101,7 +101,7 @@ mod tests {
             channels: 3,
             timepoints: 5,
         };
-        let za = build_array_zarr_json(&level, &[256, 256, 1]);
+        let za = build_array_zarr_json(&level, &[1, 256, 256]);
         assert_eq!(za["zarr_format"], 3);
         assert_eq!(za["node_type"], "array");
         assert_eq!(za["shape"], json!([5, 3, 20, 512, 512]));
@@ -125,7 +125,7 @@ mod tests {
             channels: 1,
             timepoints: 1,
         };
-        let za = build_array_zarr_json(&level, &[256, 256, 1]);
+        let za = build_array_zarr_json(&level, &[1, 256, 256]);
         assert_eq!(za["shape"], json!([1, 1, 1, 768, 1024]));
         assert_eq!(
             za["chunk_grid"]["configuration"]["chunk_shape"],

@@ -50,13 +50,13 @@ pub enum Command {
     SetContrast { min: f64, max: f64 },
     SetGamma { gamma: f64 },
     // Per-layer display
-    SetLayerOrder { order: Vec<String> },
-    SetLayerVisible { dataset_id: String, visible: bool },
-    SetLayerOpacity { dataset_id: String, opacity: f32 },
-    SetLayerContrast { dataset_id: String, min: f64, max: f64 },
-    SetLayerGamma { dataset_id: String, gamma: f64 },
-    SetLayerBlendMode { dataset_id: String, blend_mode: BlendMode },
-    SetLayerRenderMode { dataset_id: String, render_mode: RenderMode },
+    SetDatasetOrder { order: Vec<String> },
+    SetDatasetVisible { dataset_id: String, visible: bool },
+    SetDatasetOpacity { dataset_id: String, opacity: f32 },
+    SetDatasetContrast { dataset_id: String, min: f64, max: f64 },
+    SetDatasetGamma { dataset_id: String, gamma: f64 },
+    SetDatasetBlendMode { dataset_id: String, blend_mode: BlendMode },
+    SetDatasetRenderMode { dataset_id: String, render_mode: RenderMode },
 }
 
 impl Command {
@@ -152,37 +152,37 @@ impl Scene {
             Command::SetGamma { gamma } => {
                 self.display.gamma = gamma;
             }
-            Command::SetLayerOrder { order } => {
-                self.layer_order = order;
+            Command::SetDatasetOrder { order } => {
+                self.dataset_order = order;
             }
-            Command::SetLayerVisible { dataset_id, visible } => {
-                if let Some(s) = self.layer_settings.get_mut(&dataset_id) {
+            Command::SetDatasetVisible { dataset_id, visible } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.visible = visible;
                 }
             }
-            Command::SetLayerOpacity { dataset_id, opacity } => {
-                if let Some(s) = self.layer_settings.get_mut(&dataset_id) {
+            Command::SetDatasetOpacity { dataset_id, opacity } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.opacity = opacity;
                 }
             }
-            Command::SetLayerContrast { dataset_id, min, max } => {
-                if let Some(s) = self.layer_settings.get_mut(&dataset_id) {
+            Command::SetDatasetContrast { dataset_id, min, max } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.contrast_min = min;
                     s.contrast_max = max;
                 }
             }
-            Command::SetLayerGamma { dataset_id, gamma } => {
-                if let Some(s) = self.layer_settings.get_mut(&dataset_id) {
+            Command::SetDatasetGamma { dataset_id, gamma } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.gamma = gamma;
                 }
             }
-            Command::SetLayerBlendMode { dataset_id, blend_mode } => {
-                if let Some(s) = self.layer_settings.get_mut(&dataset_id) {
+            Command::SetDatasetBlendMode { dataset_id, blend_mode } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.blend_mode = blend_mode;
                 }
             }
-            Command::SetLayerRenderMode { dataset_id, render_mode } => {
-                if let Some(s) = self.layer_settings.get_mut(&dataset_id) {
+            Command::SetDatasetRenderMode { dataset_id, render_mode } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.render_mode = render_mode;
                 }
             }
@@ -277,28 +277,28 @@ mod tests {
     }
 
     #[test]
-    fn set_layer_order_round_trips() {
-        let cmd = Command::SetLayerOrder { order: vec!["a".into(), "b".into()] };
+    fn set_dataset_order_round_trips() {
+        let cmd = Command::SetDatasetOrder { order: vec!["a".into(), "b".into()] };
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"set_layer_order\""));
+        assert!(json.contains("\"type\":\"set_dataset_order\""));
         let parsed: Command = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::SetLayerOrder { order } => assert_eq!(order, vec!["a", "b"]),
-            _ => panic!("expected SetLayerOrder"),
+            Command::SetDatasetOrder { order } => assert_eq!(order, vec!["a", "b"]),
+            _ => panic!("expected SetDatasetOrder"),
         }
     }
 
     #[test]
-    fn set_layer_visible_round_trips() {
-        let cmd = Command::SetLayerVisible { dataset_id: "ds1".into(), visible: false };
+    fn set_dataset_visible_round_trips() {
+        let cmd = Command::SetDatasetVisible { dataset_id: "ds1".into(), visible: false };
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"set_layer_visible\""));
+        assert!(json.contains("\"type\":\"set_dataset_visible\""));
         let _parsed: Command = serde_json::from_str(&json).unwrap();
     }
 
     #[test]
-    fn set_layer_blend_mode_round_trips() {
-        let cmd = Command::SetLayerBlendMode {
+    fn set_dataset_blend_mode_round_trips() {
+        let cmd = Command::SetDatasetBlendMode {
             dataset_id: "ds1".into(),
             blend_mode: crate::scene::BlendMode::Additive,
         };
@@ -306,23 +306,23 @@ mod tests {
         assert!(json.contains("\"additive\""));
         let parsed: Command = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::SetLayerBlendMode { blend_mode, .. } => {
+            Command::SetDatasetBlendMode { blend_mode, .. } => {
                 assert_eq!(blend_mode, crate::scene::BlendMode::Additive);
             }
-            _ => panic!("expected SetLayerBlendMode"),
+            _ => panic!("expected SetDatasetBlendMode"),
         }
     }
 
     #[test]
-    fn layer_commands_are_not_document_commands() {
+    fn dataset_commands_are_not_document_commands() {
         let cmds: Vec<Command> = vec![
-            Command::SetLayerOrder { order: vec![] },
-            Command::SetLayerVisible { dataset_id: "x".into(), visible: true },
-            Command::SetLayerOpacity { dataset_id: "x".into(), opacity: 0.5 },
-            Command::SetLayerContrast { dataset_id: "x".into(), min: 0.0, max: 1.0 },
-            Command::SetLayerGamma { dataset_id: "x".into(), gamma: 1.0 },
-            Command::SetLayerBlendMode { dataset_id: "x".into(), blend_mode: crate::scene::BlendMode::Max },
-            Command::SetLayerRenderMode { dataset_id: "x".into(), render_mode: crate::scene::RenderMode::MaxIntensity },
+            Command::SetDatasetOrder { order: vec![] },
+            Command::SetDatasetVisible { dataset_id: "x".into(), visible: true },
+            Command::SetDatasetOpacity { dataset_id: "x".into(), opacity: 0.5 },
+            Command::SetDatasetContrast { dataset_id: "x".into(), min: 0.0, max: 1.0 },
+            Command::SetDatasetGamma { dataset_id: "x".into(), gamma: 1.0 },
+            Command::SetDatasetBlendMode { dataset_id: "x".into(), blend_mode: crate::scene::BlendMode::Max },
+            Command::SetDatasetRenderMode { dataset_id: "x".into(), render_mode: crate::scene::RenderMode::MaxIntensity },
         ];
         for cmd in cmds {
             assert!(!cmd.is_document_command(), "expected not document command: {:?}", cmd);
@@ -330,8 +330,8 @@ mod tests {
     }
 
     #[test]
-    fn set_layer_render_mode_round_trips() {
-        let cmd = Command::SetLayerRenderMode {
+    fn set_dataset_render_mode_round_trips() {
+        let cmd = Command::SetDatasetRenderMode {
             dataset_id: "ds1".into(),
             render_mode: crate::scene::RenderMode::MaxIntensity,
         };
@@ -339,15 +339,15 @@ mod tests {
         assert!(json.contains("\"max_intensity\""));
         let parsed: Command = serde_json::from_str(&json).unwrap();
         match parsed {
-            Command::SetLayerRenderMode { render_mode, .. } => {
+            Command::SetDatasetRenderMode { render_mode, .. } => {
                 assert_eq!(render_mode, crate::scene::RenderMode::MaxIntensity);
             }
-            _ => panic!("expected SetLayerRenderMode"),
+            _ => panic!("expected SetDatasetRenderMode"),
         }
     }
 
     #[test]
-    fn apply_set_layer_visible_updates_settings() {
+    fn apply_set_dataset_visible_updates_settings() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(Command::AddDataset {
             id: "ds1".into(),
@@ -357,13 +357,13 @@ mod tests {
             volume_scale: None,
             client_metadata: None,
         });
-        assert!(scene.layer_settings["ds1"].visible);
-        scene.apply(Command::SetLayerVisible { dataset_id: "ds1".into(), visible: false });
-        assert!(!scene.layer_settings["ds1"].visible);
+        assert!(scene.dataset_settings["ds1"].visible);
+        scene.apply(Command::SetDatasetVisible { dataset_id: "ds1".into(), visible: false });
+        assert!(!scene.dataset_settings["ds1"].visible);
     }
 
     #[test]
-    fn apply_set_layer_opacity_updates_settings() {
+    fn apply_set_dataset_opacity_updates_settings() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(Command::AddDataset {
             id: "ds1".into(),
@@ -373,9 +373,9 @@ mod tests {
             volume_scale: None,
             client_metadata: None,
         });
-        assert_eq!(scene.layer_settings["ds1"].opacity, 1.0);
-        scene.apply(Command::SetLayerOpacity { dataset_id: "ds1".into(), opacity: 0.5 });
-        assert_eq!(scene.layer_settings["ds1"].opacity, 0.5);
+        assert_eq!(scene.dataset_settings["ds1"].opacity, 1.0);
+        scene.apply(Command::SetDatasetOpacity { dataset_id: "ds1".into(), opacity: 0.5 });
+        assert_eq!(scene.dataset_settings["ds1"].opacity, 0.5);
     }
 
     #[test]

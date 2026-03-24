@@ -68,7 +68,7 @@ export function tickVolume(
   const viewC = scene.c();
 
   // Get layer ordering and settings from scene
-  const layerOrder: string[] = JSON.parse(scene.layer_order());
+  const layerOrder: string[] = JSON.parse(scene.dataset_order());
   const allSettings: Record<string, {
     visible: boolean;
     opacity: number;
@@ -77,7 +77,7 @@ export function tickVolume(
     gamma: number;
     blend_mode: string;
     render_mode: string;
-  }> = JSON.parse(scene.all_layer_settings());
+  }> = JSON.parse(scene.all_dataset_settings());
 
   let budgetRemaining = UPLOAD_BUDGET_BYTES;
   let exhausted = false;

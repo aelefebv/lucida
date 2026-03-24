@@ -183,8 +183,8 @@ fn build_scene(snapshot: &connection::Snapshot, peer_id: Option<ClientId>) -> Sc
             scene.camera = peer.camera.clone();
             scene.view = peer.view.clone();
             scene.display = peer.display.clone();
-            scene.layer_order = peer.layer_order.clone();
-            scene.layer_settings = peer.layer_settings.clone();
+            scene.dataset_order = peer.dataset_order.clone();
+            scene.dataset_settings = peer.dataset_settings.clone();
             return scene;
         }
         eprintln!("warning: peer {pid} not found, using defaults");
@@ -195,8 +195,8 @@ fn build_scene(snapshot: &connection::Snapshot, peer_id: Option<ClientId>) -> Sc
         scene.camera = peer.camera.clone();
         scene.view = peer.view.clone();
         scene.display = peer.display.clone();
-        scene.layer_order = peer.layer_order.clone();
-        scene.layer_settings = peer.layer_settings.clone();
+        scene.dataset_order = peer.dataset_order.clone();
+        scene.dataset_settings = peer.dataset_settings.clone();
     }
 
     scene

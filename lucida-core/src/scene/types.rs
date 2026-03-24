@@ -30,7 +30,7 @@ impl Default for RenderMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LayerDisplaySettings {
+pub struct DatasetDisplaySettings {
     pub visible: bool,
     pub opacity: f32,
     pub contrast_min: f64,
@@ -41,7 +41,7 @@ pub struct LayerDisplaySettings {
     pub render_mode: RenderMode,
 }
 
-impl Default for LayerDisplaySettings {
+impl Default for DatasetDisplaySettings {
     fn default() -> Self {
         Self {
             visible: true,
@@ -98,9 +98,9 @@ impl DocumentState {
 /// Per-level shape and chunk size metadata for anisotropic pyramids.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LevelInfo {
-    /// Data shape at this level: [x, y, z].
+    /// Data shape at this level: [Z, Y, X].
     pub shape: [u32; 3],
-    /// Chunk size at this level: [x, y, z].
+    /// Chunk size at this level: [Z, Y, X].
     pub chunk_size: [u32; 3],
 }
 
@@ -111,9 +111,9 @@ pub struct Layer {
     pub visible: bool,
     /// Number of multiscale levels available.
     pub num_levels: u32,
-    /// Chunk size in pixels: [x, y, z].
+    /// Chunk size in voxels: [Z, Y, X].
     pub chunk_size: [u32; 3],
-    /// Full-resolution data shape in voxels: [x, y, z].
+    /// Full-resolution data shape in voxels: [Z, Y, X].
     pub data_shape: [u32; 3],
     /// Per-level shape and chunk size. When empty, isotropic 2^level downsampling is assumed.
     #[serde(default)]

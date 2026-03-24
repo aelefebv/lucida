@@ -18,7 +18,7 @@ interface Params {
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   sendCommand: (json: string) => void;
   emitPresence: () => void;
-  emitLayerPresence: () => void;
+  emitDatasetPresence: () => void;
   initLayerMaps: (id: string) => void;
   // Lifted state setters
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
@@ -34,7 +34,7 @@ export function useDatasets({
   datasetsRef,
   sendCommand,
   emitPresence,
-  emitLayerPresence,
+  emitDatasetPresence,
   initLayerMaps,
   setSelectedDatasetId,
   setVolumeMap,
@@ -82,11 +82,12 @@ export function useDatasets({
       const chunkY = fullRes.chunkShape[3];
       const chunkZ = fullRes.chunkShape[2];
 
+      // All spatial arrays use [Z, Y, X] ordering
       const levelInfoArray: { shape: [number, number, number]; chunk_size: [number, number, number] }[] = [];
       for (const lvl of info.levels) {
         levelInfoArray.push({
-          shape: [lvl.shape[4], lvl.shape[3], lvl.shape[2]],
-          chunk_size: [lvl.chunkShape[4], lvl.chunkShape[3], lvl.chunkShape[2]],
+          shape: [lvl.shape[2], lvl.shape[3], lvl.shape[4]],
+          chunk_size: [lvl.chunkShape[2], lvl.chunkShape[3], lvl.chunkShape[4]],
         });
       }
 
@@ -98,8 +99,8 @@ export function useDatasets({
           name: "main",
           visible: true,
           num_levels: info.levels.length,
-          chunk_size: [chunkX, chunkY, chunkZ],
-          data_shape: [shapeX, shapeY, shapeZ],
+          chunk_size: [chunkZ, chunkY, chunkX],
+          data_shape: [shapeZ, shapeY, shapeX],
           level_info: levelInfoArray,
         }],
         volume_shape: [shapeZ, shapeY, shapeX] as [number, number, number],
@@ -152,7 +153,7 @@ export function useDatasets({
       setWasmScene(scene);
 
       setTimeout(() => emitPresence(), 0);
-      setTimeout(() => emitLayerPresence(), 0);
+      setTimeout(() => emitDatasetPresence(), 0);
     } catch (err) {
       console.error("Failed to load OME-Zarr:", err);
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -160,7 +161,7 @@ export function useDatasets({
       setLoading(false);
       e.target.value = "";
     }
-  }, [wasmSceneRef, ensureScene, setWasmScene, loopRef, datasetsRef, sendCommand, emitPresence, emitLayerPresence, initLayerMaps, setSelectedDatasetId, setVolumeMap, bumpDatasetsVersion]);
+  }, [wasmSceneRef, ensureScene, setWasmScene, loopRef, datasetsRef, sendCommand, emitPresence, emitDatasetPresence, initLayerMaps, setSelectedDatasetId, setVolumeMap, bumpDatasetsVersion]);
 
   return {
     loading,

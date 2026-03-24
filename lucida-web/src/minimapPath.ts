@@ -168,7 +168,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const eye = camData.subarray(16, 19);
   const viewProj = camData.subarray(19, 35);
 
-  const layerOrder: string[] = JSON.parse(scene.layer_order());
+  const layerOrder: string[] = JSON.parse(scene.dataset_order());
   const allSettings: Record<string, {
     visible: boolean;
     opacity: number;
@@ -176,7 +176,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     contrast_max: number;
     gamma: number;
     blend_mode: string;
-  }> = JSON.parse(scene.all_layer_settings());
+  }> = JSON.parse(scene.all_dataset_settings());
 
   const layers: MinimapLayerParams[] = [];
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];

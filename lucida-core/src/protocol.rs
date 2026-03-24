@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
 use crate::command::Command;
-use crate::scene::{DisplayState, DocumentState, LayerDisplaySettings};
+use crate::scene::{DisplayState, DocumentState, DatasetDisplaySettings};
 use crate::view::ViewState;
 
 pub type ClientId = u64;
@@ -20,9 +20,9 @@ pub struct PresenceState {
     pub following: Option<ClientId>,
     pub cursor: Option<[f64; 2]>,
     #[serde(default)]
-    pub layer_order: Vec<String>,
+    pub dataset_order: Vec<String>,
     #[serde(default)]
-    pub layer_settings: HashMap<String, LayerDisplaySettings>,
+    pub dataset_settings: HashMap<String, DatasetDisplaySettings>,
 }
 
 /// Messages sent from a client to the server.
@@ -42,9 +42,9 @@ pub enum ClientMessage {
     /// Follow another client (or stop following with `target: null`).
     Follow { target: Option<ClientId> },
     /// Layer presence update (ephemeral, latest-wins).
-    LayerPresence {
-        layer_order: Vec<String>,
-        layer_settings: HashMap<String, LayerDisplaySettings>,
+    DatasetPresence {
+        dataset_order: Vec<String>,
+        dataset_settings: HashMap<String, DatasetDisplaySettings>,
     },
     /// Remote-control another client by making them follow the sender.
     Steer { client: ClientId },
@@ -89,10 +89,10 @@ pub enum ServerMessage {
         target: Option<ClientId>,
     },
     /// A peer's layer presence changed.
-    LayerPresenceUpdate {
+    DatasetPresenceUpdate {
         client_id: ClientId,
-        layer_order: Vec<String>,
-        layer_settings: HashMap<String, LayerDisplaySettings>,
+        dataset_order: Vec<String>,
+        dataset_settings: HashMap<String, DatasetDisplaySettings>,
     },
 }
 
@@ -271,8 +271,8 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: Some([100.0, 200.0]),
-            layer_order: vec![],
-            layer_settings: HashMap::new(),
+            dataset_order: vec![],
+            dataset_settings: HashMap::new(),
         };
         let json = serde_json::to_string(&ps).unwrap();
         let parsed: PresenceState = serde_json::from_str(&json).unwrap();
@@ -290,8 +290,8 @@ mod tests {
             display: DisplayState::default(),
             following: None,
             cursor: None,
-            layer_order: vec![],
-            layer_settings: HashMap::new(),
+            dataset_order: vec![],
+            dataset_settings: HashMap::new(),
         };
         let msg = ServerMessage::PeerJoined {
             client_id: 3,

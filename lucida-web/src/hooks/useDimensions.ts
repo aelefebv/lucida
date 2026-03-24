@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
-import type { BridgeCallbacks } from "./useLayerSettings.ts";
+import type { BridgeCallbacks } from "./useDatasetSettings.ts";
 
 interface Params {
   wasmSceneRef: React.RefObject<WasmScene | null>;

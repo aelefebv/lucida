@@ -10,7 +10,7 @@ use tiff_reader::DimensionHints;
 
 /// Convert a TIFF file to an OME-Zarr v2 store with a multiscale pyramid.
 ///
-/// `chunk_size` is [x, y, z] matching lucida-core convention.
+/// `chunk_size` is [Z, Y, X] matching lucida-core convention.
 /// Output is always 5D TCZYX.
 ///
 /// Pyramid levels are built and written one at a time, pipelining I/O with

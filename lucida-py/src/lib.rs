@@ -176,26 +176,26 @@ impl PyScene {
         name: &str,
         visible: bool,
         num_levels: u32,
-        chunk_x: u32,
-        chunk_y: u32,
         chunk_z: u32,
-        shape_x: u32,
-        shape_y: u32,
+        chunk_y: u32,
+        chunk_x: u32,
         shape_z: u32,
+        shape_y: u32,
+        shape_x: u32,
     ) {
         self.inner.add_layer(Layer {
             name: name.to_string(),
             visible,
             num_levels,
-            chunk_size: [chunk_x, chunk_y, chunk_z],
-            data_shape: [shape_x, shape_y, shape_z],
+            chunk_size: [chunk_z, chunk_y, chunk_x],
+            data_shape: [shape_z, shape_y, shape_x],
             level_info: Vec::new(),
         });
     }
 
     /// Set per-level shape and chunk size metadata for anisotropic pyramids.
     ///
-    /// `shapes_flat` is `[x0,y0,z0, x1,y1,z1, ...]` — one [x,y,z] triple per level.
+    /// `shapes_flat` is `[z0,y0,x0, z1,y1,x1, ...]` — one [Z,Y,X] triple per level.
     /// `chunks_flat` is the same layout for chunk sizes.
     #[pyo3(signature = (layer_index, shapes_flat, chunks_flat))]
     fn set_level_info(

@@ -53,7 +53,8 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
-    let chunk_size = [args.chunk_xy, args.chunk_xy, args.chunk_z];
+    // [Z, Y, X] ordering
+    let chunk_size = [args.chunk_z, args.chunk_xy, args.chunk_xy];
 
     let order = args
         .dim_order

@@ -43,8 +43,8 @@ pub(crate) enum BroadcastItem {
     FollowChanged {
         json: String,
     },
-    /// Layer presence update from a client.
-    LayerPresenceUpdate {
+    /// Dataset presence update from a client.
+    DatasetPresenceUpdate {
         sender: ClientId,
         json: String,
     },

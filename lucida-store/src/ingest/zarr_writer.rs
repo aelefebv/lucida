@@ -11,7 +11,7 @@ use super::pyramid::Level;
 
 /// Write a complete OME-Zarr v0.5 (Zarr v3) store to disk.
 ///
-/// `chunk_size` is [x, y, z] matching lucida-core convention.
+/// `chunk_size` is [Z, Y, X] matching lucida-core convention.
 /// Always writes 5D TCZYX with chunk paths `t/c/z/y/x`.
 pub fn write_zarr(
     output: &Path,
@@ -75,9 +75,10 @@ fn write_chunks(
     level: &Level,
     chunk_size: &[u32; 3],
 ) -> Result<(), String> {
-    let cx = chunk_size[0];
+    // chunk_size is [Z, Y, X]
+    let cz = chunk_size[0];
     let cy = chunk_size[1];
-    let cz = chunk_size[2];
+    let cx = chunk_size[2];
 
     let nx = (level.width + cx - 1) / cx;
     let ny = (level.height + cy - 1) / cy;
@@ -267,7 +268,7 @@ mod tests {
             channels: 1,
             timepoints: 1,
         }];
-        write_zarr(&dir, &levels, &[4, 4, 1]).unwrap();
+        write_zarr(&dir, &levels, &[1, 4, 4]).unwrap();
 
         assert!(dir.join("zarr.json").exists());
         assert!(dir.join("0/zarr.json").exists());
@@ -304,7 +305,7 @@ mod tests {
             channels: 2,
             timepoints: 2,
         }];
-        write_zarr(&dir, &levels, &[4, 4, 1]).unwrap();
+        write_zarr(&dir, &levels, &[1, 4, 4]).unwrap();
 
         assert!(dir.join("0/c/0/0/0/0/0").exists()); // t=0, c=0
         assert!(dir.join("0/c/1/1/0/0/0").exists()); // t=1, c=1
@@ -324,7 +325,7 @@ mod tests {
             channels: 1,
             timepoints: 1,
         }];
-        write_zarr(&dir, &levels, &[4, 4, 1]).unwrap();
+        write_zarr(&dir, &levels, &[1, 4, 4]).unwrap();
 
         let chunk_bytes = fs::read(dir.join("0/c/0/0/0/0/0")).unwrap();
         // Should be LZ4 compressed — decompress and verify

@@ -7,8 +7,8 @@ export interface PresenceState {
   display: { contrast_min: number; contrast_max: number; gamma: number };
   following: ClientId | null;
   cursor: [number, number] | null;
-  layer_order: string[];
-  layer_settings: Record<string, unknown>;
+  dataset_order: string[];
+  dataset_settings: Record<string, unknown>;
 }
 
 export interface BridgeHandlers {
@@ -22,7 +22,7 @@ export interface BridgeHandlers {
   onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: unknown, display: PresenceState["display"]) => void;
   onCursorUpdate?: (clientId: ClientId, position: [number, number]) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
-  onLayerPresenceUpdate?: (clientId: ClientId, layerOrder: string[], layerSettings: Record<string, unknown>) => void;
+  onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
   onDisconnect?: () => void;
 }
 
@@ -34,8 +34,8 @@ export class Bridge {
   private destroyed = false;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingPresence: string | null = null;
-  private layerPresenceTimer: ReturnType<typeof setTimeout> | null = null;
-  private pendingLayerPresence: string | null = null;
+  private datasetPresenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingDatasetPresence: string | null = null;
 
   constructor(handlers: BridgeHandlers, port = 9876) {
     this.url = `ws://localhost:${port}`;
@@ -96,8 +96,8 @@ export class Bridge {
           case "follow_changed":
             this.handlers.onFollowChanged?.(msg.client_id, msg.target);
             break;
-          case "layer_presence_update":
-            this.handlers.onLayerPresenceUpdate?.(msg.client_id, msg.layer_order, msg.layer_settings);
+          case "dataset_presence_update":
+            this.handlers.onDatasetPresenceUpdate?.(msg.client_id, msg.dataset_order, msg.dataset_settings);
             break;
         }
       } catch (e) {
@@ -157,16 +157,16 @@ export class Bridge {
     }
   }
 
-  /** Send layer presence update, throttled to ~200ms. */
-  sendLayerPresence(json: string) {
+  /** Send dataset presence update, throttled to ~200ms. */
+  sendDatasetPresence(json: string) {
     const obj = JSON.parse(json);
-    this.pendingLayerPresence = JSON.stringify({ type: "layer_presence", ...obj });
-    if (!this.layerPresenceTimer) {
-      this.layerPresenceTimer = setTimeout(() => {
-        this.layerPresenceTimer = null;
-        if (this.pendingLayerPresence) {
-          this.send(this.pendingLayerPresence);
-          this.pendingLayerPresence = null;
+    this.pendingDatasetPresence = JSON.stringify({ type: "dataset_presence", ...obj });
+    if (!this.datasetPresenceTimer) {
+      this.datasetPresenceTimer = setTimeout(() => {
+        this.datasetPresenceTimer = null;
+        if (this.pendingDatasetPresence) {
+          this.send(this.pendingDatasetPresence);
+          this.pendingDatasetPresence = null;
         }
       }, 200);
     }
@@ -203,8 +203,8 @@ export class Bridge {
     if (this.presenceTimer !== null) {
       clearTimeout(this.presenceTimer);
     }
-    if (this.layerPresenceTimer !== null) {
-      clearTimeout(this.layerPresenceTimer);
+    if (this.datasetPresenceTimer !== null) {
+      clearTimeout(this.datasetPresenceTimer);
     }
     this.ws?.close();
     this.ws = null;
