@@ -173,6 +173,15 @@
 | **Minimap** | A small overview volume rendered on a separate OffscreenCanvas showing the full dataset at the coarsest **Level**, with frustum and slice plane overlays | Overview, thumbnail, inset |
 | **Auto-contrast** | A mode where the **Contrast window** is automatically set to the sampled intensity range of the currently displayed data | Auto-levels, auto-window |
 
+## Peer cursors (lucida-web)
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Peer cursor** | A colored dot overlaid on the main canvas showing where a **Peer**'s mouse is pointing, identified by color (deterministic from **ClientId**) and short numeric ID | Remote cursor, user pointer |
+| **Cursor position** | The voxel-space `[x, y]` coordinates of a client's mouse on the slice canvas, transmitted as `Option<[f64; 2]>` (null = cursor off canvas) | Screen position (ambiguous — cursor is always transmitted in voxel coordinates, not screen pixels) |
+| **Dimensional indicator** | A visual badge (▲/▼ for Z, ◄/► for T, channel number for C) shown next to a **Peer cursor** when the peer's **ViewState** differs from the local view, accompanied by 50% opacity dimming | Slice indicator, Z arrow |
+| **Cursor overlay** | The `pointer-events: none` container rendered absolutely over the main canvas, housing all **Peer cursors**; uses a `requestAnimationFrame` loop to sync screen positions with imperative **Camera** changes | Cursor layer, annotation layer |
+
 ## Chunk loading (lucida-web)
 
 | Term | Definition | Aliases to avoid |
@@ -230,6 +239,10 @@
 - The **Render loop** delegates chunk planning to **WasmScene** (`chunk_plan_for`), fetching to a **ChunkStore**, and rendering to the **RenderClient**; it never touches the GPU directly
 - The **Upload budget** limits how many chunk bytes move from **ChunkStore** to **Atlas** per RAF tick, preventing GPU stalls and maintaining interactive frame rates
 - The **Bridge** is instantiated once when the WASM module is ready and auto-reconnects on disconnect with a 2-second delay
+- A **Peer cursor** is rendered from a **Cursor position** (voxel coordinates) by transforming through the local **Camera**'s zoom and center
+- A **Cursor position** is throttled at 50ms (same as **Presence**); null positions bypass the throttle and send immediately
+- A **Dimensional indicator** compares the peer's **ViewState** (Z/T/C) against the local **ViewState** and renders directional arrows plus opacity dimming
+- The **Cursor overlay** uses a RAF loop because the **Camera** is mutated imperatively during drag, not through React state
 
 ## Example dialogue
 
@@ -271,6 +284,12 @@
 > **Dev:** "Why does the 3D view get blocky when I drag?"
 > **Domain expert:** "That's the **Render scale**. During interaction it drops to 0.25 — rendering at quarter resolution — so the **GPU worker** can keep up with the ray marching. After 50ms of no input, it snaps back to 1.0 and re-renders at full resolution. The **Render loop** uses the full-res viewport for **Level** selection though, so you don't get LOD flip-flopping during drags."
 
+> **Dev:** "How does the **Peer cursor** know where to render when I'm zoomed in and the peer is zoomed out?"
+> **Domain expert:** "The **Cursor position** is always in voxel coordinates — not screen pixels. The sender converts from screen to voxel using the **Camera**'s zoom and center, and the receiver converts back using their own **Camera**. So it always points at the same anatomical location regardless of zoom or pan differences."
+
+> **Dev:** "What if the peer is looking at a different Z slice?"
+> **Domain expert:** "Then the **Dimensional indicator** kicks in. It compares the peer's **ViewState** — their Z, T, and C — against yours. If they're on a higher Z, you see ▲ next to the dot. Lower Z, ▼. Different T gets ◄/►. Different C shows the channel number. And the whole cursor dims to 50% opacity so you know the peer isn't on your exact plane."
+
 ## Overloaded terms
 
 These terms have multiple meanings depending on context. The glossary tables above define each precisely — this section provides quick disambiguation guidance.
@@ -298,3 +317,5 @@ These terms have multiple meanings depending on context. The glossary tables abo
 - **"Bridge"**: `Bridge` is the WebSocket client class. `useBridge` is the React hook that adds state management on top.
 
 - **"Worker"**: Always qualify — **GPU worker**, **LZ4 worker**, or **fetch task** (for ChunkStore internals).
+
+- **"Cursor"**: In PresenceState, the raw `Option<[f64; 2]>` voxel coordinate data. In the UI, the rendered **Peer cursor** (colored dot + label). Use **Cursor position** for the data and **Peer cursor** for the visual.
