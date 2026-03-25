@@ -401,6 +401,10 @@ export function useBridge({
     bridgeRef.current?.sendDatasetPresence(scene.export_dataset_presence());
   }, [wasmSceneRef]);
 
+  const sendCursor = useCallback((position: [number, number] | null) => {
+    bridgeRef.current?.sendCursor(position);
+  }, []);
+
   const breakFollow = useCallback(() => {
     if (followTargetRef.current !== null) {
       setFollowTarget(null);
@@ -459,6 +463,7 @@ export function useBridge({
     followTarget,
     followTargetRef,
     sendCommand,
+    sendCursor,
     emitPresence,
     emitDatasetPresence,
     breakFollow,

@@ -99,9 +99,9 @@ impl Session {
     }
 
     /// Update a client's cursor position.
-    pub fn update_cursor(&mut self, id: ClientId, position: [f64; 2]) {
+    pub fn update_cursor(&mut self, id: ClientId, position: Option<[f64; 2]>) {
         if let Some(presence) = self.clients.get_mut(&id) {
-            presence.cursor = Some(position);
+            presence.cursor = position;
         }
     }
 

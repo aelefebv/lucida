@@ -4,6 +4,7 @@ import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
+import { PeerCursors } from "./components/PeerCursors.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import type { VolumeData } from "./zarr/volumeAssembler.ts";
 import type { DatasetState, PendingChunkResolve } from "./types.ts";
@@ -245,6 +246,7 @@ function App() {
               remoteDocumentVersion={remoteDocumentVersion}
               emitPresence={bridge.emitPresence}
               breakFollow={bridge.breakFollow}
+              sendCursor={bridge.sendCursor}
               loopRef={render.loopRef}
               onLoopChange={render.setActiveLoop}
             />
@@ -262,6 +264,17 @@ function App() {
               c={dims.c}
               loopRef={render.loopRef}
               onLoopChange={render.setActiveLoop}
+            />
+          )}
+          {bridge.peers.size > 0 && dims.viewMode === "2d" && scene.wasmScene && render.canvasRef.current && (
+            <PeerCursors
+              peers={bridge.peers}
+              myId={bridge.myId}
+              wasmSceneRef={scene.wasmSceneRef}
+              canvas={render.canvasRef.current}
+              z={dims.z}
+              t={dims.t}
+              c={dims.c}
             />
           )}
           {render.clientReady && render.clientRef.current && (

@@ -37,8 +37,8 @@ pub enum ClientMessage {
         view: ViewState,
         display: DisplayState,
     },
-    /// Cursor position update.
-    Cursor { position: [f64; 2] },
+    /// Cursor position update (null = cursor left the canvas).
+    Cursor { position: Option<[f64; 2]> },
     /// Follow another client (or stop following with `target: null`).
     Follow { target: Option<ClientId> },
     /// Layer presence update (ephemeral, latest-wins).
@@ -78,10 +78,10 @@ pub enum ServerMessage {
         view: ViewState,
         display: DisplayState,
     },
-    /// A peer's cursor moved.
+    /// A peer's cursor moved (null = cursor left the canvas).
     CursorUpdate {
         client_id: ClientId,
-        position: [f64; 2],
+        position: Option<[f64; 2]>,
     },
     /// A peer's follow target changed.
     FollowChanged {

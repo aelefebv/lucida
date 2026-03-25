@@ -3,7 +3,7 @@ export type ClientId = number;
 export interface PresenceState {
   client_id: ClientId;
   camera: unknown;
-  view: unknown;
+  view: { z_range: { start: number; end: number }; t: number; c: number };
   display: { contrast_min: number; contrast_max: number; gamma: number };
   following: ClientId | null;
   cursor: [number, number] | null;
@@ -19,8 +19,8 @@ export interface BridgeHandlers {
   onChunkData?: (key: string, data: ArrayBuffer) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
   onPeerLeft?: (clientId: ClientId) => void;
-  onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: unknown, display: PresenceState["display"]) => void;
-  onCursorUpdate?: (clientId: ClientId, position: [number, number]) => void;
+  onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: PresenceState["view"], display: PresenceState["display"]) => void;
+  onCursorUpdate?: (clientId: ClientId, position: [number, number] | null) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
   onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
   onDisconnect?: () => void;
@@ -36,6 +36,8 @@ export class Bridge {
   private pendingPresence: string | null = null;
   private datasetPresenceTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingDatasetPresence: string | null = null;
+  private cursorTimer: ReturnType<typeof setTimeout> | null = null;
+  private pendingCursor: string | null = null;
 
   constructor(handlers: BridgeHandlers, port = 9876) {
     this.url = `ws://localhost:${port}`;
@@ -177,9 +179,27 @@ export class Bridge {
     this.send(JSON.stringify({ type: "follow", target }));
   }
 
-  /** Send a cursor position update. */
-  sendCursor(position: [number, number]) {
-    this.send(JSON.stringify({ type: "cursor", position }));
+  /** Send a cursor position update, throttled to ~50ms. Null sends immediately. */
+  sendCursor(position: [number, number] | null) {
+    if (position === null) {
+      if (this.cursorTimer !== null) {
+        clearTimeout(this.cursorTimer);
+        this.cursorTimer = null;
+      }
+      this.pendingCursor = null;
+      this.send(JSON.stringify({ type: "cursor", position: null }));
+      return;
+    }
+    this.pendingCursor = JSON.stringify({ type: "cursor", position });
+    if (!this.cursorTimer) {
+      this.cursorTimer = setTimeout(() => {
+        this.cursorTimer = null;
+        if (this.pendingCursor) {
+          this.send(this.pendingCursor);
+          this.pendingCursor = null;
+        }
+      }, 50);
+    }
   }
 
   /** Low-level send (raw JSON string). */
@@ -205,6 +225,9 @@ export class Bridge {
     }
     if (this.datasetPresenceTimer !== null) {
       clearTimeout(this.datasetPresenceTimer);
+    }
+    if (this.cursorTimer !== null) {
+      clearTimeout(this.cursorTimer);
     }
     this.ws?.close();
     this.ws = null;

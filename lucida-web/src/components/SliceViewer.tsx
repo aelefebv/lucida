@@ -16,6 +16,7 @@ interface Props {
   remoteDocumentVersion: number;
   emitPresence: () => void;
   breakFollow: () => void;
+  sendCursor: (position: [number, number] | null) => void;
   loopRef: RefObject<RenderLoop | null>;
   onLoopChange: (loop: RenderLoop | null) => void;
 }
@@ -43,7 +44,7 @@ function clampCenterToBounds(scene: WasmScene, canvas: HTMLCanvasElement, datase
   }
 }
 
-export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, loopRef: parentLoopRef, onLoopChange }: Props) {
+export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -83,6 +84,16 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
 
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
+      // Always broadcast cursor in voxel coordinates
+      const rect = canvas.getBoundingClientRect();
+      const cursorX = e.clientX - rect.left;
+      const cursorY = e.clientY - rect.top;
+      const zoom = scene.zoom();
+      const centerArr = scene.center();
+      const worldX = (cursorX - canvas.clientWidth / 2) / zoom + centerArr[0];
+      const worldY = (cursorY - canvas.clientHeight / 2) / zoom + centerArr[1];
+      sendCursor([worldX, worldY]);
+
       if (!dragging) return;
       const dx = e.clientX - lastPos.current.x;
       const dy = e.clientY - lastPos.current.y;
@@ -95,12 +106,21 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
       emitPresence();
       loopRef.current?.markDirty();
     },
-    [dragging, scene, canvas, datasets, emitPresence, breakFollow],
+    [dragging, scene, canvas, datasets, emitPresence, breakFollow, sendCursor],
   );
 
   const onPointerUp = useCallback(() => {
     setDragging(false);
   }, []);
+
+  const onPointerLeave = useCallback(() => {
+    sendCursor(null);
+  }, [sendCursor]);
+
+  // Clear cursor on unmount (e.g. mode switch to 3D)
+  useEffect(() => {
+    return () => { sendCursor(null); };
+  }, [sendCursor]);
 
   const onWheel = useCallback(
     (e: WheelEvent) => {
@@ -138,6 +158,7 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
     canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.style.cursor = dragging ? "grabbing" : "grab";
     return () => {
@@ -145,9 +166,10 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointercancel", onPointerUp);
+      canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("wheel", onWheel);
     };
-  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onWheel, dragging]);
+  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerLeave, onWheel, dragging]);
 
   return null;
 }
