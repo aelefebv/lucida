@@ -19,7 +19,7 @@
 | **LevelInfo** | Per-level shape and chunk size metadata for a layer, used when the multiscale pyramid is anisotropic | Resolution info, scale metadata |
 | **VolumeTransform** | A pair of 4x4 matrices (model + inverse) that maps the `[0,1]^3` unit cube to world space, accounting for anisotropic voxel spacing | Transform, model matrix, spatial transform |
 | **Volume shape** | The voxel dimensions of a dataset, ordered `[Z, Y, X]` | Dimensions, size, extent |
-| **Data shape** | The full-resolution voxel dimensions of a layer, ordered `[X, Y, Z]` | Layer shape, array shape |
+| **Data shape** | The full-resolution voxel dimensions of a layer, ordered `[Z, Y, X]` | Layer shape, array shape |
 | **Client metadata** | Opaque JSON attached to a dataset (dtype, codecs, level paths) that the server passes through without interpretation | Dataset config, format info |
 
 ## Volume and voxels (lucida-store)
@@ -61,7 +61,7 @@
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
 | **Store** | The output directory tree conforming to Zarr v3 and OME-Zarr v0.5, containing Root Metadata and one array per Level | Archive, output, container |
-| **Chunk Size** | The dimensions of a Chunk in `[x, y, z]` order (lucida-core convention), controlling the granularity of streaming | Tile size, block size |
+| **Chunk Size** | The dimensions of a Chunk in `[Z, Y, X]` order (lucida-core convention), controlling the granularity of streaming | Tile size, block size |
 | **Codec** | A compression or encoding step applied to raw Chunk bytes before writing to disk; currently raw little-endian bytes followed by LZ4 with prepended size | Compressor, filter |
 | **Root Metadata** | The top-level `zarr.json` file declaring the Store as a Zarr v3 group with OME multiscales attributes (axes, per-Level coordinate transforms) | Group metadata |
 | **Array Metadata** | The per-Level `{level}/zarr.json` file declaring shape, Chunk grid, Codecs, and data type for one resolution array | Level metadata |
@@ -96,9 +96,9 @@
 |------|-----------|-----------------|
 | **Command** | A wrapper enum (`Command::Document` / `Command::Viewport`) used for serde-compatible deserialization of both command types | Action, event, message, operation |
 | **DocumentCommand** | A command enum (3 variants) that mutates shared DocumentState (AddDataset, RemoveDataset, SetVolumeScale) -- sequenced, persisted, and broadcast to all clients. `ClientMessage::Command` and `ServerMessage::CommandBroadcast` carry this type. | Shared command, sync command, Command (ambiguous) |
-| **ViewportCommand** | A command enum (~27 variants) that mutates local-only state (camera, display, view, dataset display settings) -- applied locally and emitted as presence | Local command, ephemeral command, Command (ambiguous) |
-| **ClientMessage** | A tagged message sent from a client to the server: Command, Presence, Cursor, Follow, LayerPresence, or Steer | Client event, upstream message |
-| **ServerMessage** | A tagged message sent from the server to clients: Snapshot, CommandBroadcast, Ack, PeerJoined/Left, PresenceUpdate, CursorUpdate, FollowChanged, LayerPresenceUpdate | Server event, downstream message |
+| **ViewportCommand** | A command enum (~23 variants) that mutates local-only state (camera, display, view, dataset display settings) -- applied locally and emitted as presence | Local command, ephemeral command, Command (ambiguous) |
+| **ClientMessage** | A tagged message sent from a client to the server: Command, Presence, Cursor, Follow, DatasetPresence, or Steer | Client event, upstream message |
+| **ServerMessage** | A tagged message sent from the server to clients: Snapshot, CommandBroadcast, Ack, PeerJoined/Left, PresenceUpdate, CursorUpdate, FollowChanged, DatasetPresenceUpdate | Server event, downstream message |
 | **Snapshot** | The first ServerMessage on connect, containing the full authoritative DocumentState, all peer PresenceStates, and the connecting client's ID | Initial state, sync, handshake |
 | **Ack** | A ServerMessage sent only to a command's sender confirming the command was applied and its sequence number | Confirmation, receipt |
 | **CommandBroadcast** | A ServerMessage relaying a document command to all clients except the sender, with a sequence number | Relay, rebroadcast |
@@ -205,7 +205,7 @@
 - A **VisibleRegion** is consumed by chunk planning to produce a **ChunkRequestPlan**
 - A **ChunkRequestPlan** contains a `needed` list and a `prefetch` list of **ChunkCoords**
 - A **Command** is either a **Document command** (broadcast) or a **Viewport command** (local + presence)
-- A **PresenceState** bundles one client's **Camera**, **ViewState**, **DisplayState**, follow target, cursor, **Layer order**, and **LayerDisplaySettings**
+- A **PresenceState** bundles one client's **Camera**, **ViewState**, **DisplayState**, follow target, cursor, **Dataset order**, and **DatasetDisplaySettings**
 - A **Client** may **Follow** at most one other **Client**; a **Client** being followed cannot itself be following anyone (max chain depth = 1)
 - A **ChunkRequest** from a viewing **Client** produces a **ChunkFetch** to the **Data Source**, which responds with **Chunk Data** routed back via **Unicast**
 - A **Snapshot** is sent exactly once per **Client** — on connect, before any **Broadcast** messages
@@ -215,7 +215,7 @@
 - A **Pyramid** contains one or more **Levels**, where Level 0 is the full-resolution **Volume** and each subsequent Level is produced by **Downsampling** the previous one
 - Each **Level Spec** records which axes to downsample, informed by **Anisotropy** via the **Uniquely Coarsest** rule
 - A **Store** contains **Root Metadata** (one group) and one **Array Metadata** + set of **Chunks** per **Level**
-- **Chunk Size** is specified in `[x, y, z]` order in code but written to Zarr metadata in TCZYX order as `[1, 1, z, y, x]`
+- **Chunk Size** is specified in `[Z, Y, X]` order in code but written to Zarr metadata in TCZYX order as `[1, 1, z, y, x]`
 - A **Store** is the producer-side name for what the viewer loads as a **Dataset**
 - A **Viewer** holds exactly one **Scene** and zero or one **Follow** target
 - A **Viewer** is a **Client** from the Server's perspective, assigned a **ClientId** on connect
@@ -279,7 +279,7 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Plane" vs "Page"**: A **Page** is a TIFF container concept (one IFD entry); a **Plane** is a logical 2D cross-section of a Volume at a given Z. Avoid "slice" — it's ambiguous between both.
 
-- **"Chunk Size" axis order**: Code passes `[x, y, z]` (lucida-core convention); Zarr metadata stores `[t, c, z, y, x]`. Always state which convention.
+- **"Chunk Size" axis order**: Code passes `[Z, Y, X]` (lucida-core convention); Zarr metadata stores `[t, c, z, y, x]`. Always state which convention.
 
 - **"Scale"**: Use **Cumulative Scale** for per-Level `[x, y, z]` factors, **Voxel Size** for physical spacing, and "scale" for UI/rendering contexts only.
 
