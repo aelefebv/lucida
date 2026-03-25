@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod chunk;
 pub mod command;
+pub mod cursor;
 pub(crate) mod mat4;
 pub mod protocol;
 pub mod scene;

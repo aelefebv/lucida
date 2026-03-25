@@ -258,8 +258,8 @@ impl View3D {
         out
     }
 
-    /// View-projection matrix in f64 for internal use.
-    fn view_proj_f64(&self) -> [f64; 16] {
+    /// View-projection matrix in f64.
+    pub(crate) fn view_proj_f64(&self) -> [f64; 16] {
         let aspect = self.viewport[0] as f64 / self.viewport[1] as f64;
         let proj = perspective(self.fov, aspect, self.near, self.far);
         let eye = self.eye_position();
@@ -412,7 +412,7 @@ impl View3D {
 /// Ray-AABB intersection using the slab method.
 /// Returns the hit point if the ray intersects the box, or None.
 /// If the ray origin is inside the box, returns the origin.
-fn ray_aabb_hit(
+pub(crate) fn ray_aabb_hit(
     origin: [f64; 3],
     dir: [f64; 3],
     box_min: [f64; 3],

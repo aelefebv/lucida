@@ -4,6 +4,7 @@ import { initGPU, createOffscreenTarget } from "./gpuContext.ts";
 import { SliceRenderer } from "./sliceRenderer.ts";
 import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
+import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { handleSliceSetFallback, handleSliceUploadChunks, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
 import { handleVolumeSetInitial, handleVolumeUploadChunks, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
@@ -16,6 +17,7 @@ let format: GPUTextureFormat;
 let sliceRenderer: SliceRenderer | null = null;
 let volumeRenderer: VolumeRenderer | null = null;
 let compositor: LayerCompositor | null = null;
+let cursorRenderer: CursorRenderer | null = null;
 
 // Shared offscreen texture pool (used by slice + volume render)
 let offscreenPool: GPUTexture[] = [];
@@ -94,6 +96,10 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
             if (!compositor) compositor = new LayerCompositor(device, format);
             return compositor;
           },
+          getCursorRenderer() {
+            if (!cursorRenderer) cursorRenderer = new CursorRenderer(device, format);
+            return cursorRenderer;
+          },
           ensureOffscreenPool,
           getDummyTexture,
           getDummy3DTexture,
@@ -146,6 +152,13 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         handleMinimapDestroy();
         break;
 
+      case "updateCursorData": {
+        if (!ctx) break;
+        const cr = ctx.getCursorRenderer();
+        cr.updateCursors(new Float32Array(msg.data), msg.count);
+        break;
+      }
+
       case "removeLayerResources":
         removeSliceResources(msg.datasetId);
         removeVolumeResources(msg.datasetId);
@@ -165,6 +178,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         sliceRenderer = null;
         volumeRenderer = null;
         compositor = null;
+        cursorRenderer = null;
         self.close();
         break;
     }

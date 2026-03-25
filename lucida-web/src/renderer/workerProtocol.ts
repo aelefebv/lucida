@@ -108,6 +108,7 @@ export interface VolumeRenderMultiPassMessage {
   eye: Float32Array;
   canvasW: number;
   canvasH: number;
+  viewProj?: Float32Array;
 }
 
 export interface SliceLayerParams {
@@ -188,6 +189,12 @@ export interface RemoveLayerResourcesMessage {
   datasetId: string;
 }
 
+export interface UpdateCursorDataMessage {
+  type: "updateCursorData";
+  data: ArrayBuffer;
+  count: number;
+}
+
 export interface DestroyMessage {
   type: "destroy";
 }
@@ -207,6 +214,7 @@ export type MainToWorkerMessage =
   | MinimapSetOverviewForLayerMessage
   | MinimapUploadOverviewChunksForLayerMessage
   | RemoveLayerResourcesMessage
+  | UpdateCursorDataMessage
   | DestroyMessage;
 
 // --- Worker -> Main ---

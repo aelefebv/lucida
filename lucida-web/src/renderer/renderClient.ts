@@ -147,11 +147,12 @@ export class RenderClient {
     eye: Float32Array,
     canvasW: number,
     canvasH: number,
+    viewProj?: Float32Array,
   ) {
     this.worker.postMessage({
       type: "volumeRenderMultiPass",
       layers, invViewProj, eye,
-      canvasW, canvasH,
+      canvasW, canvasH, viewProj,
     });
   }
 
@@ -216,6 +217,15 @@ export class RenderClient {
       },
       transferList,
     );
+  }
+
+  updateCursorData(data: Float32Array, count: number) {
+    if (count === 0) {
+      this.worker.postMessage({ type: "updateCursorData", data: new ArrayBuffer(0), count: 0 });
+      return;
+    }
+    const buf = data.buffer.slice(data.byteOffset, data.byteOffset + count * 16 * 4);
+    this.worker.postMessage({ type: "updateCursorData", data: buf, count }, [buf]);
   }
 
   minimapDestroy() {

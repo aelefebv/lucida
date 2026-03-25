@@ -259,6 +259,7 @@ export function tickVolume(
 
   // Build layer params for visible layers in order
   const invVP = new Float32Array(scene.inv_view_proj_3d());
+  const viewProj = new Float32Array(scene.view_proj_3d());
 
   const layers: VolumeLayerParams[] = [];
   for (const dsId of layerOrder) {
@@ -288,7 +289,7 @@ export function tickVolume(
     });
   }
 
-  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH);
+  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, viewProj);
 
   return exhausted || hasPending;
 }

@@ -14,11 +14,12 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 //   offset 272: chunkDims       vec4u     (16B)
 //   offset 288: gridDims        vec4u     (16B)
 //   offset 304: atlasSlotDims   vec4u     (16B) = 320 total
-const UNIFORM_SIZE = 320;
+const UNIFORM_SIZE = 384; // 320 + viewProj(64)
 
 export class VolumeRenderer {
   private device: GPUDevice;
   private pipeline: GPURenderPipeline;
+  private pipelineWithDepth: GPURenderPipeline;
   private uniformBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
   private bindGroup: GPUBindGroup | null = null;
@@ -39,6 +40,7 @@ export class VolumeRenderer {
   private chunkDims = [1, 1, 1];
   private gridDims = [1, 1, 1];
   private atlasSlotDims = [1, 1, 1];
+  private viewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
 
   constructor(device: GPUDevice, dummyFallbackTexture: GPUTexture) {
@@ -72,20 +74,33 @@ export class VolumeRenderer {
       ],
     });
 
+    const pipelineLayout = device.createPipelineLayout({
+      bindGroupLayouts: [this.bindGroupLayout],
+    });
+
     this.pipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({
-        bindGroupLayouts: [this.bindGroupLayout],
-      }),
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vs",
-      },
+      layout: pipelineLayout,
+      vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
-        module: shaderModule,
-        entryPoint: "fs",
+        module: shaderModule, entryPoint: "fs",
         targets: [{ format: OFFSCREEN_FORMAT }],
       },
       primitive: { topology: "triangle-list" },
+    });
+
+    this.pipelineWithDepth = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: { module: shaderModule, entryPoint: "vs" },
+      fragment: {
+        module: shaderModule, entryPoint: "fs",
+        targets: [{ format: OFFSCREEN_FORMAT }],
+      },
+      primitive: { topology: "triangle-list" },
+      depthStencil: {
+        format: "depth24plus",
+        depthWriteEnabled: true,
+        depthCompare: "always",
+      },
     });
 
     this.uniformBuffer = device.createBuffer({
@@ -171,14 +186,20 @@ export class VolumeRenderer {
     model: Float32Array<ArrayBufferLike>,
     invModel: Float32Array<ArrayBufferLike>,
     eye: Float32Array<ArrayBufferLike>,
+    viewProj?: Float32Array<ArrayBufferLike>,
   ) {
     this.invViewProj = invViewProj;
     this.modelMatrix = model;
     this.invModelMatrix = invModel;
     this.eyePos = eye;
+    if (viewProj) this.viewProj = viewProj;
   }
 
-  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder) {
+  getViewProj(): Float32Array<ArrayBufferLike> {
+    return this.viewProj;
+  }
+
+  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean) {
     if (!this.bindGroup) return;
 
     // Compute step size based on volume dimensions
@@ -202,20 +223,35 @@ export class VolumeRenderer {
     u32View.set([this.gridDims[0], this.gridDims[1], this.gridDims[2], 0], 72);      // gridDims at 288B = 72 u32s
     u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], this.atlasSlotDims[2], 0], 76); // atlasSlotDims at 304B = 76 u32s
 
+    // viewProj at 320B = 80 floats — compute from invViewProj by inverting
+    // We pass invViewProj and the shader already has model matrices, so viewProj = projection * view
+    // Store it at offset 80 (floats) = 320 bytes
+    uniformData.set(this.viewProj, 80);
+
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: target,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-        },
-      ],
-    });
+    const colorAttachment: GPURenderPassColorAttachment = {
+      view: target,
+      loadOp: "clear",
+      storeOp: "store",
+      clearValue: { r: 0, g: 0, b: 0, a: 0 },
+    };
 
-    pass.setPipeline(this.pipeline);
+    const desc: GPURenderPassDescriptor = {
+      colorAttachments: [colorAttachment],
+    };
+
+    if (depthView) {
+      desc.depthStencilAttachment = {
+        view: depthView,
+        depthLoadOp: isFirstLayer ? "clear" : "load",
+        depthStoreOp: "store",
+        depthClearValue: 1.0,
+      };
+    }
+
+    const pass = encoder.beginRenderPass(desc);
+    pass.setPipeline(depthView ? this.pipelineWithDepth : this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3); // full-screen triangle
     pass.end();

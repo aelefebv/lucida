@@ -327,6 +327,19 @@ impl WasmScene {
             .set_volume_scale([shape_z, shape_y, shape_x], [scale_z, scale_y, scale_x]);
     }
 
+    pub fn view_proj_3d(&self) -> Vec<f32> {
+        if let Camera::View3D(ref v) = self.inner.camera {
+            v.view_proj().to_vec()
+        } else {
+            vec![
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ]
+        }
+    }
+
     pub fn inv_view_proj_3d(&self) -> Vec<f32> {
         if let Camera::View3D(ref v) = self.inner.camera {
             v.inv_view_proj().to_vec()
@@ -483,6 +496,17 @@ impl WasmScene {
 
     pub fn camera_phi(&self) -> f64 {
         if let Camera::View3D(ref v) = self.inner.camera { v.phi } else { 0.8 }
+    }
+
+    /// Compute peer cursor geometry for GPU rendering + screen positions for labels.
+    ///
+    /// Input `peers_json`: array of `{"id": u64, "cursor": [f64,f64]|null, "mode": "2d"|"3d"}`
+    /// Returns JSON: `{"gpu": [[f32;8]], "labels": [{"id":u64,"sx":f64,"sy":f64}]}`
+    pub fn compute_peer_cursors(&self, peers_json: &str, my_id: u32, screen_w: f64, screen_h: f64) -> String {
+        let peers: Vec<crate::cursor::PeerInput> =
+            serde_json::from_str(peers_json).unwrap_or_default();
+        let output = crate::cursor::compute_peer_cursors(&self.inner, &peers, my_id as u64, screen_w, screen_h);
+        serde_json::to_string(&output).unwrap()
     }
 
     /// Returns 35 floats: invViewProj[16] + eye[3] + viewProj[16]

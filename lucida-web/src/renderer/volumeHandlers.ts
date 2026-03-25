@@ -34,6 +34,24 @@ interface FallbackState {
 
 const atlasPerDataset = new Map<string, AtlasState>();
 const fallbackPerDataset = new Map<string, FallbackState>();
+
+// Shared depth texture for volume rendering (used by cursor renderer for occlusion)
+let depthTexture: GPUTexture | null = null;
+let depthW = 0;
+let depthH = 0;
+
+function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture {
+  if (depthTexture && depthW === w && depthH === h) return depthTexture;
+  depthTexture?.destroy();
+  depthTexture = device.createTexture({
+    size: [w, h],
+    format: "depth24plus",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+  });
+  depthW = w;
+  depthH = h;
+  return depthTexture;
+}
 // Last known ray-volume hit point in local [0,1]³ space per dataset (persists across atlas recreations).
 // Chunks closest to this point are kept; farthest are evicted first.
 const rayHitPerDataset = new Map<string, [number, number, number]>();
@@ -300,16 +318,27 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(layer.opacity);
     renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
-    renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye);
+    renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye, msg.viewProj);
+    const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
+    const depthView = depth.createView();
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(pool[idx].createView(), layerEncoder);
+    renderer.renderTo(pool[idx].createView(), layerEncoder, depthView, idx === 0);
     ctx.device.queue.submit([layerEncoder.finish()]);
     renderedLayers.push({ view: pool[idx].createView(), blendMode: layer.blendMode });
   }
 
+  const canvasView = ctx.context.getCurrentTexture().createView();
   const compEncoder = ctx.device.createCommandEncoder();
-  comp.composite(ctx.context.getCurrentTexture().createView(), renderedLayers, compEncoder);
+  comp.composite(canvasView, renderedLayers, compEncoder);
   ctx.device.queue.submit([compEncoder.finish()]);
+
+  // Render peer cursors with depth testing against volume
+  const cr = ctx.getCursorRenderer();
+  if (cr.hasData() && msg.viewProj && depthTexture) {
+    const cursorEncoder = ctx.device.createCommandEncoder();
+    cr.renderVolume(canvasView, depthTexture.createView(), cursorEncoder, msg.viewProj, msg.canvasW, msg.canvasH);
+    ctx.device.queue.submit([cursorEncoder.finish()]);
+  }
 }
 
 export function removeVolumeResources(datasetId: string): void {
@@ -332,6 +361,8 @@ export function destroyAllVolumeResources(): void {
   for (const fb of fallbackPerDataset.values()) fb.texture.destroy();
   fallbackPerDataset.clear();
   rayHitPerDataset.clear();
+  depthTexture?.destroy();
+  depthTexture = null;
   dummyIndirectionBuf?.destroy();
   dummyIndirectionBuf = null;
 }

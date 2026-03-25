@@ -266,9 +266,18 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
     renderedLayers.push({ view: pool[idx].createView(), blendMode: layer.blendMode });
   }
 
+  const canvasView = ctx.context.getCurrentTexture().createView();
   const compEncoder = ctx.device.createCommandEncoder();
-  comp.composite(ctx.context.getCurrentTexture().createView(), renderedLayers, compEncoder);
+  comp.composite(canvasView, renderedLayers, compEncoder);
   ctx.device.queue.submit([compEncoder.finish()]);
+
+  // Render peer cursors on top of composited scene
+  const cr = ctx.getCursorRenderer();
+  if (cr.hasData()) {
+    const cursorEncoder = ctx.device.createCommandEncoder();
+    cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH);
+    ctx.device.queue.submit([cursorEncoder.finish()]);
+  }
 }
 
 export function removeSliceResources(datasetId: string): void {

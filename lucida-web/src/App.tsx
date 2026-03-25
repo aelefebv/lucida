@@ -1,10 +1,10 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
-import { PeerCursors } from "./components/PeerCursors.tsx";
+import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import type { VolumeData } from "./zarr/volumeAssembler.ts";
 import type { DatasetState, PendingChunkResolve } from "./types.ts";
@@ -164,6 +164,51 @@ function App() {
     emitPresence: bridge.emitPresence,
   });
 
+  const [cursorLabels, setCursorLabels] = useState<CursorLabel[]>([]);
+
+  // Sync peer cursor geometry to GPU worker
+  useEffect(() => {
+    const client = render.clientRef.current;
+    const ws = scene.wasmSceneRef.current;
+    if (!client || !ws) {
+      return;
+    }
+    if (bridge.peers.size === 0) {
+      client.updateCursorData(new Float32Array(0), 0);
+      setCursorLabels([]);
+      return;
+    }
+
+    const peersArr = Array.from(bridge.peers.values()).map(p => ({
+      id: p.client_id,
+      cursor: p.cursor,
+      mode: (p.camera as { mode?: string })?.mode ?? "2d",
+      camera: p.camera,
+      view_z: p.view?.z_range?.start,
+    }));
+    const canvasEl = render.canvasRef.current;
+    const screenW = canvasEl?.clientWidth ?? 800;
+    const screenH = canvasEl?.clientHeight ?? 600;
+    const resultJson = ws.compute_peer_cursors(JSON.stringify(peersArr), bridge.myId, screenW, screenH);
+    const result = JSON.parse(resultJson) as {
+      gpu: number[][];
+      labels: { id: number; sx: number; sy: number }[];
+    };
+
+    if (result.gpu.length > 0) {
+      const flat = new Float32Array(result.gpu.length * 16);
+      for (let i = 0; i < result.gpu.length; i++) {
+        flat.set(result.gpu[i], i * 16);
+      }
+      client.updateCursorData(flat, result.gpu.length);
+    } else {
+      client.updateCursorData(new Float32Array(0), 0);
+    }
+
+    setCursorLabels(result.labels);
+    render.loopRef.current?.markDirty();
+  }, [bridge.peers, bridge.myId, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef]);
+
   const dirInputRef = useRef<HTMLInputElement>(null);
 
   return (
@@ -277,6 +322,7 @@ function App() {
               z={dims.z}
               t={dims.t}
               c={dims.c}
+              cursorLabels={cursorLabels}
             />
           )}
           {render.clientReady && render.clientRef.current && (

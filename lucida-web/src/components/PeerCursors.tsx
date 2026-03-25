@@ -17,6 +17,12 @@ function peerColor(clientId: ClientId): string {
   return PEER_COLORS[clientId % PEER_COLORS.length];
 }
 
+export interface CursorLabel {
+  id: number;
+  sx: number;
+  sy: number;
+}
+
 interface Props {
   peers: Map<ClientId, PresenceState>;
   myId: ClientId;
@@ -26,19 +32,23 @@ interface Props {
   z: number;
   t: number;
   c: number;
+  cursorLabels: CursorLabel[];
 }
 
-function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: number): { dim: boolean; badge: string } {
+function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: number, localIs3d: boolean): { dim: boolean; badge: string } {
   const view = peer.view as { z_range?: { start: number }; t?: number; c?: number } | null;
   if (!view) return { dim: false, badge: "" };
 
   const parts: string[] = [];
   let dim = false;
 
-  const peerZ = view.z_range?.start;
-  if (peerZ !== undefined && peerZ !== localZ) {
-    dim = true;
-    parts.push(peerZ > localZ ? "▲" : "▼");
+  // Z is a spatial axis in 3D — skip Z badge/dimming when local viewer is in 3D
+  if (!localIs3d) {
+    const peerZ = view.z_range?.start;
+    if (peerZ !== undefined && peerZ !== localZ) {
+      dim = true;
+      parts.push(peerZ > localZ ? "▲" : "▼");
+    }
   }
 
   const peerT = view.t;
@@ -56,12 +66,14 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
   return { dim, badge: parts.join(" ") };
 }
 
-export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t, c }: Props) {
-  const cursorRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
+export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t, c, cursorLabels }: Props) {
+  const labelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const peersRef = useRef(peers);
   peersRef.current = peers;
   const viewModeRef = useRef(viewMode);
   viewModeRef.current = viewMode;
+  const cursorLabelsRef = useRef(cursorLabels);
+  cursorLabelsRef.current = cursorLabels;
 
   useEffect(() => {
     let rafId: number;
@@ -71,36 +83,47 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
       if (scene) {
         const canvasW = canvas.clientWidth;
         const canvasH = canvas.clientHeight;
+        const localIs3d = viewModeRef.current === "3d";
 
-        for (const [clientId, el] of cursorRefs.current) {
+        // Build a lookup from client_id → screen position from WASM labels
+        const labelMap = new Map<number, { sx: number; sy: number }>();
+        for (const lbl of cursorLabelsRef.current) {
+          labelMap.set(lbl.id, lbl);
+        }
+
+        for (const [clientId, el] of labelRefs.current) {
           const peer = peersRef.current.get(clientId);
           if (!peer?.cursor) {
             el.style.display = "none";
             continue;
           }
 
-          // Skip cross-mode cursors (coordinate systems are incompatible)
-          const peerCamera = peer.camera as { mode?: string } | null;
-          const peerIs3d = peerCamera?.mode === "3d";
-          const localIs3d = viewModeRef.current === "3d";
-          if (localIs3d !== peerIs3d) {
+          // Use WASM-computed label positions (handles all mode combinations)
+          const lbl = labelMap.get(clientId);
+          if (!lbl) {
             el.style.display = "none";
             continue;
           }
 
           let screenX: number, screenY: number;
           if (localIs3d) {
-            // 3D: cursor values are normalized screen coordinates [0-1]
-            const [nx, ny] = peer.cursor;
-            screenX = nx * canvasW;
-            screenY = ny * canvasH;
+            // For 3D, use WASM-projected screen coords directly
+            screenX = lbl.sx;
+            screenY = lbl.sy;
           } else {
-            // 2D: cursor values are voxel (world) coordinates
+            // For 2D, recompute from voxel coords for smooth camera tracking
             const zoom = scene.zoom();
             const centerArr = scene.center();
             const [worldX, worldY] = peer.cursor;
-            screenX = (worldX - centerArr[0]) * zoom + canvasW / 2;
-            screenY = (worldY - centerArr[1]) * zoom + canvasH / 2;
+            const peerIs3d = (peer.camera as { mode?: string })?.mode === "3d";
+            if (peerIs3d) {
+              // Cross-mode 3D→2D: use WASM-projected coords
+              screenX = lbl.sx;
+              screenY = lbl.sy;
+            } else {
+              screenX = (worldX - centerArr[0]) * zoom + canvasW / 2;
+              screenY = (worldY - centerArr[1]) * zoom + canvasH / 2;
+            }
           }
 
           if (screenX < -20 || screenX > canvasW + 20 || screenY < -20 || screenY > canvasH + 20) {
@@ -138,13 +161,13 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
     >
       {peerEntries.map(([clientId, peer]) => {
         const color = peerColor(clientId);
-        const { dim, badge } = dimBadge(peer, z, t, c);
+        const { dim, badge } = dimBadge(peer, z, t, c, viewMode === "3d");
         return (
           <div
             key={clientId}
             ref={(el) => {
-              if (el) cursorRefs.current.set(clientId, el);
-              else cursorRefs.current.delete(clientId);
+              if (el) labelRefs.current.set(clientId, el);
+              else labelRefs.current.delete(clientId);
             }}
             style={{
               position: "absolute",
@@ -157,20 +180,9 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
           >
             <div
               style={{
-                width: 10,
-                height: 10,
-                borderRadius: "50%",
-                backgroundColor: color,
-                border: "2px solid white",
-                boxShadow: "0 0 4px rgba(0,0,0,0.5)",
-                transform: "translate(-50%, -50%)",
-              }}
-            />
-            <div
-              style={{
                 position: "absolute",
-                left: 8,
-                top: -4,
+                left: 12,
+                top: -8,
                 fontSize: 11,
                 fontFamily: "monospace",
                 color: "white",

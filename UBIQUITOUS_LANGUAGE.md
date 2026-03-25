@@ -177,10 +177,14 @@
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Peer cursor** | A colored dot overlaid on the main canvas showing where a **Peer**'s mouse is pointing, identified by color (deterministic from **ClientId**) and short numeric ID | Remote cursor, user pointer |
-| **Cursor position** | The voxel-space `[x, y]` coordinates of a client's mouse on the slice canvas, transmitted as `Option<[f64; 2]>` (null = cursor off canvas) | Screen position (ambiguous — cursor is always transmitted in voxel coordinates, not screen pixels) |
-| **Dimensional indicator** | A visual badge (▲/▼ for Z, ◄/► for T, channel number for C) shown next to a **Peer cursor** when the peer's **ViewState** differs from the local view, accompanied by 50% opacity dimming | Slice indicator, Z arrow |
-| **Cursor overlay** | The `pointer-events: none` container rendered absolutely over the main canvas, housing all **Peer cursors**; uses a `requestAnimationFrame` loop to sync screen positions with imperative **Camera** changes | Cursor layer, annotation layer |
+| **Peer cursor** | A WebGPU-rendered cursor showing where a **Peer** is pointing, identified by color (deterministic from **ClientId**) and a numeric ID label. In 2D mode: a crosshair at voxel coordinates. In 3D mode: a billboard ray through or near the volume with a crosshair marker at the intersection point | Remote cursor, user pointer |
+| **Cursor position** | In 2D: voxel-space `[x, y]` coordinates. In 3D: normalized screen coordinates `[0-1]`. Transmitted as `Option<[f64; 2]>` (null = cursor off canvas) | Screen position (ambiguous) |
+| **Cursor ray** | A billboard quad strip rendered in 3D mode showing a **Peer**'s line of sight through the volume. For 2D→3D peers: a vertical ray at the peer's voxel position. For 3D→3D peers: the unprojected ray from the peer's camera through their cursor. Extends 50% past the volume on each end for visibility. Portions behind the volume surface render at 30% opacity via depth texture sampling | Cursor line, sight line |
+| **Cursor marker** | A crosshair rendered at the ray's intersection point with the volume surface (entry point for 3D→3D, peer's Z slice for 2D→3D), providing a focal anchor for where the peer is pointing | Hit point, intersection indicator |
+| **Cursor geometry engine** | The Rust module (`cursor.rs`) that computes GPU-ready cursor geometry (crosshairs and rays) and screen-space label positions from peer presence data. Handles all four mode combinations: 2D→2D, 2D→3D, 3D→2D, 3D→3D. Computation is receiver-side using the peer's camera from **PresenceState** | Cursor computer |
+| **Dimensional indicator** | A visual badge (◄/► for T, channel number for C) shown next to a **Peer cursor** label when the peer's **ViewState** differs from the local view, accompanied by 50% opacity dimming. Z indicators are suppressed in 3D mode since Z is a visible spatial axis | Slice indicator, Z arrow |
+| **Cursor label** | The HTML overlay div showing the peer's **ClientId** and **Dimensional indicator**, positioned using screen coordinates from the **Cursor geometry engine**. Rendered separately from the GPU geometry to support text rendering | Cursor badge, peer badge |
+| **Volume depth texture** | A `depth24plus` GPU texture written by the volume ray march at the first significant opacity sample. Used by the cursor shader to determine whether cursor fragments are in front of or behind the volume surface for opacity dimming | Depth buffer, Z-buffer |
 
 ## Chunk loading (lucida-web)
 
@@ -234,15 +238,18 @@
 - A **ChunkStore** wraps exactly one **ChunkFetcher** and maintains a cache of **Chunk keys** to decompressed ArrayBuffers
 - An **Atlas** contains a GPU texture, an **Indirection buffer**, and a slot-tracking map; one **Atlas** exists per **Dataset** per render mode (slice or volume)
 - A **Fallback texture** is assembled from all chunks of the coarsest **Level** via **Seeding**; the shader samples it when the **Indirection buffer** returns the sentinel value
-- The **GPU worker** lazily creates one `SliceRenderer`, one `VolumeRenderer`, and one **Compositor**; all three share the same `GPUDevice`
+- The **GPU worker** lazily creates one `SliceRenderer`, one `VolumeRenderer`, one **Compositor**, and one `CursorRenderer`; all share the same `GPUDevice`
 - The **RenderClient** sends chunk data to the **GPU worker** via the **Worker protocol** using `Transferable` ArrayBuffers (zero-copy ownership transfer)
 - The **Render loop** delegates chunk planning to **WasmScene** (`chunk_plan_for`), fetching to a **ChunkStore**, and rendering to the **RenderClient**; it never touches the GPU directly
 - The **Upload budget** limits how many chunk bytes move from **ChunkStore** to **Atlas** per RAF tick, preventing GPU stalls and maintaining interactive frame rates
 - The **Bridge** is instantiated once when the WASM module is ready and auto-reconnects on disconnect with a 2-second delay
-- A **Peer cursor** is rendered from a **Cursor position** (voxel coordinates) by transforming through the local **Camera**'s zoom and center
+- A **Peer cursor** is computed by the **Cursor geometry engine** from peer **PresenceState** (camera, cursor, view) and rendered as WebGPU geometry (crosshair or ray) after the **Compositor** pass
 - A **Cursor position** is throttled at 50ms (same as **Presence**); null positions bypass the throttle and send immediately
-- A **Dimensional indicator** compares the peer's **ViewState** (Z/T/C) against the local **ViewState** and renders directional arrows plus opacity dimming
-- The **Cursor overlay** uses a RAF loop because the **Camera** is mutated imperatively during drag, not through React state
+- Cross-mode cursors are supported: a 2D peer's cursor appears as a **Cursor ray** in a 3D view (and vice versa as a crosshair at the Z-plane intersection)
+- The **Cursor geometry engine** performs receiver-side computation: it uses the peer's camera from **PresenceState** to unproject 3D cursors, with no protocol changes
+- A **Dimensional indicator** compares the peer's **ViewState** (T/C) against the local **ViewState** and renders directional arrows plus opacity dimming; Z indicators are suppressed in 3D mode
+- A **Cursor label** uses a RAF loop for positioning because the **Camera** is mutated imperatively during drag, not through React state; 3D label positions are projected through the local **Camera**'s view-projection matrix
+- The **Volume depth texture** is written during volume rendering and read by the cursor shader to dim ray fragments behind the volume surface to 30% opacity
 
 ## Example dialogue
 
@@ -285,10 +292,13 @@
 > **Domain expert:** "That's the **Render scale**. During interaction it drops to 0.25 — rendering at quarter resolution — so the **GPU worker** can keep up with the ray marching. After 50ms of no input, it snaps back to 1.0 and re-renders at full resolution. The **Render loop** uses the full-res viewport for **Level** selection though, so you don't get LOD flip-flopping during drags."
 
 > **Dev:** "How does the **Peer cursor** know where to render when I'm zoomed in and the peer is zoomed out?"
-> **Domain expert:** "The **Cursor position** is always in voxel coordinates — not screen pixels. The sender converts from screen to voxel using the **Camera**'s zoom and center, and the receiver converts back using their own **Camera**. So it always points at the same anatomical location regardless of zoom or pan differences."
+> **Domain expert:** "In 2D, the **Cursor position** is always in voxel coordinates. The **Cursor geometry engine** converts to GPU-ready crosshair geometry, and the shader transforms through the local **Camera**'s zoom and center. So it always points at the same anatomical location regardless of zoom. In 3D, the cursor is a **Cursor ray** — the engine unprojects the peer's screen cursor through their **View3D** camera and clips the ray to the volume."
+
+> **Dev:** "What if the peer is in 2D and I'm in 3D?"
+> **Domain expert:** "The **Cursor geometry engine** handles all four mode combinations. A 2D peer's cursor becomes a vertical **Cursor ray** through the volume at their voxel (x, y), with a **Cursor marker** at their Z slice. The ray extends 50% past the volume bounds on each side so you can spot it. Portions behind the volume surface dim to 30% opacity via the **Volume depth texture**."
 
 > **Dev:** "What if the peer is looking at a different Z slice?"
-> **Domain expert:** "Then the **Dimensional indicator** kicks in. It compares the peer's **ViewState** — their Z, T, and C — against yours. If they're on a higher Z, you see ▲ next to the dot. Lower Z, ▼. Different T gets ◄/►. Different C shows the channel number. And the whole cursor dims to 50% opacity so you know the peer isn't on your exact plane."
+> **Domain expert:** "In 2D mode, the **Dimensional indicator** shows ▲/▼ for Z differences, ◄/► for T, and channel numbers for C, with 50% opacity dimming. In 3D mode, Z indicators are suppressed — Z is a spatial axis you can see directly, so the **Cursor marker** on the ray already shows their Z position. T and C indicators still apply in both modes."
 
 ## Overloaded terms
 
@@ -318,4 +328,4 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Worker"**: Always qualify — **GPU worker**, **LZ4 worker**, or **fetch task** (for ChunkStore internals).
 
-- **"Cursor"**: In PresenceState, the raw `Option<[f64; 2]>` voxel coordinate data. In the UI, the rendered **Peer cursor** (colored dot + label). Use **Cursor position** for the data and **Peer cursor** for the visual.
+- **"Cursor"**: In PresenceState, the raw `Option<[f64; 2]>` coordinate data (voxel coords in 2D, normalized screen coords in 3D). In the UI, the rendered **Peer cursor** (crosshair or ray + label). Use **Cursor position** for the data, **Peer cursor** for the visual, **Cursor ray** for 3D ray geometry.

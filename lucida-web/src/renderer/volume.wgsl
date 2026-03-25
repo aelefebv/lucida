@@ -11,7 +11,8 @@ struct Uniforms {
   fallbackDims: vec4f,        // offset 256 (16 bytes) — xyz=dims, w=hasFallback
   chunkDims: vec4u,           // offset 272 (16 bytes) — xyz=chunk dimensions
   gridDims: vec4u,            // offset 288 (16 bytes) — xyz=grid dimensions
-  atlasSlotDims: vec4u,       // offset 304 (16 bytes) — xyz=slots per axis = 320 total
+  atlasSlotDims: vec4u,       // offset 304 (16 bytes) — xyz=slots per axis
+  viewProj: mat4x4f,          // offset 320 (64 bytes) — for depth output = 384 total
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -82,8 +83,13 @@ fn sampleVolume(texCoord: vec3i) -> u32 {
   return textureLoad(volumeTex, atlasCoord, 0).r;
 }
 
+struct FsOut {
+  @location(0) color: vec4f,
+  @builtin(frag_depth) depth: f32,
+};
+
 @fragment
-fn fs(input: VSOut) -> @location(0) vec4f {
+fn fs(input: VSOut) -> FsOut {
   // Reconstruct ray in world space from NDC
   let clipNear = vec4f(input.ndc, -1.0, 1.0);
   let clipFar = vec4f(input.ndc, 1.0, 1.0);
@@ -104,7 +110,10 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   // Intersect unit cube [0,1]^3 representing the volume in local space
   let tt = intersectAABB(ro, rd);
   if (tt.x >= tt.y || tt.y < 0.0) {
-    return vec4f(0.0, 0.0, 0.0, 0.0);
+    var miss: FsOut;
+    miss.color = vec4f(0.0, 0.0, 0.0, 0.0);
+    miss.depth = 1.0;
+    return miss;
   }
 
   let tStart = max(tt.x, 0.0);
@@ -127,6 +136,8 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   var alpha = 0.0;
   var maxVal = 0.0;
   var t = tStart;
+  var hitDepth = 1.0;
+  var depthRecorded = false;
 
   let maxSteps = i32(ceil(rayLen / adaptiveStep));
   let steps = select(min(maxSteps, 512), min(maxSteps, 256), renderMode == 1);
@@ -158,6 +169,15 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     let gamma = u.displayParams.x;
     let normalized = pow(clamp((rawVal - intensityMin) / range, 0.0, 1.0), gamma);
 
+    // Record depth at first significant sample
+    if (!depthRecorded && normalized > 0.01) {
+      let worldHit = u.modelMatrix * vec4f(pos, 1.0);
+      let clipHit = u.viewProj * worldHit;
+      // Remap from clip [-1,1] to viewport [0,1] to match rasterizer depth
+      hitDepth = clipHit.z / clipHit.w * 0.5 + 0.5;
+      depthRecorded = true;
+    }
+
     if (renderMode == 1) {
       // MIP: track maximum intensity
       maxVal = max(maxVal, normalized);
@@ -174,8 +194,12 @@ fn fs(input: VSOut) -> @location(0) vec4f {
 
   // Pre-multiply by layer opacity for compositing
   let layerOpacity = u.displayParams.y;
+  var out: FsOut;
+  out.depth = hitDepth;
   if (renderMode == 1) {
-    return vec4f(maxVal, maxVal, maxVal, 1.0) * layerOpacity;
+    out.color = vec4f(maxVal, maxVal, maxVal, 1.0) * layerOpacity;
+  } else {
+    out.color = vec4f(color * layerOpacity, alpha * layerOpacity);
   }
-  return vec4f(color * layerOpacity, alpha * layerOpacity);
+  return out;
 }
