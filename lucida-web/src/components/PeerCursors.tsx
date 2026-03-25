@@ -22,6 +22,7 @@ interface Props {
   myId: ClientId;
   wasmSceneRef: RefObject<WasmScene | null>;
   canvas: HTMLCanvasElement;
+  viewMode: "2d" | "3d";
   z: number;
   t: number;
   c: number;
@@ -55,10 +56,12 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
   return { dim, badge: parts.join(" ") };
 }
 
-export function PeerCursors({ peers, myId, wasmSceneRef, canvas, z, t, c }: Props) {
+export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t, c }: Props) {
   const cursorRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const peersRef = useRef(peers);
   peersRef.current = peers;
+  const viewModeRef = useRef(viewMode);
+  viewModeRef.current = viewMode;
 
   useEffect(() => {
     let rafId: number;
@@ -66,8 +69,6 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, z, t, c }: Prop
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
-        const zoom = scene.zoom();
-        const centerArr = scene.center();
         const canvasW = canvas.clientWidth;
         const canvasH = canvas.clientHeight;
 
@@ -78,9 +79,29 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, z, t, c }: Prop
             continue;
           }
 
-          const [worldX, worldY] = peer.cursor;
-          const screenX = (worldX - centerArr[0]) * zoom + canvasW / 2;
-          const screenY = (worldY - centerArr[1]) * zoom + canvasH / 2;
+          // Skip cross-mode cursors (coordinate systems are incompatible)
+          const peerCamera = peer.camera as { mode?: string } | null;
+          const peerIs3d = peerCamera?.mode === "3d";
+          const localIs3d = viewModeRef.current === "3d";
+          if (localIs3d !== peerIs3d) {
+            el.style.display = "none";
+            continue;
+          }
+
+          let screenX: number, screenY: number;
+          if (localIs3d) {
+            // 3D: cursor values are normalized screen coordinates [0-1]
+            const [nx, ny] = peer.cursor;
+            screenX = nx * canvasW;
+            screenY = ny * canvasH;
+          } else {
+            // 2D: cursor values are voxel (world) coordinates
+            const zoom = scene.zoom();
+            const centerArr = scene.center();
+            const [worldX, worldY] = peer.cursor;
+            screenX = (worldX - centerArr[0]) * zoom + canvasW / 2;
+            screenY = (worldY - centerArr[1]) * zoom + canvasH / 2;
+          }
 
           if (screenX < -20 || screenX > canvasW + 20 || screenY < -20 || screenY > canvasH + 20) {
             el.style.display = "none";

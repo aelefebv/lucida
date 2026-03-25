@@ -13,13 +13,14 @@ interface Props {
   remoteDocumentVersion: number;
   emitPresence: () => void;
   breakFollow: () => void;
+  sendCursor: (position: [number, number] | null) => void;
   t: number;
   c: number;
   loopRef: RefObject<RenderLoop | null>;
   onLoopChange: (loop: RenderLoop | null) => void;
 }
 
-export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, t, c, loopRef: parentLoopRef, onLoopChange }: Props) {
+export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
 
   // Create/start render loop
@@ -78,6 +79,12 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
 
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
+      // Always broadcast cursor as normalized screen coordinates
+      const rect = canvas.getBoundingClientRect();
+      const nx = (e.clientX - rect.left) / canvas.clientWidth;
+      const ny = (e.clientY - rect.top) / canvas.clientHeight;
+      sendCursor([nx, ny]);
+
       if (!dragging) return;
       const dx = e.clientX - lastPos.current.x;
       const dy = e.clientY - lastPos.current.y;
@@ -94,13 +101,22 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
       emitPresence();
       loopRef.current?.markDirty();
     },
-    [dragging, scene, emitPresence, breakFollow],
+    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor],
   );
 
   const onPointerUp = useCallback(() => {
     setDragging(false);
     scheduleFullRes();
   }, [scheduleFullRes]);
+
+  const onPointerLeave = useCallback(() => {
+    sendCursor(null);
+  }, [sendCursor]);
+
+  // Clear cursor on unmount (e.g. mode switch to 2D)
+  useEffect(() => {
+    return () => { sendCursor(null); };
+  }, [sendCursor]);
 
   const onWheel = useCallback(
     (e: WheelEvent) => {
@@ -122,6 +138,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     canvas.addEventListener("pointermove", onPointerMove);
     canvas.addEventListener("pointerup", onPointerUp);
     canvas.addEventListener("pointercancel", onPointerUp);
+    canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("wheel", onWheel, { passive: false });
     canvas.style.cursor = dragging ? "grabbing" : "grab";
     return () => {
@@ -129,9 +146,10 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointercancel", onPointerUp);
+      canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("wheel", onWheel);
     };
-  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onWheel, dragging]);
+  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerLeave, onWheel, dragging]);
 
   return null;
 }

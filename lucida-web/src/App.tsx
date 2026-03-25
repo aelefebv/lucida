@@ -260,18 +260,20 @@ function App() {
               remoteDocumentVersion={remoteDocumentVersion}
               emitPresence={bridge.emitPresence}
               breakFollow={bridge.breakFollow}
+              sendCursor={bridge.sendCursor}
               t={dims.t}
               c={dims.c}
               loopRef={render.loopRef}
               onLoopChange={render.setActiveLoop}
             />
           )}
-          {bridge.peers.size > 0 && dims.viewMode === "2d" && scene.wasmScene && render.canvasRef.current && (
+          {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
             <PeerCursors
               peers={bridge.peers}
               myId={bridge.myId}
               wasmSceneRef={scene.wasmSceneRef}
               canvas={render.canvasRef.current}
+              viewMode={dims.viewMode}
               z={dims.z}
               t={dims.t}
               c={dims.c}
