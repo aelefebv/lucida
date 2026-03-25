@@ -12,7 +12,10 @@ struct Uniforms {
   chunkDims: vec4u,           // offset 272 (16 bytes) — xyz=chunk dimensions
   gridDims: vec4u,            // offset 288 (16 bytes) — xyz=grid dimensions
   atlasSlotDims: vec4u,       // offset 304 (16 bytes) — xyz=slots per axis
-  viewProj: mat4x4f,          // offset 320 (64 bytes) — for depth output = 384 total
+  viewProj: mat4x4f,          // offset 320 (64 bytes)
+  camForward: vec4f,          // offset 384 (16 bytes) — xyz=camera forward dir
+  clipParams: vec4f,          // offset 400 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
+  // total = 416 bytes
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -116,8 +119,56 @@ fn fs(input: VSOut) -> FsOut {
     return miss;
   }
 
-  let tStart = max(tt.x, 0.0);
+  var tStart = max(tt.x, 0.0);
   let tEnd = tt.y;
+
+  // Apply clip distance — skip samples closer than clipDist to the camera
+  let clipDist = u.clipParams.x;
+  if (clipDist > 0.0) {
+    let camWorld = u.cameraPos.xyz;
+    if (u.clipParams.y < 0.5) {
+      // Plane mode: clip plane perpendicular to camera forward at clipDist
+      let planeNormal = u.camForward.xyz;
+      let planePoint = camWorld + planeNormal * clipDist;
+      // Intersect world-space ray with the clip plane
+      let denom = dot(worldRd, planeNormal);
+      if (abs(denom) > 1e-6) {
+        let t_world = dot(planePoint - worldRo, planeNormal) / denom;
+        if (t_world > 0.0) {
+          // Convert world-space hit point to local-space t parameter
+          let worldHitPt = worldRo + worldRd * t_world;
+          let localHitPt = (u.invModelMatrix * vec4f(worldHitPt, 1.0)).xyz;
+          let localT = dot(localHitPt - ro, rd) / dot(rd, rd);
+          tStart = max(tStart, localT);
+        }
+      }
+    } else {
+      // Sphere mode: clip sphere of radius clipDist centered at camera
+      let oc = worldRo - camWorld;
+      let a_coeff = dot(worldRd, worldRd);
+      let b_coeff = 2.0 * dot(oc, worldRd);
+      let c_coeff = dot(oc, oc) - clipDist * clipDist;
+      let disc = b_coeff * b_coeff - 4.0 * a_coeff * c_coeff;
+      if (disc >= 0.0) {
+        // Take the far intersection (exit point of the sphere)
+        let t_world = (-b_coeff + sqrt(disc)) / (2.0 * a_coeff);
+        if (t_world > 0.0) {
+          let worldHitPt = worldRo + worldRd * t_world;
+          let localHitPt = (u.invModelMatrix * vec4f(worldHitPt, 1.0)).xyz;
+          let localT = dot(localHitPt - ro, rd) / dot(rd, rd);
+          tStart = max(tStart, localT);
+        }
+      }
+    }
+  }
+
+  // Bail if clipping pushed tStart past tEnd
+  if (tStart >= tEnd) {
+    var clipMiss: FsOut;
+    clipMiss.color = vec4f(0.0, 0.0, 0.0, 0.0);
+    clipMiss.depth = 1.0;
+    return clipMiss;
+  }
 
   let dims = vec3i(u.volumeDims.xyz);
   let intensityMin = u.intensityRange.x;

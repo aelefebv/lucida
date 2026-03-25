@@ -148,11 +148,15 @@ export class RenderClient {
     canvasW: number,
     canvasH: number,
     viewProj?: Float32Array,
+    camForward?: Float32Array,
+    clipDistance?: number,
+    clipMode?: number,
   ) {
     this.worker.postMessage({
       type: "volumeRenderMultiPass",
       layers, invViewProj, eye,
       canvasW, canvasH, viewProj,
+      camForward, clipDistance, clipMode,
     });
   }
 

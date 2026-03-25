@@ -301,4 +301,85 @@ mod tests {
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, ServerMessage::PeerJoined { client_id: 3, .. }));
     }
+
+    #[test]
+    fn fly_camera_presence_round_trips() {
+        use crate::camera::{Fly, ClipMode};
+        let mut fly = Fly::new([1024, 768]);
+        fly.position = [1.5, 2.5, 3.5];
+        fly.orientation = [0.1, 0.2, 0.3, 0.9273]; // approximately normalized
+        fly.clip_distance = 0.42;
+        fly.clip_mode = ClipMode::Sphere;
+
+        let ps = PresenceState {
+            client_id: 7,
+            camera: Camera::Fly(fly),
+            view: ViewState::new(),
+            display: DisplayState::default(),
+            following: Some(3),
+            cursor: Some([0.5, 0.5]),
+            dataset_order: vec![],
+            dataset_settings: HashMap::new(),
+        };
+        let json = serde_json::to_string(&ps).unwrap();
+        assert!(json.contains("\"mode\":\"fly\""), "JSON should contain fly mode tag");
+        let parsed: PresenceState = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.client_id, 7);
+        assert_eq!(parsed.following, Some(3));
+        assert_eq!(parsed.cursor, Some([0.5, 0.5]));
+        // Verify camera round-tripped as Fly with correct state
+        match &parsed.camera {
+            Camera::Fly(v) => {
+                assert_eq!(v.position, [1.5, 2.5, 3.5]);
+                assert!((v.orientation[0] - 0.1).abs() < 1e-10);
+                assert_eq!(v.clip_distance, 0.42);
+                assert_eq!(v.clip_mode, ClipMode::Sphere);
+            }
+            _ => panic!("expected Camera::Fly, got {:?}", parsed.camera),
+        }
+    }
+
+    #[test]
+    fn fly_camera_presence_update_round_trips() {
+        use crate::camera::Fly;
+        let fly = Fly::new([800, 600]);
+        let msg = ServerMessage::PresenceUpdate {
+            client_id: 5,
+            camera: Camera::Fly(fly),
+            view: ViewState::new(),
+            display: DisplayState::default(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"presence_update\""));
+        assert!(json.contains("\"mode\":\"fly\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::PresenceUpdate { client_id, camera, .. } => {
+                assert_eq!(client_id, 5);
+                assert!(matches!(camera, Camera::Fly(_)));
+            }
+            _ => panic!("expected PresenceUpdate"),
+        }
+    }
+
+    #[test]
+    fn fly_camera_client_message_presence_round_trips() {
+        use crate::camera::Fly;
+        let fly = Fly::new([800, 600]);
+        let msg = ClientMessage::Presence {
+            camera: Camera::Fly(fly),
+            view: ViewState::new(),
+            display: DisplayState::default(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"presence\""));
+        assert!(json.contains("\"mode\":\"fly\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::Presence { camera, .. } => {
+                assert!(matches!(camera, Camera::Fly(_)));
+            }
+            _ => panic!("expected Presence"),
+        }
+    }
 }

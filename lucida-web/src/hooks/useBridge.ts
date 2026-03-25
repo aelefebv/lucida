@@ -168,7 +168,7 @@ export function useBridge({
               setZ(scene.z());
               setT(scene.t());
               setC(scene.c());
-              setViewMode(scene.is_3d() ? "3d" : "2d");
+              setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
               loopRef.current?.markDirty();
               bridgeRef.current?.sendPresence(scene.export_presence());
             } catch (e) {
@@ -209,7 +209,7 @@ export function useBridge({
                   setZ(scene.z());
                   setT(scene.t());
                   setC(scene.c());
-                  setViewMode(scene.is_3d() ? "3d" : "2d");
+                  setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
                   loopRef.current?.markDirty();
                   bridgeRef.current?.sendPresence(scene.export_presence());
                 } catch (e) {
@@ -443,7 +443,7 @@ export function useBridge({
             setZ(scene.z());
             setT(scene.t());
             setC(scene.c());
-            setViewMode(scene.is_3d() ? "3d" : "2d");
+            setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
             loopRef.current?.markDirty();
           } catch (e) {
             console.warn("Failed to import peer presence:", e);

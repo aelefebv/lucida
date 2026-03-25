@@ -32,10 +32,12 @@ pub enum DocumentCommand {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ViewportCommand {
     // Mode
-    #[serde(rename = "set_mode_2d")]
+    #[serde(rename = "set_mode_slice")]
     SetMode2D,
-    #[serde(rename = "set_mode_3d")]
+    #[serde(rename = "set_mode_arcball")]
     SetMode3D,
+    #[serde(rename = "set_mode_fly")]
+    SetModeFly,
     // Viewport
     SetViewport { width: u32, height: u32 },
     // 2D camera
@@ -44,12 +46,22 @@ pub enum ViewportCommand {
     SetCenter { x: f64, y: f64 },
     SetZoom { value: f64 },
     // 3D camera
-    #[serde(rename = "rotate_3d")]
+    #[serde(rename = "arcball_rotate")]
     Rotate3D { d_theta: f64, d_phi: f64 },
-    #[serde(rename = "zoom_3d")]
+    #[serde(rename = "arcball_zoom")]
     Zoom3D { delta: f64 },
-    #[serde(rename = "pan_3d")]
+    #[serde(rename = "arcball_pan")]
     Pan3D { dx: f64, dy: f64 },
+    // Fly camera
+    FlyTick {
+        dt: f64,
+        forward: f64,
+        right: f64,
+        up: f64,
+        yaw: f64,
+        pitch: f64,
+        roll: f64,
+    },
     // View state
     SetZ { z: u32 },
     SetZRange { start: u32, end: u32 },
@@ -119,42 +131,48 @@ impl Scene {
         match cmd {
             ViewportCommand::SetMode2D => self.set_mode_2d(),
             ViewportCommand::SetMode3D => self.set_mode_3d(),
+            ViewportCommand::SetModeFly => self.set_mode_fly(),
             ViewportCommand::SetViewport { width, height } => {
                 self.camera.set_viewport(width, height)
             }
             ViewportCommand::Pan { dx, dy } => {
-                if let Camera::View2D(ref mut v) = self.camera {
+                if let Camera::Slice(ref mut v) = self.camera {
                     v.pan(dx, dy);
                 }
             }
             ViewportCommand::ZoomBy { factor } => {
-                if let Camera::View2D(ref mut v) = self.camera {
+                if let Camera::Slice(ref mut v) = self.camera {
                     v.zoom_by(factor);
                 }
             }
             ViewportCommand::SetCenter { x, y } => {
-                if let Camera::View2D(ref mut v) = self.camera {
+                if let Camera::Slice(ref mut v) = self.camera {
                     v.center = [x, y];
                 }
             }
             ViewportCommand::SetZoom { value } => {
-                if let Camera::View2D(ref mut v) = self.camera {
+                if let Camera::Slice(ref mut v) = self.camera {
                     v.zoom = value;
                 }
             }
             ViewportCommand::Rotate3D { d_theta, d_phi } => {
-                if let Camera::View3D(ref mut v) = self.camera {
+                if let Camera::Arcball(ref mut v) = self.camera {
                     v.rotate(d_theta, d_phi);
                 }
             }
             ViewportCommand::Zoom3D { delta } => {
-                if let Camera::View3D(ref mut v) = self.camera {
+                if let Camera::Arcball(ref mut v) = self.camera {
                     v.zoom(delta);
                 }
             }
             ViewportCommand::Pan3D { dx, dy } => {
-                if let Camera::View3D(ref mut v) = self.camera {
+                if let Camera::Arcball(ref mut v) = self.camera {
                     v.pan(dx, dy);
+                }
+            }
+            ViewportCommand::FlyTick { dt, forward, right, up, yaw, pitch, roll } => {
+                if let Camera::Fly(ref mut v) = self.camera {
+                    v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
                 }
             }
             ViewportCommand::SetZ { z } => self.view.set_z(z),
@@ -253,10 +271,10 @@ mod tests {
     fn apply_pan_updates_center() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::Pan { dx: 100.0, dy: 0.0 }.into());
-        if let Camera::View2D(ref v) = scene.camera {
+        if let Camera::Slice(ref v) = scene.camera {
             assert_eq!(v.center, [100.0, 0.0]);
         } else {
-            panic!("expected View2D");
+            panic!("expected Slice");
         }
     }
 
@@ -271,7 +289,7 @@ mod tests {
     fn apply_set_mode_3d_switches_camera() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetMode3D.into());
-        assert!(matches!(scene.camera, Camera::View3D(_)));
+        assert!(matches!(scene.camera, Camera::Arcball(_)));
     }
 
     #[test]

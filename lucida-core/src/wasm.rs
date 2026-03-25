@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 
-use crate::camera::{Camera, View3D};
+use crate::camera::{Camera, Arcball, ClipMode};
 use crate::command::Command;
 use crate::scene::{DisplayState, DocumentState, Layer, DatasetDisplaySettings, LevelInfo, Scene};
 use crate::view::ViewState;
@@ -110,16 +110,24 @@ impl WasmScene {
 
     // --- Mode switching ---
 
-    pub fn set_mode_2d(&mut self) {
+    pub fn set_mode_slice(&mut self) {
         self.inner.set_mode_2d();
     }
 
-    pub fn set_mode_3d(&mut self) {
+    pub fn set_mode_arcball(&mut self) {
         self.inner.set_mode_3d();
     }
 
-    pub fn is_3d(&self) -> bool {
-        matches!(self.inner.camera, Camera::View3D(_))
+    pub fn set_mode_fly(&mut self) {
+        self.inner.set_mode_fly();
+    }
+
+    pub fn camera_mode(&self) -> String {
+        match &self.inner.camera {
+            Camera::Slice(_) => "slice".to_string(),
+            Camera::Arcball(_) => "arcball".to_string(),
+            Camera::Fly(_) => "fly".to_string(),
+        }
     }
 
     // --- Shared viewport ---
@@ -183,25 +191,25 @@ impl WasmScene {
     // --- 2D camera methods ---
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
-        if let Camera::View2D(ref mut v) = self.inner.camera {
+        if let Camera::Slice(ref mut v) = self.inner.camera {
             v.pan(dx, dy);
         }
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
-        if let Camera::View2D(ref mut v) = self.inner.camera {
+        if let Camera::Slice(ref mut v) = self.inner.camera {
             v.zoom_by(factor);
         }
     }
 
     pub fn set_center(&mut self, x: f64, y: f64) {
-        if let Camera::View2D(ref mut v) = self.inner.camera {
+        if let Camera::Slice(ref mut v) = self.inner.camera {
             v.center = [x, y];
         }
     }
 
     pub fn center(&self) -> Vec<f64> {
-        if let Camera::View2D(ref v) = self.inner.camera {
+        if let Camera::Slice(ref v) = self.inner.camera {
             vec![v.center[0], v.center[1]]
         } else {
             vec![0.0, 0.0]
@@ -209,7 +217,7 @@ impl WasmScene {
     }
 
     pub fn set_zoom(&mut self, value: f64) {
-        if let Camera::View2D(ref mut v) = self.inner.camera {
+        if let Camera::Slice(ref mut v) = self.inner.camera {
             v.zoom = value;
         }
     }
@@ -268,11 +276,11 @@ impl WasmScene {
 
     pub fn world_bounds(&self) -> String {
         match &self.inner.camera {
-            Camera::View2D(v) => {
+            Camera::Slice(v) => {
                 let bounds = v.world_bounds();
                 serde_json::to_string(&bounds).unwrap()
             }
-            Camera::View3D(_) => {
+            Camera::Arcball(_) | Camera::Fly(_) => {
                 // Return the visible region xy_bounds for 3D
                 let region = self.inner.camera.visible_region(
                     &self.inner.view.z_range,
@@ -296,21 +304,143 @@ impl WasmScene {
 
     // --- 3D camera methods ---
 
-    pub fn rotate_3d(&mut self, d_theta: f64, d_phi: f64) {
-        if let Camera::View3D(ref mut v) = self.inner.camera {
+    pub fn arcball_rotate(&mut self, d_theta: f64, d_phi: f64) {
+        if let Camera::Arcball(ref mut v) = self.inner.camera {
             v.rotate(d_theta, d_phi);
         }
     }
 
-    pub fn zoom_3d(&mut self, delta: f64) {
-        if let Camera::View3D(ref mut v) = self.inner.camera {
+    pub fn arcball_zoom(&mut self, delta: f64) {
+        if let Camera::Arcball(ref mut v) = self.inner.camera {
             v.zoom(delta);
         }
     }
 
-    pub fn pan_3d(&mut self, dx: f64, dy: f64) {
-        if let Camera::View3D(ref mut v) = self.inner.camera {
+    pub fn arcball_pan(&mut self, dx: f64, dy: f64) {
+        if let Camera::Arcball(ref mut v) = self.inner.camera {
             v.pan(dx, dy);
+        }
+    }
+
+    // --- Fly camera methods ---
+
+    pub fn fly_tick(&mut self, dt: f64, forward: f64, right: f64, up: f64, yaw: f64, pitch: f64, roll: f64) {
+        if let Camera::Fly(ref mut v) = self.inner.camera {
+            v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
+        }
+    }
+
+    /// Set the base movement speed for the fly camera (world units per second).
+    pub fn fly_set_base_speed(&mut self, speed: f64) {
+        if let Camera::Fly(ref mut v) = self.inner.camera {
+            v.base_speed = speed;
+        }
+    }
+
+    /// Multiply the fly camera's speed_multiplier by the given factor.
+    /// Used for scroll-wheel speed adjustment.
+    pub fn fly_adjust_speed(&mut self, factor: f64) {
+        if let Camera::Fly(ref mut v) = self.inner.camera {
+            v.speed_multiplier = (v.speed_multiplier * factor).clamp(0.01, 100.0);
+        }
+    }
+
+    /// Return the fly camera's current speed multiplier.
+    pub fn fly_speed_multiplier(&self) -> f64 {
+        match &self.inner.camera {
+            Camera::Fly(v) => v.speed_multiplier,
+            _ => 1.0,
+        }
+    }
+
+    /// Compute the world-space bounding box diagonal of the volume.
+    /// This is sqrt(sx^2 + sy^2 + sz^2) where sx/sy/sz are the model matrix
+    /// scale factors (corrected for multi-dataset normalization).
+    /// Returns 1.0 if no volume transform is available.
+    pub fn volume_diagonal(&self) -> f64 {
+        // Use the first dataset's scene model matrix (same as scene_model_matrix_for)
+        let ds = match self.inner.document.datasets.first() {
+            Some(d) => d,
+            None => return 1.0,
+        };
+        let t = match ds.volume_transform.as_ref() {
+            Some(t) => t,
+            None => return 1.0,
+        };
+        let global_max = self.inner.global_max_physical_extent();
+        let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+        let correction = ds_max / global_max;
+        let sx = t.model[0] as f64 * correction;
+        let sy = t.model[5] as f64 * correction;
+        let sz = t.model[10] as f64 * correction;
+        (sx * sx + sy * sy + sz * sz).sqrt()
+    }
+
+    // --- Clip distance methods ---
+
+    pub fn clip_distance(&self) -> f64 {
+        match &self.inner.camera {
+            Camera::Arcball(v) => v.clip_distance,
+            Camera::Fly(v) => v.clip_distance,
+            Camera::Slice(_) => 0.0,
+        }
+    }
+
+    pub fn clip_mode(&self) -> String {
+        match &self.inner.camera {
+            Camera::Arcball(v) => match v.clip_mode {
+                ClipMode::Plane => "plane".to_string(),
+                ClipMode::Sphere => "sphere".to_string(),
+            },
+            Camera::Fly(v) => match v.clip_mode {
+                ClipMode::Plane => "plane".to_string(),
+                ClipMode::Sphere => "sphere".to_string(),
+            },
+            Camera::Slice(_) => "plane".to_string(),
+        }
+    }
+
+    pub fn set_clip_distance(&mut self, distance: f64) {
+        let d = distance.max(0.0);
+        match &mut self.inner.camera {
+            Camera::Arcball(v) => v.clip_distance = d,
+            Camera::Fly(v) => v.clip_distance = d,
+            Camera::Slice(_) => {}
+        }
+    }
+
+    pub fn set_clip_mode(&mut self, mode: &str) {
+        let m = match mode {
+            "sphere" => ClipMode::Sphere,
+            _ => ClipMode::Plane,
+        };
+        match &mut self.inner.camera {
+            Camera::Arcball(v) => v.clip_mode = m,
+            Camera::Fly(v) => v.clip_mode = m,
+            Camera::Slice(_) => {}
+        }
+    }
+
+    pub fn adjust_clip_distance(&mut self, delta: f64) {
+        match &mut self.inner.camera {
+            Camera::Arcball(v) => v.clip_distance = (v.clip_distance + delta).max(0.0),
+            Camera::Fly(v) => v.clip_distance = (v.clip_distance + delta).max(0.0),
+            Camera::Slice(_) => {}
+        }
+    }
+
+    /// Camera forward direction in world space (normalized). Returns [fx, fy, fz].
+    pub fn camera_forward(&self) -> Vec<f32> {
+        match &self.inner.camera {
+            Camera::Arcball(v) => {
+                let fwd = v.forward_direction();
+                vec![fwd[0] as f32, fwd[1] as f32, fwd[2] as f32]
+            }
+            Camera::Fly(v) => {
+                let fwd = v.forward_direction();
+                vec![fwd[0] as f32, fwd[1] as f32, fwd[2] as f32]
+            }
+            Camera::Slice(_) => vec![0.0, 0.0, -1.0],
         }
     }
 
@@ -327,54 +457,64 @@ impl WasmScene {
             .set_volume_scale([shape_z, shape_y, shape_x], [scale_z, scale_y, scale_x]);
     }
 
-    pub fn view_proj_3d(&self) -> Vec<f32> {
-        if let Camera::View3D(ref v) = self.inner.camera {
-            v.view_proj().to_vec()
-        } else {
-            vec![
+    pub fn view_proj(&self) -> Vec<f32> {
+        match &self.inner.camera {
+            Camera::Arcball(v) => v.view_proj().to_vec(),
+            Camera::Fly(v) => v.view_proj().to_vec(),
+            _ => vec![
                 1.0, 0.0, 0.0, 0.0,
                 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 1.0, 0.0,
                 0.0, 0.0, 0.0, 1.0,
-            ]
+            ],
         }
     }
 
-    pub fn inv_view_proj_3d(&self) -> Vec<f32> {
-        if let Camera::View3D(ref v) = self.inner.camera {
-            v.inv_view_proj().to_vec()
-        } else {
-            vec![
+    pub fn inv_view_proj(&self) -> Vec<f32> {
+        match &self.inner.camera {
+            Camera::Arcball(v) => v.inv_view_proj().to_vec(),
+            Camera::Fly(v) => v.inv_view_proj().to_vec(),
+            _ => vec![
                 1.0, 0.0, 0.0, 0.0,
                 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 1.0, 0.0,
                 0.0, 0.0, 0.0, 1.0,
-            ]
+            ],
         }
     }
 
-    pub fn eye_position_3d(&self) -> Vec<f32> {
-        if let Camera::View3D(ref v) = self.inner.camera {
-            let eye = v.eye_position();
-            vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
-        } else {
-            vec![0.0, 0.0, 1.0]
+    pub fn eye_position(&self) -> Vec<f32> {
+        match &self.inner.camera {
+            Camera::Arcball(v) => {
+                let eye = v.eye_position();
+                vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
+            }
+            Camera::Fly(v) => {
+                let eye = v.eye_position();
+                vec![eye[0] as f32, eye[1] as f32, eye[2] as f32]
+            }
+            _ => vec![0.0, 0.0, 1.0],
         }
     }
 
     /// Returns the ray-volume intersection point in [0,1]^3 local space for a dataset.
     /// This is where the center-screen ray hits the volume bounding box.
-    pub fn ray_hit_local_3d(&self, dataset_id: &str) -> Vec<f32> {
-        if let Camera::View3D(ref v) = self.inner.camera {
-            let inv_model_vec = self.inv_scene_model_matrix_for(dataset_id);
-            let mut im = [0.0f64; 16];
-            for (i, val) in inv_model_vec.iter().enumerate() {
-                im[i] = *val as f64;
+    pub fn ray_hit_local(&self, dataset_id: &str) -> Vec<f32> {
+        let inv_model_vec = self.inv_scene_model_matrix_for(dataset_id);
+        let mut im = [0.0f64; 16];
+        for (i, val) in inv_model_vec.iter().enumerate() {
+            im[i] = *val as f64;
+        }
+        match &self.inner.camera {
+            Camera::Arcball(v) => {
+                let hit = v.ray_hit_local(&im);
+                vec![hit[0] as f32, hit[1] as f32, hit[2] as f32]
             }
-            let hit = v.ray_hit_local(&im);
-            vec![hit[0] as f32, hit[1] as f32, hit[2] as f32]
-        } else {
-            vec![0.5, 0.5, 0.5]
+            Camera::Fly(v) => {
+                let hit = v.ray_hit_local(&im);
+                vec![hit[0] as f32, hit[1] as f32, hit[2] as f32]
+            }
+            _ => vec![0.5, 0.5, 0.5],
         }
     }
 
@@ -491,16 +631,16 @@ impl WasmScene {
     // --- Minimap camera ---
 
     pub fn camera_theta(&self) -> f64 {
-        if let Camera::View3D(ref v) = self.inner.camera { v.theta } else { 0.5 }
+        if let Camera::Arcball(ref v) = self.inner.camera { v.theta } else { 0.5 }
     }
 
     pub fn camera_phi(&self) -> f64 {
-        if let Camera::View3D(ref v) = self.inner.camera { v.phi } else { 0.8 }
+        if let Camera::Arcball(ref v) = self.inner.camera { v.phi } else { 0.8 }
     }
 
     /// Compute peer cursor geometry for GPU rendering + screen positions for labels.
     ///
-    /// Input `peers_json`: array of `{"id": u64, "cursor": [f64,f64]|null, "mode": "2d"|"3d"}`
+    /// Input `peers_json`: array of `{"id": u64, "cursor": [f64,f64]|null, "mode": "slice"|"arcball"|"fly"}`
     /// Returns JSON: `{"gpu": [[f32;8]], "labels": [{"id":u64,"sx":f64,"sy":f64}]}`
     pub fn compute_peer_cursors(&self, peers_json: &str, my_id: u32, screen_w: f64, screen_h: f64) -> String {
         let peers: Vec<crate::cursor::PeerInput> =
@@ -511,7 +651,7 @@ impl WasmScene {
 
     /// Returns 35 floats: invViewProj[16] + eye[3] + viewProj[16]
     pub fn minimap_camera(&self, theta: f64, phi: f64, w: f64, h: f64) -> Vec<f32> {
-        let cam = View3D {
+        let cam = Arcball {
             target: [0.5, 0.5, 0.5],
             theta,
             phi,
@@ -520,6 +660,8 @@ impl WasmScene {
             viewport: [w as u32, h as u32],
             near: 0.01,
             far: 100.0,
+            clip_distance: 0.0,
+            clip_mode: crate::camera::ClipMode::default(),
         };
         let mut out = Vec::with_capacity(35);
         out.extend_from_slice(&cam.inv_view_proj());

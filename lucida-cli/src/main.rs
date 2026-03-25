@@ -133,8 +133,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let command = match cmd {
                 Sub::Pan { dx, dy } => ViewportCommand::Pan { dx, dy },
                 Sub::Zoom { factor } => match scene.camera {
-                    Camera::View2D(_) => ViewportCommand::ZoomBy { factor },
-                    Camera::View3D(_) => ViewportCommand::Zoom3D { delta: 1.0 / factor - 1.0 },
+                    Camera::Slice(_) => ViewportCommand::ZoomBy { factor },
+                    Camera::Arcball(_) | Camera::Fly(_) => ViewportCommand::Zoom3D { delta: 1.0 / factor - 1.0 },
                 },
                 Sub::Slice { axis, index } => match axis.as_str() {
                     "z" => ViewportCommand::SetZ { z: index },
@@ -146,8 +146,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Sub::Gamma { gamma } => ViewportCommand::SetGamma { gamma },
                 Sub::Center { x, y } => ViewportCommand::SetCenter { x, y },
                 Sub::SetZoom { value } => match scene.camera {
-                    Camera::View2D(_) => ViewportCommand::SetZoom { value },
-                    Camera::View3D(_) => return Err("set-zoom is only supported in 2D mode".into()),
+                    Camera::Slice(_) => ViewportCommand::SetZoom { value },
+                    Camera::Arcball(_) | Camera::Fly(_) => return Err("set-zoom is only supported in 2D mode".into()),
                 },
                 Sub::Rotate { theta, phi, radians } => {
                     let (t, p) = if radians {

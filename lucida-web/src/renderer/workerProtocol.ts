@@ -109,6 +109,9 @@ export interface VolumeRenderMultiPassMessage {
   canvasW: number;
   canvasH: number;
   viewProj?: Float32Array;
+  camForward?: Float32Array;
+  clipDistance?: number;
+  clipMode?: number;
 }
 
 export interface SliceLayerParams {

@@ -305,14 +305,14 @@ class Viewer:
         self._scene.set_c(c)
         self._send_presence()
 
-    def set_mode_2d(self):
+    def set_mode_slice(self):
         self._break_follow()
-        self._scene.set_mode_2d()
+        self._scene.set_mode_slice()
         self._send_presence()
 
-    def set_mode_3d(self):
+    def set_mode_arcball(self):
         self._break_follow()
-        self._scene.set_mode_3d()
+        self._scene.set_mode_arcball()
         self._send_presence()
 
     def rotate(self, theta: float = 0.0, phi: float = 0.0, *, degrees: bool = True):
@@ -327,12 +327,12 @@ class Viewer:
             theta = math.radians(theta)
             phi = math.radians(phi)
         self._break_follow()
-        self._scene.rotate_3d(theta, phi)
+        self._scene.arcball_rotate(theta, phi)
         self._send_presence()
 
     @property
-    def is_3d(self) -> bool:
-        return self._scene.is_3d()
+    def camera_mode(self) -> str:
+        return self._scene.camera_mode()
 
     # -- Document commands (apply locally + send wrapped) ------------------
 

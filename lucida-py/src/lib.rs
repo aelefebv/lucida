@@ -76,19 +76,23 @@ impl PyScene {
         serde_json::to_string(&cmd).unwrap()
     }
 
-    fn set_mode_2d(&mut self) {
+    fn set_mode_slice(&mut self) {
         self.inner.apply(ViewportCommand::SetMode2D.into());
     }
 
-    fn set_mode_3d(&mut self) {
+    fn set_mode_arcball(&mut self) {
         self.inner.apply(ViewportCommand::SetMode3D.into());
     }
 
-    fn is_3d(&self) -> bool {
-        matches!(self.inner.camera, Camera::View3D(_))
+    fn camera_mode(&self) -> String {
+        match &self.inner.camera {
+            Camera::Slice(_) => "slice".to_string(),
+            Camera::Arcball(_) => "arcball".to_string(),
+            Camera::Fly(_) => "fly".to_string(),
+        }
     }
 
-    fn rotate_3d(&mut self, d_theta: f64, d_phi: f64) -> String {
+    fn arcball_rotate(&mut self, d_theta: f64, d_phi: f64) -> String {
         let cmd = ViewportCommand::Rotate3D { d_theta, d_phi };
         self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
@@ -99,7 +103,7 @@ impl PyScene {
     }
 
     fn center(&self) -> (f64, f64) {
-        if let Camera::View2D(ref v) = self.inner.camera {
+        if let Camera::Slice(ref v) = self.inner.camera {
             (v.center[0], v.center[1])
         } else {
             (0.0, 0.0)

@@ -229,7 +229,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     }
 
     // Main camera inv view-proj (3D only)
-    const mainInvViewProj = mode === "volume" ? new Float32Array(scene.inv_view_proj_3d()) : null;
+    const mainInvViewProj = mode === "volume" ? new Float32Array(scene.inv_view_proj()) : null;
     const currentZ = mode === "slice" ? sliceZ : scene.z();
 
     state.overlayCallback({

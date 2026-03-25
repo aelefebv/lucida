@@ -83,7 +83,7 @@ export function tickVolume(
   let exhausted = false;
   let hasPending = false;
 
-  const eye = new Float32Array(scene.eye_position_3d());
+  const eye = new Float32Array(scene.eye_position());
   const hitLocals = new Map<string, [number, number, number]>();
 
   // Upload chunks for ALL datasets
@@ -160,7 +160,7 @@ export function tickVolume(
 
     // Ray-volume intersection point in local [0,1]³ space for distance-based eviction.
     // Chunks closest to where the camera ray hits the volume surface are prioritized.
-    const hitLocal = Array.from(scene.ray_hit_local_3d(dsId)) as [number, number, number];
+    const hitLocal = Array.from(scene.ray_hit_local(dsId)) as [number, number, number];
     hitLocals.set(dsId, hitLocal);
 
     const lodKey = `${dsId}/${targetLevel}/${viewT}/${viewC}`;
@@ -258,8 +258,12 @@ export function tickVolume(
   }
 
   // Build layer params for visible layers in order
-  const invVP = new Float32Array(scene.inv_view_proj_3d());
-  const viewProj = new Float32Array(scene.view_proj_3d());
+  const invVP = new Float32Array(scene.inv_view_proj());
+  const viewProj = new Float32Array(scene.view_proj());
+  const camForward = new Float32Array(scene.camera_forward());
+  const clipDistance = scene.clip_distance();
+  const clipModeStr = scene.clip_mode();
+  const clipMode = clipModeStr === "sphere" ? 1 : 0;
 
   const layers: VolumeLayerParams[] = [];
   for (const dsId of layerOrder) {
@@ -279,7 +283,7 @@ export function tickVolume(
       datasetId: dsId,
       modelMatrix: model,
       invModelMatrix: invModel,
-      rayHitLocal: hitLocals.get(dsId) ?? Array.from(scene.ray_hit_local_3d(dsId)) as [number, number, number],
+      rayHitLocal: hitLocals.get(dsId) ?? Array.from(scene.ray_hit_local(dsId)) as [number, number, number],
       contrastMin: settings.contrast_min,
       contrastMax: settings.contrast_max,
       gamma: settings.gamma,
@@ -289,7 +293,7 @@ export function tickVolume(
     });
   }
 
-  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, viewProj);
+  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, viewProj, camForward, clipDistance, clipMode);
 
   return exhausted || hasPending;
 }

@@ -115,7 +115,8 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
             const zoom = scene.zoom();
             const centerArr = scene.center();
             const [worldX, worldY] = peer.cursor;
-            const peerIs3d = (peer.camera as { mode?: string })?.mode === "3d";
+            const peerMode = (peer.camera as { mode?: string })?.mode;
+            const peerIs3d = peerMode === "arcball" || peerMode === "fly";
             if (peerIs3d) {
               // Cross-mode 3D→2D: use WASM-projected coords
               screenX = lbl.sx;

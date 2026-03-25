@@ -71,13 +71,32 @@
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Camera** | A tagged enum that is either a View2D or View3D, providing a unified interface for viewport, zoom, and visible region computation | Viewport, view |
-| **View2D** | A pan/zoom camera for 2D slice viewing, defined by center point, zoom level, and viewport size | 2D camera, slice camera |
-| **View3D** | An arcball camera for 3D volume rendering, using spherical coordinates (theta, phi, distance) around a target point | 3D camera, orbit camera |
+| **Camera** | A tagged enum (`Slice`, `Arcball`, or `Fly`) providing a unified interface for viewport, zoom, visible region, and view-projection matrix computation | Viewport, view |
+| **Camera mode** | The string identifier returned by `camera_mode()`: `"slice"`, `"arcball"`, or `"fly"` | View mode (ambiguous with 2D/3D view mode) |
+| **Slice** (camera) | A pan/zoom camera for 2D slice viewing, defined by center point, zoom level, and viewport size (serde tag `"slice"`) | View2D (old name), 2D camera |
+| **Arcball** (camera) | An orbit camera for 3D volume rendering, using spherical coordinates (theta, phi, distance) around a target point (serde tag `"arcball"`) | View3D (old name), 3D camera, orbit camera |
+| **Fly** (camera) | A 6 degrees-of-freedom camera for free 3D navigation, using position and quaternion orientation with frame-rate-independent movement (serde tag `"fly"`) | Fly camera, FPS camera, spaceship camera |
+| **Quaternion orientation** | The `[f64; 4]` (x, y, z, w) unit quaternion storing the **Fly** camera's rotation, avoiding gimbal lock; input arrives as euler deltas (yaw, pitch, roll) converted to axis-angle quaternion rotations | Euler angles, rotation matrix |
+| **fly_tick** | The per-frame **ViewportCommand** that updates a **Fly** camera: takes `dt`, translation axes (forward/right/up as -1/0/1), and rotation floats (yaw/pitch/roll in radians); all movement math is computed in Rust | Fly update, camera tick |
+| **Base speed** | Movement speed derived from the volume's bounding box diagonal (~0.3 diagonals/sec), set when entering **Fly** mode to ensure navigation feels natural regardless of dataset size | Default speed, volume speed |
+| **Speed multiplier** | A user-adjustable factor on the **Fly** camera (modified via scroll wheel, ~1.2x per tick) that scales the **Base speed**; persists during a fly mode session | Fly speed, zoom speed |
+| **Clip distance** | The distance from the camera within which volume samples are made transparent, stored on both **Arcball** and **Fly** camera structs; defaults to 0.0 for **Arcball** and ~0.5-1% of volume diagonal for **Fly** | Near clip, clipping plane, cut distance |
+| **Clip mode** | The shape of the clip region: **Plane** (flat plane perpendicular to the view direction, producing clean cross-sections) or **Sphere** (radial cutaway around the camera position) | Clip type, clip shape |
+| **Mouselook** | Mouse drag input in **Fly** mode that applies yaw and pitch via **fly_tick**, providing fine-grained view direction control | Mouse rotation, FPS look |
+| **Mode conversion** | The state transformation when switching between camera types: **Arcball** → **Fly** derives position and quaternion from the current view; **Fly** → **Arcball** derives a target point along the view ray and spherical coordinates from the current position | Camera switch, mode switch |
 | **VisibleRegion** | The camera-agnostic output of visible region computation: an XY bounding box in voxel space, a Z range, an effective zoom, and optional frustum planes and sort center | Viewport bounds, view bounds |
 | **Effective zoom** | Screen pixels per voxel at the focal plane; in 2D this is the zoom value directly, in 3D it is derived from distance, FOV, and voxel density | Scale, magnification, resolution |
 | **Frustum planes** | Six clipping planes in full-resolution voxel coordinates, extracted from the view-projection matrix using the Gribb-Hartmann method; used for per-chunk culling in 3D | Clip planes, view planes |
 | **Sort center** | The point in voxel space where the camera's center-screen ray intersects the volume surface; used to prioritize chunk loading from the camera's point of interest outward | Focus point, hit point |
+
+## Keybinding system (lucida-web)
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Key state tracker** | Layer 1 of the keybinding system: the `useKeyState` hook that listens to `keydown`/`keyup` on the viewer container, maintains a `Set<string>` of pressed keys, clears on blur, suppresses when text inputs are focused, and calls `preventDefault` on bound keys | Key listener, input handler |
+| **Keybinding registry** | Layer 2 of the keybinding system: a plain config object mapping action names (e.g. `"fly.forward"`) to key values (e.g. `"w"`), easily changeable without code logic changes | Key map, shortcut config, hotkey registry |
+| **Keybinding consumer** | Layer 3 of the keybinding system: a hook or RAF loop that reads the **Key state tracker** and **Keybinding registry** to drive behavior (e.g. `useFlyCameraInput` for fly camera, clip distance adjustment loop) | Key handler, input consumer |
+| **Fly camera hint** | A transient overlay shown on every **Fly** mode activation displaying the control scheme ("WASD move · QE up/down · IKJLOU look · Scroll speed"), dismissed on first keypress or after 5 seconds | Controls overlay, keybinding help |
 
 ## Chunk system
 
@@ -181,7 +200,7 @@
 | **Cursor position** | In 2D: voxel-space `[x, y]` coordinates. In 3D: normalized screen coordinates `[0-1]`. Transmitted as `Option<[f64; 2]>` (null = cursor off canvas) | Screen position (ambiguous) |
 | **Cursor ray** | A billboard quad strip rendered in 3D mode showing a **Peer**'s line of sight through the volume. For 2D→3D peers: a vertical ray at the peer's voxel position. For 3D→3D peers: the unprojected ray from the peer's camera through their cursor. Extends 50% past the volume on each end for visibility. Portions behind the volume surface render at 30% opacity via depth texture sampling | Cursor line, sight line |
 | **Cursor marker** | A crosshair rendered at the ray's intersection point with the volume surface (entry point for 3D→3D, peer's Z slice for 2D→3D), providing a focal anchor for where the peer is pointing | Hit point, intersection indicator |
-| **Cursor geometry engine** | The Rust module (`cursor.rs`) that computes GPU-ready cursor geometry (crosshairs and rays) and screen-space label positions from peer presence data. Handles all four mode combinations: 2D→2D, 2D→3D, 3D→2D, 3D→3D. Computation is receiver-side using the peer's camera from **PresenceState** | Cursor computer |
+| **Cursor geometry engine** | The Rust module (`cursor.rs`) that computes GPU-ready cursor geometry (crosshairs and rays) and screen-space label positions from peer presence data. Handles all cross-mode combinations (slice↔arcball↔fly). Fly and Arcball peers are treated equivalently as "3D" for cursor rendering. Computation is receiver-side using the peer's camera from **PresenceState** | Cursor computer |
 | **Dimensional indicator** | A visual badge (◄/► for T, channel number for C) shown next to a **Peer cursor** label when the peer's **ViewState** differs from the local view, accompanied by 50% opacity dimming. Z indicators are suppressed in 3D mode since Z is a visible spatial axis | Slice indicator, Z arrow |
 | **Cursor label** | The HTML overlay div showing the peer's **ClientId** and **Dimensional indicator**, positioned using screen coordinates from the **Cursor geometry engine**. Rendered separately from the GPU geometry to support text rendering | Cursor badge, peer badge |
 | **Volume depth texture** | A `depth24plus` GPU texture written by the volume ray march at the first significant opacity sample. Used by the cursor shader to determine whether cursor fragments are in front of or behind the volume surface for opacity dimming | Depth buffer, Z-buffer |
@@ -214,6 +233,10 @@
 - A **Dataset** contains zero or more **Layers** and optionally one **VolumeTransform** and **Volume shape**
 - A **Dataset** has exactly one **Data Source** (the **Client** that added it); if that **Client** disconnects, the data source mapping is removed
 - A **Layer** contains zero or more **LevelInfo** entries; when empty, isotropic 2x downsampling is assumed
+- A **Camera** is exactly one of **Slice**, **Arcball**, or **Fly**; all three produce a **VisibleRegion** and view-projection matrix through the unified Camera enum interface
+- A **Fly** camera carries a **Quaternion orientation**, **Base speed**, **Speed multiplier**, **Clip distance**, and **Clip mode**
+- An **Arcball** camera carries a **Clip distance** and **Clip mode**
+- **Mode conversion** between **Arcball** and **Fly** preserves approximate eye position and view direction; **Fly** → **Arcball** resets **Clip distance** to 0.0
 - A **Camera** produces a **VisibleRegion** given the current **ViewState** and optional **VolumeTransform**
 - A **VisibleRegion** is consumed by chunk planning to produce a **ChunkRequestPlan**
 - A **ChunkRequestPlan** contains a `needed` list and a `prefetch` list of **ChunkCoords**
@@ -250,6 +273,10 @@
 - A **Dimensional indicator** compares the peer's **ViewState** (T/C) against the local **ViewState** and renders directional arrows plus opacity dimming; Z indicators are suppressed in 3D mode
 - A **Cursor label** uses a RAF loop for positioning because the **Camera** is mutated imperatively during drag, not through React state; 3D label positions are projected through the local **Camera**'s view-projection matrix
 - The **Volume depth texture** is written during volume rendering and read by the cursor shader to dim ray fragments behind the volume surface to 30% opacity
+- The **Key state tracker** is mounted once on the viewer container; multiple **Keybinding consumers** read from the same key state
+- The **Keybinding registry** maps action names to keys; consumers look up actions through `isActionPressed()` without touching DOM events
+- A **Fly camera hint** is shown on every **Fly** mode activation and dismissed by the first keypress or a 5-second timeout
+- **Clip distance** is serialized with presence via the camera structs, so **Follow** mode reproduces the leader's clip settings
 
 ## Example dialogue
 
@@ -292,19 +319,31 @@
 > **Domain expert:** "That's the **Render scale**. During interaction it drops to 0.25 — rendering at quarter resolution — so the **GPU worker** can keep up with the ray marching. After 50ms of no input, it snaps back to 1.0 and re-renders at full resolution. The **Render loop** uses the full-res viewport for **Level** selection though, so you don't get LOD flip-flopping during drags."
 
 > **Dev:** "How does the **Peer cursor** know where to render when I'm zoomed in and the peer is zoomed out?"
-> **Domain expert:** "In 2D, the **Cursor position** is always in voxel coordinates. The **Cursor geometry engine** converts to GPU-ready crosshair geometry, and the shader transforms through the local **Camera**'s zoom and center. So it always points at the same anatomical location regardless of zoom. In 3D, the cursor is a **Cursor ray** — the engine unprojects the peer's screen cursor through their **View3D** camera and clips the ray to the volume."
+> **Domain expert:** "In 2D, the **Cursor position** is always in voxel coordinates. The **Cursor geometry engine** converts to GPU-ready crosshair geometry, and the shader transforms through the local **Camera**'s zoom and center. So it always points at the same anatomical location regardless of zoom. In 3D, the cursor is a **Cursor ray** — the engine unprojects the peer's screen cursor through their **Arcball** or **Fly** camera and clips the ray to the volume."
 
 > **Dev:** "What if the peer is in 2D and I'm in 3D?"
-> **Domain expert:** "The **Cursor geometry engine** handles all four mode combinations. A 2D peer's cursor becomes a vertical **Cursor ray** through the volume at their voxel (x, y), with a **Cursor marker** at their Z slice. The ray extends 50% past the volume bounds on each side so you can spot it. Portions behind the volume surface dim to 30% opacity via the **Volume depth texture**."
+> **Domain expert:** "The **Cursor geometry engine** handles all cross-mode combinations — **Slice**, **Arcball**, and **Fly** are all supported. A **Slice** peer's cursor becomes a vertical **Cursor ray** through the volume at their voxel (x, y), with a **Cursor marker** at their Z slice. **Fly** and **Arcball** peers are treated equivalently as 3D for cursor rendering."
 
 > **Dev:** "What if the peer is looking at a different Z slice?"
 > **Domain expert:** "In 2D mode, the **Dimensional indicator** shows ▲/▼ for Z differences, ◄/► for T, and channel numbers for C, with 50% opacity dimming. In 3D mode, Z indicators are suppressed — Z is a spatial axis you can see directly, so the **Cursor marker** on the ray already shows their Z position. T and C indicators still apply in both modes."
+
+> **Dev:** "How does the **Fly** camera differ from the **Arcball** camera?"
+> **Domain expert:** "The **Arcball** orbits a fixed target using spherical coordinates — great for inspecting from outside. The **Fly** camera has 6 degrees of freedom: position plus a **Quaternion orientation** for gimbal-lock-free rotation. You move with WASD/QE, look with IKJLOU or **Mouselook**, and adjust speed with the scroll wheel. The **Base speed** is set from the volume diagonal when you enter **Fly** mode, and the **Speed multiplier** lets you fine-tune from there."
+
+> **Dev:** "What happens when I switch between **Arcball** and **Fly**?"
+> **Domain expert:** "**Mode conversion** preserves your viewpoint. **Arcball** → **Fly** derives the position from `eye_position()` and the **Quaternion orientation** from the view direction. **Fly** → **Arcball** picks a target along the view ray — the volume center if it's in front, otherwise a point at default distance — and computes spherical coords from there. The **Clip distance** resets to 0.0 on switch to **Arcball**."
+
+> **Dev:** "What is the **Clip distance** for?"
+> **Domain expert:** "When you're flying inside a volume, samples right against the camera create visual clutter. The **Clip distance** makes everything between the camera and a configurable distance transparent. In **Plane** **Clip mode**, it's a flat plane perpendicular to the view direction — you get clean cross-sections. In **Sphere** mode, it's a radial cutaway. Both **Arcball** and **Fly** carry clip settings, and they serialize with **Presence** so followers see your clipping too."
+
+> **Dev:** "How does the **Keybinding system** work?"
+> **Domain expert:** "Three layers. The **Key state tracker** — `useKeyState` — listens to keydown/keyup on the canvas, tracks a `Set` of pressed keys, and handles edge cases like clearing on blur and ignoring text inputs. The **Keybinding registry** is a plain config object mapping action names to keys. **Keybinding consumers** read from both — `useFlyCameraInput` polls the key state each RAF frame and feeds it into **fly_tick**, the clip distance loop reads bracket keys. No event bus, just a shared `Set`."
 
 ## Overloaded terms
 
 These terms have multiple meanings depending on context. The glossary tables above define each precisely — this section provides quick disambiguation guidance.
 
-- **"Zoom"**: In **View2D**, a direct scale factor. In **View3D**, **Effective zoom** is derived from distance, FOV, and voxel density. The chunk planner normalizes both into pixels-per-voxel.
+- **"Zoom"**: In **Slice**, a direct scale factor. In **Arcball**, **Effective zoom** is derived from distance, FOV, and voxel density. In **Fly**, it is derived from FOV and voxel density at the volume surface. The chunk planner normalizes all into pixels-per-voxel.
 
 - **"Plane" vs "Page"**: A **Page** is a TIFF container concept (one IFD entry); a **Plane** is a logical 2D cross-section of a Volume at a given Z. Avoid "slice" — it's ambiguous between both.
 
@@ -329,3 +368,9 @@ These terms have multiple meanings depending on context. The glossary tables abo
 - **"Worker"**: Always qualify — **GPU worker**, **LZ4 worker**, or **fetch task** (for ChunkStore internals).
 
 - **"Cursor"**: In PresenceState, the raw `Option<[f64; 2]>` coordinate data (voxel coords in 2D, normalized screen coords in 3D). In the UI, the rendered **Peer cursor** (crosshair or ray + label). Use **Cursor position** for the data, **Peer cursor** for the visual, **Cursor ray** for 3D ray geometry.
+
+- **"Clip"**: **Clip distance** is the volume-rendering near clip that makes samples transparent. **Frustum planes** (sometimes called "clip planes") are the chunk-culling planes from the view-projection matrix. These are unrelated — **Clip distance** affects ray marching tStart, **Frustum planes** affect chunk loading.
+
+- **"Speed"**: **Base speed** is the volume-diagonal-derived constant set on entering **Fly** mode. **Speed multiplier** is the user-adjustable factor from scroll wheel. Actual movement = **Base speed** × **Speed multiplier** × dt. Don't use "speed" alone — always qualify which.
+
+- **"Mode"**: **Camera mode** is the specific camera variant (slice/arcball/fly). View mode is the 2D/3D rendering mode. Both **Arcball** and **Fly** are 3D view modes — distinguish with "**Camera mode** is fly" vs "view mode is 3D".

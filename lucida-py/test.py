@@ -137,7 +137,7 @@ v.pan(10, 0)
 # %%
 v.zoom_by(0.5)
 #%%
-v.set_mode_3d()
+v.set_mode_arcball()
 #%%
 v.rotate(45, 0)
 #%%

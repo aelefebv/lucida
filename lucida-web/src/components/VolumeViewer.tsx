@@ -1,9 +1,13 @@
 /** 3D volume viewer — delegates WebGPU rendering to a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
+import { useKeyState } from "../hooks/useKeyState.ts";
+import { getBoundKeys, isActionPressed } from "../config/keyBindings.ts";
+import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
+import { FlyCameraHint } from "./FlyCameraHint.tsx";
 
 interface Props {
   scene: WasmScene;
@@ -18,10 +22,56 @@ interface Props {
   c: number;
   loopRef: RefObject<RenderLoop | null>;
   onLoopChange: (loop: RenderLoop | null) => void;
+  onCameraModeChange?: (mode: string) => void;
 }
 
-export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange }: Props) {
+const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
+
+export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
+  const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
+  const [showHint, setShowHint] = useState(false);
+
+  // Notify parent of camera mode (after render, to avoid setState-in-render)
+  useEffect(() => {
+    onCameraModeChange?.(cameraMode);
+  }, [cameraMode, onCameraModeChange]);
+
+  // Key state for clip distance adjustment and fly camera
+  const canvasRef = useRef<HTMLCanvasElement>(canvas);
+  canvasRef.current = canvas;
+  const boundKeys = useMemo(() => getBoundKeys(), []);
+  const pressedKeys = useKeyState(canvasRef, boundKeys);
+
+  // Stable refs for callbacks needed by useFlyCameraInput
+  const sceneRef = useRef<WasmScene>(scene);
+  sceneRef.current = scene;
+
+  const markDirty = useCallback(() => {
+    loopRef.current?.markDirty();
+  }, []);
+
+  const isFlyMode = cameraMode === "fly";
+
+  // Fly camera input hook
+  const fly = useFlyCameraInput(
+    sceneRef,
+    applyViewportCommand,
+    { current: pressedKeys },
+    isFlyMode,
+    emitPresence,
+    markDirty,
+    useCallback(() => {
+      clearTimeout(scaleTimerRef.current);
+      loopRef.current?.setRenderScale(0.25);
+    }, []),
+    useCallback(() => {
+      clearTimeout(scaleTimerRef.current);
+      scaleTimerRef.current = window.setTimeout(() => {
+        loopRef.current?.setRenderScale(1.0);
+      }, 50);
+    }, []),
+  );
 
   // Create/start render loop
   useEffect(() => {
@@ -47,6 +97,60 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     loopRef.current?.markDirty();
   }, [t, c]);
 
+  // Clip distance adjustment + fly mode toggle via RAF loop
+  useEffect(() => {
+    let rafId: number | null = null;
+    let lastTime = 0;
+    let fWasPressed = false;
+
+    function tick(time: number) {
+      const dt = lastTime > 0 ? Math.min((time - lastTime) / 1000, 0.1) : 0;
+      lastTime = time;
+
+      // Clip distance
+      const inc = isActionPressed(pressedKeys, "clip.increase");
+      const dec = isActionPressed(pressedKeys, "clip.decrease");
+      if (inc || dec) {
+        const delta = (inc ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
+        scene.adjust_clip_distance(delta);
+        emitPresence();
+        loopRef.current?.markDirty();
+      }
+
+      // Toggle fly mode on F key press (edge detect)
+      const fPressed = isActionPressed(pressedKeys, "camera.toggleFly");
+      if (fPressed && !fWasPressed) {
+        const currentMode = scene.camera_mode();
+        if (currentMode === "fly") {
+          // Switch back to arcball
+          scene.set_mode_arcball();
+        } else if (currentMode === "arcball") {
+          // Switch to fly, then set base speed from volume diagonal
+          scene.set_mode_fly();
+          const BASE_SPEED_FACTOR = 0.3;
+          const diagonal = scene.volume_diagonal();
+          scene.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
+        }
+        const newMode = scene.camera_mode();
+        setCameraMode(newMode);
+        onCameraModeChange?.(newMode);
+        if (newMode === "fly") setShowHint(true);
+        breakFollow();
+        emitPresence();
+        loopRef.current?.markDirty();
+        canvas.focus();
+      }
+      fWasPressed = fPressed;
+
+      rafId = requestAnimationFrame(tick);
+    }
+
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, [scene, pressedKeys, emitPresence, breakFollow, canvas]);
+
   // Resolution scaling during interaction
   const scaleTimerRef = useRef<number>(0);
   const setLowRes = useCallback(() => {
@@ -61,12 +165,12 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
   }, []);
   useEffect(() => () => clearTimeout(scaleTimerRef.current), []);
 
-  // Input handling
+  // --- Arcball input handling ---
   const [dragging, setDragging] = useState(false);
   const shiftDragRef = useRef(false);
   const lastPos = useRef({ x: 0, y: 0 });
 
-  const onPointerDown = useCallback(
+  const onArcballPointerDown = useCallback(
     (e: PointerEvent) => {
       setDragging(true);
       shiftDragRef.current = e.shiftKey;
@@ -77,7 +181,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     [canvas, setLowRes],
   );
 
-  const onPointerMove = useCallback(
+  const onArcballPointerMove = useCallback(
     (e: PointerEvent) => {
       // Always broadcast cursor as normalized screen coordinates
       const rect = canvas.getBoundingClientRect();
@@ -92,11 +196,11 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
 
       breakFollow();
       if (shiftDragRef.current) {
-        applyViewportCommand(scene, { type: "pan_3d", dx, dy });
+        applyViewportCommand(scene, { type: "arcball_pan", dx, dy });
       } else {
         const dTheta = -dx * 0.005;
         const dPhi = -dy * 0.005;
-        applyViewportCommand(scene, { type: "rotate_3d", d_theta: dTheta, d_phi: dPhi });
+        applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
       }
       emitPresence();
       loopRef.current?.markDirty();
@@ -104,10 +208,40 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     [dragging, scene, canvas, emitPresence, breakFollow, sendCursor],
   );
 
-  const onPointerUp = useCallback(() => {
+  const onArcballPointerUp = useCallback(() => {
     setDragging(false);
     scheduleFullRes();
   }, [scheduleFullRes]);
+
+  // --- Fly input handling ---
+  const onFlyPointerDown = useCallback(
+    (e: PointerEvent) => {
+      canvas.setPointerCapture(e.pointerId);
+      fly.onPointerDown(e);
+    },
+    [canvas, fly],
+  );
+
+  const onFlyPointerMove = useCallback(
+    (e: PointerEvent) => {
+      // Broadcast cursor
+      const rect = canvas.getBoundingClientRect();
+      const nx = (e.clientX - rect.left) / canvas.clientWidth;
+      const ny = (e.clientY - rect.top) / canvas.clientHeight;
+      sendCursor([nx, ny]);
+
+      fly.onPointerMove(e);
+    },
+    [canvas, sendCursor, fly],
+  );
+
+  const onFlyPointerUp = useCallback(
+    (e: PointerEvent) => {
+      fly.onPointerUp();
+      void e;
+    },
+    [fly],
+  );
 
   const onPointerLeave = useCallback(() => {
     sendCursor(null);
@@ -118,12 +252,12 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     return () => { sendCursor(null); };
   }, [sendCursor]);
 
-  const onWheel = useCallback(
+  const onArcballWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
       const delta = e.deltaY * 0.001;
       breakFollow();
-      applyViewportCommand(scene, { type: "zoom_3d", delta });
+      applyViewportCommand(scene, { type: "arcball_zoom", delta });
       emitPresence();
       loopRef.current?.markDirty();
       setLowRes();
@@ -131,6 +265,23 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     },
     [scene, emitPresence, breakFollow, setLowRes, scheduleFullRes],
   );
+
+  const onFlyWheel = useCallback(
+    (e: WheelEvent) => {
+      e.preventDefault();
+      // Scroll up (negative deltaY) = faster, scroll down = slower
+      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+      scene.fly_adjust_speed(factor);
+    },
+    [scene],
+  );
+
+  const onWheel = isFlyMode ? onFlyWheel : onArcballWheel;
+
+  // Select handler set based on camera mode
+  const onPointerDown = isFlyMode ? onFlyPointerDown : onArcballPointerDown;
+  const onPointerMove = isFlyMode ? onFlyPointerMove : onArcballPointerMove;
+  const onPointerUp = isFlyMode ? onFlyPointerUp : onArcballPointerUp;
 
   // Attach event handlers to the shared canvas
   useEffect(() => {
@@ -140,7 +291,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     canvas.addEventListener("pointercancel", onPointerUp);
     canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("wheel", onWheel, { passive: false });
-    canvas.style.cursor = dragging ? "grabbing" : "grab";
+    canvas.style.cursor = isFlyMode ? "crosshair" : (dragging ? "grabbing" : "grab");
     return () => {
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
@@ -149,7 +300,11 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
       canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("wheel", onWheel);
     };
-  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerLeave, onWheel, dragging]);
+  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerLeave, onWheel, dragging, isFlyMode]);
 
-  return null;
+  const dismissHint = useCallback(() => setShowHint(false), []);
+
+  return (
+    <FlyCameraHint visible={isFlyMode && showHint} onDismiss={dismissHint} />
+  );
 }

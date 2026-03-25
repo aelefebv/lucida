@@ -48,7 +48,7 @@ export function useDimensions({
     setViewMode(next);
     bridgeCallbacksRef.current.breakFollow();
     if (wasmScene) {
-      applyViewportCommand(wasmScene, { type: next === "3d" ? "set_mode_3d" : "set_mode_2d" });
+      applyViewportCommand(wasmScene, { type: next === "3d" ? "set_mode_arcball" : "set_mode_slice" });
       if (next === "2d" && selectedDatasetId) {
         const dsInfo = datasetsRef.current.get(selectedDatasetId)?.info;
         if (dsInfo) {

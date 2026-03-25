@@ -313,7 +313,7 @@ mod tests {
     #[test]
     fn panning_reveals_more_chunks() {
         let mut cam = Camera::new_2d([512, 512]);
-        if let Camera::View2D(ref mut v) = cam {
+        if let Camera::Slice(ref mut v) = cam {
             v.center = [512.0, 512.0];
         }
         let region = cam.visible_region(&(0..1), None, None);
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn prefetch_excludes_needed() {
         let mut cam = Camera::new_2d([512, 512]);
-        if let Camera::View2D(ref mut v) = cam {
+        if let Camera::Slice(ref mut v) = cam {
             v.center = [512.0, 512.0];
         }
         let region = cam.visible_region(&(0..1), None, None);
@@ -437,7 +437,7 @@ mod tests {
 
         // Camera near data edge — prefetch shouldn't exceed max_col/max_row
         let mut cam2 = Camera::new_2d([512, 512]);
-        if let Camera::View2D(ref mut v) = cam2 {
+        if let Camera::Slice(ref mut v) = cam2 {
             v.center = [4000.0, 4000.0];
         }
         let region2 = cam2.visible_region(&(0..1), None, None);

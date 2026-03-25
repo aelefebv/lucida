@@ -36,6 +36,7 @@ interface Props {
   onRemoveLayer: (id: string) => void;
   onAddLayer: () => void;
   viewModeToggle: { label: string; onClick: () => void } | null;
+  cameraModeToggle: { label: string; onClick: () => void } | null;
   style?: React.CSSProperties;
 }
 
@@ -58,6 +59,7 @@ export function LayerPanel({
   onRemoveLayer,
   onAddLayer,
   viewModeToggle,
+  cameraModeToggle,
   style,
 }: Props) {
   return (
@@ -67,6 +69,9 @@ export function LayerPanel({
         <div className="layer-panel-header-buttons">
           {viewModeToggle && (
             <button onClick={viewModeToggle.onClick}>{viewModeToggle.label}</button>
+          )}
+          {cameraModeToggle && (
+            <button onClick={cameraModeToggle.onClick} title="Toggle camera mode (F)">{cameraModeToggle.label}</button>
           )}
           <button onClick={onAddLayer}>+ Add</button>
         </div>

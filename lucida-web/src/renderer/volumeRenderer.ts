@@ -2,7 +2,7 @@
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
-// Uniform buffer layout (320 bytes):
+// Uniform buffer layout (416 bytes):
 //   offset 0:   invViewProj     mat4x4f   (64B)
 //   offset 64:  modelMatrix     mat4x4f   (64B)
 //   offset 128: invModelMatrix  mat4x4f   (64B)
@@ -13,13 +13,15 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 //   offset 256: fallbackDims    vec4f     (16B)
 //   offset 272: chunkDims       vec4u     (16B)
 //   offset 288: gridDims        vec4u     (16B)
-//   offset 304: atlasSlotDims   vec4u     (16B) = 320 total
-const UNIFORM_SIZE = 384; // 320 + viewProj(64)
+//   offset 304: atlasSlotDims   vec4u     (16B)
+//   offset 320: viewProj        mat4x4f   (64B)
+//   offset 384: camForward      vec4f     (16B)
+//   offset 400: clipParams      vec4f     (16B) = 416 total
+const UNIFORM_SIZE = 416;
 
 export class VolumeRenderer {
   private device: GPUDevice;
   private pipeline: GPURenderPipeline;
-  private pipelineWithDepth: GPURenderPipeline;
   private uniformBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
   private bindGroup: GPUBindGroup | null = null;
@@ -41,6 +43,9 @@ export class VolumeRenderer {
   private gridDims = [1, 1, 1];
   private atlasSlotDims = [1, 1, 1];
   private viewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
+  private camForward: Float32Array<ArrayBufferLike> = new Float32Array(3);
+  private clipDistance = 0;
+  private clipMode = 0; // 0=plane, 1=sphere
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
 
   constructor(device: GPUDevice, dummyFallbackTexture: GPUTexture) {
@@ -79,16 +84,6 @@ export class VolumeRenderer {
     });
 
     this.pipeline = device.createRenderPipeline({
-      layout: pipelineLayout,
-      vertex: { module: shaderModule, entryPoint: "vs" },
-      fragment: {
-        module: shaderModule, entryPoint: "fs",
-        targets: [{ format: OFFSCREEN_FORMAT }],
-      },
-      primitive: { topology: "triangle-list" },
-    });
-
-    this.pipelineWithDepth = device.createRenderPipeline({
       layout: pipelineLayout,
       vertex: { module: shaderModule, entryPoint: "vs" },
       fragment: {
@@ -187,19 +182,43 @@ export class VolumeRenderer {
     invModel: Float32Array<ArrayBufferLike>,
     eye: Float32Array<ArrayBufferLike>,
     viewProj?: Float32Array<ArrayBufferLike>,
+    camForward?: Float32Array<ArrayBufferLike>,
+    clipDistance?: number,
+    clipMode?: number,
   ) {
     this.invViewProj = invViewProj;
     this.modelMatrix = model;
     this.invModelMatrix = invModel;
     this.eyePos = eye;
     if (viewProj) this.viewProj = viewProj;
+    if (camForward) this.camForward = camForward;
+    if (clipDistance !== undefined) this.clipDistance = clipDistance;
+    if (clipMode !== undefined) this.clipMode = clipMode;
   }
 
   getViewProj(): Float32Array<ArrayBufferLike> {
     return this.viewProj;
   }
 
-  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean) {
+  private transientDepthTex: GPUTexture | null = null;
+  private transientDepthW = 0;
+  private transientDepthH = 0;
+
+  private getTransientDepth(w: number, h: number): GPUTextureView {
+    if (this.transientDepthTex && this.transientDepthW === w && this.transientDepthH === h) {
+      return this.transientDepthTex.createView();
+    }
+    this.transientDepthTex?.destroy();
+    this.transientDepthTex = this.device.createTexture({
+      size: [w, h], format: "depth24plus",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    this.transientDepthW = w;
+    this.transientDepthH = h;
+    return this.transientDepthTex.createView();
+  }
+
+  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number) {
     if (!this.bindGroup) return;
 
     // Compute step size based on volume dimensions
@@ -223,10 +242,14 @@ export class VolumeRenderer {
     u32View.set([this.gridDims[0], this.gridDims[1], this.gridDims[2], 0], 72);      // gridDims at 288B = 72 u32s
     u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], this.atlasSlotDims[2], 0], 76); // atlasSlotDims at 304B = 76 u32s
 
-    // viewProj at 320B = 80 floats — compute from invViewProj by inverting
-    // We pass invViewProj and the shader already has model matrices, so viewProj = projection * view
-    // Store it at offset 80 (floats) = 320 bytes
+    // viewProj at 320B = 80 floats
     uniformData.set(this.viewProj, 80);
+
+    // camForward at 384B = 96 floats
+    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], 96);
+
+    // clipParams at 400B = 100 floats (x=clipDist, y=clipMode, z=0, w=0)
+    uniformData.set([this.clipDistance, this.clipMode, 0, 0], 100);
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 
@@ -237,21 +260,22 @@ export class VolumeRenderer {
       clearValue: { r: 0, g: 0, b: 0, a: 0 },
     };
 
+    // Shader always writes frag_depth, so a depth attachment is required.
+    // Use a transient one for callers (e.g. minimap) that don't provide their own.
+    const actualDepth = depthView ?? this.getTransientDepth(targetWidth || 256, targetHeight || 256);
+
     const desc: GPURenderPassDescriptor = {
       colorAttachments: [colorAttachment],
-    };
-
-    if (depthView) {
-      desc.depthStencilAttachment = {
-        view: depthView,
-        depthLoadOp: isFirstLayer ? "clear" : "load",
+      depthStencilAttachment: {
+        view: actualDepth,
+        depthLoadOp: isFirstLayer || !depthView ? "clear" : "load",
         depthStoreOp: "store",
         depthClearValue: 1.0,
-      };
-    }
+      },
+    };
 
     const pass = encoder.beginRenderPass(desc);
-    pass.setPipeline(depthView ? this.pipelineWithDepth : this.pipeline);
+    pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3); // full-screen triangle
     pass.end();

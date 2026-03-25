@@ -112,7 +112,7 @@ export function useDatasets({
 
       if (isFirstDataset) {
         applyViewportCommand(scene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
-        applyViewportCommand(scene, { type: "set_mode_2d" });
+        applyViewportCommand(scene, { type: "set_mode_slice" });
         applyViewportCommand(scene, { type: "set_z", z: 0 });
         applyViewportCommand(scene, { type: "set_c", c: 0 });
         applyViewportCommand(scene, { type: "set_t", t: 0 });

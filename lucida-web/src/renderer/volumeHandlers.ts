@@ -318,7 +318,7 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(layer.opacity);
     renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
-    renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye, msg.viewProj);
+    renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
     const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
     const depthView = depth.createView();
     const layerEncoder = ctx.device.createCommandEncoder();

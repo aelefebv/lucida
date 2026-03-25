@@ -62,17 +62,40 @@ impl Scene {
 
     /// Switch to 2D mode, preserving the current viewport.
     pub fn set_mode_2d(&mut self) {
-        if !matches!(self.camera, Camera::View2D(_)) {
+        if !matches!(self.camera, Camera::Slice(_)) {
             let vp = self.camera.viewport();
             self.camera = Camera::new_2d(vp);
         }
     }
 
-    /// Switch to 3D mode, preserving the current viewport.
+    /// Switch to 3D arcball mode, preserving the current viewport.
+    /// If currently in fly mode, converts to arcball preserving eye position and view direction.
     pub fn set_mode_3d(&mut self) {
-        if !matches!(self.camera, Camera::View3D(_)) {
-            let vp = self.camera.viewport();
-            self.camera = Camera::new_3d(vp);
+        if !matches!(self.camera, Camera::Arcball(_)) {
+            match &self.camera {
+                Camera::Fly(v) => {
+                    self.camera = Camera::Arcball(v.to_arcball());
+                }
+                _ => {
+                    let vp = self.camera.viewport();
+                    self.camera = Camera::new_3d(vp);
+                }
+            }
+        }
+    }
+
+    /// Switch to fly mode, converting from arcball if possible.
+    pub fn set_mode_fly(&mut self) {
+        if !matches!(self.camera, Camera::Fly(_)) {
+            match &self.camera {
+                Camera::Arcball(v) => {
+                    self.camera = Camera::Fly(v.to_fly());
+                }
+                _ => {
+                    let vp = self.camera.viewport();
+                    self.camera = Camera::Fly(crate::camera::Fly::new(vp));
+                }
+            }
         }
     }
 
@@ -158,7 +181,7 @@ impl Scene {
             self.volume_shape(),
         );
 
-        let is_2d = matches!(self.camera, Camera::View2D(_));
+        let is_2d = matches!(self.camera, Camera::Slice(_));
         let mut needed = Vec::new();
         let mut prefetch = Vec::new();
 
@@ -204,7 +227,7 @@ impl Scene {
             dataset.volume_shape.as_ref(),
         );
 
-        let is_2d = matches!(self.camera, Camera::View2D(_));
+        let is_2d = matches!(self.camera, Camera::Slice(_));
         let mut needed = Vec::new();
         let mut prefetch = Vec::new();
 
@@ -303,14 +326,14 @@ mod tests {
     #[test]
     fn mode_switching_preserves_viewport() {
         let mut scene = Scene::new([800, 600]);
-        assert!(matches!(scene.camera, Camera::View2D(_)));
+        assert!(matches!(scene.camera, Camera::Slice(_)));
 
         scene.set_mode_3d();
-        assert!(matches!(scene.camera, Camera::View3D(_)));
+        assert!(matches!(scene.camera, Camera::Arcball(_)));
         assert_eq!(scene.camera.viewport(), [800, 600]);
 
         scene.set_mode_2d();
-        assert!(matches!(scene.camera, Camera::View2D(_)));
+        assert!(matches!(scene.camera, Camera::Slice(_)));
         assert_eq!(scene.camera.viewport(), [800, 600]);
     }
 
@@ -329,10 +352,10 @@ mod tests {
         assert_eq!(parsed.document.datasets.len(), 1);
         assert_eq!(parsed.document.datasets[0].layers.len(), 1);
         assert_eq!(parsed.document.datasets[0].layers[0].name, "test");
-        if let Camera::View2D(v) = &parsed.camera {
+        if let Camera::Slice(v) = &parsed.camera {
             assert_eq!(v.viewport, [800, 600]);
         } else {
-            panic!("expected View2D");
+            panic!("expected Slice");
         }
     }
 
@@ -344,7 +367,7 @@ mod tests {
         scene.add_layer(test_layer());
         let json = serde_json::to_string(&scene).unwrap();
         let parsed: Scene = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed.camera, Camera::View3D(_)));
+        assert!(matches!(parsed.camera, Camera::Arcball(_)));
         assert!(parsed.volume_transform().is_some());
         assert_eq!(parsed.volume_shape().copied(), Some([100, 200, 300]));
     }

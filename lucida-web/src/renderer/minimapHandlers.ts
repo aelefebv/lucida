@@ -68,7 +68,7 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
     renderer.setOpacity(1.0);
     renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye);
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder);
+    renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
     ctx.device.queue.submit([layerEncoder.finish()]);
     renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: "alpha" });
   }

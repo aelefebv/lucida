@@ -34,6 +34,7 @@ function App() {
   const [datasetsVersion, setDatasetsVersion] = useState(0);
   const [remoteDocumentVersion, setRemoteDocumentVersion] = useState(0);
   const [volumeMap, setVolumeMap] = useState<Map<string, VolumeData>>(new Map());
+  const [cameraMode, setCameraMode] = useState<string>("arcball");
   const bumpDatasetsVersion = useCallback(() => setDatasetsVersion(v => v + 1), []);
   const bumpRemoteDocumentVersion = useCallback(() => setRemoteDocumentVersion(v => v + 1), []);
 
@@ -182,7 +183,7 @@ function App() {
     const peersArr = Array.from(bridge.peers.values()).map(p => ({
       id: p.client_id,
       cursor: p.cursor,
-      mode: (p.camera as { mode?: string })?.mode ?? "2d",
+      mode: (p.camera as { mode?: string })?.mode ?? "slice",
       camera: p.camera,
       view_z: p.view?.z_range?.start,
     }));
@@ -208,6 +209,30 @@ function App() {
     setCursorLabels(result.labels);
     render.loopRef.current?.markDirty();
   }, [bridge.peers, bridge.myId, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef]);
+
+  const handleCameraModeChange = useCallback((mode: string) => {
+    setCameraMode(mode);
+  }, []);
+
+  const handleCameraModeToggle = useCallback(() => {
+    const ws = scene.wasmSceneRef.current;
+    if (!ws) return;
+    const currentMode = ws.camera_mode();
+    if (currentMode === "fly") {
+      ws.set_mode_arcball();
+    } else if (currentMode === "arcball") {
+      ws.set_mode_fly();
+      const BASE_SPEED_FACTOR = 0.3;
+      const diagonal = ws.volume_diagonal();
+      ws.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
+    }
+    const newMode = ws.camera_mode();
+    setCameraMode(newMode);
+    bridge.breakFollow();
+    bridge.emitPresence();
+    render.loopRef.current?.markDirty();
+    render.canvasRef.current?.focus();
+  }, [scene.wasmSceneRef, bridge, render.loopRef, render.canvasRef]);
 
   const dirInputRef = useRef<HTMLInputElement>(null);
 
@@ -240,6 +265,7 @@ function App() {
         onRemoveLayer={layers.handleRemoveLayer}
         onAddLayer={() => dirInputRef.current?.click()}
         viewModeToggle={volumeMap.size > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
+        cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
         style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
       />
       <div className="sidebar-resize-handle" onPointerDown={layout.handleSidebarResizeDown} />
@@ -270,6 +296,7 @@ function App() {
         <div style={{ position: "relative", display: volumeMap.size > 0 ? "block" : "none", width: layout.canvasWidth }}>
           <canvas
             ref={render.canvasRef}
+            tabIndex={0}
             style={{
               width: layout.canvasWidth,
               height: layout.canvasHeight,
@@ -310,6 +337,7 @@ function App() {
               c={dims.c}
               loopRef={render.loopRef}
               onLoopChange={render.setActiveLoop}
+              onCameraModeChange={handleCameraModeChange}
             />
           )}
           {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
