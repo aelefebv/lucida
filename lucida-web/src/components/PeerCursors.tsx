@@ -1,6 +1,7 @@
 import { useEffect, useRef, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { ClientId, PresenceState } from "../bridge.ts";
+import { projectToCanvas } from "./minimapMath.ts";
 
 const PEER_COLORS = [
   "#FF6B6B",
@@ -21,6 +22,8 @@ export interface CursorLabel {
   id: number;
   sx: number;
   sy: number;
+  world?: [number, number, number];
+  voxel?: [number, number];
 }
 
 interface Props {
@@ -66,8 +69,14 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
   return { dim, badge: parts.join(" ") };
 }
 
+const EDGE_MARGIN = 16;
+
 export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t, c, cursorLabels }: Props) {
   const labelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
+  const chevronRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
+  const chevronLabelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
+  const dotRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
+  const namePillRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const peersRef = useRef(peers);
   peersRef.current = peers;
   const viewModeRef = useRef(viewMode);
@@ -85,53 +94,96 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
         const canvasH = canvas.clientHeight;
         const localIs3d = viewModeRef.current === "3d";
 
-        // Build a lookup from client_id → screen position from WASM labels
-        const labelMap = new Map<number, { sx: number; sy: number }>();
+        // Build a lookup from client_id → label data from WASM
+        const labelMap = new Map<number, CursorLabel>();
         for (const lbl of cursorLabelsRef.current) {
           labelMap.set(lbl.id, lbl);
         }
 
+        // Pre-compute camera data once per frame
+        let vpMatrix: Float32Array | null = null;
+        let zoom = 0, centerX = 0, centerY = 0;
+        if (localIs3d) {
+          vpMatrix = new Float32Array(scene.view_proj());
+        } else {
+          zoom = scene.zoom();
+          const centerArr = scene.center();
+          centerX = centerArr[0];
+          centerY = centerArr[1];
+        }
+
         for (const [clientId, el] of labelRefs.current) {
           const peer = peersRef.current.get(clientId);
-          if (!peer?.cursor) {
+          if (!peer) {
             el.style.display = "none";
             continue;
           }
 
-          // Use WASM-computed label positions (handles all mode combinations)
           const lbl = labelMap.get(clientId);
           if (!lbl) {
             el.style.display = "none";
             continue;
           }
 
+          const isDefaulted = peer.cursor === null;
+
           let screenX: number, screenY: number;
           if (localIs3d) {
-            // For 3D, use WASM-projected screen coords directly
-            screenX = lbl.sx;
-            screenY = lbl.sy;
-          } else {
-            // For 2D, recompute from voxel coords for smooth camera tracking
-            const zoom = scene.zoom();
-            const centerArr = scene.center();
-            const [worldX, worldY] = peer.cursor;
-            const peerMode = (peer.camera as { mode?: string })?.mode;
-            const peerIs3d = peerMode === "arcball" || peerMode === "fly";
-            if (peerIs3d) {
-              // Cross-mode 3D→2D: use WASM-projected coords
+            // Re-project world coords with current VP matrix each frame
+            if (lbl.world && vpMatrix) {
+              const proj = projectToCanvas(vpMatrix, lbl.world[0], lbl.world[1], lbl.world[2], canvasW, canvasH);
+              if (!proj) { el.style.display = "none"; continue; }
+              [screenX, screenY] = proj;
+            } else {
               screenX = lbl.sx;
               screenY = lbl.sy;
+            }
+          } else {
+            if (lbl.voxel) {
+              // 3D→2D: recompute from voxel coords for smooth camera tracking
+              screenX = (lbl.voxel[0] - centerX) * zoom + canvasW / 2;
+              screenY = (lbl.voxel[1] - centerY) * zoom + canvasH / 2;
             } else {
-              screenX = (worldX - centerArr[0]) * zoom + canvasW / 2;
-              screenY = (worldY - centerArr[1]) * zoom + canvasH / 2;
+              // 2D→2D: recompute from peer cursor or camera center
+              const [worldX, worldY] = isDefaulted
+                ? (peer.camera as { center?: [number, number] })?.center ?? [0, 0]
+                : peer.cursor!;
+              screenX = (worldX - centerX) * zoom + canvasW / 2;
+              screenY = (worldY - centerY) * zoom + canvasH / 2;
             }
           }
 
-          if (screenX < -20 || screenX > canvasW + 20 || screenY < -20 || screenY > canvasH + 20) {
-            el.style.display = "none";
+          const chevronEl = chevronRefs.current.get(clientId);
+          const chevronLabelEl = chevronLabelRefs.current.get(clientId);
+          const dotEl = dotRefs.current.get(clientId);
+          const namePillEl = namePillRefs.current.get(clientId);
+          const offScreen = screenX < 0 || screenX > canvasW || screenY < 0 || screenY > canvasH;
+
+          if (offScreen) {
+            const clampedX = Math.max(EDGE_MARGIN, Math.min(screenX, canvasW - EDGE_MARGIN));
+            const clampedY = Math.max(EDGE_MARGIN, Math.min(screenY, canvasH - EDGE_MARGIN));
+            const angle = Math.atan2(screenY - clampedY, screenX - clampedX);
+            const dist = Math.hypot(screenX - clampedX, screenY - clampedY);
+            const scale = 0.25 + 1.25 * 300 / (300 + dist);
+
+            el.style.display = "";
+            el.style.transform = `translate(${clampedX}px, ${clampedY}px)`;
+            if (chevronEl) { chevronEl.style.display = ""; chevronEl.style.transform = `rotate(${angle}rad) scale(${scale})`; }
+            if (chevronLabelEl) {
+              chevronLabelEl.style.display = "";
+              const ox = -Math.cos(angle) * 18 * scale - 8;
+              const oy = -Math.sin(angle) * 18 * scale - 7;
+              chevronLabelEl.style.transform = `translate(${ox}px, ${oy}px) scale(${scale})`;
+            }
+            if (dotEl) { dotEl.style.display = "none"; }
+            if (namePillEl) { namePillEl.style.display = "none"; }
           } else {
             el.style.display = "";
             el.style.transform = `translate(${screenX}px, ${screenY}px)`;
+            if (chevronEl) { chevronEl.style.display = "none"; }
+            if (chevronLabelEl) { chevronLabelEl.style.display = "none"; }
+            if (dotEl) { dotEl.style.display = isDefaulted ? "" : "none"; }
+            if (namePillEl) { namePillEl.style.display = ""; }
           }
         }
       }
@@ -144,7 +196,7 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
   }, [wasmSceneRef, canvas]);
 
   const peerEntries = Array.from(peers.entries()).filter(
-    ([id, p]) => id !== myId && p.cursor !== null,
+    ([id]) => id !== myId,
   );
 
   return (
@@ -157,7 +209,7 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
         height: "100%",
         pointerEvents: "none",
         overflow: "hidden",
-        zIndex: 5,
+        zIndex: 11,
       }}
     >
       {peerEntries.map(([clientId, peer]) => {
@@ -180,6 +232,10 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
             }}
           >
             <div
+              ref={(el) => {
+                if (el) namePillRefs.current.set(clientId, el);
+                else namePillRefs.current.delete(clientId);
+              }}
               style={{
                 position: "absolute",
                 left: 12,
@@ -195,6 +251,61 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
               }}
             >
               {clientId}{badge ? ` ${badge}` : ""}
+            </div>
+            <div
+              ref={(el) => {
+                if (el) dotRefs.current.set(clientId, el);
+                else dotRefs.current.delete(clientId);
+              }}
+              style={{
+                position: "absolute",
+                display: "none",
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                backgroundColor: color,
+                left: -4,
+                top: -4,
+                opacity: 0.9,
+              }}
+            />
+            <div
+              ref={(el) => {
+                if (el) chevronRefs.current.set(clientId, el);
+                else chevronRefs.current.delete(clientId);
+              }}
+              style={{
+                position: "absolute",
+                display: "none",
+                width: 0,
+                height: 0,
+                borderLeft: `10px solid ${color}`,
+                borderTop: "6px solid transparent",
+                borderBottom: "6px solid transparent",
+                transformOrigin: "center center",
+                left: -5,
+                top: -6,
+              }}
+            />
+            <div
+              ref={(el) => {
+                if (el) chevronLabelRefs.current.set(clientId, el);
+                else chevronLabelRefs.current.delete(clientId);
+              }}
+              style={{
+                position: "absolute",
+                display: "none",
+                fontSize: 9,
+                fontFamily: "monospace",
+                color: "black",
+                backgroundColor: color,
+                padding: "0 2px",
+                borderRadius: 2,
+                lineHeight: "14px",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {clientId}
             </div>
           </div>
         );

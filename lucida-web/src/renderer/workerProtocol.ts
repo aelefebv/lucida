@@ -108,6 +108,9 @@ export interface VolumeRenderMultiPassMessage {
   eye: Float32Array;
   canvasW: number;
   canvasH: number;
+  /** Unscaled device-pixel dimensions for cursor sizing (immune to renderScale). */
+  fullW: number;
+  fullH: number;
   viewProj?: Float32Array;
   camForward?: Float32Array;
   clipDistance?: number;

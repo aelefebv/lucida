@@ -147,6 +147,8 @@ export class RenderClient {
     eye: Float32Array,
     canvasW: number,
     canvasH: number,
+    fullW: number,
+    fullH: number,
     viewProj?: Float32Array,
     camForward?: Float32Array,
     clipDistance?: number,
@@ -155,7 +157,7 @@ export class RenderClient {
     this.worker.postMessage({
       type: "volumeRenderMultiPass",
       layers, invViewProj, eye,
-      canvasW, canvasH, viewProj,
+      canvasW, canvasH, fullW, fullH, viewProj,
       camForward, clipDistance, clipMode,
     });
   }

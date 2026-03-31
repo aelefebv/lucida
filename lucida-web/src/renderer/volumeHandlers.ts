@@ -336,7 +336,7 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
   const cr = ctx.getCursorRenderer();
   if (cr.hasData() && msg.viewProj && depthTexture) {
     const cursorEncoder = ctx.device.createCommandEncoder();
-    cr.renderVolume(canvasView, depthTexture.createView(), cursorEncoder, msg.viewProj, msg.canvasW, msg.canvasH);
+    cr.renderVolume(canvasView, depthTexture.createView(), cursorEncoder, msg.viewProj, msg.fullW, msg.fullH);
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
 }

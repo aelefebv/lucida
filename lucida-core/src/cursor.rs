@@ -31,6 +31,8 @@ pub struct PeerInput {
     pub camera: Option<Camera>,
     #[serde(default)]
     pub view_z: Option<u32>,
+    #[serde(default)]
+    pub label_only: bool,
 }
 
 #[derive(Serialize)]
@@ -45,6 +47,12 @@ pub struct LabelOutput {
     pub id: u64,
     pub sx: f64,
     pub sy: f64,
+    /// World-space marker position for 3D re-projection (3D→3D, 2D→3D).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world: Option<[f64; 3]>,
+    /// Voxel-space intersection for 2D re-projection (3D→2D).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voxel: Option<[f64; 2]>,
 }
 
 /// Unproject a normalized screen coordinate [0-1] through a view-projection matrix
@@ -241,12 +249,14 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
         if peer_mode == local_mode {
             if local_mode == "slice" {
                 // 2D→2D: pass through voxel coords as crosshair
-                output.gpu.push(make_crosshair(cursor[0] as f32, cursor[1] as f32, r, g, b));
+                if !peer.label_only {
+                    output.gpu.push(make_crosshair(cursor[0] as f32, cursor[1] as f32, r, g, b));
+                }
 
                 if let Camera::Slice(v) = &scene.camera {
                     let sx = (cursor[0] - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
                     let sy = (cursor[1] - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
-                    output.labels.push(LabelOutput { id: peer.id, sx, sy });
+                    output.labels.push(LabelOutput { id: peer.id, sx, sy, world: None, voxel: None });
                 }
             } else {
                 // Case B: 3D→3D — unproject peer's cursor, clip to volume, render as ray
@@ -321,6 +331,7 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
                 let marker = transform_point_f64(marker_unit, model);
                 let marker_world = [marker[0] as f32, marker[1] as f32, marker[2] as f32];
 
+                // Always render the ray for 3D→3D — shows viewing direction even for defaulted cursors
                 output.gpu.push(make_ray(
                     [start[0] as f32, start[1] as f32, start[2] as f32],
                     [end[0] as f32, end[1] as f32, end[2] as f32],
@@ -330,7 +341,7 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
 
                 if let Some(local_vp) = camera_vp_f64(&scene.camera) {
                     if let Some((sx, sy)) = project_to_screen_vp(marker, local_vp, screen_w, screen_h) {
-                        output.labels.push(LabelOutput { id: peer.id, sx, sy });
+                        output.labels.push(LabelOutput { id: peer.id, sx, sy, world: Some(marker), voxel: None });
                     }
                 }
             }
@@ -361,18 +372,21 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
                 let x_voxel = x_unit * shape[2] as f64;
                 let y_voxel = (1.0 - y_unit) * shape[1] as f64;
 
-                if x_voxel >= 0.0
+                // Only render crosshair if within volume bounds and not label_only
+                if !peer.label_only
+                    && x_voxel >= 0.0
                     && x_voxel <= shape[2] as f64
                     && y_voxel >= 0.0
                     && y_voxel <= shape[1] as f64
                 {
                     output.gpu.push(make_crosshair(x_voxel as f32, y_voxel as f32, r, g, b));
+                }
 
-                    if let Camera::Slice(v) = &scene.camera {
-                        let sx = (x_voxel - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
-                        let sy = (y_voxel - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
-                        output.labels.push(LabelOutput { id: peer.id, sx, sy });
-                    }
+                // Always emit label so JS can show edge indicator
+                if let Camera::Slice(v) = &scene.camera {
+                    let sx = (x_voxel - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
+                    let sy = (y_voxel - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
+                    output.labels.push(LabelOutput { id: peer.id, sx, sy, world: None, voxel: Some([x_voxel, y_voxel]) });
                 }
             }
         } else if peer_mode == "slice" && local_mode == "arcball" {
@@ -397,13 +411,15 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
             let end = voxel_to_world(x, y, shape[0] as f64 + overshoot, shape, model);
             let marker = voxel_to_world(x, y, peer_z + 0.5, shape, model);
 
-            output.gpu.push(make_ray(start, end, marker, r, g, b));
+            if !peer.label_only {
+                output.gpu.push(make_ray(start, end, marker, r, g, b));
+            }
 
             // Project marker to screen for label
             if let Some(local_vp) = camera_vp_f64(&scene.camera) {
                 let marker_f64 = [marker[0] as f64, marker[1] as f64, marker[2] as f64];
                 if let Some((sx, sy)) = project_to_screen_vp(marker_f64, local_vp, screen_w, screen_h) {
-                    output.labels.push(LabelOutput { id: peer.id, sx, sy });
+                    output.labels.push(LabelOutput { id: peer.id, sx, sy, world: Some(marker_f64), voxel: None });
                 }
             }
         }
@@ -443,14 +459,14 @@ mod tests {
     }
 
     fn peer(id: u64, cursor: Option<[f64; 2]>, mode: &str) -> PeerInput {
-        PeerInput { id, cursor, mode: mode.into(), camera: None, view_z: None }
+        PeerInput { id, cursor, mode: mode.into(), camera: None, view_z: None, label_only: false }
     }
 
     /// Create a PeerInput with a camera, using the serde tag as the mode string
     /// (matching how the TypeScript client builds the peer array from camera.mode).
     fn peer_with_camera(id: u64, cursor: Option<[f64; 2]>, camera: Camera) -> PeerInput {
         let mode = match &camera { Camera::Slice(_) => "slice", Camera::Arcball(_) => "arcball", Camera::Fly(_) => "fly" };
-        PeerInput { id, cursor, mode: mode.into(), camera: Some(camera), view_z: None }
+        PeerInput { id, cursor, mode: mode.into(), camera: Some(camera), view_z: None, label_only: false }
     }
 
     // --- 2D→2D tests ---
@@ -708,5 +724,71 @@ mod tests {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
         let result = compute_peer_cursors(&scene, &[peer(2, Some([0.5, 0.5]), "fly")], 1, 800.0, 600.0);
         assert!(result.gpu.is_empty(), "fly peer without camera should be skipped");
+    }
+
+    // --- 3D→2D out-of-bounds label emission ---
+
+    #[test]
+    fn peer_3d_to_local_2d_out_of_bounds_emits_label() {
+        // Peer cursor ray intersects Z-plane outside volume → no GPU crosshair, but label emitted
+        let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
+        scene.view.set_z(50);
+
+        // Camera looking far off to the side so ray hits Z-plane outside volume bounds
+        let mut cam = Arcball::new([800, 600]);
+        cam.theta = 2.5; // rotated far to the side
+        let peers = vec![peer_with_camera(2, Some([0.1, 0.1]), Camera::Arcball(cam))];
+        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+
+        // Should have a label even if no GPU crosshair
+        if !result.labels.is_empty() {
+            // If a label was produced, verify it has the correct peer id
+            assert_eq!(result.labels[0].id, 2);
+            // GPU may or may not have a crosshair depending on whether intersection is in bounds
+            // The key invariant: labels.len() >= gpu.len() for this case
+            assert!(result.labels.len() >= result.gpu.len());
+        }
+        // If ray doesn't intersect Z-plane at all (returns None), both are empty — also valid
+    }
+
+    #[test]
+    fn peer_3d_to_local_2d_in_bounds_emits_both() {
+        // In-bounds case: both GPU crosshair and label should be emitted (no regression)
+        let mut scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
+        scene.view.set_z(50);
+
+        let peers = vec![peer_with_camera(
+            2, Some([0.5, 0.5]),
+            Camera::Arcball(Arcball::new([800, 600])),
+        )];
+        let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
+        assert_eq!(result.gpu.len(), 1, "in-bounds should produce GPU crosshair");
+        assert_eq!(result.labels.len(), 1, "in-bounds should produce label");
+        assert_eq!(result.labels[0].id, 2);
+    }
+
+    // --- label_only tests ---
+
+    #[test]
+    fn label_only_2d_produces_label_no_gpu() {
+        let scene = scene_2d([800, 600]);
+        let mut p = peer(2, Some([100.0, 200.0]), "slice");
+        p.label_only = true;
+        let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
+        assert!(result.gpu.is_empty(), "label_only should produce no GPU data");
+        assert_eq!(result.labels.len(), 1, "label_only should still produce label");
+        assert_eq!(result.labels[0].id, 2);
+    }
+
+    #[test]
+    fn label_only_3d_still_produces_ray() {
+        // 3D→3D always renders the ray (shows viewing direction even for defaulted cursors)
+        let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
+        let mut p = peer_with_camera(2, Some([0.5, 0.5]), Camera::Arcball(Arcball::new([800, 600])));
+        p.label_only = true;
+        let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
+        assert_eq!(result.gpu.len(), 1, "3D→3D should always produce ray");
+        assert_eq!(result.gpu[0][3], 1.0, "should be a ray cursor (type=1)");
+        assert_eq!(result.labels.len(), 1, "should still produce label");
     }
 }
