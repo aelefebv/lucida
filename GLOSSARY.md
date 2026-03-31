@@ -214,7 +214,9 @@
 | **Cursor marker** | A crosshair rendered at the ray's intersection point with the volume surface (entry point for 3D→3D, peer's Z slice for 2D→3D), providing a focal anchor for where the peer is pointing | Hit point, intersection indicator |
 | **Cursor geometry engine** | The Rust module (`cursor.rs`) that computes GPU-ready cursor geometry (crosshairs and rays) and screen-space label positions from peer presence data. Handles all cross-mode combinations (slice↔arcball↔fly). Fly and Arcball peers are treated equivalently as "3D" for cursor rendering. Computation is receiver-side using the peer's camera from **PresenceState** | Cursor computer |
 | **Dimensional indicator** | A visual badge (◄/► for T, channel number for C) shown next to a **Peer cursor** label when the peer's **ViewState** differs from the local view, accompanied by 50% opacity dimming. Z indicators are suppressed in 3D mode since Z is a visible spatial axis | Slice indicator, Z arrow |
-| **Cursor label** | The HTML overlay div showing the peer's **ClientId** and **Dimensional indicator**, positioned using screen coordinates from the **Cursor geometry engine**. Rendered separately from the GPU geometry to support text rendering | Cursor badge, peer badge |
+| **Cursor label** | The HTML overlay div showing the peer's **ClientId** and **Dimensional indicator**, positioned using screen coordinates from the **Cursor geometry engine**. In 2D mode, screen positions are recomputed every frame from voxel coords for smooth camera tracking. In 3D mode, world-space coordinates from the label output are re-projected through the local VP matrix each frame. When off-screen, replaced by an **Off-screen indicator** | Cursor badge, peer badge |
+| **Off-screen indicator** | A colored chevron with peer number shown at the viewport edge when a **Peer cursor** projects outside the canvas bounds, pointing toward the off-screen position. Scales from 1.5× (just off-screen) to 0.25× (far away) based on distance. Rendered as HTML in `PeerCursors.tsx` above the **Minimap** (z-index 11) | Edge indicator, arrow indicator |
+| **Defaulted cursor** | When a peer's **Cursor position** is null (mouse off their canvas), the system synthesizes a position at the center of their view: `camera.center` for **Slice** peers, `[0.5, 0.5]` normalized screen center for **Arcball**/**Fly** peers. Rendered as a colored dot + name pill (no crosshair). In 3D→3D, the **Cursor ray** still renders to show viewing direction. Uses the `label_only` flag on `PeerInput` to suppress GPU crosshair geometry while preserving label output | Default cursor, phantom cursor |
 | **Volume depth texture** | A `depth24plus` GPU texture written by the volume ray march at the first significant opacity sample. Used by the cursor shader to determine whether cursor fragments are in front of or behind the volume surface for opacity dimming | Depth buffer, Z-buffer |
 
 ## Chunk loading (lucida-web)
@@ -282,6 +284,8 @@
 - The **Bridge** is instantiated once when the WASM module is ready and auto-reconnects on disconnect with a 2-second delay
 - A **Peer cursor** is computed by the **Cursor geometry engine** from peer **PresenceState** (camera, cursor, view) and rendered as WebGPU geometry (crosshair or ray) after the **Compositor** pass
 - A **Cursor position** is throttled at 50ms (same as **Presence**); null positions bypass the throttle and send immediately
+- A null **Cursor position** produces a **Defaulted cursor** at the peer's view center; this is synthesized client-side in `App.tsx` before passing to the **Cursor geometry engine**
+- An **Off-screen indicator** replaces the **Cursor label** when the screen-projected position falls outside the canvas bounds; it reuses the peer color and ID from the label
 - Cross-mode cursors are supported: a 2D peer's cursor appears as a **Cursor ray** in a 3D view (and vice versa as a crosshair at the Z-plane intersection)
 - The **Cursor geometry engine** performs receiver-side computation: it uses the peer's camera from **PresenceState** to unproject 3D cursors, with no protocol changes
 - A **Dimensional indicator** compares the peer's **ViewState** (T/C) against the local **ViewState** and renders directional arrows plus opacity dimming; Z indicators are suppressed in 3D mode
@@ -381,7 +385,7 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Worker"**: Always qualify — **GPU worker**, **LZ4 worker**, or **fetch task** (for ChunkStore internals).
 
-- **"Cursor"**: In PresenceState, the raw `Option<[f64; 2]>` coordinate data (voxel coords in 2D, normalized screen coords in 3D). In the UI, the rendered **Peer cursor** (crosshair or ray + label). Use **Cursor position** for the data, **Peer cursor** for the visual, **Cursor ray** for 3D ray geometry.
+- **"Cursor"**: In PresenceState, the raw `Option<[f64; 2]>` coordinate data (voxel coords in 2D, normalized screen coords in 3D). In the UI, the rendered **Peer cursor** (crosshair or ray + label). Use **Cursor position** for the data, **Peer cursor** for the visual, **Cursor ray** for 3D ray geometry, **Defaulted cursor** for null-cursor view-center fallback, **Off-screen indicator** for the edge chevron.
 
 - **"Clip"**: **Clip distance** is the volume-rendering near clip that makes samples transparent. **Frustum planes** (sometimes called "clip planes") are the chunk-culling planes from the view-projection matrix. These are unrelated — **Clip distance** affects ray marching tStart, **Frustum planes** affect chunk loading.
 
