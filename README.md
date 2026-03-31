@@ -1,4 +1,6 @@
 # Dev
+Check the GLOSSARY.md for terminology.
+
 ## When you change Rust code (lucida-core/):
 
 1. `cargo test -p lucida-core`

@@ -1,6 +1,8 @@
 # Lucida
 A fast and lightweight 5D image viewer.
 
+Check the GLOSSARY.md for terminology.
+
 ## Parts
 - **lucida-core** decides what should be shown.
 - **lucida-web** decides how the user interacts with it.
