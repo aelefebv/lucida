@@ -486,9 +486,7 @@ async fn serve_chunk_from_store(
     store: &Arc<CachedStore>,
     unicast_routes: &UnicastRoutes,
 ) {
-    // Chunk key format: "level/t/c/z/y/x"
-    // File path in store: "{level}/c/{t}/{c}/{z}/{y}/{x}"
-    let file_path = chunk_key_to_store_path(chunk_key);
+    let file_path = lucida_store::chunk_key_to_store_path(chunk_key);
     let obj_path = Path::from(file_path.as_str());
 
     let bytes = match store.get_bytes(&obj_path).await {
@@ -514,16 +512,6 @@ async fn serve_chunk_from_store(
     let senders = unicast_routes.lock().await;
     if let Some(sender) = senders.get(&client_id) {
         let _ = sender.send(Message::Binary(buf.into()));
-    }
-}
-
-/// Convert chunk key "level/t/c/z/y/x" to store path "{level}/c/{t}/{c}/{z}/{y}/{x}".
-fn chunk_key_to_store_path(key: &str) -> String {
-    let parts: Vec<&str> = key.splitn(6, '/').collect();
-    if parts.len() == 6 {
-        format!("{}/c/{}/{}/{}/{}/{}", parts[0], parts[1], parts[2], parts[3], parts[4], parts[5])
-    } else {
-        key.to_string()
     }
 }
 

@@ -71,7 +71,7 @@
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **StorageBackend** | A trait abstracting async byte-level read access to a **Store**, with implementations for local filesystem and GCS. URL scheme determines which implementation is used. | Backend, driver, adapter |
+| **StorageBackend** | A trait abstracting async byte-level read access to a **Store**, with implementations for local filesystem, GCS, S3, and HTTP. URL scheme determines which implementation is used. | Backend, driver, adapter |
 | **Chunk Cache** | A memory-bounded LRU cache on the server wrapping a **StorageBackend**, reducing repeated reads for chunks requested by multiple **Clients** viewing the same region. Keyed by chunk path. | Server cache, data cache |
 
 ## Camera system

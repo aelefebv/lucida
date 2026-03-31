@@ -138,36 +138,21 @@ What it should not do:
 ## lucida-store in Rust
 The "data plumbing."
 
-This is the data access layer. It is responsible for getting chunk bytes and metadata from wherever they live.
+This is the data access layer, used as a library by lucida-server. It is responsible for getting chunk bytes and metadata from wherever they live.
 
-Depending on deployment, it can act in two ways:
-
-### Mode 1: optional backend service
-
-A Rust service sits between the client and the storage system. It can:
-- open local files on the server
-- read from GCS, HTTP, local FS
-- authenticate users
-- sign URLs
-- cache hot chunks
-- decode or transform data server-side
-- expose a simple chunk API to clients
-
-### Mode 2: library only
-
-If the browser can access the store directly, then Lucida may skip the server for normal reads. In that case lucida-store may still exist for:
-- ingest
-- batch transforms
-- auth/signing setup
-- precomputation
-- desktop packaging
+lucida-server calls into lucida-store for:
+- opening storage backends (local FS, GCS, S3, HTTP)
+- reading OME-Zarr v3 metadata
+- mapping logical chunk keys to on-disk store paths
+- caching chunks in memory (LRU)
+- ingestion (converting non-Zarr formats to OME-Zarr)
 
 What lucida-store should do well:
 - read v0.5 OME-Zarr (zarr v3) metadata
 - map logical chunk coordinates to store keys
+- map logical chunk keys to on-disk Zarr v3 store paths
 - fetch compressed chunk payloads
 - possibly decode codecs
-- optionally perform server-side transforms
 - cache recent metadata and chunks
 - handle concurrency and backpressure
 
@@ -260,9 +245,10 @@ What it should do:
 - store and relay ephemeral client presence
 - manage peer join/leave and follow relationships
 - handle connect/disconnect gracefully
+- serve chunks to clients using lucida-store as its data layer
+- relay chunk requests between peer-hosted data sources
 
 What it should not do:
-- serve data or chunks (that is lucida-store's job)
 - render anything
 - implement viewer logic beyond applying document commands (that is lucida-core's job)
 - require authentication for local use

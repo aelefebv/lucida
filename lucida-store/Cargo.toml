@@ -11,7 +11,7 @@ clap = { version = "4", features = ["derive"] }
 rayon = "1"
 memmap2 = "0.9"
 lz4_flex = "0.11"
-object_store = { version = "0.12", features = ["gcp"] }
+object_store = { version = "0.12", features = ["gcp", "aws", "http"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 bytes = "1"
 lru = "0.12"
