@@ -23,6 +23,7 @@ export interface BridgeHandlers {
   onCursorUpdate?: (clientId: ClientId, position: [number, number] | null) => void;
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
   onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
+  onOpenDatasetFailed?: (url: string, error: string) => void;
   onDisconnect?: () => void;
 }
 
@@ -101,6 +102,9 @@ export class Bridge {
           case "dataset_presence_update":
             this.handlers.onDatasetPresenceUpdate?.(msg.client_id, msg.dataset_order, msg.dataset_settings);
             break;
+          case "open_dataset_failed":
+            this.handlers.onOpenDatasetFailed?.(msg.url, msg.error);
+            break;
         }
       } catch (e) {
         console.warn("[Bridge] failed to parse message:", e);
@@ -172,6 +176,11 @@ export class Bridge {
         }
       }, 200);
     }
+  }
+
+  /** Send a request to open a remote dataset by URL. */
+  sendOpenRemoteDataset(url: string) {
+    this.send(JSON.stringify({ type: "open_remote_dataset", url }));
   }
 
   /** Send a follow request. */

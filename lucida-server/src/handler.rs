@@ -3,6 +3,8 @@ use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
+use lucida_store::cache::CachedStore;
+use object_store::path::Path;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
@@ -232,6 +234,18 @@ pub async fn handle_client(
                                 });
                             }
                         }
+                        ClientMessage::OpenRemoteDataset { url } => {
+                            eprintln!("client {id}: opening remote dataset from {url}");
+                            let session_clone = Arc::clone(&session);
+                            let tx_clone = tx.clone();
+                            let unicast_routes_clone = Arc::clone(&unicast_routes);
+                            let url_clone = url.clone();
+                            tokio::spawn(async move {
+                                handle_open_remote_dataset(
+                                    id, url_clone, session_clone, tx_clone, unicast_routes_clone,
+                                ).await;
+                            });
+                        }
                         ClientMessage::DatasetPresence {
                             dataset_order,
                             dataset_settings,
@@ -262,23 +276,41 @@ pub async fn handle_client(
                 if let Ok(chunk_msg) = serde_json::from_str::<ChunkMessage>(&json) {
                     match chunk_msg {
                         ChunkMessage::ChunkRequest { dataset_id, key } => {
-                            let source_id = {
+                            // Check server-hosted first, then peer relay.
+                            let server_store = {
                                 let sess = session.lock().await;
-                                sess.data_sources.get(&dataset_id).copied()
+                                sess.server_stores.get(&dataset_id).cloned()
                             };
-                            if let Some(source_id) = source_id {
-                                let fetch = ChunkMessage::ChunkFetch {
-                                    client_id: id,
-                                    dataset_id,
-                                    key,
+                            if let Some(store) = server_store {
+                                // Server-hosted: read chunk from StorageBackend.
+                                let unicast_routes_clone = Arc::clone(&unicast_routes);
+                                let ds_id = dataset_id;
+                                let chunk_key = key;
+                                tokio::spawn(async move {
+                                    serve_chunk_from_store(
+                                        id, &ds_id, &chunk_key, &store, &unicast_routes_clone,
+                                    ).await;
+                                });
+                            } else {
+                                // Peer-hosted: relay to data source.
+                                let source_id = {
+                                    let sess = session.lock().await;
+                                    sess.data_sources.get(&dataset_id).copied()
                                 };
-                                let fetch_json =
-                                    serde_json::to_string(&fetch).unwrap();
-                                let senders = unicast_routes.lock().await;
-                                if let Some(sender) = senders.get(&source_id) {
-                                    let _ = sender.send(Message::Text(
-                                        fetch_json.into(),
-                                    ));
+                                if let Some(source_id) = source_id {
+                                    let fetch = ChunkMessage::ChunkFetch {
+                                        client_id: id,
+                                        dataset_id,
+                                        key,
+                                    };
+                                    let fetch_json =
+                                        serde_json::to_string(&fetch).unwrap();
+                                    let senders = unicast_routes.lock().await;
+                                    if let Some(sender) = senders.get(&source_id) {
+                                        let _ = sender.send(Message::Text(
+                                            fetch_json.into(),
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -340,4 +372,176 @@ pub async fn handle_client(
     }
 
     eprintln!("client {id} disconnected");
+}
+
+/// Handle OpenRemoteDataset: open a StorageBackend, read metadata, broadcast AddDataset.
+async fn handle_open_remote_dataset(
+    client_id: ClientId,
+    url: String,
+    session: Arc<Mutex<Session>>,
+    tx: broadcast::Sender<BroadcastItem>,
+    unicast_routes: UnicastRoutes,
+) {
+    // Open storage backend.
+    let store = match lucida_store::backend::open(&url) {
+        Ok(s) => s,
+        Err(e) => {
+            send_open_failed(client_id, &url, &e.to_string(), &unicast_routes).await;
+            return;
+        }
+    };
+
+    // Extract dataset name from URL (last path component).
+    let name = url
+        .rsplit('/')
+        .find(|s| !s.is_empty())
+        .unwrap_or("dataset")
+        .to_string();
+
+    // Generate a dataset ID.
+    let dataset_id = format!("srv-{:016x}", {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        url.hash(&mut h);
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .hash(&mut h);
+        h.finish()
+    });
+
+    // Read metadata.
+    let meta = match lucida_store::metadata::read_dataset_info(&store, &dataset_id, &name).await {
+        Ok(m) => m,
+        Err(e) => {
+            send_open_failed(client_id, &url, &e.to_string(), &unicast_routes).await;
+            return;
+        }
+    };
+
+    // Build AddDataset command from the parsed metadata.
+    let ds = &meta.dataset;
+    let command = DocumentCommand::AddDataset {
+        id: ds.id.clone(),
+        name: ds.name.clone(),
+        layers: ds.layers.clone(),
+        volume_shape: ds.volume_shape,
+        volume_scale: ds.volume_transform.as_ref().map(|_| {
+            // Reconstruct scale from client_metadata (stored there during parsing).
+            if let Some(cm) = &ds.client_metadata {
+                if let Some(levels) = cm.get("levels").and_then(|v| v.as_array()) {
+                    if let Some(l0) = levels.first() {
+                        if let Some(scale) = l0.get("scale").and_then(|v| v.as_array()) {
+                            if scale.len() >= 5 {
+                                return [
+                                    scale[2].as_f64().unwrap_or(1.0),
+                                    scale[3].as_f64().unwrap_or(1.0),
+                                    scale[4].as_f64().unwrap_or(1.0),
+                                ];
+                            }
+                        }
+                    }
+                }
+            }
+            [1.0, 1.0, 1.0]
+        }),
+        client_metadata: ds.client_metadata.clone(),
+    };
+
+    // Wrap in a 512 MB LRU cache and register.
+    let cached = Arc::new(CachedStore::new(store, 512 * 1024 * 1024));
+
+    // Apply command and register server store.
+    let seq = {
+        let mut sess = session.lock().await;
+        let seq = sess.apply(command.clone());
+        sess.server_stores.insert(dataset_id.clone(), cached);
+        seq
+    };
+
+    // Broadcast to ALL clients including the requester.
+    // Use u64::MAX as sender so no client matches — everyone gets the
+    // CommandBroadcast (not an Ack), since the requester hasn't applied
+    // the AddDataset locally.
+    let broadcast_msg = ServerMessage::CommandBroadcast {
+        seq,
+        command,
+    };
+
+    let _ = tx.send(BroadcastItem::CommandBroadcast {
+        sender: u64::MAX,
+        broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+        ack_json: String::new(), // unused — no client will match
+    });
+
+    eprintln!("server: opened remote dataset {dataset_id} from {url}");
+}
+
+/// Read a chunk from a StorageBackend and send it to the requesting client.
+async fn serve_chunk_from_store(
+    client_id: ClientId,
+    dataset_id: &str,
+    chunk_key: &str,
+    store: &Arc<CachedStore>,
+    unicast_routes: &UnicastRoutes,
+) {
+    // Chunk key format: "level/t/c/z/y/x"
+    // File path in store: "{level}/c/{t}/{c}/{z}/{y}/{x}"
+    let file_path = chunk_key_to_store_path(chunk_key);
+    let obj_path = Path::from(file_path.as_str());
+
+    let bytes = match store.get_bytes(&obj_path).await {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("server: failed to read chunk {chunk_key} for {dataset_id}: {e}");
+            return;
+        }
+    };
+
+    // Build binary response: [client_id: u32 LE][key_len: u16 LE][key][data]
+    // The key sent back is "{dataset_id}/{chunk_key}" (composite key).
+    let composite_key = format!("{dataset_id}/{chunk_key}");
+    let key_bytes = composite_key.as_bytes();
+    let key_len = key_bytes.len() as u16;
+
+    let mut buf = Vec::with_capacity(4 + 2 + key_bytes.len() + bytes.len());
+    buf.extend_from_slice(&(client_id as u32).to_le_bytes());
+    buf.extend_from_slice(&key_len.to_le_bytes());
+    buf.extend_from_slice(key_bytes);
+    buf.extend_from_slice(&bytes);
+
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Binary(buf.into()));
+    }
+}
+
+/// Convert chunk key "level/t/c/z/y/x" to store path "{level}/c/{t}/{c}/{z}/{y}/{x}".
+fn chunk_key_to_store_path(key: &str) -> String {
+    let parts: Vec<&str> = key.splitn(6, '/').collect();
+    if parts.len() == 6 {
+        format!("{}/c/{}/{}/{}/{}/{}", parts[0], parts[1], parts[2], parts[3], parts[4], parts[5])
+    } else {
+        key.to_string()
+    }
+}
+
+/// Send an OpenDatasetFailed message to the requesting client.
+async fn send_open_failed(
+    client_id: ClientId,
+    url: &str,
+    error: &str,
+    unicast_routes: &UnicastRoutes,
+) {
+    eprintln!("server: failed to open {url}: {error}");
+    let msg = ServerMessage::OpenDatasetFailed {
+        url: url.to_string(),
+        error: error.to_string(),
+    };
+    let json = serde_json::to_string(&msg).unwrap();
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Text(json.into()));
+    }
 }

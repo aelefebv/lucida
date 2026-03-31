@@ -1,10 +1,12 @@
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use lucida_core::camera::Camera;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, PresenceState, ServerMessage};
 use lucida_core::scene::{DisplayState, DocumentState, DatasetDisplaySettings};
 use lucida_core::view::ViewState;
+use lucida_store::cache::CachedStore;
 
 const HISTORY_CAPACITY: usize = 256;
 
@@ -12,8 +14,10 @@ pub struct Session {
     pub document: DocumentState,
     pub seq: u64,
     history: VecDeque<(u64, DocumentCommand)>,
-    /// Maps dataset_id → client_id of the data source.
+    /// Maps dataset_id → client_id of the data source (peer-hosted datasets).
     pub data_sources: HashMap<String, ClientId>,
+    /// Server-hosted datasets: dataset_id → cached StorageBackend.
+    pub server_stores: HashMap<String, Arc<CachedStore>>,
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
 }
@@ -27,6 +31,7 @@ impl Session {
             seq: 0,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
             data_sources: HashMap::new(),
+            server_stores: HashMap::new(),
             clients: HashMap::new(),
         }
     }

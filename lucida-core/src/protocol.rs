@@ -48,6 +48,9 @@ pub enum ClientMessage {
     },
     /// Remote-control another client by making them follow the sender.
     Steer { client: ClientId },
+    /// Request the server open a Dataset from a URL.
+    /// The server reads metadata via a StorageBackend and broadcasts AddDataset.
+    OpenRemoteDataset { url: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +97,8 @@ pub enum ServerMessage {
         dataset_order: Vec<String>,
         dataset_settings: HashMap<String, DatasetDisplaySettings>,
     },
+    /// Sent when OpenRemoteDataset cannot be fulfilled.
+    OpenDatasetFailed { url: String, error: String },
 }
 
 /// Chunk-related messages exchanged between clients and server.
@@ -359,6 +364,36 @@ mod tests {
                 assert!(matches!(camera, Camera::Fly(_)));
             }
             _ => panic!("expected PresenceUpdate"),
+        }
+    }
+
+    #[test]
+    fn open_remote_dataset_round_trips() {
+        let msg = ClientMessage::OpenRemoteDataset { url: "/mnt/data/experiment.zarr".into() };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"open_remote_dataset\""));
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::OpenRemoteDataset { url } => assert_eq!(url, "/mnt/data/experiment.zarr"),
+            _ => panic!("expected OpenRemoteDataset"),
+        }
+    }
+
+    #[test]
+    fn open_dataset_failed_round_trips() {
+        let msg = ServerMessage::OpenDatasetFailed {
+            url: "gs://bucket/missing.zarr".into(),
+            error: "not found".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"open_dataset_failed\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::OpenDatasetFailed { url, error } => {
+                assert_eq!(url, "gs://bucket/missing.zarr");
+                assert_eq!(error, "not found");
+            }
+            _ => panic!("expected OpenDatasetFailed"),
         }
     }
 

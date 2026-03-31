@@ -18,6 +18,13 @@ from lucida.zarr_reader import (
     read_level_meta,
 )
 
+try:
+    from lucida.lucida import PyStore
+
+    _HAS_PYSTORE = True
+except ImportError:
+    _HAS_PYSTORE = False
+
 
 class Viewer:
     """High-level wrapper around PyScene that connects to a lucida-server relay."""
@@ -440,6 +447,71 @@ class Viewer:
             return self._read_viewport_remote(needed, level, t_val, c_val, ds, timeout)
 
     def _read_viewport_local(
+        self,
+        store_path: str,
+        needed: list[dict],
+        level: int,
+        t_val: int,
+        c_val: int,
+    ) -> ViewportData:
+        if _HAS_PYSTORE:
+            return self._read_viewport_local_pystore(
+                store_path, needed, level, t_val, c_val
+            )
+        return self._read_viewport_local_python(
+            store_path, needed, level, t_val, c_val
+        )
+
+    def _read_viewport_local_pystore(
+        self,
+        store_path: str,
+        needed: list[dict],
+        level: int,
+        t_val: int,
+        c_val: int,
+    ) -> ViewportData:
+        py_store = PyStore.open(store_path)
+        meta_json = py_store.read_metadata(store_path.rstrip("/").rsplit("/", 1)[-1])
+        meta_dict = json.loads(meta_json)
+
+        # Extract level metadata from client_metadata
+        client_meta = meta_dict.get("client_metadata", {})
+        level_meta = client_meta["levels"][level]
+
+        # chunkShape and shape are [T, C, Z, Y, X]
+        chunk_shape = (level_meta["chunkShape"][2], level_meta["chunkShape"][3], level_meta["chunkShape"][4])
+        shape = (level_meta["shape"][2], level_meta["shape"][3], level_meta["shape"][4])
+        dtype = np.dtype(level_meta["dataType"])
+        codecs = level_meta.get("codecs", [])
+        level_path = level_meta["path"]
+
+        cz, cy, cx = chunk_shape
+        chunks_dict: dict[str, np.ndarray] = {}
+        for ch in needed:
+            chunk_path = f"{level_path}/c/{ch['t']}/{ch['c']}/{ch['z']}/{ch['y']}/{ch['x']}"
+            raw = py_store.read_chunk(chunk_path)
+            decompressed = decompress_chunk(bytes(raw), codecs)
+            arr = np.frombuffer(decompressed, dtype=dtype).reshape((cz, cy, cx))
+            chunks_dict[ch["key"]] = arr
+
+        data, origin = assemble_chunks(chunks_dict, needed, chunk_shape, shape, dtype)
+
+        # Extract physical scale if available
+        level_scale = level_meta.get("scale", [1.0, 1.0, 1.0, 1.0, 1.0])
+        scale_zyx = (level_scale[2], level_scale[3], level_scale[4])
+
+        return ViewportData(
+            data=data,
+            origin=origin,
+            level=level,
+            level_shape=shape,
+            chunk_shape=chunk_shape,
+            t=t_val,
+            c=c_val,
+            scale=scale_zyx,
+        )
+
+    def _read_viewport_local_python(
         self,
         store_path: str,
         needed: list[dict],

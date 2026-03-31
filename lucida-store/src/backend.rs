@@ -1,0 +1,141 @@
+//! Storage backend abstraction for reading from Zarr Stores.
+//!
+//! URL scheme routing:
+//! - `/path/...` → local filesystem
+//! - `gs://bucket/...` → Google Cloud Storage (Application Default Credentials)
+
+use std::fmt;
+use std::sync::Arc;
+
+use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::local::LocalFileSystem;
+use object_store::prefix::PrefixStore;
+use object_store::ObjectStore;
+
+/// Errors from storage backend operations.
+#[derive(Debug)]
+pub enum StoreError {
+    /// The URL scheme is not supported.
+    UnsupportedScheme(String),
+    /// An error from the underlying object store.
+    ObjectStore(object_store::Error),
+    /// An error parsing metadata.
+    Metadata(String),
+}
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StoreError::UnsupportedScheme(s) => write!(f, "unsupported URL scheme: {s}"),
+            StoreError::ObjectStore(e) => write!(f, "storage error: {e}"),
+            StoreError::Metadata(s) => write!(f, "metadata error: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+impl From<object_store::Error> for StoreError {
+    fn from(e: object_store::Error) -> Self {
+        StoreError::ObjectStore(e)
+    }
+}
+
+/// Parse a `gs://bucket/prefix` URL into (bucket, optional prefix).
+fn parse_gs_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
+    let rest = url
+        .strip_prefix("gs://")
+        .ok_or_else(|| StoreError::UnsupportedScheme(url.into()))?;
+    if rest.is_empty() {
+        return Err(StoreError::Metadata("gs:// URL missing bucket name".into()));
+    }
+    match rest.find('/') {
+        Some(idx) => {
+            let bucket = &rest[..idx];
+            let prefix = &rest[idx + 1..];
+            if prefix.is_empty() {
+                Ok((bucket, None))
+            } else {
+                Ok((bucket, Some(prefix)))
+            }
+        }
+        None => Ok((rest, None)),
+    }
+}
+
+/// Open a storage backend from a URL.
+///
+/// - Paths starting with `/` are treated as local filesystem paths.
+/// - `gs://bucket/path` URLs use Google Cloud Storage with Application Default
+///   Credentials.
+pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
+    if url.starts_with('/') {
+        let store = LocalFileSystem::new_with_prefix(url)
+            .map_err(StoreError::ObjectStore)?;
+        Ok(Arc::new(store))
+    } else if url.starts_with("gs://") {
+        let (bucket, prefix) = parse_gs_url(url)?;
+        let store = GoogleCloudStorageBuilder::new()
+            .with_bucket_name(bucket)
+            .build()?;
+        match prefix {
+            Some(p) => Ok(Arc::new(PrefixStore::new(store, p))),
+            None => Ok(Arc::new(store)),
+        }
+    } else {
+        Err(StoreError::UnsupportedScheme(url.into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_local_path() {
+        let dir = std::env::temp_dir();
+        let store = open(dir.to_str().unwrap());
+        assert!(store.is_ok());
+    }
+
+    #[test]
+    fn open_unsupported_scheme() {
+        let err = open("s3://bucket/path").unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedScheme(_)));
+    }
+
+    #[test]
+    fn parse_gs_bucket_only() {
+        let (bucket, prefix) = parse_gs_url("gs://my-bucket").unwrap();
+        assert_eq!(bucket, "my-bucket");
+        assert_eq!(prefix, None);
+    }
+
+    #[test]
+    fn parse_gs_bucket_trailing_slash() {
+        let (bucket, prefix) = parse_gs_url("gs://my-bucket/").unwrap();
+        assert_eq!(bucket, "my-bucket");
+        assert_eq!(prefix, None);
+    }
+
+    #[test]
+    fn parse_gs_bucket_with_prefix() {
+        let (bucket, prefix) = parse_gs_url("gs://my-bucket/path/to/store.zarr").unwrap();
+        assert_eq!(bucket, "my-bucket");
+        assert_eq!(prefix, Some("path/to/store.zarr"));
+    }
+
+    #[test]
+    fn parse_gs_empty_bucket_error() {
+        let err = parse_gs_url("gs://").unwrap_err();
+        assert!(matches!(err, StoreError::Metadata(_)));
+    }
+
+    #[test]
+    fn open_gs_constructs_store() {
+        // Verifies that GCS builder construction succeeds (no credentials needed
+        // until an actual I/O operation is performed).
+        let store = open("gs://test-bucket/some/prefix");
+        assert!(store.is_ok());
+    }
+}

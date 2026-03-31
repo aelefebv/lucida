@@ -9,6 +9,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 lucida-core = { path = "../lucida-core" }
+lucida-store = { path = "../lucida-store" }
 pyo3 = { version = "0.24", features = ["extension-module"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+object_store = "0.12"
+bytes = "1"

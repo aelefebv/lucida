@@ -1,4 +1,9 @@
 from lucida.viewer import Viewer
 from lucida.zarr_reader import ViewportData
 
-__all__ = ["Viewer", "ViewportData"]
+try:
+    from lucida.lucida import PyStore
+except ImportError:
+    PyStore = None
+
+__all__ = ["Viewer", "ViewportData", "PyStore"]

@@ -60,6 +60,8 @@ export function useBridge({
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
   const followTargetRef = useRef<ClientId | null>(null);
   followTargetRef.current = followTarget;
+  const [remoteDatasetLoading, setRemoteDatasetLoading] = useState(false);
+  const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!wasmReady || bridgeRef.current) return;
@@ -112,6 +114,7 @@ export function useBridge({
             if (!datasetsRef.current.has(cmd.id)) {
               setupRemoteDataset(cmd.id, cmd.name ?? cmd.id, cmd.client_metadata);
             }
+            setRemoteDatasetLoading(false);
             setWasmScene(scene);
           }
           if (cmd.type === "remove_dataset") {
@@ -247,7 +250,12 @@ export function useBridge({
           }
         }
       },
+      onOpenDatasetFailed: (_url, error) => {
+        setRemoteDatasetLoading(false);
+        setRemoteDatasetError(error);
+      },
       onDisconnect: () => {
+        setRemoteDatasetLoading(false);
         for (const [, pending] of pendingChunkRequests.current) {
           pending.reject(new Error("Bridge disconnected"));
         }
@@ -405,6 +413,12 @@ export function useBridge({
     bridgeRef.current?.sendCursor(position);
   }, []);
 
+  const sendOpenRemoteDataset = useCallback((url: string) => {
+    setRemoteDatasetLoading(true);
+    setRemoteDatasetError(null);
+    bridgeRef.current?.sendOpenRemoteDataset(url);
+  }, []);
+
   const breakFollow = useCallback(() => {
     if (followTargetRef.current !== null) {
       setFollowTarget(null);
@@ -466,6 +480,9 @@ export function useBridge({
     sendCursor,
     emitPresence,
     emitDatasetPresence,
+    sendOpenRemoteDataset,
+    remoteDatasetLoading,
+    remoteDatasetError,
     breakFollow,
     handleFollow,
     followablePeers,

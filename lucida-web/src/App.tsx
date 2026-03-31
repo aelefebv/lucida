@@ -104,6 +104,7 @@ function App() {
     emitPresence: bridge.emitPresence,
     emitDatasetPresence: bridge.emitDatasetPresence,
     initLayerMaps: layers.initLayerMaps,
+    sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,
     setSelectedDatasetId,
     setVolumeMap,
     bumpDatasetsVersion,
@@ -233,6 +234,14 @@ function App() {
     render.loopRef.current?.markDirty();
     render.canvasRef.current?.focus();
   }, [scene.wasmSceneRef, bridge, render.loopRef, render.canvasRef]);
+
+  const [urlInput, setUrlInput] = useState("");
+  const handleUrlKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      datasets.handleUrlSubmit(urlInput);
+      setUrlInput("");
+    }
+  }, [datasets, urlInput]);
 
   const dirInputRef = useRef<HTMLInputElement>(null);
 
@@ -366,8 +375,28 @@ function App() {
             <DimensionControls label="T" value={dims.t} max={dims.dimT} onChange={dims.handleTChange} />
           </div>
         )}
-        {datasets.loading && <p className="secondary">Loading volume...</p>}
-        {(render.renderError || datasets.loadError) && <p style={{ color: "#f44" }}>{render.renderError || datasets.loadError}</p>}
+        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", width: "100%", maxWidth: layout.canvasWidth }}>
+          <input
+            type="text"
+            placeholder="Enter dataset path or gs:// URL"
+            value={urlInput}
+            onChange={e => setUrlInput(e.target.value)}
+            onKeyDown={handleUrlKeyDown}
+            disabled={bridge.remoteDatasetLoading}
+            style={{ flex: 1, padding: "0.375rem 0.5rem", fontSize: "0.875rem" }}
+          />
+          <button
+            onClick={() => { datasets.handleUrlSubmit(urlInput); setUrlInput(""); }}
+            disabled={bridge.remoteDatasetLoading || !urlInput.trim()}
+            style={{ padding: "0.375rem 0.75rem", fontSize: "0.875rem" }}
+          >
+            {bridge.remoteDatasetLoading ? "Loading..." : "Open"}
+          </button>
+        </div>
+        {(datasets.loading || bridge.remoteDatasetLoading) && <p className="secondary">Loading volume...</p>}
+        {(render.renderError || datasets.loadError || bridge.remoteDatasetError) && (
+          <p style={{ color: "#f44" }}>{render.renderError || datasets.loadError || bridge.remoteDatasetError}</p>
+        )}
       </div>
     </div>
   );

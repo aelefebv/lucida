@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use object_store::ObjectStore;
 use pyo3::prelude::*;
 
 use lucida_core::camera::Camera;
@@ -174,7 +177,7 @@ impl PyScene {
             .unwrap_or_default()
     }
 
-    #[pyo3(signature = (name, visible, num_levels, chunk_x, chunk_y, chunk_z, shape_x, shape_y, shape_z))]
+    #[pyo3(signature = (name, visible, num_levels, chunk_z, chunk_y, chunk_x, shape_z, shape_y, shape_x))]
     fn add_layer(
         &mut self,
         name: &str,
@@ -226,8 +229,53 @@ impl PyScene {
     }
 }
 
+#[pyclass]
+struct PyStore {
+    store: Arc<dyn ObjectStore>,
+    runtime: tokio::runtime::Runtime,
+}
+
+#[pymethods]
+impl PyStore {
+    /// Open a StorageBackend from a URL.
+    /// "/" prefix -> local filesystem, "gs://" -> GCS.
+    #[staticmethod]
+    fn open(url: &str) -> PyResult<Self> {
+        let store = lucida_store::backend::open(url)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        Ok(Self { store, runtime })
+    }
+
+    /// Read Zarr metadata, return JSON string of DatasetMetadata.
+    fn read_metadata(&self, name: &str) -> PyResult<String> {
+        let store = self.store.clone();
+        let name = name.to_string();
+        let meta = self.runtime.block_on(async {
+            lucida_store::metadata::read_dataset_info(&store, "temp-id", &name).await
+        }).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+        // Serialize the Dataset to JSON
+        let json = serde_json::to_string(&meta.dataset)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(json)
+    }
+
+    /// Read a single chunk by path (e.g., "0/c/0/0/0/0/0"), return raw bytes.
+    fn read_chunk(&self, path: &str) -> PyResult<Vec<u8>> {
+        let store = self.store.clone();
+        let obj_path = object_store::path::Path::from(path);
+        let bytes = self.runtime.block_on(async {
+            store.get(&obj_path).await?.bytes().await
+        }).map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        Ok(bytes.to_vec())
+    }
+}
+
 #[pymodule]
 fn lucida(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScene>()?;
+    m.add_class::<PyStore>()?;
     Ok(())
 }

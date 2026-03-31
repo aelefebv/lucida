@@ -20,6 +20,7 @@ interface Params {
   emitPresence: () => void;
   emitDatasetPresence: () => void;
   initLayerMaps: (id: string) => void;
+  sendOpenRemoteDataset: (url: string) => void;
   // Lifted state setters
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
   setVolumeMap: React.Dispatch<React.SetStateAction<Map<string, VolumeData>>>;
@@ -36,6 +37,7 @@ export function useDatasets({
   emitPresence,
   emitDatasetPresence,
   initLayerMaps,
+  sendOpenRemoteDataset,
   setSelectedDatasetId,
   setVolumeMap,
   bumpDatasetsVersion,
@@ -163,9 +165,16 @@ export function useDatasets({
     }
   }, [wasmSceneRef, ensureScene, setWasmScene, loopRef, datasetsRef, sendCommand, emitPresence, emitDatasetPresence, initLayerMaps, setSelectedDatasetId, setVolumeMap, bumpDatasetsVersion]);
 
+  const handleUrlSubmit = useCallback((url: string) => {
+    const trimmed = url.trim();
+    if (!trimmed) return;
+    sendOpenRemoteDataset(trimmed);
+  }, [sendOpenRemoteDataset]);
+
   return {
     loading,
     loadError,
     handleDirChange,
+    handleUrlSubmit,
   };
 }

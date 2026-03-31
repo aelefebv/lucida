@@ -1,4 +1,4 @@
-# Ubiquitous Language
+# Glossary
 
 ## Scene state
 
@@ -67,6 +67,13 @@
 | **Array Metadata** | The per-Level `{level}/zarr.json` file declaring shape, Chunk grid, Codecs, and data type for one resolution array | Level metadata |
 | **Cumulative Scale** | The `[x, y, z]` factor array on a Level Spec expressing how many times coarser this Level is relative to Level 0 | Scale factor, resolution factor |
 
+## Storage backend (lucida-store)
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **StorageBackend** | A trait abstracting async byte-level read access to a **Store**, with implementations for local filesystem and GCS. URL scheme determines which implementation is used. | Backend, driver, adapter |
+| **Chunk Cache** | A memory-bounded LRU cache on the server wrapping a **StorageBackend**, reducing repeated reads for chunks requested by multiple **Clients** viewing the same region. Keyed by chunk path. | Server cache, data cache |
+
 ## Camera system
 
 | Term | Definition | Aliases to avoid |
@@ -125,6 +132,8 @@
 | **Follow** | A peer-to-peer mode where one client mirrors another's presence; transitive chains resolved server-side | Sync view, link, mirror |
 | **Steer** | A remote-control action that makes another client follow the sender | Remote control, force-follow |
 | **ChunkMessage** | A message for chunk data relay: ChunkRequest (viewer to server) or ChunkFetch (server to data source) | Data request, tile message |
+| **OpenRemoteDataset** | A **ClientMessage** requesting the server open a **Dataset** from a URL (local path or `gs://` URI). The server reads metadata via a **StorageBackend** and broadcasts the resulting `AddDataset` **DocumentCommand** to all **Clients**. Not a **DocumentCommand** itself — it is a request that produces one. | Open URL, remote open |
+| **OpenDatasetFailed** | A **ServerMessage** sent via **Unicast** to the requesting **Client** when an **OpenRemoteDataset** cannot be fulfilled (invalid URL, auth failure, missing metadata). | Error, open error |
 
 ## Server architecture
 
@@ -133,7 +142,9 @@
 | **Session** | The single shared collaborative workspace managed by the server: document state, command history, data source registry, and per-client presence | Room, channel, workspace |
 | **Client** | A single WebSocket connection to the server, identified by a unique ClientId (u64) | User, connection, participant |
 | **Peer** | Another client from a given client's perspective, used in PeerJoined/PeerLeft messages | Other user, remote client |
-| **Data Source** | The client that added a dataset and is responsible for serving its chunk data to other clients on demand | Provider, host, owner, uploader |
+| **Data Source** | The entity responsible for serving a Dataset's **Chunk Data** on demand. For **peer-hosted Datasets**, this is the **Client** that added the Dataset. For **server-hosted Datasets**, this is the server itself (via a **StorageBackend**). | Provider, host, owner, uploader |
+| **Server-hosted Dataset** | A **Dataset** whose **Data Source** is the server, reading **Chunk Data** from a **StorageBackend**. Opened via **OpenRemoteDataset**. Always available while the server runs. | Remote dataset (ambiguous), cloud dataset |
+| **Peer-hosted Dataset** | A **Dataset** whose **Data Source** is a connected **Client**, serving **Chunk Data** via WebSocket relay through the server. The existing hosting model. | Local dataset (ambiguous with local FS) |
 | **Sequence Number (seq)** | A monotonically increasing u64 counter on the session, incremented each time a document command is applied | Version, revision, counter |
 | **History** | A bounded ring buffer (capacity 256) of recently applied document commands paired with their sequence numbers | Log, undo stack, changelog |
 | **Broadcast** | Fan-out delivery of a message to all connected clients via a tokio broadcast channel; the sender may receive a different payload (Ack vs CommandBroadcast) or be excluded (Presence, Cursor) | Multicast, publish, fan-out |
@@ -174,7 +185,8 @@
 | **Viewer** | The Python SDK client: a `PyScene` wrapper that maintains a WebSocket connection to the Server on a background thread, exposing viewport commands, follow/steer, and data read/write as a notebook-friendly API. | Client (ambiguous with server-side Client) |
 | **ViewportData** | An assembled numpy array (Z, Y, X) covering the visible Chunks for a single Dataset, bundled with its Origin, Level, level shape, chunk shape, t/c indices, and physical Scale. | Viewport, result, volume |
 | **Origin** | The voxel offset (z, y, x) of a ViewportData's top-left-front corner within the full Level shape; computed from the minimum chunk grid coordinates in the Chunk Plan. | Offset, position |
-| **Local Mode** | Chunk retrieval by reading Zarr v3 chunk files directly from a Store on the local filesystem; activated by passing a `store_path` to `read_viewport`. | File mode, disk mode |
+| **Direct Mode** | Chunk retrieval using a **StorageBackend** to read directly from a **Store** (local filesystem or GCS); activated by passing a URL/path to `read_viewport`. No server or peer required. | File mode, disk mode, local mode |
+| **PyStore** | A PyO3-wrapped **StorageBackend** that reads **Stores** directly from Python without a server. Used by the **Viewer** in **Direct Mode** for frictionless single-user data access. | Store wrapper, data reader |
 | **Remote Mode** | Chunk retrieval by sending Chunk Requests through the Server to the Data Source peer; activated by calling `read_viewport` with no `store_path`. | Server mode, proxy mode, network mode |
 
 ## Web rendering pipeline (lucida-web)
@@ -231,7 +243,9 @@
 - A **Session** contains exactly one **DocumentState**, one **History**, one data source registry, and a map of **ClientId** to **PresenceState**
 - A **DocumentState** contains zero or more **Datasets**
 - A **Dataset** contains zero or more **Layers** and optionally one **VolumeTransform** and **Volume shape**
-- A **Dataset** has exactly one **Data Source** (the **Client** that added it); if that **Client** disconnects, the data source mapping is removed
+- A **Dataset** has exactly one **Data Source**: either a **Client** (peer-hosted) or the server (server-hosted)
+- A **Server-hosted Dataset** is opened via **OpenRemoteDataset** and served by the server via a **StorageBackend** wrapped in a **Chunk Cache**
+- A **Peer-hosted Dataset** is opened via `AddDataset` from a **Client**; if that **Client** disconnects, the data source mapping is removed
 - A **Layer** contains zero or more **LevelInfo** entries; when empty, isotropic 2x downsampling is assumed
 - A **Camera** is exactly one of **Slice**, **Arcball**, or **Fly**; all three produce a **VisibleRegion** and view-projection matrix through the unified Camera enum interface
 - A **Fly** camera carries a **Quaternion orientation**, **Base speed**, **Speed multiplier**, **Clip distance**, and **Clip mode**
@@ -257,7 +271,7 @@
 - A **Viewer** is a **Client** from the Server's perspective, assigned a **ClientId** on connect
 - A **Viewer** may become a **Data Source** by calling `write_viewport`, serving **Chunks** from in-memory storage to other **Peers**
 - A **ViewportData** is assembled from the **Chunks** listed in a **ChunkRequestPlan**'s `needed` list, and records its **Origin** within the **Level** shape
-- In **Local Mode**, a **Viewer** reads **Chunks** directly from a **Store** on disk; in **Remote Mode**, it sends **ChunkRequests** through the **Server**
+- In **Direct Mode**, a **Viewer** reads **Chunks** via **PyStore** without a server; in **Remote Mode**, it sends **ChunkRequests** through the **Server**
 - A **ChunkStore** wraps exactly one **ChunkFetcher** and maintains a cache of **Chunk keys** to decompressed ArrayBuffers
 - An **Atlas** contains a GPU texture, an **Indirection buffer**, and a slot-tracking map; one **Atlas** exists per **Dataset** per render mode (slice or volume)
 - A **Fallback texture** is assembled from all chunks of the coarsest **Level** via **Seeding**; the shader samples it when the **Indirection buffer** returns the sentinel value
@@ -351,7 +365,7 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Scale"**: Use **Cumulative Scale** for per-Level `[x, y, z]` factors, **Voxel Size** for physical spacing, and "scale" for UI/rendering contexts only.
 
-- **"Store" vs "Dataset"**: A **Store** is the on-disk Zarr directory tree (producer). A **Dataset** is the same artifact loaded in the viewer (consumer).
+- **"Store"**: A **Store** is the on-disk Zarr directory tree (producer). A **Dataset** is the same artifact loaded in the viewer (consumer). Distinct from `lucida-store` the crate (which manages Stores), `ChunkStore` in lucida-web (the browser-side reactive cache), and `PyStore` (the Python binding for a StorageBackend). Always qualify when context is ambiguous.
 
 - **"Volume"**: In `lucida-store`, the in-memory 5D u16 array struct. In the viewer, the proper term is **Dataset**.
 
