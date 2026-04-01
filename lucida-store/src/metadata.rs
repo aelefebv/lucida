@@ -20,6 +20,49 @@ pub struct DatasetMetadata {
     pub dataset: Dataset,
     /// Per-level paths (e.g., ["0", "1", "2"]) for chunk key construction.
     pub level_paths: Vec<String>,
+    /// The original axis names from the OME metadata (e.g., ["t","c","z","y","x"]
+    /// or ["c","y","x"] for a 3D dataset).
+    pub axes_names: Vec<String>,
+}
+
+/// Map an OME axis name to its canonical 5D position: T=0, C=1, Z=2, Y=3, X=4.
+pub fn axis_index(name: &str) -> Option<usize> {
+    match name {
+        "t" => Some(0),
+        "c" => Some(1),
+        "z" => Some(2),
+        "y" => Some(3),
+        "x" => Some(4),
+        _ => None,
+    }
+}
+
+/// Pad an N-dimensional u64 array to 5D `[T, C, Z, Y, X]`, filling missing
+/// axes with `fill`.
+pub fn normalize_to_5d(values: &[u64], axes: &[String], fill: u64) -> [u64; 5] {
+    let mut result = [fill; 5];
+    for (i, axis_name) in axes.iter().enumerate() {
+        if let Some(pos) = axis_index(axis_name) {
+            if i < values.len() {
+                result[pos] = values[i];
+            }
+        }
+    }
+    result
+}
+
+/// Pad an N-dimensional f64 array to 5D `[T, C, Z, Y, X]`, filling missing
+/// axes with `fill`.
+pub fn normalize_f64_to_5d(values: &[f64], axes: &[String], fill: f64) -> [f64; 5] {
+    let mut result = [fill; 5];
+    for (i, axis_name) in axes.iter().enumerate() {
+        if let Some(pos) = axis_index(axis_name) {
+            if i < values.len() {
+                result[pos] = values[i];
+            }
+        }
+    }
+    result
 }
 
 /// Read OME-Zarr v0.5 metadata from a Store and construct a DatasetMetadata.
@@ -51,6 +94,19 @@ pub async fn read_dataset_info(
         .first()
         .ok_or_else(|| StoreError::Metadata("multiscales array is empty".into()))?;
 
+    // Extract axis names from the OME metadata axes array.
+    // Each axis is an object like {"name": "c", "type": "channel"}.
+    let axes_json: Vec<serde_json::Value> = ms
+        .get("axes")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.clone())
+        .unwrap_or_default();
+
+    let axes_names: Vec<String> = axes_json
+        .iter()
+        .filter_map(|a| a.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+        .collect();
+
     let datasets_arr = ms
         .get("datasets")
         .and_then(|v| v.as_array())
@@ -70,11 +126,8 @@ pub async fn read_dataset_info(
             for ct in transforms {
                 if ct.get("type").and_then(|v| v.as_str()) == Some("scale") {
                     if let Some(s) = ct.get("scale").and_then(|v| v.as_array()) {
-                        for (i, val) in s.iter().enumerate().take(5) {
-                            if let Some(f) = val.as_f64() {
-                                scale[i] = f;
-                            }
-                        }
+                        let raw: Vec<f64> = s.iter().filter_map(|v| v.as_f64()).collect();
+                        scale = normalize_f64_to_5d(&raw, &axes_names, 1.0);
                     }
                 }
             }
@@ -101,25 +154,30 @@ pub async fn read_dataset_info(
     let full_res = &level_metas[0];
     let full_res_scale = &level_entries[0].scale;
 
-    // Shape is [T, C, Z, Y, X] in Zarr metadata
-    let shape_z = full_res.shape[2] as u32;
-    let shape_y = full_res.shape[3] as u32;
-    let shape_x = full_res.shape[4] as u32;
+    // Normalize shapes and chunk shapes to 5D [T, C, Z, Y, X]
+    let full_shape_5d = normalize_to_5d(&full_res.shape, &axes_names, 1);
+    let full_chunk_5d = normalize_to_5d(&full_res.chunk_grid.configuration.chunk_shape, &axes_names, 1);
 
-    let chunk_z = full_res.chunk_grid.configuration.chunk_shape[2] as u32;
-    let chunk_y = full_res.chunk_grid.configuration.chunk_shape[3] as u32;
-    let chunk_x = full_res.chunk_grid.configuration.chunk_shape[4] as u32;
+    let shape_z = full_shape_5d[2] as u32;
+    let shape_y = full_shape_5d[3] as u32;
+    let shape_x = full_shape_5d[4] as u32;
+
+    let chunk_z = full_chunk_5d[2] as u32;
+    let chunk_y = full_chunk_5d[3] as u32;
+    let chunk_x = full_chunk_5d[4] as u32;
 
     // Build LevelInfo for each level
     let level_info: Vec<LevelInfo> = level_metas
         .iter()
         .map(|lm| {
-            let lz = lm.shape[2] as u32;
-            let ly = lm.shape[3] as u32;
-            let lx = lm.shape[4] as u32;
-            let cz = lm.chunk_grid.configuration.chunk_shape[2] as u32;
-            let cy = lm.chunk_grid.configuration.chunk_shape[3] as u32;
-            let cx = lm.chunk_grid.configuration.chunk_shape[4] as u32;
+            let norm_shape = normalize_to_5d(&lm.shape, &axes_names, 1);
+            let norm_chunk = normalize_to_5d(&lm.chunk_grid.configuration.chunk_shape, &axes_names, 1);
+            let lz = norm_shape[2] as u32;
+            let ly = norm_shape[3] as u32;
+            let lx = norm_shape[4] as u32;
+            let cz = norm_chunk[2] as u32;
+            let cy = norm_chunk[3] as u32;
+            let cx = norm_chunk[4] as u32;
             LevelInfo {
                 shape: [lz, ly, lx],
                 chunk_size: [cz, cy, cx],
@@ -134,12 +192,6 @@ pub async fn read_dataset_info(
     let volume_transform = transform::compute_volume_transform(volume_shape, volume_scale);
 
     // Build client_metadata matching what lucida-web expects (DatasetInfo format)
-    let axes_json: Vec<serde_json::Value> = ms
-        .get("axes")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.clone())
-        .unwrap_or_default();
-
     let levels_json: Vec<serde_json::Value> = level_entries
         .iter()
         .zip(level_metas.iter())
@@ -157,6 +209,7 @@ pub async fn read_dataset_info(
 
     let client_metadata = serde_json::json!({
         "axes": axes_json,
+        "axes_names": axes_names,
         "levels": levels_json,
     });
 
@@ -181,6 +234,7 @@ pub async fn read_dataset_info(
     Ok(DatasetMetadata {
         dataset,
         level_paths,
+        axes_names,
     })
 }
 
@@ -193,7 +247,7 @@ struct LevelEntry {
 
 #[derive(Deserialize)]
 struct ArrayMeta {
-    shape: Vec<u64>,       // [T, C, Z, Y, X]
+    shape: Vec<u64>,       // N-dimensional (matches axes count)
     data_type: String,
     chunk_grid: ChunkGrid,
     #[serde(default)]
@@ -207,7 +261,7 @@ struct ChunkGrid {
 
 #[derive(Deserialize)]
 struct ChunkGridConfig {
-    chunk_shape: Vec<u64>, // [T, C, Z, Y, X]
+    chunk_shape: Vec<u64>, // N-dimensional (matches axes count)
 }
 
 #[cfg(test)]
@@ -226,17 +280,55 @@ mod tests {
 
     /// Create a minimal OME-Zarr v0.5 fixture with known dimensions.
     fn create_fixture(dir: &std::path::Path, levels: usize, shape: [u64; 5], chunk: [u64; 5]) {
+        create_fixture_with_axes(
+            dir,
+            levels,
+            &shape,
+            &chunk,
+            &["t", "c", "z", "y", "x"],
+        );
+    }
+
+    /// Create a fixture with a custom set of axes.
+    fn create_fixture_with_axes(
+        dir: &std::path::Path,
+        levels: usize,
+        shape: &[u64],
+        chunk: &[u64],
+        axes: &[&str],
+    ) {
         fs::create_dir_all(dir).unwrap();
+
+        // Build axes JSON
+        let axes_json: Vec<serde_json::Value> = axes
+            .iter()
+            .map(|name| {
+                let atype = match *name {
+                    "t" => "time",
+                    "c" => "channel",
+                    _ => "space",
+                };
+                serde_json::json!({"name": name, "type": atype})
+            })
+            .collect();
 
         // Build root zarr.json with multiscales
         let mut datasets = Vec::new();
         for i in 0..levels {
             let scale_factor = (1u64 << i) as f64;
+            // Build per-axis scale: spatial axes get scale_factor, others get 1.0
+            let scale_vals: Vec<f64> = axes
+                .iter()
+                .map(|name| match *name {
+                    "z" | "y" | "x" => scale_factor,
+                    _ => 1.0,
+                })
+                .collect();
             datasets.push(serde_json::json!({
                 "path": i.to_string(),
                 "coordinateTransformations": [{
                     "type": "scale",
-                    "scale": [1.0, 1.0, scale_factor, scale_factor, scale_factor]
+                    "scale": scale_vals
                 }]
             }));
         }
@@ -250,13 +342,7 @@ mod tests {
                     "multiscales": [{
                         "version": "0.5",
                         "name": "image",
-                        "axes": [
-                            {"name": "t", "type": "time", "unit": "second"},
-                            {"name": "c", "type": "channel"},
-                            {"name": "z", "type": "space", "unit": "micrometer"},
-                            {"name": "y", "type": "space", "unit": "micrometer"},
-                            {"name": "x", "type": "space", "unit": "micrometer"}
-                        ],
+                        "axes": axes_json,
                         "datasets": datasets
                     }]
                 }
@@ -269,13 +355,17 @@ mod tests {
             let level_dir = dir.join(i.to_string());
             fs::create_dir_all(&level_dir).unwrap();
             let scale = 1u64 << i;
-            let level_shape = [
-                shape[0],
-                shape[1],
-                (shape[2] + scale - 1) / scale,
-                (shape[3] + scale - 1) / scale,
-                (shape[4] + scale - 1) / scale,
-            ];
+            let level_shape: Vec<u64> = axes
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| {
+                    if matches!(*name, "z" | "y" | "x") {
+                        (shape[idx] + scale - 1) / scale
+                    } else {
+                        shape[idx]
+                    }
+                })
+                .collect();
             let arr = serde_json::json!({
                 "zarr_format": 3,
                 "node_type": "array",
@@ -320,6 +410,7 @@ mod tests {
         assert_eq!(meta.level_paths, vec!["0"]);
         assert!(meta.dataset.volume_transform.is_some());
         assert!(meta.dataset.client_metadata.is_some());
+        assert_eq!(meta.axes_names, vec!["t", "c", "z", "y", "x"]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -359,8 +450,9 @@ mod tests {
         let meta = read_dataset_info(&store, "ds1", "test").await.unwrap();
 
         let cm = meta.dataset.client_metadata.as_ref().unwrap();
-        // Should have axes and levels arrays
+        // Should have axes, axes_names, and levels arrays
         assert!(cm.get("axes").unwrap().is_array());
+        assert!(cm.get("axes_names").unwrap().is_array());
         let levels = cm.get("levels").unwrap().as_array().unwrap();
         assert_eq!(levels.len(), 2);
 
@@ -372,6 +464,11 @@ mod tests {
         assert!(l0["chunkShape"].is_array());
         assert!(l0["scale"].is_array());
         assert!(l0["codecs"].is_array());
+
+        // axes_names should be a flat string list
+        let axes_names = cm.get("axes_names").unwrap().as_array().unwrap();
+        let names: Vec<&str> = axes_names.iter().map(|v| v.as_str().unwrap()).collect();
+        assert_eq!(names, vec!["t", "c", "z", "y", "x"]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -438,6 +535,141 @@ mod tests {
         // Z: 100/200 = 0.5
         assert!((vt.model[10] - 0.5).abs() < 1e-4);
         assert!((vt.max_physical_extent - 200.0).abs() < 1e-4);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Tests for normalization helpers ---
+
+    #[test]
+    fn normalize_to_5d_full_axes() {
+        let axes: Vec<String> = vec!["t", "c", "z", "y", "x"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let vals = &[1u64, 2, 30, 512, 512];
+        let result = normalize_to_5d(vals, &axes, 1);
+        assert_eq!(result, [1, 2, 30, 512, 512]);
+    }
+
+    #[test]
+    fn normalize_to_5d_3d_axes() {
+        let axes: Vec<String> = vec!["c", "y", "x"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let vals = &[3u64, 256, 256];
+        let result = normalize_to_5d(vals, &axes, 1);
+        // T=1 (fill), C=3, Z=1 (fill), Y=256, X=256
+        assert_eq!(result, [1, 3, 1, 256, 256]);
+    }
+
+    #[test]
+    fn normalize_to_5d_zy_x_only() {
+        let axes: Vec<String> = vec!["z", "y", "x"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let vals = &[20u64, 100, 200];
+        let result = normalize_to_5d(vals, &axes, 1);
+        assert_eq!(result, [1, 1, 20, 100, 200]);
+    }
+
+    #[test]
+    fn normalize_f64_to_5d_partial_axes() {
+        let axes: Vec<String> = vec!["c", "y", "x"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let vals = &[1.0_f64, 0.5, 0.5];
+        let result = normalize_f64_to_5d(vals, &axes, 1.0);
+        assert_eq!(result, [1.0, 1.0, 1.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn axis_index_known_names() {
+        assert_eq!(axis_index("t"), Some(0));
+        assert_eq!(axis_index("c"), Some(1));
+        assert_eq!(axis_index("z"), Some(2));
+        assert_eq!(axis_index("y"), Some(3));
+        assert_eq!(axis_index("x"), Some(4));
+        assert_eq!(axis_index("q"), None);
+    }
+
+    // --- Tests for 3D datasets (fewer than 5 axes) ---
+
+    #[tokio::test]
+    async fn read_3d_dataset_cyx() {
+        let dir = temp_dir("3d_cyx");
+        // 3D dataset with axes [c, y, x], shape [3, 256, 256], chunk [1, 64, 64]
+        create_fixture_with_axes(
+            &dir,
+            1,
+            &[3, 256, 256],
+            &[1, 64, 64],
+            &["c", "y", "x"],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let meta = read_dataset_info(&store, "ds-3d", "3d-test").await.unwrap();
+
+        assert_eq!(meta.axes_names, vec!["c", "y", "x"]);
+        // After normalization: Z=1, Y=256, X=256
+        assert_eq!(meta.dataset.volume_shape, Some([1, 256, 256]));
+
+        let layer = &meta.dataset.layers[0];
+        assert_eq!(layer.data_shape, [1, 256, 256]);
+        assert_eq!(layer.chunk_size, [1, 64, 64]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_3d_dataset_zyx() {
+        let dir = temp_dir("3d_zyx");
+        create_fixture_with_axes(
+            &dir,
+            2,
+            &[20, 100, 200],
+            &[10, 64, 64],
+            &["z", "y", "x"],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let meta = read_dataset_info(&store, "ds-zyx", "zyx-test").await.unwrap();
+
+        assert_eq!(meta.axes_names, vec!["z", "y", "x"]);
+        assert_eq!(meta.dataset.volume_shape, Some([20, 100, 200]));
+
+        let layer = &meta.dataset.layers[0];
+        assert_eq!(layer.data_shape, [20, 100, 200]);
+        assert_eq!(layer.chunk_size, [10, 64, 64]);
+        assert_eq!(layer.level_info[0].shape, [20, 100, 200]);
+        assert_eq!(layer.level_info[1].shape, [10, 50, 100]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_4d_dataset_czyx() {
+        let dir = temp_dir("4d_czyx");
+        create_fixture_with_axes(
+            &dir,
+            1,
+            &[2, 30, 128, 128],
+            &[1, 10, 64, 64],
+            &["c", "z", "y", "x"],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let meta = read_dataset_info(&store, "ds-czyx", "czyx-test").await.unwrap();
+
+        assert_eq!(meta.axes_names, vec!["c", "z", "y", "x"]);
+        assert_eq!(meta.dataset.volume_shape, Some([30, 128, 128]));
+
+        let layer = &meta.dataset.layers[0];
+        assert_eq!(layer.data_shape, [30, 128, 128]);
+        assert_eq!(layer.chunk_size, [10, 64, 64]);
 
         let _ = fs::remove_dir_all(&dir);
     }

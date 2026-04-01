@@ -519,11 +519,14 @@ class Viewer:
         t_val: int,
         c_val: int,
     ) -> ViewportData:
-        meta = read_level_meta(store_path, level)
+        from .zarr_reader import _read_axes_from_root
+        axes = _read_axes_from_root(store_path)
+        meta = read_level_meta(store_path, level, axes=axes)
         chunks_dict: dict[str, np.ndarray] = {}
         for ch in needed:
             arr = read_chunk_from_file(
-                store_path, level, ch["t"], ch["c"], ch["z"], ch["y"], ch["x"], meta
+                store_path, level, ch["t"], ch["c"], ch["z"], ch["y"], ch["x"], meta,
+                axes=axes,
             )
             chunks_dict[ch["key"]] = arr
 

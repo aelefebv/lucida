@@ -10,14 +10,22 @@ use lucida_store::cache::CachedStore;
 
 const HISTORY_CAPACITY: usize = 256;
 
+/// A server-hosted dataset entry: the cached storage backend plus the original
+/// axis names from the OME metadata (needed for chunk path mapping).
+#[derive(Clone)]
+pub struct ServerStore {
+    pub store: Arc<CachedStore>,
+    pub axes: Vec<String>,
+}
+
 pub struct Session {
     pub document: DocumentState,
     pub seq: u64,
     history: VecDeque<(u64, DocumentCommand)>,
     /// Maps dataset_id → client_id of the data source (peer-hosted datasets).
     pub data_sources: HashMap<String, ClientId>,
-    /// Server-hosted datasets: dataset_id → cached StorageBackend.
-    pub server_stores: HashMap<String, Arc<CachedStore>>,
+    /// Server-hosted datasets: dataset_id → cached StorageBackend + axes.
+    pub server_stores: HashMap<String, ServerStore>,
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
 }

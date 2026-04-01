@@ -10,6 +10,35 @@ from pathlib import Path
 import lz4.block
 import numpy as np
 
+# Canonical 5D axis positions: [T, C, Z, Y, X]
+_CANONICAL = {"t": 0, "c": 1, "z": 2, "y": 3, "x": 4}
+
+
+def _normalize_to_5d(values: list, axes: list, fill=1) -> list:
+    """Pad an N-dimensional list to canonical 5D [T, C, Z, Y, X]."""
+    result = [fill] * 5
+    for i, axis in enumerate(axes):
+        name = axis["name"] if isinstance(axis, dict) else axis
+        pos = _CANONICAL.get(name)
+        if pos is not None and i < len(values):
+            result[pos] = values[i]
+    return result
+
+
+def _read_axes_from_root(store_path: str | Path) -> list[dict]:
+    """Read OME axes from root zarr.json."""
+    root = Path(store_path) / "zarr.json"
+    with open(root) as f:
+        root_json = json.load(f)
+    ms = root_json.get("attributes", {}).get("ome", {}).get("multiscales", [{}])[0]
+    return ms.get("axes", [
+        {"name": "t", "type": "time"},
+        {"name": "c", "type": "channel"},
+        {"name": "z", "type": "space"},
+        {"name": "y", "type": "space"},
+        {"name": "x", "type": "space"},
+    ])
+
 
 @dataclass
 class ViewportData:
@@ -35,15 +64,24 @@ class LevelMeta:
     codecs: list[dict]
 
 
-def read_level_meta(store_path: str | Path, level: int) -> LevelMeta:
+def read_level_meta(
+    store_path: str | Path,
+    level: int,
+    axes: list[dict] | None = None,
+) -> LevelMeta:
     """Parse ``{store_path}/{level}/zarr.json`` for chunk shape, dtype, codecs."""
+    if axes is None:
+        axes = _read_axes_from_root(store_path)
+
     zarr_json = Path(store_path) / str(level) / "zarr.json"
     with open(zarr_json) as f:
         meta = json.load(f)
 
-    # shape and chunk_shape are [T, C, Z, Y, X]
-    full_shape = meta["shape"]
-    chunk_shape_full = meta["chunk_grid"]["configuration"]["chunk_shape"]
+    # Normalize to canonical 5D [T, C, Z, Y, X]
+    full_shape = _normalize_to_5d(meta["shape"], axes)
+    chunk_shape_full = _normalize_to_5d(
+        meta["chunk_grid"]["configuration"]["chunk_shape"], axes,
+    )
 
     shape_zyx = (full_shape[2], full_shape[3], full_shape[4])
     chunk_zyx = (chunk_shape_full[2], chunk_shape_full[3], chunk_shape_full[4])
@@ -63,12 +101,35 @@ def _has_lz4(codecs: list[dict]) -> bool:
     return any(c.get("name") == "numcodecs/lz4" for c in codecs)
 
 
+def _has_zstd(codecs: list[dict]) -> bool:
+    return any(c.get("name") == "zstd" for c in codecs)
+
+
 def decompress_chunk(raw_bytes: bytes, codecs: list[dict]) -> bytes:
-    """Decompress chunk data. LZ4 format: 4-byte LE original size + lz4 block."""
+    """Decompress chunk data based on codec metadata."""
+    if _has_zstd(codecs):
+        import zstandard
+        return zstandard.ZstdDecompressor().decompress(raw_bytes)
     if _has_lz4(codecs):
         orig_size = struct.unpack("<I", raw_bytes[:4])[0]
         return lz4.block.decompress(raw_bytes[4:], uncompressed_size=orig_size)
     return raw_bytes
+
+
+def _build_chunk_path(
+    store_path: str | Path,
+    level: int,
+    t: int, c: int, z: int, y: int, x: int,
+    axes: list[dict] | None,
+) -> Path:
+    """Build on-disk chunk path using only axes that actually exist."""
+    all_dims = [("t", t), ("c", c), ("z", z), ("y", y), ("x", x)]
+    if axes is not None:
+        axis_names = {a["name"] if isinstance(a, dict) else a for a in axes}
+        parts = [str(v) for name, v in all_dims if name in axis_names]
+    else:
+        parts = [str(v) for _, v in all_dims]
+    return Path(store_path) / str(level) / "c" / "/".join(parts)
 
 
 def read_chunk_from_file(
@@ -80,9 +141,10 @@ def read_chunk_from_file(
     y: int,
     x: int,
     meta: LevelMeta,
+    axes: list[dict] | None = None,
 ) -> np.ndarray:
     """Read a single chunk file and return as numpy array shaped (cz, cy, cx)."""
-    path = Path(store_path) / str(level) / "c" / str(t) / str(c) / str(z) / str(y) / str(x)
+    path = _build_chunk_path(store_path, level, t, c, z, y, x, axes)
     raw = path.read_bytes()
     decompressed = decompress_chunk(raw, meta.codecs)
     arr = np.frombuffer(decompressed, dtype=meta.dtype)

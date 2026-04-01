@@ -20,7 +20,8 @@
 | **VolumeTransform** | A pair of 4x4 matrices (model + inverse) that maps the `[0,1]^3` unit cube to world space, accounting for anisotropic voxel spacing | Transform, model matrix, spatial transform |
 | **Volume shape** | The voxel dimensions of a dataset, ordered `[Z, Y, X]` | Dimensions, size, extent |
 | **Data shape** | The full-resolution voxel dimensions of a layer, ordered `[Z, Y, X]` | Layer shape, array shape |
-| **Client metadata** | Opaque JSON attached to a dataset (dtype, codecs, level paths) that the server passes through without interpretation | Dataset config, format info |
+| **Axes** | The OME multiscales `axes` array declaring which dimensions exist and their types (e.g., `[{name:"c",type:"channel"}, {name:"y",type:"space"}, {name:"x",type:"space"}]`). Datasets may have fewer than 5 axes; at parse time, shapes and chunk shapes are padded to canonical 5D `[T, C, Z, Y, X]` with missing dims = 1 so downstream code always sees 5D. The original axes list is preserved for chunk path construction. | Dimensions, dim order |
+| **Client metadata** | Opaque JSON attached to a dataset (dtype, codecs, level paths, axes) that the server passes through without interpretation | Dataset config, format info |
 
 ## Volume and voxels (lucida-store)
 
@@ -62,7 +63,7 @@
 |------|-----------|-----------------|
 | **Store** | The output directory tree conforming to Zarr v3 and OME-Zarr v0.5, containing Root Metadata and one array per Level | Archive, output, container |
 | **Chunk Size** | The dimensions of a Chunk in `[Z, Y, X]` order (lucida-core convention), controlling the granularity of streaming | Tile size, block size |
-| **Codec** | A compression or encoding step applied to raw Chunk bytes before writing to disk; currently raw little-endian bytes followed by LZ4 with prepended size | Compressor, filter |
+| **Codec** | A compression or encoding step applied to raw Chunk bytes before writing to disk. Supported codecs: LZ4 (`numcodecs/lz4` — 4-byte LE size prefix + lz4 block) and Zstandard (`zstd` — self-describing frame). Detected from the `codecs` array in Array Metadata. | Compressor, filter |
 | **Root Metadata** | The top-level `zarr.json` file declaring the Store as a Zarr v3 group with OME multiscales attributes (axes, per-Level coordinate transforms) | Group metadata |
 | **Array Metadata** | The per-Level `{level}/zarr.json` file declaring shape, Chunk grid, Codecs, and data type for one resolution array | Level metadata |
 | **Cumulative Scale** | The `[x, y, z]` factor array on a Level Spec expressing how many times coarser this Level is relative to Level 0 | Scale factor, resolution factor |
@@ -236,7 +237,7 @@
 | **GPU worker** | The dedicated Web Worker that owns the OffscreenCanvas and performs all WebGPU operations (texture creation, chunk upload, rendering); the main thread never touches WebGPU | Render worker, graphics thread |
 | **RenderClient** | The main-thread proxy that communicates with the **GPU worker** via `postMessage` with zero-copy ArrayBuffer transfer | Worker client, render bridge |
 | **Worker protocol** | The discriminated-union message types (`MainToWorkerMessage` / `WorkerToMainMessage`) for structured communication between the main thread and the **GPU worker** | Worker API, message format |
-| **LZ4 worker pool** | A pool of up to 4 Web Workers for parallel LZ4 block decompression, load-balanced by active task count | Decompression pool, codec workers |
+| **LZ4 worker pool** | A pool of up to 4 Web Workers for parallel LZ4 block decompression, load-balanced by active task count. Zstandard decompression uses `fzstd` synchronously on the main thread (no worker pool). | Decompression pool, codec workers |
 | **Bridge** | The WebSocket client class on the web frontend that manages the connection to `lucida-server`, handles message dispatch, throttles **Presence** (50ms) and **Dataset Presence** (200ms), and supports auto-reconnect | Socket, connection, WS client |
 
 ## Relationships
@@ -365,7 +366,7 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Plane" vs "Page"**: A **Page** is a TIFF container concept (one IFD entry); a **Plane** is a logical 2D cross-section of a Volume at a given Z. Avoid "slice" — it's ambiguous between both.
 
-- **"Chunk Size" axis order**: Code passes `[Z, Y, X]` (lucida-core convention); Zarr metadata stores `[t, c, z, y, x]`. Always state which convention.
+- **"Chunk Size" axis order**: Code passes `[Z, Y, X]` (lucida-core convention); Zarr metadata stores dimensions matching the dataset's **Axes** (e.g., `[c, y, x]` for a 3-axis file, `[t, c, z, y, x]` for full 5D). After axis normalization, internal representations are always 5D `[T, C, Z, Y, X]`. Always state which convention.
 
 - **"Scale"**: Use **Cumulative Scale** for per-Level `[x, y, z]` factors, **Voxel Size** for physical spacing, and "scale" for UI/rendering contexts only.
 

@@ -61,7 +61,7 @@ export function useDatasets({
       console.log("OME-Zarr metadata:", info);
 
       const coarsest = info.levels[info.levels.length - 1];
-      const vol = await assembleVolume(fileIndex, coarsest.path, 0, 0, coarsest);
+      const vol = await assembleVolume(fileIndex, coarsest.path, 0, 0, coarsest, info.axes);
       console.log(`Volume loaded: ${vol.width}x${vol.height}x${vol.depth}`);
 
       let scene = wasmSceneRef.current;
@@ -132,6 +132,7 @@ export function useDatasets({
           coord.y,
           coord.x,
           levelMeta.codecs,
+          info.axes,
           signal,
         );
       };

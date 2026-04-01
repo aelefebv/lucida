@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
 import { decompressLz4Async } from "../zarr/lz4Client.ts";
+import { decompress as decompressZstd } from "fzstd";
+import { buildChunkPath } from "../zarr/chunkLoader.ts";
 import type { ChunkFetcher } from "../zarr/chunkStore.ts";
 import { ChunkStore } from "../zarr/chunkStore.ts";
 import type { DatasetState, PendingChunkResolve } from "../types.ts";
@@ -301,8 +303,12 @@ export function useBridge({
 
       const levelMeta = info.levels[coord.level];
       if (levelMeta) {
+        const hasZstd = levelMeta.codecs.some(c => c.name === "zstd");
         const hasLz4 = levelMeta.codecs.some(c => c.name === "numcodecs/lz4");
-        if (hasLz4) {
+        if (hasZstd) {
+          const dec = decompressZstd(new Uint8Array(rawBytes));
+          return dec.buffer.slice(dec.byteOffset, dec.byteOffset + dec.byteLength);
+        } else if (hasLz4) {
           return decompressLz4Async(rawBytes);
         }
       }
@@ -368,7 +374,7 @@ export function useBridge({
       return;
     }
 
-    const path = `${levelMeta.path}/c/${t}/${c}/${z}/${y}/${x}`;
+    const path = buildChunkPath(levelMeta.path, t, c, z, y, x, ds.info.axes);
     const file = ds.fileIndex.get(path);
     if (!file) {
       sendEmptyChunkResponse(clientId, datasetId, key);

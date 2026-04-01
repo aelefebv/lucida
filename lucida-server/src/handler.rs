@@ -10,7 +10,7 @@ use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::session::Session;
+use crate::session::{Session, ServerStore};
 use crate::{BroadcastItem, UnicastRoutes};
 
 pub async fn handle_client(
@@ -277,18 +277,19 @@ pub async fn handle_client(
                     match chunk_msg {
                         ChunkMessage::ChunkRequest { dataset_id, key } => {
                             // Check server-hosted first, then peer relay.
-                            let server_store = {
+                            let server_entry = {
                                 let sess = session.lock().await;
                                 sess.server_stores.get(&dataset_id).cloned()
                             };
-                            if let Some(store) = server_store {
+                            if let Some(entry) = server_entry {
                                 // Server-hosted: read chunk from StorageBackend.
                                 let unicast_routes_clone = Arc::clone(&unicast_routes);
                                 let ds_id = dataset_id;
                                 let chunk_key = key;
                                 tokio::spawn(async move {
                                     serve_chunk_from_store(
-                                        id, &ds_id, &chunk_key, &store, &unicast_routes_clone,
+                                        id, &ds_id, &chunk_key, &entry.store,
+                                        &entry.axes, &unicast_routes_clone,
                                     ).await;
                                 });
                             } else {
@@ -420,6 +421,9 @@ async fn handle_open_remote_dataset(
         }
     };
 
+    // Extract axes from the parsed metadata.
+    let axes_names = meta.axes_names.clone();
+
     // Build AddDataset command from the parsed metadata.
     let ds = &meta.dataset;
     let command = DocumentCommand::AddDataset {
@@ -452,11 +456,17 @@ async fn handle_open_remote_dataset(
     // Wrap in a 512 MB LRU cache and register.
     let cached = Arc::new(CachedStore::new(store, 512 * 1024 * 1024));
 
-    // Apply command and register server store.
+    // Apply command and register server store with axes.
     let seq = {
         let mut sess = session.lock().await;
         let seq = sess.apply(command.clone());
-        sess.server_stores.insert(dataset_id.clone(), cached);
+        sess.server_stores.insert(
+            dataset_id.clone(),
+            ServerStore {
+                store: cached,
+                axes: axes_names,
+            },
+        );
         seq
     };
 
@@ -484,9 +494,10 @@ async fn serve_chunk_from_store(
     dataset_id: &str,
     chunk_key: &str,
     store: &Arc<CachedStore>,
+    axes: &[String],
     unicast_routes: &UnicastRoutes,
 ) {
-    let file_path = lucida_store::chunk_key_to_store_path(chunk_key);
+    let file_path = lucida_store::chunk_key_to_store_path(chunk_key, axes);
     let obj_path = Path::from(file_path.as_str());
 
     let bytes = match store.get_bytes(&obj_path).await {

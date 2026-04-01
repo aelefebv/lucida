@@ -1,5 +1,5 @@
 /** Assemble all chunks for one timepoint/channel into a contiguous 3D array. */
-import type { LevelMeta } from "./metadata.ts";
+import type { AxisInfo, LevelMeta } from "./metadata.ts";
 import { loadChunk } from "./chunkLoader.ts";
 import { bufferToUint16 } from "./dtypeConvert.ts";
 
@@ -16,6 +16,7 @@ export async function assembleVolume(
   t: number,
   c: number,
   meta: LevelMeta,
+  axes: AxisInfo[],
 ): Promise<VolumeData> {
   const [, , depthFull, heightFull, widthFull] = meta.shape;
   const [, , chunkZ, chunkY, chunkX] = meta.chunkShape;
@@ -32,7 +33,7 @@ export async function assembleVolume(
     for (let iy = 0; iy < ny; iy++) {
       for (let ix = 0; ix < nx; ix++) {
         tasks.push(
-          loadChunk(fileIndex, level, t, c, iz, iy, ix, meta.codecs).then((buf) => {
+          loadChunk(fileIndex, level, t, c, iz, iy, ix, meta.codecs, axes).then((buf) => {
             const chunk = bufferToUint16(buf, meta.dataType);
             const zOff = iz * chunkZ;
             const yOff = iy * chunkY;

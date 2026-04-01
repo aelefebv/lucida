@@ -10,6 +10,7 @@ dependencies = [
     "websockets",
     "numpy",
     "lz4",
+    "zstandard",
     "maturin>=1.12.6",
 ]
 

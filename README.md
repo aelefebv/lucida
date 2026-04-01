@@ -1,16 +1,31 @@
 # Dev
 Check the GLOSSARY.md for terminology.
 
-## When you change Rust code (lucida-core/):
+## Quick start
+### Terminal 1:
+``` bash
+(cd lucida-core && cargo test)
+cargo run -p lucida-server
+```
+
+### Terminal 2:
+``` bash
+(cd lucida-web && npm run build:wasm)
+(cd lucida-web && npm run dev)
+```
+
+## Specifics
+
+### When you change Rust code (lucida-core/):
 
 1. `cargo test -p lucida-core`
 1. `cd lucida-web && npm run build:wasm` — rebuild the wasm package
 
-## When you change TypeScript code (lucida-web/):
+### When you change TypeScript code (lucida-web/):
 
 Vite hot-reloads automatically if `npm run dev` is running, so nothing extra needed.
 
-## When you change Python code (lucida-py/):
+### When you change Python code (lucida-py/):
 
 ```bash
 cd lucida-py && maturin develop

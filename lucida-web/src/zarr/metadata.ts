@@ -6,6 +6,19 @@ export interface AxisInfo {
   unit?: string;
 }
 
+/** Map axis names to canonical 5D positions: [T, C, Z, Y, X]. */
+const CANONICAL: Record<string, number> = { t: 0, c: 1, z: 2, y: 3, x: 4 };
+
+/** Pad an N-dimensional array to canonical 5D based on axis names. */
+function normalizeTo5D(values: number[], axes: AxisInfo[], fill: number): number[] {
+  const result = [fill, fill, fill, fill, fill];
+  for (let i = 0; i < axes.length; i++) {
+    const pos = CANONICAL[axes[i].name];
+    if (pos !== undefined && i < values.length) result[pos] = values[i];
+  }
+  return result;
+}
+
 export interface CodecMeta {
   name: string;
   configuration?: Record<string, unknown>;
@@ -62,10 +75,10 @@ export async function parseDatasetInfo(
 
       return {
         path: ds.path,
-        shape: levelJson.shape,
-        chunkShape: levelJson.chunk_grid.configuration.chunk_shape,
+        shape: normalizeTo5D(levelJson.shape, axes, 1),
+        chunkShape: normalizeTo5D(levelJson.chunk_grid.configuration.chunk_shape, axes, 1),
         dataType: levelJson.data_type,
-        scale,
+        scale: normalizeTo5D(scale, axes, 1),
         codecs: levelJson.codecs ?? [],
       };
     }),
