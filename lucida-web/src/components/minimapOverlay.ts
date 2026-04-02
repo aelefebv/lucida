@@ -195,11 +195,11 @@ function drawSliceViewportRect(
 // --- Entry point ---
 
 export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, layers, mode, canvasW, canvasH, currentZ, datasetDims, sliceViewBounds, mainInvViewProj, theta, phi } = data;
+  const { viewProj, layers, datasetLayers, mode, canvasW, canvasH, currentZ, datasetDims, sliceViewBounds, mainInvViewProj, theta, phi } = data;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
 
-  // Bounding boxes
+  // Bounding boxes (per-member — shows each FOV's outline)
   for (const layer of layers) {
     drawBoundingBox(ctx, viewProj, layer.modelMatrix, canvasW, canvasH, "rgba(255,255,255,0.5)");
   }
@@ -207,24 +207,31 @@ export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: Minimap
   // Axis arrows (once, not per-dataset)
   drawAxisArrows(ctx, viewProj, canvasW, canvasH);
 
-  if (mode === "slice" && sliceViewBounds) {
+  if (mode === "slice") {
+    // Slice plane (per-member — shows Z within each FOV)
     for (const layer of layers) {
       const dims = datasetDims.get(layer.datasetId);
       if (!dims) continue;
-
       drawSlicePlane(ctx, viewProj, layer.modelMatrix, currentZ, dims.depth, canvasW, canvasH, "rgba(255,200,50,0.25)");
-      drawSliceViewportRect(
-        ctx, viewProj, layer.modelMatrix, sliceViewBounds,
-        currentZ, dims.width, dims.height, dims.depth,
-        canvasW, canvasH, "rgba(100,180,255,0.3)",
-      );
+    }
+
+    // View rectangle (per-dataset — one rectangle for the camera's view)
+    if (sliceViewBounds) {
+      for (const dl of datasetLayers) {
+        drawSliceViewportRect(
+          ctx, viewProj, dl.modelMatrix, sliceViewBounds,
+          currentZ, dl.width, dl.height, dl.depth,
+          canvasW, canvasH, "rgba(100,180,255,0.3)",
+        );
+      }
     }
   }
 
   if (mode === "volume" && mainInvViewProj) {
-    for (const layer of layers) {
+    // Frustum intersection (per-dataset)
+    for (const dl of datasetLayers) {
       drawFrustumIntersection(
-        ctx, viewProj, layer.modelMatrix, layer.invModelMatrix, mainInvViewProj,
+        ctx, viewProj, dl.modelMatrix, dl.invModelMatrix, mainInvViewProj,
         canvasW, canvasH, "rgba(100,200,255,0.5)",
       );
     }

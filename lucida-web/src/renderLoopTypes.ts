@@ -19,7 +19,10 @@ export interface RenderLoopOptions {
 
 export interface MinimapOverlayData {
   viewProj: Float32Array;
+  /** Per-member layers (for bounding boxes, slice planes). */
   layers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[];
+  /** Per-dataset layers (for view rectangle, frustum). Uses dataset-level model matrix and full volume extent. */
+  datasetLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array; width: number; height: number; depth: number }[];
   mode: "slice" | "volume";
   theta: number;
   phi: number;

@@ -27,12 +27,12 @@ function clampCenterToBounds(scene: WasmScene, canvas: HTMLCanvasElement, datase
   const halfW = canvas.clientWidth / (2 * zoom);
   const halfH = canvas.clientHeight / (2 * zoom);
 
-  // Find max dataset dimensions (voxel space)
+  // Find max dataset dimensions (full volume shape, not per-FOV)
   let maxW = 0, maxH = 0;
-  for (const [, ds] of datasets) {
-    const shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
-    maxW = Math.max(maxW, shape[4]);
-    maxH = Math.max(maxH, shape[3]);
+  for (const [dsId] of datasets) {
+    const volShape = scene.dataset_volume_shape(dsId); // [Z, Y, X]
+    maxW = Math.max(maxW, volShape[2]);
+    maxH = Math.max(maxH, volShape[1]);
   }
   if (maxW === 0 || maxH === 0) return;
 

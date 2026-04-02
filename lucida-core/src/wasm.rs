@@ -302,6 +302,20 @@ impl WasmScene {
         serde_json::to_string(&plans).unwrap()
     }
 
+    /// Returns the full volume shape [Z, Y, X] for a dataset.
+    /// For plates, this is the full plate extent; for single datasets, the layer shape.
+    pub fn dataset_volume_shape(&self, dataset_id: &str) -> Vec<u32> {
+        self.inner.dataset_by_id(dataset_id)
+            .and_then(|d| d.volume_shape)
+            .map(|s| s.to_vec())
+            .unwrap_or_else(|| {
+                self.inner.dataset_by_id(dataset_id)
+                    .and_then(|d| d.layers.first())
+                    .map(|l| l.data_shape.to_vec())
+                    .unwrap_or_else(|| vec![1, 1, 1])
+            })
+    }
+
     /// Returns the model matrix for a specific member of a dataset,
     /// with the member's position offset baked into the translation.
     pub fn member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
@@ -342,10 +356,13 @@ impl WasmScene {
         let fov_shape = dataset.layers.first()
             .map(|l| l.data_shape)
             .unwrap_or(vol_shape);
+        // Flip Y offset: member positions are in voxel space (Y=0 at top),
+        // but the 3D model matrix uses Y-up convention (Y=0 at bottom).
+        let flipped_offset = [offset[0], vol_shape[1] as f64 - offset[1] - fov_shape[1] as f64];
         let mt = crate::transform::compute_member_transform(
             fov_shape,
             [scale_z, scale_y, scale_x],
-            offset,
+            flipped_offset,
             max_phys,
         );
         // Apply global correction for multi-dataset scenes (same as scene_model_matrix_for).
@@ -398,10 +415,12 @@ impl WasmScene {
         let fov_shape = dataset.layers.first()
             .map(|l| l.data_shape)
             .unwrap_or(vol_shape);
+        // Flip Y offset (same as member_model_matrix).
+        let flipped_offset = [offset[0], vol_shape[1] as f64 - offset[1] - fov_shape[1] as f64];
         let mt = crate::transform::compute_member_transform(
             fov_shape,
             [scale_z, scale_y, scale_x],
-            offset,
+            flipped_offset,
             max_phys,
         );
         // Apply inverse global correction for multi-dataset scenes.

@@ -216,8 +216,23 @@
 | **Render scale** | A resolution multiplier (0.25–1.0) applied to the render target during camera interaction to maintain frame rate; restored to 1.0 after 50ms idle | Resolution scale, quality level |
 | **Offscreen target** | An `rgba16float` intermediate texture where each visible **Dataset** layer is rendered independently before the **Compositor** blends them | Render target, layer buffer, FBO |
 | **Compositor** | The final rendering pass that blends all **Offscreen targets** onto the canvas using per-layer **BlendModes** (alpha, additive, max) | Blender, combiner, merge pass |
-| **Minimap** | A small overview volume rendered on a separate OffscreenCanvas showing the full dataset at the coarsest **Level**, with frustum and slice plane overlays | Overview, thumbnail, inset |
+| **Minimap** | A small overview volume rendered on a separate OffscreenCanvas showing the full dataset at the coarsest **Level**, with a **Minimap overlay** drawn on a second canvas. See **Minimap** section below for sub-concepts | Overview, thumbnail, inset |
 | **Auto-contrast** | A mode where the **Contrast window** is automatically set to the sampled intensity range of the currently displayed data | Auto-levels, auto-window |
+
+## Minimap (lucida-web)
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Minimap camera** | An orthographic-like camera positioned to show the full volume in overview. Computed in WASM from the main camera's `theta`/`phi` angles; returns `invViewProj[16] + eye[3] + viewProj[16]` (35 floats). Orbits around `[0.5, 0.5, 0.5]` at distance 1.8 | Overview camera |
+| **Minimap overview** | The coarsest-**Level** chunk data uploaded to the GPU for minimap rendering. Uploaded incrementally per **DatasetMember** within the **Minimap upload budget** (2 MB/frame). Tracked per-member so plate datasets get one overview texture per FOV | Overview data, thumbnail texture |
+| **Minimap seeding** | Marking a member's coarsest level as fully uploaded (all chunks present), skipping progressive upload. Called externally when overview data was bulk-loaded (e.g., from volume assembly). Distinct from view **Seeding** which builds a **Fallback texture** | Overview preload |
+| **Minimap overlay** | A 2D canvas drawn on top of the GPU-rendered minimap, containing the **Bounding box**, **Axis arrows**, and mode-dependent indicators: the **View rectangle** (slice mode), **Slice plane** (volume mode), **View frustum** (volume mode), and **Orientation cube** | Minimap HUD, overlay layer |
+| **View rectangle** | The blue rectangle on the **Minimap overlay** showing the main **Slice** camera's visible bounds in voxel space (computed from zoom, center, and viewport size). Only drawn in slice mode | View box, viewport indicator, blue box |
+| **Slice plane** | A semi-transparent golden quad on the **Minimap overlay** showing the current Z-slice position within the volume. Positioned at normalized `Z / (depth - 1)`. Only drawn in volume mode | Z indicator, slice marker |
+| **View frustum** | A light-blue filled region on the **Minimap overlay** showing the intersection of the main 3D camera's frustum with each dataset's unit cube. Computed by unprojecting the `mainInvViewProj` corners and clipping against the model bounds. Only drawn in volume mode | Frustum indicator, camera cone |
+| **Bounding box** (minimap) | Wireframe outline of each visible layer's unit cube `[0,1]³`, projected through the layer's **Model matrix** and the **Minimap camera**. Drawn as 12 edges from 8 corners | Volume outline, wireframe |
+| **Axis arrows** | Colored arrows (red = X, green = Y, blue = Z) with letter labels drawn at a fixed origin on the **Minimap overlay**, indicating spatial orientation relative to the current `theta`/`phi` | Axis indicator, orientation gizmo |
+| **Orientation cube** | A small wireframe cube in the corner of the **Minimap overlay** showing the current view rotation. Responds to the same `theta`/`phi` as the **Minimap camera** | View cube, rotation indicator |
 
 ## Peer cursors (lucida-web)
 
@@ -300,6 +315,11 @@
 - The **RenderClient** sends chunk data to the **GPU worker** via the **Worker protocol** using `Transferable` ArrayBuffers (zero-copy ownership transfer)
 - The **Render loop** delegates chunk planning to **WasmScene** (`chunk_plan_for`), fetching to a **ChunkStore**, and rendering to the **RenderClient**; it never touches the GPU directly
 - The **Upload budget** limits how many chunk bytes move from **ChunkStore** to **Atlas** per RAF tick, preventing GPU stalls and maintaining interactive frame rates
+- The **Minimap** renders on a dedicated OffscreenCanvas transferred to the **GPU worker**; the **Minimap overlay** is a separate 2D canvas drawn on the main thread
+- The **Minimap overview** is uploaded per **DatasetMember** — each FOV gets its own overview texture, so plates render all visible members. **Minimap seeding** marks a member as fully uploaded
+- The **Minimap camera** tracks the main camera's `theta`/`phi` but uses a fixed orthographic-like view; its `viewProj` is used by the **Minimap overlay** to project 3D geometry to 2D
+- The **View rectangle** is computed from the **Slice** camera's center, zoom, and viewport size (`sliceViewBounds`); the **View frustum** is computed by unprojecting the main camera's `invViewProj` corners and clipping against the dataset's unit cube
+- The **Slice plane** shows the current Z position as a normalized fraction of depth; it and the **View frustum** only appear in volume mode, while the **View rectangle** only appears in slice mode
 - The **Bridge** is instantiated once when the WASM module is ready and auto-reconnects on disconnect with a 2-second delay
 - A **Peer cursor** is computed by the **Cursor geometry engine** from peer **PresenceState** (camera, cursor, view) and rendered as WebGPU geometry (crosshair or ray) after the **Compositor** pass
 - A **Cursor position** is throttled at 50ms (same as **Presence**); null positions bypass the throttle and send immediately
@@ -398,7 +418,7 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Viewport"**: Use **viewport** for pixel dimensions, **VisibleRegion** for computed voxel bounds, **ViewportData** for the assembled numpy result.
 
-- **"Seed"/"seeding"**: Both view seeding and minimap seeding fetch the coarsest level into a texture. Distinguish as "view seeding" vs "minimap seeding" in conversation.
+- **"Seed"/"seeding"**: View **Seeding** assembles the coarsest level into a **Fallback texture** on T/C/Z change. **Minimap seeding** marks a member's coarsest level as fully uploaded to the minimap GPU texture. Both fetch the coarsest level but for different targets. Distinguish as "view seeding" vs "minimap seeding" in conversation.
 
 - **"Bridge"**: `Bridge` is the WebSocket client class. `useBridge` is the React hook that adds state management on top.
 

@@ -182,6 +182,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
 
   const layers: MinimapLayerParams[] = [];
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];
+  const datasetOverlayLayers: MinimapOverlayData["datasetLayers"] = [];
 
   for (const dsId of layerOrder) {
     const ds = datasets.get(dsId);
@@ -204,6 +205,19 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
 
       overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
     }
+
+    // Dataset-level overlay layer for view rectangle and frustum
+    const dsModel = new Float32Array(scene.scene_model_matrix_for(dsId));
+    const dsInvModel = new Float32Array(scene.inv_scene_model_matrix_for(dsId));
+    const volShape = scene.dataset_volume_shape(dsId);
+    datasetOverlayLayers.push({
+      datasetId: dsId,
+      modelMatrix: dsModel,
+      invModelMatrix: dsInvModel,
+      width: volShape[2],
+      height: volShape[1],
+      depth: volShape[0],
+    });
   }
 
   if (layers.length > 0) {
@@ -246,6 +260,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     state.overlayCallback({
       viewProj,
       layers: overlayLayers,
+      datasetLayers: datasetOverlayLayers,
       mode,
       theta,
       phi,

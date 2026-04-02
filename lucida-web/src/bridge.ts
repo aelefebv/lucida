@@ -15,7 +15,7 @@ export interface BridgeHandlers {
   onSnapshot: (seq: number, documentJson: string, peers: PresenceState[], yourId: ClientId) => void;
   onCommand: (seq: number, commandJson: string) => void;
   onAck: (seq: number) => void;
-  onChunkFetch?: (clientId: number, datasetId: string, key: string) => void;
+  onChunkFetch?: (clientId: number, datasetId: string, key: string, storePrefix: string | null) => void;
   onChunkData?: (key: string, data: ArrayBuffer) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
   onPeerLeft?: (clientId: ClientId) => void;
@@ -82,7 +82,7 @@ export class Bridge {
             this.handlers.onAck(msg.seq);
             break;
           case "chunk_fetch":
-            this.handlers.onChunkFetch?.(msg.client_id, msg.dataset_id, msg.key);
+            this.handlers.onChunkFetch?.(msg.client_id, msg.dataset_id, msg.key, msg.store_prefix ?? null);
             break;
           case "peer_joined":
             this.handlers.onPeerJoined?.(msg.client_id, msg.presence);
