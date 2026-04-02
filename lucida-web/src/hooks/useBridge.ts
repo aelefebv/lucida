@@ -6,7 +6,7 @@ import { decompress as decompressZstd } from "fzstd";
 import { buildChunkPath } from "../zarr/chunkLoader.ts";
 import type { ChunkFetcher } from "../zarr/chunkStore.ts";
 import { ChunkStore } from "../zarr/chunkStore.ts";
-import type { DatasetState, PendingChunkResolve } from "../types.ts";
+import type { DatasetState, DatasetMember, PendingChunkResolve } from "../types.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { VolumeData } from "../zarr/volumeAssembler.ts";
@@ -87,7 +87,14 @@ export function useBridge({
           if (doc.datasets) {
             for (const ds of doc.datasets) {
               if (ds.client_metadata && !datasetsRef.current.has(ds.id)) {
-                setupRemoteDataset(ds.id, ds.name ?? ds.id, ds.client_metadata);
+                const members: DatasetMember[] = (ds.members ?? []).length > 0
+                  ? ds.members.map((m: { id: string; position: [number, number]; store_prefix: string | null }) => ({
+                      id: m.id,
+                      position: m.position,
+                      storePrefix: m.store_prefix ?? null,
+                    }))
+                  : [{ id: ds.id, position: [0, 0] as [number, number], storePrefix: null }];
+                setupRemoteDataset(ds.id, ds.name ?? ds.id, ds.client_metadata, members);
               }
             }
           }
@@ -114,7 +121,14 @@ export function useBridge({
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "add_dataset" && cmd.client_metadata) {
             if (!datasetsRef.current.has(cmd.id)) {
-              setupRemoteDataset(cmd.id, cmd.name ?? cmd.id, cmd.client_metadata);
+              const members: DatasetMember[] = (cmd.members ?? []).length > 0
+                ? cmd.members.map((m: { id: string; position: [number, number]; store_prefix: string | null }) => ({
+                    id: m.id,
+                    position: m.position,
+                    storePrefix: m.store_prefix ?? null,
+                  }))
+                : [{ id: cmd.id, position: [0, 0] as [number, number], storePrefix: null }];
+              setupRemoteDataset(cmd.id, cmd.name ?? cmd.id, cmd.client_metadata, members);
             }
             setRemoteDatasetLoading(false);
             setWasmScene(scene);
@@ -128,8 +142,8 @@ export function useBridge({
         }
       },
       onAck: (_seq) => {},
-      onChunkFetch: (clientId, datasetId, key) => {
-        serveChunkFetch(clientId, datasetId, key);
+      onChunkFetch: (clientId, datasetId, key, storePrefix) => {
+        serveChunkFetch(clientId, datasetId, key, storePrefix);
       },
       onChunkData: (key, data) => {
         const pending = pendingChunkRequests.current.get(key);
@@ -267,65 +281,73 @@ export function useBridge({
     bridgeRef.current = new Bridge(handlers);
   }, [wasmReady]);
 
-  function setupRemoteDataset(datasetId: string, name: string, clientMetadata: DatasetInfo) {
+  function setupRemoteDataset(datasetId: string, name: string, clientMetadata: DatasetInfo, members: DatasetMember[]) {
     const info = clientMetadata;
     const CHUNK_TIMEOUT_MS = 10_000;
 
-    const remoteFetcher: ChunkFetcher = async (coord, signal) => {
-      const compositeKey = `${datasetId}/${coord.key}`;
-      const rawBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
-        const timeoutId = setTimeout(() => {
-          pendingChunkRequests.current.delete(compositeKey);
-          reject(new Error(`Chunk ${coord.key} timed out`));
-        }, CHUNK_TIMEOUT_MS);
+    const memberStores = new Map<string, ChunkStore>();
+    for (const member of members) {
+      const remoteFetcher: ChunkFetcher = async (coord, signal) => {
+        const compositeKey = member.storePrefix
+          ? `${datasetId}/${member.storePrefix}/${coord.key}`
+          : `${datasetId}/${coord.key}`;
+        const rawBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
+          const timeoutId = setTimeout(() => {
+            pendingChunkRequests.current.delete(compositeKey);
+            reject(new Error(`Chunk ${coord.key} timed out`));
+          }, CHUNK_TIMEOUT_MS);
 
-        pendingChunkRequests.current.set(compositeKey, {
-          resolve: (data) => { clearTimeout(timeoutId); resolve(data); },
-          reject: (err) => { clearTimeout(timeoutId); reject(err); },
+          pendingChunkRequests.current.set(compositeKey, {
+            resolve: (data) => { clearTimeout(timeoutId); resolve(data); },
+            reject: (err) => { clearTimeout(timeoutId); reject(err); },
+          });
+
+          bridgeRef.current?.send(JSON.stringify({
+            type: "chunk_request",
+            dataset_id: datasetId,
+            key: coord.key,
+            store_prefix: member.storePrefix ?? undefined,
+          }));
+
+          signal?.addEventListener("abort", () => {
+            clearTimeout(timeoutId);
+            pendingChunkRequests.current.delete(compositeKey);
+            reject(new DOMException("Aborted", "AbortError"));
+          });
         });
 
-        bridgeRef.current?.send(JSON.stringify({
-          type: "chunk_request",
-          dataset_id: datasetId,
-          key: coord.key,
-        }));
-
-        signal?.addEventListener("abort", () => {
-          clearTimeout(timeoutId);
-          pendingChunkRequests.current.delete(compositeKey);
-          reject(new DOMException("Aborted", "AbortError"));
-        });
-      });
-
-      if (rawBytes.byteLength === 0) {
-        return rawBytes;
-      }
-
-      const levelMeta = info.levels[coord.level];
-      if (levelMeta) {
-        const hasZstd = levelMeta.codecs.some(c => c.name === "zstd");
-        const hasLz4 = levelMeta.codecs.some(c => c.name === "numcodecs/lz4");
-        if (hasZstd) {
-          const dec = decompressZstd(new Uint8Array(rawBytes));
-          return dec.buffer.slice(dec.byteOffset, dec.byteOffset + dec.byteLength);
-        } else if (hasLz4) {
-          return decompressLz4Async(rawBytes);
+        if (rawBytes.byteLength === 0) {
+          return rawBytes;
         }
-      }
-      return rawBytes;
-    };
 
-    const store = new ChunkStore(remoteFetcher);
+        const levelMeta = info.levels[coord.level];
+        if (levelMeta) {
+          const hasZstd = levelMeta.codecs.some(c => c.name === "zstd");
+          const hasLz4 = levelMeta.codecs.some(c => c.name === "numcodecs/lz4");
+          if (hasZstd) {
+            const dec = decompressZstd(new Uint8Array(rawBytes));
+            return dec.buffer.slice(dec.byteOffset, dec.byteOffset + dec.byteLength);
+          } else if (hasLz4) {
+            return decompressLz4Async(rawBytes);
+          }
+        }
+        return rawBytes;
+      };
+
+      memberStores.set(member.id, new ChunkStore(remoteFetcher));
+    }
+
     datasetsRef.current.set(datasetId, {
       id: datasetId,
       name,
       info,
-      store,
+      memberStores,
       fileIndex: null,
+      members,
     });
 
     initLayerMaps(datasetId);
-    loopRef.current?.addDataset(datasetId, store, info);
+    loopRef.current?.addDataset(datasetId, memberStores, info);
 
     const coarsest = info.levels[info.levels.length - 1];
     const [, , depth, height, width] = coarsest.shape;
@@ -342,8 +364,10 @@ export function useBridge({
     bumpDatasetsVersion();
   }
 
-  function sendEmptyChunkResponse(clientId: number, datasetId: string, key: string) {
-    const compositeKey = `${datasetId}/${key}`;
+  function sendEmptyChunkResponse(clientId: number, datasetId: string, key: string, storePrefix: string | null = null) {
+    const compositeKey = storePrefix
+      ? `${datasetId}/${storePrefix}/${key}`
+      : `${datasetId}/${key}`;
     const keyBytes = new TextEncoder().encode(compositeKey);
     const headerSize = 4 + 2 + keyBytes.length;
     const message = new Uint8Array(headerSize);
@@ -354,36 +378,39 @@ export function useBridge({
     bridgeRef.current?.sendBinary(message);
   }
 
-  async function serveChunkFetch(clientId: number, datasetId: string, key: string) {
+  async function serveChunkFetch(clientId: number, datasetId: string, key: string, storePrefix: string | null) {
     const ds = datasetsRef.current.get(datasetId);
     if (!ds || !ds.fileIndex) {
-      sendEmptyChunkResponse(clientId, datasetId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
       return;
     }
 
     const parts = key.split("/").map(Number);
     if (parts.length !== 6) {
-      sendEmptyChunkResponse(clientId, datasetId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
       return;
     }
     const [level, t, c, z, y, x] = parts;
 
     const levelMeta = ds.info.levels[level];
     if (!levelMeta) {
-      sendEmptyChunkResponse(clientId, datasetId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
       return;
     }
 
-    const path = buildChunkPath(levelMeta.path, t, c, z, y, x, ds.info.axes);
+    const levelPath = storePrefix ? `${storePrefix}/${levelMeta.path}` : levelMeta.path;
+    const path = buildChunkPath(levelPath, t, c, z, y, x, ds.info.axes);
     const file = ds.fileIndex.get(path);
     if (!file) {
-      sendEmptyChunkResponse(clientId, datasetId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
       return;
     }
 
     try {
       const rawBytes = await file.arrayBuffer();
-      const compositeKey = `${datasetId}/${key}`;
+      const compositeKey = storePrefix
+        ? `${datasetId}/${storePrefix}/${key}`
+        : `${datasetId}/${key}`;
       const keyBytes = new TextEncoder().encode(compositeKey);
       const headerSize = 4 + 2 + keyBytes.length;
       const message = new Uint8Array(headerSize + rawBytes.byteLength);
@@ -395,7 +422,7 @@ export function useBridge({
       bridgeRef.current?.sendBinary(message);
     } catch (err) {
       console.error(`Failed to serve chunk ${key}:`, err);
-      sendEmptyChunkResponse(clientId, datasetId, key);
+      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
     }
   }
 

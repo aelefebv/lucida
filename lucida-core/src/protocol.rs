@@ -106,12 +106,21 @@ pub enum ServerMessage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChunkMessage {
     /// Viewer → Server: request a chunk from the dataset's data source.
-    ChunkRequest { dataset_id: String, key: String },
+    ChunkRequest {
+        dataset_id: String,
+        key: String,
+        /// Store path prefix for plate FOV routing (e.g. "A/1/0").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        store_prefix: Option<String>,
+    },
     /// Server → Data source: fetch this chunk and send it to `client_id`.
     ChunkFetch {
         client_id: u64,
         dataset_id: String,
         key: String,
+        /// Store path prefix for plate FOV routing (e.g. "A/1/0").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        store_prefix: Option<String>,
     },
 }
 
@@ -158,12 +167,13 @@ mod tests {
         let msg = ChunkMessage::ChunkRequest {
             dataset_id: "ds1".into(),
             key: "0/0/0/0/0/0".into(),
+            store_prefix: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"chunk_request\""));
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ChunkMessage::ChunkRequest { dataset_id, key } => {
+            ChunkMessage::ChunkRequest { dataset_id, key, .. } => {
                 assert_eq!(dataset_id, "ds1");
                 assert_eq!(key, "0/0/0/0/0/0");
             }
@@ -177,15 +187,41 @@ mod tests {
             client_id: 42,
             dataset_id: "ds1".into(),
             key: "1/0/0/2/3/4".into(),
+            store_prefix: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"chunk_fetch\""));
+        // store_prefix should be omitted when None
+        assert!(!json.contains("store_prefix"));
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ChunkMessage::ChunkFetch { client_id, dataset_id, key } => {
+            ChunkMessage::ChunkFetch { client_id, dataset_id, key, store_prefix } => {
                 assert_eq!(client_id, 42);
                 assert_eq!(dataset_id, "ds1");
                 assert_eq!(key, "1/0/0/2/3/4");
+                assert_eq!(store_prefix, None);
+            }
+            _ => panic!("expected ChunkFetch"),
+        }
+    }
+
+    #[test]
+    fn chunk_fetch_with_store_prefix_round_trips() {
+        let msg = ChunkMessage::ChunkFetch {
+            client_id: 7,
+            dataset_id: "plate1".into(),
+            key: "0/0/0/5/10".into(),
+            store_prefix: Some("A/1/0".into()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"store_prefix\":\"A/1/0\""));
+        let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ChunkMessage::ChunkFetch { client_id, dataset_id, key, store_prefix } => {
+                assert_eq!(client_id, 7);
+                assert_eq!(dataset_id, "plate1");
+                assert_eq!(key, "0/0/0/5/10");
+                assert_eq!(store_prefix, Some("A/1/0".into()));
             }
             _ => panic!("expected ChunkFetch"),
         }
@@ -217,9 +253,11 @@ mod tests {
             command: DocumentCommand::AddDataset {
                 id: "ds1".into(),
                 name: "test".into(),
+                kind: Default::default(),
                 layers: vec![],
                 volume_shape: None,
                 volume_scale: None,
+                members: Vec::new(),
                 client_metadata: None,
             },
         };

@@ -5,7 +5,7 @@ import type { ChunkStore } from "./zarr/chunkStore.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 
 export interface DatasetEntry {
-  store: ChunkStore;
+  memberStores: Map<string, ChunkStore>;
   info: DatasetInfo;
 }
 

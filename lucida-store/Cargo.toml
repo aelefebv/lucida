@@ -15,6 +15,7 @@ object_store = { version = "0.12", features = ["gcp", "aws", "http"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 bytes = "1"
 lru = "0.12"
+regex = "1"
 lucida-core = { path = "../lucida-core" }
 
 [profile.dev.package."*"]

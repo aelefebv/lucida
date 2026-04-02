@@ -1,7 +1,8 @@
 mod types;
 
 pub use types::{
-    BlendMode, Dataset, DisplayState, DocumentState, Layer, DatasetDisplaySettings, LevelInfo,
+    BlendMode, Dataset, DatasetDisplaySettings, DatasetKind, DatasetMember, DisplayState,
+    DocumentState, Layer, LevelInfo, MemberChunkPlan, PlateFov, PlateWell, PositioningMode,
     RenderMode,
 };
 
@@ -105,9 +106,11 @@ impl Scene {
             self.document.datasets.push(Dataset {
                 id: "default".into(),
                 name: "default".into(),
+                kind: DatasetKind::default(),
                 layers: Vec::new(),
                 volume_transform: None,
                 volume_shape: None,
+                members: Vec::new(),
                 client_metadata: None,
             });
         }
@@ -174,51 +177,36 @@ impl Scene {
     }
 
     /// Compute the chunk request plan for all visible layers across all datasets.
+    /// Returns a flat `ChunkRequestPlan` (union of all members of the first dataset).
     pub fn chunk_plan(&self) -> ChunkRequestPlan {
-        let region = self.camera.visible_region(
-            &self.view.z_range,
-            self.volume_transform(),
-            self.volume_shape(),
-        );
-
-        let is_2d = matches!(self.camera, Camera::Slice(_));
+        let ds_id = match self.document.datasets.first() {
+            Some(d) => d.id.clone(),
+            None => return ChunkRequestPlan { needed: Vec::new(), prefetch: Vec::new() },
+        };
+        let members = self.chunk_plan_for(&ds_id);
+        // Flatten all members into a single ChunkRequestPlan for backward compat.
         let mut needed = Vec::new();
         let mut prefetch = Vec::new();
-
-        for dataset in &self.document.datasets {
-            for layer in &dataset.layers {
-                if !layer.visible {
-                    continue;
-                }
-                let level = chunk::select_level(region.effective_zoom, layer.num_levels);
-                let (level_shape, level_chunk_size) = layer.shape_at_level(level);
-                if is_2d {
-                    let (n, p) = chunk::visible_and_prefetch_chunks(
-                        &region, &level_chunk_size, level,
-                        self.view.t, self.view.c,
-                        &level_shape, &layer.data_shape,
-                    );
-                    needed.extend(n);
-                    prefetch.extend(p);
-                } else {
-                    let chunks = chunk::visible_chunks(
-                        &region, &level_chunk_size, level,
-                        self.view.t, self.view.c,
-                        &level_shape, &layer.data_shape,
-                    );
-                    needed.extend(chunks);
-                }
-            }
+        for m in members {
+            needed.extend(m.needed);
+            prefetch.extend(m.prefetch);
         }
-
         ChunkRequestPlan { needed, prefetch }
     }
 
     /// Compute the chunk request plan for a specific dataset by ID.
-    pub fn chunk_plan_for(&self, dataset_id: &str) -> ChunkRequestPlan {
+    ///
+    /// Returns one `MemberChunkPlan` per visible member. For the common
+    /// single-member-at-origin case this is a single element whose
+    /// `needed`/`prefetch` lists are identical to the old flat plan.
+    ///
+    /// For multi-member datasets (plates), each member's AABB is checked
+    /// against the visible region, and chunk planning is done in
+    /// member-local coordinates.
+    pub fn chunk_plan_for(&self, dataset_id: &str) -> Vec<MemberChunkPlan> {
         let dataset = match self.dataset_by_id(dataset_id) {
             Some(ds) => ds,
-            None => return ChunkRequestPlan { needed: Vec::new(), prefetch: Vec::new() },
+            None => return Vec::new(),
         };
 
         let region = self.camera.visible_region(
@@ -228,34 +216,83 @@ impl Scene {
         );
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
-        let mut needed = Vec::new();
-        let mut prefetch = Vec::new();
+        let members = dataset.effective_members();
+        let volume_shape = dataset.volume_shape.unwrap_or([1, 1, 1]);
 
-        for layer in &dataset.layers {
-            if !layer.visible {
-                continue;
+        let mut plans = Vec::with_capacity(members.len());
+
+        for member in &members {
+            // Check member AABB against visible region.
+            // Member occupies [pos_x .. pos_x + shape_x, pos_y .. pos_y + shape_y]
+            // in voxel space.
+            let pos_x = member.position[0];
+            let pos_y = member.position[1];
+            let member_max_x = pos_x + volume_shape[2] as f64;
+            let member_max_y = pos_y + volume_shape[1] as f64;
+
+            let [vis_min_x, vis_min_y, vis_max_x, vis_max_y] = region.xy_bounds;
+
+            // AABB overlap test
+            if member_max_x <= vis_min_x
+                || pos_x >= vis_max_x
+                || member_max_y <= vis_min_y
+                || pos_y >= vis_max_y
+            {
+                continue; // member is fully outside the visible region
             }
-            let level = chunk::select_level(region.effective_zoom, layer.num_levels);
-            let (level_shape, level_chunk_size) = layer.shape_at_level(level);
-            if is_2d {
-                let (n, p) = chunk::visible_and_prefetch_chunks(
-                    &region, &level_chunk_size, level,
-                    self.view.t, self.view.c,
-                    &level_shape, &layer.data_shape,
-                );
-                needed.extend(n);
-                prefetch.extend(p);
-            } else {
-                let chunks = chunk::visible_chunks(
-                    &region, &level_chunk_size, level,
-                    self.view.t, self.view.c,
-                    &level_shape, &layer.data_shape,
-                );
-                needed.extend(chunks);
+
+            // Compute a member-local region by offsetting the visible bounds
+            // by -position, so the chunk planner works in local coordinates.
+            let local_region = crate::camera::VisibleRegion {
+                xy_bounds: [
+                    vis_min_x - pos_x,
+                    vis_min_y - pos_y,
+                    vis_max_x - pos_x,
+                    vis_max_y - pos_y,
+                ],
+                z_range: region.z_range.clone(),
+                effective_zoom: region.effective_zoom,
+                sort_center: region.sort_center.map(|[cx, cy, cz]| [cx - pos_x, cy - pos_y, cz]),
+                frustum_planes: region.frustum_planes,
+            };
+
+            let mut needed = Vec::new();
+            let mut prefetch = Vec::new();
+
+            for layer in &dataset.layers {
+                if !layer.visible {
+                    continue;
+                }
+                let level = chunk::select_level(local_region.effective_zoom, layer.num_levels);
+                let (level_shape, level_chunk_size) = layer.shape_at_level(level);
+                if is_2d {
+                    let (n, p) = chunk::visible_and_prefetch_chunks(
+                        &local_region, &level_chunk_size, level,
+                        self.view.t, self.view.c,
+                        &level_shape, &layer.data_shape,
+                    );
+                    needed.extend(n);
+                    prefetch.extend(p);
+                } else {
+                    let chunks = chunk::visible_chunks(
+                        &local_region, &level_chunk_size, level,
+                        self.view.t, self.view.c,
+                        &level_shape, &layer.data_shape,
+                    );
+                    needed.extend(chunks);
+                }
             }
+
+            plans.push(MemberChunkPlan {
+                member_id: member.id.clone(),
+                position: member.position,
+                store_prefix: member.store_prefix.clone(),
+                needed,
+                prefetch,
+            });
         }
 
-        ChunkRequestPlan { needed, prefetch }
+        plans
     }
 }
 
@@ -459,9 +496,11 @@ mod tests {
         scene.add_dataset(Dataset {
             id: "ds1".into(),
             name: "first".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(scene.dataset_order, vec!["ds1"]);
@@ -477,9 +516,11 @@ mod tests {
         scene.add_dataset(Dataset {
             id: "ds1".into(),
             name: "first".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         // Modify the opacity
@@ -488,9 +529,11 @@ mod tests {
         scene.add_dataset(Dataset {
             id: "ds1".into(),
             name: "replaced".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(scene.dataset_order, vec!["ds1"]);
@@ -503,17 +546,21 @@ mod tests {
         scene.add_dataset(Dataset {
             id: "ds1".into(),
             name: "first".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         scene.add_dataset(Dataset {
             id: "ds2".into(),
             name: "second".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         scene.remove_dataset("ds1");
@@ -543,18 +590,22 @@ mod tests {
         scene.add_dataset(Dataset {
             id: "ds1".into(),
             name: "first".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(scene.document.datasets.len(), 1);
         scene.add_dataset(Dataset {
             id: "ds1".into(),
             name: "updated".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(scene.document.datasets.len(), 1);
@@ -567,22 +618,164 @@ mod tests {
         scene.add_dataset(Dataset {
             id: "ds1".into(),
             name: "first".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         scene.add_dataset(Dataset {
             id: "ds2".into(),
             name: "second".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_transform: None,
             volume_shape: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(scene.document.datasets.len(), 2);
         scene.remove_dataset("ds1");
         assert_eq!(scene.document.datasets.len(), 1);
         assert_eq!(scene.document.datasets[0].id, "ds2");
+    }
+
+    #[test]
+    fn chunk_plan_for_returns_member_plans() {
+        let mut scene = Scene::new([512, 512]);
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            kind: DatasetKind::default(),
+            layers: vec![test_layer()],
+            volume_transform: None,
+            volume_shape: Some([256, 4096, 4096]),
+            members: Vec::new(), // backward compat: synthesize single member
+            client_metadata: None,
+        });
+        let plans = scene.chunk_plan_for("ds1");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].member_id, "ds1");
+        assert_eq!(plans[0].position, [0.0, 0.0]);
+        assert!(plans[0].store_prefix.is_none());
+        assert!(!plans[0].needed.is_empty());
+    }
+
+    #[test]
+    fn chunk_plan_for_single_member_matches_flat_plan() {
+        // Verify that a single member at [0, 0] produces identical results
+        // to the old flat chunk_plan() method.
+        let mut scene = Scene::new([512, 512]);
+        scene.add_dataset(Dataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            kind: DatasetKind::default(),
+            layers: vec![test_layer()],
+            volume_transform: None,
+            volume_shape: Some([256, 4096, 4096]),
+            members: Vec::new(),
+            client_metadata: None,
+        });
+        let flat = scene.chunk_plan();
+        let member_plans = scene.chunk_plan_for("ds1");
+        assert_eq!(member_plans.len(), 1);
+        assert_eq!(flat.needed.len(), member_plans[0].needed.len());
+        assert_eq!(flat.prefetch.len(), member_plans[0].prefetch.len());
+        for (a, b) in flat.needed.iter().zip(member_plans[0].needed.iter()) {
+            assert_eq!(a.key(), b.key());
+        }
+    }
+
+    #[test]
+    fn chunk_plan_for_missing_dataset_returns_empty() {
+        let scene = Scene::new([512, 512]);
+        let plans = scene.chunk_plan_for("nonexistent");
+        assert!(plans.is_empty());
+    }
+
+    #[test]
+    fn multi_member_aabb_culling() {
+        // Two members side-by-side, each 256x256 in XY. Camera at origin
+        // should see member at [0,0] but not the one at [10000, 0].
+        let mut scene = Scene::new([512, 512]);
+        let layer = Layer {
+            name: "img".into(),
+            visible: true,
+            num_levels: 1,
+            chunk_size: [1, 256, 256],
+            data_shape: [1, 256, 256],
+            level_info: vec![],
+        };
+        scene.add_dataset(Dataset {
+            id: "plate".into(),
+            name: "plate".into(),
+            kind: DatasetKind::default(),
+            layers: vec![layer],
+            volume_transform: None,
+            volume_shape: Some([1, 256, 256]),
+            members: vec![
+                DatasetMember {
+                    id: "m1".into(),
+                    position: [0.0, 0.0],
+                    store_prefix: Some("A/1/0".into()),
+                },
+                DatasetMember {
+                    id: "m2".into(),
+                    position: [10000.0, 0.0],
+                    store_prefix: Some("A/2/0".into()),
+                },
+            ],
+            client_metadata: None,
+        });
+        let plans = scene.chunk_plan_for("plate");
+        // Only the member at origin should be visible
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].member_id, "m1");
+        assert_eq!(plans[0].store_prefix.as_deref(), Some("A/1/0"));
+        assert!(!plans[0].needed.is_empty());
+    }
+
+    #[test]
+    fn multi_member_both_visible_when_overlapping_view() {
+        // Two adjacent members within the viewport.
+        let mut scene = Scene::new([1024, 512]);
+        let layer = Layer {
+            name: "img".into(),
+            visible: true,
+            num_levels: 1,
+            chunk_size: [1, 256, 256],
+            data_shape: [1, 256, 256],
+            level_info: vec![],
+        };
+        // Pan camera to see both members
+        if let Camera::Slice(ref mut v) = scene.camera {
+            v.center = [256.0, 128.0];
+        }
+        scene.add_dataset(Dataset {
+            id: "plate".into(),
+            name: "plate".into(),
+            kind: DatasetKind::default(),
+            layers: vec![layer],
+            volume_transform: None,
+            volume_shape: Some([1, 256, 256]),
+            members: vec![
+                DatasetMember {
+                    id: "m1".into(),
+                    position: [0.0, 0.0],
+                    store_prefix: Some("A/1/0".into()),
+                },
+                DatasetMember {
+                    id: "m2".into(),
+                    position: [256.0, 0.0],
+                    store_prefix: Some("A/2/0".into()),
+                },
+            ],
+            client_metadata: None,
+        });
+        let plans = scene.chunk_plan_for("plate");
+        let ids: Vec<&str> = plans.iter().map(|p| p.member_id.as_str()).collect();
+        assert!(ids.contains(&"m1"), "m1 should be visible");
+        assert!(ids.contains(&"m2"), "m2 should be visible");
     }
 }

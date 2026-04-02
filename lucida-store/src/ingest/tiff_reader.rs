@@ -80,6 +80,7 @@ use super::pyramid::VoxelSize;
 /// A 5D volume of u16 pixel data read from a TIFF file.
 ///
 /// Data is stored in TCZYX order (T outermost, X innermost).
+#[derive(Debug)]
 pub struct Volume {
     pub data: Vec<u16>,
     pub width: u32,

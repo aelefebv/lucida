@@ -202,9 +202,11 @@ mod tests {
         let seq = session.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: Default::default(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(seq, 1);
@@ -216,9 +218,11 @@ mod tests {
         session.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: Default::default(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(session.document.datasets.len(), 1);
@@ -231,9 +235,11 @@ mod tests {
         session.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: Default::default(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         let msg = session.snapshot(42);

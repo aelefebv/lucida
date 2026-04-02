@@ -275,7 +275,7 @@ pub async fn handle_client(
                 // Try as ChunkMessage.
                 if let Ok(chunk_msg) = serde_json::from_str::<ChunkMessage>(&json) {
                     match chunk_msg {
-                        ChunkMessage::ChunkRequest { dataset_id, key } => {
+                        ChunkMessage::ChunkRequest { dataset_id, key, store_prefix } => {
                             // Check server-hosted first, then peer relay.
                             let server_entry = {
                                 let sess = session.lock().await;
@@ -288,8 +288,8 @@ pub async fn handle_client(
                                 let chunk_key = key;
                                 tokio::spawn(async move {
                                     serve_chunk_from_store(
-                                        id, &ds_id, &chunk_key, &entry.store,
-                                        &entry.axes, &unicast_routes_clone,
+                                        id, &ds_id, &chunk_key, store_prefix.as_deref(),
+                                        &entry.store, &entry.axes, &unicast_routes_clone,
                                     ).await;
                                 });
                             } else {
@@ -303,6 +303,7 @@ pub async fn handle_client(
                                         client_id: id,
                                         dataset_id,
                                         key,
+                                        store_prefix,
                                     };
                                     let fetch_json =
                                         serde_json::to_string(&fetch).unwrap();
@@ -429,6 +430,7 @@ async fn handle_open_remote_dataset(
     let command = DocumentCommand::AddDataset {
         id: ds.id.clone(),
         name: ds.name.clone(),
+        kind: ds.kind.clone(),
         layers: ds.layers.clone(),
         volume_shape: ds.volume_shape,
         volume_scale: ds.volume_transform.as_ref().map(|_| {
@@ -450,6 +452,7 @@ async fn handle_open_remote_dataset(
             }
             [1.0, 1.0, 1.0]
         }),
+        members: ds.members.clone(),
         client_metadata: ds.client_metadata.clone(),
     };
 
@@ -489,15 +492,24 @@ async fn handle_open_remote_dataset(
 }
 
 /// Read a chunk from a StorageBackend and send it to the requesting client.
+///
+/// When `store_prefix` is `Some("A/1/0")`, the store path becomes
+/// `A/1/0/{level_path}/c/{chunk_coords}` instead of just `{level_path}/c/{chunk_coords}`.
+/// This enables plate FOV routing where each member's chunks live under a sub-path.
 async fn serve_chunk_from_store(
     client_id: ClientId,
     dataset_id: &str,
     chunk_key: &str,
+    store_prefix: Option<&str>,
     store: &Arc<CachedStore>,
     axes: &[String],
     unicast_routes: &UnicastRoutes,
 ) {
-    let file_path = lucida_store::chunk_key_to_store_path(chunk_key, axes);
+    let relative_path = lucida_store::chunk_key_to_store_path(chunk_key, axes);
+    let file_path = match store_prefix {
+        Some(prefix) => format!("{}/{}", prefix, relative_path),
+        None => relative_path,
+    };
     let obj_path = Path::from(file_path.as_str());
 
     let bytes = match store.get_bytes(&obj_path).await {
@@ -509,8 +521,11 @@ async fn serve_chunk_from_store(
     };
 
     // Build binary response: [client_id: u32 LE][key_len: u16 LE][key][data]
-    // The key sent back is "{dataset_id}/{chunk_key}" (composite key).
-    let composite_key = format!("{dataset_id}/{chunk_key}");
+    // The key sent back is "{dataset_id}[/{store_prefix}]/{chunk_key}" (composite key).
+    let composite_key = match store_prefix {
+        Some(prefix) => format!("{dataset_id}/{prefix}/{chunk_key}"),
+        None => format!("{dataset_id}/{chunk_key}"),
+    };
     let key_bytes = composite_key.as_bytes();
     let key_len = key_bytes.len() as u16;
 

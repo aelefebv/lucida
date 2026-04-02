@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
 use crate::transform::{self, VolumeTransform};
 
@@ -102,9 +103,11 @@ impl DocumentState {
             DocumentCommand::AddDataset {
                 id,
                 name,
+                kind,
                 layers,
                 volume_shape,
                 volume_scale,
+                members,
                 client_metadata,
             } => {
                 let volume_transform =
@@ -116,9 +119,11 @@ impl DocumentState {
                 self.add_dataset(Dataset {
                     id,
                     name,
+                    kind,
                     layers,
                     volume_transform,
                     volume_shape,
+                    members,
                     client_metadata,
                 });
             }
@@ -130,9 +135,11 @@ impl DocumentState {
                     self.datasets.push(Dataset {
                         id: "default".into(),
                         name: "default".into(),
+                        kind: DatasetKind::default(),
                         layers: Vec::new(),
                         volume_transform: None,
                         volume_shape: None,
+                        members: Vec::new(),
                         client_metadata: None,
                     });
                 }
@@ -188,17 +195,127 @@ impl Layer {
     }
 }
 
+/// Discriminant for dataset variants. Single datasets have one member at the
+/// origin; plates have many positioned members.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DatasetKind {
+    Single,
+    Plate {
+        rows: Vec<String>,
+        columns: Vec<String>,
+        wells: Vec<PlateWell>,
+        positioning_mode: PositioningMode,
+        has_stage_positions: bool,
+    },
+}
+
+impl Default for DatasetKind {
+    fn default() -> Self {
+        DatasetKind::Single
+    }
+}
+
+/// A well within a plate, identified by row/column path and indices.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlateWell {
+    /// Well path, e.g. "A/1".
+    pub path: String,
+    /// Zero-based row index.
+    pub row_index: u32,
+    /// Zero-based column index.
+    pub column_index: u32,
+    /// FOVs within this well.
+    #[serde(default)]
+    pub fovs: Vec<PlateFov>,
+}
+
+/// A single field of view within a plate well.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlateFov {
+    /// FOV path within the well, e.g. "0".
+    pub path: String,
+    /// Store path prefix for chunk routing, e.g. "A/1/0".
+    pub store_prefix: String,
+    /// Position offset in voxel space: [X, Y].
+    #[serde(default)]
+    pub position: [f64; 2],
+    /// Stage translation coordinates from OME metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<Vec<f64>>,
+}
+
+/// How FOVs within a plate are positioned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum PositioningMode {
+    Stage,
+    Grid,
+}
+
+impl Default for PositioningMode {
+    fn default() -> Self {
+        PositioningMode::Grid
+    }
+}
+
+/// A positioned sub-volume within a dataset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatasetMember {
+    /// Unique ID across all members of all datasets.
+    pub id: String,
+    /// Position offset in voxel space: [X, Y].
+    #[serde(default)]
+    pub position: [f64; 2],
+    /// Store path prefix for chunk routing (e.g. "A/1/0" for plate FOVs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_prefix: Option<String>,
+}
+
+/// Per-member output of chunk planning.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemberChunkPlan {
+    pub member_id: String,
+    pub position: [f64; 2],
+    pub store_prefix: Option<String>,
+    pub needed: Vec<ChunkCoord>,
+    pub prefetch: Vec<ChunkCoord>,
+}
+
 /// A single dataset in the scene, containing its layers and spatial metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dataset {
     pub id: String,
     pub name: String,
+    /// Dataset variant discriminant.
+    #[serde(default)]
+    pub kind: DatasetKind,
     pub layers: Vec<Layer>,
     pub volume_transform: Option<VolumeTransform>,
     /// Volume dimensions in voxels: [Z, Y, X].
     pub volume_shape: Option<[u32; 3]>,
+    /// Positioned sub-volumes. For single datasets, one member at [0, 0].
+    /// Empty means "synthesize a single member from the dataset ID" (backward compat).
+    #[serde(default)]
+    pub members: Vec<DatasetMember>,
     /// Opaque client metadata (dtype, codecs, level paths).
     /// Server passes through without interpretation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_metadata: Option<serde_json::Value>,
+}
+
+impl Dataset {
+    /// Returns the effective member list. If `members` is empty (backward compat),
+    /// synthesizes a single member from the dataset ID at position [0, 0].
+    pub fn effective_members(&self) -> Vec<DatasetMember> {
+        if self.members.is_empty() {
+            vec![DatasetMember {
+                id: self.id.clone(),
+                position: [0.0, 0.0],
+                store_prefix: None,
+            }]
+        } else {
+            self.members.clone()
+        }
+    }
 }

@@ -3,13 +3,21 @@ import type { ChunkStore } from "./zarr/chunkStore.ts";
 
 export type ViewMode = "2d" | "3d";
 
+/** A single member (well/field) within a plate-style dataset. */
+export interface DatasetMember {
+  id: string;
+  position: [number, number];
+  storePrefix: string | null;
+}
+
 /** State for a single dataset, either local or remote. */
 export interface DatasetState {
   id: string;
   name: string;
   info: DatasetInfo;
-  store: ChunkStore;
+  memberStores: Map<string, ChunkStore>;
   fileIndex: Map<string, File> | null; // null for remote datasets
+  members: DatasetMember[];
 }
 
 /** Pending chunk request from a remote viewer. */

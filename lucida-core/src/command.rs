@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
-use crate::scene::{BlendMode, Layer, RenderMode, Scene};
+use crate::scene::{BlendMode, DatasetKind, DatasetMember, Layer, RenderMode, Scene};
 
 /// Commands that mutate shared document state (datasets).
 /// These are sequenced, persisted, and broadcast to all clients.
@@ -11,9 +11,13 @@ pub enum DocumentCommand {
     AddDataset {
         id: String,
         name: String,
+        #[serde(default)]
+        kind: DatasetKind,
         layers: Vec<Layer>,
         volume_shape: Option<[u32; 3]>,
         volume_scale: Option<[f64; 3]>,
+        #[serde(default)]
+        members: Vec<DatasetMember>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         client_metadata: Option<serde_json::Value>,
     },
@@ -256,9 +260,11 @@ mod tests {
         let cmd = Command::Document(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         let json = serde_json::to_string(&cmd).unwrap();
@@ -297,9 +303,11 @@ mod tests {
         let cmd = DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test dataset".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_shape: Some([100, 200, 300]),
             volume_scale: Some([1.0, 0.5, 0.5]),
+            members: Vec::new(),
             client_metadata: Some(serde_json::json!({"dtype": "uint16"})),
         };
         let json = serde_json::to_string(&cmd).unwrap();
@@ -330,9 +338,11 @@ mod tests {
         scene.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_shape: Some([100, 200, 300]),
             volume_scale: Some([1.0, 1.0, 1.0]),
+            members: Vec::new(),
             client_metadata: None,
         }.into());
         assert_eq!(scene.document.datasets.len(), 1);
@@ -401,9 +411,11 @@ mod tests {
         scene.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
+            members: Vec::new(),
             client_metadata: None,
         }.into());
         assert!(scene.dataset_settings["ds1"].visible);
@@ -417,9 +429,11 @@ mod tests {
         scene.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
+            members: Vec::new(),
             client_metadata: None,
         }.into());
         assert_eq!(scene.dataset_settings["ds1"].opacity, 1.0);
@@ -433,9 +447,11 @@ mod tests {
         scene.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
+            members: Vec::new(),
             client_metadata: None,
         }.into());
         assert_eq!(scene.document.datasets.len(), 1);
@@ -449,9 +465,11 @@ mod tests {
         doc.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_shape: Some([100, 200, 300]),
             volume_scale: Some([1.0, 1.0, 1.0]),
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(doc.datasets.len(), 1);
@@ -465,9 +483,11 @@ mod tests {
         doc.apply(DocumentCommand::AddDataset {
             id: "ds1".into(),
             name: "test".into(),
+            kind: DatasetKind::default(),
             layers: vec![],
             volume_shape: None,
             volume_scale: None,
+            members: Vec::new(),
             client_metadata: None,
         });
         assert_eq!(doc.datasets.len(), 1);

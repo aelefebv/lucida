@@ -2,8 +2,8 @@
 import type { DatasetInfo } from "./zarr/metadata.ts";
 import { ChunkStore } from "./zarr/chunkStore.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
-import { type SliceState, createSliceState, tickSlice, clearSliceForDataset } from "./slicePath.ts";
-import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, resetVolumeState } from "./volumePath.ts";
+import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
+import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 
 // Re-export types so downstream imports stay unchanged
@@ -11,14 +11,14 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 
 export class RenderLoop {
   private scene: RenderLoopOptions["scene"];
-  private datasets: Map<string, { store: ChunkStore; info: DatasetInfo }>;
+  private datasets: Map<string, { memberStores: Map<string, ChunkStore>; info: DatasetInfo }>;
   private client: RenderLoopOptions["client"];
   private canvas: HTMLCanvasElement;
   private mode: "slice" | "volume";
 
   private dirty = true;
   private rafId: number | null = null;
-  private unsubs = new Map<string, () => void>();
+  private unsubs = new Map<string, (() => void)[]>();
 
   private sliceState: SliceState = createSliceState();
   private volumeState: VolumeState = createVolumeState();
@@ -35,7 +35,7 @@ export class RenderLoop {
     this.scene = opts.scene;
     this.datasets = new Map();
     for (const [id, entry] of opts.datasets) {
-      this.datasets.set(id, { store: entry.store, info: entry.info });
+      this.datasets.set(id, { memberStores: entry.memberStores, info: entry.info });
     }
     this.client = opts.client;
     this.canvas = opts.canvas;
@@ -43,12 +43,15 @@ export class RenderLoop {
   }
 
   start(): void {
-    // Subscribe to all datasets
+    // Subscribe to all member stores in all datasets
     for (const [id, ds] of this.datasets) {
-      const unsub = ds.store.subscribe(() => {
-        this.dirty = true;
-      });
-      this.unsubs.set(id, unsub);
+      const unsubs: (() => void)[] = [];
+      for (const store of ds.memberStores.values()) {
+        unsubs.push(store.subscribe(() => {
+          this.dirty = true;
+        }));
+      }
+      this.unsubs.set(id, unsubs);
     }
     this.rafId = requestAnimationFrame(this.tick);
   }
@@ -58,34 +61,68 @@ export class RenderLoop {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
-    for (const unsub of this.unsubs.values()) {
-      unsub();
+    for (const unsubs of this.unsubs.values()) {
+      for (const unsub of unsubs) unsub();
     }
     this.unsubs.clear();
   }
 
-  addDataset(id: string, store: ChunkStore, info: DatasetInfo): void {
-    this.datasets.set(id, { store, info });
-    const unsub = store.subscribe(() => {
-      this.dirty = true;
-    });
-    this.unsubs.set(id, unsub);
+  addDataset(id: string, memberStores: Map<string, ChunkStore>, info: DatasetInfo): void {
+    this.datasets.set(id, { memberStores, info });
+    const unsubs: (() => void)[] = [];
+    for (const store of memberStores.values()) {
+      unsubs.push(store.subscribe(() => {
+        this.dirty = true;
+      }));
+    }
+    this.unsubs.set(id, unsubs);
     this.dirty = true;
   }
 
   removeDataset(id: string): void {
-    const unsub = this.unsubs.get(id);
-    if (unsub) {
-      unsub();
+    const unsubs = this.unsubs.get(id);
+    if (unsubs) {
+      for (const unsub of unsubs) unsub();
       this.unsubs.delete(id);
     }
     this.datasets.delete(id);
 
+    // Collect member IDs that were keyed under this dataset.
+    // For single datasets member_id === dataset_id, but for plates
+    // member IDs may differ (e.g. "plateId:A/1/0").
+    const memberIds = this.collectMemberIds(id);
+
     clearVolumeForDataset(this.volumeState, id);
     clearSliceForDataset(this.sliceState, id);
+    clearVolumeForMembers(this.volumeState, memberIds);
+    clearSliceForMembers(this.sliceState, memberIds);
     clearMinimapForDataset(this.minimapState, id);
 
     this.dirty = true;
+  }
+
+  /** Collect member IDs associated with a dataset from state maps. */
+  private collectMemberIds(dsId: string): string[] {
+    const ids = new Set<string>();
+    // Check volume and slice state maps for keys that belong to this dataset.
+    // For single datasets, member_id === dataset_id (already cleaned by clearFor*Dataset).
+    // For plates, member IDs are prefixed with the dataset ID (e.g. "dsId:A/1/0").
+    const prefix = dsId + ":";
+    for (const key of this.volumeState.uploaded.keys()) {
+      if (key === dsId || key.startsWith(prefix)) ids.add(key);
+    }
+    for (const key of this.volumeState.lodKeys.keys()) {
+      if (key === dsId || key.startsWith(prefix)) ids.add(key);
+    }
+    for (const key of this.sliceState.uploaded.keys()) {
+      if (key === dsId || key.startsWith(prefix)) ids.add(key);
+    }
+    for (const key of this.sliceState.currentLod.keys()) {
+      if (key === dsId || key.startsWith(prefix)) ids.add(key);
+    }
+    // Remove the dsId itself since clearFor*Dataset already handles it
+    ids.delete(dsId);
+    return [...ids];
   }
 
   markDirty(): void {

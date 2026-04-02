@@ -123,7 +123,7 @@ function App() {
       render.clientRef.current?.removeLayerResources(id);
       const ds = datasetsRef.current.get(id);
       if (ds) {
-        ds.store.destroy();
+        for (const store of ds.memberStores.values()) store.destroy();
         datasetsRef.current.delete(id);
       }
       layers.cleanupLayerMaps(id);
@@ -276,7 +276,7 @@ function App() {
         onMoveLayer={layers.handleLayerMove}
         onRemoveLayer={layers.handleRemoveLayer}
         onAddLayer={() => dirInputRef.current?.click()}
-        viewModeToggle={volumeMap.size > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
+        viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
         style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
       />
@@ -305,7 +305,7 @@ function App() {
             </ul>
           </div>
         )}
-        <div style={{ position: "relative", display: volumeMap.size > 0 ? "block" : "none", width: layout.canvasWidth }}>
+        <div style={{ position: "relative", display: datasetsVersion > 0 ? "block" : "none", width: layout.canvasWidth }}>
           <canvas
             ref={render.canvasRef}
             tabIndex={0}
@@ -318,7 +318,7 @@ function App() {
               display: "block",
             }}
           />
-          {volumeMap.size > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && (
+          {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && (
             <SliceViewer
               z={dims.z}
               t={dims.t}
@@ -335,7 +335,7 @@ function App() {
               onLoopChange={render.setActiveLoop}
             />
           )}
-          {volumeMap.size > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && (
+          {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && (
             <VolumeViewer
               scene={scene.wasmScene}
               datasets={datasetsRef.current}
@@ -371,7 +371,7 @@ function App() {
           <FpsCounter />
           <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
         </div>
-        {volumeMap.size > 0 && (
+        {datasetsVersion > 0 && (
           <div className="dimension-controls" style={{ maxWidth: layout.canvasWidth }}>
             <DimensionControls label="Z" value={dims.z} max={dims.dimZ} onChange={dims.handleZChange} disabled={dims.viewMode === "3d"} />
             <DimensionControls label="C" value={dims.c} max={dims.dimC} onChange={dims.handleCChange} />

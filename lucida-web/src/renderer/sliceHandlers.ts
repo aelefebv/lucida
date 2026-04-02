@@ -227,10 +227,13 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
     const fb = fallbackPerDataset.get(layer.datasetId);
     if (!atlas && !fb) continue;
 
-    // Update viewport center in [0,1] UV space for distance-based eviction
+    // Update viewport center in [0,1] UV space for distance-based eviction.
+    // Adjust by member position offset so the atlas eviction sees member-local coords.
+    const ox = layer.offsetX ?? 0;
+    const oy = layer.offsetY ?? 0;
     cameraUVPerDataset.set(layer.datasetId, [
-      msg.cx / layer.dataW,
-      msg.cy / layer.dataH,
+      (msg.cx - ox) / layer.dataW,
+      (msg.cy - oy) / layer.dataH,
     ]);
 
     const idx = renderedLayers.length;
@@ -259,7 +262,7 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
 
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(layer.opacity);
-    renderer.setTransform(msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, layer.dataW, layer.dataH);
+    renderer.setTransform(msg.zoom, msg.cx - ox, msg.cy - oy, msg.canvasW, msg.canvasH, layer.dataW, layer.dataH);
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(pool[idx].createView(), layerEncoder);
     ctx.device.queue.submit([layerEncoder.finish()]);

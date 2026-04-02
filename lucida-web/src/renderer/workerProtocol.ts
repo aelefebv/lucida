@@ -126,6 +126,10 @@ export interface SliceLayerParams {
   gamma: number;
   opacity: number;
   blendMode: "alpha" | "additive" | "max";
+  /** Member position offset in voxels along X (default 0). */
+  offsetX?: number;
+  /** Member position offset in voxels along Y (default 0). */
+  offsetY?: number;
 }
 
 export interface SliceRenderMultiPassMessage {

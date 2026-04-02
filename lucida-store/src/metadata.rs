@@ -9,7 +9,10 @@ use object_store::ObjectStore;
 use object_store::path::Path;
 use serde::Deserialize;
 
-use lucida_core::scene::{Dataset, Layer, LevelInfo};
+use lucida_core::plate;
+use lucida_core::scene::{
+    Dataset, DatasetKind, DatasetMember, Layer, LevelInfo, PlateFov, PlateWell, PositioningMode,
+};
 use lucida_core::transform;
 
 use crate::backend::StoreError;
@@ -70,6 +73,10 @@ pub fn normalize_f64_to_5d(values: &[f64], axes: &[String], fill: f64) -> [f64; 
 /// `store` is an opened ObjectStore pointing at the Store root.
 /// `name` is the human-readable dataset name.
 /// `id` is the dataset identifier (typically a UUID).
+///
+/// Detects whether the root zarr.json describes a plate (`ome.plate`) or a
+/// single image (`ome.multiscales`). For plates, delegates to `read_plate_info`
+/// and wraps the result in a `DatasetMetadata`.
 pub async fn read_dataset_info(
     store: &Arc<dyn ObjectStore>,
     id: &str,
@@ -83,6 +90,12 @@ pub async fn read_dataset_info(
         .await?;
     let root_json: serde_json::Value =
         serde_json::from_slice(&root_bytes).map_err(|e| StoreError::Metadata(e.to_string()))?;
+
+    // Detect plate: if root has ome.plate, delegate to plate reader.
+    if root_json.pointer("/attributes/ome/plate").is_some() {
+        let plate = read_plate_info_from_root(store, &root_json, name).await?;
+        return Ok(plate.into_dataset_metadata(id));
+    }
 
     // Parse OME multiscales
     let multiscales = root_json
@@ -218,6 +231,7 @@ pub async fn read_dataset_info(
     let dataset = Dataset {
         id: id.to_string(),
         name: name.to_string(),
+        kind: lucida_core::scene::DatasetKind::default(),
         layers: vec![Layer {
             name: "main".to_string(),
             visible: true,
@@ -225,6 +239,11 @@ pub async fn read_dataset_info(
             chunk_size: [chunk_z, chunk_y, chunk_x],
             data_shape: [shape_z, shape_y, shape_x],
             level_info,
+        }],
+        members: vec![DatasetMember {
+            id: id.to_string(),
+            position: [0.0, 0.0],
+            store_prefix: None,
         }],
         volume_transform: Some(volume_transform),
         volume_shape: Some(volume_shape),
@@ -238,30 +257,448 @@ pub async fn read_dataset_info(
     })
 }
 
+// --- Plate metadata reading ---
+
+/// Parsed plate metadata, ready for conversion to a `DatasetMetadata`.
+#[derive(Debug)]
+pub struct PlateInfo {
+    /// Human-readable plate name.
+    pub name: String,
+    /// Row labels (e.g. ["A", "B"]).
+    pub rows: Vec<String>,
+    /// Column labels (e.g. ["1", "2"]).
+    pub columns: Vec<String>,
+    /// Wells with populated FOV lists and positions.
+    pub wells: Vec<PlateWell>,
+    /// Number of multiscale levels (from representative FOV).
+    pub num_levels: u32,
+    /// Per-FOV voxel shape [Z, Y, X] (uniform across the plate).
+    pub fov_shape: [u32; 3],
+    /// Per-FOV chunk size [Z, Y, X] (from representative FOV, level 0).
+    pub fov_chunk_size: [u32; 3],
+    /// Per-level info from the representative FOV.
+    pub level_info: Vec<LevelInfo>,
+    /// Level paths (e.g. ["0", "1", "2"]) from the representative FOV.
+    pub level_paths: Vec<String>,
+    /// Original axis names from the representative FOV.
+    pub axes_names: Vec<String>,
+    /// Axes JSON from the representative FOV (for client_metadata).
+    pub axes_json: Vec<serde_json::Value>,
+    /// Per-level entries from the representative FOV (for client_metadata).
+    pub level_entries: Vec<LevelEntry>,
+    /// Per-level array metadata from the representative FOV (for client_metadata).
+    pub level_metas: Vec<ArrayMeta>,
+    /// Volume scale [Z, Y, X] from the representative FOV.
+    pub volume_scale: [f64; 3],
+    /// Whether any FOV has stage position translations.
+    pub has_stage_positions: bool,
+    /// Positioning mode used.
+    pub positioning_mode: PositioningMode,
+}
+
+impl PlateInfo {
+    /// Convert this PlateInfo into a DatasetMetadata for server integration.
+    pub fn into_dataset_metadata(self, id: &str) -> DatasetMetadata {
+        // Compute plate extent from positioned wells.
+        let extent = plate::plate_extent(&self.wells, self.fov_shape);
+        let plate_width = extent[0].ceil() as u32;
+        let plate_height = extent[1].ceil() as u32;
+        let plate_z = self.fov_shape[0];
+        let volume_shape = [plate_z, plate_height, plate_width];
+
+        let volume_transform =
+            transform::compute_volume_transform(volume_shape, self.volume_scale);
+
+        // Build DatasetMember entries from positioned FOVs.
+        let mut members = Vec::new();
+        for well in &self.wells {
+            for fov in &well.fovs {
+                members.push(DatasetMember {
+                    id: fov.store_prefix.clone(),
+                    position: fov.position,
+                    store_prefix: Some(fov.store_prefix.clone()),
+                });
+            }
+        }
+
+        // Build client_metadata from representative FOV.
+        let levels_json: Vec<serde_json::Value> = self
+            .level_entries
+            .iter()
+            .zip(self.level_metas.iter())
+            .map(|(entry, meta)| {
+                serde_json::json!({
+                    "path": entry.path,
+                    "shape": meta.shape,
+                    "chunkShape": meta.chunk_grid.configuration.chunk_shape,
+                    "dataType": meta.data_type,
+                    "scale": entry.scale,
+                    "codecs": meta.codecs,
+                })
+            })
+            .collect();
+
+        let client_metadata = serde_json::json!({
+            "axes": self.axes_json,
+            "axes_names": self.axes_names,
+            "levels": levels_json,
+        });
+
+        let kind = DatasetKind::Plate {
+            rows: self.rows,
+            columns: self.columns,
+            wells: self.wells,
+            positioning_mode: self.positioning_mode,
+            has_stage_positions: self.has_stage_positions,
+        };
+
+        let dataset = Dataset {
+            id: id.to_string(),
+            name: self.name,
+            kind,
+            layers: vec![Layer {
+                name: "main".to_string(),
+                visible: true,
+                num_levels: self.num_levels,
+                chunk_size: self.fov_chunk_size,
+                data_shape: self.fov_shape,
+                level_info: self.level_info,
+            }],
+            members,
+            volume_transform: Some(volume_transform),
+            volume_shape: Some(volume_shape),
+            client_metadata: Some(client_metadata),
+        };
+
+        DatasetMetadata {
+            dataset,
+            level_paths: self.level_paths,
+            axes_names: self.axes_names,
+        }
+    }
+}
+
+/// Read plate metadata from a Store, returning a `PlateInfo`.
+///
+/// This is the public entry point for plate reading. It reads the root
+/// zarr.json, verifies it is a plate, and delegates to the internal parser.
+pub async fn read_plate_info(
+    store: &Arc<dyn ObjectStore>,
+    name: &str,
+) -> Result<PlateInfo, StoreError> {
+    let root_bytes = store
+        .get(&Path::from("zarr.json"))
+        .await?
+        .bytes()
+        .await?;
+    let root_json: serde_json::Value =
+        serde_json::from_slice(&root_bytes).map_err(|e| StoreError::Metadata(e.to_string()))?;
+
+    if root_json.pointer("/attributes/ome/plate").is_none() {
+        return Err(StoreError::Metadata("not a plate: no ome.plate in root zarr.json".into()));
+    }
+
+    read_plate_info_from_root(store, &root_json, name).await
+}
+
+/// Internal plate parser that works from an already-parsed root JSON.
+async fn read_plate_info_from_root(
+    store: &Arc<dyn ObjectStore>,
+    root_json: &serde_json::Value,
+    name: &str,
+) -> Result<PlateInfo, StoreError> {
+    let plate_json = root_json
+        .pointer("/attributes/ome/plate")
+        .ok_or_else(|| StoreError::Metadata("no ome.plate in root zarr.json".into()))?;
+
+    // Parse plate name (fall back to caller-provided name).
+    let plate_name = plate_json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| name.to_string());
+
+    // Parse rows: [{"name": "A"}, {"name": "B"}]
+    let rows: Vec<String> = plate_json
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Parse columns: [{"name": "1"}, {"name": "2"}]
+    let columns: Vec<String> = plate_json
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Parse wells: [{"path": "A/1", "rowIndex": 0, "columnIndex": 0}, ...]
+    let wells_json = plate_json
+        .get("wells")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| StoreError::Metadata("plate has no wells array".into()))?;
+
+    // Collect well paths and indices, then read each well's metadata.
+    let mut plate_wells: Vec<PlateWell> = Vec::new();
+    let mut representative_fov_path: Option<String> = None;
+    let mut has_stage_positions = false;
+
+    for well_entry in wells_json {
+        let well_path = well_entry
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| StoreError::Metadata("well entry missing path".into()))?;
+        let row_index = well_entry
+            .get("rowIndex")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let column_index = well_entry
+            .get("columnIndex")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        // Read well zarr.json to get FOV image list.
+        let well_meta_path = Path::from(format!("{well_path}/zarr.json"));
+        let well_bytes = store.get(&well_meta_path).await?.bytes().await?;
+        let well_json: serde_json::Value = serde_json::from_slice(&well_bytes)
+            .map_err(|e| StoreError::Metadata(format!("{well_path}: {e}")))?;
+
+        let images = well_json
+            .pointer("/attributes/ome/well/images")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                StoreError::Metadata(format!("{well_path}: no ome.well.images"))
+            })?;
+
+        let mut fovs: Vec<PlateFov> = Vec::new();
+        for image_entry in images {
+            let fov_path = image_entry
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0")
+                .to_string();
+            let store_prefix = format!("{well_path}/{fov_path}");
+
+            // Optionally extract translation from coordinateTransformations.
+            let translation = image_entry
+                .get("coordinateTransformations")
+                .and_then(|v| v.as_array())
+                .and_then(|transforms| {
+                    transforms.iter().find_map(|ct| {
+                        if ct.get("type").and_then(|v| v.as_str()) == Some("translation") {
+                            ct.get("translation")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+            if translation.is_some() {
+                has_stage_positions = true;
+            }
+
+            // Use the first FOV as the representative for reading multiscales.
+            if representative_fov_path.is_none() {
+                representative_fov_path = Some(store_prefix.clone());
+            }
+
+            fovs.push(PlateFov {
+                path: fov_path,
+                store_prefix,
+                position: [0.0, 0.0], // Will be computed below.
+                translation,
+            });
+        }
+
+        plate_wells.push(PlateWell {
+            path: well_path.to_string(),
+            row_index,
+            column_index,
+            fovs,
+        });
+    }
+
+    // Read representative FOV's multiscales metadata for shape, chunks, scale, codecs.
+    let rep_path = representative_fov_path
+        .ok_or_else(|| StoreError::Metadata("plate has no FOVs".into()))?;
+
+    let rep_root_path = Path::from(format!("{rep_path}/zarr.json"));
+    let rep_bytes = store.get(&rep_root_path).await?.bytes().await?;
+    let rep_json: serde_json::Value = serde_json::from_slice(&rep_bytes)
+        .map_err(|e| StoreError::Metadata(format!("{rep_path}: {e}")))?;
+
+    let multiscales = rep_json
+        .pointer("/attributes/ome/multiscales")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| {
+            StoreError::Metadata(format!("{rep_path}: no ome.multiscales"))
+        })?;
+
+    let ms = multiscales
+        .first()
+        .ok_or_else(|| StoreError::Metadata(format!("{rep_path}: multiscales empty")))?;
+
+    let axes_json: Vec<serde_json::Value> = ms
+        .get("axes")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.clone())
+        .unwrap_or_default();
+
+    let axes_names: Vec<String> = axes_json
+        .iter()
+        .filter_map(|a| a.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+        .collect();
+
+    let datasets_arr = ms
+        .get("datasets")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| StoreError::Metadata(format!("{rep_path}: no datasets")))?;
+
+    // Parse level entries from the representative FOV.
+    let mut level_entries: Vec<LevelEntry> = Vec::new();
+    for ds in datasets_arr {
+        let path = ds
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| StoreError::Metadata("FOV dataset entry missing path".into()))?
+            .to_string();
+
+        let mut scale = [1.0_f64; 5];
+        if let Some(transforms) = ds.get("coordinateTransformations").and_then(|v| v.as_array()) {
+            for ct in transforms {
+                if ct.get("type").and_then(|v| v.as_str()) == Some("scale") {
+                    if let Some(s) = ct.get("scale").and_then(|v| v.as_array()) {
+                        let raw: Vec<f64> = s.iter().filter_map(|v| v.as_f64()).collect();
+                        scale = normalize_f64_to_5d(&raw, &axes_names, 1.0);
+                    }
+                }
+            }
+        }
+
+        level_entries.push(LevelEntry { path, scale });
+    }
+
+    if level_entries.is_empty() {
+        return Err(StoreError::Metadata(format!("{rep_path}: no levels")));
+    }
+
+    // Read each level's array metadata from the representative FOV.
+    let mut level_metas: Vec<ArrayMeta> = Vec::new();
+    for entry in &level_entries {
+        let level_path = Path::from(format!("{rep_path}/{}/zarr.json", entry.path));
+        let level_bytes = store.get(&level_path).await?.bytes().await?;
+        let meta: ArrayMeta = serde_json::from_slice(&level_bytes)
+            .map_err(|e| StoreError::Metadata(format!("{rep_path}/{}: {e}", entry.path)))?;
+        level_metas.push(meta);
+    }
+
+    // Compute FOV shape and chunk size from the representative FOV (level 0).
+    let full_res = &level_metas[0];
+    let full_shape_5d = normalize_to_5d(&full_res.shape, &axes_names, 1);
+    let full_chunk_5d =
+        normalize_to_5d(&full_res.chunk_grid.configuration.chunk_shape, &axes_names, 1);
+
+    let fov_shape = [
+        full_shape_5d[2] as u32,
+        full_shape_5d[3] as u32,
+        full_shape_5d[4] as u32,
+    ];
+    let fov_chunk_size = [
+        full_chunk_5d[2] as u32,
+        full_chunk_5d[3] as u32,
+        full_chunk_5d[4] as u32,
+    ];
+
+    // Build per-level info.
+    let level_info: Vec<LevelInfo> = level_metas
+        .iter()
+        .map(|lm| {
+            let norm_shape = normalize_to_5d(&lm.shape, &axes_names, 1);
+            let norm_chunk =
+                normalize_to_5d(&lm.chunk_grid.configuration.chunk_shape, &axes_names, 1);
+            LevelInfo {
+                shape: [
+                    norm_shape[2] as u32,
+                    norm_shape[3] as u32,
+                    norm_shape[4] as u32,
+                ],
+                chunk_size: [
+                    norm_chunk[2] as u32,
+                    norm_chunk[3] as u32,
+                    norm_chunk[4] as u32,
+                ],
+            }
+        })
+        .collect();
+
+    let full_res_scale = &level_entries[0].scale;
+    let volume_scale = [full_res_scale[2], full_res_scale[3], full_res_scale[4]];
+
+    let level_paths = level_entries.iter().map(|e| e.path.clone()).collect();
+
+    // Determine positioning mode and compute FOV positions.
+    let positioning_mode = if has_stage_positions {
+        PositioningMode::Stage
+    } else {
+        PositioningMode::Grid
+    };
+    plate::compute_fov_positions(&mut plate_wells, fov_shape, positioning_mode);
+
+    Ok(PlateInfo {
+        name: plate_name,
+        rows,
+        columns,
+        wells: plate_wells,
+        num_levels: level_metas.len() as u32,
+        fov_shape,
+        fov_chunk_size,
+        level_info,
+        level_paths,
+        axes_names,
+        axes_json,
+        level_entries,
+        level_metas,
+        volume_scale,
+        has_stage_positions,
+        positioning_mode,
+    })
+}
+
 // --- Internal deserialization types for Zarr v3 Array Metadata ---
 
-struct LevelEntry {
-    path: String,
-    scale: [f64; 5], // [T, C, Z, Y, X]
+#[derive(Debug)]
+pub struct LevelEntry {
+    pub path: String,
+    pub scale: [f64; 5], // [T, C, Z, Y, X]
 }
 
-#[derive(Deserialize)]
-struct ArrayMeta {
-    shape: Vec<u64>,       // N-dimensional (matches axes count)
-    data_type: String,
-    chunk_grid: ChunkGrid,
+#[derive(Debug, Deserialize)]
+pub struct ArrayMeta {
+    pub shape: Vec<u64>,       // N-dimensional (matches axes count)
+    pub data_type: String,
+    pub chunk_grid: ChunkGrid,
     #[serde(default)]
-    codecs: Vec<serde_json::Value>,
+    pub codecs: Vec<serde_json::Value>,
 }
 
-#[derive(Deserialize)]
-struct ChunkGrid {
-    configuration: ChunkGridConfig,
+#[derive(Debug, Deserialize)]
+pub struct ChunkGrid {
+    pub configuration: ChunkGridConfig,
 }
 
-#[derive(Deserialize)]
-struct ChunkGridConfig {
-    chunk_shape: Vec<u64>, // N-dimensional (matches axes count)
+#[derive(Debug, Deserialize)]
+pub struct ChunkGridConfig {
+    pub chunk_shape: Vec<u64>, // N-dimensional (matches axes count)
 }
 
 #[cfg(test)]
@@ -670,6 +1107,327 @@ mod tests {
         let layer = &meta.dataset.layers[0];
         assert_eq!(layer.data_shape, [30, 128, 128]);
         assert_eq!(layer.chunk_size, [10, 64, 64]);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --- Tests for plate detection and reading ---
+
+    /// Create a minimal OME-Zarr plate fixture with the given wells and FOV shapes.
+    fn create_plate_fixture(
+        dir: &std::path::Path,
+        plate_name: &str,
+        rows: &[&str],
+        columns: &[&str],
+        wells: &[(/*row*/&str, /*col*/&str, /*row_idx*/u32, /*col_idx*/u32, /*num_fovs*/u32)],
+        fov_shape: [u64; 5],
+        fov_chunk: [u64; 5],
+    ) {
+        fs::create_dir_all(dir).unwrap();
+
+        // Build plate root zarr.json.
+        let rows_json: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::json!({"name": r}))
+            .collect();
+        let cols_json: Vec<serde_json::Value> = columns
+            .iter()
+            .map(|c| serde_json::json!({"name": c}))
+            .collect();
+        let wells_json: Vec<serde_json::Value> = wells
+            .iter()
+            .map(|(row, col, ri, ci, _)| {
+                serde_json::json!({
+                    "path": format!("{row}/{col}"),
+                    "rowIndex": ri,
+                    "columnIndex": ci,
+                })
+            })
+            .collect();
+
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "plate": {
+                        "version": "0.5",
+                        "name": plate_name,
+                        "rows": rows_json,
+                        "columns": cols_json,
+                        "wells": wells_json,
+                        "field_count": wells.iter().map(|w| w.4).max().unwrap_or(1),
+                    }
+                }
+            }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        // Write well and FOV metadata for each well.
+        for (row, col, _ri, _ci, num_fovs) in wells {
+            let well_dir = dir.join(row).join(col);
+            fs::create_dir_all(&well_dir).unwrap();
+
+            // Write row group zarr.json.
+            let row_dir = dir.join(row);
+            let row_meta = serde_json::json!({"zarr_format": 3, "node_type": "group"});
+            fs::write(
+                row_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&row_meta).unwrap(),
+            )
+            .unwrap();
+
+            // Build well images list.
+            let images: Vec<serde_json::Value> = (0..*num_fovs)
+                .map(|i| serde_json::json!({"path": i.to_string()}))
+                .collect();
+
+            let well_meta = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {
+                    "ome": {
+                        "version": "0.5",
+                        "well": {
+                            "images": images,
+                        }
+                    }
+                }
+            });
+            fs::write(
+                well_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&well_meta).unwrap(),
+            )
+            .unwrap();
+
+            // Write FOV metadata for each FOV.
+            for i in 0..*num_fovs {
+                let fov_dir = well_dir.join(i.to_string());
+                fs::create_dir_all(&fov_dir).unwrap();
+
+                // FOV root: multiscales with one level.
+                let fov_root = serde_json::json!({
+                    "zarr_format": 3,
+                    "node_type": "group",
+                    "attributes": {
+                        "ome": {
+                            "version": "0.5",
+                            "multiscales": [{
+                                "version": "0.5",
+                                "name": "image",
+                                "axes": [
+                                    {"name": "t", "type": "time"},
+                                    {"name": "c", "type": "channel"},
+                                    {"name": "z", "type": "space"},
+                                    {"name": "y", "type": "space"},
+                                    {"name": "x", "type": "space"}
+                                ],
+                                "datasets": [{
+                                    "path": "0",
+                                    "coordinateTransformations": [{
+                                        "type": "scale",
+                                        "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+                                    }]
+                                }]
+                            }]
+                        }
+                    }
+                });
+                fs::write(
+                    fov_dir.join("zarr.json"),
+                    serde_json::to_string_pretty(&fov_root).unwrap(),
+                )
+                .unwrap();
+
+                // Level 0 array metadata.
+                let level_dir = fov_dir.join("0");
+                fs::create_dir_all(&level_dir).unwrap();
+                let arr = serde_json::json!({
+                    "zarr_format": 3,
+                    "node_type": "array",
+                    "shape": fov_shape,
+                    "data_type": "uint16",
+                    "chunk_grid": {
+                        "name": "regular",
+                        "configuration": {
+                            "chunk_shape": fov_chunk
+                        }
+                    },
+                    "codecs": [
+                        {"name": "bytes", "configuration": {"endian": "little"}}
+                    ],
+                    "fill_value": 0
+                });
+                fs::write(
+                    level_dir.join("zarr.json"),
+                    serde_json::to_string_pretty(&arr).unwrap(),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn read_dataset_info_detects_plate() {
+        let dir = temp_dir("plate_detect");
+        create_plate_fixture(
+            &dir,
+            "test_plate",
+            &["A", "B"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 2), ("B", "2", 1, 1, 1)],
+            [1, 1, 10, 256, 256],
+            [1, 1, 1, 128, 128],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let meta = read_dataset_info(&store, "plate-id", "test_plate").await.unwrap();
+
+        // Should have detected a plate.
+        match &meta.dataset.kind {
+            DatasetKind::Plate {
+                rows, columns, wells, positioning_mode, has_stage_positions,
+            } => {
+                assert_eq!(rows, &vec!["A", "B"]);
+                assert_eq!(columns, &vec!["1", "2"]);
+                assert_eq!(wells.len(), 2);
+                assert_eq!(*positioning_mode, PositioningMode::Grid);
+                assert!(!has_stage_positions);
+
+                // Well A/1 has 2 FOVs.
+                assert_eq!(wells[0].path, "A/1");
+                assert_eq!(wells[0].fovs.len(), 2);
+                assert_eq!(wells[0].fovs[0].store_prefix, "A/1/0");
+                assert_eq!(wells[0].fovs[1].store_prefix, "A/1/1");
+
+                // Well B/2 has 1 FOV.
+                assert_eq!(wells[1].path, "B/2");
+                assert_eq!(wells[1].fovs.len(), 1);
+                assert_eq!(wells[1].fovs[0].store_prefix, "B/2/0");
+            }
+            DatasetKind::Single => panic!("expected Plate, got Single"),
+        }
+
+        // Members should be created for each FOV (3 total: 2 + 1).
+        assert_eq!(meta.dataset.members.len(), 3);
+
+        // Each member should have a store_prefix.
+        for member in &meta.dataset.members {
+            assert!(member.store_prefix.is_some());
+        }
+
+        // Layers should have FOV shape, not plate extent.
+        let layer = &meta.dataset.layers[0];
+        assert_eq!(layer.data_shape, [10, 256, 256]);
+        assert_eq!(layer.chunk_size, [1, 128, 128]);
+        assert_eq!(layer.num_levels, 1);
+
+        // Volume shape should be the plate extent (larger than a single FOV).
+        let shape = meta.dataset.volume_shape.unwrap();
+        assert!(shape[1] >= 256, "plate height should be >= FOV height");
+        assert!(shape[2] >= 256, "plate width should be >= FOV width");
+        assert_eq!(shape[0], 10); // Z comes from FOV
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_plate_info_directly() {
+        let dir = temp_dir("plate_direct");
+        create_plate_fixture(
+            &dir,
+            "direct_plate",
+            &["A"],
+            &["1"],
+            &[("A", "1", 0, 0, 4)],
+            [1, 1, 1, 512, 512],
+            [1, 1, 1, 128, 128],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let plate = read_plate_info(&store, "direct_plate").await.unwrap();
+
+        assert_eq!(plate.name, "direct_plate");
+        assert_eq!(plate.rows, vec!["A"]);
+        assert_eq!(plate.columns, vec!["1"]);
+        assert_eq!(plate.wells.len(), 1);
+        assert_eq!(plate.wells[0].fovs.len(), 4);
+        assert_eq!(plate.fov_shape, [1, 512, 512]);
+        assert_eq!(plate.fov_chunk_size, [1, 128, 128]);
+        assert_eq!(plate.num_levels, 1);
+        assert!(!plate.has_stage_positions);
+        assert_eq!(plate.positioning_mode, PositioningMode::Grid);
+
+        // FOV positions should have been computed (grid mode).
+        // With 4 FOVs in a 2x2 grid, positions should not all be [0, 0].
+        let positions: Vec<[f64; 2]> = plate.wells[0].fovs.iter().map(|f| f.position).collect();
+        assert!(
+            positions.iter().any(|p| p[0] != 0.0 || p[1] != 0.0),
+            "not all FOV positions should be at origin",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn read_plate_info_not_a_plate_returns_error() {
+        let dir = temp_dir("not_plate");
+        create_fixture(&dir, 1, [1, 1, 10, 64, 64], [1, 1, 10, 32, 32]);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = read_plate_info(&store, "test").await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not a plate"),
+            "error should mention 'not a plate': {err_msg}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn plate_into_dataset_metadata_populates_members() {
+        let dir = temp_dir("plate_members");
+        create_plate_fixture(
+            &dir,
+            "member_plate",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 2), ("A", "2", 0, 1, 3)],
+            [1, 1, 1, 128, 128],
+            [1, 1, 1, 64, 64],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let plate = read_plate_info(&store, "member_plate").await.unwrap();
+        let meta = plate.into_dataset_metadata("ds-plate");
+
+        // 5 total members: 2 from A/1 + 3 from A/2.
+        assert_eq!(meta.dataset.members.len(), 5);
+
+        // All members should have store prefixes.
+        let prefixes: Vec<&str> = meta
+            .dataset
+            .members
+            .iter()
+            .map(|m| m.store_prefix.as_deref().unwrap())
+            .collect();
+        assert!(prefixes.contains(&"A/1/0"));
+        assert!(prefixes.contains(&"A/1/1"));
+        assert!(prefixes.contains(&"A/2/0"));
+        assert!(prefixes.contains(&"A/2/1"));
+        assert!(prefixes.contains(&"A/2/2"));
+
+        // Volume transform and shape should be set.
+        assert!(meta.dataset.volume_transform.is_some());
+        assert!(meta.dataset.volume_shape.is_some());
+        assert!(meta.dataset.client_metadata.is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }

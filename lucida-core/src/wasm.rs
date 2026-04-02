@@ -298,8 +298,129 @@ impl WasmScene {
     }
 
     pub fn chunk_plan_for(&self, dataset_id: &str) -> String {
-        let plan = self.inner.chunk_plan_for(dataset_id);
-        serde_json::to_string(&plan).unwrap()
+        let plans = self.inner.chunk_plan_for(dataset_id);
+        serde_json::to_string(&plans).unwrap()
+    }
+
+    /// Returns the model matrix for a specific member of a dataset,
+    /// with the member's position offset baked into the translation.
+    pub fn member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
+        let dataset = match self.inner.dataset_by_id(dataset_id) {
+            Some(ds) => ds,
+            None => return vec![
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        let member = dataset.effective_members().into_iter()
+            .find(|m| m.id == member_id);
+        let offset = match member {
+            Some(m) => m.position,
+            None => [0.0, 0.0],
+        };
+        let vol_shape = dataset.volume_shape.unwrap_or([1, 1, 1]);
+        let t = match dataset.volume_transform.as_ref() {
+            Some(t) => t,
+            None => return vec![
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        // Recover the original voxel scale from the volume transform.
+        // model[0] = phys_x / max_phys = (scale_x * vol_shape_x) / max_phys
+        // So scale_x = model[0] * max_phys / vol_shape_x
+        let max_phys = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+        let scale_x = if vol_shape[2] > 0 { t.model[0] as f64 * max_phys / vol_shape[2] as f64 } else { 1.0 };
+        let scale_y = if vol_shape[1] > 0 { t.model[5] as f64 * max_phys / vol_shape[1] as f64 } else { 1.0 };
+        let scale_z = if vol_shape[0] > 0 { t.model[10] as f64 * max_phys / vol_shape[0] as f64 } else { 1.0 };
+        // Use the FOV shape (layer data_shape) for member transforms, not the
+        // plate extent (volume_shape). Each FOV renders at its actual size.
+        let fov_shape = dataset.layers.first()
+            .map(|l| l.data_shape)
+            .unwrap_or(vol_shape);
+        let mt = crate::transform::compute_member_transform(
+            fov_shape,
+            [scale_z, scale_y, scale_x],
+            offset,
+            max_phys,
+        );
+        // Apply global correction for multi-dataset scenes (same as scene_model_matrix_for).
+        let global_max = self.inner.global_max_physical_extent();
+        let correction = (max_phys / global_max) as f32;
+        let mut m = mt.model;
+        m[0] *= correction;
+        m[5] *= correction;
+        m[10] *= correction;
+        m[12] *= correction;
+        m[13] *= correction;
+        // Top-align: shift smaller datasets up so top edges match.
+        let phys_y = t.model[5] as f64 * max_phys;
+        let global_max_y = self.inner.global_max_physical_y();
+        m[13] += ((global_max_y - phys_y) / global_max) as f32;
+        m.to_vec()
+    }
+
+    /// Returns the inverse model matrix for a specific member of a dataset.
+    pub fn inv_member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
+        let dataset = match self.inner.dataset_by_id(dataset_id) {
+            Some(ds) => ds,
+            None => return vec![
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        let member = dataset.effective_members().into_iter()
+            .find(|m| m.id == member_id);
+        let offset = match member {
+            Some(m) => m.position,
+            None => [0.0, 0.0],
+        };
+        let vol_shape = dataset.volume_shape.unwrap_or([1, 1, 1]);
+        let t = match dataset.volume_transform.as_ref() {
+            Some(t) => t,
+            None => return vec![
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        let max_phys = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+        let scale_x = if vol_shape[2] > 0 { t.model[0] as f64 * max_phys / vol_shape[2] as f64 } else { 1.0 };
+        let scale_y = if vol_shape[1] > 0 { t.model[5] as f64 * max_phys / vol_shape[1] as f64 } else { 1.0 };
+        let scale_z = if vol_shape[0] > 0 { t.model[10] as f64 * max_phys / vol_shape[0] as f64 } else { 1.0 };
+        let fov_shape = dataset.layers.first()
+            .map(|l| l.data_shape)
+            .unwrap_or(vol_shape);
+        let mt = crate::transform::compute_member_transform(
+            fov_shape,
+            [scale_z, scale_y, scale_x],
+            offset,
+            max_phys,
+        );
+        // Apply inverse global correction for multi-dataset scenes.
+        let global_max = self.inner.global_max_physical_extent();
+        let inv_correction = (global_max / max_phys) as f32;
+        let mut m = mt.inv_model;
+        m[0] *= inv_correction;
+        m[5] *= inv_correction;
+        m[10] *= inv_correction;
+        // The member inv_model already contains -tx/sx and -ty/sy in m[12], m[13].
+        // After scaling the diagonal by inv_correction, the translation entries
+        // (which encode -offset/scale) are unchanged because the offset was
+        // already in the pre-correction coordinate system.
+        // Add inverse of Y-translation (top-align): -ta * corrected_inv_sy.
+        let phys_y = t.model[5] as f64 * max_phys;
+        let global_max_y = self.inner.global_max_physical_y();
+        let ta = ((global_max_y - phys_y) / global_max) as f32;
+        m[13] -= ta * m[5];
+        m.to_vec()
     }
 
     // --- 3D camera methods ---

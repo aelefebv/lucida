@@ -78,72 +78,74 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
 
   for (const [dsId, ds] of datasets) {
     const coarsestIdx = ds.info.levels.length - 1;
-    const overviewKey = `${dsId}/${coarsestIdx}/${t}/${c}`;
-
-    // If key changed, reset tracking
-    if (state.overviewKey.get(dsId) !== overviewKey) {
-      state.overviewUploaded.set(dsId, new Set());
-      state.overviewSeeded.delete(dsId);
-      state.overviewKey.set(dsId, overviewKey);
-    }
-
-    // Already fully seeded at matching key
-    if (state.overviewSeeded.has(dsId)) continue;
-
     const levelMeta = ds.info.levels[coarsestIdx];
     const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
     const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
     const nz = Math.ceil(levelDepth / chunkZ);
     const ny = Math.ceil(levelHeight / chunkY);
     const nx = Math.ceil(levelWidth / chunkX);
+    const totalChunks = nz * ny * nx;
 
-    const uploaded = state.overviewUploaded.get(dsId)!;
-    const missing: { level: number; x: number; y: number; z: number; t: number; c: number; key: string }[] = [];
-    const available: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+    // Iterate per-member so each FOV gets its own minimap overview texture.
+    for (const [memberId, memberStore] of ds.memberStores) {
+      const overviewKey = `${memberId}/${coarsestIdx}/${t}/${c}`;
 
-    for (let iz = 0; iz < nz; iz++) {
-      for (let iy = 0; iy < ny; iy++) {
-        for (let ix = 0; ix < nx; ix++) {
-          const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
-          if (uploaded.has(chunkKey)) continue;
+      if (state.overviewKey.get(memberId) !== overviewKey) {
+        state.overviewUploaded.set(memberId, new Set());
+        state.overviewSeeded.delete(memberId);
+        state.overviewKey.set(memberId, overviewKey);
+      }
 
-          const buf = ds.store.get(chunkKey);
-          if (buf && buf.byteLength > 0) {
-            available.push({
-              data: bufferToUint16(buf, levelMeta.dataType),
-              x: ix, y: iy, z: iz, key: chunkKey,
-            });
-            uploaded.add(chunkKey);
-            budgetRemaining -= buf.byteLength;
-            if (budgetRemaining <= 0) break;
-          } else {
-            missing.push({ level: coarsestIdx, x: ix, y: iy, z: iz, t, c, key: chunkKey });
+      if (state.overviewSeeded.has(memberId)) continue;
+
+      const uploaded = state.overviewUploaded.get(memberId)!;
+      const missing: { level: number; x: number; y: number; z: number; t: number; c: number; key: string }[] = [];
+      const available: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+
+      for (let iz = 0; iz < nz; iz++) {
+        for (let iy = 0; iy < ny; iy++) {
+          for (let ix = 0; ix < nx; ix++) {
+            const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
+            if (uploaded.has(chunkKey)) continue;
+
+            const buf = memberStore.get(chunkKey) ?? null;
+            if (buf && buf.byteLength > 0) {
+              available.push({
+                data: bufferToUint16(buf, levelMeta.dataType),
+                x: ix, y: iy, z: iz, key: chunkKey,
+              });
+              uploaded.add(chunkKey);
+              budgetRemaining -= buf.byteLength;
+              if (budgetRemaining <= 0) break;
+            } else {
+              missing.push({ level: coarsestIdx, x: ix, y: iy, z: iz, t, c, key: chunkKey });
+            }
           }
+          if (budgetRemaining <= 0) break;
         }
         if (budgetRemaining <= 0) break;
       }
+
+      if (missing.length > 0) {
+        state.pendingFetch.set(memberId, missing);
+        needsRetry = true;
+      } else {
+        state.pendingFetch.delete(memberId);
+      }
+
+      if (available.length > 0) {
+        client.minimapUploadOverviewChunksForLayer(
+          memberId, available, t, c,
+          levelWidth, levelHeight, levelDepth,
+          chunkX, chunkY, chunkZ,
+        );
+      }
+
+      if (uploaded.size >= totalChunks) {
+        state.overviewSeeded.add(memberId);
+      }
+
       if (budgetRemaining <= 0) break;
-    }
-
-    if (missing.length > 0) {
-      state.pendingFetch.set(dsId, missing);
-      needsRetry = true;
-    } else {
-      state.pendingFetch.delete(dsId);
-    }
-
-    if (available.length > 0) {
-      client.minimapUploadOverviewChunksForLayer(
-        dsId, available, t, c,
-        levelWidth, levelHeight, levelDepth,
-        chunkX, chunkY, chunkZ,
-      );
-    }
-
-    // Check if all chunks are now uploaded
-    const totalChunks = nz * ny * nx;
-    if (uploaded.size >= totalChunks) {
-      state.overviewSeeded.add(dsId);
     }
 
     if (budgetRemaining <= 0) break;
@@ -182,23 +184,26 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];
 
   for (const dsId of layerOrder) {
-    if (!datasets.has(dsId)) continue;
+    const ds = datasets.get(dsId);
+    if (!ds) continue;
     const settings = allSettings[dsId];
     if (!settings || !settings.visible) continue;
 
-    const model = new Float32Array(scene.scene_model_matrix_for(dsId));
-    const invModel = new Float32Array(scene.inv_scene_model_matrix_for(dsId));
+    for (const memberId of ds.memberStores.keys()) {
+      const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
+      const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
 
-    layers.push({
-      datasetId: dsId,
-      modelMatrix: model,
-      invModelMatrix: invModel,
-      contrastMin: settings.contrast_min,
-      contrastMax: settings.contrast_max,
-      gamma: settings.gamma,
-    });
+      layers.push({
+        datasetId: memberId,
+        modelMatrix: model,
+        invModelMatrix: invModel,
+        contrastMin: settings.contrast_min,
+        contrastMax: settings.contrast_max,
+        gamma: settings.gamma,
+      });
 
-    overlayLayers.push({ datasetId: dsId, modelMatrix: model, invModelMatrix: invModel });
+      overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
+    }
   }
 
   if (layers.length > 0) {
@@ -206,12 +211,18 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   }
 
   if (state.overlayCallback) {
-    // Dataset dimensions
+    // Dataset dimensions (per member — all members share the same FOV shape)
     const datasetDims = new Map<string, { width: number; height: number; depth: number }>();
     for (const layer of overlayLayers) {
-      const ds = datasets.get(layer.datasetId);
-      if (ds) {
-        const shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+      // Find the parent dataset for this member
+      let shape: number[] | undefined;
+      for (const [, ds] of datasets) {
+        if (ds.memberStores.has(layer.datasetId)) {
+          shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+          break;
+        }
+      }
+      if (shape) {
         datasetDims.set(layer.datasetId, { width: shape[4], height: shape[3], depth: shape[2] });
       }
     }
@@ -249,8 +260,19 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
 }
 
 export function clearMinimapForDataset(state: MinimapState, dsId: string): void {
+  // Clear the dataset ID itself (single-member case).
   state.overviewKey.delete(dsId);
   state.overviewUploaded.delete(dsId);
   state.overviewSeeded.delete(dsId);
   state.pendingFetch.delete(dsId);
+  // Clear any member-keyed entries (plate case, e.g. "dsId:A/1/0").
+  const prefix = dsId + ":";
+  for (const key of [...state.overviewKey.keys()]) {
+    if (key.startsWith(prefix)) {
+      state.overviewKey.delete(key);
+      state.overviewUploaded.delete(key);
+      state.overviewSeeded.delete(key);
+      state.pendingFetch.delete(key);
+    }
+  }
 }

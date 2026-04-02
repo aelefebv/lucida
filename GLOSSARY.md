@@ -14,7 +14,9 @@
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **Dataset** | A named, ID'd collection of layers with shared spatial metadata (volume transform and shape) | Volume, image, file |
+| **Dataset** | A named, ID'd collection of layers with shared spatial metadata (volume transform and shape). Distinguished by **DatasetKind** (`Single` or `Plate`). Contains one or more **DatasetMembers** — positioned sub-volumes that share the dataset's layers and spatial metadata. | Volume, image, file |
+| **DatasetKind** | A discriminant on `Dataset`: `Single` (one member at the origin) or `Plate` (many positioned members with plate-specific metadata: rows, columns, wells, positioning mode). Only the **PlateSelector** UI reads the `Plate` variant. | Dataset type |
+| **DatasetMember** | A positioned sub-volume within a `Dataset`. Has an `id` (unique across all members), `position: [X, Y]` in voxel space (default `[0, 0]`), and optional `store_prefix` for chunk routing. A single dataset has one member at `[0, 0]`; a plate has one member per FOV. | FOV, tile, sub-volume |
 | **Layer** | A single image channel within a dataset, described by its data shape, chunk size, number of levels, and optional per-level info | Channel, array |
 | **LevelInfo** | Per-level shape and chunk size metadata for a layer, used when the multiscale pyramid is anisotropic | Resolution info, scale metadata |
 | **VolumeTransform** | A pair of 4x4 matrices (model + inverse) that maps the `[0,1]^3` unit cube to world space, accounting for anisotropic voxel spacing | Transform, model matrix, spatial transform |
@@ -22,6 +24,18 @@
 | **Data shape** | The full-resolution voxel dimensions of a layer, ordered `[Z, Y, X]` | Layer shape, array shape |
 | **Axes** | The OME multiscales `axes` array declaring which dimensions exist and their types (e.g., `[{name:"c",type:"channel"}, {name:"y",type:"space"}, {name:"x",type:"space"}]`). Datasets may have fewer than 5 axes; at parse time, shapes and chunk shapes are padded to canonical 5D `[T, C, Z, Y, X]` with missing dims = 1 so downstream code always sees 5D. The original axes list is preserved for chunk path construction. | Dimensions, dim order |
 | **Client metadata** | Opaque JSON attached to a dataset (dtype, codecs, level paths, axes) that the server passes through without interpretation | Dataset config, format info |
+
+## Plate model (HCS)
+
+| Term | Definition | Aliases to avoid |
+|------|-----------|-----------------|
+| **Plate** | An OME-Zarr 0.5 hierarchical container representing a multi-well experiment. Represented as a `Dataset` with `kind: Plate` and multiple **DatasetMembers** (one per FOV). Renders as a seamless spatial mosaic the user pans across. | Experiment, HCS container, well plate |
+| **PlateWell** | A well within a plate, identified by `path` (e.g. `"A/1"`), `row_index`, and `column_index`. Stored on the `DatasetKind::Plate` variant. | Position, site |
+| **FOV** | A field of view within a well — a single OME-Zarr image with its own multiscale pyramid. Represented as a **DatasetMember** with `store_prefix` (e.g. `"A/1/0"`) and computed `position: [X, Y]` in plate pixel space. | Site, field, image, tile |
+| **Store prefix** | The store path prefix on a **DatasetMember** (e.g. `"A/1/0"`). Prepended to chunk paths when serving FOV chunks: `{store_prefix}/{level}/c/{coords}`. Carried on `ChunkMessage::ChunkRequest`. | FOV prefix, path prefix |
+| **PositioningMode** | How FOVs are arranged within a plate: **Stage** (using translation coordinates from OME-Zarr `coordinateTransformations`) or **Grid** (uniform tiling with gaps). Togglable via the **PlateSelector** when stage positions are available. | Layout mode |
+| **MemberChunkPlan** | The per-member output of `chunk_plan_for()`: member ID, position, store prefix, and needed/prefetch chunk lists. `chunk_plan_for()` returns `Vec<MemberChunkPlan>` — one entry per visible member after AABB culling. | Chunk plan, FOV plan |
+| **PlateSelector** | The well grid overlay UI component. Reads `DatasetKind::Plate` metadata from the dataset. Clicking a well pans the camera. Includes a stage/grid positioning toggle. The **only** component that knows about plates. | Well selector, plate navigator |
 
 ## Volume and voxels (lucida-store)
 
@@ -112,7 +126,7 @@
 |------|-----------|-----------------|
 | **ChunkCoord** | A chunk's address in the multiscale grid: level, x, y, z, t, c | Tile coordinate, block index |
 | **Chunk key** | The string encoding of a ChunkCoord in the format `level/t/c/z/y/x` | Chunk ID, chunk path |
-| **ChunkRequestPlan** | The output of chunk planning: a `needed` list (visible now) and a `prefetch` list (border for upcoming pans) | Chunk list, fetch plan, tile plan |
+| **ChunkRequestPlan** | A flat chunk plan with `needed` and `prefetch` lists. Used internally by `chunk_plan()` (backward compat). The primary output of `chunk_plan_for()` is now `Vec<MemberChunkPlan>` — one per visible **DatasetMember**. | Chunk list, fetch plan, tile plan |
 | **Level** | A resolution tier in the multiscale pyramid; level 0 is full resolution, each subsequent level halves the data (isotropic) or follows LevelInfo (anisotropic) | Resolution level, LOD, mipmap level, scale |
 | **Prefetch** | Chunks in the 1-chunk XY border surrounding the visible region, fetched proactively for smooth panning (2D only, no Z expansion) | Preload, buffer zone |
 | **Frustum culling** | Per-chunk rejection of chunks whose AABB lies entirely outside any frustum plane, using the p-vertex method | View culling, visibility test |
@@ -122,7 +136,7 @@
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
 | **Command** | A wrapper enum (`Command::Document` / `Command::Viewport`) used for serde-compatible deserialization of both command types | Action, event, message, operation |
-| **DocumentCommand** | A command enum (3 variants) that mutates shared DocumentState (AddDataset, RemoveDataset, SetVolumeScale) -- sequenced, persisted, and broadcast to all clients. `ClientMessage::Command` and `ServerMessage::CommandBroadcast` carry this type. | Shared command, sync command, Command (ambiguous) |
+| **DocumentCommand** | A command enum (3 variants) that mutates shared DocumentState (AddDataset, RemoveDataset, SetVolumeScale) -- sequenced, persisted, and broadcast to all clients. `AddDataset` carries `kind: DatasetKind` and `members: Vec<DatasetMember>` (both with serde defaults for backward compat). `ClientMessage::Command` and `ServerMessage::CommandBroadcast` carry this type. | Shared command, sync command, Command (ambiguous) |
 | **ViewportCommand** | A command enum (~23 variants) that mutates local-only state (camera, display, view, dataset display settings) -- applied locally and emitted as presence | Local command, ephemeral command, Command (ambiguous) |
 | **ClientMessage** | A tagged message sent from a client to the server: Command, Presence, Cursor, Follow, DatasetPresence, or Steer | Client event, upstream message |
 | **ServerMessage** | A tagged message sent from the server to clients: Snapshot, CommandBroadcast, Ack, PeerJoined/Left, PresenceUpdate, CursorUpdate, FollowChanged, DatasetPresenceUpdate | Server event, downstream message |
@@ -132,7 +146,7 @@
 | **Presence** | An ephemeral, latest-wins update of a client's camera, view, and display state | Viewport update, heartbeat |
 | **Follow** | A peer-to-peer mode where one client mirrors another's presence; transitive chains resolved server-side | Sync view, link, mirror |
 | **Steer** | A remote-control action that makes another client follow the sender | Remote control, force-follow |
-| **ChunkMessage** | A message for chunk data relay: ChunkRequest (viewer to server) or ChunkFetch (server to data source) | Data request, tile message |
+| **ChunkMessage** | A message for chunk data relay: ChunkRequest (viewer to server, with optional `store_prefix` for **DatasetMember** routing) or ChunkFetch (server to data source) | Data request, tile message |
 | **OpenRemoteDataset** | A **ClientMessage** requesting the server open a **Dataset** from a URL (local path or `gs://` URI). The server reads metadata via a **StorageBackend** and broadcasts the resulting `AddDataset` **DocumentCommand** to all **Clients**. Not a **DocumentCommand** itself — it is a request that produces one. | Open URL, remote open |
 | **OpenDatasetFailed** | A **ServerMessage** sent via **Unicast** to the requesting **Client** when an **OpenRemoteDataset** cannot be fulfilled (invalid URL, auth failure, missing metadata). | Error, open error |
 
@@ -244,8 +258,12 @@
 
 - A **Scene** contains exactly one **Camera**, one **ViewState**, one **DocumentState**, one **DisplayState**, a **Dataset order**, and a map of **DatasetDisplaySettings**
 - A **Session** contains exactly one **DocumentState**, one **History**, one data source registry, and a map of **ClientId** to **PresenceState**
-- A **DocumentState** contains zero or more **Datasets**
+- A **DocumentState** contains zero or more **Datasets** (both single and plate datasets live in the same list)
+- A **Dataset** has a **DatasetKind** (`Single` or `Plate`) and one or more **DatasetMembers** (positioned sub-volumes sharing the dataset's layers)
 - A **Dataset** contains zero or more **Layers** and optionally one **VolumeTransform** and **Volume shape**
+- A **Plate** dataset's `kind` holds plate metadata (rows, columns, wells, positioning mode); each FOV is a **DatasetMember** with a `store_prefix` and computed position
+- A **PlateSelector** reads **DatasetKind::Plate** from the dataset and pans the **Camera** to well positions on click
+- A **MemberChunkPlan** is produced by `chunk_plan_for()` — one per visible **DatasetMember** after AABB culling. Each contains the member's chunk lists tagged with its **store prefix** for routing
 - A **Dataset** has exactly one **Data Source**: either a **Client** (peer-hosted) or the server (server-hosted)
 - A **Server-hosted Dataset** is opened via **OpenRemoteDataset** and served by the server via a **StorageBackend** wrapped in a **Chunk Cache**
 - A **Peer-hosted Dataset** is opened via `AddDataset` from a **Client**; if that **Client** disconnects, the data source mapping is removed
