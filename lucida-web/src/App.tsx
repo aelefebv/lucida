@@ -144,6 +144,7 @@ function App() {
     wasmSceneRef: scene.wasmSceneRef,
     loopRef: render.loopRef,
     bridgeRef: bridge.bridgeRef,
+    datasetsRef,
     setDataRangeMap: layers.setDataRangeMap,
   });
 
