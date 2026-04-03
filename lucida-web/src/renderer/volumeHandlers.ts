@@ -1,7 +1,7 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
   VolumeWriteFallbackChunkMessage,
-  VolumeChunkPlanMessage,
+  VolumeAtlasConfigMessage,
   VolumeChunkDataMessage,
   VolumeRenderMultiPassMessage,
 } from "./workerProtocol.ts";
@@ -24,6 +24,7 @@ interface AtlasState {
   levelWidth: number; levelHeight: number; levelDepth: number;
   level: number; t: number; c: number;
   intensityMin: number; intensityMax: number;
+  indirectionDirty: boolean;
 }
 
 interface FallbackState {
@@ -127,6 +128,7 @@ function createVolumeAtlas(
     levelWidth: levelW, levelHeight: levelH, levelDepth: levelD,
     level, t, c,
     intensityMin: 65535, intensityMax: 0,
+    indirectionDirty: true,
   };
 }
 
@@ -192,43 +194,15 @@ export function handleVolumeWriteFallbackChunk(ctx: WorkerCtx, msg: VolumeWriteF
   }
 }
 
-export function handleVolumeChunkPlan(ctx: WorkerCtx, msg: VolumeChunkPlanMessage): void {
+export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: VolumeAtlasConfigMessage): void {
   const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
-  // Get or create atlas (recreate on LOD/T/C/chunkShape change)
-  let atlas = atlasPerDataset.get(datasetId);
-  if (!atlas || atlas.level !== level || atlas.t !== t || atlas.c !== c
-      || atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
-    if (atlas) destroyAtlas(atlas);
-    atlas = createVolumeAtlas(ctx.device, levelWidth, levelHeight, levelDepth,
-      chunkX, chunkY, chunkZ, level, t, c);
-    atlasPerDataset.set(datasetId, atlas);
-  }
-
-  // Update ray hit point for eviction distance
-  rayHitPerDataset.set(datasetId, msg.hitLocal);
-
-  // Diff needed vs atlas.slots to find missing chunks that are available in main cache
-  const availableSet = new Set(msg.availableKeys);
-  const requestKeys: string[] = [];
-  for (const coord of msg.needed) {
-    if (atlas.slots.has(coord.key)) continue; // already in atlas
-    if (!availableSet.has(coord.key)) continue; // not available in main cache
-    requestKeys.push(coord.key);
-  }
-
-  if (requestKeys.length > 0) {
-    ctx.post({
-      type: "chunkDataRequest",
-      datasetId,
-      keys: requestKeys,
-      mode: "volume",
-      level, t, c,
-      levelWidth, levelHeight, levelDepth,
-      chunkX, chunkY, chunkZ,
-      hitLocal: msg.hitLocal,
-    });
-  }
+  // Recreate atlas for new LOD/T/C/chunkShape
+  const atlas = atlasPerDataset.get(datasetId);
+  if (atlas) destroyAtlas(atlas);
+  const newAtlas = createVolumeAtlas(ctx.device, levelWidth, levelHeight, levelDepth,
+    chunkX, chunkY, chunkZ, level, t, c);
+  atlasPerDataset.set(datasetId, newAtlas);
 }
 
 export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessage): void {
@@ -288,6 +262,7 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
     atlas.indirectionData[gridIdx] = slotIndex;
     atlas.slotGridIdx[slotIndex] = gridIdx;
     atlas.slots.set(chunkKey, slotIndex);
+    atlas.indirectionDirty = true;
 
     const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
     const { min, max } = sampleIntensityRange(data, perChunkSamples);
@@ -327,8 +302,11 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     }
 
     if (atlas) {
-      // Flush indirection data to GPU
-      ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
+      // Flush indirection data to GPU only if chunks changed since last render
+      if (atlas.indirectionDirty) {
+        ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
+        atlas.indirectionDirty = false;
+      }
       renderer.setAtlas(
         atlas.texture, atlas.indirectionBuf,
         [atlas.chunkX, atlas.chunkY, atlas.chunkZ],

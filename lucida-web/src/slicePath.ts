@@ -10,12 +10,15 @@ import type { SceneSettings } from "./tickCommon.ts";
 export interface SliceState {
   prevTCZ: Map<string, string>;
   seedPending: Map<string, { level: number; coords: ChunkCoord[]; z: number; sentKeys: Set<string> }>;
+  /** Tracks which chunks have been sent to the worker per member (cleared on atlas reset). */
+  sentToWorker: Map<string, Set<string>>;
 }
 
 export function createSliceState(): SliceState {
   return {
     prevTCZ: new Map(),
     seedPending: new Map(),
+    sentToWorker: new Map(),
   };
 }
 
@@ -80,11 +83,12 @@ function planAndFetchSlice(
       const sharedQueue = ds.sharedQueue;
       const targetLevel = mp.needed[0]?.level;
 
-      // Detect T/C/Z change and compute coarse seed coords
+      // Detect T/C/Z change for seed computation.
+      // prevTCZ now stores "T/C/Z/level" (set in upload phase), so extract T/C/Z prefix for seed check.
       const tczKey = `${t}/${c}/${z}`;
-      const prevTCZKey = state.prevTCZ.get(memberId);
-      const needsSeed = prevTCZKey === undefined || prevTCZKey !== tczKey;
-      state.prevTCZ.set(memberId, tczKey);
+      const prevTCZLevel = state.prevTCZ.get(memberId);
+      const prevTCZOnly = prevTCZLevel?.substring(0, prevTCZLevel.lastIndexOf("/"));
+      const needsSeed = prevTCZOnly === undefined || prevTCZOnly !== tczKey;
 
       if (needsSeed && targetLevel !== undefined) {
         const seedLevel = ds.info.levels.length - 1;
@@ -217,23 +221,49 @@ function uploadAndRenderSlice(
       const fullResDepth = ds.info.levels[0].shape[2];
       const levelDepth = levelMeta.shape[2];
 
-      // Build available keys and send plan to worker
-      const availableKeys: string[] = [];
+      // --- Atlas config on LOD/T/C/Z change ---
+      const tczLevelKey = `${t}/${c}/${z}/${level}`;
+      const prevTCZLevel = state.prevTCZ.get(memberId);
+      if (prevTCZLevel !== tczLevelKey) {
+        client.sliceAtlasConfig(
+          memberId, level, z, t, c,
+          levelWidth, levelHeight,
+          chunkX, chunkY,
+        );
+        state.sentToWorker.delete(memberId);
+        state.prevTCZ.set(memberId, tczLevelKey);
+      }
+
+      // --- Direct chunk push: send available chunks not yet sent ---
+      let sentSet = state.sentToWorker.get(memberId);
+      if (!sentSet) {
+        sentSet = new Set();
+        state.sentToWorker.set(memberId, sentSet);
+      }
+      // Prune sentToWorker to current needed set — if a chunk left the viewport,
+      // it may have been evicted by the worker. Re-send if it becomes needed again.
+      const neededKeys = new Set(mp.needed.filter(c => c.level === level).map(c => c.key));
+      for (const key of sentSet) {
+        if (!neededKeys.has(key)) sentSet.delete(key);
+      }
+      const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
       for (const coord of mp.needed) {
         if (coord.level !== level) continue;
-        if (sharedQueue.has(memberId, coord.key)) {
-          availableKeys.push(coord.key);
-        }
+        if (sentSet.has(coord.key)) continue;
+        const buf = sharedQueue.get(memberId, coord.key);
+        if (!buf || buf.byteLength === 0) continue;
+        chunksToSend.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+        sentSet.add(coord.key);
       }
-      client.sliceChunkPlan(
-        memberId,
-        mp.needed.filter(c => c.level === level).map(c => ({ level: c.level, x: c.x, y: c.y, z: c.z, key: c.key })),
-        availableKeys,
-        level, z, t, c,
-        levelWidth, levelHeight,
-        chunkX, chunkY, chunkZ,
-        fullResDepth, levelDepth, z,
-      );
+      if (chunksToSend.length > 0) {
+        client.sliceChunkData(
+          memberId, chunksToSend,
+          level, z, t, c,
+          levelWidth, levelHeight,
+          chunkX, chunkY, chunkZ,
+          fullResDepth, levelDepth, z,
+        );
+      }
     }
   }
 
@@ -306,6 +336,7 @@ export function tickSlice(
 export function clearSliceForDataset(state: SliceState, dsId: string): void {
   state.prevTCZ.delete(dsId);
   state.seedPending.delete(dsId);
+  state.sentToWorker.delete(dsId);
 }
 
 /** Clear member-keyed entries for all members of a dataset. */
@@ -313,5 +344,6 @@ export function clearSliceForMembers(state: SliceState, memberIds: string[]): vo
   for (const id of memberIds) {
     state.prevTCZ.delete(id);
     state.seedPending.delete(id);
+    state.sentToWorker.delete(id);
   }
 }

@@ -13,7 +13,6 @@ export class RenderClient {
   private readyPromise: Promise<void>;
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
-  onChunkDataRequest: ((datasetId: string, keys: string[], mode: "slice" | "volume", level: number, t: number, c: number, levelWidth: number, levelHeight: number, levelDepth: number, chunkX: number, chunkY: number, chunkZ: number, hitLocal: [number, number, number], z?: number, fullResDepth?: number, fullResZ?: number) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -47,8 +46,6 @@ export class RenderClient {
     const msg = e.data;
     if (msg.type === "intensityRange" && this.onIntensityRange) {
       this.onIntensityRange(msg.datasetId, msg.min, msg.max);
-    } else if (msg.type === "chunkDataRequest" && this.onChunkDataRequest) {
-      this.onChunkDataRequest(msg.datasetId, msg.keys, msg.mode, msg.level, msg.t, msg.c, msg.levelWidth, msg.levelHeight, msg.levelDepth, msg.chunkX, msg.chunkY, msg.chunkZ, msg.hitLocal, msg.z, msg.fullResDepth, msg.fullResZ);
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
     }
@@ -72,10 +69,8 @@ export class RenderClient {
     );
   }
 
-  volumeChunkPlan(
+  volumeAtlasConfig(
     datasetId: string,
-    needed: { level: number; x: number; y: number; z: number; key: string }[],
-    availableKeys: string[],
     level: number,
     t: number,
     c: number,
@@ -85,14 +80,13 @@ export class RenderClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
-    hitLocal: [number, number, number],
   ) {
     this.worker.postMessage({
-      type: "volumeChunkPlan",
-      datasetId, needed, availableKeys,
+      type: "volumeAtlasConfig",
+      datasetId,
       level, t, c,
       levelWidth, levelHeight, levelDepth,
-      chunkX, chunkY, chunkZ, hitLocal,
+      chunkX, chunkY, chunkZ,
     });
   }
 
@@ -143,10 +137,8 @@ export class RenderClient {
     );
   }
 
-  sliceChunkPlan(
+  sliceAtlasConfig(
     datasetId: string,
-    needed: { level: number; x: number; y: number; z: number; key: string }[],
-    availableKeys: string[],
     level: number,
     z: number,
     t: number,
@@ -155,18 +147,13 @@ export class RenderClient {
     levelHeight: number,
     chunkX: number,
     chunkY: number,
-    chunkZ: number,
-    fullResDepth: number,
-    levelDepth: number,
-    fullResZ: number,
   ) {
     this.worker.postMessage({
-      type: "sliceChunkPlan",
-      datasetId, needed, availableKeys,
+      type: "sliceAtlasConfig",
+      datasetId,
       level, z, t, c,
       levelWidth, levelHeight,
-      chunkX, chunkY, chunkZ,
-      fullResDepth, levelDepth, fullResZ,
+      chunkX, chunkY,
     });
   }
 

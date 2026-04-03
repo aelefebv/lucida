@@ -41,11 +41,9 @@ export interface SliceWriteFallbackChunkMessage {
   srcStride: number;
 }
 
-export interface SliceChunkPlanMessage {
-  type: "sliceChunkPlan";
+export interface SliceAtlasConfigMessage {
+  type: "sliceAtlasConfig";
   datasetId: string;
-  needed: { level: number; x: number; y: number; z: number; key: string }[];
-  availableKeys: string[];
   level: number;
   z: number;
   t: number;
@@ -54,10 +52,6 @@ export interface SliceChunkPlanMessage {
   levelHeight: number;
   chunkX: number;
   chunkY: number;
-  chunkZ: number;
-  fullResDepth: number;
-  levelDepth: number;
-  fullResZ: number;
 }
 
 export interface SliceChunkDataMessage {
@@ -104,11 +98,9 @@ export interface VolumeWriteFallbackChunkMessage {
   srcChunkY: number;
 }
 
-export interface VolumeChunkPlanMessage {
-  type: "volumeChunkPlan";
+export interface VolumeAtlasConfigMessage {
+  type: "volumeAtlasConfig";
   datasetId: string;
-  needed: { level: number; x: number; y: number; z: number; key: string }[];
-  availableKeys: string[];
   level: number;
   t: number;
   c: number;
@@ -118,7 +110,6 @@ export interface VolumeChunkPlanMessage {
   chunkX: number;
   chunkY: number;
   chunkZ: number;
-  hitLocal: [number, number, number];
 }
 
 export interface VolumeChunkDataMessage {
@@ -264,10 +255,10 @@ export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
   | SliceWriteFallbackChunkMessage
-  | SliceChunkPlanMessage
+  | SliceAtlasConfigMessage
   | SliceChunkDataMessage
   | VolumeWriteFallbackChunkMessage
-  | VolumeChunkPlanMessage
+  | VolumeAtlasConfigMessage
   | VolumeChunkDataMessage
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage
@@ -298,29 +289,7 @@ export interface IntensityRangeMessage {
   max: number;
 }
 
-export interface ChunkDataRequestMessage {
-  type: "chunkDataRequest";
-  datasetId: string;
-  keys: string[];
-  mode: "slice" | "volume";
-  level: number;
-  t: number;
-  c: number;
-  levelWidth: number;
-  levelHeight: number;
-  levelDepth: number;
-  chunkX: number;
-  chunkY: number;
-  chunkZ: number;
-  hitLocal: [number, number, number];
-  // Slice-specific fields (present when mode === "slice")
-  z?: number;
-  fullResDepth?: number;
-  fullResZ?: number;
-}
-
 export type WorkerToMainMessage =
   | ReadyMessage
   | ErrorMessage
-  | IntensityRangeMessage
-  | ChunkDataRequestMessage;
+  | IntensityRangeMessage;

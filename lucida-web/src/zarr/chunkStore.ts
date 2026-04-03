@@ -146,7 +146,14 @@ export class SharedChunkQueue {
           this.pendingQueue.push(coord);
         }
       }
-      this.inFlightSince = performance.now();
+      // If workers exited but pending items remain, restart them
+      if (this.pendingQueue.length > 0 && this.activeWorkerCount === 0) {
+        this.launchFetchTasks();
+      }
+      // Only reset stale timer if workers are actively making progress
+      if (this.activeWorkerCount > 0) {
+        this.inFlightSince = performance.now();
+      }
       return;
     }
 

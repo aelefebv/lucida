@@ -2,11 +2,10 @@
 import type { DatasetInfo } from "./zarr/metadata.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
-import { UPLOAD_BUDGET_BYTES, DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+import { DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
-import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 
 // Re-export types so downstream imports stay unchanged
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -55,25 +54,6 @@ export class RenderLoop {
       }));
     }
 
-    // Handle chunk data requests from the worker
-    this.client.onChunkDataRequest = (
-      datasetId, keys, mode,
-      level, t, c,
-      levelWidth, levelHeight, levelDepth,
-      chunkX, chunkY, chunkZ,
-      hitLocal,
-      z, fullResDepth, fullResZ,
-    ) => {
-      this.handleChunkDataRequest(
-        datasetId, keys, mode,
-        level, t, c,
-        levelWidth, levelHeight, levelDepth,
-        chunkX, chunkY, chunkZ,
-        hitLocal,
-        z, fullResDepth, fullResZ,
-      );
-    };
-
     this.viewDirty = true;
     this.scheduleIfNeeded();
   }
@@ -87,80 +67,6 @@ export class RenderLoop {
       unsub();
     }
     this.unsubs.clear();
-    this.client.onChunkDataRequest = null;
-  }
-
-  /** Fulfill a chunk data request from the worker within upload budget. */
-  private handleChunkDataRequest(
-    datasetId: string,
-    keys: string[],
-    mode: "slice" | "volume",
-    level: number,
-    t: number,
-    c: number,
-    levelWidth: number,
-    levelHeight: number,
-    levelDepth: number,
-    chunkX: number,
-    chunkY: number,
-    chunkZ: number,
-    hitLocal: [number, number, number],
-    z?: number,
-    fullResDepth?: number,
-    fullResZ?: number,
-  ): void {
-    // Find the SharedChunkQueue and DatasetInfo for this member
-    let queue: SharedChunkQueue | null = null;
-    let dsInfo: DatasetInfo | null = null;
-    for (const [, ds] of this.datasets) {
-      if (ds.sharedQueue.hasMember(datasetId)) {
-        queue = ds.sharedQueue;
-        dsInfo = ds.info;
-        break;
-      }
-    }
-    if (!queue || !dsInfo) return;
-
-    const levelMeta = dsInfo.levels[level];
-    if (!levelMeta) return;
-
-    let budget = UPLOAD_BUDGET_BYTES;
-    const chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-    for (const key of keys) {
-      const buf = queue.get(datasetId, key);
-      if (!buf || buf.byteLength === 0) continue;
-      // Parse key to get coords: "level/t/c/z/y/x"
-      const parts = key.split("/").map(Number);
-      const [, , , kz, ky, kx] = parts;
-      chunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: kx, y: ky, z: kz, key });
-      budget -= buf.byteLength;
-      if (budget <= 0) break;
-    }
-
-    if (chunks.length > 0) {
-      if (mode === "volume") {
-        this.client.volumeChunkData(
-          datasetId, chunks,
-          level, t, c,
-          levelWidth, levelHeight, levelDepth,
-          chunkX, chunkY, chunkZ,
-          hitLocal,
-        );
-      } else if (mode === "slice") {
-        this.client.sliceChunkData(
-          datasetId, chunks,
-          level, z!, t, c,
-          levelWidth, levelHeight,
-          chunkX, chunkY, chunkZ,
-          fullResDepth!, levelDepth, fullResZ!,
-        );
-      }
-    }
-
-    if (budget <= 0) {
-      this.dataDirty = true;
-      this.scheduleIfNeeded();
-    }
   }
 
   addDataset(id: string, sharedQueue: SharedChunkQueue, info: DatasetInfo): void {

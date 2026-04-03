@@ -34,9 +34,6 @@ export interface MinimapOverlayData {
   mainInvViewProj: Float32Array | null;
 }
 
-/** Max bytes of chunk data to upload to the GPU per RAF tick. */
-export const UPLOAD_BUDGET_BYTES = 4 * 1024 * 1024; // 4 MB per frame
-
 /** Minimum interval between data-triggered renders (ms). View-triggered renders are immediate. */
 export const DATA_RENDER_INTERVAL_MS = 100;
 

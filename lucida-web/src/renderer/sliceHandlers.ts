@@ -1,7 +1,7 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
   SliceWriteFallbackChunkMessage,
-  SliceChunkPlanMessage,
+  SliceAtlasConfigMessage,
   SliceChunkDataMessage,
   SliceRenderMultiPassMessage,
 } from "./workerProtocol.ts";
@@ -24,6 +24,7 @@ interface SliceAtlasState {
   levelWidth: number; levelHeight: number;
   level: number; z: number; t: number; c: number;
   intensityMin: number; intensityMax: number;
+  indirectionDirty: boolean;
 }
 
 const atlasPerDataset = new Map<string, SliceAtlasState>();
@@ -97,6 +98,7 @@ function createSliceAtlas(
     levelWidth: levelW, levelHeight: levelH,
     level, z, t, c,
     intensityMin: 65535, intensityMax: 0,
+    indirectionDirty: true,
   };
 }
 
@@ -158,40 +160,14 @@ export function handleSliceWriteFallbackChunk(ctx: WorkerCtx, msg: SliceWriteFal
   }
 }
 
-export function handleSliceChunkPlan(ctx: WorkerCtx, msg: SliceChunkPlanMessage): void {
-  const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
+export function handleSliceAtlasConfig(ctx: WorkerCtx, msg: SliceAtlasConfigMessage): void {
+  const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY } = msg;
 
-  // Get or create atlas (recreate on LOD/Z/T/C/chunkShape change)
-  let atlas = atlasPerDataset.get(datasetId);
-  if (!atlas || atlas.level !== level || atlas.z !== z || atlas.t !== t || atlas.c !== c
-      || atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
-    if (atlas) destroySliceAtlas(atlas);
-    atlas = createSliceAtlas(ctx.device, levelWidth, levelHeight, chunkX, chunkY, level, z, t, c);
-    atlasPerDataset.set(datasetId, atlas);
-  }
-
-  // Diff needed vs atlas.slots to find missing chunks that are available in main cache
-  const availableSet = new Set(msg.availableKeys);
-  const requestKeys: string[] = [];
-  for (const coord of msg.needed) {
-    if (atlas.slots.has(coord.key)) continue; // already in atlas
-    if (!availableSet.has(coord.key)) continue; // not available in main cache
-    requestKeys.push(coord.key);
-  }
-
-  if (requestKeys.length > 0) {
-    ctx.post({
-      type: "chunkDataRequest",
-      datasetId,
-      keys: requestKeys,
-      mode: "slice",
-      level, t, c,
-      levelWidth, levelHeight, levelDepth,
-      chunkX, chunkY, chunkZ,
-      hitLocal: [0.5, 0.5, 0.5], // unused for slice mode
-      z, fullResDepth, fullResZ,
-    });
-  }
+  // Recreate atlas for new LOD/Z/T/C/chunkShape
+  const atlas = atlasPerDataset.get(datasetId);
+  if (atlas) destroySliceAtlas(atlas);
+  const newAtlas = createSliceAtlas(ctx.device, levelWidth, levelHeight, chunkX, chunkY, level, z, t, c);
+  atlasPerDataset.set(datasetId, newAtlas);
 }
 
 export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage): void {
@@ -262,6 +238,7 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage)
     atlas.indirectionData[gridIdx] = slotIndex;
     atlas.slotGridIdx[slotIndex] = gridIdx;
     atlas.slots.set(chunk.key, slotIndex);
+    atlas.indirectionDirty = true;
   }
 
   if (intensityChanged) {
@@ -298,8 +275,11 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
     renderer.setFallback(fb?.texture ?? ctx.getDummyTexture());
 
     if (atlas) {
-      // Flush indirection data to GPU
-      ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
+      // Flush indirection data to GPU only if chunks changed since last render
+      if (atlas.indirectionDirty) {
+        ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
+        atlas.indirectionDirty = false;
+      }
       renderer.setAtlas(
         atlas.texture, atlas.indirectionBuf,
         [atlas.chunkX, atlas.chunkY],
