@@ -7,7 +7,7 @@ import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
-import type { VolumeData } from "./zarr/volumeAssembler.ts";
+import type { VolumeData } from "./types.ts";
 import type { DatasetState, PendingChunkResolve } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
@@ -96,19 +96,7 @@ function App() {
   });
 
   const datasets = useDatasets({
-    wasmSceneRef: scene.wasmSceneRef,
-    ensureScene: scene.ensureScene,
-    setWasmScene: scene.setWasmScene,
-    loopRef: render.loopRef,
-    datasetsRef,
-    sendCommand: bridge.sendCommand,
-    emitPresence: bridge.emitPresence,
-    emitDatasetPresence: bridge.emitDatasetPresence,
-    initLayerMaps: layers.initLayerMaps,
     sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,
-    setSelectedDatasetId,
-    setVolumeMap,
-    bumpDatasetsVersion,
   });
 
   // Populate callback refs — runs during render, before effects fire
@@ -406,9 +394,9 @@ function App() {
             onClose={() => setShowFileBrowser(false)}
           />
         )}
-        {(datasets.loading || bridge.remoteDatasetLoading) && <p className="secondary">Loading volume...</p>}
-        {(render.renderError || datasets.loadError || bridge.remoteDatasetError) && (
-          <p style={{ color: "#f44" }}>{render.renderError || datasets.loadError || bridge.remoteDatasetError}</p>
+        {bridge.remoteDatasetLoading && <p className="secondary">Loading volume...</p>}
+        {(render.renderError || bridge.remoteDatasetError) && (
+          <p style={{ color: "#f44" }}>{render.renderError || bridge.remoteDatasetError}</p>
         )}
       </div>
     </div>

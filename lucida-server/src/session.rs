@@ -22,8 +22,6 @@ pub struct Session {
     pub document: DocumentState,
     pub seq: u64,
     history: VecDeque<(u64, DocumentCommand)>,
-    /// Maps dataset_id → client_id of the data source (peer-hosted datasets).
-    pub data_sources: HashMap<String, ClientId>,
     /// Server-hosted datasets: dataset_id → cached StorageBackend + axes.
     pub server_stores: HashMap<String, ServerStore>,
     /// Per-client ephemeral presence state.
@@ -38,7 +36,6 @@ impl Session {
             },
             seq: 0,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
-            data_sources: HashMap::new(),
             server_stores: HashMap::new(),
             clients: HashMap::new(),
         }

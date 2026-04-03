@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import type { WasmScene } from "lucida-core";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop } from "../renderLoop.ts";
-import type { VolumeData } from "../zarr/volumeAssembler.ts";
+import type { VolumeData } from "../types.ts";
 import type { DatasetState } from "../types.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 

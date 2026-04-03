@@ -8,7 +8,7 @@ import { SharedChunkQueue } from "../zarr/chunkStore.ts";
 import type { DatasetState, DatasetMember, PendingChunkResolve } from "../types.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import type { RenderLoop } from "../renderLoop.ts";
-import type { VolumeData } from "../zarr/volumeAssembler.ts";
+import type { VolumeData } from "../types.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 
 interface Params {
@@ -141,9 +141,6 @@ export function useBridge({
         }
       },
       onAck: (_seq) => {},
-      onChunkFetch: (clientId, datasetId, key, storePrefix) => {
-        serveChunkFetch(clientId, datasetId, key, storePrefix);
-      },
       onChunkData: (key, data) => {
         const pending = pendingChunkRequests.current.get(key);
         if (pending) {
@@ -360,25 +357,6 @@ export function useBridge({
     }
 
     bumpDatasetsVersion();
-  }
-
-  function sendEmptyChunkResponse(clientId: number, datasetId: string, key: string, storePrefix: string | null = null) {
-    const compositeKey = storePrefix
-      ? `${datasetId}/${storePrefix}/${key}`
-      : `${datasetId}/${key}`;
-    const keyBytes = new TextEncoder().encode(compositeKey);
-    const headerSize = 4 + 2 + keyBytes.length;
-    const message = new Uint8Array(headerSize);
-    const view = new DataView(message.buffer);
-    view.setUint32(0, clientId, true);
-    view.setUint16(4, keyBytes.length, true);
-    message.set(keyBytes, 6);
-    bridgeRef.current?.sendBinary(message);
-  }
-
-  function serveChunkFetch(clientId: number, datasetId: string, key: string, storePrefix: string | null) {
-    // All datasets are now server-hosted — send empty response for any peer chunk requests.
-    sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
   }
 
   const sendCommand = useCallback((json: string) => {

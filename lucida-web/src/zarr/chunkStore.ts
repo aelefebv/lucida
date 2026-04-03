@@ -1,5 +1,4 @@
 /** Shared chunk fetch queue with cross-member spatial priority. */
-import { useSyncExternalStore } from "react";
 
 export interface ChunkCoord {
   level: number;
@@ -251,9 +250,4 @@ export class SharedChunkQueue {
       }
     }
   }
-}
-
-/** React hook to subscribe to SharedChunkQueue updates. */
-export function useChunkStore(store: SharedChunkQueue): number {
-  return useSyncExternalStore(store.subscribe, store.getVersion);
 }

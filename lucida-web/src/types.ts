@@ -3,6 +3,13 @@ import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 
 export type ViewMode = "2d" | "3d";
 
+export interface VolumeData {
+  data: Uint16Array;
+  width: number; // X
+  height: number; // Y
+  depth: number; // Z
+}
+
 /** A single member (well/field) within a plate-style dataset. */
 export interface DatasetMember {
   id: string;

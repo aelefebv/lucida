@@ -134,20 +134,7 @@ pub async fn handle_client(
                             // by construction — no runtime guard needed.
                             let seq = {
                                 let mut sess = session.lock().await;
-                                let seq = sess.apply(command.clone());
-                                match &command {
-                                    DocumentCommand::AddDataset {
-                                        id: dataset_id, ..
-                                    } => {
-                                        sess.data_sources
-                                            .insert(dataset_id.clone(), id);
-                                    }
-                                    DocumentCommand::RemoveDataset { id: dataset_id } => {
-                                        sess.data_sources.remove(dataset_id);
-                                    }
-                                    DocumentCommand::SetVolumeScale { .. } => {}
-                                }
-                                seq
+                                sess.apply(command.clone())
                             };
 
                             let broadcast_msg = ServerMessage::CommandBroadcast {
@@ -280,7 +267,6 @@ pub async fn handle_client(
                                 sess.server_stores.get(&dataset_id).cloned()
                             };
                             if let Some(entry) = server_entry {
-                                // Server-hosted: read chunk from StorageBackend.
                                 let unicast_routes_clone = Arc::clone(&unicast_routes);
                                 let ds_id = dataset_id;
                                 let chunk_key = key;
@@ -290,28 +276,6 @@ pub async fn handle_client(
                                         &entry.store, &entry.axes, &unicast_routes_clone,
                                     ).await;
                                 });
-                            } else {
-                                // Peer-hosted: relay to data source.
-                                let source_id = {
-                                    let sess = session.lock().await;
-                                    sess.data_sources.get(&dataset_id).copied()
-                                };
-                                if let Some(source_id) = source_id {
-                                    let fetch = ChunkMessage::ChunkFetch {
-                                        client_id: id,
-                                        dataset_id,
-                                        key,
-                                        store_prefix,
-                                    };
-                                    let fetch_json =
-                                        serde_json::to_string(&fetch).unwrap();
-                                    let senders = unicast_routes.lock().await;
-                                    if let Some(sender) = senders.get(&source_id) {
-                                        let _ = sender.send(Message::Text(
-                                            fetch_json.into(),
-                                        ));
-                                    }
-                                }
                             }
                         }
                         ChunkMessage::ChunkFetch { .. } => {
@@ -349,7 +313,6 @@ pub async fn handle_client(
     let (affected_followers, peer_left_json) = {
         let mut sess = session.lock().await;
         let affected = sess.remove_client(id);
-        sess.data_sources.retain(|_, &mut src| src != id);
         let peer_left = ServerMessage::PeerLeft { client_id: id };
         let json = serde_json::to_string(&peer_left).unwrap();
         (affected, json)
