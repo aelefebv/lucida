@@ -1,11 +1,11 @@
 /** Shared types and constants for the render loop modules. */
 import type { WasmScene } from "lucida-core";
 import type { DatasetInfo } from "./zarr/metadata.ts";
-import type { ChunkStore } from "./zarr/chunkStore.ts";
+import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 
 export interface DatasetEntry {
-  memberStores: Map<string, ChunkStore>;
+  sharedQueue: SharedChunkQueue;
   info: DatasetInfo;
 }
 

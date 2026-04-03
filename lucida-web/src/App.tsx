@@ -6,6 +6,7 @@ import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
+import { FileBrowser } from "./components/FileBrowser.tsx";
 import type { VolumeData } from "./zarr/volumeAssembler.ts";
 import type { DatasetState, PendingChunkResolve } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
@@ -123,7 +124,7 @@ function App() {
       render.clientRef.current?.removeLayerResources(id);
       const ds = datasetsRef.current.get(id);
       if (ds) {
-        for (const store of ds.memberStores.values()) store.destroy();
+        ds.sharedQueue.destroy();
         datasetsRef.current.delete(id);
       }
       layers.cleanupLayerMaps(id);
@@ -246,18 +247,14 @@ function App() {
     }
   }, [datasets, urlInput]);
 
-  const dirInputRef = useRef<HTMLInputElement>(null);
+  const [showFileBrowser, setShowFileBrowser] = useState(false);
+
+  const handleFileBrowserSelect = useCallback((path: string) => {
+    datasets.handleUrlSubmit(path);
+  }, [datasets]);
 
   return (
     <div className="app">
-      <input
-        ref={dirInputRef}
-        type="file"
-        // @ts-expect-error webkitdirectory is non-standard but widely supported
-        webkitdirectory=""
-        onChange={datasets.handleDirChange}
-        hidden
-      />
       <LayerPanel
         layers={layers.layerInfos}
         selectedLayerId={selectedDatasetId}
@@ -275,7 +272,7 @@ function App() {
         onFullRangeToggle={layers.handleLayerFullRangeToggle}
         onMoveLayer={layers.handleLayerMove}
         onRemoveLayer={layers.handleRemoveLayer}
-        onAddLayer={() => dirInputRef.current?.click()}
+        onAddLayer={() => setShowFileBrowser(true)}
         viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
         style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
@@ -395,7 +392,20 @@ function App() {
           >
             {bridge.remoteDatasetLoading ? "Loading..." : "Open"}
           </button>
+          <button
+            onClick={() => setShowFileBrowser(true)}
+            disabled={bridge.remoteDatasetLoading}
+            style={{ padding: "0.375rem 0.75rem", fontSize: "0.875rem", whiteSpace: "nowrap" }}
+          >
+            Browse Local
+          </button>
         </div>
+        {showFileBrowser && (
+          <FileBrowser
+            onSelect={handleFileBrowserSelect}
+            onClose={() => setShowFileBrowser(false)}
+          />
+        )}
         {(datasets.loading || bridge.remoteDatasetLoading) && <p className="secondary">Loading volume...</p>}
         {(render.renderError || datasets.loadError || bridge.remoteDatasetError) && (
           <p style={{ color: "#f44" }}>{render.renderError || datasets.loadError || bridge.remoteDatasetError}</p>

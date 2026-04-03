@@ -52,7 +52,7 @@ export function usePreUpload({
       client.sliceSetFallbackForLayer(id, slice, vol.width, vol.height);
 
       const ds = datasetsRef.current.get(id);
-      if (ds && ds.fileIndex !== null) {
+      if (ds) {
         client.minimapSetOverviewForLayer(id, vol.data, vol.width, vol.height, vol.depth, 0, 0);
         loopRef.current?.markMinimapOverviewSeeded(id, 0, 0);
       }

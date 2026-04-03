@@ -1,5 +1,5 @@
 /** Volume render path: upload chunks with atlas-based tracking + render multi-pass. */
-import type { ChunkCoord } from "./zarr/chunkStore.ts";
+import type { ChunkCoord, QualifiedChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import { VOLUME_ATLAS_BUDGET } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
@@ -90,6 +90,9 @@ export function tickVolume(
   // Cache member plans per dataset so we don't call WASM twice (upload + render).
   const memberPlanCache = new Map<string, MemberChunkPlan[]>();
 
+  // Camera target for spatial priority (eye position in volume mode)
+  const eyeForPriority: [number, number, number] = [eye[0], eye[1], eye[2]];
+
   // Upload chunks for ALL datasets, iterating per-member
   for (const [dsId, ds] of datasets) {
     // Skip datasets whose C/T are exceeded (volume renders all Z slices)
@@ -100,10 +103,21 @@ export function tickVolume(
     if (!memberPlans) continue;
     memberPlanCache.set(dsId, memberPlans);
 
-    for (const mp of memberPlans) {
+    // Sort member plans by distance from eye position (nearest first)
+    const sortedPlans = [...memberPlans].sort((a, b) => {
+      const dxA = a.position[0] - eyeForPriority[0];
+      const dyA = a.position[1] - eyeForPriority[1];
+      const dxB = b.position[0] - eyeForPriority[0];
+      const dyB = b.position[1] - eyeForPriority[1];
+      return (dxA * dxA + dyA * dyA) - (dxB * dxB + dyB * dyB);
+    });
+
+    // Build per-member fetch lists (with seed coords prepended) and collect for interleaving
+    const perMemberFetchLists: { memberId: string; list: ChunkCoord[] }[] = [];
+
+    for (const mp of sortedPlans) {
       const memberId = mp.member_id;
-      const memberStore = ds.memberStores.get(memberId);
-      if (!memberStore) continue;
+      const sharedQueue = ds.sharedQueue;
 
       if (mp.needed.length === 0) continue;
       const targetLevel = mp.needed[0].level;
@@ -142,19 +156,20 @@ export function tickVolume(
         }
       }
 
-      // Build fetch list with seed coords prepended for priority
+      // Build per-member fetch list with seed coords prepended for priority
       const mmPending = minimapPendingFetch.get(memberId);
       let fetchList: ChunkCoord[] = [...mp.needed, ...mp.prefetch, ...(mmPending ?? [])];
       const seedInfo = state.seedPending.get(memberId);
       if (seedInfo) {
-        const seedFetchCoords = seedInfo.coords.filter(c => !memberStore.has(c.key));
+        const seedFetchCoords = seedInfo.coords.filter(c => !sharedQueue.has(memberId, c.key));
         if (seedFetchCoords.length > 0) {
           fetchList = [...seedFetchCoords, ...fetchList];
         }
       }
       if (fetchList.length > 0) {
-        memberStore.ensureFetched(fetchList);
+        perMemberFetchLists.push({ memberId, list: fetchList });
       }
+
       const levelMeta = ds.info.levels[targetLevel];
       const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
       const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
@@ -191,7 +206,7 @@ export function tickVolume(
       // --- Seed upload (assemble coarse new-T/C data as fallback) ---
       if (seedInfo) {
         const allReady = seedInfo.coords.every(sc => {
-          const buf = memberStore.get(sc.key);
+          const buf = sharedQueue.get(memberId, sc.key);
           return buf && buf.byteLength > 0;
         });
         if (allReady) {
@@ -200,7 +215,7 @@ export function tickVolume(
           const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
           const assembled = new Uint16Array(sWidth * sHeight * sDepth);
           for (const sc of seedInfo.coords) {
-            const buf = memberStore.get(sc.key)!;
+            const buf = sharedQueue.get(memberId, sc.key)!;
             const data = bufferToUint16(buf, seedMeta.dataType);
             const xOff = sc.x * sChunkX;
             const yOff = sc.y * sChunkY;
@@ -227,7 +242,7 @@ export function tickVolume(
       const newChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
       for (const coord of mp.needed) {
         if (uploaded.has(coord.key)) continue;
-        const buf = memberStore.get(coord.key);
+        const buf = sharedQueue.get(memberId, coord.key);
         if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
         if (uploaded.size >= totalSlots) {
           // Evict the farthest uploaded chunk if incoming chunk is closer
@@ -265,6 +280,20 @@ export function tickVolume(
       }
 
       if (budgetRemaining <= 0) break;
+    }
+
+    // Interleave per-member fetch lists (round-robin by spatial priority) and submit
+    if (perMemberFetchLists.length > 0) {
+      const unified: QualifiedChunkCoord[] = [];
+      const maxLen = Math.max(...perMemberFetchLists.map(p => p.list.length));
+      for (let i = 0; i < maxLen; i++) {
+        for (const { memberId, list } of perMemberFetchLists) {
+          if (i < list.length) {
+            unified.push({ ...list[i], memberId });
+          }
+        }
+      }
+      ds.sharedQueue.ensureFetched(unified);
     }
 
     if (budgetRemaining <= 0) break;

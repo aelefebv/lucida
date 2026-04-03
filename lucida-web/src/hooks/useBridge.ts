@@ -3,9 +3,8 @@ import type { WasmScene } from "lucida-core";
 import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
 import { decompressLz4Async } from "../zarr/lz4Client.ts";
 import { decompress as decompressZstd } from "fzstd";
-import { buildChunkPath } from "../zarr/chunkLoader.ts";
 import type { ChunkFetcher } from "../zarr/chunkStore.ts";
-import { ChunkStore } from "../zarr/chunkStore.ts";
+import { SharedChunkQueue } from "../zarr/chunkStore.ts";
 import type { DatasetState, DatasetMember, PendingChunkResolve } from "../types.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -285,7 +284,7 @@ export function useBridge({
     const info = clientMetadata;
     const CHUNK_TIMEOUT_MS = 10_000;
 
-    const memberStores = new Map<string, ChunkStore>();
+    const sharedQueue = new SharedChunkQueue();
     for (const member of members) {
       const remoteFetcher: ChunkFetcher = async (coord, signal) => {
         const compositeKey = member.storePrefix
@@ -334,20 +333,19 @@ export function useBridge({
         return rawBytes;
       };
 
-      memberStores.set(member.id, new ChunkStore(remoteFetcher));
+      sharedQueue.registerMember(member.id, remoteFetcher);
     }
 
     datasetsRef.current.set(datasetId, {
       id: datasetId,
       name,
       info,
-      memberStores,
-      fileIndex: null,
+      sharedQueue,
       members,
     });
 
     initLayerMaps(datasetId);
-    loopRef.current?.addDataset(datasetId, memberStores, info);
+    loopRef.current?.addDataset(datasetId, sharedQueue, info);
 
     const coarsest = info.levels[info.levels.length - 1];
     const [, , depth, height, width] = coarsest.shape;
@@ -378,52 +376,9 @@ export function useBridge({
     bridgeRef.current?.sendBinary(message);
   }
 
-  async function serveChunkFetch(clientId: number, datasetId: string, key: string, storePrefix: string | null) {
-    const ds = datasetsRef.current.get(datasetId);
-    if (!ds || !ds.fileIndex) {
-      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
-      return;
-    }
-
-    const parts = key.split("/").map(Number);
-    if (parts.length !== 6) {
-      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
-      return;
-    }
-    const [level, t, c, z, y, x] = parts;
-
-    const levelMeta = ds.info.levels[level];
-    if (!levelMeta) {
-      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
-      return;
-    }
-
-    const levelPath = storePrefix ? `${storePrefix}/${levelMeta.path}` : levelMeta.path;
-    const path = buildChunkPath(levelPath, t, c, z, y, x, ds.info.axes);
-    const file = ds.fileIndex.get(path);
-    if (!file) {
-      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
-      return;
-    }
-
-    try {
-      const rawBytes = await file.arrayBuffer();
-      const compositeKey = storePrefix
-        ? `${datasetId}/${storePrefix}/${key}`
-        : `${datasetId}/${key}`;
-      const keyBytes = new TextEncoder().encode(compositeKey);
-      const headerSize = 4 + 2 + keyBytes.length;
-      const message = new Uint8Array(headerSize + rawBytes.byteLength);
-      const view = new DataView(message.buffer);
-      view.setUint32(0, clientId, true);
-      view.setUint16(4, keyBytes.length, true);
-      message.set(keyBytes, 6);
-      message.set(new Uint8Array(rawBytes), headerSize);
-      bridgeRef.current?.sendBinary(message);
-    } catch (err) {
-      console.error(`Failed to serve chunk ${key}:`, err);
-      sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
-    }
+  function serveChunkFetch(clientId: number, datasetId: string, key: string, storePrefix: string | null) {
+    // All datasets are now server-hosted — send empty response for any peer chunk requests.
+    sendEmptyChunkResponse(clientId, datasetId, key, storePrefix);
   }
 
   const sendCommand = useCallback((json: string) => {

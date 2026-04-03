@@ -1,4 +1,4 @@
-/** Reactive chunk cache + fetcher. Replaces ChunkCache + ChunkManager. */
+/** Shared chunk fetch queue with cross-member spatial priority. */
 import { useSyncExternalStore } from "react";
 
 export interface ChunkCoord {
@@ -11,27 +11,63 @@ export interface ChunkCoord {
   key: string;
 }
 
+/** A ChunkCoord qualified with its owning member. */
+export interface QualifiedChunkCoord extends ChunkCoord {
+  memberId: string;
+}
+
 /** A function that fetches a single chunk's decompressed data. */
 export type ChunkFetcher = (coord: ChunkCoord, signal?: AbortSignal) => Promise<ArrayBuffer>;
 
-const MAX_CONCURRENT = 6;
+const MAX_CONCURRENT = 12;
 
-export class ChunkStore {
-  private cache = new Map<string, ArrayBuffer>();
+/**
+ * A shared fetch queue for an entire dataset. All members share global
+ * concurrency (MAX_CONCURRENT = 12) and a single abort/priority mechanism.
+ * Cache lookups remain per-member so the render loop can query
+ * "does member X have chunk Y".
+ */
+export class SharedChunkQueue {
+  /** memberId → chunkKey → ArrayBuffer */
+  private cache = new Map<string, Map<string, ArrayBuffer>>();
   private version = 0;
   private listeners = new Set<() => void>();
   private inFlight = new Set<string>();
   private inFlightSince = 0;
   private abortController: AbortController | null = null;
   private bumpScheduled = false;
-  private pendingQueue: ChunkCoord[] = [];
-  private fetcher: ChunkFetcher;
+  private pendingQueue: QualifiedChunkCoord[] = [];
+  private fetchers = new Map<string, ChunkFetcher>();
   private activeWorkerCount = 0;
   private activeFetches = new Set<string>();
   private workerGeneration = 0;
 
-  constructor(fetcher: ChunkFetcher) {
-    this.fetcher = fetcher;
+  /** Composite cache key incorporating memberId. */
+  private compositeKey(memberId: string, chunkKey: string): string {
+    return `${memberId}/${chunkKey}`;
+  }
+
+  /** Register a member's fetcher function. */
+  registerMember(memberId: string, fetcher: ChunkFetcher): void {
+    this.fetchers.set(memberId, fetcher);
+    if (!this.cache.has(memberId)) {
+      this.cache.set(memberId, new Map());
+    }
+  }
+
+  /** Remove a member and its cached data. */
+  removeMember(memberId: string): void {
+    this.fetchers.delete(memberId);
+    this.cache.delete(memberId);
+    // Clean up in-flight entries for this member
+    const prefix = memberId + "/";
+    for (const key of this.inFlight) {
+      if (key.startsWith(prefix)) this.inFlight.delete(key);
+    }
+    for (const key of this.activeFetches) {
+      if (key.startsWith(prefix)) this.activeFetches.delete(key);
+    }
+    this.pendingQueue = this.pendingQueue.filter(c => c.memberId !== memberId);
   }
 
   // --- React subscription via useSyncExternalStore ---
@@ -47,24 +83,35 @@ export class ChunkStore {
 
   // --- Synchronous pull — viewers call this at paint time ---
 
-  get(key: string): ArrayBuffer | null {
-    return this.cache.get(key) ?? null;
+  get(memberId: string, key: string): ArrayBuffer | null {
+    return this.cache.get(memberId)?.get(key) ?? null;
   }
 
-  has(key: string): boolean {
-    return this.cache.has(key);
+  has(memberId: string, key: string): boolean {
+    return this.cache.get(memberId)?.has(key) ?? false;
+  }
+
+  /** Iterate registered member IDs. */
+  memberIds(): IterableIterator<string> {
+    return this.fetchers.keys();
+  }
+
+  /** Check if a member is registered. */
+  hasMember(memberId: string): boolean {
+    return this.fetchers.has(memberId);
   }
 
   // --- Background fetching with incremental add/abort pattern ---
 
-  ensureFetched(coords: ChunkCoord[]): void {
-    const uncached: ChunkCoord[] = [];
+  /** Accept a unified, pre-prioritized fetch list covering all members. */
+  ensureFetched(coords: QualifiedChunkCoord[]): void {
+    const uncached: QualifiedChunkCoord[] = [];
     for (const coord of coords) {
-      if (!this.cache.has(coord.key)) uncached.push(coord);
+      if (!this.has(coord.memberId, coord.key)) uncached.push(coord);
     }
     if (uncached.length === 0) return;
 
-    const newChunks = uncached.filter(c => !this.inFlight.has(c.key));
+    const newChunks = uncached.filter(c => !this.inFlight.has(this.compositeKey(c.memberId, c.key)));
     const isStale = this.inFlightSince > 0
       && performance.now() - this.inFlightSince > 15_000;
 
@@ -72,7 +119,7 @@ export class ChunkStore {
     if (newChunks.length === 0 && !isStale) {
       this.pendingQueue.length = 0;
       for (const coord of uncached) {
-        if (!this.activeFetches.has(coord.key)) {
+        if (!this.activeFetches.has(this.compositeKey(coord.memberId, coord.key))) {
           this.pendingQueue.push(coord);
         }
       }
@@ -82,7 +129,7 @@ export class ChunkStore {
 
     // Decide: abort everything or add incrementally
     const shouldAbort = isStale
-      || (this.inFlight.size > 0 && !uncached.some(c => this.inFlight.has(c.key)));
+      || (this.inFlight.size > 0 && !uncached.some(c => this.inFlight.has(this.compositeKey(c.memberId, c.key))));
 
     if (shouldAbort) {
       // Path 3: complete view change or stale — abort and restart
@@ -93,26 +140,26 @@ export class ChunkStore {
       this.activeFetches.clear();
       this.inFlight.clear();
       this.inFlightSince = performance.now();
-      for (const coord of uncached) this.inFlight.add(coord.key);
+      for (const coord of uncached) this.inFlight.add(this.compositeKey(coord.memberId, coord.key));
       this.pendingQueue = [...uncached];
       this.launchFetchTasks();
       return;
     }
 
     // Path 2: incremental — add new chunks, keep existing fetches running
-    for (const chunk of newChunks) this.inFlight.add(chunk.key);
+    for (const chunk of newChunks) this.inFlight.add(this.compositeKey(chunk.memberId, chunk.key));
     this.inFlightSince = performance.now();
 
     // Rebuild pending queue from new plan, excluding actively-fetching items
     this.pendingQueue.length = 0;
     for (const coord of uncached) {
-      if (!this.activeFetches.has(coord.key)) {
+      if (!this.activeFetches.has(this.compositeKey(coord.memberId, coord.key))) {
         this.pendingQueue.push(coord);
       }
     }
 
     // Clean up inFlight: remove items no longer in plan and not being actively fetched
-    const newPlanKeys = new Set(uncached.map(c => c.key));
+    const newPlanKeys = new Set(uncached.map(c => this.compositeKey(c.memberId, c.key)));
     for (const key of this.inFlight) {
       if (!newPlanKeys.has(key) && !this.activeFetches.has(key)) {
         this.inFlight.delete(key);
@@ -163,28 +210,39 @@ export class ChunkStore {
       while (this.pendingQueue.length > 0) {
         if (signal.aborted) return;
         const coord = this.pendingQueue.shift()!;
-        const key = coord.key;
+        const compositeKey = this.compositeKey(coord.memberId, coord.key);
 
-        if (this.cache.has(key)) {
-          this.inFlight.delete(key);
+        if (this.has(coord.memberId, coord.key)) {
+          this.inFlight.delete(compositeKey);
           continue;
         }
 
-        this.activeFetches.add(key);
+        const fetcher = this.fetchers.get(coord.memberId);
+        if (!fetcher) {
+          this.inFlight.delete(compositeKey);
+          continue;
+        }
+
+        this.activeFetches.add(compositeKey);
         try {
-          const data = await this.fetcher(coord, signal);
+          const data = await fetcher(coord, signal);
           if (signal.aborted) return;
-          this.cache.set(key, data);
-          this.inFlight.delete(key);
+          let memberCache = this.cache.get(coord.memberId);
+          if (!memberCache) {
+            memberCache = new Map();
+            this.cache.set(coord.memberId, memberCache);
+          }
+          memberCache.set(coord.key, data);
+          this.inFlight.delete(compositeKey);
           this.bumpVersion();
         } catch (err) {
           if (err instanceof DOMException && err.name === "AbortError") return;
           if (signal.aborted) return;
-          this.inFlight.delete(key);
-          console.error(`Chunk ${key} fetch failed, skipping.`, err);
+          this.inFlight.delete(compositeKey);
+          console.error(`Chunk ${compositeKey} fetch failed, skipping.`, err);
           this.bumpVersion();
         } finally {
-          this.activeFetches.delete(key);
+          this.activeFetches.delete(compositeKey);
         }
       }
     } finally {
@@ -195,7 +253,7 @@ export class ChunkStore {
   }
 }
 
-/** React hook to subscribe to ChunkStore updates. */
-export function useChunkStore(store: ChunkStore): number {
+/** React hook to subscribe to SharedChunkQueue updates. */
+export function useChunkStore(store: SharedChunkQueue): number {
   return useSyncExternalStore(store.subscribe, store.getVersion);
 }

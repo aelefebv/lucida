@@ -87,7 +87,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
     const totalChunks = nz * ny * nx;
 
     // Iterate per-member so each FOV gets its own minimap overview texture.
-    for (const [memberId, memberStore] of ds.memberStores) {
+    for (const memberId of ds.sharedQueue.memberIds()) {
       const overviewKey = `${memberId}/${coarsestIdx}/${t}/${c}`;
 
       if (state.overviewKey.get(memberId) !== overviewKey) {
@@ -108,7 +108,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
             const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
             if (uploaded.has(chunkKey)) continue;
 
-            const buf = memberStore.get(chunkKey) ?? null;
+            const buf = ds.sharedQueue.get(memberId, chunkKey) ?? null;
             if (buf && buf.byteLength > 0) {
               available.push({
                 data: bufferToUint16(buf, levelMeta.dataType),
@@ -190,7 +190,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     const settings = allSettings[dsId];
     if (!settings || !settings.visible) continue;
 
-    for (const memberId of ds.memberStores.keys()) {
+    for (const memberId of ds.sharedQueue.memberIds()) {
       const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
       const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
 
@@ -231,7 +231,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       // Find the parent dataset for this member
       let shape: number[] | undefined;
       for (const [, ds] of datasets) {
-        if (ds.memberStores.has(layer.datasetId)) {
+        if (ds.sharedQueue.hasMember(layer.datasetId)) {
           shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
           break;
         }

@@ -1,5 +1,5 @@
 import type { DatasetInfo } from "./zarr/metadata.ts";
-import type { ChunkStore } from "./zarr/chunkStore.ts";
+import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 
 export type ViewMode = "2d" | "3d";
 
@@ -15,8 +15,7 @@ export interface DatasetState {
   id: string;
   name: string;
   info: DatasetInfo;
-  memberStores: Map<string, ChunkStore>;
-  fileIndex: Map<string, File> | null; // null for remote datasets
+  sharedQueue: SharedChunkQueue;
   members: DatasetMember[];
 }
 

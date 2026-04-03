@@ -6,6 +6,7 @@ struct Uniforms {
   chunkDims: vec4u,          // offset 80  (16 bytes) — xy=chunk dimensions
   gridDims: vec4u,           // offset 96  (16 bytes) — xy=grid dimensions
   atlasSlotDims: vec4u,      // offset 112 (16 bytes) — xy=slots per axis = 128 total
+  memberScreenSize: vec4f,   // offset 128 (16 bytes) — xy=member pixel size on screen
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -39,6 +40,17 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   // Bounds check — transparent for compositing
   if (texUV.x < 0.0 || texUV.x > 1.0 || texUV.y < 0.0 || texUV.y > 1.0) {
     return vec4f(0.0, 0.0, 0.0, 0.0);
+  }
+
+  // FOV member border: detect fragments within 1.5 px of the member edge
+  let border_width = 1.5;
+  let edge_x = min(texUV.x, 1.0 - texUV.x);
+  let edge_y = min(texUV.y, 1.0 - texUV.y);
+  let dist_x_px = edge_x * u.memberScreenSize.x;
+  let dist_y_px = edge_y * u.memberScreenSize.y;
+  let edge_min_px = min(dist_x_px, dist_y_px);
+  if (edge_min_px < border_width) {
+    return vec4f(0.3, 0.3, 0.3, 1.0);
   }
 
   let intensityMin = u.intensityRange.x;

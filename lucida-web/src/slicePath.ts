@@ -1,5 +1,5 @@
 /** Slice render path: upload chunks + render multi-pass. */
-import type { ChunkCoord } from "./zarr/chunkStore.ts";
+import type { ChunkCoord, QualifiedChunkCoord } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
@@ -68,6 +68,11 @@ export function tickSlice(
   // Cache member plans per dataset so we don't call WASM twice (upload + render).
   const memberPlanCache = new Map<string, MemberChunkPlan[]>();
 
+  // Viewport center for spatial priority (camera position in slice mode)
+  const vpCenter = scene.center();
+  const vpCx = vpCenter[0];
+  const vpCy = vpCenter[1];
+
   // Upload chunks for ALL datasets, iterating per-member
   for (const [dsId, ds] of datasets) {
     // Skip datasets whose dimensions are exceeded by the current slice position
@@ -78,10 +83,21 @@ export function tickSlice(
     if (!memberPlans) continue;
     memberPlanCache.set(dsId, memberPlans);
 
-    for (const mp of memberPlans) {
+    // Sort member plans by distance from viewport center (nearest first)
+    const sortedPlans = [...memberPlans].sort((a, b) => {
+      const dxA = a.position[0] - vpCx;
+      const dyA = a.position[1] - vpCy;
+      const dxB = b.position[0] - vpCx;
+      const dyB = b.position[1] - vpCy;
+      return (dxA * dxA + dyA * dyA) - (dxB * dxB + dyB * dyB);
+    });
+
+    // Build per-member fetch lists (with seed coords prepended) and collect for interleaving
+    const perMemberFetchLists: { memberId: string; list: ChunkCoord[] }[] = [];
+
+    for (const mp of sortedPlans) {
       const memberId = mp.member_id;
-      const memberStore = ds.memberStores.get(memberId);
-      if (!memberStore) continue;
+      const sharedQueue = ds.sharedQueue;
       const targetLevel = mp.needed[0]?.level;
 
       // Detect T/C/Z change and compute coarse seed coords
@@ -121,24 +137,24 @@ export function tickSlice(
         }
       }
 
-      // Build fetch list with seed coords prepended for priority
+      // Build per-member fetch list with seed coords prepended for priority
       const mmPending = minimapPendingFetch.get(memberId);
       let fetchList: ChunkCoord[] = [...mp.needed, ...mp.prefetch, ...(mmPending ?? [])];
       const seedInfo = state.seedPending.get(memberId);
       if (seedInfo) {
-        const seedFetchCoords = seedInfo.coords.filter(sc => !memberStore.has(sc.key));
+        const seedFetchCoords = seedInfo.coords.filter(sc => !sharedQueue.has(memberId, sc.key));
         if (seedFetchCoords.length > 0) {
           fetchList = [...seedFetchCoords, ...fetchList];
         }
       }
       if (fetchList.length > 0) {
-        memberStore.ensureFetched(fetchList);
+        perMemberFetchLists.push({ memberId, list: fetchList });
       }
 
       // Check if all seed chunks are available and assemble fallback
       if (seedInfo) {
         const allReady = seedInfo.coords.every(sc => {
-          const buf = memberStore.get(sc.key);
+          const buf = sharedQueue.get(memberId, sc.key);
           return buf && buf.byteLength > 0;
         });
         if (allReady) {
@@ -148,7 +164,7 @@ export function tickSlice(
           const localZ = seedInfo.z - seedInfo.coords[0].z * sChunkZ;
           const assembled = new Uint16Array(sWidth * sHeight);
           for (const sc of seedInfo.coords) {
-            const buf = memberStore.get(sc.key)!;
+            const buf = sharedQueue.get(memberId, sc.key)!;
             const data = bufferToUint16(buf, seedMeta.dataType);
             const xOff = sc.x * sChunkX;
             const yOff = sc.y * sChunkY;
@@ -194,7 +210,7 @@ export function tickSlice(
       for (const coord of mp.needed) {
         if (coord.level !== level) continue;
         if (uploaded.has(coord.key)) continue;
-        const buf = memberStore.get(coord.key);
+        const buf = sharedQueue.get(memberId, coord.key);
         if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
         availableChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
         uploaded.set(coord.key, true as const);
@@ -217,6 +233,20 @@ export function tickSlice(
       }
 
       if (budgetRemaining <= 0) break;
+    }
+
+    // Interleave per-member fetch lists (round-robin by spatial priority) and submit
+    if (perMemberFetchLists.length > 0) {
+      const unified: QualifiedChunkCoord[] = [];
+      const maxLen = Math.max(...perMemberFetchLists.map(p => p.list.length));
+      for (let i = 0; i < maxLen; i++) {
+        for (const { memberId, list } of perMemberFetchLists) {
+          if (i < list.length) {
+            unified.push({ ...list[i], memberId });
+          }
+        }
+      }
+      ds.sharedQueue.ensureFetched(unified);
     }
 
     if (budgetRemaining <= 0) break;

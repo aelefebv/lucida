@@ -1,6 +1,6 @@
 /** Pull-based render loop: coalesces chunk arrivals into a single RAF tick. */
 import type { DatasetInfo } from "./zarr/metadata.ts";
-import { ChunkStore } from "./zarr/chunkStore.ts";
+import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
@@ -11,14 +11,14 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 
 export class RenderLoop {
   private scene: RenderLoopOptions["scene"];
-  private datasets: Map<string, { memberStores: Map<string, ChunkStore>; info: DatasetInfo }>;
+  private datasets: Map<string, { sharedQueue: SharedChunkQueue; info: DatasetInfo }>;
   private client: RenderLoopOptions["client"];
   private canvas: HTMLCanvasElement;
   private mode: "slice" | "volume";
 
   private dirty = true;
   private rafId: number | null = null;
-  private unsubs = new Map<string, (() => void)[]>();
+  private unsubs = new Map<string, () => void>();
 
   private sliceState: SliceState = createSliceState();
   private volumeState: VolumeState = createVolumeState();
@@ -35,7 +35,7 @@ export class RenderLoop {
     this.scene = opts.scene;
     this.datasets = new Map();
     for (const [id, entry] of opts.datasets) {
-      this.datasets.set(id, { memberStores: entry.memberStores, info: entry.info });
+      this.datasets.set(id, { sharedQueue: entry.sharedQueue, info: entry.info });
     }
     this.client = opts.client;
     this.canvas = opts.canvas;
@@ -43,15 +43,11 @@ export class RenderLoop {
   }
 
   start(): void {
-    // Subscribe to all member stores in all datasets
+    // Subscribe to each dataset's shared queue
     for (const [id, ds] of this.datasets) {
-      const unsubs: (() => void)[] = [];
-      for (const store of ds.memberStores.values()) {
-        unsubs.push(store.subscribe(() => {
-          this.dirty = true;
-        }));
-      }
-      this.unsubs.set(id, unsubs);
+      this.unsubs.set(id, ds.sharedQueue.subscribe(() => {
+        this.dirty = true;
+      }));
     }
     this.rafId = requestAnimationFrame(this.tick);
   }
@@ -61,28 +57,24 @@ export class RenderLoop {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
-    for (const unsubs of this.unsubs.values()) {
-      for (const unsub of unsubs) unsub();
+    for (const unsub of this.unsubs.values()) {
+      unsub();
     }
     this.unsubs.clear();
   }
 
-  addDataset(id: string, memberStores: Map<string, ChunkStore>, info: DatasetInfo): void {
-    this.datasets.set(id, { memberStores, info });
-    const unsubs: (() => void)[] = [];
-    for (const store of memberStores.values()) {
-      unsubs.push(store.subscribe(() => {
-        this.dirty = true;
-      }));
-    }
-    this.unsubs.set(id, unsubs);
+  addDataset(id: string, sharedQueue: SharedChunkQueue, info: DatasetInfo): void {
+    this.datasets.set(id, { sharedQueue, info });
+    this.unsubs.set(id, sharedQueue.subscribe(() => {
+      this.dirty = true;
+    }));
     this.dirty = true;
   }
 
   removeDataset(id: string): void {
-    const unsubs = this.unsubs.get(id);
-    if (unsubs) {
-      for (const unsub of unsubs) unsub();
+    const unsub = this.unsubs.get(id);
+    if (unsub) {
+      unsub();
       this.unsubs.delete(id);
     }
     this.datasets.delete(id);

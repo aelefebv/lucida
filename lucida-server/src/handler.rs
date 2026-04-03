@@ -1,21 +1,19 @@
 use std::sync::Arc;
 
+use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use lucida_store::cache::CachedStore;
 use object_store::path::Path;
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::WebSocketStream;
 
 use crate::session::{Session, ServerStore};
 use crate::{BroadcastItem, UnicastRoutes};
 
 pub async fn handle_client(
     id: ClientId,
-    ws: WebSocketStream<TcpStream>,
+    ws: WebSocket,
     session: Arc<Mutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,

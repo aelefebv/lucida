@@ -8,7 +8,7 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 //   offset 80:  chunkDims      vec4u     (16B) — x=chunkX, y=chunkY, z=levelWidth, w=levelHeight
 //   offset 96:  gridDims       vec4u     (16B) — x=gridX, y=gridY
 //   offset 112: atlasSlotDims  vec4u     (16B) — x=slotsX, y=slotsY
-const UNIFORM_SIZE = 128;
+const UNIFORM_SIZE = 144;
 
 export class SliceRenderer {
   private device: GPUDevice;
@@ -175,6 +175,11 @@ export class SliceRenderer {
     u32View.set([this.chunkDims[0], this.chunkDims[1], this.levelDims[0], this.levelDims[1]], 20); // chunkDims at 80B = 20 u32s
     u32View.set([this.gridDims[0], this.gridDims[1], 0, 0], 24);      // gridDims at 96B = 24 u32s
     u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], 0, 0], 28); // atlasSlotDims at 112B = 28 u32s
+
+    // Member screen-pixel size for border detection
+    const memberScreenW = dataW * zoom;
+    const memberScreenH = dataH * zoom;
+    uniformData.set([memberScreenW, memberScreenH, 0, 0], 32); // memberScreenSize at 128B = 32 f32s
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }

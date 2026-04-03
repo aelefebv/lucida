@@ -97,6 +97,9 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 /// - `s3://bucket/path` URLs use Amazon S3 with environment/instance credentials.
 /// - `http://` and `https://` URLs use an HTTP static file server.
 pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
+    // Strip file:// prefix for local paths.
+    let url = url.strip_prefix("file://").unwrap_or(url);
+
     if url.starts_with('/') {
         let store = LocalFileSystem::new_with_prefix(url)
             .map_err(StoreError::ObjectStore)?;

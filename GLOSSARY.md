@@ -147,7 +147,10 @@
 | **Follow** | A peer-to-peer mode where one client mirrors another's presence; transitive chains resolved server-side | Sync view, link, mirror |
 | **Steer** | A remote-control action that makes another client follow the sender | Remote control, force-follow |
 | **ChunkMessage** | A message for chunk data relay: ChunkRequest (viewer to server, with optional `store_prefix` for **DatasetMember** routing) or ChunkFetch (server to data source) | Data request, tile message |
-| **OpenRemoteDataset** | A **ClientMessage** requesting the server open a **Dataset** from a URL (local path or `gs://` URI). The server reads metadata via a **StorageBackend** and broadcasts the resulting `AddDataset` **DocumentCommand** to all **Clients**. Not a **DocumentCommand** itself — it is a request that produces one. | Open URL, remote open |
+| **OpenRemoteDataset** | A **ClientMessage** requesting the server open a **Dataset** from a URL (local path, `file://` URI, or `gs://`/`s3://`/`http://` URI). The server reads metadata via a **StorageBackend** and broadcasts the resulting `AddDataset` **DocumentCommand** to all **Clients**. Not a **DocumentCommand** itself — it is a request that produces one. | Open URL, remote open |
+| **Browse endpoint** | `GET /api/browse?path=<dir>` — an HTTP endpoint on `lucida-server` that lists directory entries (name, type) for the **File browser**. Constrained by optional `--data-dir` CLI flag. | File listing API |
+| **File browser** | A React component (`FileBrowser.tsx`) that navigates local directories via the **Browse endpoint**, detects `.zarr` directories by the presence of `zarr.json`, and opens them via **OpenRemoteDataset**. | Directory picker, file chooser |
+| **Member border** | A 1.5-pixel gray border rendered in the 2D slice shader at each **DatasetMember**'s UV bounds, providing immediate visual feedback of plate grid structure before chunk data arrives. Uses a `memberScreenSize` uniform for zoom-independent pixel width. | FOV outline, grid border |
 | **OpenDatasetFailed** | A **ServerMessage** sent via **Unicast** to the requesting **Client** when an **OpenRemoteDataset** cannot be fulfilled (invalid URL, auth failure, missing metadata). | Error, open error |
 
 ## Server architecture
@@ -253,11 +256,10 @@
 
 | Term | Definition | Aliases to avoid |
 |------|-----------|-----------------|
-| **ChunkStore** | A reactive cache wrapping a **ChunkFetcher** with `useSyncExternalStore` subscription, max 6 concurrent fetches, and abort/restart logic for view changes | Chunk cache, tile manager, data store |
-| **ChunkFetcher** | A pluggable async function that retrieves a single chunk's decompressed data given its **ChunkCoord**; file-based for local datasets, WebSocket-based for remote | Loader, data source (ambiguous with server concept) |
-| **File index** | A `Map<string, File>` built from a `webkitdirectory` FileList, mapping Zarr-relative paths to browser File objects for local chunk access | File map, file lookup |
-| **Dirty flag** | The boolean on the **Render loop** that gates whether GPU work is done on a given RAF tick; set by **ChunkStore** subscriptions and viewport changes | Needs redraw, invalidated |
-| **Render loop** | The pull-based `requestAnimationFrame` tick that checks the **Dirty flag**, evaluates **ChunkRequestPlans**, uploads available chunks within the **Upload budget**, and dispatches render commands to the **GPU worker** | Frame loop, game loop, RAF loop |
+| **SharedChunkQueue** | A reactive cache wrapping per-member **ChunkFetchers** with `useSyncExternalStore` subscription and a global `MAX_CONCURRENT = 12` fetch limit shared across all **DatasetMembers**. One instance per **Dataset** (not per member). Accepts a priority-sorted, member-qualified fetch list for cross-member spatial ordering. | ChunkStore (old name), chunk cache, tile manager |
+| **ChunkFetcher** | A pluggable async function that retrieves a single chunk's decompressed data given its **ChunkCoord**; WebSocket-based for server-hosted datasets | Loader, data source (ambiguous with server concept) |
+| **Dirty flag** | The boolean on the **Render loop** that gates whether GPU work is done on a given RAF tick; set by **SharedChunkQueue** subscriptions and viewport changes | Needs redraw, invalidated |
+| **Render loop** | The pull-based `requestAnimationFrame` tick that checks the **Dirty flag**, evaluates **ChunkRequestPlans**, uploads available chunks within the **Upload budget**, and dispatches render commands to the **GPU worker**. Cross-member fetch lists are sorted by distance from viewport center for spatial priority. | Frame loop, game loop, RAF loop |
 
 ## Web worker architecture (lucida-web)
 
@@ -308,12 +310,12 @@
 - A **Viewer** may become a **Data Source** by calling `write_viewport`, serving **Chunks** from in-memory storage to other **Peers**
 - A **ViewportData** is assembled from the **Chunks** listed in a **ChunkRequestPlan**'s `needed` list, and records its **Origin** within the **Level** shape
 - In **Direct Mode**, a **Viewer** reads **Chunks** via **PyStore** without a server; in **Remote Mode**, it sends **ChunkRequests** through the **Server**
-- A **ChunkStore** wraps exactly one **ChunkFetcher** and maintains a cache of **Chunk keys** to decompressed ArrayBuffers
+- A **SharedChunkQueue** wraps per-member **ChunkFetchers** and maintains a two-level cache (member → chunk key → ArrayBuffer) with global concurrency control across all members
 - An **Atlas** contains a GPU texture, an **Indirection buffer**, and a slot-tracking map; one **Atlas** exists per **Dataset** per render mode (slice or volume)
 - A **Fallback texture** is assembled from all chunks of the coarsest **Level** via **Seeding**; the shader samples it when the **Indirection buffer** returns the sentinel value
 - The **GPU worker** lazily creates one `SliceRenderer`, one `VolumeRenderer`, one **Compositor**, and one `CursorRenderer`; all share the same `GPUDevice`
 - The **RenderClient** sends chunk data to the **GPU worker** via the **Worker protocol** using `Transferable` ArrayBuffers (zero-copy ownership transfer)
-- The **Render loop** delegates chunk planning to **WasmScene** (`chunk_plan_for`), fetching to a **ChunkStore**, and rendering to the **RenderClient**; it never touches the GPU directly
+- The **Render loop** delegates chunk planning to **WasmScene** (`chunk_plan_for`), fetching to a **SharedChunkQueue**, and rendering to the **RenderClient**; it never touches the GPU directly
 - The **Upload budget** limits how many chunk bytes move from **ChunkStore** to **Atlas** per RAF tick, preventing GPU stalls and maintaining interactive frame rates
 - The **Minimap** renders on a dedicated OffscreenCanvas transferred to the **GPU worker**; the **Minimap overlay** is a separate 2D canvas drawn on the main thread
 - The **Minimap overview** is uploaded per **DatasetMember** — each FOV gets its own overview texture, so plates render all visible members. **Minimap seeding** marks a member as fully uploaded
@@ -367,7 +369,7 @@
 > **Domain expert:** "The server removes the **Data Source** mapping. The **Dataset** stays in the **DocumentState** — it's not automatically removed — but no one can fetch **Chunks** for it anymore. The server also broadcasts **PeerLeft** and breaks any **Follow Chains**: if anyone was following the disconnected **Client**, their follow target gets set to `None` and a **FollowChanged** is broadcast."
 
 > **Dev:** "How does a chunk get from disk to the screen in the web viewer?"
-> **Domain expert:** "The **Render loop** fires on each RAF tick if the **Dirty flag** is set. It asks the **WasmScene** for a **ChunkRequestPlan** per **Dataset**, then passes the `needed` and `prefetch` lists to the **ChunkStore**. The **ChunkStore** fetches from the **File index** (local) or via **Bridge** (remote), decompressing LZ4 chunks through the **LZ4 worker pool**. When data arrives, the **ChunkStore** bumps its version — that sets the **Dirty flag** again. On the next tick, the **Render loop** finds the chunk in cache, converts it to u16, and sends it to the **RenderClient**, which transfers the ArrayBuffer to the **GPU worker**. The worker writes it into the **Atlas** and updates the **Indirection buffer**. All within the **Upload budget** — 4 MB per tick."
+> **Domain expert:** "The **Render loop** fires on each RAF tick if the **Dirty flag** is set. It asks the **WasmScene** for a **ChunkRequestPlan** per **Dataset**, then passes the `needed` and `prefetch` lists to the **ChunkStore**. The **SharedChunkQueue** fetches via the server (which serves chunks from its **StorageBackend**), decompressing LZ4 chunks through the **LZ4 worker pool**. When data arrives, the **SharedChunkQueue** bumps its version — that sets the **Dirty flag** again. On the next tick, the **Render loop** finds the chunk in cache, converts it to u16, and sends it to the **RenderClient**, which transfers the ArrayBuffer to the **GPU worker**. The worker writes it into the **Atlas** and updates the **Indirection buffer**. All within the **Upload budget** — 4 MB per tick."
 
 > **Dev:** "What happens visually when the user changes the timepoint?"
 > **Domain expert:** "The viewer **Seeds** the new timepoint: it fetches all chunks of the coarsest **Level** and assembles them into a **Fallback texture**. That gets uploaded immediately, so the user sees a blurry preview right away. Meanwhile, the **ChunkRequestPlan** now has fine-level `needed` chunks for the new timepoint. Those flow through the **ChunkStore** and get uploaded to the **Atlas** incrementally, capped by the **Upload budget**. The shader samples from the **Atlas** where chunks are loaded and falls back to the **Fallback texture** where they're not. The transition is progressive — blurry to sharp."
@@ -408,7 +410,7 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Scale"**: Use **Cumulative Scale** for per-Level `[x, y, z]` factors, **Voxel Size** for physical spacing, and "scale" for UI/rendering contexts only.
 
-- **"Store"**: A **Store** is the on-disk Zarr directory tree (producer). A **Dataset** is the same artifact loaded in the viewer (consumer). Distinct from `lucida-store` the crate (which manages Stores), `ChunkStore` in lucida-web (the browser-side reactive cache), and `PyStore` (the Python binding for a StorageBackend). Always qualify when context is ambiguous.
+- **"Store"**: A **Store** is the on-disk Zarr directory tree (producer). A **Dataset** is the same artifact loaded in the viewer (consumer). Distinct from `lucida-store` the crate (which manages Stores), `SharedChunkQueue` in lucida-web (the browser-side reactive fetch queue), and `PyStore` (the Python binding for a StorageBackend). Always qualify when context is ambiguous.
 
 - **"Volume"**: In `lucida-store`, the in-memory 5D u16 array struct. In the viewer, the proper term is **Dataset**.
 
