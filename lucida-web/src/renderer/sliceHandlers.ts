@@ -104,9 +104,20 @@ function destroySliceAtlas(atlas: SliceAtlasState): void {
   atlas.indirectionBuf.destroy();
 }
 
+/** Squared distance from a chunk grid coordinate to a reference point in [0,1] UV space. */
+function chunkDistSq2D(
+  atlas: SliceAtlasState, cx: number, cy: number,
+  cam: [number, number],
+): number {
+  const px = (cx + 0.5) * atlas.chunkX / atlas.levelWidth;
+  const py = (cy + 0.5) * atlas.chunkY / atlas.levelHeight;
+  const dx = px - cam[0];
+  const dy = py - cam[1];
+  return dx * dx + dy * dy;
+}
+
 /** Find the occupied slot whose chunk center is farthest from the viewport center. */
-function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): string {
-  const [camX, camY] = cam;
+function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): { key: string; dist: number } {
   let farthestKey = "";
   let maxDist = -1;
 
@@ -116,14 +127,7 @@ function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): stri
 
     const cx = gridIdx % atlas.gridX;
     const cy = Math.floor(gridIdx / atlas.gridX);
-
-    // Chunk center in [0,1] UV space
-    const px = (cx + 0.5) * atlas.chunkX / atlas.levelWidth;
-    const py = (cy + 0.5) * atlas.chunkY / atlas.levelHeight;
-
-    const dx = px - camX;
-    const dy = py - camY;
-    const dist = dx * dx + dy * dy;
+    const dist = chunkDistSq2D(atlas, cx, cy, cam);
 
     if (dist > maxDist) {
       maxDist = dist;
@@ -131,7 +135,7 @@ function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): stri
     }
   }
 
-  return farthestKey;
+  return { key: farthestKey, dist: maxDist };
 }
 
 export function handleSliceWriteFallbackChunk(ctx: WorkerCtx, msg: SliceWriteFallbackChunkMessage): void {
@@ -190,9 +194,12 @@ export function handleSliceUploadChunks(ctx: WorkerCtx, msg: SliceUploadChunksFo
       if (atlas.freeSlots.length > 0) {
         slotIndex = atlas.freeSlots.pop()!;
       } else {
-        // Evict the chunk farthest from the viewport center
+        // Only evict if the incoming chunk is closer than the farthest in the atlas.
         const cam = cameraUVPerDataset.get(datasetId) ?? [0.5, 0.5];
-        const evictKey = findFarthestSlot2D(atlas, cam);
+        const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(atlas, cam);
+        if (!evictKey) continue;
+        const incomingDist = chunkDistSq2D(atlas, chunk.x, chunk.y, cam);
+        if (incomingDist >= farthestDist) break; // sorted nearest-first; rest are farther
         slotIndex = atlas.slots.get(evictKey)!;
         atlas.slots.delete(evictKey);
         const oldGridIdx = atlas.slotGridIdx[slotIndex];

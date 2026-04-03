@@ -658,6 +658,13 @@ impl WasmScene {
         }
     }
 
+    /// Like `ray_hit_local`, but flips Y from unit space (Y-up: 0=bottom)
+    /// to image space (Y-down: 0=top).
+    pub fn ray_hit_local_image(&self, dataset_id: &str) -> Vec<f32> {
+        let hit = self.ray_hit_local(dataset_id);
+        vec![hit[0], 1.0 - hit[1], hit[2]]
+    }
+
     // --- Layer display settings ---
 
     pub fn dataset_order(&self) -> String {

@@ -47,9 +47,11 @@ export class RenderLoop {
     for (const [id, ds] of this.datasets) {
       this.unsubs.set(id, ds.sharedQueue.subscribe(() => {
         this.dirty = true;
+        this.scheduleIfNeeded();
       }));
     }
-    this.rafId = requestAnimationFrame(this.tick);
+    this.dirty = true;
+    this.scheduleIfNeeded();
   }
 
   stop(): void {
@@ -67,8 +69,10 @@ export class RenderLoop {
     this.datasets.set(id, { sharedQueue, info });
     this.unsubs.set(id, sharedQueue.subscribe(() => {
       this.dirty = true;
+      this.scheduleIfNeeded();
     }));
     this.dirty = true;
+    this.scheduleIfNeeded();
   }
 
   removeDataset(id: string): void {
@@ -91,6 +95,7 @@ export class RenderLoop {
     clearMinimapForDataset(this.minimapState, id);
 
     this.dirty = true;
+    this.scheduleIfNeeded();
   }
 
   /** Collect member IDs associated with a dataset from state maps. */
@@ -100,13 +105,13 @@ export class RenderLoop {
     // For single datasets, member_id === dataset_id (already cleaned by clearFor*Dataset).
     // For plates, member IDs are prefixed with the dataset ID (e.g. "dsId:A/1/0").
     const prefix = dsId + ":";
-    for (const key of this.volumeState.uploaded.keys()) {
+    for (const key of this.volumeState.sent.keys()) {
       if (key === dsId || key.startsWith(prefix)) ids.add(key);
     }
     for (const key of this.volumeState.lodKeys.keys()) {
       if (key === dsId || key.startsWith(prefix)) ids.add(key);
     }
-    for (const key of this.sliceState.uploaded.keys()) {
+    for (const key of this.sliceState.sent.keys()) {
       if (key === dsId || key.startsWith(prefix)) ids.add(key);
     }
     for (const key of this.sliceState.currentLod.keys()) {
@@ -119,6 +124,7 @@ export class RenderLoop {
 
   markDirty(): void {
     this.dirty = true;
+    this.scheduleIfNeeded();
   }
 
   resetVolumeCache(): void {
@@ -131,24 +137,35 @@ export class RenderLoop {
       this.sliceT = t;
       this.sliceC = c;
       this.dirty = true;
+      this.scheduleIfNeeded();
     }
   }
 
   setRenderScale(s: number): void {
     this._renderScale = s;
     this.dirty = true;
+    this.scheduleIfNeeded();
   }
 
   setMinimap(enabled: boolean, size?: number, overlayCallback?: ((data: MinimapOverlayData) => void) | null): void {
     this.minimapState.enabled = enabled;
     if (size !== undefined) this.minimapState.size = size;
     this.minimapState.overlayCallback = overlayCallback ?? null;
-    if (enabled) this.dirty = true;
+    if (enabled) {
+      this.dirty = true;
+      this.scheduleIfNeeded();
+    }
   }
 
   markMinimapOverviewSeeded(datasetId: string, t: number, c: number): void {
     const ctx = this.buildContext();
     markMinimapOverviewSeeded(ctx, this.minimapState, datasetId, t, c);
+  }
+
+  private scheduleIfNeeded(): void {
+    if (this.dirty && this.rafId === null) {
+      this.rafId = requestAnimationFrame(this.tick);
+    }
   }
 
   private buildContext(): TickContext {
@@ -163,10 +180,8 @@ export class RenderLoop {
   }
 
   private tick = (): void => {
-    if (!this.dirty) {
-      this.rafId = requestAnimationFrame(this.tick);
-      return;
-    }
+    this.rafId = null;  // clear so scheduleIfNeeded can re-schedule
+    if (!this.dirty) return;  // quiesce — no reschedule
     this.dirty = false;
 
     const ctx = this.buildContext();
@@ -184,6 +199,7 @@ export class RenderLoop {
     if (tickMinimapOverview(ctx, this.minimapState)) this.dirty = true;
     tickMinimap(ctx, this.minimapState, this.sliceZ);
 
-    this.rafId = requestAnimationFrame(this.tick);
+    // If work remains (budget exhausted or chunks pending), schedule another frame
+    this.scheduleIfNeeded();
   };
 }

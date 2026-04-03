@@ -195,6 +195,8 @@
 | **Unit space** | The `[0,1]^3` coordinate system where the volume is a unit cube at the origin | Normalized space, object space, local space |
 | **Voxel space** | The integer coordinate system of the full-resolution data grid, where each unit is one voxel | Image space, pixel space, data coordinates |
 | **World space** | The coordinate system after applying the model matrix, where the camera operates | View space, scene space |
+| **Unit space (Y convention)** | Within the `[0,1]^3` unit cube, Y=0 is bottom and Y=1 is top (standard math convention). This is the coordinate system used by the model matrix, ray marching in `volume.wgsl`, and `ray_hit_local()`. The shader converts to image space for texture sampling via `(1.0 - pos.y)` | Model Y (ambiguous) |
+| **Image space (Y convention)** | The convention where Y=0 is the top row of image data, increasing downward. Used by chunk grid indices (row 0 = top), voxel array storage, `sort_center` in chunk planning, and atlas eviction distance. `ray_hit_local_image()` returns coordinates in this convention. Convert between conventions with `flipY()` | Texture Y (ambiguous), voxel Y |
 
 ## Python SDK (lucida-py)
 
@@ -258,8 +260,8 @@
 |------|-----------|-----------------|
 | **SharedChunkQueue** | A reactive cache wrapping per-member **ChunkFetchers** with `useSyncExternalStore` subscription and a global `MAX_CONCURRENT = 12` fetch limit shared across all **DatasetMembers**. One instance per **Dataset** (not per member). Accepts a priority-sorted, member-qualified fetch list for cross-member spatial ordering. | ChunkStore (old name), chunk cache, tile manager |
 | **ChunkFetcher** | A pluggable async function that retrieves a single chunk's decompressed data given its **ChunkCoord**; WebSocket-based for server-hosted datasets | Loader, data source (ambiguous with server concept) |
-| **Dirty flag** | The boolean on the **Render loop** that gates whether GPU work is done on a given RAF tick; set by **SharedChunkQueue** subscriptions and viewport changes | Needs redraw, invalidated |
-| **Render loop** | The pull-based `requestAnimationFrame` tick that checks the **Dirty flag**, evaluates **ChunkRequestPlans**, uploads available chunks within the **Upload budget**, and dispatches render commands to the **GPU worker**. Cross-member fetch lists are sorted by distance from viewport center for spatial priority. | Frame loop, game loop, RAF loop |
+| **Dirty flag** | The boolean on the **Render loop** that gates whether GPU work is done on a given RAF tick; set by **SharedChunkQueue** subscriptions and viewport changes. The loop quiesces when not dirty — no `requestAnimationFrame` is scheduled until a dirty-setter fires `scheduleIfNeeded()` | Needs redraw, invalidated |
+| **Render loop** | The pull-based `requestAnimationFrame` tick that runs in two phases: (1) plan+fetch — evaluates **ChunkRequestPlans**, computes seeds, builds fetch lists, submits to **SharedChunkQueue**; (2) upload+render — streams fallback chunks, uploads fine chunks within the **Upload budget**, builds layer params, dispatches render commands to the **GPU worker**. Quiesces when idle (no RAF callbacks fire until dirty). Shared planning logic lives in `tickCommon.ts`. | Frame loop, game loop, RAF loop |
 
 ## Web worker architecture (lucida-web)
 
@@ -433,3 +435,5 @@ These terms have multiple meanings depending on context. The glossary tables abo
 - **"Speed"**: **Base speed** is the volume-diagonal-derived constant set on entering **Fly** mode. **Speed multiplier** is the user-adjustable factor from scroll wheel. Actual movement = **Base speed** × **Speed multiplier** × dt. Don't use "speed" alone — always qualify which.
 
 - **"Mode"**: **Camera mode** is the specific camera variant (slice/arcball/fly). View mode is the 2D/3D rendering mode. Both **Arcball** and **Fly** are 3D view modes — distinguish with "**Camera mode** is fly" vs "view mode is 3D".
+
+- **"Y convention"**: **Unit space** has Y-up (0=bottom, 1=top). **Image space** has Y-down (0=top, 1=bottom). The boundary runs through the model matrix, the shader's texture sampling (`1.0 - pos.y`), and the `ray_hit_local` → chunk planning interface. Use `flipY()` in TypeScript or `ray_hit_local_image()` from Rust at convention boundaries. Inline `1.0 - y` patterns are discouraged — use the named helpers for grepability.

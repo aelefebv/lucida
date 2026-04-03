@@ -219,11 +219,12 @@ export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunks
     if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;
     } else {
-      // Evict the chunk farthest from the camera — the main thread already
-      // ensured the incoming chunk is closer via distance-based eviction.
+      // Only evict if the incoming chunk is closer than the farthest in the atlas.
       const cam = rayHitPerDataset.get(datasetId) ?? [0.5, 0.5, 0.5];
-      const { key: evictKey } = findFarthestSlot(atlas, cam);
+      const { key: evictKey, dist: farthestDist } = findFarthestSlot(atlas, cam);
       if (!evictKey) continue;
+      const incomingDist = chunkDistSq(atlas, chunk.x, chunk.y, chunk.z, cam);
+      if (incomingDist >= farthestDist) break; // sorted nearest-first; rest are farther
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       // Clear old indirection entry

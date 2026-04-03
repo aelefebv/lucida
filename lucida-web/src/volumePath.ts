@@ -1,15 +1,15 @@
 /** Volume render path: upload chunks with atlas-based tracking + render multi-pass. */
-import type { ChunkCoord, QualifiedChunkCoord } from "./zarr/chunkStore.ts";
+import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
-import { VOLUME_ATLAS_BUDGET } from "./renderer/workerProtocol.ts";
-import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+import { evaluateAndSortPlans, buildMemberFetchList, interleaveFetchLists, getSceneSettings } from "./tickCommon.ts";
+import type { DatasetSettings } from "./tickCommon.ts";
 
 export interface VolumeState {
-  uploaded: Map<string, Map<string, { x: number; y: number; z: number }>>;  // memberId → chunkKey → position
+  sent: Map<string, Set<string>>;  // memberId → chunkKey set
   lodKeys: Map<string, string>;
   prevTC: Map<string, string>;
   seedPending: Map<string, {
@@ -19,47 +19,46 @@ export interface VolumeState {
   }>;
 }
 
-/** Squared distance from a chunk grid coordinate to a reference point in [0,1] volume space. */
-function chunkDistSqLocal(
-  cx: number, cy: number, cz: number,
-  chunkX: number, chunkY: number, chunkZ: number,
-  levelW: number, levelH: number, levelD: number,
-  cam: [number, number, number],
-): number {
-  const px = (cx + 0.5) * chunkX / levelW;
-  const py = (cy + 0.5) * chunkY / levelH;
-  const pz = (cz + 0.5) * chunkZ / levelD;
-  const dx = px - cam[0];
-  const dy = py - cam[1];
-  const dz = pz - cam[2];
-  return dx * dx + dy * dy + dz * dz;
-}
-
 export function createVolumeState(): VolumeState {
   return {
-    uploaded: new Map(),
+    sent: new Map(),
     lodKeys: new Map(),
     prevTC: new Map(),
     seedPending: new Map(),
   };
 }
 
+/** Data passed from the plan+fetch phase to the upload+render phase. */
+interface PlanResult {
+  memberPlanCache: Map<string, MemberChunkPlan[]>;
+  settings: { layerOrder: string[]; allSettings: Record<string, DatasetSettings> };
+  eye: Float32Array;
+  hitLocals: Map<string, [number, number, number]>;
+  canvasW: number;
+  canvasH: number;
+  fullW: number;
+  fullH: number;
+  viewT: number;
+  viewC: number;
+}
+
 /**
- * Upload volume chunks and render. Returns true if upload budget was exhausted
- * (caller should schedule another frame).
+ * Plan+fetch phase: evaluate chunk plans, compute seeds, build fetch lists,
+ * and submit to ensureFetched. Returns data needed by upload+render, or null
+ * if there's nothing to do.
  */
-export function tickVolume(
+function planAndFetchVolume(
   ctx: TickContext,
   state: VolumeState,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
-): boolean {
-  const { scene, client, canvas, datasets } = ctx;
+): PlanResult | null {
+  const { scene, datasets } = ctx;
 
   // Use full-res viewport for chunk planning so LOD selection isn't affected
   // by renderScale (which drops to 0.25 during interaction). This prevents
   // the level from flip-flopping and clearing the chunk cache on every drag.
-  const fullW = Math.round(canvas.clientWidth * devicePixelRatio);
-  const fullH = Math.round(canvas.clientHeight * devicePixelRatio);
+  const fullW = Math.round(ctx.canvas.clientWidth * devicePixelRatio);
+  const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
   scene.set_viewport(fullW, fullH);
 
   // Scaled dimensions for the actual render target
@@ -69,21 +68,7 @@ export function tickVolume(
   const viewT = scene.t();
   const viewC = scene.c();
 
-  // Get layer ordering and settings from scene
-  const layerOrder: string[] = JSON.parse(scene.dataset_order());
-  const allSettings: Record<string, {
-    visible: boolean;
-    opacity: number;
-    contrast_min: number;
-    contrast_max: number;
-    gamma: number;
-    blend_mode: string;
-    render_mode: string;
-  }> = JSON.parse(scene.all_dataset_settings());
-
-  let budgetRemaining = UPLOAD_BUDGET_BYTES;
-  let exhausted = false;
-  let hasPending = false;
+  const settings = getSceneSettings(scene);
 
   const eye = new Float32Array(scene.eye_position());
   const hitLocals = new Map<string, [number, number, number]>();
@@ -94,24 +79,14 @@ export function tickVolume(
   // Camera target for spatial priority (eye position in volume mode)
   const eyeForPriority: [number, number, number] = [eye[0], eye[1], eye[2]];
 
-  // Upload chunks for ALL datasets, iterating per-member
   for (const [dsId, ds] of datasets) {
     // Skip datasets whose C/T are exceeded (volume renders all Z slices)
     const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
     if (viewC >= dsShape[1] || viewT >= dsShape[0]) continue;
 
-    const memberPlans = evaluateChunkPlanFor(scene, dsId);
-    if (!memberPlans) continue;
-    memberPlanCache.set(dsId, memberPlans);
-
-    // Sort member plans by distance from eye position (nearest first)
-    const sortedPlans = [...memberPlans].sort((a, b) => {
-      const dxA = a.position[0] - eyeForPriority[0];
-      const dyA = a.position[1] - eyeForPriority[1];
-      const dxB = b.position[0] - eyeForPriority[0];
-      const dyB = b.position[1] - eyeForPriority[1];
-      return (dxA * dxA + dyA * dyA) - (dxB * dxB + dyB * dyB);
-    });
+    const sortedPlans = evaluateAndSortPlans(scene, dsId, eyeForPriority[0], eyeForPriority[1]);
+    if (!sortedPlans) continue;
+    memberPlanCache.set(dsId, sortedPlans);
 
     // Build per-member fetch lists (with seed coords prepended) and collect for interleaving
     const perMemberFetchLists: { memberId: string; list: ChunkCoord[] }[] = [];
@@ -159,52 +134,85 @@ export function tickVolume(
 
       // Build per-member fetch list with seed coords prepended for priority
       const mmPending = minimapPendingFetch.get(memberId);
-      let fetchList: ChunkCoord[] = [...mp.needed, ...mp.prefetch, ...(mmPending ?? [])];
       const seedInfo = state.seedPending.get(memberId);
-      if (seedInfo) {
-        const seedFetchCoords = seedInfo.coords.filter(c => !sharedQueue.has(memberId, c.key));
-        if (seedFetchCoords.length > 0) {
-          fetchList = [...seedFetchCoords, ...fetchList];
-        }
-      }
+      const fetchList = buildMemberFetchList(mp.needed, mp.prefetch, seedInfo, sharedQueue, memberId, mmPending);
       if (fetchList.length > 0) {
         perMemberFetchLists.push({ memberId, list: fetchList });
       }
+
+      // Ray-volume intersection point in local [0,1]^3 space for upload prioritization.
+      const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
+      hitLocals.set(memberId, hitLocal);
+    }
+
+    // Interleave per-member fetch lists (round-robin by spatial priority) and submit
+    if (perMemberFetchLists.length > 0) {
+      const unified = interleaveFetchLists(perMemberFetchLists);
+      ds.sharedQueue.ensureFetched(unified);
+    }
+  }
+
+  return { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC };
+}
+
+/**
+ * Upload+render phase: stream seed chunks, upload fine chunks within budget,
+ * build layer params, and render. Returns true if more work remains.
+ */
+function uploadAndRenderVolume(
+  ctx: TickContext,
+  state: VolumeState,
+  plan: PlanResult,
+): boolean {
+  const { scene, client, datasets } = ctx;
+  const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC } = plan;
+  const { layerOrder, allSettings } = settings;
+
+  let budgetRemaining = UPLOAD_BUDGET_BYTES;
+  let exhausted = false;
+  let hasPending = false;
+
+  // Upload chunks for ALL datasets, iterating per-member
+  for (const [dsId, ds] of datasets) {
+    // Skip datasets whose C/T are exceeded (volume renders all Z slices)
+    const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+    if (viewC >= dsShape[1] || viewT >= dsShape[0]) continue;
+
+    const sortedPlans = memberPlanCache.get(dsId);
+    if (!sortedPlans) continue;
+
+    for (const mp of sortedPlans) {
+      const memberId = mp.member_id;
+      const sharedQueue = ds.sharedQueue;
+
+      if (mp.needed.length === 0) continue;
+      const targetLevel = mp.needed[0].level;
+
+      const tcKey = `${viewT}/${viewC}`;
 
       const levelMeta = ds.info.levels[targetLevel];
       const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
       const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
 
-      // Compute atlas capacity (mirrors createVolumeAtlas in volumeHandlers.ts)
-      const chunkTexels = chunkX * chunkY * chunkZ;
-      const maxSlots = Math.floor(VOLUME_ATLAS_BUDGET / (chunkTexels * 2));
-      const slotsPerAxis = Math.floor(Math.cbrt(maxSlots));
-      const totalSlots =
-        Math.min(slotsPerAxis, Math.floor(2048 / chunkX)) *
-        Math.min(slotsPerAxis, Math.floor(2048 / chunkY)) *
-        Math.min(slotsPerAxis, Math.floor(2048 / chunkZ));
-
-      // Ray-volume intersection point in local [0,1]^3 space for distance-based eviction.
-      // Chunks closest to where the camera ray hits the volume surface are prioritized.
-      const hitLocal = Array.from(scene.ray_hit_local(dsId)) as [number, number, number];
-      hitLocals.set(memberId, hitLocal);
+      const hitLocal = hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
 
       const lodKey = `${memberId}/${targetLevel}/${viewT}/${viewC}`;
       const lodKeyChanged = state.lodKeys.get(memberId) !== lodKey;
 
-      // On LOD key change, clear the uploaded set for this member
+      // On LOD key change, clear the sent set for this member
       if (lodKeyChanged) {
-        state.uploaded.set(memberId, new Map());
+        state.sent.set(memberId, new Set());
         state.lodKeys.set(memberId, lodKey);
       }
 
-      let uploaded = state.uploaded.get(memberId);
-      if (!uploaded) {
-        uploaded = new Map();
-        state.uploaded.set(memberId, uploaded);
+      let sent = state.sent.get(memberId);
+      if (!sent) {
+        sent = new Set();
+        state.sent.set(memberId, sent);
       }
 
       // --- Seed upload (stream coarse chunks as fallback) ---
+      const seedInfo = state.seedPending.get(memberId);
       if (seedInfo) {
         const seedMeta = ds.info.levels[seedInfo.level];
         const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
@@ -242,26 +250,11 @@ export function tickVolume(
       // --- Fine-level upload ---
       const newChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
       for (const coord of mp.needed) {
-        if (uploaded.has(coord.key)) continue;
+        if (sent.has(coord.key)) continue;
         const buf = sharedQueue.get(memberId, coord.key);
         if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
-        if (uploaded.size >= totalSlots) {
-          // Evict the farthest uploaded chunk if incoming chunk is closer
-          let farthestKey = "";
-          let farthestDist = -1;
-          for (const [key, pos] of uploaded) {
-            const d = chunkDistSqLocal(pos.x, pos.y, pos.z, chunkX, chunkY, chunkZ, widthFull, heightFull, depthFull, hitLocal);
-            if (d > farthestDist) { farthestDist = d; farthestKey = key; }
-          }
-          const incomingDist = chunkDistSqLocal(coord.x, coord.y, coord.z, chunkX, chunkY, chunkZ, widthFull, heightFull, depthFull, hitLocal);
-          if (incomingDist < farthestDist) {
-            uploaded.delete(farthestKey);
-          } else {
-            break; // plan is sorted center-out; remaining chunks are all farther
-          }
-        }
         newChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-        uploaded.set(coord.key, { x: coord.x, y: coord.y, z: coord.z });
+        sent.add(coord.key);
         budgetRemaining -= buf.byteLength;
         if (budgetRemaining <= 0) {
           exhausted = true;
@@ -280,21 +273,14 @@ export function tickVolume(
         );
       }
 
-      if (budgetRemaining <= 0) break;
-    }
-
-    // Interleave per-member fetch lists (round-robin by spatial priority) and submit
-    if (perMemberFetchLists.length > 0) {
-      const unified: QualifiedChunkCoord[] = [];
-      const maxLen = Math.max(...perMemberFetchLists.map(p => p.list.length));
-      for (let i = 0; i < maxLen; i++) {
-        for (const { memberId, list } of perMemberFetchLists) {
-          if (i < list.length) {
-            unified.push({ ...list[i], memberId });
-          }
-        }
+      // Prune sent set to current needed keys — allows re-sending chunks
+      // that the worker may have evicted from the atlas after panning away.
+      const neededKeys = new Set(mp.needed.map(c => c.key));
+      for (const key of sent) {
+        if (!neededKeys.has(key)) sent.delete(key);
       }
-      ds.sharedQueue.ensureFetched(unified);
+
+      if (budgetRemaining <= 0) break;
     }
 
     if (budgetRemaining <= 0) break;
@@ -312,8 +298,8 @@ export function tickVolume(
   for (const dsId of layerOrder) {
     const dsVol = datasets.get(dsId);
     if (!dsVol) continue;
-    const settings = allSettings[dsId];
-    if (!settings || !settings.visible) continue;
+    const dsSettings = allSettings[dsId];
+    if (!dsSettings || !dsSettings.visible) continue;
 
     // Skip layers whose C/T are exceeded (volume renders all Z slices)
     const dsShapeV = dsVol.info.levels[0].shape; // [T, C, Z, Y, X]
@@ -331,13 +317,13 @@ export function tickVolume(
         datasetId: memberId,
         modelMatrix: model,
         invModelMatrix: invModel,
-        rayHitLocal: hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local(dsId)) as [number, number, number],
-        contrastMin: settings.contrast_min,
-        contrastMax: settings.contrast_max,
-        gamma: settings.gamma,
-        opacity: settings.opacity,
-        blendMode: settings.blend_mode as "alpha" | "additive" | "max",
-        renderMode: (settings.render_mode || "translucent") as "translucent" | "max_intensity",
+        rayHitLocal: hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number],
+        contrastMin: dsSettings.contrast_min,
+        contrastMax: dsSettings.contrast_max,
+        gamma: dsSettings.gamma,
+        opacity: dsSettings.opacity,
+        blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
+        renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
       });
     }
   }
@@ -347,8 +333,22 @@ export function tickVolume(
   return exhausted || hasPending;
 }
 
+/**
+ * Upload volume chunks and render. Returns true if upload budget was exhausted
+ * (caller should schedule another frame).
+ */
+export function tickVolume(
+  ctx: TickContext,
+  state: VolumeState,
+  minimapPendingFetch: Map<string, ChunkCoord[]>,
+): boolean {
+  const planResult = planAndFetchVolume(ctx, state, minimapPendingFetch);
+  if (!planResult) return false;
+  return uploadAndRenderVolume(ctx, state, planResult);
+}
+
 export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
-  state.uploaded.delete(dsId);
+  state.sent.delete(dsId);
   state.lodKeys.delete(dsId);
   state.prevTC.delete(dsId);
   state.seedPending.delete(dsId);
@@ -357,7 +357,7 @@ export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
 /** Clear member-keyed entries for all members of a dataset. */
 export function clearVolumeForMembers(state: VolumeState, memberIds: string[]): void {
   for (const id of memberIds) {
-    state.uploaded.delete(id);
+    state.sent.delete(id);
     state.lodKeys.delete(id);
     state.prevTC.delete(id);
     state.seedPending.delete(id);
@@ -365,7 +365,7 @@ export function clearVolumeForMembers(state: VolumeState, memberIds: string[]): 
 }
 
 export function resetVolumeState(state: VolumeState): void {
-  state.uploaded.clear();
+  state.sent.clear();
   state.lodKeys.clear();
   state.prevTC.clear();
   state.seedPending.clear();
