@@ -1,5 +1,6 @@
 import type { DatasetInfo } from "./zarr/metadata.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
+import type { PlateKind } from "./components/PlateSelector.tsx";
 
 export type ViewMode = "2d" | "3d";
 
@@ -23,6 +24,7 @@ export interface DatasetState {
   name: string;
   info: DatasetInfo;
   sharedQueue: SharedChunkQueue;
+  kind?: PlateKind;
   members: DatasetMember[];
 }
 

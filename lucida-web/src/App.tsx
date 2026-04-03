@@ -7,6 +7,8 @@ import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
+import { PlateSelector } from "./components/PlateSelector.tsx";
+import { applyViewportCommand } from "./applyAndSend.ts";
 import type { VolumeData } from "./types.ts";
 import type { DatasetState, PendingChunkResolve } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
@@ -320,6 +322,24 @@ function App() {
               onLoopChange={render.setActiveLoop}
             />
           )}
+          {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
+            const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
+            if (!ds?.kind) return null;
+            return (
+              <PlateSelector
+                plateKind={ds.kind}
+                members={ds.members}
+                plateName={ds.name}
+                onWellClick={(cx, cy) => {
+                  const ws = scene.wasmSceneRef.current;
+                  if (!ws) return;
+                  applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
+                  bridge.emitPresence();
+                  render.loopRef.current?.markDirty();
+                }}
+              />
+            );
+          })()}
           {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && (
             <VolumeViewer
               scene={scene.wasmScene}

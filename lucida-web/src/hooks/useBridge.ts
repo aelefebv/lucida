@@ -93,7 +93,7 @@ export function useBridge({
                       storePrefix: m.store_prefix ?? null,
                     }))
                   : [{ id: ds.id, position: [0, 0] as [number, number], storePrefix: null }];
-                setupRemoteDataset(ds.id, ds.name ?? ds.id, ds.client_metadata, members);
+                setupRemoteDataset(ds.id, ds.name ?? ds.id, ds.client_metadata, members, ds.kind);
               }
             }
           }
@@ -127,7 +127,7 @@ export function useBridge({
                     storePrefix: m.store_prefix ?? null,
                   }))
                 : [{ id: cmd.id, position: [0, 0] as [number, number], storePrefix: null }];
-              setupRemoteDataset(cmd.id, cmd.name ?? cmd.id, cmd.client_metadata, members);
+              setupRemoteDataset(cmd.id, cmd.name ?? cmd.id, cmd.client_metadata, members, cmd.kind);
             }
             setRemoteDatasetLoading(false);
             setWasmScene(scene);
@@ -277,7 +277,7 @@ export function useBridge({
     bridgeRef.current = new Bridge(handlers);
   }, [wasmReady]);
 
-  function setupRemoteDataset(datasetId: string, name: string, clientMetadata: DatasetInfo, members: DatasetMember[]) {
+  function setupRemoteDataset(datasetId: string, name: string, clientMetadata: DatasetInfo, members: DatasetMember[], kind?: Record<string, unknown>) {
     const info = clientMetadata;
     const CHUNK_TIMEOUT_MS = 10_000;
 
@@ -338,6 +338,7 @@ export function useBridge({
       name,
       info,
       sharedQueue,
+      kind: kind?.type === "plate" ? kind as unknown as import("../components/PlateSelector.tsx").PlateKind : undefined,
       members,
     });
 
