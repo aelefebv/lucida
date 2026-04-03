@@ -64,7 +64,7 @@ fn sampleVolume(texCoord: vec3i) -> u32 {
   let slot = indirection[gridIdx];
 
   if (slot == 0xFFFFFFFFu) {
-    return 0u; // chunk not loaded — caller handles fallback
+    return 0xFFFFFFFFu; // chunk not loaded
   }
 
   // Decode slot index to atlas grid position
@@ -206,14 +206,20 @@ fn fs(input: VSOut) -> FsOut {
     );
 
     var val = sampleVolume(texCoord);
-    if (val == 0u && u.fallbackDims.w > 0.5) {
-      let fbDims = vec3i(u.fallbackDims.xyz);
-      let fbCoord = vec3i(
-        clamp(i32(pos.x * u.fallbackDims.x), 0, fbDims.x - 1),
-        clamp(i32((1.0 - pos.y) * u.fallbackDims.y), 0, fbDims.y - 1),
-        clamp(i32(pos.z * u.fallbackDims.z), 0, fbDims.z - 1),
-      );
-      val = textureLoad(fallbackTex, fbCoord, 0).r;
+    if (val == 0xFFFFFFFFu) {
+      // Chunk not loaded — try fallback
+      if (u.fallbackDims.w > 0.5) {
+        let fbDims = vec3i(u.fallbackDims.xyz);
+        let fbCoord = vec3i(
+          clamp(i32(pos.x * u.fallbackDims.x), 0, fbDims.x - 1),
+          clamp(i32((1.0 - pos.y) * u.fallbackDims.y), 0, fbDims.y - 1),
+          clamp(i32(pos.z * u.fallbackDims.z), 0, fbDims.z - 1),
+        );
+        val = textureLoad(fallbackTex, fbCoord, 0).r;
+      } else {
+        t += adaptiveStep;
+        continue;
+      }
     }
     if (val == 0u) { t += adaptiveStep; continue; }
     let rawVal = f32(val);

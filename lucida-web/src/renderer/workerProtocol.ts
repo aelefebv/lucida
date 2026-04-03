@@ -27,12 +27,18 @@ export interface SliceChunk {
   key: string;
 }
 
-export interface SliceSetFallbackForLayerMessage {
-  type: "sliceSetFallbackForLayer";
+export interface SliceWriteFallbackChunkMessage {
+  type: "sliceWriteFallbackChunk";
   datasetId: string;
+  tczKey: string;
+  fbWidth: number;
+  fbHeight: number;
   data: ArrayBuffer;
-  width: number;
-  height: number;
+  xOff: number;
+  yOff: number;
+  chunkW: number;
+  chunkH: number;
+  srcStride: number;
 }
 
 export interface SliceUploadChunksForLayerMessage {
@@ -61,13 +67,22 @@ export interface VolumeChunk {
   key: string;
 }
 
-export interface VolumeSetInitialForLayerMessage {
-  type: "volumeSetInitialForLayer";
+export interface VolumeWriteFallbackChunkMessage {
+  type: "volumeWriteFallbackChunk";
   datasetId: string;
+  tcKey: string;
+  fbWidth: number;
+  fbHeight: number;
+  fbDepth: number;
   data: ArrayBuffer;
-  width: number;
-  height: number;
-  depth: number;
+  xOff: number;
+  yOff: number;
+  zOff: number;
+  chunkW: number;
+  chunkH: number;
+  chunkD: number;
+  srcChunkX: number;
+  srcChunkY: number;
 }
 
 export interface VolumeUploadChunksForLayerMessage {
@@ -212,9 +227,9 @@ export interface DestroyMessage {
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
-  | SliceSetFallbackForLayerMessage
+  | SliceWriteFallbackChunkMessage
   | SliceUploadChunksForLayerMessage
-  | VolumeSetInitialForLayerMessage
+  | VolumeWriteFallbackChunkMessage
   | VolumeUploadChunksForLayerMessage
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage

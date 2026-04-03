@@ -91,6 +91,7 @@ So lucida-web is mostly responsible for:
 - UI rendering
 - orchestration between core, store, and renderer
 - frame-rate coalescing of chunk uploads and render requests
+- chunk lifecycle orchestration: evaluating chunk plans from lucida-core, submitting fetch requests, and forwarding cached chunks to the renderer with upload budgets and spatial priority
 
 What it should not do:
 - decode chunk data itself unless absolutely necessary
@@ -129,6 +130,21 @@ Responsibilities inside the renderer usually include:
 - view transform application
 - possibly partial redraw strategies
 - GPU-level tile/chunk compositing
+
+### Progressive LOD rendering model
+
+Every chunk position always renders the best available resolution. There is no blank/black state — the view is always populated, and it sharpens progressively as finer data arrives.
+
+The renderer maintains two textures per layer:
+- **Fallback texture**: the coarsest multiscale level, assembled incrementally as seed chunks arrive. This is the initial state for every new view — not a reaction to a T/C/Z change, but the baseline that is always populated first. Each seed chunk writes its region to the fallback texture as soon as it arrives (no all-or-nothing gate).
+- **Atlas texture**: fine-level chunks packed into a fixed-budget texture atlas. An indirection buffer maps chunk grid coordinates to atlas slot indices. The shader checks indirection first — if the fine chunk is loaded, it samples the atlas; if not (sentinel `0xFFFFFFFF`), it falls back to the coarse texture.
+
+For volume rendering, the shader must cleanly distinguish "chunk not loaded" from "voxel value is zero." `sampleVolume()` returns a sentinel value (`0xFFFFFFFF`, impossible for real u16 data) for unloaded chunks, so the caller can branch to fallback without conflating it with genuinely zero-valued voxels.
+
+Key invariants:
+- Seed chunks (coarsest level) are always requested on first render and on any T/C/Z change — the fallback texture is treated as the initial state, not a special case
+- The old fallback persists until the first chunk of a new generation arrives — no gap, no flash of black during transitions
+- Fine-level atlas chunks are uploaded with a per-frame byte budget and evicted by distance from the camera when the atlas is full
 
 What it should not do:
 - decide which chunks to fetch

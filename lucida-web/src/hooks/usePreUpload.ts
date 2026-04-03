@@ -45,11 +45,27 @@ export function usePreUpload({
       if (preUploadedRef.current.has(id)) continue;
       preUploadedRef.current.add(id);
 
-      client.volumeSetInitialForLayer(id, vol.data, vol.width, vol.height, vol.depth);
+      const volBuf = vol.data.buffer.slice(vol.data.byteOffset, vol.data.byteOffset + vol.data.byteLength);
+      client.volumeWriteFallbackChunk(
+        id, "preupload",
+        vol.width, vol.height, vol.depth,
+        volBuf,
+        0, 0, 0,
+        vol.width, vol.height, vol.depth,
+        vol.width, vol.height,
+      );
 
       const sliceSize = vol.width * vol.height;
       const slice = vol.data.subarray(0, sliceSize);
-      client.sliceSetFallbackForLayer(id, slice, vol.width, vol.height);
+      const sliceBuf = slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength);
+      client.sliceWriteFallbackChunk(
+        id, "preupload",
+        vol.width, vol.height,
+        sliceBuf,
+        0, 0,
+        vol.width, vol.height,
+        vol.width,
+      );
 
       const ds = datasetsRef.current.get(id);
       if (ds) {

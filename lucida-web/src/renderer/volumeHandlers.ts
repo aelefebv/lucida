@@ -1,6 +1,6 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
-  VolumeSetInitialForLayerMessage,
+  VolumeWriteFallbackChunkMessage,
   VolumeUploadChunksForLayerMessage,
   VolumeRenderMultiPassMessage,
 } from "./workerProtocol.ts";
@@ -30,6 +30,9 @@ interface FallbackState {
   width: number;
   height: number;
   depth: number;
+  tcKey: string;
+  intensityMin: number;
+  intensityMax: number;
 }
 
 const atlasPerDataset = new Map<string, AtlasState>();
@@ -169,28 +172,23 @@ function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): { k
   return { key: farthestKey, dist: maxDist };
 }
 
-export function handleVolumeSetInitial(ctx: WorkerCtx, msg: VolumeSetInitialForLayerMessage): void {
-  const data = new Uint16Array(msg.data);
-  const texture = createEmptyVolumeTexture(ctx.device, msg.width, msg.height, msg.depth);
-  for (let z = 0; z < msg.depth; z++) {
-    ctx.device.queue.writeTexture(
-      { texture, origin: [0, 0, z] },
-      msg.data,
-      {
-        offset: z * msg.width * msg.height * 2,
-        bytesPerRow: msg.width * 2,
-        rowsPerImage: msg.height,
-      },
-      [msg.width, msg.height, 1],
-    );
+export function handleVolumeWriteFallbackChunk(ctx: WorkerCtx, msg: VolumeWriteFallbackChunkMessage): void {
+  let fb = fallbackPerDataset.get(msg.datasetId);
+  if (!fb || fb.tcKey !== msg.tcKey) {
+    if (fb) fb.texture.destroy();
+    const texture = createEmptyVolumeTexture(ctx.device, msg.fbWidth, msg.fbHeight, msg.fbDepth);
+    fb = { texture, width: msg.fbWidth, height: msg.fbHeight, depth: msg.fbDepth, tcKey: msg.tcKey, intensityMin: 65535, intensityMax: 0 };
+    fallbackPerDataset.set(msg.datasetId, fb);
   }
+  const data = new Uint16Array(msg.data);
+  writeVolumeChunk(ctx.device, fb.texture, data, msg.srcChunkX, msg.srcChunkY, msg.chunkW, msg.chunkH, msg.chunkD, msg.xOff, msg.yOff, msg.zOff);
   const { min, max } = sampleIntensityRange(data);
-  ctx.post({ type: "intensityRange", datasetId: msg.datasetId, min, max });
-
-  // Replace fallback for this dataset
-  const oldFb = fallbackPerDataset.get(msg.datasetId);
-  if (oldFb) oldFb.texture.destroy();
-  fallbackPerDataset.set(msg.datasetId, { texture, width: msg.width, height: msg.height, depth: msg.depth });
+  let changed = false;
+  if (min < fb.intensityMin) { fb.intensityMin = min; changed = true; }
+  if (max > fb.intensityMax) { fb.intensityMax = max; changed = true; }
+  if (changed) {
+    ctx.post({ type: "intensityRange", datasetId: msg.datasetId, min: fb.intensityMin, max: fb.intensityMax });
+  }
 }
 
 export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunksForLayerMessage): void {

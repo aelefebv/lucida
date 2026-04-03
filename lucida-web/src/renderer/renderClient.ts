@@ -55,11 +55,17 @@ export class RenderClient {
     this.worker.postMessage({ type: "resize", width, height });
   }
 
-  volumeSetInitialForLayer(datasetId: string, data: Uint16Array, width: number, height: number, depth: number) {
-    const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  volumeWriteFallbackChunk(
+    datasetId: string, tcKey: string,
+    fbWidth: number, fbHeight: number, fbDepth: number,
+    data: ArrayBuffer,
+    xOff: number, yOff: number, zOff: number,
+    chunkW: number, chunkH: number, chunkD: number,
+    srcChunkX: number, srcChunkY: number,
+  ) {
     this.worker.postMessage(
-      { type: "volumeSetInitialForLayer", datasetId, data: buf, width, height, depth },
-      [buf],
+      { type: "volumeWriteFallbackChunk", datasetId, tcKey, fbWidth, fbHeight, fbDepth, data, xOff, yOff, zOff, chunkW, chunkH, chunkD, srcChunkX, srcChunkY },
+      [data],
     );
   }
 
@@ -97,11 +103,17 @@ export class RenderClient {
     );
   }
 
-  sliceSetFallbackForLayer(datasetId: string, data: Uint16Array, width: number, height: number) {
-    const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  sliceWriteFallbackChunk(
+    datasetId: string, tczKey: string,
+    fbWidth: number, fbHeight: number,
+    data: ArrayBuffer,
+    xOff: number, yOff: number,
+    chunkW: number, chunkH: number,
+    srcStride: number,
+  ) {
     this.worker.postMessage(
-      { type: "sliceSetFallbackForLayer", datasetId, data: buf, width, height },
-      [buf],
+      { type: "sliceWriteFallbackChunk", datasetId, tczKey, fbWidth, fbHeight, data, xOff, yOff, chunkW, chunkH, srcStride },
+      [data],
     );
   }
 

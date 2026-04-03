@@ -6,8 +6,8 @@ import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import { handleSliceSetFallback, handleSliceUploadChunks, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
-import { handleVolumeSetInitial, handleVolumeUploadChunks, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
+import { handleSliceWriteFallbackChunk, handleSliceUploadChunks, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
+import { handleVolumeWriteFallbackChunk, handleVolumeUploadChunks, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 
 let device: GPUDevice;
@@ -116,8 +116,8 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
-      case "sliceSetFallbackForLayer":
-        handleSliceSetFallback(ctx, msg);
+      case "sliceWriteFallbackChunk":
+        handleSliceWriteFallbackChunk(ctx, msg);
         break;
       case "sliceUploadChunksForLayer":
         handleSliceUploadChunks(ctx, msg);
@@ -126,8 +126,8 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         handleSliceRenderMultiPass(ctx, msg);
         break;
 
-      case "volumeSetInitialForLayer":
-        handleVolumeSetInitial(ctx, msg);
+      case "volumeWriteFallbackChunk":
+        handleVolumeWriteFallbackChunk(ctx, msg);
         break;
       case "volumeUploadChunksForLayer":
         handleVolumeUploadChunks(ctx, msg);

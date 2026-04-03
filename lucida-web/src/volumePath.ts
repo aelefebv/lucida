@@ -15,6 +15,7 @@ export interface VolumeState {
   seedPending: Map<string, {
     level: number;
     coords: ChunkCoord[];
+    sentKeys: Set<string>;
   }>;
 }
 
@@ -125,10 +126,10 @@ export function tickVolume(
       // Detect T/C change and compute coarse seed coords
       const tcKey = `${viewT}/${viewC}`;
       const prevTCKey = state.prevTC.get(memberId);
-      const tcChanged = prevTCKey !== undefined && prevTCKey !== tcKey;
+      const needsSeed = prevTCKey === undefined || prevTCKey !== tcKey;
       state.prevTC.set(memberId, tcKey);
 
-      if (tcChanged) {
+      if (needsSeed) {
         const seedLevel = ds.info.levels.length - 1;
         if (seedLevel > targetLevel) {
           const seedMeta = ds.info.levels[seedLevel];
@@ -150,7 +151,7 @@ export function tickVolume(
               }
             }
           }
-          state.seedPending.set(memberId, { level: seedLevel, coords: seedCoords });
+          state.seedPending.set(memberId, { level: seedLevel, coords: seedCoords, sentKeys: new Set() });
         } else {
           state.seedPending.delete(memberId);
         }
@@ -203,35 +204,35 @@ export function tickVolume(
         state.uploaded.set(memberId, uploaded);
       }
 
-      // --- Seed upload (assemble coarse new-T/C data as fallback) ---
+      // --- Seed upload (stream coarse chunks as fallback) ---
       if (seedInfo) {
-        const allReady = seedInfo.coords.every(sc => {
+        const seedMeta = ds.info.levels[seedInfo.level];
+        const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
+        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+        let allSent = true;
+        for (const sc of seedInfo.coords) {
+          if (seedInfo.sentKeys.has(sc.key)) continue;
           const buf = sharedQueue.get(memberId, sc.key);
-          return buf && buf.byteLength > 0;
-        });
-        if (allReady) {
-          const seedMeta = ds.info.levels[seedInfo.level];
-          const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
-          const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-          const assembled = new Uint16Array(sWidth * sHeight * sDepth);
-          for (const sc of seedInfo.coords) {
-            const buf = sharedQueue.get(memberId, sc.key)!;
-            const data = bufferToUint16(buf, seedMeta.dataType);
-            const xOff = sc.x * sChunkX;
-            const yOff = sc.y * sChunkY;
-            const zOff = sc.z * sChunkZ;
-            const cw = Math.min(sChunkX, sWidth - xOff);
-            const ch = Math.min(sChunkY, sHeight - yOff);
-            const cd = Math.min(sChunkZ, sDepth - zOff);
-            for (let iz = 0; iz < cd; iz++) {
-              for (let iy = 0; iy < ch; iy++) {
-                const srcStart = iz * sChunkY * sChunkX + iy * sChunkX;
-                const dstStart = (zOff + iz) * sHeight * sWidth + (yOff + iy) * sWidth + xOff;
-                assembled.set(data.subarray(srcStart, srcStart + cw), dstStart);
-              }
-            }
-          }
-          client.volumeSetInitialForLayer(memberId, assembled, sWidth, sHeight, sDepth);
+          if (!buf || buf.byteLength === 0) { allSent = false; hasPending = true; continue; }
+          const data = bufferToUint16(buf, seedMeta.dataType);
+          const xOff = sc.x * sChunkX;
+          const yOff = sc.y * sChunkY;
+          const zOff = sc.z * sChunkZ;
+          const cw = Math.min(sChunkX, sWidth - xOff);
+          const ch = Math.min(sChunkY, sHeight - yOff);
+          const cd = Math.min(sChunkZ, sDepth - zOff);
+          const transferBuf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+          client.volumeWriteFallbackChunk(
+            memberId, tcKey,
+            sWidth, sHeight, sDepth,
+            transferBuf,
+            xOff, yOff, zOff,
+            cw, ch, cd,
+            sChunkX, sChunkY,
+          );
+          seedInfo.sentKeys.add(sc.key);
+        }
+        if (allSent) {
           state.seedPending.delete(memberId);
         } else {
           hasPending = true;

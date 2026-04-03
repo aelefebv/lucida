@@ -11,7 +11,7 @@ export interface SliceState {
   uploaded: Map<string, Map<string, true>>;  // memberId → chunkKey → true (ordered for LRU)
   currentLod: Map<string, { level: number; z: number; t: number; c: number }>;
   prevTCZ: Map<string, string>;
-  seedPending: Map<string, { level: number; coords: ChunkCoord[]; z: number }>;
+  seedPending: Map<string, { level: number; coords: ChunkCoord[]; z: number; sentKeys: Set<string> }>;
 }
 
 export function createSliceState(): SliceState {
@@ -103,10 +103,10 @@ export function tickSlice(
       // Detect T/C/Z change and compute coarse seed coords
       const tczKey = `${t}/${c}/${z}`;
       const prevTCZKey = state.prevTCZ.get(memberId);
-      const tczChanged = prevTCZKey !== undefined && prevTCZKey !== tczKey;
+      const needsSeed = prevTCZKey === undefined || prevTCZKey !== tczKey;
       state.prevTCZ.set(memberId, tczKey);
 
-      if (tczChanged && targetLevel !== undefined) {
+      if (needsSeed && targetLevel !== undefined) {
         const seedLevel = ds.info.levels.length - 1;
         if (seedLevel > targetLevel) {
           const seedMeta = ds.info.levels[seedLevel];
@@ -131,7 +131,7 @@ export function tickSlice(
               });
             }
           }
-          state.seedPending.set(memberId, { level: seedLevel, coords: seedCoords, z: seedLevelZ });
+          state.seedPending.set(memberId, { level: seedLevel, coords: seedCoords, z: seedLevelZ, sentKeys: new Set() });
         } else {
           state.seedPending.delete(memberId);
         }
@@ -151,33 +151,36 @@ export function tickSlice(
         perMemberFetchLists.push({ memberId, list: fetchList });
       }
 
-      // Check if all seed chunks are available and assemble fallback
+      // Send available seed chunks incrementally as fallback
       if (seedInfo) {
-        const allReady = seedInfo.coords.every(sc => {
+        const seedMeta = ds.info.levels[seedInfo.level];
+        const [, , , sHeight, sWidth] = seedMeta.shape;
+        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+        const localZ = seedInfo.z - seedInfo.coords[0].z * sChunkZ;
+        let allSent = true;
+        for (const sc of seedInfo.coords) {
+          if (seedInfo.sentKeys.has(sc.key)) continue;
           const buf = sharedQueue.get(memberId, sc.key);
-          return buf && buf.byteLength > 0;
-        });
-        if (allReady) {
-          const seedMeta = ds.info.levels[seedInfo.level];
-          const [, , , sHeight, sWidth] = seedMeta.shape;
-          const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-          const localZ = seedInfo.z - seedInfo.coords[0].z * sChunkZ;
-          const assembled = new Uint16Array(sWidth * sHeight);
-          for (const sc of seedInfo.coords) {
-            const buf = sharedQueue.get(memberId, sc.key)!;
-            const data = bufferToUint16(buf, seedMeta.dataType);
-            const xOff = sc.x * sChunkX;
-            const yOff = sc.y * sChunkY;
-            const chunkW = Math.min(sChunkX, sWidth - xOff);
-            const chunkH = Math.min(sChunkY, sHeight - yOff);
-            const sliceOffset = localZ * sChunkY * sChunkX;
-            for (let row = 0; row < chunkH; row++) {
-              const srcStart = sliceOffset + row * sChunkX;
-              const dstStart = (yOff + row) * sWidth + xOff;
-              assembled.set(data.subarray(srcStart, srcStart + chunkW), dstStart);
-            }
-          }
-          client.sliceSetFallbackForLayer(memberId, assembled, sWidth, sHeight);
+          if (!buf || buf.byteLength === 0) { allSent = false; hasPending = true; continue; }
+          const data = bufferToUint16(buf, seedMeta.dataType);
+          const xOff = sc.x * sChunkX;
+          const yOff = sc.y * sChunkY;
+          const chunkW = Math.min(sChunkX, sWidth - xOff);
+          const chunkH = Math.min(sChunkY, sHeight - yOff);
+          const sliceOffset = localZ * sChunkY * sChunkX;
+          const sliceData = data.subarray(sliceOffset, sliceOffset + sChunkY * sChunkX);
+          const transferBuf = sliceData.buffer.slice(sliceData.byteOffset, sliceData.byteOffset + sliceData.byteLength);
+          client.sliceWriteFallbackChunk(
+            memberId, tczKey,
+            sWidth, sHeight,
+            transferBuf,
+            xOff, yOff,
+            chunkW, chunkH,
+            sChunkX,
+          );
+          seedInfo.sentKeys.add(sc.key);
+        }
+        if (allSent) {
           state.seedPending.delete(memberId);
         }
       }

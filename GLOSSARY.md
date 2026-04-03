@@ -213,8 +213,8 @@
 |------|-----------|-----------------|
 | **Atlas** | A large GPU texture that packs multiple chunks into fixed-size slots, indexed by an **Indirection buffer**; one per **Dataset** per render mode (2D slice or 3D volume) | Texture cache, sprite sheet |
 | **Indirection buffer** | A GPU storage buffer mapping chunk grid coordinates to **Atlas** slot indices; the sentinel value `0xFFFFFFFF` means "not loaded" and triggers **Fallback** sampling | Lookup table, slot map |
-| **Fallback texture** | A coarse-resolution texture (assembled from the lowest **Level** of the **Pyramid**) displayed in place of unloaded **Atlas** chunks | Low-res preview, placeholder |
-| **Seed** | The process of fetching all chunks from the coarsest **Level** and assembling them into a **Fallback texture** when T/C/Z changes, providing instant visual feedback while fine chunks load | Preload, initialize, warm |
+| **Fallback texture** | A coarse-resolution texture (from the lowest **Level** of the **Pyramid**) displayed in place of unloaded **Atlas** chunks. Assembled incrementally — each coarsest-level chunk writes its region as soon as it arrives, keyed by a generation string (`tczKey`/`tcKey`) so the texture is recreated on T/C/Z change | Low-res preview, placeholder |
+| **Seed** | The process of fetching coarsest-**Level** chunks and incrementally writing them into a **Fallback texture**. Triggered on first render and on every T/C/Z change (not only on change). Each chunk is uploaded individually as it arrives — no all-or-nothing gate | Preload, initialize, warm |
 | **Upload budget** | The maximum bytes of chunk data transferred to the GPU per RAF tick: 4 MB for the main view, 2 MB for the **Minimap** | Frame budget, bandwidth cap |
 | **Render scale** | A resolution multiplier (0.25–1.0) applied to the render target during camera interaction to maintain frame rate; restored to 1.0 after 50ms idle | Resolution scale, quality level |
 | **Offscreen target** | An `rgba16float` intermediate texture where each visible **Dataset** layer is rendered independently before the **Compositor** blends them | Render target, layer buffer, FBO |
@@ -312,7 +312,7 @@
 - In **Direct Mode**, a **Viewer** reads **Chunks** via **PyStore** without a server; in **Remote Mode**, it sends **ChunkRequests** through the **Server**
 - A **SharedChunkQueue** wraps per-member **ChunkFetchers** and maintains a two-level cache (member → chunk key → ArrayBuffer) with global concurrency control across all members
 - An **Atlas** contains a GPU texture, an **Indirection buffer**, and a slot-tracking map; one **Atlas** exists per **Dataset** per render mode (slice or volume)
-- A **Fallback texture** is assembled from all chunks of the coarsest **Level** via **Seeding**; the shader samples it when the **Indirection buffer** returns the sentinel value
+- A **Fallback texture** is assembled incrementally from coarsest-**Level** chunks via **Seeding**; the shader samples it when the **Indirection buffer** returns the sentinel value
 - The **GPU worker** lazily creates one `SliceRenderer`, one `VolumeRenderer`, one **Compositor**, and one `CursorRenderer`; all share the same `GPUDevice`
 - The **RenderClient** sends chunk data to the **GPU worker** via the **Worker protocol** using `Transferable` ArrayBuffers (zero-copy ownership transfer)
 - The **Render loop** delegates chunk planning to **WasmScene** (`chunk_plan_for`), fetching to a **SharedChunkQueue**, and rendering to the **RenderClient**; it never touches the GPU directly
@@ -372,7 +372,7 @@
 > **Domain expert:** "The **Render loop** fires on each RAF tick if the **Dirty flag** is set. It asks the **WasmScene** for a **ChunkRequestPlan** per **Dataset**, then passes the `needed` and `prefetch` lists to the **ChunkStore**. The **SharedChunkQueue** fetches via the server (which serves chunks from its **StorageBackend**), decompressing LZ4 chunks through the **LZ4 worker pool**. When data arrives, the **SharedChunkQueue** bumps its version — that sets the **Dirty flag** again. On the next tick, the **Render loop** finds the chunk in cache, converts it to u16, and sends it to the **RenderClient**, which transfers the ArrayBuffer to the **GPU worker**. The worker writes it into the **Atlas** and updates the **Indirection buffer**. All within the **Upload budget** — 4 MB per tick."
 
 > **Dev:** "What happens visually when the user changes the timepoint?"
-> **Domain expert:** "The viewer **Seeds** the new timepoint: it fetches all chunks of the coarsest **Level** and assembles them into a **Fallback texture**. That gets uploaded immediately, so the user sees a blurry preview right away. Meanwhile, the **ChunkRequestPlan** now has fine-level `needed` chunks for the new timepoint. Those flow through the **ChunkStore** and get uploaded to the **Atlas** incrementally, capped by the **Upload budget**. The shader samples from the **Atlas** where chunks are loaded and falls back to the **Fallback texture** where they're not. The transition is progressive — blurry to sharp."
+> **Domain expert:** "The viewer **Seeds** the new timepoint: it fetches coarsest-**Level** chunks and writes each one into the **Fallback texture** as it arrives — no waiting for all of them. The user sees a blurry preview within the first few frames. Meanwhile, the **ChunkRequestPlan** has fine-level `needed` chunks for the new timepoint. Those flow through the **SharedChunkQueue** and get uploaded to the **Atlas** incrementally, capped by the **Upload budget**. The shader samples from the **Atlas** where chunks are loaded and falls back to the **Fallback texture** where they're not. The transition is progressive — blurry to sharp."
 
 > **Dev:** "Why does the 3D view get blocky when I drag?"
 > **Domain expert:** "That's the **Render scale**. During interaction it drops to 0.25 — rendering at quarter resolution — so the **GPU worker** can keep up with the ray marching. After 50ms of no input, it snaps back to 1.0 and re-renders at full resolution. The **Render loop** uses the full-res viewport for **Level** selection though, so you don't get LOD flip-flopping during drags."
@@ -420,7 +420,7 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Viewport"**: Use **viewport** for pixel dimensions, **VisibleRegion** for computed voxel bounds, **ViewportData** for the assembled numpy result.
 
-- **"Seed"/"seeding"**: View **Seeding** assembles the coarsest level into a **Fallback texture** on T/C/Z change. **Minimap seeding** marks a member's coarsest level as fully uploaded to the minimap GPU texture. Both fetch the coarsest level but for different targets. Distinguish as "view seeding" vs "minimap seeding" in conversation.
+- **"Seed"/"seeding"**: View **Seeding** incrementally writes coarsest-level chunks into a **Fallback texture** on first render and on T/C/Z change. **Minimap seeding** marks a member's coarsest level as fully uploaded to the minimap GPU texture. Both fetch the coarsest level but for different targets. Distinguish as "view seeding" vs "minimap seeding" in conversation.
 
 - **"Bridge"**: `Bridge` is the WebSocket client class. `useBridge` is the React hook that adds state management on top.
 

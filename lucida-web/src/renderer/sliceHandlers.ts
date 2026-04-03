@@ -1,6 +1,6 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
-  SliceSetFallbackForLayerMessage,
+  SliceWriteFallbackChunkMessage,
   SliceUploadChunksForLayerMessage,
   SliceRenderMultiPassMessage,
 } from "./workerProtocol.ts";
@@ -26,7 +26,14 @@ interface SliceAtlasState {
 }
 
 const atlasPerDataset = new Map<string, SliceAtlasState>();
-const fallbackPerDataset = new Map<string, GPUTexture>();
+
+interface SliceFallbackEntry {
+  texture: GPUTexture;
+  tczKey: string;
+  intensityMin: number;
+  intensityMax: number;
+}
+const fallbackPerDataset = new Map<string, SliceFallbackEntry>();
 // Last known viewport center in [0,1] UV space per dataset
 const cameraUVPerDataset = new Map<string, [number, number]>();
 
@@ -127,14 +134,23 @@ function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): stri
   return farthestKey;
 }
 
-export function handleSliceSetFallback(ctx: WorkerCtx, msg: SliceSetFallbackForLayerMessage): void {
-  const slice = new Uint16Array(msg.data);
-  const { min, max } = sampleIntensityRange(slice);
-  const old = fallbackPerDataset.get(msg.datasetId);
-  if (old) old.destroy();
-  const texture = createSliceTexture(ctx.device, msg.width, msg.height, slice);
-  fallbackPerDataset.set(msg.datasetId, texture);
-  ctx.post({ type: "intensityRange", datasetId: msg.datasetId, min, max });
+export function handleSliceWriteFallbackChunk(ctx: WorkerCtx, msg: SliceWriteFallbackChunkMessage): void {
+  let fb = fallbackPerDataset.get(msg.datasetId);
+  if (!fb || fb.tczKey !== msg.tczKey) {
+    if (fb) fb.texture.destroy();
+    const texture = createSliceTexture(ctx.device, msg.fbWidth, msg.fbHeight, null);
+    fb = { texture, tczKey: msg.tczKey, intensityMin: 65535, intensityMax: 0 };
+    fallbackPerDataset.set(msg.datasetId, fb);
+  }
+  const data = new Uint16Array(msg.data);
+  writeSliceRegion(ctx.device, fb.texture, data, msg.srcStride, msg.xOff, msg.yOff, msg.chunkW, msg.chunkH);
+  const { min, max } = sampleIntensityRange(data);
+  let changed = false;
+  if (min < fb.intensityMin) { fb.intensityMin = min; changed = true; }
+  if (max > fb.intensityMax) { fb.intensityMax = max; changed = true; }
+  if (changed) {
+    ctx.post({ type: "intensityRange", datasetId: msg.datasetId, min: fb.intensityMin, max: fb.intensityMax });
+  }
 }
 
 export function handleSliceUploadChunks(ctx: WorkerCtx, msg: SliceUploadChunksForLayerMessage): void {
@@ -237,7 +253,7 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
     ]);
 
     const idx = renderedLayers.length;
-    renderer.setFallback(fb ?? ctx.getDummyTexture());
+    renderer.setFallback(fb?.texture ?? ctx.getDummyTexture());
 
     if (atlas) {
       // Flush indirection data to GPU
@@ -291,7 +307,7 @@ export function removeSliceResources(datasetId: string): void {
   }
   const fb = fallbackPerDataset.get(datasetId);
   if (fb) {
-    fb.destroy();
+    fb.texture.destroy();
     fallbackPerDataset.delete(datasetId);
   }
   cameraUVPerDataset.delete(datasetId);
@@ -300,7 +316,7 @@ export function removeSliceResources(datasetId: string): void {
 export function destroyAllSliceResources(): void {
   for (const atlas of atlasPerDataset.values()) destroySliceAtlas(atlas);
   atlasPerDataset.clear();
-  for (const fb of fallbackPerDataset.values()) fb.destroy();
+  for (const fb of fallbackPerDataset.values()) fb.texture.destroy();
   fallbackPerDataset.clear();
   cameraUVPerDataset.clear();
   dummyIndirectionBuf?.destroy();
