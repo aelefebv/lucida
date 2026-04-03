@@ -29,6 +29,7 @@ export interface CursorLabel {
 interface Props {
   peers: Map<ClientId, PresenceState>;
   myId: ClientId;
+  followTarget: ClientId | null;
   wasmSceneRef: RefObject<WasmScene | null>;
   canvas: HTMLCanvasElement;
   viewMode: "2d" | "3d";
@@ -71,7 +72,7 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
 
 const EDGE_MARGIN = 16;
 
-export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t, c, cursorLabels }: Props) {
+export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, viewMode, z, t, c, cursorLabels }: Props) {
   const labelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronLabelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
@@ -83,6 +84,8 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
   viewModeRef.current = viewMode;
   const cursorLabelsRef = useRef(cursorLabels);
   cursorLabelsRef.current = cursorLabels;
+  const followTargetRef = useRef(followTarget);
+  followTargetRef.current = followTarget;
 
   useEffect(() => {
     let rafId: number;
@@ -126,6 +129,12 @@ export function PeerCursors({ peers, myId, wasmSceneRef, canvas, viewMode, z, t,
           }
 
           const isDefaulted = peer.cursor === null;
+
+          // Hide defaulted cursor for peers in a follow relationship with us
+          if (isDefaulted && (peer.following === myId || followTargetRef.current === clientId)) {
+            el.style.display = "none";
+            continue;
+          }
 
           let screenX: number, screenY: number;
           if (localIs3d) {

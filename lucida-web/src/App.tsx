@@ -172,16 +172,22 @@ function App() {
       return;
     }
 
-    const peersArr = Array.from(bridge.peers.values()).map(p => {
-      const mode = (p.camera as { mode?: string })?.mode ?? "slice";
-      if (p.cursor === null) {
-        const center = mode === "slice"
-          ? (p.camera as { center?: [number, number] })?.center ?? [0, 0]
-          : [0.5, 0.5];
-        return { id: p.client_id, cursor: center, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: true };
-      }
-      return { id: p.client_id, cursor: p.cursor, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: false };
-    });
+    const peersArr = Array.from(bridge.peers.values())
+      .filter(p => {
+        if (p.cursor !== null) return true;
+        // Hide defaulted cursor for peers in a follow relationship with us
+        return !(p.following === bridge.myId || bridge.followTarget === p.client_id);
+      })
+      .map(p => {
+        const mode = (p.camera as { mode?: string })?.mode ?? "slice";
+        if (p.cursor === null) {
+          const center = mode === "slice"
+            ? (p.camera as { center?: [number, number] })?.center ?? [0, 0]
+            : [0.5, 0.5];
+          return { id: p.client_id, cursor: center, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: true };
+        }
+        return { id: p.client_id, cursor: p.cursor, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: false };
+      });
     const canvasEl = render.canvasRef.current;
     const screenW = canvasEl?.clientWidth ?? 800;
     const screenH = canvasEl?.clientHeight ?? 600;
@@ -203,7 +209,7 @@ function App() {
 
     setCursorLabels(result.labels);
     render.loopRef.current?.markDirty();
-  }, [bridge.peers, bridge.myId, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef]);
+  }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef]);
 
   const handleCameraModeChange = useCallback((mode: string) => {
     setCameraMode(mode);
@@ -361,6 +367,7 @@ function App() {
             <PeerCursors
               peers={bridge.peers}
               myId={bridge.myId}
+              followTarget={bridge.followTarget}
               wasmSceneRef={scene.wasmSceneRef}
               canvas={render.canvasRef.current}
               viewMode={dims.viewMode}
