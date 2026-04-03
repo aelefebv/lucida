@@ -1,7 +1,8 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
   SliceWriteFallbackChunkMessage,
-  SliceUploadChunksForLayerMessage,
+  SliceChunkPlanMessage,
+  SliceChunkDataMessage,
   SliceRenderMultiPassMessage,
 } from "./workerProtocol.ts";
 import { SLICE_ATLAS_BUDGET } from "./workerProtocol.ts";
@@ -157,7 +158,43 @@ export function handleSliceWriteFallbackChunk(ctx: WorkerCtx, msg: SliceWriteFal
   }
 }
 
-export function handleSliceUploadChunks(ctx: WorkerCtx, msg: SliceUploadChunksForLayerMessage): void {
+export function handleSliceChunkPlan(ctx: WorkerCtx, msg: SliceChunkPlanMessage): void {
+  const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
+
+  // Get or create atlas (recreate on LOD/Z/T/C/chunkShape change)
+  let atlas = atlasPerDataset.get(datasetId);
+  if (!atlas || atlas.level !== level || atlas.z !== z || atlas.t !== t || atlas.c !== c
+      || atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
+    if (atlas) destroySliceAtlas(atlas);
+    atlas = createSliceAtlas(ctx.device, levelWidth, levelHeight, chunkX, chunkY, level, z, t, c);
+    atlasPerDataset.set(datasetId, atlas);
+  }
+
+  // Diff needed vs atlas.slots to find missing chunks that are available in main cache
+  const availableSet = new Set(msg.availableKeys);
+  const requestKeys: string[] = [];
+  for (const coord of msg.needed) {
+    if (atlas.slots.has(coord.key)) continue; // already in atlas
+    if (!availableSet.has(coord.key)) continue; // not available in main cache
+    requestKeys.push(coord.key);
+  }
+
+  if (requestKeys.length > 0) {
+    ctx.post({
+      type: "chunkDataRequest",
+      datasetId,
+      keys: requestKeys,
+      mode: "slice",
+      level, t, c,
+      levelWidth, levelHeight, levelDepth,
+      chunkX, chunkY, chunkZ,
+      hitLocal: [0.5, 0.5, 0.5], // unused for slice mode
+      z, fullResDepth, fullResZ,
+    });
+  }
+}
+
+export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage): void {
   const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
 
   let atlas = atlasPerDataset.get(datasetId);
@@ -176,61 +213,59 @@ export function handleSliceUploadChunks(ctx: WorkerCtx, msg: SliceUploadChunksFo
   const targetChunkZ = Math.floor(levelZ / chunkZ);
   const localZ = levelZ - targetChunkZ * chunkZ;
 
-  if (msg.chunks.length > 0) {
-    let intensityChanged = false;
-    const perChunkSamples = Math.floor(10000 / Math.max(1, msg.chunks.length));
+  let intensityChanged = false;
+  const perChunkSamples = Math.floor(10000 / Math.max(1, msg.chunks.length));
 
-    for (const chunk of msg.chunks) {
-      if (atlas.slots.has(chunk.key)) continue;
-      if (chunk.z !== targetChunkZ) continue;
-      const data = new Uint16Array(chunk.data);
+  for (const chunk of msg.chunks) {
+    if (atlas.slots.has(chunk.key)) continue;
+    if (chunk.z !== targetChunkZ) continue;
+    const data = new Uint16Array(chunk.data);
 
-      const r = sampleIntensityRange(data, perChunkSamples);
-      if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
-      if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
+    const r = sampleIntensityRange(data, perChunkSamples);
+    if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
+    if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
 
-      // Allocate a slot
-      let slotIndex: number;
-      if (atlas.freeSlots.length > 0) {
-        slotIndex = atlas.freeSlots.pop()!;
-      } else {
-        // Only evict if the incoming chunk is closer than the farthest in the atlas.
-        const cam = cameraUVPerDataset.get(datasetId) ?? [0.5, 0.5];
-        const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(atlas, cam);
-        if (!evictKey) continue;
-        const incomingDist = chunkDistSq2D(atlas, chunk.x, chunk.y, cam);
-        if (incomingDist >= farthestDist) break; // sorted nearest-first; rest are farther
-        slotIndex = atlas.slots.get(evictKey)!;
-        atlas.slots.delete(evictKey);
-        const oldGridIdx = atlas.slotGridIdx[slotIndex];
-        if (oldGridIdx >= 0) {
-          atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
-        }
+    // Allocate a slot
+    let slotIndex: number;
+    if (atlas.freeSlots.length > 0) {
+      slotIndex = atlas.freeSlots.pop()!;
+    } else {
+      // Only evict if the incoming chunk is closer than the farthest in the atlas.
+      const cam = cameraUVPerDataset.get(datasetId) ?? [0.5, 0.5];
+      const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(atlas, cam);
+      if (!evictKey) continue;
+      const incomingDist = chunkDistSq2D(atlas, chunk.x, chunk.y, cam);
+      if (incomingDist >= farthestDist) continue; // skip -- farther than what we have
+      slotIndex = atlas.slots.get(evictKey)!;
+      atlas.slots.delete(evictKey);
+      const oldGridIdx = atlas.slotGridIdx[slotIndex];
+      if (oldGridIdx >= 0) {
+        atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
       }
-
-      // Decode slot to atlas grid position
-      const sx = slotIndex % atlas.slotsX;
-      const sy = Math.floor(slotIndex / atlas.slotsX);
-
-      const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
-      const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
-      const sliceOffset = localZ * chunkY * chunkX;
-      const sliceData = data.subarray(sliceOffset, sliceOffset + chunkY * chunkX);
-
-      const xOff = sx * chunkX;
-      const yOff = sy * chunkY;
-      writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
-
-      // Update indirection
-      const gridIdx = chunk.y * atlas.gridX + chunk.x;
-      atlas.indirectionData[gridIdx] = slotIndex;
-      atlas.slotGridIdx[slotIndex] = gridIdx;
-      atlas.slots.set(chunk.key, slotIndex);
     }
 
-    if (intensityChanged) {
-      ctx.post({ type: "intensityRange", datasetId, min: atlas.intensityMin, max: atlas.intensityMax });
-    }
+    // Decode slot to atlas grid position
+    const sx = slotIndex % atlas.slotsX;
+    const sy = Math.floor(slotIndex / atlas.slotsX);
+
+    const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
+    const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
+    const sliceOffset = localZ * chunkY * chunkX;
+    const sliceData = data.subarray(sliceOffset, sliceOffset + chunkY * chunkX);
+
+    const xOff = sx * chunkX;
+    const yOff = sy * chunkY;
+    writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
+
+    // Update indirection
+    const gridIdx = chunk.y * atlas.gridX + chunk.x;
+    atlas.indirectionData[gridIdx] = slotIndex;
+    atlas.slotGridIdx[slotIndex] = gridIdx;
+    atlas.slots.set(chunk.key, slotIndex);
+  }
+
+  if (intensityChanged) {
+    ctx.post({ type: "intensityRange", datasetId, min: atlas.intensityMin, max: atlas.intensityMax });
   }
 }
 

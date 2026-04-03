@@ -6,8 +6,8 @@ import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import { handleSliceWriteFallbackChunk, handleSliceUploadChunks, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
-import { handleVolumeWriteFallbackChunk, handleVolumeUploadChunks, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
+import { handleSliceWriteFallbackChunk, handleSliceChunkPlan, handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
+import { handleVolumeWriteFallbackChunk, handleVolumeChunkPlan, handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 
 let device: GPUDevice;
@@ -119,8 +119,11 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       case "sliceWriteFallbackChunk":
         handleSliceWriteFallbackChunk(ctx, msg);
         break;
-      case "sliceUploadChunksForLayer":
-        handleSliceUploadChunks(ctx, msg);
+      case "sliceChunkPlan":
+        handleSliceChunkPlan(ctx, msg);
+        break;
+      case "sliceChunkData":
+        handleSliceChunkData(ctx, msg);
         break;
       case "sliceRenderMultiPass":
         handleSliceRenderMultiPass(ctx, msg);
@@ -129,8 +132,11 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       case "volumeWriteFallbackChunk":
         handleVolumeWriteFallbackChunk(ctx, msg);
         break;
-      case "volumeUploadChunksForLayer":
-        handleVolumeUploadChunks(ctx, msg);
+      case "volumeChunkPlan":
+        handleVolumeChunkPlan(ctx, msg);
+        break;
+      case "volumeChunkData":
+        handleVolumeChunkData(ctx, msg);
         break;
       case "volumeRenderMultiPass":
         handleVolumeRenderMultiPass(ctx, msg);

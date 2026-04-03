@@ -1,7 +1,8 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
   VolumeWriteFallbackChunkMessage,
-  VolumeUploadChunksForLayerMessage,
+  VolumeChunkPlanMessage,
+  VolumeChunkDataMessage,
   VolumeRenderMultiPassMessage,
 } from "./workerProtocol.ts";
 import { VOLUME_ATLAS_BUDGET } from "./workerProtocol.ts";
@@ -191,7 +192,46 @@ export function handleVolumeWriteFallbackChunk(ctx: WorkerCtx, msg: VolumeWriteF
   }
 }
 
-export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunksForLayerMessage): void {
+export function handleVolumeChunkPlan(ctx: WorkerCtx, msg: VolumeChunkPlanMessage): void {
+  const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+
+  // Get or create atlas (recreate on LOD/T/C/chunkShape change)
+  let atlas = atlasPerDataset.get(datasetId);
+  if (!atlas || atlas.level !== level || atlas.t !== t || atlas.c !== c
+      || atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
+    if (atlas) destroyAtlas(atlas);
+    atlas = createVolumeAtlas(ctx.device, levelWidth, levelHeight, levelDepth,
+      chunkX, chunkY, chunkZ, level, t, c);
+    atlasPerDataset.set(datasetId, atlas);
+  }
+
+  // Update ray hit point for eviction distance
+  rayHitPerDataset.set(datasetId, msg.hitLocal);
+
+  // Diff needed vs atlas.slots to find missing chunks that are available in main cache
+  const availableSet = new Set(msg.availableKeys);
+  const requestKeys: string[] = [];
+  for (const coord of msg.needed) {
+    if (atlas.slots.has(coord.key)) continue; // already in atlas
+    if (!availableSet.has(coord.key)) continue; // not available in main cache
+    requestKeys.push(coord.key);
+  }
+
+  if (requestKeys.length > 0) {
+    ctx.post({
+      type: "chunkDataRequest",
+      datasetId,
+      keys: requestKeys,
+      mode: "volume",
+      level, t, c,
+      levelWidth, levelHeight, levelDepth,
+      chunkX, chunkY, chunkZ,
+      hitLocal: msg.hitLocal,
+    });
+  }
+}
+
+export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessage): void {
   const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
   let atlas = atlasPerDataset.get(datasetId);
@@ -203,43 +243,37 @@ export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunks
     atlasPerDataset.set(datasetId, atlas);
   }
 
-  // Update ray-volume hit point so eviction uses the current view
-  rayHitPerDataset.set(datasetId, msg.cameraLocal);
+  // Update ray hit point
+  rayHitPerDataset.set(datasetId, msg.hitLocal);
 
   let intensityChanged = false;
   const totalChunks = msg.chunks.length;
 
   for (const chunk of msg.chunks) {
     const chunkKey = chunk.key;
-
     if (atlas.slots.has(chunkKey)) continue;
 
-    // Allocate a slot
     let slotIndex: number;
     if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;
     } else {
-      // Only evict if the incoming chunk is closer than the farthest in the atlas.
       const cam = rayHitPerDataset.get(datasetId) ?? [0.5, 0.5, 0.5];
       const { key: evictKey, dist: farthestDist } = findFarthestSlot(atlas, cam);
       if (!evictKey) continue;
       const incomingDist = chunkDistSq(atlas, chunk.x, chunk.y, chunk.z, cam);
-      if (incomingDist >= farthestDist) break; // sorted nearest-first; rest are farther
+      if (incomingDist >= farthestDist) continue; // skip -- farther than what we have
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
-      // Clear old indirection entry
       const oldGridIdx = atlas.slotGridIdx[slotIndex];
       if (oldGridIdx >= 0) {
         atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
       }
     }
 
-    // Decode slot to atlas grid position
     const sx = slotIndex % atlas.slotsX;
     const sy = Math.floor(slotIndex / atlas.slotsX) % atlas.slotsY;
     const sz = Math.floor(slotIndex / (atlas.slotsX * atlas.slotsY));
 
-    // Write chunk data to atlas
     const data = new Uint16Array(chunk.data);
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;
@@ -250,13 +284,11 @@ export function handleVolumeUploadChunks(ctx: WorkerCtx, msg: VolumeUploadChunks
 
     writeVolumeChunk(ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
 
-    // Update indirection
     const gridIdx = chunk.z * atlas.gridY * atlas.gridX + chunk.y * atlas.gridX + chunk.x;
     atlas.indirectionData[gridIdx] = slotIndex;
     atlas.slotGridIdx[slotIndex] = gridIdx;
     atlas.slots.set(chunkKey, slotIndex);
 
-    // Sample intensity range
     const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
     const { min, max } = sampleIntensityRange(data, perChunkSamples);
     if (min < atlas.intensityMin) { atlas.intensityMin = min; intensityChanged = true; }

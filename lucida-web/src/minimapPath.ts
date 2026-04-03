@@ -74,7 +74,6 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
   const c = scene.c();
 
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
-  let needsRetry = false;
 
   for (const [dsId, ds] of datasets) {
     const coarsestIdx = ds.info.levels.length - 1;
@@ -128,7 +127,6 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
 
       if (missing.length > 0) {
         state.pendingFetch.set(memberId, missing);
-        needsRetry = true;
       } else {
         state.pendingFetch.delete(memberId);
       }
@@ -151,7 +149,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
     if (budgetRemaining <= 0) break;
   }
 
-  return needsRetry;
+  return budgetRemaining <= 0;
 }
 
 /** Render the minimap and invoke the overlay callback. */

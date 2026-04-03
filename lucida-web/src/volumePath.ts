@@ -1,16 +1,13 @@
-/** Volume render path: upload chunks with atlas-based tracking + render multi-pass. */
+/** Volume render path: plan-based chunk upload + multi-pass render. */
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { evaluateAndSortPlans, buildMemberFetchList, interleaveFetchLists, getSceneSettings } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 
 export interface VolumeState {
-  sent: Map<string, Set<string>>;  // memberId → chunkKey set
-  lodKeys: Map<string, string>;
   prevTC: Map<string, string>;
   seedPending: Map<string, {
     level: number;
@@ -21,8 +18,6 @@ export interface VolumeState {
 
 export function createVolumeState(): VolumeState {
   return {
-    sent: new Map(),
-    lodKeys: new Map(),
     prevTC: new Map(),
     seedPending: new Map(),
   };
@@ -156,7 +151,7 @@ function planAndFetchVolume(
 }
 
 /**
- * Upload+render phase: stream seed chunks, upload fine chunks within budget,
+ * Upload+render phase: stream seed chunks, send chunk plans to worker,
  * build layer params, and render. Returns true if more work remains.
  */
 function uploadAndRenderVolume(
@@ -168,11 +163,7 @@ function uploadAndRenderVolume(
   const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC } = plan;
   const { layerOrder, allSettings } = settings;
 
-  let budgetRemaining = UPLOAD_BUDGET_BYTES;
-  let exhausted = false;
-  let hasPending = false;
-
-  // Upload chunks for ALL datasets, iterating per-member
+  // Send chunk plans for ALL datasets, iterating per-member
   for (const [dsId, ds] of datasets) {
     // Skip datasets whose C/T are exceeded (volume renders all Z slices)
     const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
@@ -196,21 +187,6 @@ function uploadAndRenderVolume(
 
       const hitLocal = hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
 
-      const lodKey = `${memberId}/${targetLevel}/${viewT}/${viewC}`;
-      const lodKeyChanged = state.lodKeys.get(memberId) !== lodKey;
-
-      // On LOD key change, clear the sent set for this member
-      if (lodKeyChanged) {
-        state.sent.set(memberId, new Set());
-        state.lodKeys.set(memberId, lodKey);
-      }
-
-      let sent = state.sent.get(memberId);
-      if (!sent) {
-        sent = new Set();
-        state.sent.set(memberId, sent);
-      }
-
       // --- Seed upload (stream coarse chunks as fallback) ---
       const seedInfo = state.seedPending.get(memberId);
       if (seedInfo) {
@@ -221,7 +197,7 @@ function uploadAndRenderVolume(
         for (const sc of seedInfo.coords) {
           if (seedInfo.sentKeys.has(sc.key)) continue;
           const buf = sharedQueue.get(memberId, sc.key);
-          if (!buf || buf.byteLength === 0) { allSent = false; hasPending = true; continue; }
+          if (!buf || buf.byteLength === 0) { allSent = false; continue; }
           const data = bufferToUint16(buf, seedMeta.dataType);
           const xOff = sc.x * sChunkX;
           const yOff = sc.y * sChunkY;
@@ -242,48 +218,26 @@ function uploadAndRenderVolume(
         }
         if (allSent) {
           state.seedPending.delete(memberId);
-        } else {
-          hasPending = true;
         }
       }
 
-      // --- Fine-level upload ---
-      const newChunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+      // --- Send plan to worker — worker will request what it needs ---
+      const availableKeys: string[] = [];
       for (const coord of mp.needed) {
-        if (sent.has(coord.key)) continue;
-        const buf = sharedQueue.get(memberId, coord.key);
-        if (!buf || buf.byteLength === 0) { hasPending = true; continue; }
-        newChunks.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-        sent.add(coord.key);
-        budgetRemaining -= buf.byteLength;
-        if (budgetRemaining <= 0) {
-          exhausted = true;
-          break;
+        if (sharedQueue.has(memberId, coord.key)) {
+          availableKeys.push(coord.key);
         }
       }
-
-      if (newChunks.length > 0 || (lodKeyChanged && !state.seedPending.has(memberId))) {
-        client.volumeUploadChunksForLayer(
-          memberId,
-          newChunks,
-          targetLevel, viewT, viewC,
-          widthFull, heightFull, depthFull,
-          chunkX, chunkY, chunkZ,
-          hitLocal,
-        );
-      }
-
-      // Prune sent set to current needed keys — allows re-sending chunks
-      // that the worker may have evicted from the atlas after panning away.
-      const neededKeys = new Set(mp.needed.map(c => c.key));
-      for (const key of sent) {
-        if (!neededKeys.has(key)) sent.delete(key);
-      }
-
-      if (budgetRemaining <= 0) break;
+      client.volumeChunkPlan(
+        memberId,
+        mp.needed.map(c => ({ level: c.level, x: c.x, y: c.y, z: c.z, key: c.key })),
+        availableKeys,
+        targetLevel, viewT, viewC,
+        widthFull, heightFull, depthFull,
+        chunkX, chunkY, chunkZ,
+        hitLocal,
+      );
     }
-
-    if (budgetRemaining <= 0) break;
   }
 
   // Build layer params for visible layers in order
@@ -330,7 +284,7 @@ function uploadAndRenderVolume(
 
   client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, viewProj, camForward, clipDistance, clipMode);
 
-  return exhausted || hasPending;
+  return false;
 }
 
 /**
@@ -348,8 +302,6 @@ export function tickVolume(
 }
 
 export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
-  state.sent.delete(dsId);
-  state.lodKeys.delete(dsId);
   state.prevTC.delete(dsId);
   state.seedPending.delete(dsId);
 }
@@ -357,16 +309,12 @@ export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
 /** Clear member-keyed entries for all members of a dataset. */
 export function clearVolumeForMembers(state: VolumeState, memberIds: string[]): void {
   for (const id of memberIds) {
-    state.sent.delete(id);
-    state.lodKeys.delete(id);
     state.prevTC.delete(id);
     state.seedPending.delete(id);
   }
 }
 
 export function resetVolumeState(state: VolumeState): void {
-  state.sent.clear();
-  state.lodKeys.clear();
   state.prevTC.clear();
   state.seedPending.clear();
 }
