@@ -88,7 +88,7 @@ export function usePreUpload({
           applyViewportCommand(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 });
           applyViewportCommand(scene, { type: "set_zoom", value: 1.0 });
           emitPresence();
-          loopRef.current?.markDirty();
+          loopRef.current?.markDataDirty();
         }
       }
       prevDimsMapRef.current.set(id, { w: vol.width, h: vol.height, d: vol.depth });

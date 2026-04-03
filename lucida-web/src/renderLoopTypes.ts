@@ -37,6 +37,9 @@ export interface MinimapOverlayData {
 /** Max bytes of chunk data to upload to the GPU per RAF tick. */
 export const UPLOAD_BUDGET_BYTES = 4 * 1024 * 1024; // 4 MB per frame
 
+/** Minimum interval between data-triggered renders (ms). View-triggered renders are immediate. */
+export const DATA_RENDER_INTERVAL_MS = 100;
+
 /** Separate budget for minimap overview uploads (independent from main view). */
 export const MINIMAP_UPLOAD_BUDGET_BYTES = 2 * 1024 * 1024; // 2 MB per frame
 

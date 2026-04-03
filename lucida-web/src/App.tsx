@@ -209,7 +209,7 @@ function App() {
     }
 
     setCursorLabels(result.labels);
-    render.loopRef.current?.markDirty();
+    render.loopRef.current?.markViewDirty();
   }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef]);
 
   const handleCameraModeChange = useCallback((mode: string) => {
@@ -232,7 +232,7 @@ function App() {
     setCameraMode(newMode);
     bridge.breakFollow();
     bridge.emitPresence();
-    render.loopRef.current?.markDirty();
+    render.loopRef.current?.markViewDirty();
     render.canvasRef.current?.focus();
   }, [scene.wasmSceneRef, bridge, render.loopRef, render.canvasRef]);
 
@@ -342,7 +342,7 @@ function App() {
                   if (!ws) return;
                   applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
                   bridge.emitPresence();
-                  render.loopRef.current?.markDirty();
+                  render.loopRef.current?.markViewDirty();
                 }}
               />
             );

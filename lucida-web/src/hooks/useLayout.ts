@@ -15,7 +15,7 @@ export function useLayout({ loopRef }: { loopRef: React.RefObject<RenderLoop | n
     const onMove = (ev: PointerEvent) => {
       const newWidth = Math.min(600, Math.max(180, startWidth + ev.clientX - startX));
       setSidebarWidth(newWidth);
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
     };
     const onUp = () => {
       document.body.style.cursor = "";
@@ -39,7 +39,7 @@ export function useLayout({ loopRef }: { loopRef: React.RefObject<RenderLoop | n
     const onMove = (ev: PointerEvent) => {
       setCanvasWidth(Math.max(320, startW + ev.clientX - startX));
       setCanvasHeight(Math.max(200, startH + ev.clientY - startY));
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
     };
     const onUp = () => {
       document.body.style.cursor = "";

@@ -184,7 +184,7 @@ export function useBridge({
               setT(scene.t());
               setC(scene.c());
               setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
-              loopRef.current?.markDirty();
+              loopRef.current?.markViewDirty();
               bridgeRef.current?.sendPresence(scene.export_presence());
             } catch (e) {
               console.warn("[Bridge] failed to import presence:", e);
@@ -225,7 +225,7 @@ export function useBridge({
                   setT(scene.t());
                   setC(scene.c());
                   setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
-                  loopRef.current?.markDirty();
+                  loopRef.current?.markViewDirty();
                   bridgeRef.current?.sendPresence(scene.export_presence());
                 } catch (e) {
                   console.warn("[Bridge] failed to import presence on steer:", e);
@@ -255,7 +255,7 @@ export function useBridge({
               const json = JSON.stringify({ dataset_order: datasetOrder, dataset_settings: datasetSettings });
               scene.import_dataset_presence(json);
               bumpLayerSettingsVersion();
-              loopRef.current?.markDirty();
+              loopRef.current?.markViewDirty();
             } catch (e) {
               console.warn("[Bridge] failed to import dataset presence:", e);
             }
@@ -425,7 +425,7 @@ export function useBridge({
             setT(scene.t());
             setC(scene.c());
             setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
-            loopRef.current?.markDirty();
+            loopRef.current?.markViewDirty();
           } catch (e) {
             console.warn("Failed to import peer presence:", e);
           }

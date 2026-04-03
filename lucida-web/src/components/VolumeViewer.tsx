@@ -26,6 +26,9 @@ interface Props {
 }
 
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
+const INTERACTION_RENDER_SCALE = 0.5;
+const FULL_RENDER_SCALE = 1.0;
+const SCALE_RESTORE_DELAY_MS = 50;
 
 export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
@@ -47,8 +50,8 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
   const sceneRef = useRef<WasmScene>(scene);
   sceneRef.current = scene;
 
-  const markDirty = useCallback(() => {
-    loopRef.current?.markDirty();
+  const markViewDirty = useCallback(() => {
+    loopRef.current?.markViewDirty();
   }, []);
 
   const isFlyMode = cameraMode === "fly";
@@ -60,16 +63,16 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
     { current: pressedKeys },
     isFlyMode,
     emitPresence,
-    markDirty,
+    markViewDirty,
     useCallback(() => {
       clearTimeout(scaleTimerRef.current);
-      loopRef.current?.setRenderScale(0.25);
+      loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
     }, []),
     useCallback(() => {
       clearTimeout(scaleTimerRef.current);
       scaleTimerRef.current = window.setTimeout(() => {
-        loopRef.current?.setRenderScale(1.0);
-      }, 50);
+        loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
+      }, SCALE_RESTORE_DELAY_MS);
     }, []),
   );
 
@@ -89,12 +92,12 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
 
   // Mark dirty on remote document updates
   useEffect(() => {
-    loopRef.current?.markDirty();
+    loopRef.current?.markViewDirty();
   }, [remoteDocumentVersion]);
 
   // Mark dirty on T/C changes so the render loop re-evaluates chunks
   useEffect(() => {
-    loopRef.current?.markDirty();
+    loopRef.current?.markViewDirty();
   }, [t, c]);
 
   // Clip distance adjustment + fly mode toggle via RAF loop
@@ -114,7 +117,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
         const delta = (inc ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
         scene.adjust_clip_distance(delta);
         emitPresence();
-        loopRef.current?.markDirty();
+        loopRef.current?.markViewDirty();
       }
 
       // Toggle fly mode on F key press (edge detect)
@@ -137,7 +140,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
         if (newMode === "fly") setShowHint(true);
         breakFollow();
         emitPresence();
-        loopRef.current?.markDirty();
+        loopRef.current?.markViewDirty();
         canvas.focus();
       }
       fWasPressed = fPressed;
@@ -155,13 +158,13 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
   const scaleTimerRef = useRef<number>(0);
   const setLowRes = useCallback(() => {
     clearTimeout(scaleTimerRef.current);
-    loopRef.current?.setRenderScale(0.25);
+    loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
   }, []);
   const scheduleFullRes = useCallback(() => {
     clearTimeout(scaleTimerRef.current);
     scaleTimerRef.current = window.setTimeout(() => {
-      loopRef.current?.setRenderScale(1.0);
-    }, 50);
+      loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
+    }, SCALE_RESTORE_DELAY_MS);
   }, []);
   useEffect(() => () => clearTimeout(scaleTimerRef.current), []);
 
@@ -203,7 +206,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
         applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
       }
       emitPresence();
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
     },
     [dragging, scene, canvas, emitPresence, breakFollow, sendCursor],
   );
@@ -259,7 +262,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
       breakFollow();
       applyViewportCommand(scene, { type: "arcball_zoom", delta });
       emitPresence();
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
       setLowRes();
       scheduleFullRes();
     },

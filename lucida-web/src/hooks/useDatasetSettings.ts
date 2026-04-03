@@ -77,7 +77,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_dataset_visible", dataset_id: id, visible }));
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -88,7 +88,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_dataset_opacity", dataset_id: id, opacity }));
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -99,7 +99,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min, max }));
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
@@ -110,7 +110,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_dataset_gamma", dataset_id: id, gamma }));
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -121,7 +121,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode }));
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -132,7 +132,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       scene.apply_command(JSON.stringify({ type: "set_dataset_render_mode", dataset_id: id, render_mode: mode }));
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -145,7 +145,7 @@ export function useDatasetSettings({
       if (scene) {
         bridgeCallbacksRef.current.breakFollow();
         scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max }));
-        loopRef.current?.markDirty();
+        loopRef.current?.markViewDirty();
         bridgeCallbacksRef.current.emitDatasetPresence();
       }
     }
@@ -164,7 +164,7 @@ export function useDatasetSettings({
           if (scene) {
             bridgeCallbacksRef.current.breakFollow();
             scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max }));
-            loopRef.current?.markDirty();
+            loopRef.current?.markViewDirty();
             bridgeCallbacksRef.current.emitDatasetPresence();
           }
         }
@@ -193,7 +193,7 @@ export function useDatasetSettings({
           }
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
         }
-        loopRef.current?.markDirty();
+        loopRef.current?.markViewDirty();
         bridgeCallbacksRef.current.emitDatasetPresence();
       }
       return next;
@@ -211,7 +211,7 @@ export function useDatasetSettings({
     if (swapIdx < 0 || swapIdx >= order.length) return;
     [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
     scene.apply_command(JSON.stringify({ type: "set_dataset_order", order }));
-    loopRef.current?.markDirty();
+    loopRef.current?.markViewDirty();
     bridgeCallbacksRef.current.emitDatasetPresence();
     setLayerSettingsVersion((v) => v + 1);
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);

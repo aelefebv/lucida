@@ -70,7 +70,7 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
 
   // Mark dirty on remote document updates
   useEffect(() => {
-    loopRef.current?.markDirty();
+    loopRef.current?.markViewDirty();
   }, [remoteDocumentVersion]);
 
   const onPointerDown = useCallback(
@@ -104,7 +104,7 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
       applyViewportCommand(scene, { type: "pan", dx: pdx, dy: pdy });
       clampCenterToBounds(scene, canvas, datasets);
       emitPresence();
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
     },
     [dragging, scene, canvas, datasets, emitPresence, breakFollow, sendCursor],
   );
@@ -147,7 +147,7 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
       applyViewportCommand(scene, { type: "set_center", x: newCx, y: newCy });
       clampCenterToBounds(scene, canvas, datasets);
       emitPresence();
-      loopRef.current?.markDirty();
+      loopRef.current?.markViewDirty();
     },
     [scene, canvas, datasets, emitPresence, breakFollow],
   );

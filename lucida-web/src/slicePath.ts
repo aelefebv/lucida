@@ -147,6 +147,7 @@ function uploadAndRenderSlice(
   sliceT: number,
   sliceC: number,
   planResult: SlicePlanResult,
+  shouldRender: boolean = true,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
   const { memberPlanCache, settings } = planResult;
@@ -236,6 +237,8 @@ function uploadAndRenderSlice(
     }
   }
 
+  if (!shouldRender) return false;
+
   // Build layer params for visible layers in order
   const { layerOrder, allSettings } = settings;
   const currentZoom = scene.zoom();
@@ -293,10 +296,11 @@ export function tickSlice(
   sliceT: number,
   sliceC: number,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
+  shouldRender: boolean = true,
 ): boolean {
   const planResult = planAndFetchSlice(ctx, state, sliceZ, sliceT, sliceC, minimapPendingFetch);
   if (!planResult) return false;
-  return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult);
+  return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult, shouldRender);
 }
 
 export function clearSliceForDataset(state: SliceState, dsId: string): void {

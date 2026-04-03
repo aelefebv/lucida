@@ -158,6 +158,7 @@ function uploadAndRenderVolume(
   ctx: TickContext,
   state: VolumeState,
   plan: PlanResult,
+  shouldRender: boolean = true,
 ): boolean {
   const { scene, client, datasets } = ctx;
   const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC } = plan;
@@ -240,6 +241,8 @@ function uploadAndRenderVolume(
     }
   }
 
+  if (!shouldRender) return false;
+
   // Build layer params for visible layers in order
   const invVP = new Float32Array(scene.inv_view_proj());
   const viewProj = new Float32Array(scene.view_proj());
@@ -295,10 +298,11 @@ export function tickVolume(
   ctx: TickContext,
   state: VolumeState,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
+  shouldRender: boolean = true,
 ): boolean {
   const planResult = planAndFetchVolume(ctx, state, minimapPendingFetch);
   if (!planResult) return false;
-  return uploadAndRenderVolume(ctx, state, planResult);
+  return uploadAndRenderVolume(ctx, state, planResult, shouldRender);
 }
 
 export function clearVolumeForDataset(state: VolumeState, dsId: string): void {

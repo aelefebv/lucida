@@ -61,7 +61,7 @@ export function useIntensityBatcher({
             min: mergedMin,
             max: mergedMax,
           }));
-          loopRef.current?.markDirty();
+          loopRef.current?.markDataDirty();
           bridgeRef.current?.sendDatasetPresence(scene.export_dataset_presence());
         }
       }
