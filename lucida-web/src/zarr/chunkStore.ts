@@ -19,6 +19,7 @@ export interface QualifiedChunkCoord extends ChunkCoord {
 export type ChunkFetcher = (coord: ChunkCoord, signal?: AbortSignal) => Promise<ArrayBuffer>;
 
 const MAX_CONCURRENT = 12;
+const MAX_CACHE_BYTES = 512 * 1024 * 1024; // 512 MB
 
 /**
  * A shared fetch queue for an entire dataset. All members share global
@@ -41,6 +42,11 @@ export class SharedChunkQueue {
   private activeFetches = new Set<string>();
   private workerGeneration = 0;
 
+  /** LRU eviction state */
+  private totalBytes = 0;
+  private entryInfo = new Map<string, { memberId: string; chunkKey: string; size: number }>();
+  private lruOrder = new Set<string>();
+
   /** Composite cache key incorporating memberId. */
   private compositeKey(memberId: string, chunkKey: string): string {
     return `${memberId}/${chunkKey}`;
@@ -57,6 +63,18 @@ export class SharedChunkQueue {
   /** Remove a member and its cached data. */
   removeMember(memberId: string): void {
     this.fetchers.delete(memberId);
+    const memberCache = this.cache.get(memberId);
+    if (memberCache) {
+      for (const chunkKey of memberCache.keys()) {
+        const ck = this.compositeKey(memberId, chunkKey);
+        const info = this.entryInfo.get(ck);
+        if (info) {
+          this.totalBytes -= info.size;
+          this.entryInfo.delete(ck);
+        }
+        this.lruOrder.delete(ck);
+      }
+    }
     this.cache.delete(memberId);
     // Clean up in-flight entries for this member
     const prefix = memberId + "/";
@@ -83,7 +101,13 @@ export class SharedChunkQueue {
   // --- Synchronous pull — viewers call this at paint time ---
 
   get(memberId: string, key: string): ArrayBuffer | null {
-    return this.cache.get(memberId)?.get(key) ?? null;
+    const buf = this.cache.get(memberId)?.get(key) ?? null;
+    if (buf) {
+      const ck = this.compositeKey(memberId, key);
+      this.lruOrder.delete(ck);
+      this.lruOrder.add(ck);
+    }
+    return buf;
   }
 
   has(memberId: string, key: string): boolean {
@@ -174,9 +198,26 @@ export class SharedChunkQueue {
     this.inFlight.clear();
     this.activeFetches.clear();
     this.activeWorkerCount = 0;
+    this.totalBytes = 0;
+    this.entryInfo.clear();
+    this.lruOrder.clear();
   }
 
   // --- Internal ---
+
+  private evictIfNeeded(): void {
+    while (this.totalBytes > MAX_CACHE_BYTES && this.lruOrder.size > 0) {
+      const oldest = this.lruOrder.values().next().value;
+      if (!oldest) break;
+      this.lruOrder.delete(oldest);
+      const info = this.entryInfo.get(oldest);
+      if (info) {
+        this.entryInfo.delete(oldest);
+        this.totalBytes -= info.size;
+        this.cache.get(info.memberId)?.delete(info.chunkKey);
+      }
+    }
+  }
 
   private bumpVersion(): void {
     if (this.bumpScheduled) return;
@@ -232,6 +273,11 @@ export class SharedChunkQueue {
             this.cache.set(coord.memberId, memberCache);
           }
           memberCache.set(coord.key, data);
+          const ck = this.compositeKey(coord.memberId, coord.key);
+          this.entryInfo.set(ck, { memberId: coord.memberId, chunkKey: coord.key, size: data.byteLength });
+          this.lruOrder.add(ck);
+          this.totalBytes += data.byteLength;
+          this.evictIfNeeded();
           this.inFlight.delete(compositeKey);
           this.bumpVersion();
         } catch (err) {
