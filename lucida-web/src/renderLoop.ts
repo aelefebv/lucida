@@ -54,6 +54,8 @@ export class RenderLoop {
       }));
     }
 
+    // When the worker skips/rejects chunks, remove them from sentToWorker
+    // so they can be re-sent when the camera moves closer.
     this.viewDirty = true;
     this.scheduleIfNeeded();
   }
@@ -185,10 +187,11 @@ export class RenderLoop {
   private tick = (): void => {
     this.rafId = null;  // clear so scheduleIfNeeded can re-schedule
 
-    if (!this.viewDirty && !this.dataDirty) return;  // quiesce
+    if (!this.viewDirty && !this.dataDirty) return;
 
     const now = performance.now();
     let shouldRender = false;
+    let isDataRender = false;
 
     if (this.viewDirty) {
       // View changed — render immediately
@@ -202,20 +205,21 @@ export class RenderLoop {
         this.dataDirty = false;
         this.lastDataRenderTime = now;
         shouldRender = true;
+        isDataRender = true;
       }
       // else: data dirty but debounce not elapsed — still run tick for uploads, skip render
     }
 
     const ctx = this.buildContext();
 
-    // Always run tick functions to drive the upload pipeline.
-    // The shouldRender flag controls whether the expensive render pass executes.
+    // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
+    // isDataRender (data-dirty, not view-dirty) triggers sentToWorker clear for atlas reconvergence.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.sliceState, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickSlice(ctx, this.sliceState, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender, isDataRender)) {
         this.dataDirty = true;
       }
     } else {
-      if (tickVolume(ctx, this.volumeState, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickVolume(ctx, this.volumeState, this.minimapState.pendingFetch, shouldRender, isDataRender)) {
         this.dataDirty = true;
       }
     }

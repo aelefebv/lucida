@@ -14,7 +14,7 @@ export interface VolumeState {
     coords: ChunkCoord[];
     sentKeys: Set<string>;
   }>;
-  /** Tracks which chunks have been sent to the worker per member (cleared on atlas reset). */
+  /** Tracks which chunks have been sent to the worker per member. Cleared on atlas reset and on data-render (camera stop) to force atlas reconvergence. */
   sentToWorker: Map<string, Set<string>>;
   /** Cached chunk plans per dataset, invalidated on camera/viewport/T/C change. */
   planCache: Map<string, { key: string; plans: MemberChunkPlan[] }>;
@@ -62,7 +62,6 @@ function planAndFetchVolume(
   const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
   scene.set_viewport(fullW, fullH);
 
-  // Scaled dimensions for the actual render target
   const canvasW = Math.round(fullW * ctx.renderScale);
   const canvasH = Math.round(fullH * ctx.renderScale);
 
@@ -73,11 +72,9 @@ function planAndFetchVolume(
 
   const eye = new Float32Array(scene.eye_position());
   const hitLocals = new Map<string, [number, number, number]>();
-
   // Cache member plans per dataset so we don't call WASM twice (upload + render).
   const memberPlanCache = new Map<string, MemberChunkPlan[]>();
 
-  // Camera target for spatial priority (eye position in volume mode)
   const eyeForPriority: [number, number, number] = [eye[0], eye[1], eye[2]];
 
   for (const [dsId, ds] of datasets) {
@@ -175,6 +172,7 @@ function uploadAndRenderVolume(
   state: VolumeState,
   plan: PlanResult,
   shouldRender: boolean = true,
+  isDataRender: boolean = false,
 ): boolean {
   const { scene, client, datasets } = ctx;
   const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC } = plan;
@@ -204,7 +202,6 @@ function uploadAndRenderVolume(
 
       const hitLocal = hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
 
-      // --- Atlas config on LOD/T/C change ---
       const tcLevelKey = `${viewT}/${viewC}/${targetLevel}`;
       const prevTCLevel = state.prevTC.get(memberId);
       if (prevTCLevel !== tcLevelKey) {
@@ -218,7 +215,6 @@ function uploadAndRenderVolume(
         state.prevTC.set(memberId, tcLevelKey);
       }
 
-      // --- Seed upload (stream coarse chunks as fallback) ---
       const seedInfo = state.seedPending.get(memberId);
       if (seedInfo) {
         const seedMeta = ds.info.levels[seedInfo.level];
@@ -252,7 +248,6 @@ function uploadAndRenderVolume(
         }
       }
 
-      // --- Direct chunk push: send available chunks not yet sent ---
       let sentSet = state.sentToWorker.get(memberId);
       if (!sentSet) {
         sentSet = new Set();
@@ -263,6 +258,11 @@ function uploadAndRenderVolume(
       const neededKeys = new Set(mp.needed.map(c => c.key));
       for (const key of sentSet) {
         if (!neededKeys.has(key)) sentSet.delete(key);
+      }
+      // On data-render (camera stopped): clear sentToWorker so the worker
+      // re-evaluates the full atlas with the current camera position.
+      if (isDataRender) {
+        sentSet.clear();
       }
       const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
       for (const coord of mp.needed) {
@@ -342,10 +342,11 @@ export function tickVolume(
   state: VolumeState,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
   shouldRender: boolean = true,
+  isDataRender: boolean = false,
 ): boolean {
   const planResult = planAndFetchVolume(ctx, state, minimapPendingFetch);
   if (!planResult) return false;
-  return uploadAndRenderVolume(ctx, state, planResult, shouldRender);
+  return uploadAndRenderVolume(ctx, state, planResult, shouldRender, isDataRender);
 }
 
 export function clearVolumeForDataset(state: VolumeState, dsId: string): void {

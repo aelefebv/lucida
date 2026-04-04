@@ -164,6 +164,7 @@ function uploadAndRenderSlice(
   sliceC: number,
   planResult: SlicePlanResult,
   shouldRender: boolean = true,
+  isDataRender: boolean = false,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
   const { memberPlanCache, settings } = planResult;
@@ -258,6 +259,13 @@ function uploadAndRenderSlice(
       for (const key of sentSet) {
         if (!neededKeys.has(key)) sentSet.delete(key);
       }
+      // If the worker rejected chunks and we're about to render, force a full
+      // atlas rebuild so the worker re-evaluates all chunks with fresh distance ordering.
+      // On data-render (camera stopped): clear sentToWorker so the worker
+      // re-evaluates the full atlas with the current camera position.
+      if (isDataRender) {
+        sentSet.clear();
+      }
       const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
       for (const coord of mp.needed) {
         if (coord.level !== level) continue;
@@ -339,10 +347,11 @@ export function tickSlice(
   sliceC: number,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
   shouldRender: boolean = true,
+  isDataRender: boolean = false,
 ): boolean {
   const planResult = planAndFetchSlice(ctx, state, sliceZ, sliceT, sliceC, minimapPendingFetch);
   if (!planResult) return false;
-  return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult, shouldRender);
+  return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult, shouldRender, isDataRender);
 }
 
 export function clearSliceForDataset(state: SliceState, dsId: string): void {

@@ -163,7 +163,6 @@ export function handleSliceWriteFallbackChunk(ctx: WorkerCtx, msg: SliceWriteFal
 export function handleSliceAtlasConfig(ctx: WorkerCtx, msg: SliceAtlasConfigMessage): void {
   const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY } = msg;
 
-  // Recreate atlas for new LOD/Z/T/C/chunkShape
   const atlas = atlasPerDataset.get(datasetId);
   if (atlas) destroySliceAtlas(atlas);
   const newAtlas = createSliceAtlas(ctx.device, levelWidth, levelHeight, chunkX, chunkY, level, z, t, c);
@@ -211,7 +210,7 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage)
       const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(atlas, cam);
       if (!evictKey) continue;
       const incomingDist = chunkDistSq2D(atlas, chunk.x, chunk.y, cam);
-      if (incomingDist >= farthestDist) continue; // skip -- farther than what we have
+      if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       const oldGridIdx = atlas.slotGridIdx[slotIndex];
@@ -220,7 +219,6 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage)
       }
     }
 
-    // Decode slot to atlas grid position
     const sx = slotIndex % atlas.slotsX;
     const sy = Math.floor(slotIndex / atlas.slotsX);
 
@@ -233,7 +231,6 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage)
     const yOff = sy * chunkY;
     writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
 
-    // Update indirection
     const gridIdx = chunk.y * atlas.gridX + chunk.x;
     atlas.indirectionData[gridIdx] = slotIndex;
     atlas.slotGridIdx[slotIndex] = gridIdx;
@@ -312,7 +309,6 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
   comp.composite(canvasView, renderedLayers, compEncoder);
   ctx.device.queue.submit([compEncoder.finish()]);
 
-  // Render peer cursors on top of composited scene
   const cr = ctx.getCursorRenderer();
   if (cr.hasData()) {
     const cursorEncoder = ctx.device.createCommandEncoder();

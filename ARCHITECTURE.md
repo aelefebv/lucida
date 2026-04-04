@@ -179,7 +179,7 @@ Main → Worker:  RenderMultiPass (when shouldRender — uses current atlas)
 **If you're changing this:**
 - ArrayBuffers are transferred (zero-copy), not copied. The sender loses access after `postMessage`.
 - `postMessage` to a worker is FIFO. AtlasConfig → ChunkData → RenderMultiPass arrives in order.
-- The `sentToWorker` set is pruned to the current needed list on each tick, so chunks that leave the frustum are removed. If the worker evicts a chunk and it re-enters the frustum, it will be re-sent.
+- The `sentToWorker` set is pruned to the current needed list on each tick, so chunks that leave the frustum are removed. On data-render ticks (camera stopped), `sentToWorker` is cleared entirely — all cached chunks are re-sent, letting the worker re-evaluate atlas allocation with the current camera position. The worker deduplicates (skips chunks already in atlas).
 - Atlas recreation happens both via `atlasConfig` messages and in `handleChunkData` (if the incoming metadata doesn't match the current atlas).
 
 **Files:** `renderer/workerProtocol.ts`, `renderer/renderClient.ts`, `renderer/gpu.worker.ts`

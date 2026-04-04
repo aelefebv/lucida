@@ -197,7 +197,6 @@ export function handleVolumeWriteFallbackChunk(ctx: WorkerCtx, msg: VolumeWriteF
 export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: VolumeAtlasConfigMessage): void {
   const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
-  // Recreate atlas for new LOD/T/C/chunkShape
   const atlas = atlasPerDataset.get(datasetId);
   if (atlas) destroyAtlas(atlas);
   const newAtlas = createVolumeAtlas(ctx.device, levelWidth, levelHeight, levelDepth,
@@ -217,7 +216,6 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
     atlasPerDataset.set(datasetId, atlas);
   }
 
-  // Update ray hit point
   rayHitPerDataset.set(datasetId, msg.hitLocal);
 
   let intensityChanged = false;
@@ -235,7 +233,7 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
       const { key: evictKey, dist: farthestDist } = findFarthestSlot(atlas, cam);
       if (!evictKey) continue;
       const incomingDist = chunkDistSq(atlas, chunk.x, chunk.y, chunk.z, cam);
-      if (incomingDist >= farthestDist) continue; // skip -- farther than what we have
+      if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       const oldGridIdx = atlas.slotGridIdx[slotIndex];
@@ -291,10 +289,8 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     const fb = fallbackPerDataset.get(layer.datasetId);
     if (!atlas && !fb) continue;
 
-    // Update ray-volume hit point in local [0,1]³ space for distance-based eviction
     rayHitPerDataset.set(layer.datasetId, layer.rayHitLocal);
 
-    // Set fallback
     if (fb) {
       renderer.setFallbackVolume(fb.texture, fb.width, fb.height, fb.depth);
     } else {
@@ -341,7 +337,6 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
   comp.composite(canvasView, renderedLayers, compEncoder);
   ctx.device.queue.submit([compEncoder.finish()]);
 
-  // Render peer cursors with depth testing against volume
   const cr = ctx.getCursorRenderer();
   if (cr.hasData() && msg.viewProj && depthTexture) {
     const cursorEncoder = ctx.device.createCommandEncoder();
