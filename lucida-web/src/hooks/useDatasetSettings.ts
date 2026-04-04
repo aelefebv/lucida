@@ -5,6 +5,13 @@ import type { LayerInfo } from "../components/LayerPanel.tsx";
 import type { DatasetState } from "../types.ts";
 import { dtypeMax } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
+import { bumpSettingsGeneration } from "../tickCommon.ts";
+
+/** Apply a settings command and invalidate the settings cache. */
+function applySettingsCommand(scene: WasmScene, cmd: Record<string, unknown>): void {
+  scene.apply_command(JSON.stringify(cmd));
+  bumpSettingsGeneration();
+}
 
 export interface BridgeCallbacks {
   sendCommand: (json: string) => void;
@@ -76,7 +83,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_dataset_visible", dataset_id: id, visible }));
+      applySettingsCommand(scene, { type: "set_dataset_visible", dataset_id: id, visible });
       loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
@@ -87,7 +94,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_dataset_opacity", dataset_id: id, opacity }));
+      applySettingsCommand(scene, { type: "set_dataset_opacity", dataset_id: id, opacity });
       loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
@@ -98,7 +105,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min, max }));
+      applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min, max });
       loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
     }
@@ -109,7 +116,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_dataset_gamma", dataset_id: id, gamma }));
+      applySettingsCommand(scene, { type: "set_dataset_gamma", dataset_id: id, gamma });
       loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
@@ -120,7 +127,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode }));
+      applySettingsCommand(scene, { type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode });
       loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
@@ -131,7 +138,7 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      scene.apply_command(JSON.stringify({ type: "set_dataset_render_mode", dataset_id: id, render_mode: mode }));
+      applySettingsCommand(scene, { type: "set_dataset_render_mode", dataset_id: id, render_mode: mode });
       loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
@@ -144,7 +151,7 @@ export function useDatasetSettings({
       const scene = wasmSceneRef.current;
       if (scene) {
         bridgeCallbacksRef.current.breakFollow();
-        scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+        applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max });
         loopRef.current?.markViewDirty();
         bridgeCallbacksRef.current.emitDatasetPresence();
       }
@@ -163,7 +170,7 @@ export function useDatasetSettings({
           const scene = wasmSceneRef.current;
           if (scene) {
             bridgeCallbacksRef.current.breakFollow();
-            scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+            applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max });
             loopRef.current?.markViewDirty();
             bridgeCallbacksRef.current.emitDatasetPresence();
           }
@@ -184,12 +191,12 @@ export function useDatasetSettings({
         if (!wasFull) {
           const ds = datasetsRef.current.get(id);
           const frMax = ds ? dtypeMax(ds.info.levels[0].dataType) : 65535;
-          scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: 0, max: frMax }));
+          applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min: 0, max: frMax });
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
         } else {
           const dr = dataRangeMap.get(id);
           if (dr) {
-            scene.apply_command(JSON.stringify({ type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max }));
+            applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max });
           }
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
         }
@@ -210,7 +217,7 @@ export function useDatasetSettings({
     const swapIdx = direction === "up" ? idx + 1 : idx - 1;
     if (swapIdx < 0 || swapIdx >= order.length) return;
     [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
-    scene.apply_command(JSON.stringify({ type: "set_dataset_order", order }));
+    applySettingsCommand(scene, { type: "set_dataset_order", order });
     loopRef.current?.markViewDirty();
     bridgeCallbacksRef.current.emitDatasetPresence();
     setLayerSettingsVersion((v) => v + 1);

@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import type { WasmScene } from "lucida-core";
 import type { Bridge } from "../bridge.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
+import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState } from "../types.ts";
 
@@ -61,6 +62,7 @@ export function useIntensityBatcher({
             min: mergedMin,
             max: mergedMax,
           }));
+          bumpSettingsGeneration();
           loopRef.current?.markDataDirty();
           bridgeRef.current?.sendDatasetPresence(scene.export_dataset_presence());
         }

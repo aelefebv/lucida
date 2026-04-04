@@ -4,6 +4,16 @@ import type { ChunkCoord, QualifiedChunkCoord, SharedChunkQueue } from "./zarr/c
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 
+// --- Scene settings cache ---
+let cachedSettings: SceneSettings | null = null;
+let settingsGeneration = -1;
+let currentGeneration = 0;
+
+/** Bump this after any apply_command that changes dataset settings or order. */
+export function bumpSettingsGeneration(): void {
+  currentGeneration++;
+}
+
 /** Per-dataset settings parsed from the WASM scene. */
 export interface DatasetSettings {
   visible: boolean;
@@ -28,9 +38,14 @@ export interface SceneSettings {
  * `scene.all_dataset_settings()` then JSON.parse the results.
  */
 export function getSceneSettings(scene: WasmScene): SceneSettings {
+  if (cachedSettings && settingsGeneration === currentGeneration) {
+    return cachedSettings;
+  }
   const layerOrder: string[] = JSON.parse(scene.dataset_order());
   const allSettings: Record<string, DatasetSettings> = JSON.parse(scene.all_dataset_settings());
-  return { layerOrder, allSettings };
+  cachedSettings = { layerOrder, allSettings };
+  settingsGeneration = currentGeneration;
+  return cachedSettings;
 }
 
 /**

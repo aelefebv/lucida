@@ -8,6 +8,7 @@ import { SharedChunkQueue } from "../zarr/chunkStore.ts";
 import type { DatasetState, DatasetMember, PendingChunkResolve } from "../types.ts";
 import type { DatasetInfo } from "../zarr/metadata.ts";
 import type { RenderLoop } from "../renderLoop.ts";
+import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { VolumeData } from "../types.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 
@@ -117,6 +118,7 @@ export function useBridge({
             }
           }
           scene.apply_command(commandJson);
+          bumpSettingsGeneration();
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "add_dataset" && cmd.client_metadata) {
             if (!datasetsRef.current.has(cmd.id)) {

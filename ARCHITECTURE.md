@@ -18,9 +18,8 @@ The high-level flow:
 
 ```
 User action → WASM scene update → chunk plan → fetch from server →
-cache on main thread → plan message to worker → worker requests
-missing chunks → main fulfills from cache → worker uploads to atlas →
-shader samples atlas (or fallback) → pixels
+cache on main thread → push chunks directly to worker → worker uploads
+to atlas → render command → shader samples atlas (or fallback) → pixels
 ```
 
 ---
@@ -99,28 +98,28 @@ Gets compressed chunk data from the server, decompresses, and caches it.
 Orchestrates the per-frame tick: planning, fetching, sending plans to the worker, fulfilling worker requests, and dispatching render commands.
 
 **Owns:** `RenderLoop` instance with:
-- `dirty` flag — gates whether a tick does work
+- `viewDirty` / `dataDirty` flags — typed dirty flags that determine tick behavior
+- `lastDataRenderTime` — debounce timer for data-triggered renders (`DATA_RENDER_INTERVAL_MS`)
 - `rafId` — pending `requestAnimationFrame` handle (null when quiesced)
 - Subscriptions to each dataset's `SharedChunkQueue`
-- `handleChunkDataRequest` — fulfills worker requests from cache
 
 **How a tick works:**
-1. `scheduleIfNeeded()` — only schedules RAF if `dirty && rafId === null`
-2. `tick()` — clears `rafId`, checks dirty, runs mode-specific tick, runs minimap tick
-3. Mode tick calls `planAndFetch[Volume|Slice]()` then `uploadAndRender[Volume|Slice]()`
-4. Plan phase: evaluates WASM chunk plan, submits to fetch queue, sends plan message to worker
-5. Upload phase: streams seed chunks to fallback texture, sends plan to worker, builds render params, dispatches render
-6. If minimap budget exhausted → `dirty=true` → another frame
+1. `scheduleIfNeeded()` — only schedules RAF if `(viewDirty || dataDirty) && rafId === null`
+2. `tick()` — determines `shouldRender`: viewDirty → immediate; dataDirty → only if debounce elapsed
+3. Mode tick ALWAYS runs (drives chunk uploads), but the expensive render pass only executes when `shouldRender` is true
+4. Plan phase: evaluates WASM chunk plan (cached per dataset), submits to fetch queue
+5. Upload phase: sends atlas config on LOD/T/C change, pushes available chunks directly to worker, streams seed chunks, builds render params if `shouldRender`
+6. Minimap: skipped entirely when stationary (render key unchanged); if overview budget exhausted → `dataDirty=true`
 
 **Event-driven re-scheduling (no polling):**
-- Chunk arrives from network → subscriber → `dirty=true` + `scheduleIfNeeded()`
-- User interaction → `markDirty()`
-- Worker request fulfilled but budget exhausted → `dirty=true` + `scheduleIfNeeded()`
-- When none of these fire → loop quiesces (0 CPU)
+- Chunk arrives from network → subscriber → `dataDirty=true` + `scheduleIfNeeded()`
+- User interaction → `markViewDirty()` (camera, contrast, visibility, resize)
+- Auto-contrast update → `markDataDirty()` (intensity range from GPU worker)
+- When neither flag is set → loop quiesces (0 CPU)
 
 **If you're changing this:**
-- Never return `true` from tick functions to indicate "chunks are still fetching from network." The subscriber handles that. Only return `true` if there's work that can be done NOW but wasn't (budget exhaustion).
-- The `handleChunkDataRequest` callback applies `UPLOAD_BUDGET_BYTES` (4 MB) per invocation. If budget is exceeded, it marks dirty for the next frame.
+- Never return `true` from tick functions to indicate "chunks are still fetching from network." The subscriber handles that. Only return `true` if there's work that can be done NOW but wasn't (minimap budget exhaustion).
+- The tick always runs plan+upload when dirty (to keep chunk pipeline flowing), but only renders when `shouldRender` is true. This prevents expensive ray marches during rapid chunk arrivals.
 - The VolumeViewer component has a separate RAF loop for clip-distance key polling — this is independent of the render loop.
 
 **Files:** `renderLoop.ts`, `renderLoopTypes.ts`, `volumePath.ts`, `slicePath.ts`, `minimapPath.ts`
@@ -154,35 +153,34 @@ Ensures every pixel always has something to display — no black regions. The co
 
 ---
 
-## 6. Worker Protocol & Request-Based Upload
+## 6. Worker Protocol & Direct Chunk Push
 
-The main thread and GPU worker communicate via `postMessage`. The worker owns the atlas and drives chunk requests.
+The main thread and GPU worker communicate via `postMessage`. Chunk uploads and renders are independent operations.
 
-**The request-based flow:**
+**The direct-push flow:**
 ```
-Main → Worker:  ChunkPlan (needed list + available keys)
-Worker → Main:  ChunkDataRequest (keys the worker is missing)
-Main → Worker:  ChunkData (ArrayBuffer transfers, within budget)
+Main → Worker:  AtlasConfig (on LOD/T/C change — recreates atlas)
+Main → Worker:  ChunkData (as chunks become available in cache)
+Main → Worker:  RenderMultiPass (when shouldRender — uses current atlas)
 ```
 
-**Why request-based:** The worker is the sole authority on atlas contents. The main thread doesn't track what the worker has — it sends the plan, and the worker requests what it needs. This eliminates the class of bugs where a main-thread tracking set diverges from the actual atlas.
+**Why direct-push:** The main thread tracks which chunks have been sent (`sentToWorker` per member, pruned to the current needed set). The worker uploads whatever it receives and manages eviction. No round-trip messaging — chunks flow directly from cache to GPU.
 
 **Message types:**
 
 | Direction | Message | Purpose |
 |-----------|---------|---------|
-| Main → Worker | `volumeChunkPlan` / `sliceChunkPlan` | Tell worker what's needed and what's in cache |
-| Worker → Main | `chunkDataRequest` | Worker requests specific chunks it's missing |
-| Main → Worker | `volumeChunkData` / `sliceChunkData` | Fulfill request with ArrayBuffer transfers |
+| Main → Worker | `volumeAtlasConfig` / `sliceAtlasConfig` | Recreate atlas on LOD/T/C/chunkShape change |
+| Main → Worker | `volumeChunkData` / `sliceChunkData` | Push chunk data with ArrayBuffer transfers |
 | Main → Worker | `volumeWriteFallbackChunk` / `sliceWriteFallbackChunk` | Incremental seed/fallback writes |
 | Main → Worker | `volumeRenderMultiPass` / `sliceRenderMultiPass` | Dispatch render with layer params |
 | Worker → Main | `intensityRange` | Sampled min/max for auto-contrast |
 
 **If you're changing this:**
 - ArrayBuffers are transferred (zero-copy), not copied. The sender loses access after `postMessage`.
-- The `chunkDataRequest` echoes back all metadata from the plan message (level, dims, hitLocal) so the fulfillment handler doesn't need to store intermediate state.
-- `postMessage` to a worker is FIFO. Plan → request → data arrives in order. No races.
-- The upload budget (4 MB/frame) is applied when fulfilling requests in `handleChunkDataRequest`, not when sending plans.
+- `postMessage` to a worker is FIFO. AtlasConfig → ChunkData → RenderMultiPass arrives in order.
+- The `sentToWorker` set is pruned to the current needed list on each tick, so chunks that leave the frustum are removed. If the worker evicts a chunk and it re-enters the frustum, it will be re-sent.
+- Atlas recreation happens both via `atlasConfig` messages and in `handleChunkData` (if the incoming metadata doesn't match the current atlas).
 
 **Files:** `renderer/workerProtocol.ts`, `renderer/renderClient.ts`, `renderer/gpu.worker.ts`
 
@@ -205,10 +203,10 @@ The GPU worker packs fine-level chunks into a fixed-size texture atlas with an i
    - If incoming is closer: evict farthest, use its slot
    - If incoming is farther: skip (don't degrade atlas quality)
 3. Write chunk data to atlas texture at slot position
-4. Update indirection: `indirectionData[gridIdx] = slotIndex`
-5. Flush indirection buffer to GPU before each render
+4. Update indirection: `indirectionData[gridIdx] = slotIndex`, set `indirectionDirty = true`
+5. Flush indirection buffer to GPU only if `indirectionDirty` (reset after write) — eliminates per-frame GPU writes when stationary
 
-**Atlas recreation:** Destroyed and recreated when level, T, C, or chunk dimensions change. This happens in `handleChunkPlan` when the incoming metadata doesn't match the current atlas.
+**Atlas recreation:** Destroyed and recreated when level, T, C, or chunk dimensions change. Triggered by `volumeAtlasConfig` / `sliceAtlasConfig` messages, or in `handleChunkData` when the incoming metadata doesn't match the current atlas.
 
 **If you're changing this:**
 - The indirection buffer maps chunk grid coordinates to atlas slot indices. Sentinel `0xFFFFFFFF` means "not loaded — use fallback."
@@ -316,11 +314,11 @@ For reference, the complete end-to-end flow:
 ```
 ┌─────────────────── MAIN THREAD ───────────────────┐
 │                                                     │
-│  User Input                                         │
+│  User Input → markViewDirty()                       │
 │    │                                                │
 │    ▼                                                │
 │  WASM Scene ──── chunk_plan_for() ──► Chunk Plan    │
-│    │                                     │          │
+│    │                  (cached)            │          │
 │    │                              ┌──────┘          │
 │    │                              ▼                  │
 │    │                     SharedChunkQueue             │
@@ -328,44 +326,41 @@ For reference, the complete end-to-end flow:
 │    │                      ├─ fetch workers (×12)     │
 │    │                      ├─ decompress (LZ4/Zstd)  │
 │    │                      ├─ cache                   │
-│    │                      └─ subscriber → dirty      │
+│    │                      └─ subscriber → dataDirty  │
 │    │                                                 │
 │    ▼                                                 │
 │  Render Loop tick()                                  │
+│    ├─ viewDirty? → shouldRender=true (immediate)    │
+│    ├─ dataDirty? → shouldRender if debounce elapsed │
 │    ├─ planAndFetch() → submit fetches               │
 │    ├─ uploadAndRender()                              │
-│    │   ├─ stream seed → fallback chunk messages     │
-│    │   ├─ send ChunkPlan to worker ─────────────┐   │
-│    │   └─ send RenderMultiPass to worker ───┐   │   │
-│    └─ tickMinimap()                         │   │   │
-│                                             │   │   │
-│  handleChunkDataRequest() ◄─────────────┐   │   │   │
-│    ├─ look up cache                     │   │   │   │
-│    ├─ bufferToUint16                    │   │   │   │
-│    └─ send ChunkData to worker ─────┐  │   │   │   │
-│                                     │  │   │   │   │
-├─────────── postMessage ─────────────┼──┼───┼───┼───┤
-│                                     │  │   │   │   │
-│  ┌────────── GPU WORKER ────────────┼──┼───┼───┼─┐ │
-│  │                                  ▼  │   ▼   ▼ │ │
-│  │  handleChunkPlan()               │  │         │ │
-│  │    ├─ create/recreate atlas      │  │         │ │
-│  │    ├─ diff needed vs atlas       │  │         │ │
-│  │    └─ post ChunkDataRequest ─────┘  │         │ │
-│  │                                     │         │ │
-│  │  handleChunkData() ◄───────────────-┘         │ │
-│  │    ├─ allocate slot (or evict farthest)       │ │
-│  │    ├─ writeTexture to atlas                   │ │
-│  │    └─ update indirection buffer               │ │
-│  │                                               │ │
-│  │  handleRenderMultiPass() ◄────────────────────┘ │
-│  │    ├─ bind atlas + fallback + indirection       │
-│  │    ├─ render each layer to offscreen            │
-│  │    ├─ composite layers → canvas                 │
-│  │    └─ render peer cursors                       │
-│  │              │                                  │
-│  └──────────────┼──────────────────────────────────┘
-│                 ▼
-│            Pixels on screen
-└─────────────────────────────────────────────────────┘
+│    │   ├─ send AtlasConfig on LOD/T/C change ──┐   │
+│    │   ├─ push ChunkData directly ──────────────┤   │
+│    │   ├─ stream seed → fallback chunks ────────┤   │
+│    │   └─ if shouldRender: RenderMultiPass ─────┤   │
+│    └─ tickMinimap() (skipped if stationary)     │   │
+│                                                 │   │
+├─────────── postMessage ─────────────────────────┤   │
+│                                                 │   │
+│  ┌────────── GPU WORKER ────────────────────────┤─┐ │
+│  │                                              ▼ │ │
+│  │  handleAtlasConfig()                           │ │
+│  │    └─ recreate atlas for new LOD/T/C           │ │
+│  │                                                │ │
+│  │  handleChunkData()                             │ │
+│  │    ├─ allocate slot (or evict farthest)        │ │
+│  │    ├─ writeTexture to atlas                    │ │
+│  │    └─ update indirection (indirectionDirty)    │ │
+│  │                                                │ │
+│  │  handleRenderMultiPass()                       │ │
+│  │    ├─ flush indirection only if dirty          │ │
+│  │    ├─ bind atlas + fallback + indirection      │ │
+│  │    ├─ render each layer to offscreen           │ │
+│  │    ├─ composite layers → canvas                │ │
+│  │    └─ render peer cursors                      │ │
+│  │              │                                 │ │
+│  └──────────────┼─────────────────────────────────┘ │
+│                 ▼                                    │
+│            Pixels on screen                          │
+└──────────────────────────────────────────────────────┘
 ```

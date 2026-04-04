@@ -16,6 +16,8 @@ export interface VolumeState {
   }>;
   /** Tracks which chunks have been sent to the worker per member (cleared on atlas reset). */
   sentToWorker: Map<string, Set<string>>;
+  /** Cached chunk plans per dataset, invalidated on camera/viewport/T/C change. */
+  planCache: Map<string, { key: string; plans: MemberChunkPlan[] }>;
 }
 
 export function createVolumeState(): VolumeState {
@@ -23,6 +25,7 @@ export function createVolumeState(): VolumeState {
     prevTC: new Map(),
     seedPending: new Map(),
     sentToWorker: new Map(),
+    planCache: new Map(),
   };
 }
 
@@ -82,8 +85,17 @@ function planAndFetchVolume(
     const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
     if (viewC >= dsShape[1] || viewT >= dsShape[0]) continue;
 
-    const sortedPlans = evaluateAndSortPlans(scene, dsId, eyeForPriority[0], eyeForPriority[1]);
-    if (!sortedPlans) continue;
+    const planCacheKey = `${eye[0].toFixed(4)}|${eye[1].toFixed(4)}|${eye[2].toFixed(4)}|${fullW}|${fullH}|${viewT}|${viewC}`;
+    const cached = state.planCache.get(dsId);
+    let sortedPlans: MemberChunkPlan[];
+    if (cached && cached.key === planCacheKey) {
+      sortedPlans = cached.plans;
+    } else {
+      const evaluated = evaluateAndSortPlans(scene, dsId, eyeForPriority[0], eyeForPriority[1]);
+      if (!evaluated) continue;
+      sortedPlans = evaluated;
+      state.planCache.set(dsId, { key: planCacheKey, plans: sortedPlans });
+    }
     memberPlanCache.set(dsId, sortedPlans);
 
     // Build per-member fetch lists (with seed coords prepended) and collect for interleaving
@@ -340,6 +352,7 @@ export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
   state.prevTC.delete(dsId);
   state.seedPending.delete(dsId);
   state.sentToWorker.delete(dsId);
+  state.planCache.delete(dsId);
 }
 
 /** Clear member-keyed entries for all members of a dataset. */
@@ -355,4 +368,5 @@ export function resetVolumeState(state: VolumeState): void {
   state.prevTC.clear();
   state.seedPending.clear();
   state.sentToWorker.clear();
+  state.planCache.clear();
 }

@@ -13,6 +13,8 @@ export interface MinimapState {
   enabled: boolean;
   size: number;
   overlayCallback: ((data: MinimapOverlayData) => void) | null;
+  /** Hash of inputs that affect minimap output — skip render if unchanged. */
+  lastRenderKey: string | null;
 }
 
 export function createMinimapState(): MinimapState {
@@ -24,6 +26,7 @@ export function createMinimapState(): MinimapState {
     enabled: false,
     size: 200,
     overlayCallback: null,
+    lastRenderKey: null,
   };
 }
 
@@ -160,6 +163,16 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
 
   const theta = scene.camera_theta();
   const phi = scene.camera_phi();
+
+  // Build a key from minimap-relevant state; skip if unchanged
+  const settingsSnap = scene.all_dataset_settings();
+  const orderSnap = scene.dataset_order();
+  // In volume mode, the main camera position affects the frustum overlay
+  const mainCamSnap = mode === "volume" ? `${scene.eye_position()}` : `${scene.zoom()}|${scene.center()}`;
+  const renderKey = `${theta}|${phi}|${mode}|${sliceZ}|${mainCamSnap}|${orderSnap}|${settingsSnap}`;
+  if (renderKey === state.lastRenderKey) return;
+  state.lastRenderKey = renderKey;
+
   const cssSize = state.size;
   const backingSize = Math.round(cssSize * devicePixelRatio);
 
@@ -168,7 +181,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const eye = camData.subarray(16, 19);
   const viewProj = camData.subarray(19, 35);
 
-  const layerOrder: string[] = JSON.parse(scene.dataset_order());
+  const layerOrder: string[] = JSON.parse(orderSnap);
   const allSettings: Record<string, {
     visible: boolean;
     opacity: number;
@@ -176,7 +189,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     contrast_max: number;
     gamma: number;
     blend_mode: string;
-  }> = JSON.parse(scene.all_dataset_settings());
+  }> = JSON.parse(settingsSnap);
 
   const layers: MinimapLayerParams[] = [];
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];

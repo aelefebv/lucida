@@ -1,4 +1,5 @@
 import type { WasmScene } from "lucida-core";
+import { bumpSettingsGeneration } from "./tickCommon.ts";
 
 /** Apply a document command locally and send it to the server. */
 export function applyDocumentCommand(
@@ -8,6 +9,7 @@ export function applyDocumentCommand(
 ) {
   const json = JSON.stringify(cmd);
   scene.apply_command(json);
+  bumpSettingsGeneration();
   sendCommand(json);
 }
 

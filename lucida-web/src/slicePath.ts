@@ -12,6 +12,8 @@ export interface SliceState {
   seedPending: Map<string, { level: number; coords: ChunkCoord[]; z: number; sentKeys: Set<string> }>;
   /** Tracks which chunks have been sent to the worker per member (cleared on atlas reset). */
   sentToWorker: Map<string, Set<string>>;
+  /** Cached chunk plans per dataset, invalidated on camera/viewport/T/C/Z change. */
+  planCache: Map<string, { key: string; plans: MemberChunkPlan[] }>;
 }
 
 export function createSliceState(): SliceState {
@@ -19,6 +21,7 @@ export function createSliceState(): SliceState {
     prevTCZ: new Map(),
     seedPending: new Map(),
     sentToWorker: new Map(),
+    planCache: new Map(),
   };
 }
 
@@ -71,8 +74,17 @@ function planAndFetchSlice(
     const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
     if (z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0]) continue;
 
-    const sortedPlans = evaluateAndSortPlans(scene, dsId, vpCx, vpCy);
-    if (!sortedPlans) continue;
+    const planCacheKey = `${vpCx.toFixed(4)}|${vpCy.toFixed(4)}|${canvasW}|${canvasH}|${t}|${c}|${z}`;
+    const cached = state.planCache.get(dsId);
+    let sortedPlans: MemberChunkPlan[];
+    if (cached && cached.key === planCacheKey) {
+      sortedPlans = cached.plans;
+    } else {
+      const evaluated = evaluateAndSortPlans(scene, dsId, vpCx, vpCy);
+      if (!evaluated) continue;
+      sortedPlans = evaluated;
+      state.planCache.set(dsId, { key: planCacheKey, plans: sortedPlans });
+    }
     memberPlanCache.set(dsId, sortedPlans);
 
     // Build per-member fetch lists (with seed coords prepended) and collect for interleaving
@@ -337,6 +349,7 @@ export function clearSliceForDataset(state: SliceState, dsId: string): void {
   state.prevTCZ.delete(dsId);
   state.seedPending.delete(dsId);
   state.sentToWorker.delete(dsId);
+  state.planCache.delete(dsId);
 }
 
 /** Clear member-keyed entries for all members of a dataset. */
