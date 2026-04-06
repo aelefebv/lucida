@@ -1,29 +1,23 @@
 /** Slice render path: upload chunks + render multi-pass. */
-import type { ChunkCoord } from "./zarr/chunkStore.ts";
+import type { ChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
-import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
-import { MAIN_VIEW_UPLOAD_BUDGET_BYTES, type TickContext } from "./renderLoopTypes.ts";
+import type { TickContext } from "./renderLoopTypes.ts";
 import { evaluateAndSortPlans, buildMemberFetchList, interleaveFetchLists, getSceneSettings } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
+import {
+  type UploadState,
+  type MemberUploadActions,
+  uploadChunksForMembers,
+  clearUploadStateForDataset,
+  clearUploadStateForMembers,
+} from "./uploadCommon.ts";
+import type { DatasetInfo } from "./zarr/metadata.ts";
 
-export interface SliceState {
-  prevTCZ: Map<string, string>;
-  seedPending: Map<string, { level: number; coords: ChunkCoord[]; z: number; sentKeys: Set<string> }>;
-  /** Tracks which chunks have been sent to the worker per member (cleared on atlas reset). */
-  sentToWorker: Map<string, Set<string>>;
-  /** Cached chunk plans per dataset, invalidated on camera/viewport/T/C/Z change. */
-  planCache: Map<string, { key: string; plans: MemberChunkPlan[] }>;
-}
+/** Backward-compatible alias. */
+export type SliceState = UploadState;
 
-export function createSliceState(): SliceState {
-  return {
-    prevTCZ: new Map(),
-    seedPending: new Map(),
-    sentToWorker: new Map(),
-    planCache: new Map(),
-  };
-}
+export { createUploadState as createSliceState } from "./uploadCommon.ts";
 
 /** Result of the plan+fetch phase, passed to the upload+render phase. */
 interface SlicePlanResult {
@@ -96,10 +90,10 @@ function planAndFetchSlice(
       const targetLevel = mp.needed[0]?.level;
 
       // Detect T/C/Z change for seed computation.
-      // prevTCZ now stores "T/C/Z/level" (set in upload phase), so extract T/C/Z prefix for seed check.
+      // prevStateKey stores "T/C/Z/level" (set in upload phase), so extract T/C/Z prefix for seed check.
       const tczKey = `${t}/${c}/${z}`;
-      const prevTCZLevel = state.prevTCZ.get(memberId);
-      const prevTCZOnly = prevTCZLevel?.substring(0, prevTCZLevel.lastIndexOf("/"));
+      const prevStateKeyVal = state.prevStateKey.get(memberId);
+      const prevTCZOnly = prevStateKeyVal?.substring(0, prevStateKeyVal.lastIndexOf("/"));
       const needsSeed = prevTCZOnly === undefined || prevTCZOnly !== tczKey;
 
       if (needsSeed && targetLevel !== undefined) {
@@ -175,117 +169,74 @@ function uploadAndRenderSlice(
   const canvasW = canvas.clientWidth;
   const canvasH = canvas.clientHeight;
 
-  let uploadBudget = MAIN_VIEW_UPLOAD_BUDGET_BYTES;
-  let budgetExhausted = false;
-
-  // Atlas config and seeds are always processed for all members (critical for
-  // T/C/Z changes on plates). Only fine chunk uploads are gated by the budget.
-  for (const [dsId, ds] of datasets) {
+  const shouldSkipDataset = (_dsId: string, ds: { info: DatasetInfo }) => {
     const dsShape = ds.info.levels[0].shape;
-    if (z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0]) continue;
+    return z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0];
+  };
 
-    const sortedPlans = memberPlanCache.get(dsId);
-    if (!sortedPlans) continue;
+  const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }, _dsId: string): MemberUploadActions | null => {
+    const level = mp.needed[0]?.level;
+    if (level === undefined) return null;
 
-    for (const mp of sortedPlans) {
-      const memberId = mp.member_id;
-      const sharedQueue = ds.sharedQueue;
-      const tczKey = `${t}/${c}/${z}`;
+    const levelMeta = ds.info.levels[level];
+    if (!levelMeta) return null;
 
-      // Send available seed chunks incrementally as fallback (not budgeted)
-      const seedInfo = state.seedPending.get(memberId);
-      if (seedInfo) {
-        const seedMeta = ds.info.levels[seedInfo.level];
-        const [, , , sHeight, sWidth] = seedMeta.shape;
-        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-        const localZ = seedInfo.z - seedInfo.coords[0].z * sChunkZ;
-        let allSent = true;
-        for (const sc of seedInfo.coords) {
-          if (seedInfo.sentKeys.has(sc.key)) continue;
-          const buf = sharedQueue.get(memberId, sc.key);
-          if (!buf || buf.byteLength === 0) { allSent = false; continue; }
-          const data = bufferToUint16(buf, seedMeta.dataType);
-          const xOff = sc.x * sChunkX;
-          const yOff = sc.y * sChunkY;
-          const chunkW = Math.min(sChunkX, sWidth - xOff);
-          const chunkH = Math.min(sChunkY, sHeight - yOff);
-          const sliceOffset = localZ * sChunkY * sChunkX;
-          const sliceData = data.subarray(sliceOffset, sliceOffset + sChunkY * sChunkX);
-          const transferBuf = sliceData.buffer.slice(sliceData.byteOffset, sliceData.byteOffset + sliceData.byteLength);
-          client.sliceWriteFallbackChunk(
-            memberId, tczKey,
-            sWidth, sHeight,
-            transferBuf,
-            xOff, yOff,
-            chunkW, chunkH,
-            sChunkX,
-          );
-          seedInfo.sentKeys.add(sc.key);
-        }
-        if (allSent) {
-          state.seedPending.delete(memberId);
-        }
-      }
+    const [, , , levelHeight, levelWidth] = levelMeta.shape;
+    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+    const fullResDepth = ds.info.levels[0].shape[2];
+    const levelDepth = levelMeta.shape[2];
 
-      const level = mp.needed[0]?.level;
-      if (level === undefined) continue;
+    const tczKey = `${t}/${c}/${z}`;
 
-      const levelMeta = ds.info.levels[level];
-      if (!levelMeta) continue;
+    return {
+      stateKey: `${t}/${c}/${z}/${level}`,
 
-      const [, , , levelHeight, levelWidth] = levelMeta.shape;
-      const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-      const fullResDepth = ds.info.levels[0].shape[2];
-      const levelDepth = levelMeta.shape[2];
-
-      // --- Atlas config on LOD/T/C/Z change ---
-      const tczLevelKey = `${t}/${c}/${z}/${level}`;
-      const prevTCZLevel = state.prevTCZ.get(memberId);
-      if (prevTCZLevel !== tczLevelKey) {
+      sendAtlasConfig() {
         client.sliceAtlasConfig(
           memberId, level, z, t, c,
           levelWidth, levelHeight,
           chunkX, chunkY,
         );
-        state.sentToWorker.delete(memberId);
-        state.prevTCZ.set(memberId, tczLevelKey);
-      }
+      },
 
-      // --- Direct chunk push: send available chunks not yet sent (budgeted) ---
-      let sentSet = state.sentToWorker.get(memberId);
-      if (!sentSet) {
-        sentSet = new Set();
-        state.sentToWorker.set(memberId, sentSet);
-      }
+      processSeedChunk(data, sc, seedMeta) {
+        const seedInfo = state.seedPending.get(memberId);
+        if (!seedInfo || seedInfo.z === undefined) return;
+        const [, , , sHeight, sWidth] = seedMeta.shape;
+        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+        const localZ = seedInfo.z - seedInfo.coords[0].z * sChunkZ;
+        const xOff = sc.x * sChunkX;
+        const yOff = sc.y * sChunkY;
+        const chunkW = Math.min(sChunkX, sWidth - xOff);
+        const chunkH = Math.min(sChunkY, sHeight - yOff);
+        const sliceOffset = localZ * sChunkY * sChunkX;
+        const sliceData = data.subarray(sliceOffset, sliceOffset + sChunkY * sChunkX);
+        const transferBuf = sliceData.buffer.slice(sliceData.byteOffset, sliceData.byteOffset + sliceData.byteLength);
+        client.sliceWriteFallbackChunk(
+          memberId, tczKey,
+          sWidth, sHeight,
+          transferBuf,
+          xOff, yOff,
+          chunkW, chunkH,
+          sChunkX,
+        );
+      },
 
-      if (!budgetExhausted) {
-        const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-        for (const coord of mp.needed) {
-          if (coord.level !== level) continue;
-          if (sentSet.has(coord.key)) continue;
-          const buf = sharedQueue.get(memberId, coord.key);
-          if (!buf || buf.byteLength === 0) continue;
-          const data = bufferToUint16(buf, levelMeta.dataType);
-          chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-          sentSet.add(coord.key);
-          uploadBudget -= buf.byteLength;
-          if (uploadBudget <= 0) {
-            budgetExhausted = true;
-            break;
-          }
-        }
-        if (chunksToSend.length > 0) {
-          client.sliceChunkData(
-            memberId, chunksToSend,
-            level, z, t, c,
-            levelWidth, levelHeight,
-            chunkX, chunkY, chunkZ,
-            fullResDepth, levelDepth, z,
-          );
-        }
-      }
-    }
-  }
+      sendFineChunks(chunks) {
+        client.sliceChunkData(
+          memberId, chunks,
+          level, z, t, c,
+          levelWidth, levelHeight,
+          chunkX, chunkY, chunkZ,
+          fullResDepth, levelDepth, z,
+        );
+      },
+    };
+  };
+
+  const budgetExhausted = uploadChunksForMembers(
+    datasets, memberPlanCache, state, shouldSkipDataset, createActions,
+  );
 
   if (!shouldRender) return budgetExhausted;
 
@@ -354,17 +305,10 @@ export function tickSlice(
 }
 
 export function clearSliceForDataset(state: SliceState, dsId: string): void {
-  state.prevTCZ.delete(dsId);
-  state.seedPending.delete(dsId);
-  state.sentToWorker.delete(dsId);
-  state.planCache.delete(dsId);
+  clearUploadStateForDataset(state, dsId);
 }
 
 /** Clear member-keyed entries for all members of a dataset. */
 export function clearSliceForMembers(state: SliceState, memberIds: string[]): void {
-  for (const id of memberIds) {
-    state.prevTCZ.delete(id);
-    state.seedPending.delete(id);
-    state.sentToWorker.delete(id);
-  }
+  clearUploadStateForMembers(state, memberIds);
 }

@@ -127,10 +127,10 @@ export class RenderLoop {
     // For single datasets, member_id === dataset_id (already cleaned by clearFor*Dataset).
     // For plates, member IDs are prefixed with the dataset ID (e.g. "dsId:A/1/0").
     const prefix = dsId + ":";
-    for (const key of this.volumeState.prevTC.keys()) {
+    for (const key of this.volumeState.prevStateKey.keys()) {
       if (key === dsId || key.startsWith(prefix)) ids.add(key);
     }
-    for (const key of this.sliceState.prevTCZ.keys()) {
+    for (const key of this.sliceState.prevStateKey.keys()) {
       if (key === dsId || key.startsWith(prefix)) ids.add(key);
     }
     // Remove the dsId itself since clearFor*Dataset already handles it

@@ -2,32 +2,24 @@
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
-import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
-import { MAIN_VIEW_UPLOAD_BUDGET_BYTES, type TickContext } from "./renderLoopTypes.ts";
+import type { TickContext } from "./renderLoopTypes.ts";
 import { evaluateAndSortPlans, buildMemberFetchList, interleaveFetchLists, getSceneSettings } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
+import {
+  type UploadState,
+  type MemberUploadActions,
+  uploadChunksForMembers,
+  clearUploadStateForDataset,
+  clearUploadStateForMembers,
+  resetUploadState,
+} from "./uploadCommon.ts";
+import type { DatasetInfo } from "./zarr/metadata.ts";
+import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 
-export interface VolumeState {
-  prevTC: Map<string, string>;
-  seedPending: Map<string, {
-    level: number;
-    coords: ChunkCoord[];
-    sentKeys: Set<string>;
-  }>;
-  /** Tracks which chunks have been sent to the worker per member. Cleared on atlas reset. */
-  sentToWorker: Map<string, Set<string>>;
-  /** Cached chunk plans per dataset, invalidated on camera/viewport/T/C change. */
-  planCache: Map<string, { key: string; plans: MemberChunkPlan[] }>;
-}
+/** Backward-compatible alias. */
+export type VolumeState = UploadState;
 
-export function createVolumeState(): VolumeState {
-  return {
-    prevTC: new Map(),
-    seedPending: new Map(),
-    sentToWorker: new Map(),
-    planCache: new Map(),
-  };
-}
+export { createUploadState as createVolumeState } from "./uploadCommon.ts";
 
 /** Data passed from the plan+fetch phase to the upload+render phase. */
 interface PlanResult {
@@ -106,9 +98,9 @@ function planAndFetchVolume(
       const targetLevel = mp.needed[0].level;
 
       // Detect T/C change for seed computation.
-      // prevTC now stores "T/C/level" (set in upload phase), so extract T/C prefix for seed check.
+      // prevStateKey stores "T/C/level" (set in upload phase), so extract T/C prefix for seed check.
       const tcKey = `${viewT}/${viewC}`;
-      const prevTCLevel = state.prevTC.get(memberId);
+      const prevTCLevel = state.prevStateKey.get(memberId);
       const prevTCOnly = prevTCLevel?.substring(0, prevTCLevel.lastIndexOf("/"));
       const needsSeed = prevTCOnly === undefined || prevTCOnly !== tcKey;
 
@@ -177,116 +169,69 @@ function uploadAndRenderVolume(
   const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC } = plan;
   const { layerOrder, allSettings } = settings;
 
-  let uploadBudget = MAIN_VIEW_UPLOAD_BUDGET_BYTES;
-  let budgetExhausted = false;
+  const shouldSkipDataset = (_dsId: string, ds: { info: DatasetInfo }) => {
+    const dsShape = ds.info.levels[0].shape;
+    return viewC >= dsShape[1] || viewT >= dsShape[0];
+  };
 
-  // Upload chunks and manage atlas for ALL datasets, iterating per-member.
-  // Atlas config and seeds are always processed (critical for T/C changes on plates).
-  // Only fine chunk uploads are gated by the per-frame budget.
-  for (const [dsId, ds] of datasets) {
-    // Skip datasets whose C/T are exceeded (volume renders all Z slices)
-    const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
-    if (viewC >= dsShape[1] || viewT >= dsShape[0]) continue;
+  const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }, dsId: string): MemberUploadActions | null => {
+    if (mp.needed.length === 0) return null;
 
-    const sortedPlans = memberPlanCache.get(dsId);
-    if (!sortedPlans) continue;
+    const targetLevel = mp.needed[0].level;
+    const levelMeta = ds.info.levels[targetLevel];
+    const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
+    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
 
-    for (const mp of sortedPlans) {
-      const memberId = mp.member_id;
-      const sharedQueue = ds.sharedQueue;
+    const hitLocal = hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
 
-      if (mp.needed.length === 0) continue;
-      const targetLevel = mp.needed[0].level;
+    const tcKey = `${viewT}/${viewC}`;
 
-      const tcKey = `${viewT}/${viewC}`;
+    return {
+      stateKey: `${viewT}/${viewC}/${targetLevel}`,
 
-      const levelMeta = ds.info.levels[targetLevel];
-      const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
-      const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-
-      const hitLocal = hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
-
-      const tcLevelKey = `${viewT}/${viewC}/${targetLevel}`;
-      const prevTCLevel = state.prevTC.get(memberId);
-      if (prevTCLevel !== tcLevelKey) {
-        // Atlas needs recreation — send config and clear sent tracking
+      sendAtlasConfig() {
         client.volumeAtlasConfig(
           memberId, targetLevel, viewT, viewC,
           widthFull, heightFull, depthFull,
           chunkX, chunkY, chunkZ,
         );
-        state.sentToWorker.delete(memberId);
-        state.prevTC.set(memberId, tcLevelKey);
-      }
+      },
 
-      // Send available seed chunks as fallback (not budgeted)
-      const seedInfo = state.seedPending.get(memberId);
-      if (seedInfo) {
-        const seedMeta = ds.info.levels[seedInfo.level];
+      processSeedChunk(data, sc, seedMeta) {
         const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
         const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-        let allSent = true;
-        for (const sc of seedInfo.coords) {
-          if (seedInfo.sentKeys.has(sc.key)) continue;
-          const buf = sharedQueue.get(memberId, sc.key);
-          if (!buf || buf.byteLength === 0) { allSent = false; continue; }
-          const data = bufferToUint16(buf, seedMeta.dataType);
-          const xOff = sc.x * sChunkX;
-          const yOff = sc.y * sChunkY;
-          const zOff = sc.z * sChunkZ;
-          const cw = Math.min(sChunkX, sWidth - xOff);
-          const ch = Math.min(sChunkY, sHeight - yOff);
-          const cd = Math.min(sChunkZ, sDepth - zOff);
-          const transferBuf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-          client.volumeWriteFallbackChunk(
-            memberId, tcKey,
-            sWidth, sHeight, sDepth,
-            transferBuf,
-            xOff, yOff, zOff,
-            cw, ch, cd,
-            sChunkX, sChunkY,
-          );
-          seedInfo.sentKeys.add(sc.key);
-        }
-        if (allSent) {
-          state.seedPending.delete(memberId);
-        }
-      }
+        const xOff = sc.x * sChunkX;
+        const yOff = sc.y * sChunkY;
+        const zOff = sc.z * sChunkZ;
+        const cw = Math.min(sChunkX, sWidth - xOff);
+        const ch = Math.min(sChunkY, sHeight - yOff);
+        const cd = Math.min(sChunkZ, sDepth - zOff);
+        const transferBuf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+        client.volumeWriteFallbackChunk(
+          memberId, tcKey,
+          sWidth, sHeight, sDepth,
+          transferBuf,
+          xOff, yOff, zOff,
+          cw, ch, cd,
+          sChunkX, sChunkY,
+        );
+      },
 
-      let sentSet = state.sentToWorker.get(memberId);
-      if (!sentSet) {
-        sentSet = new Set();
-        state.sentToWorker.set(memberId, sentSet);
-      }
+      sendFineChunks(chunks) {
+        client.volumeChunkData(
+          memberId, chunks,
+          targetLevel, viewT, viewC,
+          widthFull, heightFull, depthFull,
+          chunkX, chunkY, chunkZ,
+          hitLocal,
+        );
+      },
+    };
+  };
 
-      // Fine chunk uploads are gated by the per-frame budget
-      if (!budgetExhausted) {
-        const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-        for (const coord of mp.needed) {
-          if (sentSet.has(coord.key)) continue;
-          const buf = sharedQueue.get(memberId, coord.key);
-          if (!buf || buf.byteLength === 0) continue;
-          const data = bufferToUint16(buf, levelMeta.dataType);
-          chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-          sentSet.add(coord.key);
-          uploadBudget -= buf.byteLength;
-          if (uploadBudget <= 0) {
-            budgetExhausted = true;
-            break;
-          }
-        }
-        if (chunksToSend.length > 0) {
-          client.volumeChunkData(
-            memberId, chunksToSend,
-            targetLevel, viewT, viewC,
-            widthFull, heightFull, depthFull,
-            chunkX, chunkY, chunkZ,
-            hitLocal,
-          );
-        }
-      }
-    }
-  }
+  const budgetExhausted = uploadChunksForMembers(
+    datasets, memberPlanCache, state, shouldSkipDataset, createActions,
+  );
 
   if (!shouldRender) return budgetExhausted;
 
@@ -353,24 +298,14 @@ export function tickVolume(
 }
 
 export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
-  state.prevTC.delete(dsId);
-  state.seedPending.delete(dsId);
-  state.sentToWorker.delete(dsId);
-  state.planCache.delete(dsId);
+  clearUploadStateForDataset(state, dsId);
 }
 
 /** Clear member-keyed entries for all members of a dataset. */
 export function clearVolumeForMembers(state: VolumeState, memberIds: string[]): void {
-  for (const id of memberIds) {
-    state.prevTC.delete(id);
-    state.seedPending.delete(id);
-    state.sentToWorker.delete(id);
-  }
+  clearUploadStateForMembers(state, memberIds);
 }
 
 export function resetVolumeState(state: VolumeState): void {
-  state.prevTC.clear();
-  state.seedPending.clear();
-  state.sentToWorker.clear();
-  state.planCache.clear();
+  resetUploadState(state);
 }

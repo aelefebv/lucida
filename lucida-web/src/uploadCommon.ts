@@ -1,0 +1,153 @@
+/** Shared upload infrastructure for slice and volume render paths. */
+import type { ChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
+import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
+import type { DatasetInfo, LevelMeta } from "./zarr/metadata.ts";
+import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
+import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+
+// ---------------------------------------------------------------------------
+// State types
+// ---------------------------------------------------------------------------
+
+export interface SeedPendingInfo {
+  level: number;
+  coords: ChunkCoord[];
+  z?: number; // slice-only: seed layer Z for 2D extraction
+  sentKeys: Set<string>;
+}
+
+export interface UploadState {
+  prevStateKey: Map<string, string>;
+  seedPending: Map<string, SeedPendingInfo>;
+  sentToWorker: Map<string, Set<string>>;
+  planCache: Map<string, { key: string; plans: MemberChunkPlan[] }>;
+}
+
+export function createUploadState(): UploadState {
+  return {
+    prevStateKey: new Map(),
+    seedPending: new Map(),
+    sentToWorker: new Map(),
+    planCache: new Map(),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Per-member action interface (caller supplies render-path-specific logic)
+// ---------------------------------------------------------------------------
+
+export interface MemberUploadActions {
+  stateKey: string;
+  sendAtlasConfig(): void;
+  processSeedChunk(data: Uint16Array, sc: ChunkCoord, seedMeta: LevelMeta): void;
+  sendFineChunks(chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[]): void;
+}
+
+// ---------------------------------------------------------------------------
+// Core shared upload loop
+// ---------------------------------------------------------------------------
+
+export function uploadChunksForMembers(
+  datasets: Map<string, { sharedQueue: SharedChunkQueue; info: DatasetInfo }>,
+  memberPlanCache: Map<string, MemberChunkPlan[]>,
+  state: UploadState,
+  shouldSkipDataset: (dsId: string, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }) => boolean,
+  createActions: (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }, dsId: string) => MemberUploadActions | null,
+): boolean {
+  let uploadBudget = MAIN_VIEW_UPLOAD_BUDGET_BYTES;
+  let budgetExhausted = false;
+
+  for (const [dsId, ds] of datasets) {
+    if (shouldSkipDataset(dsId, ds)) continue;
+
+    const sortedPlans = memberPlanCache.get(dsId);
+    if (!sortedPlans) continue;
+
+    for (const mp of sortedPlans) {
+      const memberId = mp.member_id;
+      const actions = createActions(memberId, mp, ds, dsId);
+      if (!actions) continue;
+
+      // --- Seed upload (not budgeted) ---
+      const seedInfo = state.seedPending.get(memberId);
+      if (seedInfo) {
+        const seedMeta = ds.info.levels[seedInfo.level];
+        let allSent = true;
+        for (const sc of seedInfo.coords) {
+          if (seedInfo.sentKeys.has(sc.key)) continue;
+          const buf = ds.sharedQueue.get(memberId, sc.key);
+          if (!buf || buf.byteLength === 0) { allSent = false; continue; }
+          const data = bufferToUint16(buf, seedMeta.dataType);
+          actions.processSeedChunk(data, sc, seedMeta);
+          seedInfo.sentKeys.add(sc.key);
+        }
+        if (allSent) {
+          state.seedPending.delete(memberId);
+        }
+      }
+
+      // --- Atlas config on state key change ---
+      if (actions.stateKey !== state.prevStateKey.get(memberId)) {
+        actions.sendAtlasConfig();
+        state.sentToWorker.delete(memberId);
+        state.prevStateKey.set(memberId, actions.stateKey);
+      }
+
+      // --- Fine chunk upload (budgeted) ---
+      let sentSet = state.sentToWorker.get(memberId);
+      if (!sentSet) {
+        sentSet = new Set();
+        state.sentToWorker.set(memberId, sentSet);
+      }
+
+      if (!budgetExhausted) {
+        const fineDataType = ds.info.levels[mp.needed[0].level].dataType;
+        const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+        for (const coord of mp.needed) {
+          if (sentSet.has(coord.key)) continue;
+          const buf = ds.sharedQueue.get(memberId, coord.key);
+          if (!buf || buf.byteLength === 0) continue;
+          const data = bufferToUint16(buf, fineDataType);
+          chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+          sentSet.add(coord.key);
+          uploadBudget -= buf.byteLength;
+          if (uploadBudget <= 0) {
+            budgetExhausted = true;
+            break;
+          }
+        }
+        if (chunksToSend.length > 0) {
+          actions.sendFineChunks(chunksToSend);
+        }
+      }
+    }
+  }
+
+  return budgetExhausted;
+}
+
+// ---------------------------------------------------------------------------
+// Clear / reset helpers
+// ---------------------------------------------------------------------------
+
+export function clearUploadStateForDataset(state: UploadState, dsId: string): void {
+  state.prevStateKey.delete(dsId);
+  state.seedPending.delete(dsId);
+  state.sentToWorker.delete(dsId);
+  state.planCache.delete(dsId);
+}
+
+export function clearUploadStateForMembers(state: UploadState, memberIds: string[]): void {
+  for (const id of memberIds) {
+    state.prevStateKey.delete(id);
+    state.seedPending.delete(id);
+    state.sentToWorker.delete(id);
+  }
+}
+
+export function resetUploadState(state: UploadState): void {
+  state.prevStateKey.clear();
+  state.seedPending.clear();
+  state.sentToWorker.clear();
+  state.planCache.clear();
+}
