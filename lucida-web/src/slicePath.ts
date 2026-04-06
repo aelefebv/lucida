@@ -3,7 +3,7 @@ import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
-import type { TickContext } from "./renderLoopTypes.ts";
+import { MAIN_VIEW_UPLOAD_BUDGET_BYTES, type TickContext } from "./renderLoopTypes.ts";
 import { evaluateAndSortPlans, buildMemberFetchList, interleaveFetchLists, getSceneSettings } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 
@@ -164,7 +164,6 @@ function uploadAndRenderSlice(
   sliceC: number,
   planResult: SlicePlanResult,
   shouldRender: boolean = true,
-  isDataRender: boolean = false,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
   const { memberPlanCache, settings } = planResult;
@@ -176,7 +175,12 @@ function uploadAndRenderSlice(
   const canvasW = canvas.clientWidth;
   const canvasH = canvas.clientHeight;
 
+  let uploadBudget = MAIN_VIEW_UPLOAD_BUDGET_BYTES;
+  let budgetExhausted = false;
+
   for (const [dsId, ds] of datasets) {
+    if (budgetExhausted) break;
+
     const dsShape = ds.info.levels[0].shape;
     if (z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0]) continue;
 
@@ -184,11 +188,13 @@ function uploadAndRenderSlice(
     if (!sortedPlans) continue;
 
     for (const mp of sortedPlans) {
+      if (budgetExhausted) break;
+
       const memberId = mp.member_id;
       const sharedQueue = ds.sharedQueue;
       const tczKey = `${t}/${c}/${z}`;
 
-      // Send available seed chunks incrementally as fallback
+      // Send available seed chunks incrementally as fallback (not budgeted)
       const seedInfo = state.seedPending.get(memberId);
       if (seedInfo) {
         const seedMeta = ds.info.levels[seedInfo.level];
@@ -253,27 +259,21 @@ function uploadAndRenderSlice(
         sentSet = new Set();
         state.sentToWorker.set(memberId, sentSet);
       }
-      // Prune sentToWorker to current needed set — if a chunk left the viewport,
-      // it may have been evicted by the worker. Re-send if it becomes needed again.
-      const neededKeys = new Set(mp.needed.filter(c => c.level === level).map(c => c.key));
-      for (const key of sentSet) {
-        if (!neededKeys.has(key)) sentSet.delete(key);
-      }
-      // If the worker rejected chunks and we're about to render, force a full
-      // atlas rebuild so the worker re-evaluates all chunks with fresh distance ordering.
-      // On data-render (camera stopped): clear sentToWorker so the worker
-      // re-evaluates the full atlas with the current camera position.
-      if (isDataRender) {
-        sentSet.clear();
-      }
+
       const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
       for (const coord of mp.needed) {
         if (coord.level !== level) continue;
         if (sentSet.has(coord.key)) continue;
         const buf = sharedQueue.get(memberId, coord.key);
         if (!buf || buf.byteLength === 0) continue;
-        chunksToSend.push({ data: bufferToUint16(buf, levelMeta.dataType), x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+        const data = bufferToUint16(buf, levelMeta.dataType);
+        chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
         sentSet.add(coord.key);
+        uploadBudget -= buf.byteLength;
+        if (uploadBudget <= 0) {
+          budgetExhausted = true;
+          break;
+        }
       }
       if (chunksToSend.length > 0) {
         client.sliceChunkData(
@@ -287,7 +287,7 @@ function uploadAndRenderSlice(
     }
   }
 
-  if (!shouldRender) return false;
+  if (!shouldRender) return budgetExhausted;
 
   // Build layer params for visible layers in order
   const { layerOrder, allSettings } = settings;
@@ -332,7 +332,7 @@ function uploadAndRenderSlice(
   client.resize(canvasW, canvasH);
   client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH);
 
-  return false;
+  return budgetExhausted;
 }
 
 /**
@@ -347,11 +347,10 @@ export function tickSlice(
   sliceC: number,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
   shouldRender: boolean = true,
-  isDataRender: boolean = false,
 ): boolean {
   const planResult = planAndFetchSlice(ctx, state, sliceZ, sliceT, sliceC, minimapPendingFetch);
   if (!planResult) return false;
-  return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult, shouldRender, isDataRender);
+  return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult, shouldRender);
 }
 
 export function clearSliceForDataset(state: SliceState, dsId: string): void {

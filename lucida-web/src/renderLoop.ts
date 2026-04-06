@@ -54,8 +54,23 @@ export class RenderLoop {
       }));
     }
 
-    // When the worker skips/rejects chunks, remove them from sentToWorker
-    // so they can be re-sent when the camera moves closer.
+    // When the worker evicts or skips chunks, update sentToWorker so they can be
+    // re-sent. Evictions (chunks removed from atlas) trigger a new tick so the
+    // main thread can re-send them. Skipped chunks (rejected because too far)
+    // are just removed from sentToWorker without triggering re-sends.
+    this.client.onChunksEvicted = (datasetId: string, evicted: string[], skipped: string[]) => {
+      const sentSet = this.sliceState.sentToWorker.get(datasetId)
+        ?? this.volumeState.sentToWorker.get(datasetId);
+      if (sentSet) {
+        for (const key of evicted) sentSet.delete(key);
+        for (const key of skipped) sentSet.delete(key);
+      }
+      if (evicted.length > 0) {
+        this.dataDirty = true;
+        this.scheduleIfNeeded();
+      }
+    };
+
     this.viewDirty = true;
     this.scheduleIfNeeded();
   }
@@ -65,6 +80,7 @@ export class RenderLoop {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    this.client.onChunksEvicted = null;
     for (const unsub of this.unsubs.values()) {
       unsub();
     }
@@ -191,7 +207,6 @@ export class RenderLoop {
 
     const now = performance.now();
     let shouldRender = false;
-    let isDataRender = false;
 
     if (this.viewDirty) {
       // View changed — render immediately
@@ -205,7 +220,6 @@ export class RenderLoop {
         this.dataDirty = false;
         this.lastDataRenderTime = now;
         shouldRender = true;
-        isDataRender = true;
       }
       // else: data dirty but debounce not elapsed — still run tick for uploads, skip render
     }
@@ -213,13 +227,12 @@ export class RenderLoop {
     const ctx = this.buildContext();
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
-    // isDataRender (data-dirty, not view-dirty) triggers sentToWorker clear for atlas reconvergence.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.sliceState, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender, isDataRender)) {
+      if (tickSlice(ctx, this.sliceState, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
         this.dataDirty = true;
       }
     } else {
-      if (tickVolume(ctx, this.volumeState, this.minimapState.pendingFetch, shouldRender, isDataRender)) {
+      if (tickVolume(ctx, this.volumeState, this.minimapState.pendingFetch, shouldRender)) {
         this.dataDirty = true;
       }
     }

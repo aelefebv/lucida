@@ -190,6 +190,7 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage)
 
   let intensityChanged = false;
   const perChunkSamples = Math.floor(10000 / Math.max(1, msg.chunks.length));
+  const evictedKeys: string[] = [];
 
   for (const chunk of msg.chunks) {
     if (atlas.slots.has(chunk.key)) continue;
@@ -213,6 +214,7 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage)
       if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
+      evictedKeys.push(evictKey);
       const oldGridIdx = atlas.slotGridIdx[slotIndex];
       if (oldGridIdx >= 0) {
         atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
@@ -236,6 +238,18 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage)
     atlas.slotGridIdx[slotIndex] = gridIdx;
     atlas.slots.set(chunk.key, slotIndex);
     atlas.indirectionDirty = true;
+  }
+
+  // Report chunks from the batch that the atlas did not keep (rejected as too far, wrong Z, etc.)
+  const skippedKeys: string[] = [];
+  for (const chunk of msg.chunks) {
+    if (!atlas.slots.has(chunk.key)) {
+      skippedKeys.push(chunk.key);
+    }
+  }
+
+  if (evictedKeys.length > 0 || skippedKeys.length > 0) {
+    ctx.post({ type: "chunksEvicted", datasetId, keys: evictedKeys, skipped: skippedKeys });
   }
 
   if (intensityChanged) {

@@ -13,6 +13,7 @@ export class RenderClient {
   private readyPromise: Promise<void>;
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
+  onChunksEvicted: ((datasetId: string, evicted: string[], skipped: string[]) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -46,6 +47,8 @@ export class RenderClient {
     const msg = e.data;
     if (msg.type === "intensityRange" && this.onIntensityRange) {
       this.onIntensityRange(msg.datasetId, msg.min, msg.max);
+    } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
+      this.onChunksEvicted(msg.datasetId, msg.keys, msg.skipped ?? []);
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
     }

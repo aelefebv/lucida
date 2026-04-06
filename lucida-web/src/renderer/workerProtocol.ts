@@ -289,7 +289,17 @@ export interface IntensityRangeMessage {
   max: number;
 }
 
+export interface ChunksEvictedMessage {
+  type: "chunksEvicted";
+  datasetId: string;
+  /** Chunks removed from the atlas (were present, got evicted by closer chunks). */
+  keys: string[];
+  /** Chunks from the batch that were not inserted (too far, wrong Z, etc.). */
+  skipped?: string[];
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | ErrorMessage
-  | IntensityRangeMessage;
+  | IntensityRangeMessage
+  | ChunksEvictedMessage;

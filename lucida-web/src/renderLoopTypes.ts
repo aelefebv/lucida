@@ -40,6 +40,9 @@ export const DATA_RENDER_INTERVAL_MS = 100;
 /** Separate budget for minimap overview uploads (independent from main view). */
 export const MINIMAP_UPLOAD_BUDGET_BYTES = 2 * 1024 * 1024; // 2 MB per frame
 
+/** Per-frame upload budget for the main view (slice + volume). */
+export const MAIN_VIEW_UPLOAD_BUDGET_BYTES = 8 * 1024 * 1024; // 8 MB per frame
+
 /** Shared dependency bag passed to all tick functions. */
 export interface TickContext {
   scene: WasmScene;
