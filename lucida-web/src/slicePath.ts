@@ -178,9 +178,9 @@ function uploadAndRenderSlice(
   let uploadBudget = MAIN_VIEW_UPLOAD_BUDGET_BYTES;
   let budgetExhausted = false;
 
+  // Atlas config and seeds are always processed for all members (critical for
+  // T/C/Z changes on plates). Only fine chunk uploads are gated by the budget.
   for (const [dsId, ds] of datasets) {
-    if (budgetExhausted) break;
-
     const dsShape = ds.info.levels[0].shape;
     if (z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0]) continue;
 
@@ -188,8 +188,6 @@ function uploadAndRenderSlice(
     if (!sortedPlans) continue;
 
     for (const mp of sortedPlans) {
-      if (budgetExhausted) break;
-
       const memberId = mp.member_id;
       const sharedQueue = ds.sharedQueue;
       const tczKey = `${t}/${c}/${z}`;
@@ -253,36 +251,38 @@ function uploadAndRenderSlice(
         state.prevTCZ.set(memberId, tczLevelKey);
       }
 
-      // --- Direct chunk push: send available chunks not yet sent ---
+      // --- Direct chunk push: send available chunks not yet sent (budgeted) ---
       let sentSet = state.sentToWorker.get(memberId);
       if (!sentSet) {
         sentSet = new Set();
         state.sentToWorker.set(memberId, sentSet);
       }
 
-      const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-      for (const coord of mp.needed) {
-        if (coord.level !== level) continue;
-        if (sentSet.has(coord.key)) continue;
-        const buf = sharedQueue.get(memberId, coord.key);
-        if (!buf || buf.byteLength === 0) continue;
-        const data = bufferToUint16(buf, levelMeta.dataType);
-        chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-        sentSet.add(coord.key);
-        uploadBudget -= buf.byteLength;
-        if (uploadBudget <= 0) {
-          budgetExhausted = true;
-          break;
+      if (!budgetExhausted) {
+        const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+        for (const coord of mp.needed) {
+          if (coord.level !== level) continue;
+          if (sentSet.has(coord.key)) continue;
+          const buf = sharedQueue.get(memberId, coord.key);
+          if (!buf || buf.byteLength === 0) continue;
+          const data = bufferToUint16(buf, levelMeta.dataType);
+          chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+          sentSet.add(coord.key);
+          uploadBudget -= buf.byteLength;
+          if (uploadBudget <= 0) {
+            budgetExhausted = true;
+            break;
+          }
         }
-      }
-      if (chunksToSend.length > 0) {
-        client.sliceChunkData(
-          memberId, chunksToSend,
-          level, z, t, c,
-          levelWidth, levelHeight,
-          chunkX, chunkY, chunkZ,
-          fullResDepth, levelDepth, z,
-        );
+        if (chunksToSend.length > 0) {
+          client.sliceChunkData(
+            memberId, chunksToSend,
+            level, z, t, c,
+            levelWidth, levelHeight,
+            chunkX, chunkY, chunkZ,
+            fullResDepth, levelDepth, z,
+          );
+        }
       }
     }
   }

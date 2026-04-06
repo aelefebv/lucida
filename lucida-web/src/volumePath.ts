@@ -180,10 +180,10 @@ function uploadAndRenderVolume(
   let uploadBudget = MAIN_VIEW_UPLOAD_BUDGET_BYTES;
   let budgetExhausted = false;
 
-  // Upload chunks and manage atlas for ALL datasets, iterating per-member
+  // Upload chunks and manage atlas for ALL datasets, iterating per-member.
+  // Atlas config and seeds are always processed (critical for T/C changes on plates).
+  // Only fine chunk uploads are gated by the per-frame budget.
   for (const [dsId, ds] of datasets) {
-    if (budgetExhausted) break;
-
     // Skip datasets whose C/T are exceeded (volume renders all Z slices)
     const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
     if (viewC >= dsShape[1] || viewT >= dsShape[0]) continue;
@@ -192,8 +192,6 @@ function uploadAndRenderVolume(
     if (!sortedPlans) continue;
 
     for (const mp of sortedPlans) {
-      if (budgetExhausted) break;
-
       const memberId = mp.member_id;
       const sharedQueue = ds.sharedQueue;
 
@@ -261,28 +259,31 @@ function uploadAndRenderVolume(
         state.sentToWorker.set(memberId, sentSet);
       }
 
-      const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
-      for (const coord of mp.needed) {
-        if (sentSet.has(coord.key)) continue;
-        const buf = sharedQueue.get(memberId, coord.key);
-        if (!buf || buf.byteLength === 0) continue;
-        const data = bufferToUint16(buf, levelMeta.dataType);
-        chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
-        sentSet.add(coord.key);
-        uploadBudget -= buf.byteLength;
-        if (uploadBudget <= 0) {
-          budgetExhausted = true;
-          break;
+      // Fine chunk uploads are gated by the per-frame budget
+      if (!budgetExhausted) {
+        const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+        for (const coord of mp.needed) {
+          if (sentSet.has(coord.key)) continue;
+          const buf = sharedQueue.get(memberId, coord.key);
+          if (!buf || buf.byteLength === 0) continue;
+          const data = bufferToUint16(buf, levelMeta.dataType);
+          chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
+          sentSet.add(coord.key);
+          uploadBudget -= buf.byteLength;
+          if (uploadBudget <= 0) {
+            budgetExhausted = true;
+            break;
+          }
         }
-      }
-      if (chunksToSend.length > 0) {
-        client.volumeChunkData(
-          memberId, chunksToSend,
-          targetLevel, viewT, viewC,
-          widthFull, heightFull, depthFull,
-          chunkX, chunkY, chunkZ,
-          hitLocal,
-        );
+        if (chunksToSend.length > 0) {
+          client.volumeChunkData(
+            memberId, chunksToSend,
+            targetLevel, viewT, viewC,
+            widthFull, heightFull, depthFull,
+            chunkX, chunkY, chunkZ,
+            hitLocal,
+          );
+        }
       }
     }
   }
