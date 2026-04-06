@@ -284,6 +284,54 @@ WebGPU-rendered cursors showing where other connected users are pointing.
 
 ---
 
+## 11. Plate Datasets
+
+A plate is an OME-Zarr 0.5 container representing a multi-well experiment (e.g. a physical microplate in high-content screening). It renders as a seamless spatial mosaic the user pans across. A plate is a `Dataset` with `kind: DatasetKind::Plate` — every well/FOV becomes a `DatasetMember` that flows through the normal chunk pipeline.
+
+**Owns:** Plate structure (rows, columns, wells, FOVs), FOV positions, `store_prefix` routing.
+
+**How plate loading works:**
+1. Server receives `OpenRemoteDataset` for a plate URL
+2. `read_dataset_info()` reads the root `zarr.json`, detects `attributes.ome.plate`
+3. `read_plate_info_from_root()` parses the plate hierarchy:
+   - Rows, columns, wells from the plate metadata
+   - For each well: reads `{well_path}/zarr.json` to discover FOVs
+   - Extracts optional stage translation coordinates per FOV
+   - Picks the **first FOV as representative** for multiscales metadata (shape, chunks, scales, codecs)
+4. `compute_fov_positions()` assigns pixel-space `[X, Y]` to every FOV:
+   - **Grid mode**: Uniform layout. `WELL_GAP_FRACTION` (20%) between wells, `FIELD_GAP_FRACTION` (8%) between FOVs within a well
+   - **Stage mode**: Uses `coordinateTransformations.translation` from OME metadata, normalized to origin. Falls back to grid if absent
+5. `PlateInfo::into_dataset_metadata()` builds:
+   - `Dataset.kind = DatasetKind::Plate { rows, columns, wells, positioning_mode, has_stage_positions }`
+   - `Dataset.members`: one `DatasetMember` per FOV, each with `store_prefix` (e.g. `"A/1/0"`) and computed position
+   - `Dataset.volume_shape`: full plate extent `[Z, H, W]` via `plate::plate_extent()`
+6. Server wraps the store in a 512 MB LRU cache, broadcasts `AddDataset` to all clients
+
+**Chunk routing via `store_prefix`:**
+- Each FOV has a unique `store_prefix` (e.g. `"A/1/0"` = well A, column 1, FOV 0)
+- Client includes `store_prefix` in every `ChunkRequest`
+- Server prepends it to the chunk path: `"A/1/0" + "/" + "0/c/1/2/3"` → reads `"A/1/0/0/c/1/2/3"` from the store
+- Response uses a composite key (`plate1/A/1/0/0/c/1/2/3`) so the client cache distinguishes FOVs
+
+**How plates interact with the rest of the pipeline:**
+- **Chunk planning** (§2): `chunk_plan_for()` returns `MemberChunkPlan[]` — one per visible FOV. AABB culling skips off-screen FOVs.
+- **Fetching** (§3): Per-member fetch lists are interleaved round-robin for spatial fairness.
+- **Atlas** (§7): Each FOV (`memberId`) gets its own atlas — the atlas key is `memberId`, not `datasetId`.
+- **Shaders** (§8): Slice shader draws 1.5px borders at UV edges for plate grid visualization.
+
+**UI: PlateSelector** (2D mode only):
+- Renders a well grid overlay. Clicking a well pans the camera to its center.
+- If `has_stage_positions`, a toggle switches between Grid and Stage positioning modes.
+
+**If you're changing this:**
+- All FOVs in a plate share the same multiscales metadata (shape, chunks, codecs) — read from the representative FOV. If FOVs ever have heterogeneous shapes, this assumption breaks.
+- Positioning mode is togglable at runtime. The toggle sends a command that recomputes positions and re-broadcasts the dataset.
+- `store_prefix` is the routing key that makes plates work end-to-end. Every component that touches chunk identity (cache keys, fetch dedup, atlas keying, `sentToWorker` tracking) must include it.
+
+**Files:** `lucida-store/src/metadata.rs` (plate discovery + `PlateInfo`), `lucida-core/src/plate.rs` (position computation), `lucida-core/src/scene/types.rs` (`DatasetKind::Plate`, `PlateWell`, `PlateFov`, `DatasetMember`), `lucida-server/src/handler.rs` (chunk routing), `lucida-web/src/components/PlateSelector.tsx` (UI), `lucida-web/src/hooks/useBridge.ts` (client-side `store_prefix` in requests)
+
+---
+
 ## Coordinate Conventions
 
 Two Y conventions exist. Bugs happen at the boundary between them.
