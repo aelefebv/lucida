@@ -256,6 +256,7 @@ export function useBridge({
             try {
               const json = JSON.stringify({ dataset_order: datasetOrder, dataset_settings: datasetSettings });
               scene.import_dataset_presence(json);
+              bumpSettingsGeneration();
               bumpLayerSettingsVersion();
               loopRef.current?.markViewDirty();
             } catch (e) {
@@ -418,6 +419,7 @@ export function useBridge({
                   dataset_settings: peer.dataset_settings,
                 });
                 scene.import_dataset_presence(layerJson);
+                bumpSettingsGeneration();
                 bumpLayerSettingsVersion();
               } catch (e) {
                 console.warn("Failed to import peer dataset presence:", e);

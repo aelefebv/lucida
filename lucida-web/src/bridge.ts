@@ -143,12 +143,15 @@ export class Bridge {
     this.send(JSON.stringify({ type: "command", command: cmd }));
   }
 
-  /** Send presence update, throttled to ~50ms. */
+  /** Send presence update, throttled to ~50ms (leading+trailing edge). */
   sendPresence(presenceJson: string) {
     // Merge type field into the presence object
     const obj = JSON.parse(presenceJson);
-    this.pendingPresence = JSON.stringify({ type: "presence", ...obj });
+    const json = JSON.stringify({ type: "presence", ...obj });
     if (!this.presenceTimer) {
+      // Leading edge: send immediately, start cooldown
+      this.send(json);
+      this.pendingPresence = null;
       this.presenceTimer = setTimeout(() => {
         this.presenceTimer = null;
         if (this.pendingPresence) {
@@ -156,6 +159,9 @@ export class Bridge {
           this.pendingPresence = null;
         }
       }, 50);
+    } else {
+      // During cooldown: store latest for trailing edge
+      this.pendingPresence = json;
     }
   }
 

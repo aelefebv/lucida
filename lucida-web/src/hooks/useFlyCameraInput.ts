@@ -109,6 +109,7 @@ export function useFlyCameraInput(
         });
         markViewDirty();
         setLowRes();
+        emitPresence();
         hadInputRef.current = true;
       } else if (hadInputRef.current) {
         // Input just stopped — schedule full res and emit presence

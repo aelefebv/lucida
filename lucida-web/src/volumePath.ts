@@ -74,7 +74,8 @@ function planAndFetchVolume(
     const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
     if (viewC >= dsShape[1] || viewT >= dsShape[0]) continue;
 
-    const planCacheKey = `${eye[0].toFixed(4)}|${eye[1].toFixed(4)}|${eye[2].toFixed(4)}|${fullW}|${fullH}|${viewT}|${viewC}`;
+    const fwd = new Float32Array(scene.camera_forward());
+    const planCacheKey = `${eye[0].toFixed(4)}|${eye[1].toFixed(4)}|${eye[2].toFixed(4)}|${fwd[0].toFixed(4)}|${fwd[1].toFixed(4)}|${fwd[2].toFixed(4)}|${fullW}|${fullH}|${viewT}|${viewC}`;
     const cached = state.planCache.get(dsId);
     let sortedPlans: MemberChunkPlan[];
     if (cached && cached.key === planCacheKey) {
