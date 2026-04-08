@@ -182,7 +182,11 @@
 | **Gamma** | A nonlinear intensity exponent applied after contrast windowing | Gamma correction, tone curve |
 | **BlendMode** | How overlapping layers composite: alpha, additive, or max | Compositing mode, mix mode |
 | **RenderMode** | The volume rendering strategy for 3D: translucent (front-to-back compositing) or max-intensity (MIP) | Projection mode, ray-cast mode |
-| **DatasetDisplaySettings** | Per-dataset display configuration: visibility, opacity, contrast window, gamma, blend mode, and render mode | LayerDisplaySettings (old name), layer style |
+| **DatasetDisplaySettings** | Per-dataset display configuration: visibility, opacity, contrast window, gamma, blend mode, render mode, per-channel settings (`channel_settings`), and inter-channel blend mode (`channel_blend_mode`) | LayerDisplaySettings (old name), layer style |
+| **ChannelSettings** | Per-channel display configuration within a dataset: visibility, colormap, contrast window, and gamma. Stored as a `Vec<ChannelSettings>` on `DatasetDisplaySettings`, indexed by channel. In both single-channel and multi-channel modes, contrast/gamma/colormap are read from `channel_settings[c]` | Channel display, channel style |
+| **Colormap** | A named color lookup table mapping normalized [0,1] intensity to RGB color. Applied in the shader via a 256x1 RGBA8 GPU texture sampled with linear interpolation. 15 built-in colormaps: Gray, Magenta, Green, Cyan, Red, Blue, Yellow, Viridis, Inferno, Plasma, Magma, Turbo, Hot, Cool, Jet. Default channel assignments cycle Magenta/Green/Cyan | LUT, color table, false color |
+| **Multi-channel mode** | A global toggle (`ViewState.multi_channel`) that enables simultaneous rendering of multiple channels. Each (member, channel) pair becomes an independent render pass with its own atlas, chunk plan, and colormap. Channels are composited via the dataset's `channel_blend_mode`. In single-channel mode, the C slider selects one channel at a time | Composite mode, channel overlay |
+| **Composite key** | The string `${memberId}:ch${channel}` used to identify a (member, channel) pair in multi-channel mode. Used as the key in atlas config, sentToWorker tracking, plan cache, and worker resource management. Parsed by `parseChannel()` and `stripChannelSuffix()` | Channel key, member-channel key |
 | **Dataset order** | The rendering order of datasets, stored as a list of dataset IDs (`dataset_order`) | Layer order (old name), Z-order, draw order, stack order |
 
 ## Spatial math
@@ -416,7 +420,7 @@ These terms have multiple meanings depending on context. The glossary tables abo
 
 - **"Volume"**: In `lucida-store`, the in-memory 5D u16 array struct. In the viewer, the proper term is **Dataset**.
 
-- **"Channel"**: In `lucida-store`, the C dimension (fluorescence wavelength). In `lucida-core`, a **Layer** represents the same concept.
+- **"Channel"**: In `lucida-store`, the C dimension (fluorescence wavelength). In `lucida-core`, a **Layer** represents the spatial metadata of a channel. **ChannelSettings** holds per-channel display properties (colormap, contrast, gamma). In **Multi-channel mode**, each channel becomes an independent render pass with its own **Colormap** and **Atlas**.
 
 - **"Viewer" vs "Client"**: **Viewer** for the Python SDK API, **Client** for server-side protocol. Same entity, different perspective.
 

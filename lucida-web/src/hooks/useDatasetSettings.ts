@@ -105,7 +105,8 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min, max });
+      const c = scene.c();
+      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min, max });
       loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
     }
@@ -116,7 +117,76 @@ export function useDatasetSettings({
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
-      applySettingsCommand(scene, { type: "set_dataset_gamma", dataset_id: id, gamma });
+      const c = scene.c();
+      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel: c, gamma });
+      loopRef.current?.markViewDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  const handleLayerSetColormap = useCallback((id: string, colormap: string) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      const c = scene.c();
+      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel: c, colormap });
+      loopRef.current?.markViewDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  // Channel-specific handlers for multi-channel sublayer controls
+  const handleChannelSetVisible = useCallback((id: string, channel: number, visible: boolean) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_channel_visible", dataset_id: id, channel, visible });
+      loopRef.current?.markViewDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  const handleChannelSetColormap = useCallback((id: string, channel: number, colormap: string) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel, colormap });
+      loopRef.current?.markViewDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel, min, max });
+      loopRef.current?.markViewDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  const handleChannelSetGamma = useCallback((id: string, channel: number, gamma: number) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel, gamma });
+      loopRef.current?.markViewDirty();
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  const handleChannelSetBlendMode = useCallback((id: string, blendMode: string) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_channel_blend_mode", dataset_id: id, blend_mode: blendMode });
       loopRef.current?.markViewDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
@@ -151,7 +221,8 @@ export function useDatasetSettings({
       const scene = wasmSceneRef.current;
       if (scene) {
         bridgeCallbacksRef.current.breakFollow();
-        applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max });
+        const c = scene.c();
+        applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max });
         loopRef.current?.markViewDirty();
         bridgeCallbacksRef.current.emitDatasetPresence();
       }
@@ -170,7 +241,8 @@ export function useDatasetSettings({
           const scene = wasmSceneRef.current;
           if (scene) {
             bridgeCallbacksRef.current.breakFollow();
-            applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max });
+            const c = scene.c();
+            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max });
             loopRef.current?.markViewDirty();
             bridgeCallbacksRef.current.emitDatasetPresence();
           }
@@ -188,15 +260,16 @@ export function useDatasetSettings({
       const scene = wasmSceneRef.current;
       if (scene) {
         bridgeCallbacksRef.current.breakFollow();
+        const c = scene.c();
         if (!wasFull) {
           const ds = datasetsRef.current.get(id);
           const frMax = ds ? dtypeMax(ds.info.levels[0].dataType) : 65535;
-          applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min: 0, max: frMax });
+          applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: 0, max: frMax });
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
         } else {
           const dr = dataRangeMap.get(id);
           if (dr) {
-            applySettingsCommand(scene, { type: "set_dataset_contrast", dataset_id: id, min: dr.min, max: dr.max });
+            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max });
           }
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
         }
@@ -245,6 +318,8 @@ export function useDatasetSettings({
       gamma: number;
       blend_mode: string;
       render_mode: string;
+      channel_settings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number }[];
+      channel_blend_mode?: string;
     }>;
     try {
       layerOrder = JSON.parse(scene.dataset_order());
@@ -253,26 +328,34 @@ export function useDatasetSettings({
       return [];
     }
 
+    const currentC = scene.c();
+
     return layerOrder.slice().reverse().map(id => {
       const settings = allSettings[id];
       const ds = datasetsRef.current.get(id);
       const dr = dataRangeMap.get(id) ?? null;
       const frMax = ds ? dtypeMax(ds.info.levels[0].dataType) : 65535;
 
+      // Use per-channel settings if available
+      const chSettings = settings?.channel_settings?.[currentC];
+
       return {
         id,
         name: scene.dataset_name(id),
         visible: settings?.visible ?? true,
         opacity: settings?.opacity ?? 1,
-        contrastMin: settings?.contrast_min ?? 0,
-        contrastMax: settings?.contrast_max ?? 65535,
-        gamma: settings?.gamma ?? 1,
+        contrastMin: chSettings?.contrast_min ?? settings?.contrast_min ?? 0,
+        contrastMax: chSettings?.contrast_max ?? settings?.contrast_max ?? 65535,
+        gamma: chSettings?.gamma ?? settings?.gamma ?? 1,
+        colormap: chSettings?.colormap ?? "gray",
         blendMode: settings?.blend_mode ?? "alpha",
         renderMode: settings?.render_mode ?? "translucent",
         autoContrast: autoContrastMap.get(id) ?? true,
         fullRange: fullRangeMap.get(id) ?? false,
         dataRange: dr,
         fullRangeMax: frMax,
+        channelSettings: settings?.channel_settings,
+        channelBlendMode: settings?.channel_blend_mode ?? "additive",
       };
     });
   };
@@ -304,6 +387,12 @@ export function useDatasetSettings({
     handleLayerSetOpacity,
     handleLayerSetContrast,
     handleLayerSetGamma,
+    handleLayerSetColormap,
+    handleChannelSetVisible,
+    handleChannelSetColormap,
+    handleChannelSetContrast,
+    handleChannelSetGamma,
+    handleChannelSetBlendMode,
     handleLayerSetBlendMode,
     handleLayerSetRenderMode,
     handleLayerAutoContrast,

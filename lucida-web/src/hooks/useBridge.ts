@@ -346,6 +346,25 @@ export function useBridge({
     });
 
     initLayerMaps(datasetId);
+
+    // Ensure per-channel settings exist for all channels.
+    // AddDataset only creates 1 channel setting (layers.len() = 1),
+    // but the real channel count is in the data shape.
+    const channelCount = info.levels[0].shape[1]; // [T, C, Z, Y, X]
+    if (channelCount > 1) {
+      const scene = wasmSceneRef.current;
+      if (scene) {
+        // Touch the last channel to grow the vec via ensure_channel
+        scene.apply_command(JSON.stringify({
+          type: "set_channel_visible",
+          dataset_id: datasetId,
+          channel: channelCount - 1,
+          visible: true,
+        }));
+        bumpSettingsGeneration();
+      }
+    }
+
     loopRef.current?.addDataset(datasetId, sharedQueue, info);
 
     const coarsest = info.levels[info.levels.length - 1];

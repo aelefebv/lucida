@@ -240,6 +240,16 @@ impl WasmScene {
         self.inner.view.c = c;
     }
 
+    // --- Multi-channel ---
+
+    pub fn multi_channel(&self) -> bool {
+        self.inner.view.multi_channel
+    }
+
+    pub fn set_multi_channel(&mut self, enabled: bool) {
+        self.inner.view.multi_channel = enabled;
+    }
+
     // --- Display state ---
 
     pub fn contrast_min(&self) -> f64 {

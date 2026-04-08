@@ -1,9 +1,9 @@
 mod types;
 
 pub use types::{
-    BlendMode, Dataset, DatasetDisplaySettings, DatasetKind, DatasetMember, DisplayState,
-    DocumentState, Layer, LevelInfo, MemberChunkPlan, PlateFov, PlateWell, PositioningMode,
-    RenderMode,
+    BlendMode, ChannelSettings, Colormap, Dataset, DatasetDisplaySettings, DatasetKind,
+    DatasetMember, DisplayState, DocumentState, Layer, LevelInfo, MemberChunkPlan, PlateFov,
+    PlateWell, PositioningMode, RenderMode,
 };
 
 use std::collections::HashMap;

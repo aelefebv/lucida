@@ -47,6 +47,8 @@ export class VolumeRenderer {
   private clipDistance = 0;
   private clipMode = 0; // 0=plane, 1=sphere
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
+  private lutTexture: GPUTexture;
+  private lutSampler: GPUSampler;
 
   constructor(device: GPUDevice, dummyFallbackTexture: GPUTexture) {
     this.device = device;
@@ -75,6 +77,16 @@ export class VolumeRenderer {
           binding: 3,
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float" },
+        },
+        {
+          binding: 5,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: "filtering" },
         },
       ],
     });
@@ -106,6 +118,29 @@ export class VolumeRenderer {
     // Default to identity
     this.modelMatrix[0] = this.modelMatrix[5] = this.modelMatrix[10] = this.modelMatrix[15] = 1;
     this.invModelMatrix[0] = this.invModelMatrix[5] = this.invModelMatrix[10] = this.invModelMatrix[15] = 1;
+
+    // Default 1x1 white LUT (renders grayscale when no colormap is set)
+    this.lutTexture = device.createTexture({
+      size: [1, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this.lutTexture },
+      new Uint8Array([255, 255, 255, 255]),
+      { bytesPerRow: 4 },
+      [1, 1],
+    );
+
+    this.lutSampler = device.createSampler({
+      magFilter: "linear",
+      minFilter: "linear",
+    });
+  }
+
+  setColormapTexture(texture: GPUTexture) {
+    this.lutTexture = texture;
+    // Bind group will be rebuilt on the next setAtlas call
   }
 
   setAtlas(
@@ -128,6 +163,8 @@ export class VolumeRenderer {
         { binding: 1, resource: texture.createView() },
         { binding: 2, resource: fbTex.createView() },
         { binding: 3, resource: { buffer: indirectionBuf } },
+        { binding: 4, resource: this.lutTexture.createView() },
+        { binding: 5, resource: this.lutSampler },
       ],
     });
   }

@@ -62,6 +62,7 @@ function App() {
     datasetsRef,
     datasetsVersion,
     bridgeCallbacksRef,
+    loopRef: render.loopRef,
   });
 
   const layers = useDatasetSettings({
@@ -260,8 +261,10 @@ function App() {
         onToggleExpand={layers.handleLayerToggleExpand}
         onSetVisible={layers.handleLayerSetVisible}
         onSetOpacity={layers.handleLayerSetOpacity}
+        multiChannel={dims.multiChannel}
         onSetContrast={layers.handleLayerSetContrast}
         onSetGamma={layers.handleLayerSetGamma}
+        onSetColormap={layers.handleLayerSetColormap}
         onSetBlendMode={layers.handleLayerSetBlendMode}
         onSetRenderMode={layers.handleLayerSetRenderMode}
         onAutoContrast={layers.handleLayerAutoContrast}
@@ -269,6 +272,11 @@ function App() {
         onFullRangeToggle={layers.handleLayerFullRangeToggle}
         onMoveLayer={layers.handleLayerMove}
         onRemoveLayer={layers.handleRemoveLayer}
+        onChannelSetVisible={layers.handleChannelSetVisible}
+        onChannelSetColormap={layers.handleChannelSetColormap}
+        onChannelSetContrast={layers.handleChannelSetContrast}
+        onChannelSetGamma={layers.handleChannelSetGamma}
+        onChannelSetBlendMode={layers.handleChannelSetBlendMode}
         onAddLayer={() => setShowFileBrowser(true)}
         viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
@@ -387,7 +395,21 @@ function App() {
         {datasetsVersion > 0 && (
           <div className="dimension-controls" style={{ maxWidth: layout.canvasWidth }}>
             <DimensionControls label="Z" value={dims.z} max={dims.dimZ} onChange={dims.handleZChange} disabled={dims.viewMode === "3d"} />
-            <DimensionControls label="C" value={dims.c} max={dims.dimC} onChange={dims.handleCChange} />
+            {dims.multiChannel ? (
+              dims.dimC > 1 && (
+                <div className="dim-control">
+                  <span className="dim-label">C</span>
+                  <button className="dim-btn" style={{ background: "#4a9eff", color: "#fff" }} onClick={dims.handleMultiChannelToggle} title="Switch to single-channel mode">Multi</button>
+                </div>
+              )
+            ) : (
+              <DimensionControls label="C" value={dims.c} max={dims.dimC} onChange={dims.handleCChange} />
+            )}
+            {!dims.multiChannel && dims.dimC > 1 && (
+              <div className="dim-control" style={{ marginLeft: "-0.25rem" }}>
+                <button className="dim-btn" onClick={dims.handleMultiChannelToggle} title="Switch to multi-channel composite mode">Multi</button>
+              </div>
+            )}
             <DimensionControls label="T" value={dims.t} max={dims.dimT} onChange={dims.handleTChange} />
           </div>
         )}

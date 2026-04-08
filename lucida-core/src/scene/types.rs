@@ -31,6 +31,64 @@ impl Default for RenderMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum Colormap {
+    Gray,
+    Magenta,
+    Green,
+    Cyan,
+    Red,
+    Blue,
+    Yellow,
+    Viridis,
+    Inferno,
+    Plasma,
+    Magma,
+    Turbo,
+    Hot,
+    Cool,
+    Jet,
+}
+
+impl Default for Colormap {
+    fn default() -> Self {
+        Colormap::Gray
+    }
+}
+
+impl Colormap {
+    pub fn default_for_channel(index: usize) -> Self {
+        const CYCLE: [Colormap; 3] = [Colormap::Magenta, Colormap::Green, Colormap::Cyan];
+        CYCLE[index % CYCLE.len()]
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelSettings {
+    pub visible: bool,
+    pub colormap: Colormap,
+    pub contrast_min: f64,
+    pub contrast_max: f64,
+    pub gamma: f64,
+}
+
+impl Default for ChannelSettings {
+    fn default() -> Self {
+        Self {
+            visible: true,
+            colormap: Colormap::Gray,
+            contrast_min: 0.0,
+            contrast_max: 65535.0,
+            gamma: 1.0,
+        }
+    }
+}
+
+fn default_channel_blend_mode() -> BlendMode {
+    BlendMode::Additive
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetDisplaySettings {
     pub visible: bool,
@@ -41,6 +99,25 @@ pub struct DatasetDisplaySettings {
     pub blend_mode: BlendMode,
     #[serde(default)]
     pub render_mode: RenderMode,
+    #[serde(default)]
+    pub channel_settings: Vec<ChannelSettings>,
+    #[serde(default = "default_channel_blend_mode")]
+    pub channel_blend_mode: BlendMode,
+}
+
+impl DatasetDisplaySettings {
+    /// Get a mutable reference to channel settings at the given index,
+    /// growing the vec with defaults if needed.
+    pub fn ensure_channel(&mut self, index: usize) -> &mut ChannelSettings {
+        while self.channel_settings.len() <= index {
+            let i = self.channel_settings.len();
+            self.channel_settings.push(ChannelSettings {
+                colormap: Colormap::default_for_channel(i),
+                ..Default::default()
+            });
+        }
+        &mut self.channel_settings[index]
+    }
 }
 
 impl Default for DatasetDisplaySettings {
@@ -53,6 +130,8 @@ impl Default for DatasetDisplaySettings {
             gamma: 1.0,
             blend_mode: BlendMode::Alpha,
             render_mode: RenderMode::Translucent,
+            channel_settings: Vec::new(),
+            channel_blend_mode: BlendMode::Additive,
         }
     }
 }

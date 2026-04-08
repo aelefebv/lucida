@@ -141,6 +141,7 @@ export interface VolumeLayerParams {
   opacity: number;
   blendMode: "alpha" | "additive" | "max";
   renderMode: "translucent" | "max_intensity";
+  colormap?: string;
 }
 
 export interface VolumeRenderMultiPassMessage {
@@ -168,6 +169,7 @@ export interface SliceLayerParams {
   gamma: number;
   opacity: number;
   blendMode: "alpha" | "additive" | "max";
+  colormap?: string;
   /** Member position offset in voxels along X (default 0). */
   offsetX?: number;
   /** Member position offset in voxels along Y (default 0). */

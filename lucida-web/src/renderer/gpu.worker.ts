@@ -9,6 +9,7 @@ import type { WorkerCtx } from "./workerContext.ts";
 import { handleSliceWriteFallbackChunk, handleSliceAtlasConfig, handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
 import { handleVolumeWriteFallbackChunk, handleVolumeAtlasConfig, handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
+import { getColormapData } from "../colormaps.ts";
 
 let device: GPUDevice;
 let context: GPUCanvasContext;
@@ -18,6 +19,23 @@ let sliceRenderer: SliceRenderer | null = null;
 let volumeRenderer: VolumeRenderer | null = null;
 let compositor: LayerCompositor | null = null;
 let cursorRenderer: CursorRenderer | null = null;
+
+// LUT texture cache for colormap rendering
+const lutCache = new Map<string, GPUTexture>();
+
+function getOrCreateLUT(name: string): GPUTexture {
+  let tex = lutCache.get(name);
+  if (tex) return tex;
+  const data = getColormapData(name);
+  tex = device.createTexture({
+    size: [256, 1],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  device.queue.writeTexture({ texture: tex }, data, { bytesPerRow: 256 * 4 }, [256, 1]);
+  lutCache.set(name, tex);
+  return tex;
+}
 
 // Shared offscreen texture pool (used by slice + volume render)
 let offscreenPool: GPUTexture[] = [];
@@ -103,6 +121,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           ensureOffscreenPool,
           getDummyTexture,
           getDummy3DTexture,
+          getOrCreateLUT,
           post,
         };
         post({ type: "ready" });
@@ -177,6 +196,8 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         destroyAllMinimapResources();
         for (const tex of offscreenPool) tex.destroy();
         offscreenPool = [];
+        for (const tex of lutCache.values()) tex.destroy();
+        lutCache.clear();
         dummyTexture?.destroy();
         dummyTexture = null;
         dummy3DTexture?.destroy();

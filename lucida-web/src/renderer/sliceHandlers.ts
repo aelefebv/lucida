@@ -309,6 +309,8 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
       );
     }
 
+    const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");
+    renderer.setColormapTexture(lutTex);
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(layer.opacity);
     renderer.setTransform(msg.zoom, msg.cx - ox, msg.cy - oy, msg.canvasW, msg.canvasH, layer.dataW, layer.dataH);

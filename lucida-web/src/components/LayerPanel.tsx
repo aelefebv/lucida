@@ -1,4 +1,5 @@
 import { ContrastControls } from "./ContrastControls.tsx";
+import { ColormapSelector } from "./ColormapSelector.tsx";
 import "./LayerPanel.css";
 
 export interface LayerInfo {
@@ -9,24 +10,29 @@ export interface LayerInfo {
   contrastMin: number;
   contrastMax: number;
   gamma: number;
+  colormap: string;
   blendMode: string;
   renderMode: string;
   autoContrast: boolean;
   fullRange: boolean;
   dataRange: { min: number; max: number } | null;
   fullRangeMax: number;
+  channelSettings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number }[];
+  channelBlendMode: string;
 }
 
 interface Props {
   layers: LayerInfo[];
   selectedLayerId: string | null;
   expandedLayerId: string | null;
+  multiChannel: boolean;
   onSelectLayer: (id: string) => void;
   onToggleExpand: (id: string) => void;
   onSetVisible: (id: string, visible: boolean) => void;
   onSetOpacity: (id: string, opacity: number) => void;
   onSetContrast: (id: string, min: number, max: number) => void;
   onSetGamma: (id: string, gamma: number) => void;
+  onSetColormap: (id: string, colormap: string) => void;
   onSetBlendMode: (id: string, mode: string) => void;
   onSetRenderMode: (id: string, mode: string) => void;
   onAutoContrast: (id: string) => void;
@@ -35,6 +41,11 @@ interface Props {
   onMoveLayer: (id: string, direction: "up" | "down") => void;
   onRemoveLayer: (id: string) => void;
   onAddLayer: () => void;
+  onChannelSetVisible?: (id: string, ch: number, visible: boolean) => void;
+  onChannelSetColormap?: (id: string, ch: number, colormap: string) => void;
+  onChannelSetContrast?: (id: string, ch: number, min: number, max: number) => void;
+  onChannelSetGamma?: (id: string, ch: number, gamma: number) => void;
+  onChannelSetBlendMode?: (id: string, blendMode: string) => void;
   viewModeToggle: { label: string; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
   style?: React.CSSProperties;
@@ -44,12 +55,14 @@ export function LayerPanel({
   layers,
   selectedLayerId,
   expandedLayerId,
+  multiChannel,
   onSelectLayer,
   onToggleExpand,
   onSetVisible,
   onSetOpacity,
   onSetContrast,
   onSetGamma,
+  onSetColormap,
   onSetBlendMode,
   onSetRenderMode,
   onAutoContrast,
@@ -58,6 +71,11 @@ export function LayerPanel({
   onMoveLayer,
   onRemoveLayer,
   onAddLayer,
+  onChannelSetVisible,
+  onChannelSetColormap,
+  onChannelSetContrast,
+  onChannelSetGamma,
+  onChannelSetBlendMode,
   viewModeToggle,
   cameraModeToggle,
   style,
@@ -119,21 +137,83 @@ export function LayerPanel({
               </div>
               {isExpanded && (
                 <div className="layer-detail" onClick={(e) => e.stopPropagation()}>
-                  <ContrastControls
-                    dataMin={layer.dataRange?.min ?? 0}
-                    dataMax={layer.dataRange?.max ?? 65535}
-                    contrastMin={layer.contrastMin}
-                    contrastMax={layer.contrastMax}
-                    gamma={layer.gamma}
-                    autoContrast={layer.autoContrast}
-                    onContrastChange={(min, max) => onSetContrast(layer.id, min, max)}
-                    onGammaChange={(g) => onSetGamma(layer.id, g)}
-                    onAutoContrast={() => onAutoContrast(layer.id)}
-                    onAutoContrastToggle={() => onAutoContrastToggle(layer.id)}
-                    fullRange={layer.fullRange}
-                    onFullRangeToggle={() => onFullRangeToggle(layer.id)}
-                    fullRangeMax={layer.fullRangeMax}
-                  />
+                  {multiChannel && layer.channelSettings ? (
+                    <>
+                      {layer.channelSettings.map((ch, chIdx) => (
+                        <div key={chIdx} className="channel-sublayer">
+                          <div className="channel-sublayer-header">
+                            <button
+                              className="layer-eye-btn"
+                              title={ch.visible ? "Hide channel" : "Show channel"}
+                              onClick={() => onChannelSetVisible?.(layer.id, chIdx, !ch.visible)}
+                            >
+                              {ch.visible ? "\u25C9" : "\u25CB"}
+                            </button>
+                            <span className="channel-label">Ch {chIdx}</span>
+                            <ColormapSelector
+                              value={ch.colormap}
+                              onChange={(cmap) => onChannelSetColormap?.(layer.id, chIdx, cmap)}
+                            />
+                          </div>
+                          {ch.visible && (
+                            <div className="channel-sublayer-detail">
+                              <ContrastControls
+                                dataMin={0}
+                                dataMax={layer.fullRangeMax}
+                                contrastMin={ch.contrast_min}
+                                contrastMax={ch.contrast_max}
+                                gamma={ch.gamma}
+                                autoContrast={false}
+                                onContrastChange={(min, max) => onChannelSetContrast?.(layer.id, chIdx, min, max)}
+                                onGammaChange={(g) => onChannelSetGamma?.(layer.id, chIdx, g)}
+                                onAutoContrast={() => {}}
+                                onAutoContrastToggle={() => {}}
+                                fullRange={false}
+                                onFullRangeToggle={() => {}}
+                                fullRangeMax={layer.fullRangeMax}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                      <div className="layer-detail-row">
+                        <label>Ch Blend</label>
+                        <select
+                          value={layer.channelBlendMode}
+                          onChange={(e) => onChannelSetBlendMode?.(layer.id, e.target.value)}
+                        >
+                          <option value="alpha">Alpha</option>
+                          <option value="additive">Additive</option>
+                          <option value="max">Max</option>
+                        </select>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <ContrastControls
+                        dataMin={layer.dataRange?.min ?? 0}
+                        dataMax={layer.dataRange?.max ?? 65535}
+                        contrastMin={layer.contrastMin}
+                        contrastMax={layer.contrastMax}
+                        gamma={layer.gamma}
+                        autoContrast={layer.autoContrast}
+                        onContrastChange={(min, max) => onSetContrast(layer.id, min, max)}
+                        onGammaChange={(g) => onSetGamma(layer.id, g)}
+                        onAutoContrast={() => onAutoContrast(layer.id)}
+                        onAutoContrastToggle={() => onAutoContrastToggle(layer.id)}
+                        fullRange={layer.fullRange}
+                        onFullRangeToggle={() => onFullRangeToggle(layer.id)}
+                        fullRangeMax={layer.fullRangeMax}
+                      />
+                      <div className="layer-detail-row">
+                        <label>Colormap</label>
+                        <ColormapSelector
+                          value={layer.colormap}
+                          onChange={(cmap) => onSetColormap(layer.id, cmap)}
+                        />
+                      </div>
+                    </>
+                  )}
                   <div className="layer-detail-row">
                     <label>Blend</label>
                     <select

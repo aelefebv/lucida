@@ -305,6 +305,9 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
 
     rayHitPerDataset.set(layer.datasetId, layer.rayHitLocal);
 
+    const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");
+    renderer.setColormapTexture(lutTex);
+
     if (fb) {
       renderer.setFallbackVolume(fb.texture, fb.width, fb.height, fb.depth);
     } else {

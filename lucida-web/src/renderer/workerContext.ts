@@ -15,5 +15,6 @@ export interface WorkerCtx {
   ensureOffscreenPool(count: number, w: number, h: number): GPUTexture[];
   getDummyTexture(): GPUTexture;
   getDummy3DTexture(): GPUTexture;
+  getOrCreateLUT(name: string): GPUTexture;
   post(msg: WorkerToMainMessage): void;
 }

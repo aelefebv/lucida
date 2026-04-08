@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::camera::Camera;
-use crate::scene::{BlendMode, DatasetKind, DatasetMember, Layer, RenderMode, Scene};
+use crate::scene::{BlendMode, Colormap, DatasetKind, DatasetMember, Layer, RenderMode, Scene};
 
 /// Commands that mutate shared document state (datasets).
 /// These are sequenced, persisted, and broadcast to all clients.
@@ -82,6 +82,13 @@ pub enum ViewportCommand {
     SetDatasetGamma { dataset_id: String, gamma: f64 },
     SetDatasetBlendMode { dataset_id: String, blend_mode: BlendMode },
     SetDatasetRenderMode { dataset_id: String, render_mode: RenderMode },
+    // Multi-channel
+    SetMultiChannel { enabled: bool },
+    SetChannelVisible { dataset_id: String, channel: u32, visible: bool },
+    SetChannelColormap { dataset_id: String, channel: u32, colormap: Colormap },
+    SetChannelContrast { dataset_id: String, channel: u32, min: f64, max: f64 },
+    SetChannelGamma { dataset_id: String, channel: u32, gamma: f64 },
+    SetChannelBlendMode { dataset_id: String, blend_mode: BlendMode },
 }
 
 /// Wrapper enum for serde compatibility. Deserializes from the same
@@ -111,13 +118,24 @@ impl Scene {
             Command::Document(doc_cmd) => {
                 // Handle Scene-level side effects for document commands.
                 match &doc_cmd {
-                    DocumentCommand::AddDataset { id, .. } => {
+                    DocumentCommand::AddDataset { id, layers, .. } => {
                         if !self.dataset_order.contains(id) {
                             self.dataset_order.push(id.clone());
                         }
                         self.dataset_settings
                             .entry(id.clone())
                             .or_insert_with(Default::default);
+                        // Lazy-initialize channel_settings from layer count.
+                        if let Some(s) = self.dataset_settings.get_mut(id) {
+                            if s.channel_settings.is_empty() {
+                                s.channel_settings = layers.iter().enumerate().map(|(i, _)| {
+                                    crate::scene::ChannelSettings {
+                                        colormap: Colormap::default_for_channel(i),
+                                        ..Default::default()
+                                    }
+                                }).collect();
+                            }
+                        }
                     }
                     DocumentCommand::RemoveDataset { id } => {
                         self.dataset_order.retain(|s| s != id);
@@ -228,6 +246,36 @@ impl Scene {
             } => {
                 if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
                     s.render_mode = render_mode;
+                }
+            }
+            ViewportCommand::SetMultiChannel { enabled } => {
+                self.view.multi_channel = enabled;
+            }
+            ViewportCommand::SetChannelVisible { dataset_id, channel, visible } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                    s.ensure_channel(channel as usize).visible = visible;
+                }
+            }
+            ViewportCommand::SetChannelColormap { dataset_id, channel, colormap } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                    s.ensure_channel(channel as usize).colormap = colormap;
+                }
+            }
+            ViewportCommand::SetChannelContrast { dataset_id, channel, min, max } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                    let ch = s.ensure_channel(channel as usize);
+                    ch.contrast_min = min;
+                    ch.contrast_max = max;
+                }
+            }
+            ViewportCommand::SetChannelGamma { dataset_id, channel, gamma } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                    s.ensure_channel(channel as usize).gamma = gamma;
+                }
+            }
+            ViewportCommand::SetChannelBlendMode { dataset_id, blend_mode } => {
+                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                    s.channel_blend_mode = blend_mode;
                 }
             }
         }
@@ -521,5 +569,257 @@ mod tests {
             assert!(serde_json::from_str::<ViewportCommand>(json).is_ok(),
                 "should parse as ViewportCommand: {}", json);
         }
+    }
+
+    // --- Colormap / Channel tests ---
+
+    #[test]
+    fn colormap_serde_round_trips() {
+        use crate::scene::Colormap;
+        let all = vec![
+            Colormap::Gray, Colormap::Magenta, Colormap::Green, Colormap::Cyan,
+            Colormap::Red, Colormap::Blue, Colormap::Yellow, Colormap::Viridis,
+            Colormap::Inferno, Colormap::Plasma, Colormap::Magma, Colormap::Turbo,
+            Colormap::Hot, Colormap::Cool, Colormap::Jet,
+        ];
+        for cm in &all {
+            let json = serde_json::to_string(cm).unwrap();
+            let parsed: Colormap = serde_json::from_str(&json).unwrap();
+            assert_eq!(*cm, parsed);
+        }
+    }
+
+    #[test]
+    fn channel_settings_serde_round_trips() {
+        use crate::scene::{ChannelSettings, Colormap};
+        let cs = ChannelSettings {
+            visible: false,
+            colormap: Colormap::Viridis,
+            contrast_min: 100.0,
+            contrast_max: 50000.0,
+            gamma: 0.8,
+        };
+        let json = serde_json::to_string(&cs).unwrap();
+        let parsed: ChannelSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.visible, false);
+        assert_eq!(parsed.colormap, Colormap::Viridis);
+        assert_eq!(parsed.contrast_min, 100.0);
+        assert_eq!(parsed.contrast_max, 50000.0);
+        assert_eq!(parsed.gamma, 0.8);
+    }
+
+    #[test]
+    fn set_multi_channel_round_trips() {
+        let cmd = ViewportCommand::SetMultiChannel { enabled: true };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_multi_channel\""));
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetMultiChannel { enabled } => assert!(enabled),
+            _ => panic!("expected SetMultiChannel"),
+        }
+    }
+
+    #[test]
+    fn set_channel_visible_round_trips() {
+        let cmd = ViewportCommand::SetChannelVisible {
+            dataset_id: "ds1".into(),
+            channel: 2,
+            visible: false,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_channel_visible\""));
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetChannelVisible { dataset_id, channel, visible } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(channel, 2);
+                assert!(!visible);
+            }
+            _ => panic!("expected SetChannelVisible"),
+        }
+    }
+
+    #[test]
+    fn set_channel_colormap_round_trips() {
+        let cmd = ViewportCommand::SetChannelColormap {
+            dataset_id: "ds1".into(),
+            channel: 0,
+            colormap: crate::scene::Colormap::Viridis,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"viridis\""));
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetChannelColormap { colormap, .. } => {
+                assert_eq!(colormap, crate::scene::Colormap::Viridis);
+            }
+            _ => panic!("expected SetChannelColormap"),
+        }
+    }
+
+    #[test]
+    fn set_channel_contrast_round_trips() {
+        let cmd = ViewportCommand::SetChannelContrast {
+            dataset_id: "ds1".into(),
+            channel: 1,
+            min: 50.0,
+            max: 30000.0,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_channel_contrast\""));
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetChannelContrast { dataset_id, channel, min, max } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(channel, 1);
+                assert_eq!(min, 50.0);
+                assert_eq!(max, 30000.0);
+            }
+            _ => panic!("expected SetChannelContrast"),
+        }
+    }
+
+    #[test]
+    fn set_channel_gamma_round_trips() {
+        let cmd = ViewportCommand::SetChannelGamma {
+            dataset_id: "ds1".into(),
+            channel: 0,
+            gamma: 2.2,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_channel_gamma\""));
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetChannelGamma { dataset_id, channel, gamma } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(channel, 0);
+                assert_eq!(gamma, 2.2);
+            }
+            _ => panic!("expected SetChannelGamma"),
+        }
+    }
+
+    #[test]
+    fn set_channel_blend_mode_round_trips() {
+        let cmd = ViewportCommand::SetChannelBlendMode {
+            dataset_id: "ds1".into(),
+            blend_mode: crate::scene::BlendMode::Additive,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"additive\""));
+        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ViewportCommand::SetChannelBlendMode { dataset_id, blend_mode } => {
+                assert_eq!(dataset_id, "ds1");
+                assert_eq!(blend_mode, crate::scene::BlendMode::Additive);
+            }
+            _ => panic!("expected SetChannelBlendMode"),
+        }
+    }
+
+    #[test]
+    fn apply_set_multi_channel_updates_view() {
+        let mut scene = Scene::new([800, 600]);
+        assert!(!scene.view.multi_channel);
+        scene.apply(ViewportCommand::SetMultiChannel { enabled: true }.into());
+        assert!(scene.view.multi_channel);
+        scene.apply(ViewportCommand::SetMultiChannel { enabled: false }.into());
+        assert!(!scene.view.multi_channel);
+    }
+
+    #[test]
+    fn apply_set_channel_colormap_updates_settings() {
+        use crate::scene::{Colormap, Layer};
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(DocumentCommand::AddDataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            kind: DatasetKind::default(),
+            layers: vec![
+                Layer {
+                    name: "ch0".into(),
+                    visible: true,
+                    num_levels: 1,
+                    chunk_size: [1, 256, 256],
+                    data_shape: [1, 256, 256],
+                    level_info: vec![],
+                },
+                Layer {
+                    name: "ch1".into(),
+                    visible: true,
+                    num_levels: 1,
+                    chunk_size: [1, 256, 256],
+                    data_shape: [1, 256, 256],
+                    level_info: vec![],
+                },
+            ],
+            volume_shape: None,
+            volume_scale: None,
+            members: Vec::new(),
+            client_metadata: None,
+        }.into());
+        // Verify default colormap assignments
+        assert_eq!(scene.dataset_settings["ds1"].channel_settings[0].colormap, Colormap::Magenta);
+        assert_eq!(scene.dataset_settings["ds1"].channel_settings[1].colormap, Colormap::Green);
+        // Apply SetChannelColormap
+        scene.apply(ViewportCommand::SetChannelColormap {
+            dataset_id: "ds1".into(),
+            channel: 1,
+            colormap: Colormap::Viridis,
+        }.into());
+        assert_eq!(scene.dataset_settings["ds1"].channel_settings[1].colormap, Colormap::Viridis);
+    }
+
+    #[test]
+    fn add_dataset_initializes_channel_settings() {
+        use crate::scene::{Colormap, Layer};
+        let mut scene = Scene::new([800, 600]);
+        let layers = vec![
+            Layer { name: "DAPI".into(), visible: true, num_levels: 1, chunk_size: [1, 256, 256], data_shape: [1, 256, 256], level_info: vec![] },
+            Layer { name: "GFP".into(), visible: true, num_levels: 1, chunk_size: [1, 256, 256], data_shape: [1, 256, 256], level_info: vec![] },
+            Layer { name: "RFP".into(), visible: true, num_levels: 1, chunk_size: [1, 256, 256], data_shape: [1, 256, 256], level_info: vec![] },
+            Layer { name: "Cy5".into(), visible: true, num_levels: 1, chunk_size: [1, 256, 256], data_shape: [1, 256, 256], level_info: vec![] },
+        ];
+        scene.apply(DocumentCommand::AddDataset {
+            id: "ds1".into(),
+            name: "test".into(),
+            kind: DatasetKind::default(),
+            layers,
+            volume_shape: None,
+            volume_scale: None,
+            members: Vec::new(),
+            client_metadata: None,
+        }.into());
+        let ch = &scene.dataset_settings["ds1"].channel_settings;
+        assert_eq!(ch.len(), 4);
+        // Cycling: Magenta, Green, Cyan, Magenta
+        assert_eq!(ch[0].colormap, Colormap::Magenta);
+        assert_eq!(ch[1].colormap, Colormap::Green);
+        assert_eq!(ch[2].colormap, Colormap::Cyan);
+        assert_eq!(ch[3].colormap, Colormap::Magenta);
+        // All visible by default
+        for c in ch {
+            assert!(c.visible);
+            assert_eq!(c.contrast_min, 0.0);
+            assert_eq!(c.contrast_max, 65535.0);
+            assert_eq!(c.gamma, 1.0);
+        }
+    }
+
+    #[test]
+    fn dataset_display_settings_backward_compat() {
+        // Deserialize JSON without channel_settings or channel_blend_mode
+        let json = r#"{
+            "visible": true,
+            "opacity": 1.0,
+            "contrast_min": 0.0,
+            "contrast_max": 65535.0,
+            "gamma": 1.0,
+            "blend_mode": "alpha"
+        }"#;
+        let settings: crate::scene::DatasetDisplaySettings = serde_json::from_str(json).unwrap();
+        assert!(settings.channel_settings.is_empty());
+        assert_eq!(settings.channel_blend_mode, crate::scene::BlendMode::Additive);
     }
 }

@@ -47,24 +47,46 @@ export interface MemberUploadActions {
 // Core shared upload loop
 // ---------------------------------------------------------------------------
 
+/**
+ * Resolve the real dataset ID from a plan cache key.
+ *
+ * In multi-channel mode the cache key is `${dsId}:ch${n}` — strip the
+ * channel suffix to find the dataset. In single-channel mode the key is
+ * the plain dataset ID.
+ */
+function resolveDatasetId(cacheKey: string): string {
+  return cacheKey.replace(/:ch\d+$/, "");
+}
+
 export function uploadChunksForMembers(
   datasets: Map<string, { sharedQueue: SharedChunkQueue; info: DatasetInfo }>,
   memberPlanCache: Map<string, MemberChunkPlan[]>,
   state: UploadState,
-  shouldSkipDataset: (dsId: string, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }) => boolean,
+  shouldSkipDataset: (cacheKey: string, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }) => boolean,
   createActions: (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }, dsId: string) => MemberUploadActions | null,
 ): boolean {
   let uploadBudget = MAIN_VIEW_UPLOAD_BUDGET_BYTES;
   let budgetExhausted = false;
 
-  for (const [dsId, ds] of datasets) {
-    if (shouldSkipDataset(dsId, ds)) continue;
-
-    const sortedPlans = memberPlanCache.get(dsId);
-    if (!sortedPlans) continue;
+  // Iterate memberPlanCache instead of datasets so that composite keys
+  // (e.g. `dsId:ch0`) from multi-channel mode are found correctly.
+  for (const [cacheKey, sortedPlans] of memberPlanCache) {
+    const dsId = resolveDatasetId(cacheKey);
+    const ds = datasets.get(dsId);
+    if (!ds) continue;
+    if (shouldSkipDataset(cacheKey, ds)) continue;
 
     for (const mp of sortedPlans) {
-      const memberId = mp.member_id;
+      // In multi-channel mode, the plan cache key includes the channel
+      // (e.g. `dsId:ch1`). We need to pass the composite member ID to
+      // createActions so that state maps (prevStateKey, sentToWorker, etc.)
+      // are keyed correctly. The composite member ID is built by the caller
+      // in tickCommon's planAndFetchForDatasets.
+      const isComposite = cacheKey !== dsId;
+      const channelSuffix = isComposite ? cacheKey.substring(dsId.length) : "";
+      const memberId = isComposite ? `${mp.member_id}${channelSuffix}` : mp.member_id;
+      const rawMemberId = mp.member_id;
+
       const actions = createActions(memberId, mp, ds, dsId);
       if (!actions) continue;
 
@@ -75,7 +97,9 @@ export function uploadChunksForMembers(
         let allSent = true;
         for (const sc of seedInfo.coords) {
           if (seedInfo.sentKeys.has(sc.key)) continue;
-          const buf = ds.sharedQueue.get(memberId, sc.key);
+          // Fetch from the shared queue using the raw member ID (the chunk
+          // store doesn't know about composite channel keys).
+          const buf = ds.sharedQueue.get(rawMemberId, sc.key);
           if (!buf || buf.byteLength === 0) { allSent = false; continue; }
           const data = bufferToUint16(buf, seedMeta.dataType);
           actions.processSeedChunk(data, sc, seedMeta);
@@ -105,7 +129,7 @@ export function uploadChunksForMembers(
         const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
         for (const coord of mp.needed) {
           if (sentSet.has(coord.key)) continue;
-          const buf = ds.sharedQueue.get(memberId, coord.key);
+          const buf = ds.sharedQueue.get(rawMemberId, coord.key);
           if (!buf || buf.byteLength === 0) continue;
           const data = bufferToUint16(buf, fineDataType);
           chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });

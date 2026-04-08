@@ -13,6 +13,8 @@ struct Uniforms {
 @group(0) @binding(1) var fallbackTex: texture_2d<u32>;
 @group(0) @binding(2) var chunkTex: texture_2d<u32>;
 @group(0) @binding(3) var<storage, read> indirection: array<u32>;
+@group(0) @binding(4) var lutTex: texture_2d<f32>;
+@group(0) @binding(5) var lutSampler: sampler;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -90,7 +92,8 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     );
     let chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
     let normalized = pow(clamp((f32(chunkVal) - intensityMin) / range, 0.0, 1.0), gamma);
-    return vec4f(vec3f(normalized) * layerOpacity, layerOpacity);
+    let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
+    return vec4f(color * layerOpacity, layerOpacity);
   }
 
   // Chunk not loaded — fall back to coarse texture
@@ -101,5 +104,6 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   );
   let fbVal = textureLoad(fallbackTex, fbCoord, 0).r;
   let normalized = pow(clamp((f32(fbVal) - intensityMin) / range, 0.0, 1.0), gamma);
-  return vec4f(vec3f(normalized) * layerOpacity, layerOpacity);
+  let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
+  return vec4f(color * layerOpacity, layerOpacity);
 }

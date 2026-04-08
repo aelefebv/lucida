@@ -9,6 +9,8 @@ pub struct ViewState {
     pub z_range: Range<u32>,
     pub t: u32,
     pub c: u32,
+    #[serde(default)]
+    pub multi_channel: bool,
 }
 
 impl ViewState {
@@ -17,6 +19,7 @@ impl ViewState {
             z_range: 0..1,
             t: 0,
             c: 0,
+            multi_channel: false,
         }
     }
 

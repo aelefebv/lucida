@@ -3,7 +3,7 @@ import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { planAndFetchForDatasets } from "./tickCommon.ts";
+import { planAndFetchForDatasets, getActiveChannels, compositeKey, parseChannel } from "./tickCommon.ts";
 import type { PlanFetchActions, DatasetSettings } from "./tickCommon.ts";
 import {
   type UploadState,
@@ -33,6 +33,7 @@ interface PlanResult {
   fullH: number;
   viewT: number;
   viewC: number;
+  multiChannel: boolean;
 }
 
 /**
@@ -46,6 +47,7 @@ function planAndFetchVolume(
   minimapPendingFetch: Map<string, ChunkCoord[]>,
 ): PlanResult | null {
   const { scene, datasets } = ctx;
+  const multiChannel = scene.multi_channel();
 
   // Use full-res viewport for chunk planning so LOD selection isn't affected
   // by renderScale (which drops to 0.25 during interaction). This prevents
@@ -64,6 +66,29 @@ function planAndFetchVolume(
   const fwd = new Float32Array(scene.camera_forward());
   const hitLocals = new Map<string, [number, number, number]>();
 
+  const makeSeedCoords = (dsInfo: DatasetInfo, seedLevel: number, seedT: number, seedC: number) => {
+    const seedMeta = dsInfo.levels[seedLevel];
+    const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
+    const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+    const nz = Math.ceil(sDepth / sChunkZ);
+    const ny = Math.ceil(sHeight / sChunkY);
+    const nx = Math.ceil(sWidth / sChunkX);
+    const seedCoords: ChunkCoord[] = [];
+    for (let iz = 0; iz < nz; iz++) {
+      for (let iy = 0; iy < ny; iy++) {
+        for (let ix = 0; ix < nx; ix++) {
+          seedCoords.push({
+            level: seedLevel,
+            x: ix, y: iy, z: iz,
+            t: seedT, c: seedC,
+            key: `${seedLevel}/${seedT}/${seedC}/${iz}/${iy}/${ix}`,
+          });
+        }
+      }
+    }
+    return { level: seedLevel, coords: seedCoords, sentKeys: new Set<string>() };
+  };
+
   const actions: PlanFetchActions = {
     seedChangeKey: `${viewT}/${viewC}`,
 
@@ -78,42 +103,41 @@ function planAndFetchVolume(
     computeSeeds(dsInfo, targetLevel) {
       const seedLevel = dsInfo.levels.length - 1;
       if (seedLevel <= targetLevel) return null;
-
-      const seedMeta = dsInfo.levels[seedLevel];
-      const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
-      const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-      const nz = Math.ceil(sDepth / sChunkZ);
-      const ny = Math.ceil(sHeight / sChunkY);
-      const nx = Math.ceil(sWidth / sChunkX);
-      const seedCoords: ChunkCoord[] = [];
-      for (let iz = 0; iz < nz; iz++) {
-        for (let iy = 0; iy < ny; iy++) {
-          for (let ix = 0; ix < nx; ix++) {
-            seedCoords.push({
-              level: seedLevel,
-              x: ix, y: iy, z: iz,
-              t: viewT, c: viewC,
-              key: `${seedLevel}/${viewT}/${viewC}/${iz}/${iy}/${ix}`,
-            });
-          }
-        }
-      }
-      return { level: seedLevel, coords: seedCoords, sentKeys: new Set<string>() };
+      return makeSeedCoords(dsInfo, seedLevel, viewT, viewC);
     },
 
     onMemberProcessed(memberId, _mp, dsId) {
       const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
       hitLocals.set(memberId, hitLocal);
     },
+
+    // Multi-channel overrides
+    seedChangeKeyForChannel(ch: number) {
+      return `${viewT}/${ch}`;
+    },
+
+    shouldSkipChannel(dsShape: number[], ch: number) {
+      return ch >= dsShape[1] || viewT >= dsShape[0];
+    },
+
+    planCacheKeyForChannel(_dsId: string, ch: number) {
+      return `${eye[0].toFixed(4)}|${eye[1].toFixed(4)}|${eye[2].toFixed(4)}|${fwd[0].toFixed(4)}|${fwd[1].toFixed(4)}|${fwd[2].toFixed(4)}|${fullW}|${fullH}|${viewT}|${ch}`;
+    },
+
+    computeSeedsForChannel(dsInfo, targetLevel, ch) {
+      const seedLevel = dsInfo.levels.length - 1;
+      if (seedLevel <= targetLevel) return null;
+      return makeSeedCoords(dsInfo, seedLevel, viewT, ch);
+    },
   };
 
-  const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, eye[0], eye[1]);
+  const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, eye[0], eye[1], multiChannel);
   if (!result) return null;
 
   return {
     memberPlanCache: result.memberPlanCache,
     settings: result.settings,
-    eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC,
+    eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel,
   };
 }
 
@@ -128,10 +152,14 @@ function uploadAndRenderVolume(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, datasets } = ctx;
-  const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC } = plan;
+  const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel } = plan;
   const { layerOrder, allSettings } = settings;
 
-  const shouldSkipDataset = (_dsId: string, ds: { info: DatasetInfo }) => {
+  const shouldSkipDataset = (cacheKey: string, ds: { info: DatasetInfo }) => {
+    if (multiChannel) {
+      // In multi-channel mode, the plan phase already filtered channels.
+      return !ds;
+    }
     const dsShape = ds.info.levels[0].shape;
     return viewC >= dsShape[1] || viewT >= dsShape[0];
   };
@@ -144,16 +172,19 @@ function uploadAndRenderVolume(
     const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
     const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
 
+    // In multi-channel mode, memberId is composite; extract channel
+    const ch = multiChannel ? (parseChannel(memberId) ?? viewC) : viewC;
+
     const hitLocal = hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
 
-    const tcKey = `${viewT}/${viewC}`;
+    const tcKey = `${viewT}/${ch}`;
 
     return {
-      stateKey: `${viewT}/${viewC}/${targetLevel}`,
+      stateKey: `${viewT}/${ch}/${targetLevel}`,
 
       sendAtlasConfig() {
         client.volumeAtlasConfig(
-          memberId, targetLevel, viewT, viewC,
+          memberId, targetLevel, viewT, ch,
           widthFull, heightFull, depthFull,
           chunkX, chunkY, chunkZ,
         );
@@ -166,7 +197,7 @@ function uploadAndRenderVolume(
         const yOff = sc.y * sChunkY;
         const zOff = sc.z * sChunkZ;
         const cw = Math.min(sChunkX, sWidth - xOff);
-        const ch = Math.min(sChunkY, sHeight - yOff);
+        const chH = Math.min(sChunkY, sHeight - yOff);
         const cd = Math.min(sChunkZ, sDepth - zOff);
         const transferBuf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
         client.volumeWriteFallbackChunk(
@@ -174,7 +205,7 @@ function uploadAndRenderVolume(
           sWidth, sHeight, sDepth,
           transferBuf,
           xOff, yOff, zOff,
-          cw, ch, cd,
+          cw, chH, cd,
           sChunkX, sChunkY,
         );
       },
@@ -182,7 +213,7 @@ function uploadAndRenderVolume(
       sendFineChunks(chunks) {
         client.volumeChunkData(
           memberId, chunks,
-          targetLevel, viewT, viewC,
+          targetLevel, viewT, ch,
           widthFull, heightFull, depthFull,
           chunkX, chunkY, chunkZ,
           hitLocal,
@@ -212,30 +243,79 @@ function uploadAndRenderVolume(
     const dsSettings = allSettings[dsId];
     if (!dsSettings || !dsSettings.visible) continue;
 
-    // Skip layers whose C/T are exceeded (volume renders all Z slices)
     const dsShapeV = dsVol.info.levels[0].shape; // [T, C, Z, Y, X]
-    if (viewC >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
 
-    // Get member plans to emit one layer per member with its own model matrix (use cache from upload phase)
-    const members: MemberChunkPlan[] = memberPlanCache.get(dsId) ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+    if (multiChannel) {
+      // Multi-channel: emit one layer per (member, channel)
+      const activeChannels = getActiveChannels(dsSettings);
+      const channelBlend = dsSettings.channel_blend_mode as "alpha" | "additive" | "max" || "additive";
 
-    for (const mp of members) {
-      const memberId = mp.member_id;
-      const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
-      const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
+      for (const ch of activeChannels) {
+        if (ch >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
 
-      layers.push({
-        datasetId: memberId,
-        modelMatrix: model,
-        invModelMatrix: invModel,
-        rayHitLocal: hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number],
-        contrastMin: dsSettings.contrast_min,
-        contrastMax: dsSettings.contrast_max,
-        gamma: dsSettings.gamma,
-        opacity: dsSettings.opacity,
-        blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
-        renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
-      });
+        const chSettings = dsSettings.channel_settings?.[ch];
+        const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
+        const layerContrastMax = chSettings?.contrast_max ?? dsSettings.contrast_max;
+        const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
+        const layerColormap = chSettings?.colormap ?? "gray";
+
+        const planCacheKey = `${dsId}:ch${ch}`;
+        const members: MemberChunkPlan[] = memberPlanCache.get(planCacheKey)
+          ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+
+        for (const mp of members) {
+          const rawMemberId = mp.member_id;
+          const compKey = compositeKey(rawMemberId, ch);
+          const model = new Float32Array(scene.member_model_matrix(dsId, rawMemberId));
+          const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, rawMemberId));
+
+          layers.push({
+            datasetId: compKey,
+            modelMatrix: model,
+            invModelMatrix: invModel,
+            rayHitLocal: hitLocals.get(compKey) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number],
+            contrastMin: layerContrastMin,
+            contrastMax: layerContrastMax,
+            gamma: layerGamma,
+            opacity: dsSettings.opacity,
+            blendMode: channelBlend,
+            renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
+            colormap: layerColormap,
+          });
+        }
+      }
+    } else {
+      // Single-channel: existing behavior
+      if (viewC >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
+
+      const members: MemberChunkPlan[] = memberPlanCache.get(dsId)
+        ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+
+      const chSettings = dsSettings.channel_settings?.[viewC];
+      const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
+      const layerContrastMax = chSettings?.contrast_max ?? dsSettings.contrast_max;
+      const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
+      const layerColormap = chSettings?.colormap ?? "gray";
+
+      for (const mp of members) {
+        const memberId = mp.member_id;
+        const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
+        const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
+
+        layers.push({
+          datasetId: memberId,
+          modelMatrix: model,
+          invModelMatrix: invModel,
+          rayHitLocal: hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number],
+          contrastMin: layerContrastMin,
+          contrastMax: layerContrastMax,
+          gamma: layerGamma,
+          opacity: dsSettings.opacity,
+          blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
+          renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
+          colormap: layerColormap,
+        });
+      }
     }
   }
 

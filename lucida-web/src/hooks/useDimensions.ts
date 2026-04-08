@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyViewportCommand } from "../applyAndSend.ts";
+import { bumpSettingsGeneration } from "../tickCommon.ts";
+import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
 
@@ -11,6 +13,7 @@ interface Params {
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   datasetsVersion: number;
   bridgeCallbacksRef: React.RefObject<BridgeCallbacks>;
+  loopRef: React.RefObject<RenderLoop | null>;
 }
 
 export function useDimensions({
@@ -20,11 +23,13 @@ export function useDimensions({
   datasetsRef,
   datasetsVersion,
   bridgeCallbacksRef,
+  loopRef,
 }: Params) {
   const [z, setZ] = useState(0);
   const [c, setC] = useState(0);
   const [t, setT] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>("2d");
+  const [multiChannel, setMultiChannel] = useState(false);
 
   // Union dimension extents across ALL datasets for slider ranges
   let dimZ = 1, dimC = 1, dimT = 1;
@@ -91,11 +96,25 @@ export function useDimensions({
     }
   }, [wasmSceneRef, bridgeCallbacksRef]);
 
+  const handleMultiChannelToggle = useCallback(() => {
+    const next = !multiChannel;
+    setMultiChannel(next);
+    bridgeCallbacksRef.current.breakFollow();
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      applyViewportCommand(scene, { type: "set_multi_channel", enabled: next });
+      bumpSettingsGeneration();
+      loopRef.current?.markViewDirty();
+      bridgeCallbacksRef.current.emitPresence();
+    }
+  }, [multiChannel, wasmSceneRef, bridgeCallbacksRef, loopRef]);
+
   return {
     z, c, t, setZ, setC, setT,
     viewMode, setViewMode,
+    multiChannel, setMultiChannel,
     dimZ, dimC, dimT,
     handleViewModeToggle,
-    handleZChange, handleCChange, handleTChange,
+    handleZChange, handleCChange, handleTChange, handleMultiChannelToggle,
   };
 }

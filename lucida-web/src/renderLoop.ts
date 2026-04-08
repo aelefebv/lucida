@@ -29,6 +29,9 @@ export class RenderLoop {
 
   private _renderScale = 1.0;
 
+  /** Track previous multi_channel state to detect transitions and clean up. */
+  private prevMultiChannel = false;
+
   // Slice-specific params
   private sliceZ = 0;
   private sliceT = 0;
@@ -116,8 +119,75 @@ export class RenderLoop {
     clearSliceForMembers(this.sliceState, memberIds);
     clearMinimapForDataset(this.minimapState, id);
 
+    // Remove GPU resources for this dataset's members
+    this.client.removeLayerResources(id);
+    for (const mid of memberIds) {
+      this.client.removeLayerResources(mid);
+    }
+
+    // If no datasets remain, clear the canvas by rendering empty layers
+    if (this.datasets.size === 0) {
+      const w = this.canvas.clientWidth;
+      const h = this.canvas.clientHeight;
+      this.client.resize(w, h);
+      if (this.mode === "slice") {
+        this.client.sliceRenderMultiPass([], 1, 0, 0, w, h);
+      } else {
+        const identity = new Float32Array(16);
+        identity[0] = identity[5] = identity[10] = identity[15] = 1;
+        this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, identity, new Float32Array([0, 0, -1]), 0, 0);
+      }
+    }
+
     this.viewDirty = true;
     this.scheduleIfNeeded();
+  }
+
+  /**
+   * Handle multi-channel mode transitions. When switching from multi-channel
+   * to single-channel (or vice versa), clean up resources keyed with the
+   * old naming convention so they don't leak on the worker.
+   */
+  private handleMultiChannelTransition(): void {
+    const mc = this.scene.multi_channel();
+    if (mc === this.prevMultiChannel) return;
+    this.prevMultiChannel = mc;
+
+    // Collect all keys that match the old mode's pattern and remove them
+    const states = [this.sliceState, this.volumeState];
+    for (const st of states) {
+      const keysToRemove: string[] = [];
+      for (const key of st.prevStateKey.keys()) {
+        const isComposite = /:ch\d+$/.test(key);
+        if (mc && !isComposite) {
+          // Switching TO multi-channel: clean up non-composite keys
+          keysToRemove.push(key);
+        } else if (!mc && isComposite) {
+          // Switching FROM multi-channel: clean up composite keys
+          keysToRemove.push(key);
+        }
+      }
+      for (const key of keysToRemove) {
+        this.client.removeLayerResources(key);
+        st.prevStateKey.delete(key);
+        st.seedPending.delete(key);
+        st.sentToWorker.delete(key);
+      }
+
+      // Also clean up composite-keyed plan cache entries
+      const planKeysToRemove: string[] = [];
+      for (const key of st.planCache.keys()) {
+        const isComposite = /:ch\d+$/.test(key);
+        if (mc && !isComposite) {
+          planKeysToRemove.push(key);
+        } else if (!mc && isComposite) {
+          planKeysToRemove.push(key);
+        }
+      }
+      for (const key of planKeysToRemove) {
+        st.planCache.delete(key);
+      }
+    }
   }
 
   /** Collect member IDs associated with a dataset from state maps. */
@@ -225,6 +295,9 @@ export class RenderLoop {
     }
 
     const ctx = this.buildContext();
+
+    // Detect multi-channel mode transitions and clean up stale resources
+    this.handleMultiChannelTransition();
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {

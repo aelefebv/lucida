@@ -16,6 +16,15 @@ export function bumpSettingsGeneration(): void {
   currentGeneration++;
 }
 
+/** Per-channel display settings parsed from the WASM scene. */
+export interface ChannelSettingsJS {
+  visible: boolean;
+  colormap: string;
+  contrast_min: number;
+  contrast_max: number;
+  gamma: number;
+}
+
 /** Per-dataset settings parsed from the WASM scene. */
 export interface DatasetSettings {
   visible: boolean;
@@ -25,6 +34,8 @@ export interface DatasetSettings {
   gamma: number;
   blend_mode: string;
   render_mode?: string;
+  channel_settings: ChannelSettingsJS[];
+  channel_blend_mode: string;
 }
 
 /** Parsed scene-level settings: layer order + per-dataset settings map. */
@@ -140,6 +151,15 @@ export interface PlanFetchActions {
   planCacheKey(dsId: string): string;
   computeSeeds(dsInfo: DatasetInfo, targetLevel: number): SeedPendingInfo | null;
   onMemberProcessed?(memberId: string, mp: MemberChunkPlan, dsId: string): void;
+  /**
+   * Multi-channel variants: when multiChannel is true, these are called
+   * per-channel with the channel index. The base versions above are used
+   * for the channel that scene.c() is set to at that moment.
+   */
+  seedChangeKeyForChannel?(ch: number): string;
+  shouldSkipChannel?(dsShape: number[], ch: number): boolean;
+  planCacheKeyForChannel?(dsId: string, ch: number): string;
+  computeSeedsForChannel?(dsInfo: DatasetInfo, targetLevel: number, ch: number): SeedPendingInfo | null;
 }
 
 /**
@@ -147,6 +167,10 @@ export interface PlanFetchActions {
  *
  * For each dataset: evaluate chunk plans, compute seeds on T/C/(Z) change,
  * build per-member fetch lists, interleave them, and submit to ensureFetched.
+ *
+ * When `multiChannel` is true, iterates visible channels for each dataset,
+ * temporarily setting `scene.set_c(ch)` for each and using composite keys
+ * `${memberId}:ch${ch}` in state maps and plan cache.
  */
 export function planAndFetchForDatasets(
   scene: WasmScene,
@@ -156,57 +180,102 @@ export function planAndFetchForDatasets(
   minimapPendingFetch: Map<string, ChunkCoord[]>,
   sortCenterX: number,
   sortCenterY: number,
+  multiChannel: boolean = false,
 ): { memberPlanCache: Map<string, MemberChunkPlan[]>; settings: SceneSettings } | null {
   if (datasets.size === 0) return null;
 
   const settings = getSceneSettings(scene);
   const memberPlanCache = new Map<string, MemberChunkPlan[]>();
+  const originalC = scene.c();
 
   for (const [dsId, ds] of datasets) {
     const dsShape = ds.info.levels[0].shape;
-    if (actions.shouldSkipDataset(dsShape)) continue;
 
-    const planKey = actions.planCacheKey(dsId);
-    const cached = state.planCache.get(dsId);
-    let sortedPlans: MemberChunkPlan[];
-    if (cached && cached.key === planKey) {
-      sortedPlans = cached.plans;
-    } else {
-      const evaluated = evaluateAndSortPlans(scene, dsId, sortCenterX, sortCenterY);
-      if (!evaluated) continue;
-      sortedPlans = evaluated;
-      state.planCache.set(dsId, { key: planKey, plans: sortedPlans });
-    }
-    memberPlanCache.set(dsId, sortedPlans);
+    // Determine which channels to iterate
+    const channels = multiChannel
+      ? getActiveChannels(settings.allSettings[dsId])
+      : [originalC]; // single-channel: use the current scene C (no composite key)
 
     const perMemberFetchLists: { memberId: string; list: ChunkCoord[] }[] = [];
 
-    for (const mp of sortedPlans) {
-      const memberId = mp.member_id;
-      const targetLevel = mp.needed[0]?.level;
+    for (const ch of channels) {
+      // In multi-channel mode, set the scene's C for plan evaluation
+      if (multiChannel) {
+        scene.set_c(ch);
+      }
 
-      const prevStateKeyVal = state.prevStateKey.get(memberId);
-      const prevChangeKey = prevStateKeyVal?.substring(0, prevStateKeyVal.lastIndexOf("/"));
-      const needsSeed = prevChangeKey === undefined || prevChangeKey !== actions.seedChangeKey;
-
-      if (needsSeed && targetLevel !== undefined) {
-        const seedInfo = actions.computeSeeds(ds.info, targetLevel);
-        if (seedInfo) {
-          state.seedPending.set(memberId, seedInfo);
-        } else {
-          state.seedPending.delete(memberId);
+      // Channel-specific skip: in multi-channel mode check per-channel,
+      // in single-channel mode use the base shouldSkipDataset.
+      if (multiChannel) {
+        if (actions.shouldSkipChannel
+          ? actions.shouldSkipChannel(dsShape, ch)
+          : ch >= dsShape[1]) {
+          continue;
         }
+      } else {
+        if (actions.shouldSkipDataset(dsShape)) continue;
       }
 
-      const seedInfo = state.seedPending.get(memberId);
-      const mmPending = minimapPendingFetch.get(memberId);
-      const fetchList = buildMemberFetchList(mp.needed, mp.prefetch, seedInfo, ds.sharedQueue, memberId, mmPending);
-      if (fetchList.length > 0) {
-        perMemberFetchLists.push({ memberId, list: fetchList });
+      const seedChangeKey = multiChannel && actions.seedChangeKeyForChannel
+        ? actions.seedChangeKeyForChannel(ch)
+        : actions.seedChangeKey;
+
+      const planCacheId = multiChannel ? `${dsId}:ch${ch}` : dsId;
+      const planKey = multiChannel && actions.planCacheKeyForChannel
+        ? actions.planCacheKeyForChannel(dsId, ch)
+        : actions.planCacheKey(dsId);
+
+      const cached = state.planCache.get(planCacheId);
+      let sortedPlans: MemberChunkPlan[];
+      if (cached && cached.key === planKey) {
+        sortedPlans = cached.plans;
+      } else {
+        const evaluated = evaluateAndSortPlans(scene, dsId, sortCenterX, sortCenterY);
+        if (!evaluated) continue;
+        sortedPlans = evaluated;
+        state.planCache.set(planCacheId, { key: planKey, plans: sortedPlans });
       }
 
-      if (actions.onMemberProcessed) {
-        actions.onMemberProcessed(memberId, mp, dsId);
+      // Store plans in memberPlanCache with composite key when multi-channel
+      if (multiChannel) {
+        memberPlanCache.set(`${dsId}:ch${ch}`, sortedPlans);
+      } else {
+        memberPlanCache.set(dsId, sortedPlans);
+      }
+
+      for (const mp of sortedPlans) {
+        const rawMemberId = mp.member_id;
+        const memberId = multiChannel ? compositeKey(rawMemberId, ch) : rawMemberId;
+        const targetLevel = mp.needed[0]?.level;
+
+        const prevStateKeyVal = state.prevStateKey.get(memberId);
+        const prevChangeKey = prevStateKeyVal?.substring(0, prevStateKeyVal.lastIndexOf("/"));
+        const needsSeed = prevChangeKey === undefined || prevChangeKey !== seedChangeKey;
+
+        if (needsSeed && targetLevel !== undefined) {
+          const seedInfo = multiChannel && actions.computeSeedsForChannel
+            ? actions.computeSeedsForChannel(ds.info, targetLevel, ch)
+            : actions.computeSeeds(ds.info, targetLevel);
+          if (seedInfo) {
+            state.seedPending.set(memberId, seedInfo);
+          } else {
+            state.seedPending.delete(memberId);
+          }
+        }
+
+        const seedInfo = state.seedPending.get(memberId);
+        const mmPending = minimapPendingFetch.get(rawMemberId);
+        // Use rawMemberId for both sharedQueue lookups and fetch list qualification.
+        // The chunk store's fetchers are keyed by raw member ID, not composite.
+        // Chunks are distinguished by their key (which includes level/t/c/z/y/x).
+        const fetchList = buildMemberFetchList(mp.needed, mp.prefetch, seedInfo, ds.sharedQueue, rawMemberId, mmPending);
+        if (fetchList.length > 0) {
+          perMemberFetchLists.push({ memberId: rawMemberId, list: fetchList });
+        }
+
+        if (actions.onMemberProcessed) {
+          actions.onMemberProcessed(memberId, mp, dsId);
+        }
       }
     }
 
@@ -216,7 +285,52 @@ export function planAndFetchForDatasets(
     }
   }
 
+  // Restore original C after multi-channel iteration
+  if (multiChannel) {
+    scene.set_c(originalC);
+  }
+
   return { memberPlanCache, settings };
+}
+
+// ---------------------------------------------------------------------------
+// Multi-channel helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Return the list of visible channel indices from a dataset's settings.
+ * Falls back to [0] when there are no channel settings or none are visible.
+ */
+export function getActiveChannels(dsSettings: DatasetSettings): number[] {
+  if (!dsSettings.channel_settings || dsSettings.channel_settings.length === 0) return [0];
+  const channels: number[] = [];
+  for (let i = 0; i < dsSettings.channel_settings.length; i++) {
+    if (dsSettings.channel_settings[i].visible) channels.push(i);
+  }
+  return channels.length > 0 ? channels : [0];
+}
+
+/**
+ * Build a composite key for a (member, channel) pair in multi-channel mode.
+ */
+export function compositeKey(memberId: string, channel: number): string {
+  return `${memberId}:ch${channel}`;
+}
+
+/**
+ * Parse the channel index from a composite member key.
+ * Returns undefined for non-composite keys.
+ */
+export function parseChannel(key: string): number | undefined {
+  const match = key.match(/:ch(\d+)$/);
+  return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * Strip the channel suffix from a composite key to recover the original member ID.
+ */
+export function stripChannelSuffix(key: string): string {
+  return key.replace(/:ch\d+$/, "");
 }
 
 /** Flip Y between unit space (Y-up: 0=bottom) and image space (Y-down: 0=top). */

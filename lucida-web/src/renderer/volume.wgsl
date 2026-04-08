@@ -22,6 +22,8 @@ struct Uniforms {
 @group(0) @binding(1) var volumeTex: texture_3d<u32>;
 @group(0) @binding(2) var fallbackTex: texture_3d<u32>;
 @group(0) @binding(3) var<storage, read> indirection: array<u32>;
+@group(0) @binding(4) var lutTex: texture_2d<f32>;
+@group(0) @binding(5) var lutSampler: sampler;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -241,7 +243,7 @@ fn fs(input: VSOut) -> FsOut {
     } else {
       // Translucent: front-to-back blending
       let sampleAlpha = normalized * opacityScale;
-      let sampleColor = vec3f(normalized);
+      let sampleColor = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
       color += (1.0 - alpha) * sampleAlpha * sampleColor;
       alpha += (1.0 - alpha) * sampleAlpha;
     }
@@ -254,7 +256,8 @@ fn fs(input: VSOut) -> FsOut {
   var out: FsOut;
   out.depth = hitDepth;
   if (renderMode == 1) {
-    out.color = vec4f(maxVal, maxVal, maxVal, 1.0) * layerOpacity;
+    let mipColor = textureSampleLevel(lutTex, lutSampler, vec2f(maxVal, 0.5), 0.0).rgb;
+    out.color = vec4f(mipColor, 1.0) * layerOpacity;
   } else {
     out.color = vec4f(color * layerOpacity, alpha * layerOpacity);
   }

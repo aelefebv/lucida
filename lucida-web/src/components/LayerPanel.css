@@ -138,3 +138,31 @@
   color: #666;
   font-size: 0.85rem;
 }
+
+.channel-sublayer {
+  border-left: 2px solid #444;
+  padding-left: 0.5rem;
+  margin-left: 0.25rem;
+}
+
+.channel-sublayer-header {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  padding: 0.2rem 0;
+}
+
+.channel-label {
+  min-width: 2rem;
+  font-size: 0.75rem;
+  color: #aaa;
+}
+
+.channel-sublayer-detail {
+  padding: 0.2rem 0 0.2rem 1.85rem;
+}
+
+.channel-sublayer-detail .contrast-controls {
+  max-width: none;
+}

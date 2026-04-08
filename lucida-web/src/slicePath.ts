@@ -3,7 +3,7 @@ import type { ChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { planAndFetchForDatasets } from "./tickCommon.ts";
+import { planAndFetchForDatasets, getActiveChannels, compositeKey, parseChannel, stripChannelSuffix } from "./tickCommon.ts";
 import type { PlanFetchActions, SceneSettings } from "./tickCommon.ts";
 import {
   type UploadState,
@@ -25,6 +25,7 @@ interface SlicePlanResult {
   settings: SceneSettings;
   vpCx: number;
   vpCy: number;
+  multiChannel: boolean;
 }
 
 /**
@@ -44,6 +45,7 @@ function planAndFetchSlice(
   const z = sliceZ;
   const t = sliceT;
   const c = sliceC;
+  const multiChannel = scene.multi_channel();
 
   scene.set_z(z);
   scene.set_t(t);
@@ -57,6 +59,32 @@ function planAndFetchSlice(
   const vpCenter = scene.center();
   const vpCx = vpCenter[0];
   const vpCy = vpCenter[1];
+
+  const makeSeedCoords = (dsInfo: DatasetInfo, seedLevel: number, seedT: number, seedC: number) => {
+    const seedMeta = dsInfo.levels[seedLevel];
+    const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
+    const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+    const fullResDepthS = dsInfo.levels[0].shape[2];
+    const seedLevelZ = Math.min(
+      Math.floor((z / Math.max(fullResDepthS - 1, 1)) * Math.max(sDepth - 1, 1)),
+      sDepth - 1,
+    );
+    const targetChunkZ = Math.floor(seedLevelZ / sChunkZ);
+    const ny = Math.ceil(sHeight / sChunkY);
+    const nx = Math.ceil(sWidth / sChunkX);
+    const seedCoords: ChunkCoord[] = [];
+    for (let iy = 0; iy < ny; iy++) {
+      for (let ix = 0; ix < nx; ix++) {
+        seedCoords.push({
+          level: seedLevel,
+          x: ix, y: iy, z: targetChunkZ,
+          t: seedT, c: seedC,
+          key: `${seedLevel}/${seedT}/${seedC}/${targetChunkZ}/${iy}/${ix}`,
+        });
+      }
+    }
+    return { level: seedLevel, coords: seedCoords, z: seedLevelZ, sentKeys: new Set<string>() };
+  };
 
   const actions: PlanFetchActions = {
     seedChangeKey: `${t}/${c}/${z}`,
@@ -72,37 +100,33 @@ function planAndFetchSlice(
     computeSeeds(dsInfo, targetLevel) {
       const seedLevel = dsInfo.levels.length - 1;
       if (seedLevel <= targetLevel) return null;
+      return makeSeedCoords(dsInfo, seedLevel, t, c);
+    },
 
-      const seedMeta = dsInfo.levels[seedLevel];
-      const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
-      const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-      const fullResDepthS = dsInfo.levels[0].shape[2];
-      const seedLevelZ = Math.min(
-        Math.floor((z / Math.max(fullResDepthS - 1, 1)) * Math.max(sDepth - 1, 1)),
-        sDepth - 1,
-      );
-      const targetChunkZ = Math.floor(seedLevelZ / sChunkZ);
-      const ny = Math.ceil(sHeight / sChunkY);
-      const nx = Math.ceil(sWidth / sChunkX);
-      const seedCoords: ChunkCoord[] = [];
-      for (let iy = 0; iy < ny; iy++) {
-        for (let ix = 0; ix < nx; ix++) {
-          seedCoords.push({
-            level: seedLevel,
-            x: ix, y: iy, z: targetChunkZ,
-            t, c,
-            key: `${seedLevel}/${t}/${c}/${targetChunkZ}/${iy}/${ix}`,
-          });
-        }
-      }
-      return { level: seedLevel, coords: seedCoords, z: seedLevelZ, sentKeys: new Set<string>() };
+    // Multi-channel overrides
+    seedChangeKeyForChannel(ch: number) {
+      return `${t}/${ch}/${z}`;
+    },
+
+    shouldSkipChannel(dsShape: number[], ch: number) {
+      return z >= dsShape[2] || ch >= dsShape[1] || t >= dsShape[0];
+    },
+
+    planCacheKeyForChannel(_dsId: string, ch: number) {
+      return `${vpCx.toFixed(4)}|${vpCy.toFixed(4)}|${canvasW}|${canvasH}|${t}|${ch}|${z}`;
+    },
+
+    computeSeedsForChannel(dsInfo, targetLevel, ch) {
+      const seedLevel = dsInfo.levels.length - 1;
+      if (seedLevel <= targetLevel) return null;
+      return makeSeedCoords(dsInfo, seedLevel, t, ch);
     },
   };
 
-  const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, vpCx, vpCy);
+  const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, vpCx, vpCy, multiChannel);
   if (!result) return null;
 
-  return { memberPlanCache: result.memberPlanCache, settings: result.settings, vpCx, vpCy };
+  return { memberPlanCache: result.memberPlanCache, settings: result.settings, vpCx, vpCy, multiChannel };
 }
 
 /**
@@ -119,7 +143,7 @@ function uploadAndRenderSlice(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
-  const { memberPlanCache, settings } = planResult;
+  const { memberPlanCache, settings, multiChannel } = planResult;
 
   const z = sliceZ;
   const t = sliceT;
@@ -128,8 +152,14 @@ function uploadAndRenderSlice(
   const canvasW = canvas.clientWidth;
   const canvasH = canvas.clientHeight;
 
-  const shouldSkipDataset = (_dsId: string, ds: { info: DatasetInfo }) => {
+  const shouldSkipDataset = (cacheKey: string, ds: { info: DatasetInfo }) => {
     const dsShape = ds.info.levels[0].shape;
+    if (multiChannel) {
+      // In multi-channel mode, cache keys are `${dsId}:ch${ch}` — the plan
+      // phase already filtered channels, so nothing to skip here.
+      // But we still need to validate the dataset exists.
+      return !ds;
+    }
     return z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0];
   };
 
@@ -145,14 +175,16 @@ function uploadAndRenderSlice(
     const fullResDepth = ds.info.levels[0].shape[2];
     const levelDepth = levelMeta.shape[2];
 
-    const tczKey = `${t}/${c}/${z}`;
+    // In multi-channel mode, memberId is a composite key; extract the channel
+    const ch = multiChannel ? (parseChannel(memberId) ?? c) : c;
+    const tczKey = `${t}/${ch}/${z}`;
 
     return {
-      stateKey: `${t}/${c}/${z}/${level}`,
+      stateKey: `${t}/${ch}/${z}/${level}`,
 
       sendAtlasConfig() {
         client.sliceAtlasConfig(
-          memberId, level, z, t, c,
+          memberId, level, z, t, ch,
           levelWidth, levelHeight,
           chunkX, chunkY,
         );
@@ -184,7 +216,7 @@ function uploadAndRenderSlice(
       sendFineChunks(chunks) {
         client.sliceChunkData(
           memberId, chunks,
-          level, z, t, c,
+          level, z, t, ch,
           levelWidth, levelHeight,
           chunkX, chunkY, chunkZ,
           fullResDepth, levelDepth, z,
@@ -213,29 +245,72 @@ function uploadAndRenderSlice(
     const dsSettings = allSettings[dsId];
     if (!dsSettings || !dsSettings.visible) continue;
 
-    // Skip layers whose dimensions are exceeded by the current slice position
     const dsShapeL = ds.info.levels[0].shape; // [T, C, Z, Y, X]
-    if (z >= dsShapeL[2] || c >= dsShapeL[1] || t >= dsShapeL[0]) continue;
-
     const fullResWidth = ds.info.levels[0].shape[4];
     const fullResHeight = ds.info.levels[0].shape[3];
 
-    // Get member plans to emit one layer per member with position offsets (use cache from plan phase)
-    const members: MemberChunkPlan[] = memberPlanCache.get(dsId) ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+    if (multiChannel) {
+      // Multi-channel: emit one layer per (member, channel) with per-channel settings
+      const activeChannels = getActiveChannels(dsSettings);
+      const channelBlend = dsSettings.channel_blend_mode as "alpha" | "additive" | "max" || "additive";
 
-    for (const mp of members) {
-      layers.push({
-        datasetId: mp.member_id,
-        dataW: fullResWidth,
-        dataH: fullResHeight,
-        contrastMin: dsSettings.contrast_min,
-        contrastMax: dsSettings.contrast_max,
-        gamma: dsSettings.gamma,
-        opacity: dsSettings.opacity,
-        blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
-        offsetX: mp.position[0],
-        offsetY: mp.position[1],
-      });
+      for (const ch of activeChannels) {
+        if (z >= dsShapeL[2] || ch >= dsShapeL[1] || t >= dsShapeL[0]) continue;
+
+        const chSettings = dsSettings.channel_settings?.[ch];
+        const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
+        const layerContrastMax = chSettings?.contrast_max ?? dsSettings.contrast_max;
+        const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
+        const layerColormap = chSettings?.colormap ?? "gray";
+
+        const planCacheKey = `${dsId}:ch${ch}`;
+        const members: MemberChunkPlan[] = memberPlanCache.get(planCacheKey)
+          ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+
+        for (const mp of members) {
+          layers.push({
+            datasetId: compositeKey(mp.member_id, ch),
+            dataW: fullResWidth,
+            dataH: fullResHeight,
+            contrastMin: layerContrastMin,
+            contrastMax: layerContrastMax,
+            gamma: layerGamma,
+            opacity: dsSettings.opacity,
+            blendMode: channelBlend,
+            colormap: layerColormap,
+            offsetX: mp.position[0],
+            offsetY: mp.position[1],
+          });
+        }
+      }
+    } else {
+      // Single-channel: existing behavior
+      if (z >= dsShapeL[2] || c >= dsShapeL[1] || t >= dsShapeL[0]) continue;
+
+      const members: MemberChunkPlan[] = memberPlanCache.get(dsId)
+        ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+
+      const chSettings = dsSettings.channel_settings?.[c];
+      const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
+      const layerContrastMax = chSettings?.contrast_max ?? dsSettings.contrast_max;
+      const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
+      const layerColormap = chSettings?.colormap ?? "gray";
+
+      for (const mp of members) {
+        layers.push({
+          datasetId: mp.member_id,
+          dataW: fullResWidth,
+          dataH: fullResHeight,
+          contrastMin: layerContrastMin,
+          contrastMax: layerContrastMax,
+          gamma: layerGamma,
+          opacity: dsSettings.opacity,
+          blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
+          colormap: layerColormap,
+          offsetX: mp.position[0],
+          offsetY: mp.position[1],
+        });
+      }
     }
   }
 

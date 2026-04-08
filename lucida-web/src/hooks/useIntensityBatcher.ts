@@ -56,9 +56,11 @@ export function useIntensityBatcher({
       if (isAuto) {
         const scene = wasmSceneRef.current;
         if (scene) {
+          const c = scene.c();
           scene.apply_command(JSON.stringify({
-            type: "set_dataset_contrast",
+            type: "set_channel_contrast",
             dataset_id: datasetId,
+            channel: c,
             min: mergedMin,
             max: mergedMax,
           }));

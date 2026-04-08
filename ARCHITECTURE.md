@@ -28,14 +28,15 @@ to atlas → render command → shader samples atlas (or fallback) → pixels
 
 The WASM scene is the single source of truth for viewer state. TypeScript never reimplements camera math, LOD selection, or chunk planning — it calls into WASM.
 
-**Owns:** Camera (slice/arcball/fly), viewport, Z/T/C indices, dataset list, layer settings, volume transforms.
+**Owns:** Camera (slice/arcball/fly), viewport, Z/T/C indices, multi-channel toggle, dataset list, layer settings (including per-channel settings and colormaps), volume transforms.
 
 **Key calls from TypeScript:**
-- `scene.apply_command(json)` — pan, zoom, set_z, add_dataset, etc.
+- `scene.apply_command(json)` — pan, zoom, set_z, set_multi_channel, set_channel_colormap, add_dataset, etc.
 - `scene.chunk_plan_for(dsId)` — returns which chunks are needed at the current camera/viewport
 - `scene.ray_hit_local(dsId)` / `scene.ray_hit_local_image(dsId)` — where the camera ray hits the volume (unit space / image space)
 - `scene.set_viewport(w, h)` — tells WASM the canvas size for LOD selection
-- `scene.all_dataset_settings()` — contrast, gamma, opacity, blend mode per dataset
+- `scene.all_dataset_settings()` — contrast, gamma, opacity, blend mode, channel_settings, channel_blend_mode per dataset
+- `scene.multi_channel()` / `scene.set_c(c)` — multi-channel mode flag and channel setter (used by pipeline to iterate channels)
 
 **If you're changing this:**
 - Viewport commands (pan, zoom) are local-only. Document commands (add/remove dataset) go through the server for broadcast.
@@ -117,12 +118,15 @@ Orchestrates the per-frame tick: planning, fetching, sending plans to the worker
 - Auto-contrast update → `markDataDirty()` (intensity range from GPU worker)
 - When neither flag is set → loop quiesces (0 CPU)
 
+**Multi-channel mode:** When `scene.multi_channel()` is true, the plan phase iterates all visible channels (from `channel_settings[ch].visible`), temporarily setting `scene.set_c(ch)` for each to evaluate per-channel chunk plans. Each (member, channel) pair gets a composite key `${memberId}:ch${channel}` for independent atlas, sentToWorker, and plan cache tracking. The render phase emits one layer per (member, channel) with per-channel colormap, contrast, and gamma. Channels within a dataset use `channel_blend_mode`; datasets use their inter-dataset `blend_mode`.
+
 **If you're changing this:**
 - Never return `true` from tick functions to indicate "chunks are still fetching from network." The subscriber handles that. Only return `true` if there's work that can be done NOW but wasn't (minimap budget exhaustion).
 - The tick always runs plan+upload when dirty (to keep chunk pipeline flowing), but only renders when `shouldRender` is true. This prevents expensive ray marches during rapid chunk arrivals.
 - The VolumeViewer component has a separate RAF loop for clip-distance key polling — this is independent of the render loop.
+- In multi-channel mode, fetch lists use raw member IDs (chunk store fetchers are keyed by raw ID). Composite keys are only used for state tracking (atlas, sentToWorker, plan cache).
 
-**Files:** `renderLoop.ts`, `renderLoopTypes.ts`, `tickCommon.ts` (shared plan+fetch + upload helpers), `uploadCommon.ts` (shared upload loop), `volumePath.ts`, `slicePath.ts`, `minimapPath.ts`
+**Files:** `renderLoop.ts`, `renderLoopTypes.ts`, `tickCommon.ts` (shared plan+fetch + upload helpers, multi-channel iteration), `uploadCommon.ts` (shared upload loop), `volumePath.ts`, `slicePath.ts`, `minimapPath.ts`
 
 ---
 
@@ -234,12 +238,15 @@ Two WGSL shaders render the visible data using the atlas + fallback two-texture 
 - Indirection lookup → atlas or fallback
 - Draws 1.5px member border at UV edges for plate grid visualization
 
+**Colormap LUT:** Both shaders apply a colormap via a 256×1 `rgba8unorm` LUT texture (binding 4) and linear sampler (binding 5). After normalization, `textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb` replaces the old `vec3f(normalized)` grayscale output. LUT textures are cached per colormap name on the worker. Gray LUT produces identical output to the previous grayscale behavior.
+
 **If you're changing this:**
 - The volume shader flips Y when sampling: `(1.0 - pos.y)`. This converts from model space (Y-up) to texture storage (Y-down). See [Coordinate Conventions](#coordinate-conventions).
 - `sampleVolume` returns `0xFFFFFFFFu` (impossible for real u16 data) for unloaded chunks. This is distinct from `0u` (genuine zero voxel).
 - Adaptive step size: `max(stepSize, rayLen / 512.0)`. Capped at 512 steps for translucent, 256 for MIP.
+- Colormap data is generated in `colormaps.ts` (15 built-in maps). The worker caches GPU textures in a `Map<string, GPUTexture>`. To add a new colormap, add it to `colormaps.ts` and the `Colormap` enum in Rust.
 
-**Files:** `renderer/volume.wgsl`, `renderer/slice.wgsl`, `renderer/compositor.wgsl`
+**Files:** `renderer/volume.wgsl`, `renderer/slice.wgsl`, `renderer/compositor.wgsl`, `colormaps.ts`
 
 ---
 

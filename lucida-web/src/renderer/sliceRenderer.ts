@@ -22,6 +22,8 @@ export class SliceRenderer {
   private indirectionBuffer: GPUBuffer | null = null;
   private dummyTexture: GPUTexture;
   private dummyIndirectionBuffer: GPUBuffer;
+  private lutTexture: GPUTexture;
+  private lutSampler: GPUSampler;
 
   private intensityMin = 0;
   private intensityMax = 65535;
@@ -58,6 +60,16 @@ export class SliceRenderer {
           binding: 3,
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 4,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "float" },
+        },
+        {
+          binding: 5,
+          visibility: GPUShaderStage.FRAGMENT,
+          sampler: { type: "filtering" },
         },
       ],
     });
@@ -97,6 +109,29 @@ export class SliceRenderer {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(this.dummyIndirectionBuffer, 0, dummyData);
+
+    // Default 1x1 white LUT (renders grayscale when no colormap is set)
+    this.lutTexture = device.createTexture({
+      size: [1, 1],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    device.queue.writeTexture(
+      { texture: this.lutTexture },
+      new Uint8Array([255, 255, 255, 255]),
+      { bytesPerRow: 4 },
+      [1, 1],
+    );
+
+    this.lutSampler = device.createSampler({
+      magFilter: "linear",
+      minFilter: "linear",
+    });
+  }
+
+  setColormapTexture(texture: GPUTexture) {
+    this.lutTexture = texture;
+    this.rebuildBindGroup();
   }
 
   setFallback(texture: GPUTexture) {
@@ -147,6 +182,8 @@ export class SliceRenderer {
         { binding: 1, resource: fallback.createView() },
         { binding: 2, resource: atlas.createView() },
         { binding: 3, resource: { buffer: indirection } },
+        { binding: 4, resource: this.lutTexture.createView() },
+        { binding: 5, resource: this.lutSampler },
       ],
     });
   }
