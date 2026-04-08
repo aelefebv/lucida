@@ -3,8 +3,8 @@ import type { ChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { evaluateAndSortPlans, buildMemberFetchList, interleaveFetchLists, getSceneSettings } from "./tickCommon.ts";
-import type { SceneSettings } from "./tickCommon.ts";
+import { planAndFetchForDatasets } from "./tickCommon.ts";
+import type { PlanFetchActions, SceneSettings } from "./tickCommon.ts";
 import {
   type UploadState,
   type MemberUploadActions,
@@ -40,7 +40,6 @@ function planAndFetchSlice(
   minimapPendingFetch: Map<string, ChunkCoord[]>,
 ): SlicePlanResult | null {
   const { scene, canvas, datasets } = ctx;
-  if (datasets.size === 0) return null;
 
   const z = sliceZ;
   const t = sliceT;
@@ -54,96 +53,56 @@ function planAndFetchSlice(
   const canvasH = canvas.clientHeight;
   scene.set_viewport(canvasW, canvasH);
 
-  const settings = getSceneSettings(scene);
-
-  const memberPlanCache = new Map<string, MemberChunkPlan[]>();
-
   // Viewport center for spatial priority (camera position in slice mode)
   const vpCenter = scene.center();
   const vpCx = vpCenter[0];
   const vpCy = vpCenter[1];
 
-  for (const [dsId, ds] of datasets) {
-    // Skip datasets whose dimensions are exceeded by the current slice position
-    const dsShape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
-    if (z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0]) continue;
+  const actions: PlanFetchActions = {
+    seedChangeKey: `${t}/${c}/${z}`,
 
-    const planCacheKey = `${vpCx.toFixed(4)}|${vpCy.toFixed(4)}|${canvasW}|${canvasH}|${t}|${c}|${z}`;
-    const cached = state.planCache.get(dsId);
-    let sortedPlans: MemberChunkPlan[];
-    if (cached && cached.key === planCacheKey) {
-      sortedPlans = cached.plans;
-    } else {
-      const evaluated = evaluateAndSortPlans(scene, dsId, vpCx, vpCy);
-      if (!evaluated) continue;
-      sortedPlans = evaluated;
-      state.planCache.set(dsId, { key: planCacheKey, plans: sortedPlans });
-    }
-    memberPlanCache.set(dsId, sortedPlans);
+    shouldSkipDataset(dsShape: number[]) {
+      return z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0];
+    },
 
-    // Build per-member fetch lists (with seed coords prepended) and collect for interleaving
-    const perMemberFetchLists: { memberId: string; list: ChunkCoord[] }[] = [];
+    planCacheKey(_dsId: string) {
+      return `${vpCx.toFixed(4)}|${vpCy.toFixed(4)}|${canvasW}|${canvasH}|${t}|${c}|${z}`;
+    },
 
-    for (const mp of sortedPlans) {
-      const memberId = mp.member_id;
-      const sharedQueue = ds.sharedQueue;
-      const targetLevel = mp.needed[0]?.level;
+    computeSeeds(dsInfo, targetLevel) {
+      const seedLevel = dsInfo.levels.length - 1;
+      if (seedLevel <= targetLevel) return null;
 
-      // Detect T/C/Z change for seed computation.
-      // prevStateKey stores "T/C/Z/level" (set in upload phase), so extract T/C/Z prefix for seed check.
-      const tczKey = `${t}/${c}/${z}`;
-      const prevStateKeyVal = state.prevStateKey.get(memberId);
-      const prevTCZOnly = prevStateKeyVal?.substring(0, prevStateKeyVal.lastIndexOf("/"));
-      const needsSeed = prevTCZOnly === undefined || prevTCZOnly !== tczKey;
-
-      if (needsSeed && targetLevel !== undefined) {
-        const seedLevel = ds.info.levels.length - 1;
-        if (seedLevel > targetLevel) {
-          const seedMeta = ds.info.levels[seedLevel];
-          const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
-          const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-          const fullResDepthS = ds.info.levels[0].shape[2];
-          const seedLevelZ = Math.min(
-            Math.floor((z / Math.max(fullResDepthS - 1, 1)) * Math.max(sDepth - 1, 1)),
-            sDepth - 1,
-          );
-          const targetChunkZ = Math.floor(seedLevelZ / sChunkZ);
-          const ny = Math.ceil(sHeight / sChunkY);
-          const nx = Math.ceil(sWidth / sChunkX);
-          const seedCoords: ChunkCoord[] = [];
-          for (let iy = 0; iy < ny; iy++) {
-            for (let ix = 0; ix < nx; ix++) {
-              seedCoords.push({
-                level: seedLevel,
-                x: ix, y: iy, z: targetChunkZ,
-                t, c,
-                key: `${seedLevel}/${t}/${c}/${targetChunkZ}/${iy}/${ix}`,
-              });
-            }
-          }
-          state.seedPending.set(memberId, { level: seedLevel, coords: seedCoords, z: seedLevelZ, sentKeys: new Set() });
-        } else {
-          state.seedPending.delete(memberId);
+      const seedMeta = dsInfo.levels[seedLevel];
+      const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
+      const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
+      const fullResDepthS = dsInfo.levels[0].shape[2];
+      const seedLevelZ = Math.min(
+        Math.floor((z / Math.max(fullResDepthS - 1, 1)) * Math.max(sDepth - 1, 1)),
+        sDepth - 1,
+      );
+      const targetChunkZ = Math.floor(seedLevelZ / sChunkZ);
+      const ny = Math.ceil(sHeight / sChunkY);
+      const nx = Math.ceil(sWidth / sChunkX);
+      const seedCoords: ChunkCoord[] = [];
+      for (let iy = 0; iy < ny; iy++) {
+        for (let ix = 0; ix < nx; ix++) {
+          seedCoords.push({
+            level: seedLevel,
+            x: ix, y: iy, z: targetChunkZ,
+            t, c,
+            key: `${seedLevel}/${t}/${c}/${targetChunkZ}/${iy}/${ix}`,
+          });
         }
       }
+      return { level: seedLevel, coords: seedCoords, z: seedLevelZ, sentKeys: new Set<string>() };
+    },
+  };
 
-      // Build per-member fetch list with seed coords prepended for priority
-      const seedInfo = state.seedPending.get(memberId);
-      const mmPending = minimapPendingFetch.get(memberId);
-      const fetchList = buildMemberFetchList(mp.needed, mp.prefetch, seedInfo, sharedQueue, memberId, mmPending);
-      if (fetchList.length > 0) {
-        perMemberFetchLists.push({ memberId, list: fetchList });
-      }
-    }
+  const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, vpCx, vpCy);
+  if (!result) return null;
 
-    // Interleave per-member fetch lists (round-robin by spatial priority) and submit
-    if (perMemberFetchLists.length > 0) {
-      const unified = interleaveFetchLists(perMemberFetchLists);
-      ds.sharedQueue.ensureFetched(unified);
-    }
-  }
-
-  return { memberPlanCache, settings, vpCx, vpCy };
+  return { memberPlanCache: result.memberPlanCache, settings: result.settings, vpCx, vpCy };
 }
 
 /**

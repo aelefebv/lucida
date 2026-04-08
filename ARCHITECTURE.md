@@ -63,7 +63,7 @@ Determines which chunks are needed, at what LOD, in what order.
 - `evaluateAndSortPlans()` sorts *members* by 2D distance from the camera. `interleaveFetchLists()` merges member lists round-robin so spatially-closer members get priority at each depth level.
 - Seed computation triggers on first render AND on T/C/Z change (not just change). See [Fallback System](#5-fallback--seed-system).
 
-**Files:** `zarr/chunkPlan.ts`, `tickCommon.ts`, plan phase in `volumePath.ts` / `slicePath.ts`
+**Files:** `zarr/chunkPlan.ts`, `tickCommon.ts` (`planAndFetchForDatasets` shared skeleton + `PlanFetchActions` callback interface), `volumePath.ts` / `slicePath.ts` (thin wrappers providing mode-specific closures)
 
 ---
 
@@ -122,7 +122,7 @@ Orchestrates the per-frame tick: planning, fetching, sending plans to the worker
 - The tick always runs plan+upload when dirty (to keep chunk pipeline flowing), but only renders when `shouldRender` is true. This prevents expensive ray marches during rapid chunk arrivals.
 - The VolumeViewer component has a separate RAF loop for clip-distance key polling — this is independent of the render loop.
 
-**Files:** `renderLoop.ts`, `renderLoopTypes.ts`, `volumePath.ts`, `slicePath.ts`, `minimapPath.ts`
+**Files:** `renderLoop.ts`, `renderLoopTypes.ts`, `tickCommon.ts` (shared plan+fetch + upload helpers), `uploadCommon.ts` (shared upload loop), `volumePath.ts`, `slicePath.ts`, `minimapPath.ts`
 
 ---
 

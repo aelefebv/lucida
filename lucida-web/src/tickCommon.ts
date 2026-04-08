@@ -3,6 +3,8 @@ import type { WasmScene } from "lucida-core";
 import type { ChunkCoord, QualifiedChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
+import type { SeedPendingInfo, UploadState } from "./uploadCommon.ts";
+import type { DatasetInfo } from "./zarr/metadata.ts";
 
 // --- Scene settings cache ---
 let cachedSettings: SceneSettings | null = null;
@@ -125,6 +127,96 @@ export function interleaveFetchLists(
     }
   }
   return unified;
+}
+
+// ---------------------------------------------------------------------------
+// Shared plan+fetch interface + function
+// ---------------------------------------------------------------------------
+
+/** Callback interface for render-path-specific plan+fetch logic. */
+export interface PlanFetchActions {
+  seedChangeKey: string;
+  shouldSkipDataset(dsShape: number[]): boolean;
+  planCacheKey(dsId: string): string;
+  computeSeeds(dsInfo: DatasetInfo, targetLevel: number): SeedPendingInfo | null;
+  onMemberProcessed?(memberId: string, mp: MemberChunkPlan, dsId: string): void;
+}
+
+/**
+ * Shared plan+fetch skeleton used by both slice and volume paths.
+ *
+ * For each dataset: evaluate chunk plans, compute seeds on T/C/(Z) change,
+ * build per-member fetch lists, interleave them, and submit to ensureFetched.
+ */
+export function planAndFetchForDatasets(
+  scene: WasmScene,
+  datasets: Map<string, { sharedQueue: SharedChunkQueue; info: DatasetInfo }>,
+  state: UploadState,
+  actions: PlanFetchActions,
+  minimapPendingFetch: Map<string, ChunkCoord[]>,
+  sortCenterX: number,
+  sortCenterY: number,
+): { memberPlanCache: Map<string, MemberChunkPlan[]>; settings: SceneSettings } | null {
+  if (datasets.size === 0) return null;
+
+  const settings = getSceneSettings(scene);
+  const memberPlanCache = new Map<string, MemberChunkPlan[]>();
+
+  for (const [dsId, ds] of datasets) {
+    const dsShape = ds.info.levels[0].shape;
+    if (actions.shouldSkipDataset(dsShape)) continue;
+
+    const planKey = actions.planCacheKey(dsId);
+    const cached = state.planCache.get(dsId);
+    let sortedPlans: MemberChunkPlan[];
+    if (cached && cached.key === planKey) {
+      sortedPlans = cached.plans;
+    } else {
+      const evaluated = evaluateAndSortPlans(scene, dsId, sortCenterX, sortCenterY);
+      if (!evaluated) continue;
+      sortedPlans = evaluated;
+      state.planCache.set(dsId, { key: planKey, plans: sortedPlans });
+    }
+    memberPlanCache.set(dsId, sortedPlans);
+
+    const perMemberFetchLists: { memberId: string; list: ChunkCoord[] }[] = [];
+
+    for (const mp of sortedPlans) {
+      const memberId = mp.member_id;
+      const targetLevel = mp.needed[0]?.level;
+
+      const prevStateKeyVal = state.prevStateKey.get(memberId);
+      const prevChangeKey = prevStateKeyVal?.substring(0, prevStateKeyVal.lastIndexOf("/"));
+      const needsSeed = prevChangeKey === undefined || prevChangeKey !== actions.seedChangeKey;
+
+      if (needsSeed && targetLevel !== undefined) {
+        const seedInfo = actions.computeSeeds(ds.info, targetLevel);
+        if (seedInfo) {
+          state.seedPending.set(memberId, seedInfo);
+        } else {
+          state.seedPending.delete(memberId);
+        }
+      }
+
+      const seedInfo = state.seedPending.get(memberId);
+      const mmPending = minimapPendingFetch.get(memberId);
+      const fetchList = buildMemberFetchList(mp.needed, mp.prefetch, seedInfo, ds.sharedQueue, memberId, mmPending);
+      if (fetchList.length > 0) {
+        perMemberFetchLists.push({ memberId, list: fetchList });
+      }
+
+      if (actions.onMemberProcessed) {
+        actions.onMemberProcessed(memberId, mp, dsId);
+      }
+    }
+
+    if (perMemberFetchLists.length > 0) {
+      const unified = interleaveFetchLists(perMemberFetchLists);
+      ds.sharedQueue.ensureFetched(unified);
+    }
+  }
+
+  return { memberPlanCache, settings };
 }
 
 /** Flip Y between unit space (Y-up: 0=bottom) and image space (Y-down: 0=top). */

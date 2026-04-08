@@ -1,5 +1,5 @@
 # Lucida
-A fast and lightweight 5D image viewer.
+A fast, lightweight, collaborative 5D image viewer.
 
 Check the GLOSSARY.md for terminology.
 
