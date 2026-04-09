@@ -48,6 +48,7 @@ interface Props {
   onChannelSetBlendMode?: (id: string, blendMode: string) => void;
   viewModeToggle: { label: string; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
+  debugToggle?: { label: string; active: boolean; onClick: () => void };
   style?: React.CSSProperties;
 }
 
@@ -78,6 +79,7 @@ export function LayerPanel({
   onChannelSetBlendMode,
   viewModeToggle,
   cameraModeToggle,
+  debugToggle,
   style,
 }: Props) {
   return (
@@ -90,6 +92,15 @@ export function LayerPanel({
           )}
           {cameraModeToggle && (
             <button onClick={cameraModeToggle.onClick} title="Toggle camera mode (F)">{cameraModeToggle.label}</button>
+          )}
+          {debugToggle && (
+            <button
+              onClick={debugToggle.onClick}
+              title="Toggle debug overlay"
+              style={debugToggle.active ? { background: "#4a9eff", color: "#fff" } : undefined}
+            >
+              {debugToggle.label}
+            </button>
           )}
           <button onClick={onAddLayer}>+ Add</button>
         </div>

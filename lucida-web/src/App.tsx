@@ -9,6 +9,8 @@ import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector } from "./components/PlateSelector.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
+import { DebugOverlay } from "./debug/DebugOverlay.tsx";
+import { debugStats } from "./debug/debugStats.ts";
 import type { VolumeData } from "./types.ts";
 import type { DatasetState, PendingChunkResolve } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
@@ -246,6 +248,13 @@ function App() {
   }, [datasets, urlInput]);
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
+  const handleDebugToggle = useCallback(() => {
+    setShowDebug(prev => {
+      debugStats.enabled = !prev;
+      return !prev;
+    });
+  }, []);
 
   const handleFileBrowserSelect = useCallback((path: string) => {
     datasets.handleUrlSubmit(path);
@@ -280,6 +289,7 @@ function App() {
         onAddLayer={() => setShowFileBrowser(true)}
         viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
+        debugToggle={{ label: "Debug", active: showDebug, onClick: handleDebugToggle }}
         style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
       />
       <div className="sidebar-resize-handle" onPointerDown={layout.handleSidebarResizeDown} />
@@ -390,6 +400,7 @@ function App() {
             <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
           )}
           <FpsCounter />
+          {showDebug && <DebugOverlay />}
           <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
         </div>
         {datasetsVersion > 0 && (

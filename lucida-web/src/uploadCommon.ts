@@ -4,6 +4,7 @@ import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import type { DatasetInfo, LevelMeta } from "./zarr/metadata.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+import { debugStats } from "./debug/debugStats.ts";
 
 // ---------------------------------------------------------------------------
 // State types
@@ -145,6 +146,11 @@ export function uploadChunksForMembers(
         }
       }
     }
+  }
+
+  if (debugStats.enabled) {
+    debugStats.uploadBytesUsed = MAIN_VIEW_UPLOAD_BUDGET_BYTES - uploadBudget;
+    debugStats.budgetExhausted = budgetExhausted;
   }
 
   return budgetExhausted;

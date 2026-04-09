@@ -1,0 +1,67 @@
+.debug-overlay {
+  position: absolute;
+  top: 28px;
+  left: 8px;
+  z-index: 20;
+  background: rgba(0, 0, 0, 0.75);
+  color: #ccc;
+  font-family: "SF Mono", "Menlo", "Monaco", monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 6px 10px;
+  border-radius: 6px;
+  pointer-events: none;
+  min-width: 200px;
+  max-width: 320px;
+  backdrop-filter: blur(4px);
+}
+
+.debug-section {
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.debug-section:last-child {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.debug-title {
+  color: #4a9eff;
+  font-weight: 600;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 1px;
+}
+
+.debug-warn {
+  color: #f44;
+  font-weight: 600;
+}
+
+.debug-member-list {
+  font-size: 10px;
+}
+
+.debug-member-row {
+  display: flex;
+  gap: 6px;
+  justify-content: space-between;
+}
+
+.debug-member-id {
+  color: #999;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.debug-more {
+  color: #666;
+  font-style: italic;
+}

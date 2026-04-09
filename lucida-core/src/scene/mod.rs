@@ -217,18 +217,22 @@ impl Scene {
 
         let is_2d = matches!(self.camera, Camera::Slice(_));
         let members = dataset.effective_members();
-        let volume_shape = dataset.volume_shape.unwrap_or([1, 1, 1]);
+
+        // For plates, use the FOV shape (not the full plate extent) for
+        // per-member AABB visibility tests.
+        let fov_shape = dataset.layers.first()
+            .map(|l| l.data_shape)
+            .unwrap_or(dataset.volume_shape.unwrap_or([1, 1, 1]));
 
         let mut plans = Vec::with_capacity(members.len());
 
         for member in &members {
             // Check member AABB against visible region.
-            // Member occupies [pos_x .. pos_x + shape_x, pos_y .. pos_y + shape_y]
-            // in voxel space.
+            // Each member occupies one FOV's worth of voxels, not the full plate.
             let pos_x = member.position[0];
             let pos_y = member.position[1];
-            let member_max_x = pos_x + volume_shape[2] as f64;
-            let member_max_y = pos_y + volume_shape[1] as f64;
+            let member_max_x = pos_x + fov_shape[2] as f64;
+            let member_max_y = pos_y + fov_shape[1] as f64;
 
             let [vis_min_x, vis_min_y, vis_max_x, vis_max_y] = region.xy_bounds;
 

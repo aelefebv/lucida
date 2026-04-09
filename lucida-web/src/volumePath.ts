@@ -13,6 +13,7 @@ import {
   clearUploadStateForMembers,
   resetUploadState,
 } from "./uploadCommon.ts";
+import { debugStats } from "./debug/debugStats.ts";
 import type { DatasetInfo } from "./zarr/metadata.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 
@@ -189,6 +190,19 @@ function planAndFetchVolume(
 
   const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, eye[0], eye[1], multiChannel);
   if (!result) return null;
+
+  if (debugStats.enabled) {
+    // Record LOD debug info from first dataset
+    const firstDsId = result.settings.layerOrder[0];
+    if (firstDsId) {
+      const lodInfo = scene.debug_lod_info(firstDsId);
+      debugStats.effectiveZoom = lodInfo[0];
+      debugStats.zoomPerVoxel = lodInfo[1];
+    }
+    debugStats.activeChannels = multiChannel
+      ? getActiveChannels(result.settings.allSettings[result.settings.layerOrder[0]]).length
+      : 1;
+  }
 
   return {
     memberPlanCache: result.memberPlanCache,
@@ -383,6 +397,10 @@ function uploadAndRenderVolume(
     }
   }
 
+  if (debugStats.enabled) {
+    debugStats.renderPassCount = layers.length;
+  }
+
   client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, viewProj, camForward, clipDistance, clipMode);
 
   return budgetExhausted;
@@ -398,9 +416,14 @@ export function tickVolume(
   minimapPendingFetch: Map<string, ChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
+  const t0 = debugStats.enabled ? performance.now() : 0;
   const planResult = planAndFetchVolume(ctx, state, minimapPendingFetch);
+  if (debugStats.enabled) debugStats.planTimeMs = performance.now() - t0;
   if (!planResult) return false;
-  return uploadAndRenderVolume(ctx, state, planResult, shouldRender);
+  const t1 = debugStats.enabled ? performance.now() : 0;
+  const result = uploadAndRenderVolume(ctx, state, planResult, shouldRender);
+  if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
+  return result;
 }
 
 export function clearVolumeForDataset(state: VolumeState, dsId: string): void {

@@ -264,7 +264,7 @@ impl Arcball {
     }
 
     pub fn zoom(&mut self, delta: f64) {
-        self.distance = (self.distance * (1.0 + delta)).max(0.1);
+        self.distance = (self.distance * (1.0 + delta)).max(self.near);
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
@@ -464,13 +464,22 @@ impl Arcball {
         let vpw_y = shape_y / sy.abs().max(1e-12);
         let vpw_z = shape_z / sz.abs().max(1e-12);
         let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
-        let zoom_per_voxel = self.effective_zoom() / max_vpw;
 
         // Cast a ray from the eye toward the target to find where it hits the
-        // volume surface. Use this intersection point as the sort center so the
-        // chunk the camera is looking at loads first and surrounding chunks are
-        // prioritized by distance from that point.
+        // volume surface. Use distance to this hit point (not self.distance to
+        // the orbit target) for LOD — the surface is what we're resolving.
         let hit_unit = self.ray_hit_local(&inv_model);
+        let hit_world = transform_point(hit_unit, &model_f64);
+        let eye = self.eye_position();
+        let dx = hit_world[0] - eye[0];
+        let dy = hit_world[1] - eye[1];
+        let dz = hit_world[2] - eye[2];
+        let dist_to_surface = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+
+        // pixels-per-world-unit at the surface, then convert to pixels-per-voxel
+        let base_zoom = self.viewport[1] as f64 / (2.0 * (self.fov / 2.0).tan());
+        let zoom_per_voxel = (base_zoom / dist_to_surface) / max_vpw;
+
         let sort_center = Some([
             hit_unit[0] * shape_x,
             (1.0 - hit_unit[1]) * shape_y,
@@ -768,9 +777,30 @@ impl Fly {
         let vpw_y = shape_y / sy.abs().max(1e-12);
         let vpw_z = shape_z / sz.abs().max(1e-12);
         let max_vpw = vpw_x.max(vpw_y).max(vpw_z);
-        let zoom_per_voxel = self.effective_zoom() / max_vpw;
 
+        // For the fly camera, effective_zoom() is a constant (no distance term).
+        // Compute the actual distance to the volume surface and factor it in,
+        // mirroring how the arcball divides by its target distance.
         let hit_unit = self.ray_hit_local(&inv_model);
+
+        let model_f64_for_hit: [f64; 16] = match volume_transform {
+            Some(t) => t.model.map(|v| v as f64),
+            None => [
+                1.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0,
+                0.0, 0.0, 0.0, 1.0,
+            ],
+        };
+        let hit_world = transform_point(hit_unit, &model_f64_for_hit);
+        let dx = hit_world[0] - self.position[0];
+        let dy = hit_world[1] - self.position[1];
+        let dz = hit_world[2] - self.position[2];
+        let dist_to_surface = (dx * dx + dy * dy + dz * dz).sqrt().max(1e-6);
+
+        // effective_zoom at distance d = base_zoom / d
+        let zoom_per_voxel = (self.effective_zoom() / dist_to_surface) / max_vpw;
+
         let sort_center = Some([
             hit_unit[0] * shape_x,
             (1.0 - hit_unit[1]) * shape_y,
@@ -838,7 +868,7 @@ impl Fly {
             target,
             theta,
             phi,
-            distance: distance.max(0.1), // clamp minimum distance
+            distance: distance.max(self.near),
             fov: self.fov,
             viewport: self.viewport,
             near: self.near,
@@ -1061,7 +1091,7 @@ mod tests {
     fn zoom_clamps_min() {
         let mut cam = Arcball::new([800, 600]);
         cam.zoom(-0.99);
-        assert!(cam.distance >= 0.1);
+        assert!(cam.distance >= cam.near);
     }
 
     #[test]

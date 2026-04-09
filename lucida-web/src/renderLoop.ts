@@ -3,6 +3,7 @@ import type { DatasetInfo } from "./zarr/metadata.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
@@ -276,6 +277,10 @@ export class RenderLoop {
     if (!this.viewDirty && !this.dataDirty) return;
 
     const now = performance.now();
+    if (debugStats.enabled) {
+      resetFrameStats();
+      debugStats.mode = this.mode;
+    }
     let shouldRender = false;
 
     if (this.viewDirty) {
@@ -308,6 +313,10 @@ export class RenderLoop {
       if (tickVolume(ctx, this.volumeState, this.minimapState.pendingFetch, shouldRender)) {
         this.dataDirty = true;
       }
+    }
+
+    if (debugStats.enabled) {
+      debugStats.frameTimeMs = performance.now() - now;
     }
 
     if (tickMinimapOverview(ctx, this.minimapState)) this.dataDirty = true;

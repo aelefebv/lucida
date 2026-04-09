@@ -5,6 +5,7 @@ import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import type { SeedPendingInfo, UploadState } from "./uploadCommon.ts";
 import type { DatasetInfo } from "./zarr/metadata.ts";
+import { debugStats } from "./debug/debugStats.ts";
 
 // --- Scene settings cache ---
 let cachedSettings: SceneSettings | null = null;
@@ -229,11 +230,13 @@ export function planAndFetchForDatasets(
       let sortedPlans: MemberChunkPlan[];
       if (cached && cached.key === planKey) {
         sortedPlans = cached.plans;
+        if (debugStats.enabled) debugStats.planCacheHits++;
       } else {
         const evaluated = evaluateAndSortPlans(scene, dsId, sortCenterX, sortCenterY);
         if (!evaluated) continue;
         sortedPlans = evaluated;
         state.planCache.set(planCacheId, { key: planKey, plans: sortedPlans });
+        if (debugStats.enabled) debugStats.planCacheMisses++;
       }
 
       // Store plans in memberPlanCache with composite key when multi-channel
@@ -241,6 +244,27 @@ export function planAndFetchForDatasets(
         memberPlanCache.set(`${dsId}:ch${ch}`, sortedPlans);
       } else {
         memberPlanCache.set(dsId, sortedPlans);
+      }
+
+      if (debugStats.enabled) {
+        debugStats.totalMembers += sortedPlans.length;
+        debugStats.visibleMembers += sortedPlans.length;
+        for (const mp of sortedPlans) {
+          const tl = mp.needed[0]?.level ?? -1;
+          debugStats.memberStats.push({
+            id: multiChannel ? compositeKey(mp.member_id, ch) : mp.member_id,
+            level: tl,
+            numLevels: ds.info.levels.length,
+            chunksNeeded: mp.needed.length,
+            chunksSent: state.sentToWorker.get(
+              multiChannel ? compositeKey(mp.member_id, ch) : mp.member_id
+            )?.size ?? 0,
+          });
+          if (tl >= 0) {
+            debugStats.selectedLevel = tl;
+            debugStats.numLevels = ds.info.levels.length;
+          }
+        }
       }
 
       for (const mp of sortedPlans) {

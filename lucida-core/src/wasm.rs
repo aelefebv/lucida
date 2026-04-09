@@ -302,6 +302,20 @@ impl WasmScene {
         }
     }
 
+    /// Debug helper: returns [effective_zoom, zoom_per_voxel] for a dataset.
+    pub fn debug_lod_info(&self, dataset_id: &str) -> Vec<f64> {
+        let ds = match self.inner.dataset_by_id(dataset_id) {
+            Some(d) => d,
+            None => return vec![0.0, 0.0],
+        };
+        let region = self.inner.camera.visible_region(
+            &self.inner.view.z_range,
+            ds.volume_transform.as_ref(),
+            ds.volume_shape.as_ref(),
+        );
+        vec![self.inner.camera.effective_zoom(), region.effective_zoom]
+    }
+
     pub fn chunk_plan(&self) -> String {
         let plan = self.inner.chunk_plan();
         serde_json::to_string(&plan).unwrap()
