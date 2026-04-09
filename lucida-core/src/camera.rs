@@ -302,7 +302,8 @@ impl Arcball {
     }
 
     /// Compute where the center-screen ray hits the unit [0,1]^3 volume box.
-    /// Returns the intersection point in unit space, or the eye position if the ray misses.
+    /// Returns the intersection point in unit space, or the closest point on the
+    /// box surface if the ray misses (so distance calculations remain meaningful).
     pub fn ray_hit_local(&self, inv_model: &[f64; 16]) -> [f64; 3] {
         let eye_unit = transform_point(self.eye_position(), inv_model);
         let target_unit = transform_point(self.target, inv_model);
@@ -312,7 +313,7 @@ impl Arcball {
             target_unit[2] - eye_unit[2],
         ];
         ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-            .unwrap_or(eye_unit)
+            .unwrap_or_else(|| closest_point_on_aabb(eye_unit, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
     }
 
     /// Effective zoom: screen pixels per world unit at the target plane.
@@ -669,6 +670,7 @@ impl Fly {
     }
 
     /// Compute where the center-screen ray hits the unit [0,1]^3 volume box.
+    /// Returns the closest point on the box surface if the ray misses.
     pub fn ray_hit_local(&self, inv_model: &[f64; 16]) -> [f64; 3] {
         let eye_unit = transform_point(self.position, inv_model);
         let target = self.target();
@@ -679,7 +681,7 @@ impl Fly {
             target_unit[2] - eye_unit[2],
         ];
         ray_aabb_hit(eye_unit, dir, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
-            .unwrap_or(eye_unit)
+            .unwrap_or_else(|| closest_point_on_aabb(eye_unit, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]))
     }
 
     /// Compute the visible region in voxel coordinates by unprojecting the frustum.
@@ -960,6 +962,19 @@ fn rotation_matrix_to_quat(m: [[f64; 3]; 3]) -> [f64; 4] {
             (m[1][0] - m[0][1]) / s,
         ]
     }
+}
+
+/// Closest point on an AABB to a given point (clamped to the box surface).
+fn closest_point_on_aabb(
+    point: [f64; 3],
+    box_min: [f64; 3],
+    box_max: [f64; 3],
+) -> [f64; 3] {
+    [
+        point[0].clamp(box_min[0], box_max[0]),
+        point[1].clamp(box_min[1], box_max[1]),
+        point[2].clamp(box_min[2], box_max[2]),
+    ]
 }
 
 /// Ray-AABB intersection using the slab method.
