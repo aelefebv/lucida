@@ -63,17 +63,19 @@ export class LayerCompositor {
     };
   }
 
-  composite(canvasView: GPUTextureView, layers: CompositeLayer[], encoder: GPUCommandEncoder): void {
+  composite(canvasView: GPUTextureView, layers: CompositeLayer[], encoder: GPUCommandEncoder, clearFirst: boolean = true): void {
     if (layers.length === 0) {
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: canvasView,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: BG,
-        }],
-      });
-      pass.end();
+      if (clearFirst) {
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [{
+            view: canvasView,
+            loadOp: "clear",
+            storeOp: "store",
+            clearValue: BG,
+          }],
+        });
+        pass.end();
+      }
       return;
     }
 
@@ -82,9 +84,9 @@ export class LayerCompositor {
       const pass = encoder.beginRenderPass({
         colorAttachments: [{
           view: canvasView,
-          loadOp: i === 0 ? "clear" : "load",
+          loadOp: (clearFirst && i === 0) ? "clear" : "load",
           storeOp: "store",
-          ...(i === 0 ? { clearValue: BG } : {}),
+          ...((clearFirst && i === 0) ? { clearValue: BG } : {}),
         }],
       });
 

@@ -142,6 +142,7 @@ export interface VolumeLayerParams {
   blendMode: "alpha" | "additive" | "max";
   renderMode: "translucent" | "max_intensity";
   colormap?: string;
+  scissorRect?: [number, number, number, number];
 }
 
 export interface VolumeRenderMultiPassMessage {

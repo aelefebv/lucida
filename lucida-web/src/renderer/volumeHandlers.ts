@@ -7,7 +7,6 @@ import type {
 } from "./workerProtocol.ts";
 import { VOLUME_ATLAS_BUDGET } from "./workerProtocol.ts";
 import { createEmptyVolumeTexture, writeVolumeChunk } from "./gpuContext.ts";
-import type { CompositeLayer } from "./layerCompositor.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 
 interface AtlasState {
@@ -294,9 +293,11 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
 
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
-  const pool = ctx.ensureOffscreenPool(msg.layers.length, msg.canvasW, msg.canvasH);
+  // Only 1 offscreen texture needed — render and composite each layer incrementally
+  const pool = ctx.ensureOffscreenPool(1, msg.canvasW, msg.canvasH);
 
-  const renderedLayers: CompositeLayer[] = [];
+  const canvasView = ctx.context.getCurrentTexture().createView();
+  let isFirstLayer = true;
 
   for (const layer of msg.layers) {
     const atlas = atlasPerDataset.get(layer.datasetId);
@@ -315,7 +316,6 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
     }
 
     if (atlas) {
-      // Flush indirection data to GPU only if chunks changed since last render
       if (atlas.indirectionDirty) {
         ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
         atlas.indirectionDirty = false;
@@ -328,7 +328,6 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
         [atlas.levelWidth, atlas.levelHeight, atlas.levelDepth],
       );
     } else {
-      // No atlas — use dummy; set chunkDims = volumeDims so single indirection entry covers all
       renderer.setAtlas(
         ctx.getDummy3DTexture(), getDummyIndirectionBuf(ctx.device),
         [fb!.width, fb!.height, fb!.depth], [1, 1, 1], [1, 1, 1],
@@ -336,23 +335,28 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
       );
     }
 
-    const idx = renderedLayers.length;
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(layer.opacity);
     renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
     renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
     const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
     const depthView = depth.createView();
-    const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(pool[idx].createView(), layerEncoder, depthView, idx === 0);
-    ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: pool[idx].createView(), blendMode: layer.blendMode });
+
+    // Render volume to single offscreen texture, then composite onto canvas
+    const encoder = ctx.device.createCommandEncoder();
+    renderer.renderTo(pool[0].createView(), encoder, depthView, isFirstLayer, undefined, undefined, layer.scissorRect);
+    comp.composite(canvasView, [{ view: pool[0].createView(), blendMode: layer.blendMode }], encoder, isFirstLayer);
+    ctx.device.queue.submit([encoder.finish()]);
+
+    isFirstLayer = false;
   }
 
-  const canvasView = ctx.context.getCurrentTexture().createView();
-  const compEncoder = ctx.device.createCommandEncoder();
-  comp.composite(canvasView, renderedLayers, compEncoder);
-  ctx.device.queue.submit([compEncoder.finish()]);
+  // If no layers were rendered, clear the canvas
+  if (isFirstLayer) {
+    const clearEncoder = ctx.device.createCommandEncoder();
+    comp.composite(canvasView, [], clearEncoder);
+    ctx.device.queue.submit([clearEncoder.finish()]);
+  }
 
   const cr = ctx.getCursorRenderer();
   if (cr.hasData() && msg.viewProj && depthTexture) {

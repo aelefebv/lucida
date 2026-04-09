@@ -81,7 +81,7 @@ Gets compressed chunk data from the server, decompresses, and caches it.
 **How it works:**
 1. `ensureFetched(coords[])` accepts a priority-sorted list of chunk coords
 2. Filters to uncached chunks, decides abort-and-restart vs. incremental-add
-3. Up to `MAX_CONCURRENT=12` fetch workers run in parallel
+3. Up to `maxConcurrent` fetch workers run in parallel (default 12, scaled by active channel count in multi-channel mode via `setConcurrency()`, capped at 48)
 4. Each worker: pops from queue → calls `remoteFetcher(coord, signal)` → decompresses → stores in cache
 5. `bumpVersion()` fires a `setTimeout` to coalesce rapid arrivals, then notifies all subscribers
 
@@ -410,8 +410,8 @@ For reference, the complete end-to-end flow:
 │  │  handleRenderMultiPass()                       │ │
 │  │    ├─ flush indirection only if dirty          │ │
 │  │    ├─ bind atlas + fallback + indirection      │ │
-│  │    ├─ render each layer to offscreen           │ │
-│  │    ├─ composite layers → canvas                │ │
+│  │    ├─ per layer: render to offscreen + scissor  │ │
+│  │    ├─ per layer: composite onto canvas          │ │
 │  │    └─ render peer cursors                      │ │
 │  │              │                                 │ │
 │  └──────────────┼─────────────────────────────────┘ │

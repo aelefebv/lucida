@@ -18,12 +18,12 @@ export interface QualifiedChunkCoord extends ChunkCoord {
 /** A function that fetches a single chunk's decompressed data. */
 export type ChunkFetcher = (coord: ChunkCoord, signal?: AbortSignal) => Promise<ArrayBuffer>;
 
-const MAX_CONCURRENT = 12;
+const DEFAULT_MAX_CONCURRENT = 12;
 const MAX_CACHE_BYTES = 512 * 1024 * 1024; // 512 MB
 
 /**
  * A shared fetch queue for an entire dataset. All members share global
- * concurrency (MAX_CONCURRENT = 12) and a single abort/priority mechanism.
+ * concurrency (default 12, scalable for multi-channel) and a single abort/priority mechanism.
  * Cache lookups remain per-member so the render loop can query
  * "does member X have chunk Y".
  */
@@ -41,6 +41,7 @@ export class SharedChunkQueue {
   private activeWorkerCount = 0;
   private activeFetches = new Set<string>();
   private workerGeneration = 0;
+  private maxConcurrent = DEFAULT_MAX_CONCURRENT;
 
   /** LRU eviction state */
   private totalBytes = 0;
@@ -50,6 +51,15 @@ export class SharedChunkQueue {
   /** Composite cache key incorporating memberId. */
   private compositeKey(memberId: string, chunkKey: string): string {
     return `${memberId}/${chunkKey}`;
+  }
+
+  /** Adjust max concurrent fetches (e.g. scale by active channel count). */
+  setConcurrency(n: number): void {
+    const prev = this.maxConcurrent;
+    this.maxConcurrent = n;
+    if (n > prev && this.pendingQueue.length > 0) {
+      this.launchFetchTasks();
+    }
   }
 
   /** Register a member's fetcher function. */
@@ -243,7 +253,7 @@ export class SharedChunkQueue {
     const signal = this.abortController.signal;
     const gen = this.workerGeneration;
     const toStart = Math.min(
-      MAX_CONCURRENT - this.activeWorkerCount,
+      this.maxConcurrent - this.activeWorkerCount,
       this.pendingQueue.length,
     );
     for (let i = 0; i < toStart; i++) {

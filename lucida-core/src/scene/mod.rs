@@ -253,7 +253,9 @@ impl Scene {
                 z_range: region.z_range.clone(),
                 effective_zoom: region.effective_zoom,
                 sort_center: region.sort_center.map(|[cx, cy, cz]| [cx - pos_x, cy - pos_y, cz]),
-                frustum_planes: region.frustum_planes,
+                frustum_planes: region.frustum_planes.map(|planes| {
+                    planes.map(|[a, b, c, d]| [a, b, c, d + a * pos_x + b * pos_y])
+                }),
             };
 
             let mut needed = Vec::new();
@@ -777,5 +779,71 @@ mod tests {
         let ids: Vec<&str> = plans.iter().map(|p| p.member_id.as_str()).collect();
         assert!(ids.contains(&"m1"), "m1 should be visible");
         assert!(ids.contains(&"m2"), "m2 should be visible");
+    }
+
+    #[test]
+    fn frustum_culling_offset_member_3d() {
+        // Two plate members side by side, viewed with an Arcball camera zoomed
+        // into the SECOND member. m2 is at voxel position [256, 0] — a full
+        // well-width away. This exercises two fixes:
+        //   1. visible_region xy_bounds must NOT be clamped to [0, shape],
+        //      otherwise the AABB test rejects m2 (pos_x=256 >= shape_x=256).
+        //   2. frustum planes must be offset by [pos_x, pos_y] so the
+        //      per-chunk culling operates in member-local coordinates.
+        let shape: [u32; 3] = [64, 256, 256];
+        let scale: [f64; 3] = [1.0, 1.0, 1.0];
+        let vt = crate::transform::compute_volume_transform(shape, scale);
+
+        let layer = Layer {
+            name: "img".into(),
+            visible: true,
+            num_levels: 1,
+            chunk_size: [64, 256, 256],
+            data_shape: shape,
+            level_info: vec![],
+        };
+
+        let mut scene = Scene::new([800, 600]);
+        // Camera aimed at m2's center in world space.
+        // m2 occupies world X [1.0, 2.0] (since shape_x=256, sx=1.0, offset=256/256=1.0).
+        // Center of m2 is at world [1.5, 0.5, 0.125].
+        scene.camera = Camera::new_3d([800, 600]);
+        if let Camera::Arcball(ref mut arc) = scene.camera {
+            arc.target = [1.5, 0.5, 0.125];
+            arc.distance = 1.0;
+            arc.phi = std::f64::consts::FRAC_PI_2;
+            arc.theta = 0.0;
+        }
+
+        scene.add_dataset(Dataset {
+            id: "plate".into(),
+            name: "plate".into(),
+            kind: DatasetKind::default(),
+            layers: vec![layer],
+            volume_transform: Some(vt),
+            volume_shape: Some(shape),
+            members: vec![
+                DatasetMember {
+                    id: "m1".into(),
+                    position: [0.0, 0.0],
+                    store_prefix: Some("A/1/0".into()),
+                },
+                DatasetMember {
+                    id: "m2".into(),
+                    position: [256.0, 0.0],
+                    store_prefix: Some("A/2/0".into()),
+                },
+            ],
+            client_metadata: None,
+        });
+
+        scene.view.z_range = 0..64;
+        let plans = scene.chunk_plan_for("plate");
+        let m2_plan = plans.iter().find(|p| p.member_id == "m2");
+        assert!(m2_plan.is_some(), "m2 should pass AABB (visible_region not clamped to shape)");
+        assert!(
+            !m2_plan.unwrap().needed.is_empty(),
+            "m2 should have non-empty needed list (frustum planes offset correctly)",
+        );
     }
 }

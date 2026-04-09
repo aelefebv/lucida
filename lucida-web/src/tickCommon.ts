@@ -279,6 +279,10 @@ export function planAndFetchForDatasets(
       }
     }
 
+    // Scale fetch concurrency by active channel count so multi-channel
+    // mode gets comparable throughput to separate datasets.
+    ds.sharedQueue.setConcurrency(Math.min(12 * channels.length, 48));
+
     if (perMemberFetchLists.length > 0) {
       const unified = interleaveFetchLists(perMemberFetchLists);
       ds.sharedQueue.ensureFetched(unified);

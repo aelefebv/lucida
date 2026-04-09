@@ -255,7 +255,7 @@ export class VolumeRenderer {
     return this.transientDepthTex.createView();
   }
 
-  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number) {
+  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number, scissorRect?: [number, number, number, number]) {
     if (!this.bindGroup) return;
 
     // Compute step size based on volume dimensions
@@ -312,6 +312,9 @@ export class VolumeRenderer {
     };
 
     const pass = encoder.beginRenderPass(desc);
+    if (scissorRect) {
+      pass.setScissorRect(scissorRect[0], scissorRect[1], scissorRect[2], scissorRect[3]);
+    }
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.draw(3); // full-screen triangle
