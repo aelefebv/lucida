@@ -3,7 +3,7 @@ import type { WasmScene } from "lucida-core";
 import type { ChunkCoord, QualifiedChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
-import type { SeedPendingInfo, UploadState } from "./uploadCommon.ts";
+import type { UploadState } from "./uploadCommon.ts";
 import type { DatasetInfo } from "./zarr/metadata.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
@@ -91,31 +91,16 @@ export function evaluateAndSortPlans(
 }
 
 /**
- * Build a fetch list for a single member, prepending seed coords for priority.
+ * Build a fetch list for a single member.
  *
- * Both paths concatenate `needed + prefetch + minimapPending`, then prepend
- * any seed coords that haven't already been queued in the shared fetch queue.
+ * Concatenates `needed + prefetch + minimapPending`.
  */
 export function buildMemberFetchList(
   needed: ChunkCoord[],
   prefetch: ChunkCoord[],
-  seedInfo: { coords: ChunkCoord[] } | undefined,
-  sharedQueue: SharedChunkQueue,
-  memberId: string,
   minimapPending: ChunkCoord[] | undefined,
 ): ChunkCoord[] {
-  let fetchList: ChunkCoord[] = [...needed, ...prefetch, ...(minimapPending ?? [])];
-
-  if (seedInfo) {
-    const seedFetchCoords = seedInfo.coords.filter(
-      sc => !sharedQueue.has(memberId, sc.key),
-    );
-    if (seedFetchCoords.length > 0) {
-      fetchList = [...seedFetchCoords, ...fetchList];
-    }
-  }
-
-  return fetchList;
+  return [...needed, ...prefetch, ...(minimapPending ?? [])];
 }
 
 /**
@@ -147,27 +132,23 @@ export function interleaveFetchLists(
 
 /** Callback interface for render-path-specific plan+fetch logic. */
 export interface PlanFetchActions {
-  seedChangeKey: string;
   shouldSkipDataset(dsShape: number[]): boolean;
   planCacheKey(dsId: string): string;
-  computeSeeds(dsInfo: DatasetInfo, targetLevel: number): SeedPendingInfo | null;
   onMemberProcessed?(memberId: string, mp: MemberChunkPlan, dsId: string): void;
   /**
    * Multi-channel variants: when multiChannel is true, these are called
    * per-channel with the channel index. The base versions above are used
    * for the channel that scene.c() is set to at that moment.
    */
-  seedChangeKeyForChannel?(ch: number): string;
   shouldSkipChannel?(dsShape: number[], ch: number): boolean;
   planCacheKeyForChannel?(dsId: string, ch: number): string;
-  computeSeedsForChannel?(dsInfo: DatasetInfo, targetLevel: number, ch: number): SeedPendingInfo | null;
 }
 
 /**
  * Shared plan+fetch skeleton used by both slice and volume paths.
  *
- * For each dataset: evaluate chunk plans, compute seeds on T/C/(Z) change,
- * build per-member fetch lists, interleave them, and submit to ensureFetched.
+ * For each dataset: evaluate chunk plans, build per-member fetch lists,
+ * interleave them, and submit to ensureFetched.
  *
  * When `multiChannel` is true, iterates visible channels for each dataset,
  * temporarily setting `scene.set_c(ch)` for each and using composite keys
@@ -216,10 +197,6 @@ export function planAndFetchForDatasets(
       } else {
         if (actions.shouldSkipDataset(dsShape)) continue;
       }
-
-      const seedChangeKey = multiChannel && actions.seedChangeKeyForChannel
-        ? actions.seedChangeKeyForChannel(ch)
-        : actions.seedChangeKey;
 
       const planCacheId = multiChannel ? `${dsId}:ch${ch}` : dsId;
       const planKey = multiChannel && actions.planCacheKeyForChannel
@@ -270,29 +247,12 @@ export function planAndFetchForDatasets(
       for (const mp of sortedPlans) {
         const rawMemberId = mp.member_id;
         const memberId = multiChannel ? compositeKey(rawMemberId, ch) : rawMemberId;
-        const targetLevel = mp.needed[0]?.level;
 
-        const prevStateKeyVal = state.prevStateKey.get(memberId);
-        const prevChangeKey = prevStateKeyVal?.substring(0, prevStateKeyVal.lastIndexOf("/"));
-        const needsSeed = prevChangeKey === undefined || prevChangeKey !== seedChangeKey;
-
-        if (needsSeed && targetLevel !== undefined) {
-          const seedInfo = multiChannel && actions.computeSeedsForChannel
-            ? actions.computeSeedsForChannel(ds.info, targetLevel, ch)
-            : actions.computeSeeds(ds.info, targetLevel);
-          if (seedInfo) {
-            state.seedPending.set(memberId, seedInfo);
-          } else {
-            state.seedPending.delete(memberId);
-          }
-        }
-
-        const seedInfo = state.seedPending.get(memberId);
         const mmPending = minimapPendingFetch.get(rawMemberId);
         // Use rawMemberId for both sharedQueue lookups and fetch list qualification.
         // The chunk store's fetchers are keyed by raw member ID, not composite.
         // Chunks are distinguished by their key (which includes level/t/c/z/y/x).
-        const fetchList = buildMemberFetchList(mp.needed, mp.prefetch, seedInfo, ds.sharedQueue, rawMemberId, mmPending);
+        const fetchList = buildMemberFetchList(mp.needed, mp.prefetch, mmPending);
         if (fetchList.length > 0) {
           perMemberFetchLists.push({ memberId: rawMemberId, list: fetchList });
         }

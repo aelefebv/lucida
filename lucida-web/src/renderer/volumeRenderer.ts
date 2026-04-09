@@ -2,7 +2,7 @@
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
-// Uniform buffer layout (416 bytes):
+// Uniform buffer layout (400 bytes):
 //   offset 0:   invViewProj     mat4x4f   (64B)
 //   offset 64:  modelMatrix     mat4x4f   (64B)
 //   offset 128: invModelMatrix  mat4x4f   (64B)
@@ -10,14 +10,13 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 //   offset 208: volumeDims      vec4f     (16B)
 //   offset 224: intensityRange  vec4f     (16B)
 //   offset 240: displayParams   vec4f     (16B)
-//   offset 256: fallbackDims    vec4f     (16B)
-//   offset 272: chunkDims       vec4u     (16B)
-//   offset 288: gridDims        vec4u     (16B)
-//   offset 304: atlasSlotDims   vec4u     (16B)
-//   offset 320: viewProj        mat4x4f   (64B)
-//   offset 384: camForward      vec4f     (16B)
-//   offset 400: clipParams      vec4f     (16B) = 416 total
-const UNIFORM_SIZE = 416;
+//   offset 256: chunkDims       vec4u     (16B)
+//   offset 272: gridDims        vec4u     (16B)
+//   offset 288: atlasSlotDims   vec4u     (16B)
+//   offset 304: viewProj        mat4x4f   (64B)
+//   offset 368: camForward      vec4f     (16B)
+//   offset 384: clipParams      vec4f     (16B) = 400 total
+const UNIFORM_SIZE = 400;
 
 export class VolumeRenderer {
   private device: GPUDevice;
@@ -31,10 +30,6 @@ export class VolumeRenderer {
   private gamma = 1.0;
   private opacity = 1.0;
   private renderMode = 0;
-  private fallbackTexture: GPUTexture | null = null;
-  private fallbackDims = [1, 1, 1];
-  private hasFallback = false;
-  private dummyFallbackTexture: GPUTexture | null = null;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private modelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private invModelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
@@ -50,9 +45,8 @@ export class VolumeRenderer {
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
 
-  constructor(device: GPUDevice, dummyFallbackTexture: GPUTexture) {
+  constructor(device: GPUDevice) {
     this.device = device;
-    this.dummyFallbackTexture = dummyFallbackTexture;
 
     const shaderModule = device.createShaderModule({ code: shaderSource });
 
@@ -71,20 +65,15 @@ export class VolumeRenderer {
         {
           binding: 2,
           visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
+          buffer: { type: "read-only-storage" },
         },
         {
           binding: 3,
           visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "read-only-storage" },
-        },
-        {
-          binding: 4,
-          visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float" },
         },
         {
-          binding: 5,
+          binding: 4,
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" },
         },
@@ -155,16 +144,14 @@ export class VolumeRenderer {
     this.chunkDims = chunkDims;
     this.gridDims = gridDims;
     this.atlasSlotDims = atlasSlotDims;
-    const fbTex = this.fallbackTexture ?? this.dummyFallbackTexture!;
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: texture.createView() },
-        { binding: 2, resource: fbTex.createView() },
-        { binding: 3, resource: { buffer: indirectionBuf } },
-        { binding: 4, resource: this.lutTexture.createView() },
-        { binding: 5, resource: this.lutSampler },
+        { binding: 2, resource: { buffer: indirectionBuf } },
+        { binding: 3, resource: this.lutTexture.createView() },
+        { binding: 4, resource: this.lutSampler },
       ],
     });
   }
@@ -181,17 +168,6 @@ export class VolumeRenderer {
     }
     this.setAtlas(texture, this.singleSlotIndirectionBuf,
       [width, height, depth], [1, 1, 1], [1, 1, 1], [width, height, depth]);
-  }
-
-  setFallbackVolume(texture: GPUTexture, w: number, h: number, d: number) {
-    this.fallbackTexture = texture;
-    this.fallbackDims = [w, h, d];
-    this.hasFallback = true;
-  }
-
-  clearFallback() {
-    this.fallbackTexture = null;
-    this.hasFallback = false;
   }
 
   setIntensityRange(min: number, max: number) {
@@ -270,23 +246,21 @@ export class VolumeRenderer {
     uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 52); // volumeDims at 208B = 52 floats
     uniformData.set([this.intensityMin, this.intensityMax, 0.08, stepSize], 56); // intensityRange at 224B = 56 floats
     uniformData.set([this.gamma, this.opacity, this.renderMode, 0], 60); // displayParams at 240B = 60 floats
-    uniformData.set([this.fallbackDims[0], this.fallbackDims[1], this.fallbackDims[2],
-                     this.hasFallback ? 1.0 : 0.0], 64); // fallbackDims at 256B = 64 floats
 
     // Atlas params (u32 written via Uint32Array view)
     const u32View = new Uint32Array(uniformData.buffer);
-    u32View.set([this.chunkDims[0], this.chunkDims[1], this.chunkDims[2], 0], 68);   // chunkDims at 272B = 68 u32s
-    u32View.set([this.gridDims[0], this.gridDims[1], this.gridDims[2], 0], 72);      // gridDims at 288B = 72 u32s
-    u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], this.atlasSlotDims[2], 0], 76); // atlasSlotDims at 304B = 76 u32s
+    u32View.set([this.chunkDims[0], this.chunkDims[1], this.chunkDims[2], 0], 64);   // chunkDims at 256B = 64 u32s
+    u32View.set([this.gridDims[0], this.gridDims[1], this.gridDims[2], 0], 68);      // gridDims at 272B = 68 u32s
+    u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], this.atlasSlotDims[2], 0], 72); // atlasSlotDims at 288B = 72 u32s
 
-    // viewProj at 320B = 80 floats
-    uniformData.set(this.viewProj, 80);
+    // viewProj at 304B = 76 floats
+    uniformData.set(this.viewProj, 76);
 
-    // camForward at 384B = 96 floats
-    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], 96);
+    // camForward at 368B = 92 floats
+    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], 92);
 
-    // clipParams at 400B = 100 floats (x=clipDist, y=clipMode, z=0, w=0)
-    uniformData.set([this.clipDistance, this.clipMode, 0, 0], 100);
+    // clipParams at 384B = 96 floats (x=clipDist, y=clipMode, z=0, w=0)
+    uniformData.set([this.clipDistance, this.clipMode, 0, 0], 96);
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

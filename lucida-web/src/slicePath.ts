@@ -29,8 +29,8 @@ interface SlicePlanResult {
 }
 
 /**
- * Plan+fetch phase: set scene params, evaluate chunk plans, compute seeds,
- * build fetch lists, and submit to ensureFetched.
+ * Plan+fetch phase: set scene params, evaluate chunk plans, build fetch
+ * lists, and submit to ensureFetched.
  */
 function planAndFetchSlice(
   ctx: TickContext,
@@ -60,35 +60,7 @@ function planAndFetchSlice(
   const vpCx = vpCenter[0];
   const vpCy = vpCenter[1];
 
-  const makeSeedCoords = (dsInfo: DatasetInfo, seedLevel: number, seedT: number, seedC: number) => {
-    const seedMeta = dsInfo.levels[seedLevel];
-    const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
-    const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-    const fullResDepthS = dsInfo.levels[0].shape[2];
-    const seedLevelZ = Math.min(
-      Math.floor((z / Math.max(fullResDepthS - 1, 1)) * Math.max(sDepth - 1, 1)),
-      sDepth - 1,
-    );
-    const targetChunkZ = Math.floor(seedLevelZ / sChunkZ);
-    const ny = Math.ceil(sHeight / sChunkY);
-    const nx = Math.ceil(sWidth / sChunkX);
-    const seedCoords: ChunkCoord[] = [];
-    for (let iy = 0; iy < ny; iy++) {
-      for (let ix = 0; ix < nx; ix++) {
-        seedCoords.push({
-          level: seedLevel,
-          x: ix, y: iy, z: targetChunkZ,
-          t: seedT, c: seedC,
-          key: `${seedLevel}/${seedT}/${seedC}/${targetChunkZ}/${iy}/${ix}`,
-        });
-      }
-    }
-    return { level: seedLevel, coords: seedCoords, z: seedLevelZ, sentKeys: new Set<string>() };
-  };
-
   const actions: PlanFetchActions = {
-    seedChangeKey: `${t}/${c}/${z}`,
-
     shouldSkipDataset(dsShape: number[]) {
       return z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0];
     },
@@ -97,17 +69,7 @@ function planAndFetchSlice(
       return `${vpCx.toFixed(4)}|${vpCy.toFixed(4)}|${canvasW}|${canvasH}|${t}|${c}|${z}`;
     },
 
-    computeSeeds(dsInfo, targetLevel) {
-      const seedLevel = dsInfo.levels.length - 1;
-      if (seedLevel <= targetLevel) return null;
-      return makeSeedCoords(dsInfo, seedLevel, t, c);
-    },
-
     // Multi-channel overrides
-    seedChangeKeyForChannel(ch: number) {
-      return `${t}/${ch}/${z}`;
-    },
-
     shouldSkipChannel(dsShape: number[], ch: number) {
       return z >= dsShape[2] || ch >= dsShape[1] || t >= dsShape[0];
     },
@@ -116,11 +78,6 @@ function planAndFetchSlice(
       return `${vpCx.toFixed(4)}|${vpCy.toFixed(4)}|${canvasW}|${canvasH}|${t}|${ch}|${z}`;
     },
 
-    computeSeedsForChannel(dsInfo, targetLevel, ch) {
-      const seedLevel = dsInfo.levels.length - 1;
-      if (seedLevel <= targetLevel) return null;
-      return makeSeedCoords(dsInfo, seedLevel, t, ch);
-    },
   };
 
   const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, vpCx, vpCy, multiChannel);
@@ -130,8 +87,8 @@ function planAndFetchSlice(
 }
 
 /**
- * Upload+render phase: stream seed chunks as fallback, upload fine chunks
- * within budget, build layer params, and render.
+ * Upload+render phase: upload fine chunks within budget, build layer
+ * params, and render.
  */
 function uploadAndRenderSlice(
   ctx: TickContext,
@@ -177,7 +134,6 @@ function uploadAndRenderSlice(
 
     // In multi-channel mode, memberId is a composite key; extract the channel
     const ch = multiChannel ? (parseChannel(memberId) ?? c) : c;
-    const tczKey = `${t}/${ch}/${z}`;
 
     return {
       stateKey: `${t}/${ch}/${z}/${level}`,
@@ -187,29 +143,6 @@ function uploadAndRenderSlice(
           memberId, level, z, t, ch,
           levelWidth, levelHeight,
           chunkX, chunkY,
-        );
-      },
-
-      processSeedChunk(data, sc, seedMeta) {
-        const seedInfo = state.seedPending.get(memberId);
-        if (!seedInfo || seedInfo.z === undefined) return;
-        const [, , , sHeight, sWidth] = seedMeta.shape;
-        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-        const localZ = seedInfo.z - seedInfo.coords[0].z * sChunkZ;
-        const xOff = sc.x * sChunkX;
-        const yOff = sc.y * sChunkY;
-        const chunkW = Math.min(sChunkX, sWidth - xOff);
-        const chunkH = Math.min(sChunkY, sHeight - yOff);
-        const sliceOffset = localZ * sChunkY * sChunkX;
-        const sliceData = data.subarray(sliceOffset, sliceOffset + sChunkY * sChunkX);
-        const transferBuf = sliceData.buffer.slice(sliceData.byteOffset, sliceData.byteOffset + sliceData.byteLength);
-        client.sliceWriteFallbackChunk(
-          memberId, tczKey,
-          sWidth, sHeight,
-          transferBuf,
-          xOff, yOff,
-          chunkW, chunkH,
-          sChunkX,
         );
       },
 

@@ -1,7 +1,7 @@
 /** Shared upload infrastructure for slice and volume render paths. */
-import type { ChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
+import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
-import type { DatasetInfo, LevelMeta } from "./zarr/metadata.ts";
+import type { DatasetInfo } from "./zarr/metadata.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { debugStats } from "./debug/debugStats.ts";
@@ -10,16 +10,8 @@ import { debugStats } from "./debug/debugStats.ts";
 // State types
 // ---------------------------------------------------------------------------
 
-export interface SeedPendingInfo {
-  level: number;
-  coords: ChunkCoord[];
-  z?: number; // slice-only: seed layer Z for 2D extraction
-  sentKeys: Set<string>;
-}
-
 export interface UploadState {
   prevStateKey: Map<string, string>;
-  seedPending: Map<string, SeedPendingInfo>;
   sentToWorker: Map<string, Set<string>>;
   planCache: Map<string, { key: string; plans: MemberChunkPlan[] }>;
 }
@@ -27,7 +19,6 @@ export interface UploadState {
 export function createUploadState(): UploadState {
   return {
     prevStateKey: new Map(),
-    seedPending: new Map(),
     sentToWorker: new Map(),
     planCache: new Map(),
   };
@@ -40,7 +31,6 @@ export function createUploadState(): UploadState {
 export interface MemberUploadActions {
   stateKey: string;
   sendAtlasConfig(): void;
-  processSeedChunk(data: Uint16Array, sc: ChunkCoord, seedMeta: LevelMeta): void;
   sendFineChunks(chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[]): void;
 }
 
@@ -90,26 +80,6 @@ export function uploadChunksForMembers(
 
       const actions = createActions(memberId, mp, ds, dsId);
       if (!actions) continue;
-
-      // --- Seed upload (not budgeted) ---
-      const seedInfo = state.seedPending.get(memberId);
-      if (seedInfo) {
-        const seedMeta = ds.info.levels[seedInfo.level];
-        let allSent = true;
-        for (const sc of seedInfo.coords) {
-          if (seedInfo.sentKeys.has(sc.key)) continue;
-          // Fetch from the shared queue using the raw member ID (the chunk
-          // store doesn't know about composite channel keys).
-          const buf = ds.sharedQueue.get(rawMemberId, sc.key);
-          if (!buf || buf.byteLength === 0) { allSent = false; continue; }
-          const data = bufferToUint16(buf, seedMeta.dataType);
-          actions.processSeedChunk(data, sc, seedMeta);
-          seedInfo.sentKeys.add(sc.key);
-        }
-        if (allSent) {
-          state.seedPending.delete(memberId);
-        }
-      }
 
       // --- Atlas config on state key change ---
       if (actions.stateKey !== state.prevStateKey.get(memberId)) {
@@ -162,7 +132,6 @@ export function uploadChunksForMembers(
 
 export function clearUploadStateForDataset(state: UploadState, dsId: string): void {
   state.prevStateKey.delete(dsId);
-  state.seedPending.delete(dsId);
   state.sentToWorker.delete(dsId);
   state.planCache.delete(dsId);
 }
@@ -170,14 +139,12 @@ export function clearUploadStateForDataset(state: UploadState, dsId: string): vo
 export function clearUploadStateForMembers(state: UploadState, memberIds: string[]): void {
   for (const id of memberIds) {
     state.prevStateKey.delete(id);
-    state.seedPending.delete(id);
     state.sentToWorker.delete(id);
   }
 }
 
 export function resetUploadState(state: UploadState): void {
   state.prevStateKey.clear();
-  state.seedPending.clear();
   state.sentToWorker.clear();
   state.planCache.clear();
 }

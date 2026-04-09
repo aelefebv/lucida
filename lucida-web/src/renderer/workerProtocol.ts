@@ -27,20 +27,6 @@ export interface SliceChunk {
   key: string;
 }
 
-export interface SliceWriteFallbackChunkMessage {
-  type: "sliceWriteFallbackChunk";
-  datasetId: string;
-  tczKey: string;
-  fbWidth: number;
-  fbHeight: number;
-  data: ArrayBuffer;
-  xOff: number;
-  yOff: number;
-  chunkW: number;
-  chunkH: number;
-  srcStride: number;
-}
-
 export interface SliceAtlasConfigMessage {
   type: "sliceAtlasConfig";
   datasetId: string;
@@ -78,24 +64,6 @@ export interface VolumeChunk {
   y: number;
   z: number;
   key: string;
-}
-
-export interface VolumeWriteFallbackChunkMessage {
-  type: "volumeWriteFallbackChunk";
-  datasetId: string;
-  tcKey: string;
-  fbWidth: number;
-  fbHeight: number;
-  fbDepth: number;
-  data: ArrayBuffer;
-  xOff: number;
-  yOff: number;
-  zOff: number;
-  chunkW: number;
-  chunkH: number;
-  chunkD: number;
-  srcChunkX: number;
-  srcChunkY: number;
 }
 
 export interface VolumeAtlasConfigMessage {
@@ -257,10 +225,8 @@ export interface DestroyMessage {
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
-  | SliceWriteFallbackChunkMessage
   | SliceAtlasConfigMessage
   | SliceChunkDataMessage
-  | VolumeWriteFallbackChunkMessage
   | VolumeAtlasConfigMessage
   | VolumeChunkDataMessage
   | VolumeRenderMultiPassMessage

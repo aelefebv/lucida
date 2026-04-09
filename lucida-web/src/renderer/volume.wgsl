@@ -8,22 +8,20 @@ struct Uniforms {
   volumeDims: vec4f,          // offset 208 (16 bytes)
   intensityRange: vec4f,      // offset 224 (16 bytes)
   displayParams: vec4f,       // offset 240 (16 bytes) — x=gamma
-  fallbackDims: vec4f,        // offset 256 (16 bytes) — xyz=dims, w=hasFallback
-  chunkDims: vec4u,           // offset 272 (16 bytes) — xyz=chunk dimensions
-  gridDims: vec4u,            // offset 288 (16 bytes) — xyz=grid dimensions
-  atlasSlotDims: vec4u,       // offset 304 (16 bytes) — xyz=slots per axis
-  viewProj: mat4x4f,          // offset 320 (64 bytes)
-  camForward: vec4f,          // offset 384 (16 bytes) — xyz=camera forward dir
-  clipParams: vec4f,          // offset 400 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
-  // total = 416 bytes
+  chunkDims: vec4u,           // offset 256 (16 bytes) — xyz=chunk dimensions
+  gridDims: vec4u,            // offset 272 (16 bytes) — xyz=grid dimensions
+  atlasSlotDims: vec4u,       // offset 288 (16 bytes) — xyz=slots per axis
+  viewProj: mat4x4f,          // offset 304 (64 bytes)
+  camForward: vec4f,          // offset 368 (16 bytes) — xyz=camera forward dir
+  clipParams: vec4f,          // offset 384 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
+  // total = 400 bytes
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var volumeTex: texture_3d<u32>;
-@group(0) @binding(2) var fallbackTex: texture_3d<u32>;
-@group(0) @binding(3) var<storage, read> indirection: array<u32>;
-@group(0) @binding(4) var lutTex: texture_2d<f32>;
-@group(0) @binding(5) var lutSampler: sampler;
+@group(0) @binding(2) var<storage, read> indirection: array<u32>;
+@group(0) @binding(3) var lutTex: texture_2d<f32>;
+@group(0) @binding(4) var lutSampler: sampler;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -209,19 +207,8 @@ fn fs(input: VSOut) -> FsOut {
 
     var val = sampleVolume(texCoord);
     if (val == 0xFFFFFFFFu) {
-      // Chunk not loaded — try fallback
-      if (u.fallbackDims.w > 0.5) {
-        let fbDims = vec3i(u.fallbackDims.xyz);
-        let fbCoord = vec3i(
-          clamp(i32(pos.x * u.fallbackDims.x), 0, fbDims.x - 1),
-          clamp(i32((1.0 - pos.y) * u.fallbackDims.y), 0, fbDims.y - 1),
-          clamp(i32(pos.z * u.fallbackDims.z), 0, fbDims.z - 1),
-        );
-        val = textureLoad(fallbackTex, fbCoord, 0).r;
-      } else {
-        t += adaptiveStep;
-        continue;
-      }
+      t += adaptiveStep;
+      continue;
     }
     if (val == 0u) { t += adaptiveStep; continue; }
     let rawVal = f32(val);

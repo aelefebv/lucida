@@ -171,7 +171,6 @@ export class RenderLoop {
       for (const key of keysToRemove) {
         this.client.removeLayerResources(key);
         st.prevStateKey.delete(key);
-        st.seedPending.delete(key);
         st.sentToWorker.delete(key);
       }
 

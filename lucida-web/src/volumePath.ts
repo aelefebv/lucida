@@ -94,7 +94,7 @@ interface PlanResult {
 }
 
 /**
- * Plan+fetch phase: evaluate chunk plans, compute seeds, build fetch lists,
+ * Plan+fetch phase: evaluate chunk plans, build fetch lists,
  * and submit to ensureFetched. Returns data needed by upload+render, or null
  * if there's nothing to do.
  */
@@ -123,32 +123,7 @@ function planAndFetchVolume(
   const fwd = new Float32Array(scene.camera_forward());
   const hitLocals = new Map<string, [number, number, number]>();
 
-  const makeSeedCoords = (dsInfo: DatasetInfo, seedLevel: number, seedT: number, seedC: number) => {
-    const seedMeta = dsInfo.levels[seedLevel];
-    const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
-    const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-    const nz = Math.ceil(sDepth / sChunkZ);
-    const ny = Math.ceil(sHeight / sChunkY);
-    const nx = Math.ceil(sWidth / sChunkX);
-    const seedCoords: ChunkCoord[] = [];
-    for (let iz = 0; iz < nz; iz++) {
-      for (let iy = 0; iy < ny; iy++) {
-        for (let ix = 0; ix < nx; ix++) {
-          seedCoords.push({
-            level: seedLevel,
-            x: ix, y: iy, z: iz,
-            t: seedT, c: seedC,
-            key: `${seedLevel}/${seedT}/${seedC}/${iz}/${iy}/${ix}`,
-          });
-        }
-      }
-    }
-    return { level: seedLevel, coords: seedCoords, sentKeys: new Set<string>() };
-  };
-
   const actions: PlanFetchActions = {
-    seedChangeKey: `${viewT}/${viewC}`,
-
     shouldSkipDataset(dsShape: number[]) {
       return viewC >= dsShape[1] || viewT >= dsShape[0];
     },
@@ -157,22 +132,12 @@ function planAndFetchVolume(
       return `${eye[0].toFixed(4)}|${eye[1].toFixed(4)}|${eye[2].toFixed(4)}|${fwd[0].toFixed(4)}|${fwd[1].toFixed(4)}|${fwd[2].toFixed(4)}|${fullW}|${fullH}|${viewT}|${viewC}`;
     },
 
-    computeSeeds(dsInfo, targetLevel) {
-      const seedLevel = dsInfo.levels.length - 1;
-      if (seedLevel <= targetLevel) return null;
-      return makeSeedCoords(dsInfo, seedLevel, viewT, viewC);
-    },
-
     onMemberProcessed(memberId, _mp, dsId) {
       const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
       hitLocals.set(memberId, hitLocal);
     },
 
     // Multi-channel overrides
-    seedChangeKeyForChannel(ch: number) {
-      return `${viewT}/${ch}`;
-    },
-
     shouldSkipChannel(dsShape: number[], ch: number) {
       return ch >= dsShape[1] || viewT >= dsShape[0];
     },
@@ -181,11 +146,6 @@ function planAndFetchVolume(
       return `${eye[0].toFixed(4)}|${eye[1].toFixed(4)}|${eye[2].toFixed(4)}|${fwd[0].toFixed(4)}|${fwd[1].toFixed(4)}|${fwd[2].toFixed(4)}|${fullW}|${fullH}|${viewT}|${ch}`;
     },
 
-    computeSeedsForChannel(dsInfo, targetLevel, ch) {
-      const seedLevel = dsInfo.levels.length - 1;
-      if (seedLevel <= targetLevel) return null;
-      return makeSeedCoords(dsInfo, seedLevel, viewT, ch);
-    },
   };
 
   const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, eye[0], eye[1], multiChannel);
@@ -212,8 +172,8 @@ function planAndFetchVolume(
 }
 
 /**
- * Upload+render phase: stream seed chunks, send chunk plans to worker,
- * build layer params, and render. Returns true if more work remains.
+ * Upload+render phase: send chunk plans to worker, build layer params,
+ * and render. Returns true if more work remains.
  */
 function uploadAndRenderVolume(
   ctx: TickContext,
@@ -247,8 +207,6 @@ function uploadAndRenderVolume(
 
     const hitLocal = hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
 
-    const tcKey = `${viewT}/${ch}`;
-
     return {
       stateKey: `${viewT}/${ch}/${targetLevel}`,
 
@@ -257,26 +215,6 @@ function uploadAndRenderVolume(
           memberId, targetLevel, viewT, ch,
           widthFull, heightFull, depthFull,
           chunkX, chunkY, chunkZ,
-        );
-      },
-
-      processSeedChunk(data, sc, seedMeta) {
-        const [, , sDepth, sHeight, sWidth] = seedMeta.shape;
-        const [, , sChunkZ, sChunkY, sChunkX] = seedMeta.chunkShape;
-        const xOff = sc.x * sChunkX;
-        const yOff = sc.y * sChunkY;
-        const zOff = sc.z * sChunkZ;
-        const cw = Math.min(sChunkX, sWidth - xOff);
-        const chH = Math.min(sChunkY, sHeight - yOff);
-        const cd = Math.min(sChunkZ, sDepth - zOff);
-        const transferBuf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-        client.volumeWriteFallbackChunk(
-          memberId, tcKey,
-          sWidth, sHeight, sDepth,
-          transferBuf,
-          xOff, yOff, zOff,
-          cw, chH, cd,
-          sChunkX, sChunkY,
         );
       },
 

@@ -28,7 +28,7 @@ export function usePreUpload({
   const preUploadedRef = useRef(new Set<string>());
   const prevDimsMapRef = useRef(new Map<string, { w: number; h: number; d: number }>());
 
-  // Eagerly pre-upload initial volumes/fallbacks for all datasets
+  // Eagerly pre-upload minimap overviews for all datasets
   useEffect(() => {
     const client = clientRef.current;
     if (!client || !clientReady) return;
@@ -44,28 +44,6 @@ export function usePreUpload({
     for (const [id, vol] of volumeMap) {
       if (preUploadedRef.current.has(id)) continue;
       preUploadedRef.current.add(id);
-
-      const volBuf = vol.data.buffer.slice(vol.data.byteOffset, vol.data.byteOffset + vol.data.byteLength);
-      client.volumeWriteFallbackChunk(
-        id, "preupload",
-        vol.width, vol.height, vol.depth,
-        volBuf,
-        0, 0, 0,
-        vol.width, vol.height, vol.depth,
-        vol.width, vol.height,
-      );
-
-      const sliceSize = vol.width * vol.height;
-      const slice = vol.data.subarray(0, sliceSize);
-      const sliceBuf = slice.buffer.slice(slice.byteOffset, slice.byteOffset + slice.byteLength);
-      client.sliceWriteFallbackChunk(
-        id, "preupload",
-        vol.width, vol.height,
-        sliceBuf,
-        0, 0,
-        vol.width, vol.height,
-        vol.width,
-      );
 
       const ds = datasetsRef.current.get(id);
       if (ds) {
