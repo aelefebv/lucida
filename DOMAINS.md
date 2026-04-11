@@ -63,9 +63,9 @@ The simple rule: if a function depends only on camera state, transforms, metadat
                   │                                             │
                   │  lucida-server                              │
                   │  ├─ Session management                      │
-                  │  ├─ Import: import_dataset → ServerBinding  │
+                  │  ├─ Import: dataset registration + serving  │
                   │  ├─ Chunk serving via ChunkResolver         │
-                  │  ├─ Storage decompression (LZ4 → raw)       │
+                  │  ├─ Storage codec decompression              │
                   │  └─ Future: overview generation, sharding   │
                   │                                             │
                   │  lucida-protocol (shared Rust crate)        │
@@ -83,8 +83,8 @@ The simple rule: if a function depends only on camera state, transforms, metadat
                   │                                             │
                   │  lucida-core (consumes content + protocol)  │
                   │  ├─ Scene state: camera, viewport, view     │
-                  │  ├─ DocumentState (IndexMap of ContentGraph)│
-                  │  ├─ DatasetDerivedState (precomputed cache) │
+                  │  ├─ Document state (dataset registry)       │
+                  │  ├─ Precomputed per-dataset query cache      │
                   │  ├─ Command & protocol types                │
                   │  ├─ Geometric query engine:                 │
                   │  │  ├─ Transform composition                │
@@ -93,7 +93,7 @@ The simple rule: if a function depends only on camera state, transforms, metadat
                   │  │  ├─ Ideal target LOD                     │
                   │  │  ├─ Ray intersection                     │
                   │  │  └─ Distance/importance ranking          │
-                  │  └─ Chunk plan (per-image, uses derived)    │
+                  │  └─ Chunk-grid helpers (per-level geometry) │
                   │                                             │
                   │  lucida-store (consumes content + protocol) │
                   │  ├─ OME-Zarr parsing (parse module)         │
@@ -130,9 +130,8 @@ The simple rule: if a function depends only on camera state, transforms, metadat
 | Domain | Language | Clients | Why |
 |--------|----------|---------|-----|
 | **Canonical Content Graph** | Rust (`lucida-content`) | All | Shared data model. Every client needs entities, transforms, layouts, metadata. |
-| **Import Protocol** | Rust (`lucida-protocol`) | All | Fetch descriptors (`ClientFetchDescriptor`), wire format, `RegisterDataset`. Shared between store (producer) and clients (consumers). |
-| **Scene State** | Rust (`lucida-core`) | All | Geometric query engine over the content graph. `DocumentState` stores `ContentGraph`s; `DatasetDerivedState` caches hot-path lookups. Shared across web (WASM), CLI (native), Python (PyO3). |
-| **Collaboration** | Rust types + client transport | All | Wire protocol from shared Rust types. Transport in TS (web), Rust (CLI), Python (py). |
+| **Scene State** | Rust (`lucida-core`) | All | Geometric query engine over the content graph. Dataset registry with precomputed per-dataset caches for hot-path queries. Shared across web (WASM), CLI (native), Python (PyO3). |
+| **Collaboration** | Rust types (`lucida-core`) + client transport | All | Collaboration protocol (commands, presence, session messages) in `lucida-core`. Transport in TS (web), Rust (CLI), Python (py). |
 | **Client UI/API** | Per client | Per client | React (web), clap (CLI), Python API (py). |
 | **Presentation Overlay** | TypeScript | Web only | Custom layouts, condition grids, browser-authored arrangements. |
 | **Asset Catalog** | TypeScript | Web only | Overview/proxy product availability, shard/transport capability. |
@@ -143,6 +142,14 @@ The simple rule: if a function depends only on camera state, transforms, metadat
 | **Pipeline.GPU Residency** | TypeScript | Web only | Atlas, page table, descriptors, wanted set. |
 | **Pipeline.Rendering** | TypeScript + WGSL | Web only | Shader dispatch, compositing. |
 | **Headless data pipeline** | Python + Rust | Python only | Chunk fetch, decode, numpy assembly. No GPU. |
+
+### Shared contract crates
+
+These are not runtime domains — they define shared types that multiple domains depend on.
+
+| Crate | Depends on | Consumers | Owns |
+|-------|-----------|-----------|------|
+| `lucida-protocol` | `lucida-content` | `lucida-core`, `lucida-store` | Fetch descriptors, wire format, registration commands |
 
 ### The WASM output boundary
 
@@ -191,10 +198,21 @@ LOD is not one decision — it is four, split across languages:
 | **Orchestrator → Planning** | `PlanningSnapshot` (assembled from all upstream domains) | In-process TypeScript call | Per planning cycle |
 | **Main thread → Worker** | `postMessage` + binary payloads | Structured clone with transfer/copy/shared-memory depending on deployment | Per frame (hot state), per epoch (cold state), per chunk (data) |
 | **Worker → Main thread** | `postMessage` | Structured clone | Wanted-set deltas, eviction reports, intensity samples, telemetry |
-| **Main thread → Decode workers** | `postMessage` + ArrayBuffer transfer | Zero-copy transfer | Per compressed chunk |
-| **Client → Server** | WebSocket + JSON/binary | Network serialization | Per command, per presence, per chunk request (`{ dataset_id, image_id, key }`) |
-| **Server → Client (import)** | `RegisterDataset { content: ContentGraph, fetch: ClientFetchDescriptor }` via command broadcast | JSON serialization | Per dataset open |
-| **Server → Client (chunks)** | Binary: `[client_id][key_len][composite_key][raw_bytes]`. Server decodes storage codec (LZ4 → raw). Wire format is `Raw` (phase 1). | Binary serialization | Per chunk response |
+| **Main thread → Decode workers** | `postMessage` + ArrayBuffer transfer | Zero-copy transfer | Per chunk requiring decode |
+| **Client → Server** | WebSocket + JSON/binary | Network serialization | Per command, per presence, per asset request (detail pages, overview assets) |
+| **Server → Client (import)** | Registration command with content graph and fetch descriptor | JSON serialization | Per dataset open |
+| **Server → Client (data)** | Asset response. Server decompresses storage codec; response encoded with negotiated wire codec. | Binary serialization | Per asset response |
+
+**Fetch modes:** The boundary rows above describe the proxied path, where all data flows through the server. The architecture also allows a direct path where the client fetches from storage without a server relay. In that mode, only data delivery changes — registration still goes through the server. Proxied-first; direct fetch details belong in a protocol spec when that capability is implemented.
+
+### Decompression authority
+
+Decompression responsibility follows the layer that owns the codec:
+
+- **Storage codec** (e.g., LZ4/Zstd in OME-Zarr storage): decompressed by the layer that reads from storage — the server for networked access, or the client directly for local file access (Python with local OME-Zarr).
+- **Wire codec** (format negotiated between server and client): decompressed by the receiving client's fetch-decode pipeline.
+
+The CPU Cache's decode pipeline handles wire-format decompression and pixel-format normalization. It does not re-decompress what the server already decompressed from storage.
 
 ### What this means in practice
 
@@ -231,7 +249,7 @@ Fetch and registration types live in `lucida-protocol` (depends on `lucida-conte
 | **Canonical entities** | Images, wells, fields — stable identity for data objects independent of layout, residency, or client |
 | **Canonical transforms** | Field-to-well transforms, voxel-to-image transforms from source metadata |
 | **Source layouts** | Plate grid layout, stage-position layout — derived deterministically from metadata |
-| **Multiscale metadata** | Axes, chunk grids, level geometry, coordinate transformations per multiscale image |
+| **Multiscale metadata** | Axes, per-level chunk geometry (chunk shape, grid dimensions, coordinate transforms), level count. Chunk shape is a **per-level property** — levels within the same image may have different chunk dimensions |
 | **Layout value types** | `LayoutSpec` — a portable value object describing a spatial arrangement of wells. Can be created by any client and registered with Scene State |
 
 ### Boundary contract
@@ -250,6 +268,8 @@ Fetch and registration types live in `lucida-protocol` (depends on `lucida-conte
 - A well exists regardless of whether a proxy has been generated for it. Proxy availability is not part of the content graph.
 - Layout definitions are portable value objects (`LayoutSpec`), not client-specific concepts. Any client can create a `LayoutSpec` and register it with Scene State via `register_layout(spec)` / `set_active_layout(id)`.
 - Custom/derived layouts (condition grids, comparison views) are authored by clients but expressed as `LayoutSpec` values that Rust can represent and Scene State can query against.
+- Chunk geometry (chunk shape, grid dimensions) is a per-level property, not an image-level invariant. Different resolution levels of the same image may have different chunk dimensions. All consumers of multiscale metadata must handle per-level chunk shapes — there is no global "chunk size" for an image.
+- Within a single resolution level, the chunk grid must be regular (uniform chunk dimensions with possible edge truncation at array boundaries). Non-regular chunk grids within a level are not supported by the interactive GPU path and must be normalized during import or rejected with a capability error.
 
 ---
 
@@ -261,7 +281,7 @@ The Rust geometric query engine. Owns viewer state and evaluates spatial queries
 
 | Subdomain | Owns | Shared across clients? |
 |-----------|------|----------------------|
-| **Document** | `DocumentState` with `IndexMap<DatasetId, ContentGraph>`. Registration via `RegisterDataset`, derived indices (`DatasetDerivedState`) precomputed per dataset for hot-path queries. | Yes (synced via server) |
+| **Document** | Dataset registry mapping dataset IDs to content graphs. Registration via commands, precomputed per-dataset caches for hot-path queries. | Yes (synced via server) |
 | **View** | Camera, T/C/Z selection, view mode, channel settings, layer visibility | No (local per client) |
 | **Layout registration** | Registered `LayoutSpec` instances, active layout selection via `register_layout()` / `set_active_layout()` | Active layout is per-client; specs may be shared |
 | **Geometric queries** | Transform composition, frustum culling, projected-size metrics, ideal target LOD, ray intersection, distance/importance ranking — all evaluated against the active layout | Shared implementation (same Rust runs native on server, WASM in browser, PyO3 in Python) |
@@ -314,7 +334,7 @@ Multiplayer session management over WebSocket.
 
 ### Cross-client notes
 
-All three clients use the same wire protocol (defined by shared Rust types in lucida-core). Transport implementation varies:
+All three clients use the same collaboration wire protocol. Protocol types (commands, presence, session messages) are defined in `lucida-core` alongside the scene state types they operate on. Fetch and import protocol types live separately in `lucida-protocol`. Transport implementation varies:
 
 - **Web:** TypeScript WebSocket client
 - **CLI:** Rust tokio-tungstenite
@@ -458,6 +478,7 @@ Planning does **not** receive chunk lists. It iterates chunks itself, lazily, bo
 - Planning is a pure function: `PlanningSnapshot → RequestPlan`. No I/O, no GPU calls, no network fetches, no direct reads from other domains.
 - Testable in isolation with a synthetic `PlanningSnapshot` — no WASM, no worker, no browser required.
 - The planner decides *what* to load. It does not decide *how* to fetch or *where* to store.
+- Planning operates on logical content identities — detail pages (entity, level, T, C, page coordinates) and proxy assets (entity, representation kind, proxy level, T, C) — not on atlas classes or physical slot dimensions. Varying chunk shape across LODs does not change request identity or planning logic — it changes worker residency behavior only.
 
 ### 6.2 CPU Cache + Content Source (main thread)
 
@@ -469,7 +490,7 @@ Holds decompressed data between network and GPU. Schedules fetches. Resolves log
 |-----------|------|
 | **Overview cache** | Coarse proxy assets (well proxies, field proxies, native image overviews) |
 | **Detail cache** | Decompressed native chunks for active promoted fields |
-| **Fetch + decode pipeline** | Network request scheduling, LZ4/Zstd decompression, concurrency budgeting |
+| **Fetch + decode pipeline** | Network request scheduling, wire-format decompression, pixel-format normalization, concurrency budgeting |
 | **Content source** | Resolves logical asset requests to physical storage. The planner requests logical things (overview asset for well A1, T=37, channel 2; detail page for field F17, level 2, T=37, C=0, z/y/x). The source resolves that to a raw OME-Zarr object, a shard byte range, a derived overview asset, or a batched response. This keeps transport layout from contaminating planning. |
 
 **Boundary contract:**
@@ -478,8 +499,8 @@ Holds decompressed data between network and GPU. Schedules fetches. Resolves log
 - **Outputs:** Ready deliveries to Orchestrator (decompressed chunk/proxy buffers for GPU upload). Cache status (hit rates, bytes).
 
 **Rules:**
-- The CPU cache does not know about GPU textures, atlas slots, or page tables.
-- Cache keys are canonical content identity, not layout-dependent.
+- The CPU cache does not know about GPU textures, atlas pools, or page tables.
+- Cache keys are canonical content identity — detail pages keyed by (entity, level, T, C, page coordinates), proxy assets keyed by (entity, representation kind, proxy level, T, C) — not layout-dependent or atlas-class-dependent. Varying chunk shape across LODs does not affect cache key semantics.
 - Overview and detail have separate eviction policies and lifetime behavior.
 - The fetch scheduler budgets by bytes-in-flight and lane priority, not a single flat count.
 - The content source abstraction hides whether bytes came from individual OME-Zarr chunks, a shard, a batched response, or a cached overview product.
@@ -493,15 +514,15 @@ Defines the serialization contract between main thread and worker. Messages are 
 | Direction | Message | Frequency |
 |-----------|---------|-----------|
 | Main → Worker | Hot render state (camera, viewport, T, channel mask, render mode, interaction state) | Every frame |
-| Main → Worker | Cold layout/content state (entity list, transforms, descriptors, metadata) | Per epoch change |
+| Main → Worker | Cold layout/content state (entity list, transforms, per-LOD chunk dimensions, channel config, metadata). The worker builds descriptor buffers from these logical inputs — proxy handles and page-table bases are worker-owned residency state, not main-thread outputs. | Per epoch change |
 | Worker → Main | Wanted-set deltas (missing proxy assets, missing detail pages for current epoch) | On epoch change or whenever the wanted set changes materially |
 
 **Data messages** (deliver content):
 
 | Direction | Message | Frequency |
 |-----------|---------|-----------|
-| Main → Worker | Proxy asset deliveries (overview data with entity/T/C/epoch tags) | As ready |
-| Main → Worker | Detail page deliveries (chunk data with page identity/T/C/epoch tags) | As ready |
+| Main → Worker | Proxy asset deliveries (overview data with entity/representation kind/proxy level/T/C/epoch tags) | As ready |
+| Main → Worker | Detail page deliveries (chunk data with page identity, actualDims for edge chunks, T/C/epoch tags) | As ready |
 
 **Telemetry messages** (observe, never act on):
 
@@ -537,15 +558,14 @@ Manages where data lives in VRAM. Emits demand for missing assets back to the ma
 
 | Subdomain | Owns |
 |-----------|------|
-| **Proxy atlas** | Overview asset slots — one slot per proxy volume/tile. Simple allocation, no page table |
-| **Detail atlas** | Chunk page slots — page-table-backed virtual texturing for promoted fields. Holds multiple native LODs per promoted entity within the detail-owned range, not just the target LOD |
-| **Page table** | Maps page addresses to atlas slots. Only maps current-T/current-C pages. Contains entries for every detail-owned level per promoted entity |
-| **Descriptors** | Per-entity GPU buffers (model matrix, proxy handle, page table base, channel mask) |
+| **Atlas pools** | Multiple texture atlases keyed by (representation kind, texel format, slot dimensions). A single promoted entity may span multiple pools across LODs when chunk shape varies by level. Pools are allocated on demand and shared across entities with matching physical parameters. Overview proxy assets are addressed via a direct (pool, slot) handle — they do not go through the page table |
+| **Page table** | Maps logical detail page addresses to physical (pool, slot) pairs. Only used for native detail pages, not for overview proxies. Only maps current-T/current-C pages. Contains entries for every detail-owned level per promoted entity. Logical chunk geometry (per-LOD dimensions) lives in per-level descriptors, not in page-table entries |
+| **Descriptors** | Per-entity GPU buffers: model matrix, channel mask, and proxy handle (direct pool/slot reference for overview fallback), and for promoted entities also page table base + per-LOD chunk dimensions. A promoted entity carries both paths to support the detail → proxy → nothing fallback chain. Detail descriptors carry the logical chunk geometry the shader needs for page lookup and intra-chunk sampling |
 | **Wanted set** | Reports missing proxy assets and detail pages for the current epoch to main thread via Worker Protocol. Subscription/delta-based, not per-frame polling |
 
 **Boundary contract:**
 
-- **Inputs:** Chunk buffers (via protocol), cold state (layout, transforms, metadata on epoch change).
+- **Inputs:** Chunk buffers with edge dimensions (via protocol), cold state (layout, transforms, per-LOD chunk geometry, metadata on epoch change).
 - **Outputs:**
   - Bound textures + descriptor buffers ready for rendering
   - Wanted-set deltas back to main thread (missing proxies and pages for current epoch)
@@ -553,11 +573,13 @@ Manages where data lives in VRAM. Emits demand for missing assets back to the ma
 
 **Rules:**
 - GPU Residency does not decide what to load — it manages where delivered data lives and reports what is missing.
+- Atlas pools are keyed by physical parameters (representation kind, texel format, slot dimensions), not by entity or LOD level. A promoted entity whose chunk shape varies across LODs will have pages in different pools — this is normal, not exceptional.
+- In v1, atlas pool slot dimensions exactly match the logical chunk dimensions of the pages they hold. Padded or bucketed slot sizes (accepting smaller chunks into larger slots) are a future optimization that trades VRAM waste for fewer pools — not supported initially.
 - Atlas entries are keyed by canonical content identity, not by layout. Same well in two layouts = one atlas entry, two instance transforms.
+- The page table maps logical detail page addresses to physical (pool, slot) pairs. It does not encode chunk geometry — that lives in per-LOD descriptors.
 - The page table only maps currently valid pages (current T, current channels). Stale T/C pages are unmapped, not kept as fallback.
-- Proxy atlas and detail atlas are separate families with separate eviction.
 - Stale deliveries (wrong epoch) are dropped on arrival, not placed into the atlas.
-- Adjacent-T runway pages may remain physically resident in the detail atlas but are not mapped into the current page table until `selectionEpoch` changes. This is how temporal runway coexists with the "no stale T/C mapping" rule.
+- Adjacent-T runway pages may remain physically resident in atlas pools but are not mapped into the current page table until `selectionEpoch` changes. This is how temporal runway coexists with the "no stale T/C mapping" rule.
 
 ### 6.5 Rendering (worker thread)
 
@@ -591,6 +613,7 @@ The overview proxy is the fallback below the detail-owned range and the global n
 
 **Rules:**
 - Rendering does not manage residency. It does not allocate atlas slots, update page tables, or evict data.
+- The shader has two residency addressing paths: overview proxies are sampled via a direct proxy handle (pool/slot reference), while detail pages are sampled via page-table lookup with LOD-specific logical chunk dimensions from per-LOD descriptors. The atlas pool is just the physical backing store — its slot dimensions are a packing concern, not a sampling concern.
 - Never render stale T/C data as if it were current. Stale data may be physically cached but must not be semantically mapped.
 - Rendering may use one pass or multiple passes, but the semantic fallback chain is fixed.
 
@@ -638,6 +661,7 @@ These rules prevent the domains from becoming entangled.
 Client UI/API ──reads──► Scene State
 Client UI/API ──reads──► Content Graph
 Client UI/API ──reads──► Pipeline (telemetry only, web)
+Client UI/API ──reads──► Presentation Overlay (derived layouts, web)
 Client UI/API ──writes─► Scene State (commands)
 Collaboration ──reads/writes──► Scene State (commands, view snapshots)
 Scene State ──reads──► Content Graph (entities, transforms, source layouts, LayoutSpec values)
