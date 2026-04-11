@@ -192,6 +192,25 @@ impl Camera {
         }
     }
 
+    /// Unproject screen coordinates to a world-space ray.
+    pub fn unproject_ray(&self, screen_x: f64, screen_y: f64) -> crate::ray::Ray {
+        match self {
+            Camera::Slice(s) => {
+                let world_x =
+                    (screen_x - s.viewport[0] as f64 / 2.0) / s.zoom + s.center[0];
+                let world_y =
+                    (screen_y - s.viewport[1] as f64 / 2.0) / s.zoom + s.center[1];
+                crate::ray::Ray::new([world_x, world_y, -1000.0], [0.0, 0.0, 1.0])
+            }
+            Camera::Arcball(a) => {
+                unproject_screen_ray(screen_x, screen_y, a.viewport, &a.view_proj_f64())
+            }
+            Camera::Fly(f) => {
+                unproject_screen_ray(screen_x, screen_y, f.viewport, &f.view_proj_f64())
+            }
+        }
+    }
+
     /// Compute the visible region in voxel coordinates for chunk planning.
     ///
     /// - `view_z_range`: z range from ViewState (used in 2D mode)
@@ -996,7 +1015,6 @@ fn rotation_matrix_to_quat(m: [[f64; 3]; 3]) -> [f64; 4] {
 fn project_3d(world_point: [f64; 3], view_proj: &[f64; 16], viewport: [u32; 2]) -> Option<[f64; 2]> {
     let [x, y, z] = world_point;
     let vp = view_proj;
-    // Multiply by view-projection matrix (column-major)
     let clip_x = vp[0] * x + vp[4] * y + vp[8]  * z + vp[12];
     let clip_y = vp[1] * x + vp[5] * y + vp[9]  * z + vp[13];
     let clip_w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
@@ -1005,15 +1023,36 @@ fn project_3d(world_point: [f64; 3], view_proj: &[f64; 16], viewport: [u32; 2]) 
         return None;
     }
 
-    // Perspective divide -> NDC [-1, 1]
     let ndc_x = clip_x / clip_w;
     let ndc_y = clip_y / clip_w;
 
-    // NDC to screen pixels: x: [-1,1] -> [0, width], y: [-1,1] -> [height, 0] (y flipped)
     let sx = (ndc_x + 1.0) * 0.5 * viewport[0] as f64;
     let sy = (1.0 - ndc_y) * 0.5 * viewport[1] as f64;
 
     Some([sx, sy])
+}
+
+/// Unproject screen coordinates to a world-space ray using a view-projection matrix.
+fn unproject_screen_ray(
+    screen_x: f64,
+    screen_y: f64,
+    viewport: [u32; 2],
+    view_proj: &[f64; 16],
+) -> crate::ray::Ray {
+    let ndc_x = (screen_x / viewport[0] as f64) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (screen_y / viewport[1] as f64) * 2.0;
+
+    let inv_vp = invert4_f64(*view_proj);
+    let near_world = unproject(&[ndc_x, ndc_y, -1.0], &inv_vp);
+    let far_world = unproject(&[ndc_x, ndc_y, 1.0], &inv_vp);
+
+    let dir = [
+        far_world[0] - near_world[0],
+        far_world[1] - near_world[1],
+        far_world[2] - near_world[2],
+    ];
+
+    crate::ray::Ray::new(near_world, dir)
 }
 
 /// Closest point on an AABB to a given point (clamped to the box surface).

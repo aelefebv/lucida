@@ -620,6 +620,16 @@ impl WasmScene {
         vec![hit[0], 1.0 - hit[1], hit[2]]
     }
 
+    /// Pick the closest entity hit by a ray cast from screen coordinates.
+    /// Returns a JSON-serialized `RayHit` or `"null"` if nothing was hit.
+    pub fn ray_pick(&self, dataset_id: &str, screen_x: f64, screen_y: f64) -> String {
+        let id = DatasetId(dataset_id.into());
+        match self.inner.ray_pick(&id, screen_x, screen_y) {
+            Some(hit) => serde_json::to_string(&hit).unwrap_or_default(),
+            None => "null".to_string(),
+        }
+    }
+
     // --- Layer display settings ---
 
     pub fn dataset_order(&self) -> String {
