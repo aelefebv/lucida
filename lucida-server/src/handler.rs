@@ -501,8 +501,21 @@ async fn serve_chunk_from_store(
             }
         }
         crate::binding::StorageCompression::Zstd => {
-            eprintln!("server: zstd decompression not yet implemented for {chunk_key}");
-            return;
+            match zstd::stream::decode_all(std::io::Cursor::new(&storage_bytes)) {
+                Ok(raw) => {
+                    tracing::debug!(
+                        key = chunk_key,
+                        compressed = storage_bytes.len(),
+                        decompressed = raw.len(),
+                        "zstd decoded"
+                    );
+                    raw
+                }
+                Err(e) => {
+                    eprintln!("server: zstd decompression failed for {chunk_key}: {e}");
+                    return;
+                }
+            }
         }
         crate::binding::StorageCompression::None => storage_bytes.to_vec(),
     };
