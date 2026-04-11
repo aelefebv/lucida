@@ -74,6 +74,24 @@ impl From<&str> for ImageId {
 #[serde(transparent)]
 pub struct LayoutId(pub String);
 
+impl std::fmt::Display for LayoutId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for LayoutId {
+    fn from(s: &str) -> Self {
+        LayoutId(s.to_string())
+    }
+}
+
+impl From<String> for LayoutId {
+    fn from(s: String) -> Self {
+        LayoutId(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +127,12 @@ mod tests {
         let json = serde_json::to_string(&id).unwrap();
         let back: LayoutId = serde_json::from_str(&json).unwrap();
         assert_eq!(id, back);
+    }
+
+    #[test]
+    fn layout_id_display() {
+        let id = LayoutId("grid-2x2".to_string());
+        assert_eq!(id.to_string(), "grid-2x2");
     }
 
     #[test]
