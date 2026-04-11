@@ -87,16 +87,16 @@ async fn import_single_image(
         }],
     };
 
-    let content = ContentGraph {
-        dataset_id: DatasetId(id.to_string()),
-        name: name.to_string(),
-        kind: DatasetKind::Single,
-        entities: vec![entity],
-        transforms: vec![],
-        images: vec![image],
-        source_layouts: vec![source_layout],
-        default_layout_id: Some(default_layout_id),
-    };
+    let content = ContentGraph::new(
+        DatasetId(id.to_string()),
+        name.to_string(),
+        DatasetKind::Single,
+        vec![entity],
+        vec![],
+        vec![image],
+        vec![source_layout],
+        Some(default_layout_id),
+    );
 
     let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
         images: vec![ProxiedImageSpec {
@@ -450,10 +450,10 @@ async fn import_plate(
 
     let default_layout_id = source_layout.id.clone();
 
-    let content = ContentGraph {
-        dataset_id: DatasetId(id.to_string()),
-        name: name.to_string(),
-        kind: DatasetKind::Plate {
+    let content = ContentGraph::new(
+        DatasetId(id.to_string()),
+        name.to_string(),
+        DatasetKind::Plate {
             rows,
             columns,
             positioning_mode,
@@ -462,9 +462,9 @@ async fn import_plate(
         entities,
         transforms,
         images,
-        source_layouts: vec![source_layout],
-        default_layout_id: Some(default_layout_id),
-    };
+        vec![source_layout],
+        Some(default_layout_id),
+    );
 
     let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
         images: fetch_images,
@@ -768,13 +768,13 @@ mod tests {
         assert_eq!(result.content.dataset_id, DatasetId("test-id".into()));
         assert_eq!(result.content.name, "Test Dataset");
         assert!(matches!(result.content.kind, DatasetKind::Single));
-        assert_eq!(result.content.entities.len(), 1);
-        assert_eq!(result.content.entities[0].kind, EntityKind::Image);
-        assert_eq!(result.content.images.len(), 1);
-        assert_eq!(result.content.source_layouts.len(), 1);
+        assert_eq!(result.content.entities().len(), 1);
+        assert_eq!(result.content.entities()[0].kind, EntityKind::Image);
+        assert_eq!(result.content.images().len(), 1);
+        assert_eq!(result.content.source_layouts().len(), 1);
 
         // Verify multiscale.
-        let image = &result.content.images[0];
+        let image = &result.content.images()[0];
         assert!(
             image.multiscale.levels.len() >= 2,
             "expected at least 2 levels, got {}",
@@ -827,13 +827,13 @@ mod tests {
         // Should have well entities and field entities.
         let wells: Vec<_> = result
             .content
-            .entities
+            .entities()
             .iter()
             .filter(|e| e.kind == EntityKind::Well)
             .collect();
         let fields: Vec<_> = result
             .content
-            .entities
+            .entities()
             .iter()
             .filter(|e| e.kind == EntityKind::Field)
             .collect();
@@ -852,10 +852,10 @@ mod tests {
         }
 
         // Should have transforms (field->well).
-        assert!(!result.content.transforms.is_empty());
+        assert!(!result.content.transforms().is_empty());
 
         // Should have one image per field.
-        assert_eq!(result.content.images.len(), fields.len());
+        assert_eq!(result.content.images().len(), fields.len());
 
         // Fetch should be Proxied with one spec per image.
         if let ClientFetchDescriptor::Proxied(ref proxied) = result.fetch {
@@ -871,7 +871,7 @@ mod tests {
         }
 
         // Verify source layout places wells, not fields.
-        let layout = &result.content.source_layouts[0];
+        let layout = &result.content.source_layouts()[0];
         for placement in &layout.placements {
             assert!(
                 wells.iter().any(|w| w.id == placement.entity_id),
@@ -880,7 +880,7 @@ mod tests {
         }
 
         // Verify multiscale levels on images.
-        for image in &result.content.images {
+        for image in result.content.images() {
             assert_eq!(image.multiscale.levels.len(), 2, "expected 2 levels");
             let l0 = &image.multiscale.levels[0];
             assert_eq!(l0.shape, [1, 1, 10, 256, 256]);
@@ -1056,12 +1056,12 @@ mod tests {
         }
 
         // Transforms should reflect normalized stage positions.
-        assert_eq!(result.content.transforms.len(), 2);
+        assert_eq!(result.content.transforms().len(), 2);
         // FOV 0 translation [y=100, x=200] => position [x=200, y=100], normalized min.
         // FOV 1 translation [y=300, x=600] => position [x=600, y=300].
         // min_x=200, min_y=100 => FOV 0 at (0,0), FOV 1 at (400,200).
-        let t0 = &result.content.transforms[0];
-        let t1 = &result.content.transforms[1];
+        let t0 = &result.content.transforms()[0];
+        let t1 = &result.content.transforms()[1];
         assert!((t0.transform.matrix[12]).abs() < 1e-9, "FOV 0 tx should be 0");
         assert!((t0.transform.matrix[13]).abs() < 1e-9, "FOV 0 ty should be 0");
         assert!(

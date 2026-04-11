@@ -288,8 +288,8 @@ impl Scene {
 pub fn build_derived_state(content: &ContentGraph) -> DatasetDerivedState {
     // 1. Find active layout
     let active_layout = content.default_layout_id.as_ref()
-        .and_then(|id| content.source_layouts.iter().find(|l| &l.id == id))
-        .or_else(|| content.source_layouts.first())
+        .and_then(|id| content.source_layouts().iter().find(|l| &l.id == id))
+        .or_else(|| content.source_layouts().first())
         .cloned()
         .unwrap_or_else(|| LayoutSpec {
             id: LayoutId("default".into()),
@@ -301,13 +301,13 @@ pub fn build_derived_state(content: &ContentGraph) -> DatasetDerivedState {
     let mut members = Vec::new();
     let mut volume_transforms = HashMap::new();
 
-    for image in &content.images {
+    for image in content.images() {
         // Find position from layout placements
         let position = find_entity_position(
             &image.owner,
             &active_layout,
-            &content.entities,
-            &content.transforms,
+            content.entities(),
+            content.transforms(),
         );
 
         // Compute volume transform from level 0 geometry
@@ -400,11 +400,11 @@ pub(crate) mod test_helpers {
         let entity_id = EntityId(format!("{id}-entity"));
         let image_id = ImageId(format!("{id}-image"));
 
-        let content = ContentGraph {
-            dataset_id: DatasetId(id.to_string()),
-            name: name.to_string(),
-            kind: DatasetKind::Single,
-            entities: vec![Entity {
+        let content = ContentGraph::new(
+            DatasetId(id.to_string()),
+            name.to_string(),
+            DatasetKind::Single,
+            vec![Entity {
                 id: entity_id.clone(),
                 kind: EntityKind::Image,
                 parent: None,
@@ -413,8 +413,8 @@ pub(crate) mod test_helpers {
                     ..Default::default()
                 },
             }],
-            transforms: vec![],
-            images: vec![ImageSpec {
+            vec![],
+            vec![ImageSpec {
                 image_id: image_id.clone(),
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
@@ -435,9 +435,9 @@ pub(crate) mod test_helpers {
                     data_type: DataType::Uint16,
                 },
             }],
-            source_layouts: vec![],
-            default_layout_id: None,
-        };
+            vec![],
+            None,
+        );
 
         let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
@@ -487,11 +487,11 @@ pub(crate) mod test_helpers {
             });
         }
 
-        let content = ContentGraph {
-            dataset_id: DatasetId(id.to_string()),
-            name: name.to_string(),
-            kind: DatasetKind::Single,
-            entities: vec![Entity {
+        let content = ContentGraph::new(
+            DatasetId(id.to_string()),
+            name.to_string(),
+            DatasetKind::Single,
+            vec![Entity {
                 id: entity_id.clone(),
                 kind: EntityKind::Image,
                 parent: None,
@@ -500,8 +500,8 @@ pub(crate) mod test_helpers {
                     ..Default::default()
                 },
             }],
-            transforms: vec![],
-            images: vec![ImageSpec {
+            vec![],
+            vec![ImageSpec {
                 image_id: image_id.clone(),
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
@@ -516,9 +516,9 @@ pub(crate) mod test_helpers {
                     data_type: DataType::Uint16,
                 },
             }],
-            source_layouts: vec![],
-            default_layout_id: None,
-        };
+            vec![],
+            None,
+        );
 
         let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
@@ -608,21 +608,21 @@ pub(crate) mod test_helpers {
             placements,
         };
 
-        let content = ContentGraph {
-            dataset_id: DatasetId(id.to_string()),
-            name: name.to_string(),
-            kind: DatasetKind::Plate {
+        let content = ContentGraph::new(
+            DatasetId(id.to_string()),
+            name.to_string(),
+            DatasetKind::Plate {
                 rows: vec!["A".to_string()],
                 columns: vec!["1".to_string(), "2".to_string()],
                 positioning_mode: PositioningMode::Grid,
                 has_stage_positions: false,
             },
             entities,
-            transforms: vec![],
+            vec![],
             images,
-            source_layouts: vec![layout],
-            default_layout_id: Some(LayoutId("default".into())),
-        };
+            vec![layout],
+            Some(LayoutId("default".into())),
+        );
 
         let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
             images: fetch_images,
