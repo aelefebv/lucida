@@ -165,6 +165,33 @@ impl Camera {
         }
     }
 
+    /// Returns the camera position in world space.
+    pub fn eye_position(&self) -> [f64; 3] {
+        match self {
+            Camera::Slice(v) => [v.center[0], v.center[1], 0.0],
+            Camera::Arcball(v) => v.eye_position(),
+            Camera::Fly(v) => v.eye_position(),
+        }
+    }
+
+    /// Projects a world-space point to screen-space pixel coordinates.
+    /// Returns `None` if the point is behind the camera (3D modes only).
+    pub fn project_to_screen(&self, world_point: [f64; 3]) -> Option<[f64; 2]> {
+        match self {
+            Camera::Slice(v) => {
+                let sx = (world_point[0] - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
+                let sy = (world_point[1] - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
+                Some([sx, sy])
+            }
+            Camera::Arcball(v) => {
+                project_3d(world_point, &v.view_proj_f64(), v.viewport)
+            }
+            Camera::Fly(v) => {
+                project_3d(world_point, &v.view_proj_f64(), v.viewport)
+            }
+        }
+    }
+
     /// Compute the visible region in voxel coordinates for chunk planning.
     ///
     /// - `view_z_range`: z range from ViewState (used in 2D mode)
@@ -962,6 +989,31 @@ fn rotation_matrix_to_quat(m: [[f64; 3]; 3]) -> [f64; 4] {
             (m[1][0] - m[0][1]) / s,
         ]
     }
+}
+
+/// Project a world-space point to screen-space pixels using a view-projection matrix.
+/// Returns `None` if the point is behind the camera (clip-space w <= 0).
+fn project_3d(world_point: [f64; 3], view_proj: &[f64; 16], viewport: [u32; 2]) -> Option<[f64; 2]> {
+    let [x, y, z] = world_point;
+    let vp = view_proj;
+    // Multiply by view-projection matrix (column-major)
+    let clip_x = vp[0] * x + vp[4] * y + vp[8]  * z + vp[12];
+    let clip_y = vp[1] * x + vp[5] * y + vp[9]  * z + vp[13];
+    let clip_w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+
+    if clip_w <= 0.0 {
+        return None;
+    }
+
+    // Perspective divide -> NDC [-1, 1]
+    let ndc_x = clip_x / clip_w;
+    let ndc_y = clip_y / clip_w;
+
+    // NDC to screen pixels: x: [-1,1] -> [0, width], y: [-1,1] -> [height, 0] (y flipped)
+    let sx = (ndc_x + 1.0) * 0.5 * viewport[0] as f64;
+    let sy = (1.0 - ndc_y) * 0.5 * viewport[1] as f64;
+
+    Some([sx, sy])
 }
 
 /// Closest point on an AABB to a given point (clamped to the box surface).

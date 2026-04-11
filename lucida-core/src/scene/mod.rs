@@ -13,6 +13,8 @@ use lucida_content::*;
 
 use crate::camera::Camera;
 use crate::chunk::{self, ChunkRequestPlan};
+use crate::epoch::SceneEpochs;
+use crate::query::{EntityQueryResult, ViewQueryResult};
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
@@ -54,6 +56,9 @@ pub struct Scene {
     /// Derived state for fast hot-path lookups. Rebuilt on register/remove.
     #[serde(skip)]
     pub derived: HashMap<DatasetId, DatasetDerivedState>,
+    /// Monotonic epoch counters for change detection.
+    #[serde(default)]
+    pub epochs: SceneEpochs,
 }
 
 impl Scene {
@@ -66,6 +71,7 @@ impl Scene {
             dataset_order: Vec::new(),
             dataset_settings: HashMap::new(),
             derived: HashMap::new(),
+            epochs: SceneEpochs::default(),
         }
     }
 
@@ -281,6 +287,118 @@ impl Scene {
         for (id, content) in &self.document.content_graphs {
             self.derived.insert(id.clone(), build_derived_state(content));
         }
+    }
+
+    /// Query the scene for geometric information about all entities in a dataset
+    /// from the current camera viewpoint.
+    pub fn view_query(&self, dataset_id: &DatasetId) -> Option<ViewQueryResult> {
+        let derived = self.derived.get(dataset_id)?;
+        let content = self.document.content_graphs.get(dataset_id)?;
+        let vp = self.camera.viewport();
+        let eye = self.camera.eye_position();
+
+        let mut results = Vec::with_capacity(derived.members.len());
+
+        for member in &derived.members {
+            let vt = &member.volume_transform;
+            let centroid = vt.world_centroid();
+
+            // Project all 8 corners to screen space
+            let corners = vt.world_corners();
+            let mut screen_min = [f64::MAX, f64::MAX];
+            let mut screen_max = [f64::MIN, f64::MIN];
+            let mut any_visible = false;
+
+            for corner in &corners {
+                if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
+                    screen_min[0] = screen_min[0].min(sx);
+                    screen_min[1] = screen_min[1].min(sy);
+                    screen_max[0] = screen_max[0].max(sx);
+                    screen_max[1] = screen_max[1].max(sy);
+                    any_visible = true;
+                }
+            }
+
+            // Check if screen rect overlaps viewport
+            let visible = any_visible
+                && screen_max[0] > 0.0
+                && screen_max[1] > 0.0
+                && screen_min[0] < vp[0] as f64
+                && screen_min[1] < vp[1] as f64;
+
+            let (projected_diagonal_px, projected_area_px2) = if visible {
+                let w = (screen_max[0] - screen_min[0]).max(0.0);
+                let h = (screen_max[1] - screen_min[1]).max(0.0);
+                ((w * w + h * h).sqrt(), w * h)
+            } else {
+                (0.0, 0.0)
+            };
+
+            // Per-entity ideal LOD
+            let num_levels = member.levels.len() as u32;
+            let ideal_target_lod = if visible && projected_diagonal_px > 0.0 {
+                let level_0 = member.levels.first();
+                let voxel_diagonal = level_0
+                    .map(|l| {
+                        let sx = l.shape[4] as f64; // X
+                        let sy = l.shape[3] as f64; // Y
+                        let sz = l.shape[2] as f64; // Z
+                        (sx * sx + sy * sy + sz * sz).sqrt()
+                    })
+                    .unwrap_or(1.0);
+
+                let ppv = projected_diagonal_px / voxel_diagonal.max(1.0);
+                let raw = (-ppv.log2()).floor().max(0.0) as u32;
+                raw.min(num_levels.saturating_sub(1))
+            } else {
+                num_levels.saturating_sub(1) // coarsest
+            };
+
+            // Distance from camera
+            let dx = centroid[0] - eye[0];
+            let dy = centroid[1] - eye[1];
+            let dz = centroid[2] - eye[2];
+            let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+
+            // Importance: larger on screen + closer = more important
+            let importance = if distance > 1e-6 {
+                projected_area_px2 / distance
+            } else {
+                projected_area_px2
+            };
+
+            // Determine entity kind
+            let kind = content
+                .entities
+                .iter()
+                .find(|e| e.id == member.entity_id)
+                .map(|e| e.kind.clone())
+                .unwrap_or(EntityKind::Image);
+
+            results.push(EntityQueryResult {
+                entity_id: member.entity_id.clone(),
+                image_id: member.image_id.clone(),
+                kind,
+                visible,
+                projected_diagonal_px,
+                projected_area_px2,
+                centroid_world: centroid,
+                ideal_target_lod,
+                importance,
+            });
+        }
+
+        // Sort by importance descending
+        results.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Some(ViewQueryResult {
+            epochs: self.epochs.clone(),
+            visible_entities: results,
+        })
     }
 }
 
