@@ -12,11 +12,51 @@ pub struct ContentGraph {
     pub dataset_id: DatasetId,
     pub name: String,
     pub kind: DatasetKind,
-    pub entities: Vec<Entity>,
-    pub transforms: Vec<TransformEdge>,
-    pub images: Vec<ImageSpec>,
-    pub source_layouts: Vec<LayoutSpec>,
+    entities: Vec<Entity>,
+    transforms: Vec<TransformEdge>,
+    images: Vec<ImageSpec>,
+    source_layouts: Vec<LayoutSpec>,
     pub default_layout_id: Option<LayoutId>,
+}
+
+impl ContentGraph {
+    pub fn new(
+        dataset_id: DatasetId,
+        name: String,
+        kind: DatasetKind,
+        entities: Vec<Entity>,
+        transforms: Vec<TransformEdge>,
+        images: Vec<ImageSpec>,
+        source_layouts: Vec<LayoutSpec>,
+        default_layout_id: Option<LayoutId>,
+    ) -> Self {
+        Self {
+            dataset_id,
+            name,
+            kind,
+            entities,
+            transforms,
+            images,
+            source_layouts,
+            default_layout_id,
+        }
+    }
+
+    pub fn entities(&self) -> &[Entity] {
+        &self.entities
+    }
+
+    pub fn transforms(&self) -> &[TransformEdge] {
+        &self.transforms
+    }
+
+    pub fn images(&self) -> &[ImageSpec] {
+        &self.images
+    }
+
+    pub fn source_layouts(&self) -> &[LayoutSpec] {
+        &self.source_layouts
+    }
 }
 
 #[cfg(test)]
@@ -33,11 +73,11 @@ mod tests {
         let entity_id = EntityId("img-0".to_string());
         let image_id = ImageId("multiscale-0".to_string());
 
-        ContentGraph {
-            dataset_id: DatasetId("ds-test".to_string()),
-            name: "test dataset".to_string(),
-            kind: DatasetKind::Single,
-            entities: vec![Entity {
+        ContentGraph::new(
+            DatasetId("ds-test".to_string()),
+            "test dataset".to_string(),
+            DatasetKind::Single,
+            vec![Entity {
                 id: entity_id.clone(),
                 kind: EntityKind::Image,
                 parent: None,
@@ -46,12 +86,12 @@ mod tests {
                     ..Default::default()
                 },
             }],
-            transforms: vec![TransformEdge {
+            vec![TransformEdge {
                 from: entity_id.clone(),
                 to: entity_id.clone(),
                 transform: AffineTransform::identity(),
             }],
-            images: vec![ImageSpec {
+            vec![ImageSpec {
                 image_id,
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
@@ -72,9 +112,9 @@ mod tests {
                     data_type: DataType::Uint16,
                 },
             }],
-            source_layouts: vec![],
-            default_layout_id: None,
-        }
+            vec![],
+            None,
+        )
     }
 
     #[test]
@@ -85,21 +125,21 @@ mod tests {
 
         assert_eq!(graph.dataset_id, back.dataset_id);
         assert_eq!(graph.name, back.name);
-        assert_eq!(graph.entities.len(), back.entities.len());
-        assert_eq!(graph.entities[0].id, back.entities[0].id);
-        assert_eq!(graph.entities[0].kind, back.entities[0].kind);
-        assert_eq!(graph.images.len(), back.images.len());
-        assert_eq!(graph.images[0].image_id, back.images[0].image_id);
+        assert_eq!(graph.entities().len(), back.entities().len());
+        assert_eq!(graph.entities()[0].id, back.entities()[0].id);
+        assert_eq!(graph.entities()[0].kind, back.entities()[0].kind);
+        assert_eq!(graph.images().len(), back.images().len());
+        assert_eq!(graph.images()[0].image_id, back.images()[0].image_id);
         assert_eq!(
-            graph.images[0].multiscale.data_type,
-            back.images[0].multiscale.data_type
+            graph.images()[0].multiscale.data_type,
+            back.images()[0].multiscale.data_type
         );
         assert_eq!(
-            graph.images[0].multiscale.levels[0].shape,
-            back.images[0].multiscale.levels[0].shape
+            graph.images()[0].multiscale.levels[0].shape,
+            back.images()[0].multiscale.levels[0].shape
         );
-        assert_eq!(graph.transforms.len(), back.transforms.len());
-        assert_eq!(graph.transforms[0].from, back.transforms[0].from);
+        assert_eq!(graph.transforms().len(), back.transforms().len());
+        assert_eq!(graph.transforms()[0].from, back.transforms()[0].from);
         assert_eq!(graph.default_layout_id, back.default_layout_id);
     }
 }

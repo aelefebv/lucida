@@ -21,11 +21,11 @@ mod tests {
         let entity_id = EntityId("img-0".to_string());
         let image_id = ImageId("multiscale-0".to_string());
 
-        let content = ContentGraph {
-            dataset_id: DatasetId("ds-test".to_string()),
-            name: "test dataset".to_string(),
-            kind: DatasetKind::Single,
-            entities: vec![Entity {
+        let content = ContentGraph::new(
+            DatasetId("ds-test".to_string()),
+            "test dataset".to_string(),
+            DatasetKind::Single,
+            vec![Entity {
                 id: entity_id.clone(),
                 kind: EntityKind::Image,
                 parent: None,
@@ -34,12 +34,12 @@ mod tests {
                     ..Default::default()
                 },
             }],
-            transforms: vec![TransformEdge {
+            vec![TransformEdge {
                 from: entity_id.clone(),
                 to: entity_id.clone(),
                 transform: AffineTransform::identity(),
             }],
-            images: vec![ImageSpec {
+            vec![ImageSpec {
                 image_id: image_id.clone(),
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
@@ -58,9 +58,9 @@ mod tests {
                     data_type: DataType::Uint16,
                 },
             }],
-            source_layouts: vec![],
-            default_layout_id: None,
-        };
+            vec![],
+            None,
+        );
 
         let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
@@ -82,11 +82,11 @@ mod tests {
 
         assert_eq!(reg.content.dataset_id, back.content.dataset_id);
         assert_eq!(reg.content.name, back.content.name);
-        assert_eq!(reg.content.entities.len(), back.content.entities.len());
-        assert_eq!(reg.content.images.len(), back.content.images.len());
+        assert_eq!(reg.content.entities().len(), back.content.entities().len());
+        assert_eq!(reg.content.images().len(), back.content.images().len());
         assert_eq!(
-            reg.content.images[0].image_id,
-            back.content.images[0].image_id
+            reg.content.images()[0].image_id,
+            back.content.images()[0].image_id
         );
 
         match &back.fetch {

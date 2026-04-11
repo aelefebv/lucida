@@ -390,9 +390,9 @@ async fn handle_open_remote_dataset(
     };
 
     // Log import result summary.
-    let n_entities = result.content.entities.len();
-    let n_images = result.content.images.len();
-    let n_levels = result.content.images.first().map(|i| i.multiscale.levels.len()).unwrap_or(0);
+    let n_entities = result.content.entities().len();
+    let n_images = result.content.images().len();
+    let n_levels = result.content.images().first().map(|i| i.multiscale.levels.len()).unwrap_or(0);
     tracing::info!(
         id = %dataset_id,
         kind = ?result.content.kind,

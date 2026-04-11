@@ -183,11 +183,11 @@ mod tests {
     fn make_register(id: &str, name: &str) -> RegisterDataset {
         let entity_id = EntityId(format!("{id}-entity"));
         let image_id = ImageId(format!("{id}-image"));
-        let content = ContentGraph {
-            dataset_id: DatasetId(id.to_string()),
-            name: name.to_string(),
-            kind: DatasetKind::Single,
-            entities: vec![Entity {
+        let content = ContentGraph::new(
+            DatasetId(id.to_string()),
+            name.to_string(),
+            DatasetKind::Single,
+            vec![Entity {
                 id: entity_id.clone(),
                 kind: EntityKind::Image,
                 parent: None,
@@ -196,8 +196,8 @@ mod tests {
                     ..Default::default()
                 },
             }],
-            transforms: vec![],
-            images: vec![ImageSpec {
+            vec![],
+            vec![ImageSpec {
                 image_id: image_id.clone(),
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
@@ -216,9 +216,9 @@ mod tests {
                     data_type: DataType::Uint16,
                 },
             }],
-            source_layouts: vec![],
-            default_layout_id: None,
-        };
+            vec![],
+            None,
+        );
         let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id,

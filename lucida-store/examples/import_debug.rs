@@ -49,10 +49,10 @@ async fn main() {
     match lucida_store::import::import_dataset(&store, &id, &name).await {
         Ok(result) => {
             // Summary to stderr
-            let n_entities = result.content.entities.len();
-            let n_images = result.content.images.len();
-            let n_transforms = result.content.transforms.len();
-            let n_layouts = result.content.source_layouts.len();
+            let n_entities = result.content.entities().len();
+            let n_images = result.content.images().len();
+            let n_transforms = result.content.transforms().len();
+            let n_layouts = result.content.source_layouts().len();
             eprintln!("");
             eprintln!("=== Import Summary ===");
             eprintln!("  Dataset:    {} ({})", result.content.name, result.content.dataset_id.0);
@@ -62,7 +62,7 @@ async fn main() {
             eprintln!("  Transforms: {n_transforms}");
             eprintln!("  Layouts:    {n_layouts}");
 
-            if let Some(img) = result.content.images.first() {
+            if let Some(img) = result.content.images().first() {
                 let ms = &img.multiscale;
                 eprintln!("  Levels:     {}", ms.levels.len());
                 eprintln!("  Data type:  {:?}", ms.data_type);

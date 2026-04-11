@@ -112,7 +112,7 @@ impl Scene {
                         }
 
                         // Channel count from first image's C dimension
-                        let channel_count = reg.content.images.first()
+                        let channel_count = reg.content.images().first()
                             .and_then(|img| img.multiscale.levels.first())
                             .map(|l| l.shape[1] as usize)
                             .unwrap_or(1);
