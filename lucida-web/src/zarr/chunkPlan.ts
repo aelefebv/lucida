@@ -4,9 +4,8 @@ import type { ChunkCoord } from "./chunkStore.ts";
 
 /** A single member's chunk plan, as returned by the Rust WASM scene. */
 export interface MemberChunkPlan {
-  member_id: string;
+  image_id: string;
   position: [number, number];
-  store_prefix: string | null;
   needed: ChunkCoord[];
   prefetch: ChunkCoord[];
 }

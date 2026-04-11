@@ -43,14 +43,15 @@ export function markMinimapOverviewSeeded(
 ): void {
   const ds = ctx.datasets.get(datasetId);
   if (!ds) return;
-  const coarsestIdx = ds.info.levels.length - 1;
+  const multiscale = ds.content.images[0].multiscale;
+  const coarsestIdx = multiscale.levels.length - 1;
   const key = `${datasetId}/${coarsestIdx}/${t}/${c}`;
   state.overviewKey.set(datasetId, key);
   state.overviewSeeded.add(datasetId);
   // Mark all chunks as uploaded so progressive path skips
-  const levelMeta = ds.info.levels[coarsestIdx];
+  const levelMeta = multiscale.levels[coarsestIdx];
   const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
-  const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+  const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
   const nz = Math.ceil(levelDepth / chunkZ);
   const ny = Math.ceil(levelHeight / chunkY);
   const nx = Math.ceil(levelWidth / chunkX);
@@ -79,10 +80,11 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
 
   for (const [dsId, ds] of datasets) {
-    const coarsestIdx = ds.info.levels.length - 1;
-    const levelMeta = ds.info.levels[coarsestIdx];
+    const multiscale = ds.content.images[0].multiscale;
+    const coarsestIdx = multiscale.levels.length - 1;
+    const levelMeta = multiscale.levels[coarsestIdx];
     const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
-    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
     const nz = Math.ceil(levelDepth / chunkZ);
     const ny = Math.ceil(levelHeight / chunkY);
     const nx = Math.ceil(levelWidth / chunkX);
@@ -113,7 +115,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
             const buf = ds.sharedQueue.get(memberId, chunkKey) ?? null;
             if (buf && buf.byteLength > 0) {
               available.push({
-                data: bufferToUint16(buf, levelMeta.dataType),
+                data: bufferToUint16(buf, multiscale.data_type),
                 x: ix, y: iy, z: iz, key: chunkKey,
               });
               uploaded.add(chunkKey);
@@ -243,7 +245,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       let shape: number[] | undefined;
       for (const [, ds] of datasets) {
         if (ds.sharedQueue.hasMember(layer.datasetId)) {
-          shape = ds.info.levels[0].shape; // [T, C, Z, Y, X]
+          shape = ds.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
           break;
         }
       }

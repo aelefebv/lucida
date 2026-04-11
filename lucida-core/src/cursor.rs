@@ -209,7 +209,7 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
         Camera::Arcball(_) | Camera::Fly(_) => "arcball",
     };
 
-    let volume_shape = scene.volume_shape().copied();
+    let volume_shape = scene.volume_shape();
     let inv_model_f64: Option<[f64; 16]> = scene.volume_transform().map(|t| {
         t.inv_model.map(|v| v as f64)
     });
@@ -438,22 +438,32 @@ mod tests {
         Scene::new(viewport)
     }
 
+    fn register_shape(scene: &mut Scene, shape: [u32; 3]) {
+        let reg = crate::scene::test_helpers::make_register_dataset_with_shape(
+            "default", "default", 1,
+            [1, 1, shape[0] as u64, shape[1] as u64, shape[2] as u64],
+            [1, 1, 1, 128, 128],
+            1,
+        );
+        scene.apply(crate::command::DocumentCommand::RegisterDataset(reg).into());
+    }
+
     fn scene_2d_with_shape(viewport: [u32; 2], shape: [u32; 3]) -> Scene {
         let mut scene = Scene::new(viewport);
-        scene.set_volume_scale(shape, [1.0, 1.0, 1.0]);
+        register_shape(&mut scene, shape);
         scene
     }
 
     fn scene_3d_with_shape(viewport: [u32; 2], shape: [u32; 3]) -> Scene {
         let mut scene = Scene::new(viewport);
-        scene.set_volume_scale(shape, [1.0, 1.0, 1.0]);
+        register_shape(&mut scene, shape);
         scene.set_mode_3d();
         scene
     }
 
     fn scene_fly_with_shape(viewport: [u32; 2], shape: [u32; 3]) -> Scene {
         let mut scene = Scene::new(viewport);
-        scene.set_volume_scale(shape, [1.0, 1.0, 1.0]);
+        register_shape(&mut scene, shape);
         scene.set_mode_fly();
         scene
     }

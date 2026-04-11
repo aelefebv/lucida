@@ -10,11 +10,10 @@ struct Uniforms {
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var fallbackTex: texture_2d<u32>;
-@group(0) @binding(2) var chunkTex: texture_2d<u32>;
-@group(0) @binding(3) var<storage, read> indirection: array<u32>;
-@group(0) @binding(4) var lutTex: texture_2d<f32>;
-@group(0) @binding(5) var lutSampler: sampler;
+@group(0) @binding(1) var chunkTex: texture_2d<u32>;
+@group(0) @binding(2) var<storage, read> indirection: array<u32>;
+@group(0) @binding(3) var lutTex: texture_2d<f32>;
+@group(0) @binding(4) var lutSampler: sampler;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -76,34 +75,26 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   let gridIdx = chunkCoord.y * u.gridDims.x + chunkCoord.x;
   let slot = indirection[gridIdx];
 
-  if (slot != 0xFFFFFFFFu) {
-    // Decode slot to atlas position
-    let slotCoord = vec2u(
-      slot % u.atlasSlotDims.x,
-      slot / u.atlasSlotDims.x,
-    );
-    let localTexel = vec2u(
-      u32(texCoord.x) % u.chunkDims.x,
-      u32(texCoord.y) % u.chunkDims.y,
-    );
-    let atlasCoord = vec2i(
-      i32(slotCoord.x * u.chunkDims.x + localTexel.x),
-      i32(slotCoord.y * u.chunkDims.y + localTexel.y),
-    );
-    let chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
-    let normalized = pow(clamp((f32(chunkVal) - intensityMin) / range, 0.0, 1.0), gamma);
-    let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
-    return vec4f(color * layerOpacity, layerOpacity);
+  if (slot == 0xFFFFFFFFu) {
+    // Chunk not loaded — show as empty
+    return vec4f(0.0, 0.0, 0.0, 0.0);
   }
 
-  // Chunk not loaded — fall back to coarse texture
-  let fbDims = textureDimensions(fallbackTex);
-  let fbCoord = vec2i(
-    clamp(i32(texUV.x * f32(fbDims.x)), 0, i32(fbDims.x) - 1),
-    clamp(i32(texUV.y * f32(fbDims.y)), 0, i32(fbDims.y) - 1),
+  // Decode slot to atlas position
+  let slotCoord = vec2u(
+    slot % u.atlasSlotDims.x,
+    slot / u.atlasSlotDims.x,
   );
-  let fbVal = textureLoad(fallbackTex, fbCoord, 0).r;
-  let normalized = pow(clamp((f32(fbVal) - intensityMin) / range, 0.0, 1.0), gamma);
+  let localTexel = vec2u(
+    u32(texCoord.x) % u.chunkDims.x,
+    u32(texCoord.y) % u.chunkDims.y,
+  );
+  let atlasCoord = vec2i(
+    i32(slotCoord.x * u.chunkDims.x + localTexel.x),
+    i32(slotCoord.y * u.chunkDims.y + localTexel.y),
+  );
+  let chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
+  let normalized = pow(clamp((f32(chunkVal) - intensityMin) / range, 0.0, 1.0), gamma);
   let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
   return vec4f(color * layerOpacity, layerOpacity);
 }

@@ -1,3 +1,4 @@
+pub mod binding;
 mod browse;
 mod handler;
 mod session;
@@ -80,6 +81,12 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "lucida_server=info".parse().unwrap()),
+        )
+        .init();
     let session = Arc::new(Mutex::new(Session::new()));
     let (tx, _) = broadcast::channel::<BroadcastItem>(256);
     let next_id = Arc::new(AtomicU64::new(0));

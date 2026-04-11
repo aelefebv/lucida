@@ -176,6 +176,8 @@ fn build_scene(snapshot: &connection::Snapshot, peer_id: Option<ClientId>) -> Sc
     let mut scene = Scene::new([800, 600]);
     // Restore document state
     scene.document = snapshot.document.clone();
+    // Rebuild derived state (not serialized, so must be reconstructed)
+    scene.rebuild_derived();
 
     // If --peer was specified, adopt that peer's viewport
     if let Some(pid) = peer_id {

@@ -9,6 +9,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 lucida-core = { path = "../lucida-core" }
+lucida-content = { path = "../lucida-content" }
+lucida-protocol = { path = "../lucida-protocol" }
 lucida-store = { path = "../lucida-store" }
 pyo3 = { version = "0.24", features = ["extension-module"] }
 serde = { version = "1", features = ["derive"] }

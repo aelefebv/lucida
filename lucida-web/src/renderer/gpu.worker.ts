@@ -6,8 +6,8 @@ import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import { handleSliceWriteFallbackChunk, handleSliceAtlasConfig, handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
-import { handleVolumeWriteFallbackChunk, handleVolumeAtlasConfig, handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
+import { handleSliceAtlasConfig, handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
+import { handleVolumeAtlasConfig, handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 import { getColormapData } from "../colormaps.ts";
 
@@ -68,7 +68,7 @@ function getDummyTexture(): GPUTexture {
   return dummyTexture;
 }
 
-// 1x1x1 dummy 3D texture for unset fallback bindings (volume renderer)
+// 1x1x1 dummy 3D texture for unset bindings (minimap renderer)
 let dummy3DTexture: GPUTexture | null = null;
 function getDummy3DTexture(): GPUTexture {
   if (!dummy3DTexture) {
@@ -107,7 +107,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
             return sliceRenderer;
           },
           getVolumeRenderer() {
-            if (!volumeRenderer) volumeRenderer = new VolumeRenderer(device, getDummy3DTexture());
+            if (!volumeRenderer) volumeRenderer = new VolumeRenderer(device);
             return volumeRenderer;
           },
           getCompositor() {
@@ -135,9 +135,6 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
-      case "sliceWriteFallbackChunk":
-        handleSliceWriteFallbackChunk(ctx, msg);
-        break;
       case "sliceAtlasConfig":
         handleSliceAtlasConfig(ctx, msg);
         break;
@@ -148,9 +145,6 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         handleSliceRenderMultiPass(ctx, msg);
         break;
 
-      case "volumeWriteFallbackChunk":
-        handleVolumeWriteFallbackChunk(ctx, msg);
-        break;
       case "volumeAtlasConfig":
         handleVolumeAtlasConfig(ctx, msg);
         break;

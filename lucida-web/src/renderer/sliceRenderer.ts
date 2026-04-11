@@ -17,7 +17,6 @@ export class SliceRenderer {
   private bindGroupLayout: GPUBindGroupLayout;
   private bindGroup: GPUBindGroup | null = null;
 
-  private fallbackTexture: GPUTexture | null = null;
   private atlasTexture: GPUTexture | null = null;
   private indirectionBuffer: GPUBuffer | null = null;
   private dummyTexture: GPUTexture;
@@ -54,20 +53,15 @@ export class SliceRenderer {
         {
           binding: 2,
           visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "2d" },
+          buffer: { type: "read-only-storage" },
         },
         {
           binding: 3,
           visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "read-only-storage" },
-        },
-        {
-          binding: 4,
-          visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "float" },
         },
         {
-          binding: 5,
+          binding: 4,
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" },
         },
@@ -134,11 +128,6 @@ export class SliceRenderer {
     this.rebuildBindGroup();
   }
 
-  setFallback(texture: GPUTexture) {
-    this.fallbackTexture = texture;
-    this.rebuildBindGroup();
-  }
-
   setAtlas(
     texture: GPUTexture,
     indirectionBuf: GPUBuffer,
@@ -172,18 +161,16 @@ export class SliceRenderer {
   }
 
   private rebuildBindGroup() {
-    const fallback = this.fallbackTexture ?? this.dummyTexture;
     const atlas = this.atlasTexture ?? this.dummyTexture;
     const indirection = this.indirectionBuffer ?? this.dummyIndirectionBuffer;
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: fallback.createView() },
-        { binding: 2, resource: atlas.createView() },
-        { binding: 3, resource: { buffer: indirection } },
-        { binding: 4, resource: this.lutTexture.createView() },
-        { binding: 5, resource: this.lutSampler },
+        { binding: 1, resource: atlas.createView() },
+        { binding: 2, resource: { buffer: indirection } },
+        { binding: 3, resource: this.lutTexture.createView() },
+        { binding: 4, resource: this.lutSampler },
       ],
     });
   }

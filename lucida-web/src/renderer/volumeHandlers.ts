@@ -1,12 +1,11 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
-  VolumeWriteFallbackChunkMessage,
   VolumeAtlasConfigMessage,
   VolumeChunkDataMessage,
   VolumeRenderMultiPassMessage,
 } from "./workerProtocol.ts";
 import { VOLUME_ATLAS_BUDGET } from "./workerProtocol.ts";
-import { createEmptyVolumeTexture, writeVolumeChunk } from "./gpuContext.ts";
+import { writeVolumeChunk } from "./gpuContext.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 
 interface AtlasState {
@@ -26,18 +25,7 @@ interface AtlasState {
   indirectionDirty: boolean;
 }
 
-interface FallbackState {
-  texture: GPUTexture;
-  width: number;
-  height: number;
-  depth: number;
-  tcKey: string;
-  intensityMin: number;
-  intensityMax: number;
-}
-
 const atlasPerDataset = new Map<string, AtlasState>();
-const fallbackPerDataset = new Map<string, FallbackState>();
 
 // Shared depth texture for volume rendering (used by cursor renderer for occlusion)
 let depthTexture: GPUTexture | null = null;
@@ -59,19 +47,6 @@ function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture
 // Last known ray-volume hit point in local [0,1]³ space per dataset (persists across atlas recreations).
 // Chunks closest to this point are kept; farthest are evicted first.
 const rayHitPerDataset = new Map<string, [number, number, number]>();
-
-let dummyIndirectionBuf: GPUBuffer | null = null;
-function getDummyIndirectionBuf(device: GPUDevice): GPUBuffer {
-  if (!dummyIndirectionBuf) {
-    const data = new Uint32Array([0xFFFFFFFF]);
-    dummyIndirectionBuf = device.createBuffer({
-      size: 4,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(dummyIndirectionBuf, 0, data);
-  }
-  return dummyIndirectionBuf;
-}
 
 function createVolumeAtlas(
   device: GPUDevice,
@@ -172,25 +147,6 @@ function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): { k
   }
 
   return { key: farthestKey, dist: maxDist };
-}
-
-export function handleVolumeWriteFallbackChunk(ctx: WorkerCtx, msg: VolumeWriteFallbackChunkMessage): void {
-  let fb = fallbackPerDataset.get(msg.datasetId);
-  if (!fb || fb.tcKey !== msg.tcKey) {
-    if (fb) fb.texture.destroy();
-    const texture = createEmptyVolumeTexture(ctx.device, msg.fbWidth, msg.fbHeight, msg.fbDepth);
-    fb = { texture, width: msg.fbWidth, height: msg.fbHeight, depth: msg.fbDepth, tcKey: msg.tcKey, intensityMin: 65535, intensityMax: 0 };
-    fallbackPerDataset.set(msg.datasetId, fb);
-  }
-  const data = new Uint16Array(msg.data);
-  writeVolumeChunk(ctx.device, fb.texture, data, msg.srcChunkX, msg.srcChunkY, msg.chunkW, msg.chunkH, msg.chunkD, msg.xOff, msg.yOff, msg.zOff);
-  const { min, max } = sampleIntensityRange(data);
-  let changed = false;
-  if (min < fb.intensityMin) { fb.intensityMin = min; changed = true; }
-  if (max > fb.intensityMax) { fb.intensityMax = max; changed = true; }
-  if (changed) {
-    ctx.post({ type: "intensityRange", datasetId: msg.datasetId, min: fb.intensityMin, max: fb.intensityMax });
-  }
 }
 
 export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: VolumeAtlasConfigMessage): void {
@@ -301,39 +257,24 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
 
   for (const layer of msg.layers) {
     const atlas = atlasPerDataset.get(layer.datasetId);
-    const fb = fallbackPerDataset.get(layer.datasetId);
-    if (!atlas && !fb) continue;
+    if (!atlas) continue;
 
     rayHitPerDataset.set(layer.datasetId, layer.rayHitLocal);
 
     const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");
     renderer.setColormapTexture(lutTex);
 
-    if (fb) {
-      renderer.setFallbackVolume(fb.texture, fb.width, fb.height, fb.depth);
-    } else {
-      renderer.clearFallback();
+    if (atlas.indirectionDirty) {
+      ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
+      atlas.indirectionDirty = false;
     }
-
-    if (atlas) {
-      if (atlas.indirectionDirty) {
-        ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
-        atlas.indirectionDirty = false;
-      }
-      renderer.setAtlas(
-        atlas.texture, atlas.indirectionBuf,
-        [atlas.chunkX, atlas.chunkY, atlas.chunkZ],
-        [atlas.gridX, atlas.gridY, atlas.gridZ],
-        [atlas.slotsX, atlas.slotsY, atlas.slotsZ],
-        [atlas.levelWidth, atlas.levelHeight, atlas.levelDepth],
-      );
-    } else {
-      renderer.setAtlas(
-        ctx.getDummy3DTexture(), getDummyIndirectionBuf(ctx.device),
-        [fb!.width, fb!.height, fb!.depth], [1, 1, 1], [1, 1, 1],
-        [fb!.width, fb!.height, fb!.depth],
-      );
-    }
+    renderer.setAtlas(
+      atlas.texture, atlas.indirectionBuf,
+      [atlas.chunkX, atlas.chunkY, atlas.chunkZ],
+      [atlas.gridX, atlas.gridY, atlas.gridZ],
+      [atlas.slotsX, atlas.slotsY, atlas.slotsZ],
+      [atlas.levelWidth, atlas.levelHeight, atlas.levelDepth],
+    );
 
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(layer.opacity);
@@ -372,22 +313,13 @@ export function removeVolumeResources(datasetId: string): void {
     destroyAtlas(atlas);
     atlasPerDataset.delete(datasetId);
   }
-  const fb = fallbackPerDataset.get(datasetId);
-  if (fb) {
-    fb.texture.destroy();
-    fallbackPerDataset.delete(datasetId);
-  }
   rayHitPerDataset.delete(datasetId);
 }
 
 export function destroyAllVolumeResources(): void {
   for (const atlas of atlasPerDataset.values()) destroyAtlas(atlas);
   atlasPerDataset.clear();
-  for (const fb of fallbackPerDataset.values()) fb.texture.destroy();
-  fallbackPerDataset.clear();
   rayHitPerDataset.clear();
   depthTexture?.destroy();
   depthTexture = null;
-  dummyIndirectionBuf?.destroy();
-  dummyIndirectionBuf = null;
 }

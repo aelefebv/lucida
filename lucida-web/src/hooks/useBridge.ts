@@ -1,12 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
-import { decompressLz4Async } from "../zarr/lz4Client.ts";
-import { decompress as decompressZstd } from "fzstd";
 import type { ChunkFetcher } from "../zarr/chunkStore.ts";
 import { SharedChunkQueue } from "../zarr/chunkStore.ts";
-import type { DatasetState, DatasetMember, PendingChunkResolve } from "../types.ts";
-import type { DatasetInfo } from "../zarr/metadata.ts";
+import type { DatasetState, PendingChunkResolve } from "../types.ts";
+import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { VolumeData } from "../types.ts";
@@ -84,17 +82,20 @@ export function useBridge({
           setPeers(peerMap);
 
           const doc = JSON.parse(documentJson);
-          if (doc.datasets) {
-            for (const ds of doc.datasets) {
-              if (ds.client_metadata && !datasetsRef.current.has(ds.id)) {
-                const members: DatasetMember[] = (ds.members ?? []).length > 0
-                  ? ds.members.map((m: { id: string; position: [number, number]; store_prefix: string | null }) => ({
-                      id: m.id,
-                      position: m.position,
-                      storePrefix: m.store_prefix ?? null,
-                    }))
-                  : [{ id: ds.id, position: [0, 0] as [number, number], storePrefix: null }];
-                setupRemoteDataset(ds.id, ds.name ?? ds.id, ds.client_metadata, members, ds.kind);
+          if (doc.content_graphs) {
+            for (const [dsId, content] of Object.entries(doc.content_graphs as Record<string, ContentGraph>)) {
+              if (!datasetsRef.current.has(dsId)) {
+                // For snapshots, we don't have the fetch descriptor.
+                // Build a proxied descriptor from the content graph's images.
+                const fetchDesc: ClientFetchDescriptor = {
+                  Proxied: {
+                    images: (content as ContentGraph).images.map(img => ({
+                      image_id: img.image_id,
+                      wire_format: { Raw: { data_type: img.multiscale.data_type } },
+                    })),
+                  },
+                };
+                setupFetchPipeline(content as ContentGraph, fetchDesc);
               }
             }
           }
@@ -111,7 +112,7 @@ export function useBridge({
           let scene = wasmSceneRef.current;
           if (!scene) {
             const cmd = JSON.parse(commandJson);
-            if (cmd.type === "add_dataset" && cmd.client_metadata) {
+            if (cmd.type === "register_dataset") {
               scene = ensureScene();
             } else {
               return;
@@ -120,16 +121,9 @@ export function useBridge({
           scene.apply_command(commandJson);
           bumpSettingsGeneration();
           const cmd = JSON.parse(commandJson);
-          if (cmd.type === "add_dataset" && cmd.client_metadata) {
-            if (!datasetsRef.current.has(cmd.id)) {
-              const members: DatasetMember[] = (cmd.members ?? []).length > 0
-                ? cmd.members.map((m: { id: string; position: [number, number]; store_prefix: string | null }) => ({
-                    id: m.id,
-                    position: m.position,
-                    storePrefix: m.store_prefix ?? null,
-                  }))
-                : [{ id: cmd.id, position: [0, 0] as [number, number], storePrefix: null }];
-              setupRemoteDataset(cmd.id, cmd.name ?? cmd.id, cmd.client_metadata, members, cmd.kind);
+          if (cmd.type === "register_dataset") {
+            if (!datasetsRef.current.has(cmd.content.dataset_id)) {
+              setupFetchPipeline(cmd.content as ContentGraph, cmd.fetch as ClientFetchDescriptor);
             }
             setRemoteDatasetLoading(false);
             setWasmScene(scene);
@@ -280,77 +274,75 @@ export function useBridge({
     bridgeRef.current = new Bridge(handlers);
   }, [wasmReady]);
 
-  function setupRemoteDataset(datasetId: string, name: string, clientMetadata: DatasetInfo, members: DatasetMember[], kind?: Record<string, unknown>) {
-    const info = clientMetadata;
+  function setupFetchPipeline(content: ContentGraph, fetchDesc: ClientFetchDescriptor) {
+    const datasetId = content.dataset_id;
     const CHUNK_TIMEOUT_MS = 10_000;
 
     const sharedQueue = new SharedChunkQueue();
-    for (const member of members) {
-      const remoteFetcher: ChunkFetcher = async (coord, signal) => {
-        const compositeKey = member.storePrefix
-          ? `${datasetId}/${member.storePrefix}/${coord.key}`
-          : `${datasetId}/${coord.key}`;
-        const rawBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
-          const timeoutId = setTimeout(() => {
-            pendingChunkRequests.current.delete(compositeKey);
-            reject(new Error(`Chunk ${coord.key} timed out`));
-          }, CHUNK_TIMEOUT_MS);
 
-          pendingChunkRequests.current.set(compositeKey, {
-            resolve: (data) => { clearTimeout(timeoutId); resolve(data); },
-            reject: (err) => { clearTimeout(timeoutId); reject(err); },
+    if ("Proxied" in fetchDesc) {
+      for (const spec of fetchDesc.Proxied.images) {
+        const imageId = spec.image_id;
+        const remoteFetcher: ChunkFetcher = async (coord, signal) => {
+          const compositeKey = `${datasetId}/${imageId}/${coord.key}`;
+          const rawBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+              pendingChunkRequests.current.delete(compositeKey);
+              reject(new Error(`Chunk ${coord.key} timed out`));
+            }, CHUNK_TIMEOUT_MS);
+
+            pendingChunkRequests.current.set(compositeKey, {
+              resolve: (data) => { clearTimeout(timeoutId); resolve(data); },
+              reject: (err) => { clearTimeout(timeoutId); reject(err); },
+            });
+
+            bridgeRef.current?.send(JSON.stringify({
+              type: "chunk_request",
+              dataset_id: datasetId,
+              image_id: imageId,
+              key: coord.key,
+            }));
+
+            signal?.addEventListener("abort", () => {
+              clearTimeout(timeoutId);
+              pendingChunkRequests.current.delete(compositeKey);
+              reject(new DOMException("Aborted", "AbortError"));
+            });
           });
 
-          bridgeRef.current?.send(JSON.stringify({
-            type: "chunk_request",
-            dataset_id: datasetId,
-            key: coord.key,
-            store_prefix: member.storePrefix ?? undefined,
-          }));
-
-          signal?.addEventListener("abort", () => {
-            clearTimeout(timeoutId);
-            pendingChunkRequests.current.delete(compositeKey);
-            reject(new DOMException("Aborted", "AbortError"));
-          });
-        });
-
-        if (rawBytes.byteLength === 0) {
-          return rawBytes;
-        }
-
-        const levelMeta = info.levels[coord.level];
-        if (levelMeta) {
-          const hasZstd = levelMeta.codecs.some(c => c.name === "zstd");
-          const hasLz4 = levelMeta.codecs.some(c => c.name === "numcodecs/lz4");
-          if (hasZstd) {
-            const dec = decompressZstd(new Uint8Array(rawBytes));
-            return dec.buffer.slice(dec.byteOffset, dec.byteOffset + dec.byteLength);
-          } else if (hasLz4) {
-            return decompressLz4Async(rawBytes);
+          // Decode wire format. Phase 1: server sends Raw (decompressed).
+          // Future: if wire format is Lz4/Zstd, client decompresses here.
+          const wf = spec.wire_format;
+          if ("Lz4" in wf) {
+            const { decompressLz4 } = await import("../zarr/lz4.ts");
+            return decompressLz4(rawBytes);
+          } else if ("Zstd" in wf) {
+            const fzstd = await import("fzstd");
+            return fzstd.decompress(new Uint8Array(rawBytes)).buffer;
           }
-        }
-        return rawBytes;
-      };
+          // Raw — already decompressed, return as ArrayBuffer
+          return rawBytes;
+        };
 
-      sharedQueue.registerMember(member.id, remoteFetcher);
+        sharedQueue.registerMember(imageId, remoteFetcher);
+      }
     }
 
     datasetsRef.current.set(datasetId, {
       id: datasetId,
-      name,
-      info,
+      name: content.name,
+      content,
+      fetch: fetchDesc,
       sharedQueue,
-      kind: kind?.type === "plate" ? kind as unknown as import("../components/PlateSelector.tsx").PlateKind : undefined,
-      members,
     });
 
     initLayerMaps(datasetId);
 
     // Ensure per-channel settings exist for all channels.
-    // AddDataset only creates 1 channel setting (layers.len() = 1),
+    // RegisterDataset may only create 1 channel setting (layers.len() = 1),
     // but the real channel count is in the data shape.
-    const channelCount = info.levels[0].shape[1]; // [T, C, Z, Y, X]
+    const firstImage = content.images[0];
+    const channelCount = firstImage?.multiscale.levels[0]?.shape[1] ?? 1; // [T, C, Z, Y, X]
     if (channelCount > 1) {
       const scene = wasmSceneRef.current;
       if (scene) {
@@ -365,15 +357,17 @@ export function useBridge({
       }
     }
 
-    loopRef.current?.addDataset(datasetId, sharedQueue, info);
+    loopRef.current?.addDataset(datasetId, sharedQueue, content);
 
-    const coarsest = info.levels[info.levels.length - 1];
-    const [, , depth, height, width] = coarsest.shape;
-    setVolumeMap(prev => {
-      const next = new Map(prev);
-      next.set(datasetId, { data: new Uint16Array(width * height * depth), width, height, depth });
-      return next;
-    });
+    const coarsestLevel = firstImage?.multiscale.levels[firstImage.multiscale.levels.length - 1];
+    if (coarsestLevel) {
+      const [, , depth, height, width] = coarsestLevel.shape;
+      setVolumeMap(prev => {
+        const next = new Map(prev);
+        next.set(datasetId, { data: new Uint16Array(width * height * depth), width, height, depth });
+        return next;
+      });
+    }
 
     if (datasetsRef.current.size === 1) {
       setSelectedDatasetId(datasetId);

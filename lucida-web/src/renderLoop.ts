@@ -1,5 +1,5 @@
 /** Pull-based render loop: coalesces chunk arrivals into a single RAF tick. */
-import type { DatasetInfo } from "./zarr/metadata.ts";
+import type { ContentGraph } from "./contentTypes.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
@@ -13,7 +13,7 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 
 export class RenderLoop {
   private scene: RenderLoopOptions["scene"];
-  private datasets: Map<string, { sharedQueue: SharedChunkQueue; info: DatasetInfo }>;
+  private datasets: Map<string, { sharedQueue: SharedChunkQueue; content: ContentGraph }>;
   private client: RenderLoopOptions["client"];
   private canvas: HTMLCanvasElement;
   private mode: "slice" | "volume";
@@ -42,7 +42,7 @@ export class RenderLoop {
     this.scene = opts.scene;
     this.datasets = new Map();
     for (const [id, entry] of opts.datasets) {
-      this.datasets.set(id, { sharedQueue: entry.sharedQueue, info: entry.info });
+      this.datasets.set(id, { sharedQueue: entry.sharedQueue, content: entry.content });
     }
     this.client = opts.client;
     this.canvas = opts.canvas;
@@ -91,8 +91,8 @@ export class RenderLoop {
     this.unsubs.clear();
   }
 
-  addDataset(id: string, sharedQueue: SharedChunkQueue, info: DatasetInfo): void {
-    this.datasets.set(id, { sharedQueue, info });
+  addDataset(id: string, sharedQueue: SharedChunkQueue, content: ContentGraph): void {
+    this.datasets.set(id, { sharedQueue, content });
     this.unsubs.set(id, sharedQueue.subscribe(() => {
       this.dataDirty = true;
       this.scheduleIfNeeded();
@@ -110,7 +110,7 @@ export class RenderLoop {
     this.datasets.delete(id);
 
     // Collect member IDs that were keyed under this dataset.
-    // For single datasets member_id === dataset_id, but for plates
+    // For single datasets image_id === dataset_id, but for plates
     // member IDs may differ (e.g. "plateId:A/1/0").
     const memberIds = this.collectMemberIds(id);
 
@@ -171,7 +171,6 @@ export class RenderLoop {
       for (const key of keysToRemove) {
         this.client.removeLayerResources(key);
         st.prevStateKey.delete(key);
-        st.seedPending.delete(key);
         st.sentToWorker.delete(key);
       }
 
@@ -195,7 +194,7 @@ export class RenderLoop {
   private collectMemberIds(dsId: string): string[] {
     const ids = new Set<string>();
     // Check volume and slice state maps for keys that belong to this dataset.
-    // For single datasets, member_id === dataset_id (already cleaned by clearFor*Dataset).
+    // For single datasets, image_id === dataset_id (already cleaned by clearFor*Dataset).
     // For plates, member IDs are prefixed with the dataset ID (e.g. "dsId:A/1/0").
     const prefix = dsId + ":";
     for (const key of this.volumeState.prevStateKey.keys()) {

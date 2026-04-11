@@ -7,7 +7,7 @@ import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
-import { PlateSelector } from "./components/PlateSelector.tsx";
+import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { DebugOverlay } from "./debug/DebugOverlay.tsx";
 import { debugStats } from "./debug/debugStats.ts";
@@ -349,11 +349,13 @@ function App() {
           )}
           {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
             const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
-            if (!ds?.kind) return null;
+            if (!ds) return null;
+            const plateData = extractPlateData(ds.content);
+            if (!plateData) return null;
             return (
               <PlateSelector
-                plateKind={ds.kind}
-                members={ds.members}
+                plateKind={plateData.plateKind}
+                members={plateData.members}
                 plateName={ds.name}
                 onWellClick={(cx, cy) => {
                   const ws = scene.wasmSceneRef.current;

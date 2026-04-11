@@ -1,0 +1,15 @@
+use serde::{Deserialize, Serialize};
+
+use crate::layout::PositioningMode;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub enum DatasetKind {
+    #[default]
+    Single,
+    Plate {
+        rows: Vec<String>,
+        columns: Vec<String>,
+        positioning_mode: PositioningMode,
+        has_stage_positions: bool,
+    },
+}

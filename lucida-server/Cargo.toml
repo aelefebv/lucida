@@ -8,7 +8,9 @@ name = "lucida-server"
 path = "src/main.rs"
 
 [dependencies]
+lucida-content = { path = "../lucida-content" }
 lucida-core = { path = "../lucida-core" }
+lucida-protocol = { path = "../lucida-protocol" }
 lucida-store = { path = "../lucida-store" }
 object_store = "0.12"
 tokio = { version = "1", features = ["full"] }
@@ -17,3 +19,6 @@ tower-http = { version = "0.6", features = ["cors"] }
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+lz4_flex = "0.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

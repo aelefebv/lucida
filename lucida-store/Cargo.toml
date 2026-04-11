@@ -16,7 +16,8 @@ tokio = { version = "1", features = ["rt-multi-thread"] }
 bytes = "1"
 lru = "0.12"
 regex = "1"
-lucida-core = { path = "../lucida-core" }
+lucida-content = { path = "../lucida-content" }
+lucida-protocol = { path = "../lucida-protocol" }
 
 [profile.dev.package."*"]
 opt-level = 2

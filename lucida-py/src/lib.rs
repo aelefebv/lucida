@@ -3,10 +3,11 @@ use std::sync::Arc;
 use object_store::ObjectStore;
 use pyo3::prelude::*;
 
+use lucida_content::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
-use lucida_core::scene::{DisplayState, Layer, LevelInfo, Scene};
+use lucida_core::scene::{DisplayState, Scene};
 use lucida_core::view::ViewState;
 
 #[pyclass]
@@ -27,6 +28,7 @@ impl PyScene {
         let doc: lucida_core::scene::DocumentState = serde_json::from_str(json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
         self.inner.document = doc;
+        self.inner.rebuild_derived();
         Ok(())
     }
 
@@ -161,72 +163,22 @@ impl PyScene {
     }
 
     fn chunk_plan_for(&self, dataset_id: &str) -> String {
-        let plan = self.inner.chunk_plan_for(dataset_id);
+        let id = DatasetId(dataset_id.to_string());
+        let plan = self.inner.chunk_plan_for(&id);
         serde_json::to_string(&plan).unwrap()
     }
 
     fn dataset_ids(&self) -> String {
-        let ids: Vec<&str> = self.inner.document.datasets.iter().map(|d| d.id.as_str()).collect();
+        let ids: Vec<&str> = self.inner.document.content_graphs.keys().map(|id| id.0.as_str()).collect();
         serde_json::to_string(&ids).unwrap()
     }
 
     fn dataset_name(&self, id: &str) -> String {
-        self.inner.document.datasets.iter()
-            .find(|d| d.id == id)
-            .map(|d| d.name.clone())
+        self.inner.document.content_graphs.get(&DatasetId(id.to_string()))
+            .map(|cg| cg.name.clone())
             .unwrap_or_default()
     }
 
-    #[pyo3(signature = (name, visible, num_levels, chunk_z, chunk_y, chunk_x, shape_z, shape_y, shape_x))]
-    fn add_layer(
-        &mut self,
-        name: &str,
-        visible: bool,
-        num_levels: u32,
-        chunk_z: u32,
-        chunk_y: u32,
-        chunk_x: u32,
-        shape_z: u32,
-        shape_y: u32,
-        shape_x: u32,
-    ) {
-        self.inner.add_layer(Layer {
-            name: name.to_string(),
-            visible,
-            num_levels,
-            chunk_size: [chunk_z, chunk_y, chunk_x],
-            data_shape: [shape_z, shape_y, shape_x],
-            level_info: Vec::new(),
-        });
-    }
-
-    /// Set per-level shape and chunk size metadata for anisotropic pyramids.
-    ///
-    /// `shapes_flat` is `[z0,y0,x0, z1,y1,x1, ...]` — one [Z,Y,X] triple per level.
-    /// `chunks_flat` is the same layout for chunk sizes.
-    #[pyo3(signature = (layer_index, shapes_flat, chunks_flat))]
-    fn set_level_info(
-        &mut self,
-        layer_index: usize,
-        shapes_flat: Vec<u32>,
-        chunks_flat: Vec<u32>,
-    ) {
-        let layers = match self.inner.document.datasets.first_mut() {
-            Some(ds) => &mut ds.layers,
-            None => return,
-        };
-        if let Some(layer) = layers.get_mut(layer_index) {
-            let num_levels = shapes_flat.len() / 3;
-            let mut info = Vec::with_capacity(num_levels);
-            for i in 0..num_levels {
-                info.push(LevelInfo {
-                    shape: [shapes_flat[i * 3], shapes_flat[i * 3 + 1], shapes_flat[i * 3 + 2]],
-                    chunk_size: [chunks_flat[i * 3], chunks_flat[i * 3 + 1], chunks_flat[i * 3 + 2]],
-                });
-            }
-            layer.level_info = info;
-        }
-    }
 }
 
 #[pyclass]
@@ -248,16 +200,15 @@ impl PyStore {
         Ok(Self { store, runtime })
     }
 
-    /// Read Zarr metadata, return JSON string of DatasetMetadata.
+    /// Import dataset from OME-Zarr, return JSON string of ImportResult.
     fn read_metadata(&self, name: &str) -> PyResult<String> {
         let store = self.store.clone();
         let name = name.to_string();
-        let meta = self.runtime.block_on(async {
-            lucida_store::metadata::read_dataset_info(&store, "temp-id", &name).await
+        let result = self.runtime.block_on(async {
+            lucida_store::import::import_dataset(&store, "temp-id", &name).await
         }).map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 
-        // Serialize the Dataset to JSON
-        let json = serde_json::to_string(&meta.dataset)
+        let json = serde_json::to_string(&result)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         Ok(json)
     }

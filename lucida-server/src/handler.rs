@@ -2,13 +2,16 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
+use lucida_content::{DatasetId, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
+use lucida_protocol::RegisterDataset;
 use lucida_store::cache::CachedStore;
 use object_store::path::Path;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
-use crate::session::{Session, ServerStore};
+use crate::binding::{ChunkResolver, ServerBinding};
+use crate::session::Session;
 use crate::{BroadcastItem, UnicastRoutes};
 
 pub async fn handle_client(
@@ -260,20 +263,22 @@ pub async fn handle_client(
                 // Try as ChunkMessage.
                 if let Ok(chunk_msg) = serde_json::from_str::<ChunkMessage>(&json) {
                     match chunk_msg {
-                        ChunkMessage::ChunkRequest { dataset_id, key, store_prefix } => {
-                            // Check server-hosted first, then peer relay.
-                            let server_entry = {
+                        ChunkMessage::ChunkRequest { dataset_id, image_id, key } => {
+                            // Look up the server binding for this dataset.
+                            let binding = {
                                 let sess = session.lock().await;
-                                sess.server_stores.get(&dataset_id).cloned()
+                                sess.server_bindings.get(&dataset_id).map(|b| {
+                                    let compression = b.resolver.storage_compression(&image_id);
+                                    (b.resolver.resolve(&image_id, &key), compression, b.cache.clone())
+                                })
                             };
-                            if let Some(entry) = server_entry {
+                            if let Some((resolved, compression, cache)) = binding {
                                 let unicast_routes_clone = Arc::clone(&unicast_routes);
-                                let ds_id = dataset_id;
-                                let chunk_key = key;
                                 tokio::spawn(async move {
                                     serve_chunk_from_store(
-                                        id, &ds_id, &chunk_key, store_prefix.as_deref(),
-                                        &entry.store, &entry.axes, &unicast_routes_clone,
+                                        id, &dataset_id, &image_id, &key,
+                                        resolved.as_deref(), compression, &cache,
+                                        &unicast_routes_clone,
                                     ).await;
                                 });
                             }
@@ -337,7 +342,7 @@ pub async fn handle_client(
     eprintln!("client {id} disconnected");
 }
 
-/// Handle OpenRemoteDataset: open a StorageBackend, read metadata, broadcast AddDataset.
+/// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast RegisterDataset.
 async fn handle_open_remote_dataset(
     client_id: ClientId,
     url: String,
@@ -374,70 +379,60 @@ async fn handle_open_remote_dataset(
         h.finish()
     });
 
-    // Read metadata.
-    let meta = match lucida_store::metadata::read_dataset_info(&store, &dataset_id, &name).await {
-        Ok(m) => m,
+    // Import dataset via the new pipeline.
+    tracing::info!(url = %url, id = %dataset_id, name = %name, "importing dataset");
+    let result = match lucida_store::import::import_dataset(&store, &dataset_id, &name).await {
+        Ok(r) => r,
         Err(e) => {
             send_open_failed(client_id, &url, &e.to_string(), &unicast_routes).await;
             return;
         }
     };
 
-    // Extract axes from the parsed metadata.
-    let axes_names = meta.axes_names.clone();
+    // Log import result summary.
+    let n_entities = result.content.entities.len();
+    let n_images = result.content.images.len();
+    let n_levels = result.content.images.first().map(|i| i.multiscale.levels.len()).unwrap_or(0);
+    tracing::info!(
+        id = %dataset_id,
+        kind = ?result.content.kind,
+        entities = n_entities,
+        images = n_images,
+        levels = n_levels,
+        binding_images = result.binding_seed.images.len(),
+        "import complete"
+    );
 
-    // Build AddDataset command from the parsed metadata.
-    let ds = &meta.dataset;
-    let command = DocumentCommand::AddDataset {
-        id: ds.id.clone(),
-        name: ds.name.clone(),
-        kind: ds.kind.clone(),
-        layers: ds.layers.clone(),
-        volume_shape: ds.volume_shape,
-        volume_scale: ds.volume_transform.as_ref().map(|_| {
-            // Reconstruct scale from client_metadata (stored there during parsing).
-            if let Some(cm) = &ds.client_metadata {
-                if let Some(levels) = cm.get("levels").and_then(|v| v.as_array()) {
-                    if let Some(l0) = levels.first() {
-                        if let Some(scale) = l0.get("scale").and_then(|v| v.as_array()) {
-                            if scale.len() >= 5 {
-                                return [
-                                    scale[2].as_f64().unwrap_or(1.0),
-                                    scale[3].as_f64().unwrap_or(1.0),
-                                    scale[4].as_f64().unwrap_or(1.0),
-                                ];
-                            }
-                        }
-                    }
-                }
-            }
-            [1.0, 1.0, 1.0]
-        }),
-        members: ds.members.clone(),
-        client_metadata: ds.client_metadata.clone(),
+    // Build operational binding.
+    let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
+    let resolver = ChunkResolver::new(&result.binding_seed);
+    let binding = ServerBinding {
+        source_url: url.clone(),
+        store: store.clone(),
+        resolver,
+        cache: cached,
     };
 
-    // Wrap in a 512 MB LRU cache and register.
-    let cached = Arc::new(CachedStore::new(store, 512 * 1024 * 1024));
+    // Build RegisterDataset command (content + fetch, no server-private state).
+    let command = DocumentCommand::RegisterDataset(RegisterDataset {
+        content: result.content,
+        fetch: result.fetch,
+    });
 
-    // Apply command and register server store with axes.
+    let dataset_id_key = DatasetId(dataset_id.clone());
+
+    // Apply command and register server binding.
     let seq = {
         let mut sess = session.lock().await;
         let seq = sess.apply(command.clone());
-        sess.server_stores.insert(
-            dataset_id.clone(),
-            ServerStore {
-                store: cached,
-                axes: axes_names,
-            },
-        );
+        sess.server_bindings.insert(dataset_id_key, binding);
         seq
     };
 
     // Broadcast to ALL clients including the requester.
     // Use u64::MAX as sender so no client matches — everyone gets the
     // CommandBroadcast (not an Ack), since the requester hasn't applied
-    // the AddDataset locally.
+    // the RegisterDataset locally.
     let broadcast_msg = ServerMessage::CommandBroadcast {
         seq,
         command,
@@ -452,28 +447,33 @@ async fn handle_open_remote_dataset(
     eprintln!("server: opened remote dataset {dataset_id} from {url}");
 }
 
-/// Read a chunk from a StorageBackend and send it to the requesting client.
+/// Read a chunk from a CachedStore and send it to the requesting client.
 ///
-/// When `store_prefix` is `Some("A/1/0")`, the store path becomes
-/// `A/1/0/{level_path}/c/{chunk_coords}` instead of just `{level_path}/c/{chunk_coords}`.
-/// This enables plate FOV routing where each member's chunks live under a sub-path.
+/// `object_path` is the pre-resolved object store path from the ChunkResolver.
+/// If `None`, the image_id was unknown and the request is rejected.
 async fn serve_chunk_from_store(
     client_id: ClientId,
-    dataset_id: &str,
+    dataset_id: &DatasetId,
+    image_id: &ImageId,
     chunk_key: &str,
-    store_prefix: Option<&str>,
-    store: &Arc<CachedStore>,
-    axes: &[String],
+    object_path: Option<&str>,
+    storage_compression: crate::binding::StorageCompression,
+    cache: &Arc<CachedStore>,
     unicast_routes: &UnicastRoutes,
 ) {
-    let relative_path = lucida_store::chunk_key_to_store_path(chunk_key, axes);
-    let file_path = match store_prefix {
-        Some(prefix) => format!("{}/{}", prefix, relative_path),
-        None => relative_path,
+    let object_path = match object_path {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "server: unknown image_id {image_id} for dataset {dataset_id}, key {chunk_key}"
+            );
+            return;
+        }
     };
-    let obj_path = Path::from(file_path.as_str());
 
-    let bytes = match store.get_bytes(&obj_path).await {
+    tracing::trace!(dataset = %dataset_id, image = %image_id, key = chunk_key, path = object_path, "serving chunk");
+    let obj_path = Path::from(object_path);
+    let storage_bytes = match cache.get_bytes(&obj_path).await {
         Ok(b) => b,
         Err(e) => {
             eprintln!("server: failed to read chunk {chunk_key} for {dataset_id}: {e}");
@@ -481,12 +481,35 @@ async fn serve_chunk_from_store(
         }
     };
 
-    // Build binary response: [client_id: u32 LE][key_len: u16 LE][key][data]
-    // The key sent back is "{dataset_id}[/{store_prefix}]/{chunk_key}" (composite key).
-    let composite_key = match store_prefix {
-        Some(prefix) => format!("{dataset_id}/{prefix}/{chunk_key}"),
-        None => format!("{dataset_id}/{chunk_key}"),
+    // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
+    let bytes: Vec<u8> = match storage_compression {
+        crate::binding::StorageCompression::Lz4 => {
+            match lz4_flex::decompress_size_prepended(&storage_bytes) {
+                Ok(raw) => {
+                    tracing::debug!(
+                        key = chunk_key,
+                        compressed = storage_bytes.len(),
+                        decompressed = raw.len(),
+                        "lz4 decoded"
+                    );
+                    raw
+                }
+                Err(e) => {
+                    eprintln!("server: lz4 decompress failed for {chunk_key}: {e}");
+                    return;
+                }
+            }
+        }
+        crate::binding::StorageCompression::Zstd => {
+            eprintln!("server: zstd decompression not yet implemented for {chunk_key}");
+            return;
+        }
+        crate::binding::StorageCompression::None => storage_bytes.to_vec(),
     };
+
+    // Build binary response: [client_id: u32 LE][key_len: u16 LE][key][data]
+    // The composite key is "{dataset_id}/{image_id}/{chunk_key}".
+    let composite_key = format!("{dataset_id}/{image_id}/{chunk_key}");
     let key_bytes = composite_key.as_bytes();
     let key_len = key_bytes.len() as u16;
 

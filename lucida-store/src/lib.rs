@@ -1,7 +1,9 @@
 pub mod backend;
 pub mod cache;
+pub mod import;
+pub mod import_types;
 pub mod ingest;
-pub mod metadata;
+pub(crate) mod parse;
 
 /// The canonical 5D axis names in order.
 const ALL_DIMS: [&str; 5] = ["t", "c", "z", "y", "x"];
