@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use std::collections::HashMap;
+
 use indexmap::IndexMap;
-use lucida_content::DatasetId;
+use lucida_content::{DatasetId, LayoutId, LayoutSpec};
 
 use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
@@ -160,6 +162,10 @@ impl Default for DisplayState {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DocumentState {
     pub content_graphs: IndexMap<DatasetId, lucida_content::ContentGraph>,
+    #[serde(default)]
+    pub registered_layouts: HashMap<DatasetId, Vec<LayoutSpec>>,
+    #[serde(default)]
+    pub active_layout_ids: HashMap<DatasetId, LayoutId>,
 }
 
 impl DocumentState {
@@ -182,6 +188,15 @@ impl DocumentState {
             }
             DocumentCommand::RemoveDataset { id } => {
                 self.remove_dataset(&id);
+            }
+            DocumentCommand::RegisterLayout { dataset_id, layout } => {
+                self.registered_layouts
+                    .entry(dataset_id)
+                    .or_default()
+                    .push(layout);
+            }
+            DocumentCommand::SetActiveLayout { dataset_id, layout_id } => {
+                self.active_layout_ids.insert(dataset_id, layout_id);
             }
         }
     }

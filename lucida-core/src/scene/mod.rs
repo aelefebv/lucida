@@ -279,15 +279,43 @@ impl Scene {
     pub fn rebuild_derived(&mut self) {
         self.derived.clear();
         for (id, content) in &self.document.content_graphs {
-            self.derived.insert(id.clone(), build_derived_state(content));
+            let layout = resolve_layout(
+                content,
+                self.document.registered_layouts.get(id),
+                self.document.active_layout_ids.get(id),
+            );
+            self.derived.insert(id.clone(), build_derived_state(content, &layout));
         }
     }
 }
 
-/// Build derived state from a content graph.
-pub fn build_derived_state(content: &ContentGraph) -> DatasetDerivedState {
-    // 1. Find active layout
-    let active_layout = content.default_layout_id.as_ref()
+/// Resolve which layout to use for a dataset.
+///
+/// Search order:
+/// 1. If `active_id` is Some, search source_layouts then registered for matching ID
+/// 2. Otherwise use `content.default_layout_id` to search source_layouts
+/// 3. Fallback to first source layout
+/// 4. Fallback to empty LayoutSpec
+pub fn resolve_layout(
+    content: &ContentGraph,
+    registered: Option<&Vec<LayoutSpec>>,
+    active_id: Option<&LayoutId>,
+) -> LayoutSpec {
+    if let Some(id) = active_id {
+        // Search source layouts first
+        if let Some(layout) = content.source_layouts.iter().find(|l| &l.id == id) {
+            return layout.clone();
+        }
+        // Then registered layouts
+        if let Some(layouts) = registered {
+            if let Some(layout) = layouts.iter().find(|l| &l.id == id) {
+                return layout.clone();
+            }
+        }
+    }
+
+    // Fallback: use default_layout_id from content
+    content.default_layout_id.as_ref()
         .and_then(|id| content.source_layouts.iter().find(|l| &l.id == id))
         .or_else(|| content.source_layouts.first())
         .cloned()
@@ -295,9 +323,14 @@ pub fn build_derived_state(content: &ContentGraph) -> DatasetDerivedState {
             id: LayoutId("default".into()),
             name: "Default".into(),
             placements: vec![],
-        });
+        })
+}
 
-    // 2. Build per-image member state
+/// Build derived state from a content graph and a resolved layout.
+pub fn build_derived_state(content: &ContentGraph, layout: &LayoutSpec) -> DatasetDerivedState {
+    let active_layout = layout.clone();
+
+    // Build per-image member state
     let mut members = Vec::new();
     let mut volume_transforms = HashMap::new();
 
