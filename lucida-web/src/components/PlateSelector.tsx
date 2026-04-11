@@ -13,6 +13,8 @@ export interface PlateKind {
 interface PlacedMember {
   id: string;
   position: [number, number];
+  rowIndex?: number;
+  columnIndex?: number;
 }
 
 interface PlateSelectorProps {
@@ -47,7 +49,13 @@ export function extractPlateData(content: ContentGraph): { plateKind: PlateKind;
     for (const placement of defaultLayout.placements) {
       const entity = content.entities.find((e: Entity) => e.id === placement.entity_id);
       if (entity) {
-        members.push({ id: entity.id, position: placement.position });
+        const labels = entity.labels as Record<string, unknown>;
+        members.push({
+          id: entity.id,
+          position: placement.position,
+          rowIndex: typeof labels.row_index === "number" ? labels.row_index : undefined,
+          columnIndex: typeof labels.column_index === "number" ? labels.column_index : undefined,
+        });
       }
     }
   } else {
@@ -77,23 +85,16 @@ export function PlateSelector({
   // A well is populated if any member belongs to it (entity parent or label-based).
   const wellMemberMap = useMemo(() => {
     const map = new Map<string, PlacedMember[]>();
-    // For plate datasets, members are positioned by their layout placements.
-    // We group them by grid position (row, col).
-    const numCols = plateKind.columns.length;
-    for (let rowIdx = 0; rowIdx < plateKind.rows.length; rowIdx++) {
-      for (let colIdx = 0; colIdx < numCols; colIdx++) {
-        // Members whose index maps to this well position
-        const wellIdx = rowIdx * numCols + colIdx;
-        if (wellIdx < members.length) {
-          const key = `${rowIdx},${colIdx}`;
-          const existing = map.get(key) ?? [];
-          existing.push(members[wellIdx]);
-          map.set(key, existing);
-        }
+    for (const member of members) {
+      if (member.rowIndex != null && member.columnIndex != null) {
+        const key = `${member.rowIndex},${member.columnIndex}`;
+        const existing = map.get(key) ?? [];
+        existing.push(member);
+        map.set(key, existing);
       }
     }
     return map;
-  }, [plateKind.rows, plateKind.columns, members]);
+  }, [members]);
 
   // Build a well lookup by (row, col) for grid rendering
   const wellPathMap = useMemo(() => {

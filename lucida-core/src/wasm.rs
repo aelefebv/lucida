@@ -749,15 +749,17 @@ impl WasmScene {
 
     /// Returns 35 floats: invViewProj[16] + eye[3] + viewProj[16]
     pub fn minimap_camera(&self, theta: f64, phi: f64, w: f64, h: f64) -> Vec<f32> {
+        // Compute bounding box of all members to frame the camera
+        let (target, distance) = self.minimap_framing();
         let cam = Arcball {
-            target: [0.5, 0.5, 0.5],
+            target,
             theta,
             phi,
-            distance: 1.8,
+            distance,
             fov: std::f64::consts::FRAC_PI_4,
             viewport: [w as u32, h as u32],
             near: 0.01,
-            far: 100.0,
+            far: (distance * 4.0_f64).max(100.0),
             clip_distance: 0.0,
             clip_mode: crate::camera::ClipMode::default(),
         };
@@ -769,5 +771,50 @@ impl WasmScene {
         out.push(eye[2] as f32);
         out.extend_from_slice(&cam.view_proj());
         out
+    }
+
+    /// Compute minimap camera target and distance from the bounding box
+    /// of all member model matrices.
+    fn minimap_framing(&self) -> ([f64; 3], f64) {
+        let mut min = [f64::MAX, f64::MAX, f64::MAX];
+        let mut max = [f64::MIN, f64::MIN, f64::MIN];
+        let mut has_any = false;
+
+        for (ds_id, derived) in &self.inner.derived {
+            for member in &derived.members {
+                let mat = self.member_model_matrix(&ds_id.0, &member.entity_id.0);
+                has_any = true;
+
+                // Model matrix is scale+translate (diagonal), so corners are:
+                // (0,0,0) → (tx, ty, tz) and (1,1,1) → (sx+tx, sy+ty, sz+tz)
+                let sx = mat[0] as f64;
+                let sy = mat[5] as f64;
+                let sz = mat[10] as f64;
+                let tx = mat[12] as f64;
+                let ty = mat[13] as f64;
+                let tz = mat[14] as f64;
+
+                min[0] = min[0].min(tx);
+                min[1] = min[1].min(ty);
+                min[2] = min[2].min(tz);
+                max[0] = max[0].max(tx + sx);
+                max[1] = max[1].max(ty + sy);
+                max[2] = max[2].max(tz + sz);
+            }
+        }
+
+        if !has_any {
+            return ([0.5, 0.5, 0.5], 1.8);
+        }
+
+        let center = [
+            (min[0] + max[0]) / 2.0,
+            (min[1] + max[1]) / 2.0,
+            (min[2] + max[2]) / 2.0,
+        ];
+        let extent = (max[0] - min[0]).max(max[1] - min[1]).max(max[2] - min[2]);
+        let distance = extent * 1.8;
+
+        (center, distance)
     }
 }
