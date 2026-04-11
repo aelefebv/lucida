@@ -133,11 +133,17 @@ impl Scene {
                         // Build derived state
                         let derived = crate::scene::build_derived_state(&reg.content);
                         self.derived.insert(dataset_id, derived);
+
+                        self.epochs.content += 1;
+                        self.epochs.layout += 1;
                     }
                     DocumentCommand::RemoveDataset { id } => {
                         self.dataset_order.retain(|s| s != id);
                         self.dataset_settings.remove(id);
                         self.derived.remove(id);
+
+                        self.epochs.content += 1;
+                        self.epochs.layout += 1;
                     }
                 }
                 self.document.apply(doc_cmd);
@@ -148,86 +154,123 @@ impl Scene {
 
     fn apply_viewport(&mut self, cmd: ViewportCommand) {
         match cmd {
-            ViewportCommand::SetMode2D => self.set_mode_2d(),
-            ViewportCommand::SetMode3D => self.set_mode_3d(),
-            ViewportCommand::SetModeFly => self.set_mode_fly(),
+            ViewportCommand::SetMode2D => {
+                self.set_mode_2d();
+                self.epochs.view += 1;
+            }
+            ViewportCommand::SetMode3D => {
+                self.set_mode_3d();
+                self.epochs.view += 1;
+            }
+            ViewportCommand::SetModeFly => {
+                self.set_mode_fly();
+                self.epochs.view += 1;
+            }
             ViewportCommand::SetViewport { width, height } => {
-                self.inner_set_viewport(width, height)
+                self.inner_set_viewport(width, height);
+                self.epochs.view += 1;
             }
             ViewportCommand::Pan { dx, dy } => {
                 if let Camera::Slice(ref mut v) = self.camera {
                     v.pan(dx, dy);
                 }
+                self.epochs.view += 1;
             }
             ViewportCommand::ZoomBy { factor } => {
                 if let Camera::Slice(ref mut v) = self.camera {
                     v.zoom_by(factor);
                 }
+                self.epochs.view += 1;
             }
             ViewportCommand::SetCenter { x, y } => {
                 if let Camera::Slice(ref mut v) = self.camera {
                     v.center = [x, y];
                 }
+                self.epochs.view += 1;
             }
             ViewportCommand::SetZoom { value } => {
                 if let Camera::Slice(ref mut v) = self.camera {
                     v.zoom = value;
                 }
+                self.epochs.view += 1;
             }
             ViewportCommand::Rotate3D { d_theta, d_phi } => {
                 if let Camera::Arcball(ref mut v) = self.camera {
                     v.rotate(d_theta, d_phi);
                 }
+                self.epochs.view += 1;
             }
             ViewportCommand::Zoom3D { delta } => {
                 if let Camera::Arcball(ref mut v) = self.camera {
                     v.zoom(delta);
                 }
+                self.epochs.view += 1;
             }
             ViewportCommand::Pan3D { dx, dy } => {
                 if let Camera::Arcball(ref mut v) = self.camera {
                     v.pan(dx, dy);
                 }
+                self.epochs.view += 1;
             }
             ViewportCommand::FlyTick { dt, forward, right, up, yaw, pitch, roll } => {
                 if let Camera::Fly(ref mut v) = self.camera {
                     v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
                 }
+                self.epochs.view += 1;
             }
-            ViewportCommand::SetZ { z } => self.view.set_z(z),
-            ViewportCommand::SetZRange { start, end } => self.view.set_z_range(start..end),
-            ViewportCommand::SetT { t } => self.view.t = t,
-            ViewportCommand::SetC { c } => self.view.c = c,
+            ViewportCommand::SetZ { z } => {
+                self.view.set_z(z);
+                self.epochs.selection += 1;
+            }
+            ViewportCommand::SetZRange { start, end } => {
+                self.view.set_z_range(start..end);
+                self.epochs.selection += 1;
+            }
+            ViewportCommand::SetT { t } => {
+                self.view.t = t;
+                self.epochs.selection += 1;
+            }
+            ViewportCommand::SetC { c } => {
+                self.view.c = c;
+                self.epochs.selection += 1;
+            }
             ViewportCommand::SetContrast { min, max } => {
                 self.display.contrast_min = min;
                 self.display.contrast_max = max;
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetGamma { gamma } => {
                 self.display.gamma = gamma;
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetDatasetOrder { order } => {
                 self.dataset_order = order.into_iter().map(DatasetId).collect();
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetDatasetVisible { dataset_id, visible } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.visible = visible;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetDatasetOpacity { dataset_id, opacity } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.opacity = opacity;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetDatasetContrast { dataset_id, min, max } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.contrast_min = min;
                     s.contrast_max = max;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetDatasetGamma { dataset_id, gamma } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.gamma = gamma;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetDatasetBlendMode {
                 dataset_id,
@@ -236,6 +279,7 @@ impl Scene {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.blend_mode = blend_mode;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetDatasetRenderMode {
                 dataset_id,
@@ -244,19 +288,23 @@ impl Scene {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.render_mode = render_mode;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetMultiChannel { enabled } => {
                 self.view.multi_channel = enabled;
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetChannelVisible { dataset_id, channel, visible } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).visible = visible;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetChannelColormap { dataset_id, channel, colormap } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).colormap = colormap;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetChannelContrast { dataset_id, channel, min, max } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
@@ -264,16 +312,19 @@ impl Scene {
                     ch.contrast_min = min;
                     ch.contrast_max = max;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetChannelGamma { dataset_id, channel, gamma } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).gamma = gamma;
                 }
+                self.epochs.selection += 1;
             }
             ViewportCommand::SetChannelBlendMode { dataset_id, blend_mode } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.channel_blend_mode = blend_mode;
                 }
+                self.epochs.selection += 1;
             }
         }
     }
@@ -688,6 +739,69 @@ mod tests {
             assert_eq!(c.contrast_max, 65535.0);
             assert_eq!(c.gamma, 1.0);
         }
+    }
+
+    // --- Epoch tests ---
+
+    #[test]
+    fn register_dataset_bumps_content_and_layout_epochs() {
+        let mut scene = Scene::new([800, 600]);
+        assert_eq!(scene.epochs.content, 0);
+        assert_eq!(scene.epochs.layout, 0);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        assert_eq!(scene.epochs.content, 1);
+        assert_eq!(scene.epochs.layout, 1);
+        assert_eq!(scene.epochs.view, 0);
+        assert_eq!(scene.epochs.selection, 0);
+    }
+
+    #[test]
+    fn remove_dataset_bumps_content_and_layout_epochs() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) }.into());
+        assert_eq!(scene.epochs.content, 2);
+        assert_eq!(scene.epochs.layout, 2);
+    }
+
+    #[test]
+    fn pan_bumps_only_view_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(ViewportCommand::Pan { dx: 10.0, dy: 0.0 }.into());
+        assert_eq!(scene.epochs.view, 1);
+        assert_eq!(scene.epochs.content, 0);
+        assert_eq!(scene.epochs.layout, 0);
+        assert_eq!(scene.epochs.selection, 0);
+    }
+
+    #[test]
+    fn set_t_bumps_only_selection_epoch() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(ViewportCommand::SetT { t: 5 }.into());
+        assert_eq!(scene.epochs.selection, 1);
+        assert_eq!(scene.epochs.view, 0);
+        assert_eq!(scene.epochs.content, 0);
+        assert_eq!(scene.epochs.layout, 0);
+    }
+
+    #[test]
+    fn epochs_increase_monotonically() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(ViewportCommand::Pan { dx: 1.0, dy: 0.0 }.into());
+        scene.apply(ViewportCommand::Pan { dx: 1.0, dy: 0.0 }.into());
+        scene.apply(ViewportCommand::Pan { dx: 1.0, dy: 0.0 }.into());
+        assert_eq!(scene.epochs.view, 3);
+    }
+
+    #[test]
+    fn scene_epochs_serde_round_trip() {
+        use crate::epoch::SceneEpochs;
+        let epochs = SceneEpochs { content: 1, layout: 2, view: 3, selection: 4 };
+        let json = serde_json::to_string(&epochs).unwrap();
+        let parsed: SceneEpochs = serde_json::from_str(&json).unwrap();
+        assert_eq!(epochs, parsed);
     }
 
     #[test]

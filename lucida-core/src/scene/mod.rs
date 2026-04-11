@@ -13,6 +13,7 @@ use lucida_content::*;
 
 use crate::camera::Camera;
 use crate::chunk::{self, ChunkRequestPlan};
+use crate::epoch::SceneEpochs;
 use crate::transform::{self, VolumeTransform};
 use crate::view::ViewState;
 
@@ -54,6 +55,9 @@ pub struct Scene {
     /// Derived state for fast hot-path lookups. Rebuilt on register/remove.
     #[serde(skip)]
     pub derived: HashMap<DatasetId, DatasetDerivedState>,
+    /// Monotonic epoch counters for change detection.
+    #[serde(default)]
+    pub epochs: SceneEpochs,
 }
 
 impl Scene {
@@ -66,6 +70,7 @@ impl Scene {
             dataset_order: Vec::new(),
             dataset_settings: HashMap::new(),
             derived: HashMap::new(),
+            epochs: SceneEpochs::default(),
         }
     }
 

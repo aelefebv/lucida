@@ -717,6 +717,10 @@ impl WasmScene {
         }
     }
 
+    pub fn epochs(&self) -> String {
+        serde_json::to_string(&self.inner.epochs).unwrap_or_default()
+    }
+
     pub fn dataset_ids(&self) -> String {
         let ids: Vec<&str> = self.inner.document.content_graphs.keys().map(|id| id.0.as_str()).collect();
         serde_json::to_string(&ids).unwrap()
