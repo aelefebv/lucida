@@ -12,6 +12,44 @@ pub struct VolumeTransform {
     pub max_physical_extent: f64,
 }
 
+impl VolumeTransform {
+    /// Returns the world-space centroid of this volume.
+    /// Transforms the unit-cube center [0.5, 0.5, 0.5] by the model matrix.
+    pub fn world_centroid(&self) -> [f64; 3] {
+        let m = &self.model;
+        [
+            m[0] as f64 * 0.5 + m[4] as f64 * 0.5 + m[8]  as f64 * 0.5 + m[12] as f64,
+            m[1] as f64 * 0.5 + m[5] as f64 * 0.5 + m[9]  as f64 * 0.5 + m[13] as f64,
+            m[2] as f64 * 0.5 + m[6] as f64 * 0.5 + m[10] as f64 * 0.5 + m[14] as f64,
+        ]
+    }
+
+    /// Returns the 8 corners of this volume in world space.
+    pub fn world_corners(&self) -> [[f64; 3]; 8] {
+        let corners_local = [
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0],
+        ];
+        corners_local.map(|[x, y, z]| {
+            let m = &self.model;
+            [
+                m[0] as f64 * x + m[4] as f64 * y + m[8]  as f64 * z + m[12] as f64,
+                m[1] as f64 * x + m[5] as f64 * y + m[9]  as f64 * z + m[13] as f64,
+                m[2] as f64 * x + m[6] as f64 * y + m[10] as f64 * z + m[14] as f64,
+            ]
+        })
+    }
+
+    /// Returns the diagonal of this volume in world-space units.
+    pub fn world_diagonal(&self) -> f64 {
+        let corners = self.world_corners();
+        let dx = corners[7][0] - corners[0][0];
+        let dy = corners[7][1] - corners[0][1];
+        let dz = corners[7][2] - corners[0][2];
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    }
+}
+
 /// Compute a model matrix that maps the volume into a normalized coordinate space
 /// where the longest physical axis has length 1.0, with corner at the origin.
 ///

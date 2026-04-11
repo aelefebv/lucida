@@ -253,6 +253,15 @@ impl WasmScene {
         }
     }
 
+    /// Query the scene for geometric information about all entities in a dataset.
+    pub fn view_query(&self, dataset_id: &str) -> String {
+        let id = DatasetId(dataset_id.into());
+        match self.inner.view_query(&id) {
+            Some(result) => serde_json::to_string(&result).unwrap_or_default(),
+            None => "null".to_string(),
+        }
+    }
+
     /// Debug helper: returns [effective_zoom, zoom_per_voxel] for a dataset.
     pub fn debug_lod_info(&self, dataset_id: &str) -> Vec<f64> {
         let ds_id = DatasetId(dataset_id.to_string());
