@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use lucida_content::DatasetId;
+use lucida_content::{DatasetId, LayoutId, LayoutSpec};
 use lucida_protocol::RegisterDataset;
 
 use crate::camera::Camera;
@@ -13,6 +13,14 @@ use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
 pub enum DocumentCommand {
     RegisterDataset(RegisterDataset),
     RemoveDataset { id: DatasetId },
+    RegisterLayout {
+        dataset_id: DatasetId,
+        layout: LayoutSpec,
+    },
+    SetActiveLayout {
+        dataset_id: DatasetId,
+        layout_id: LayoutId,
+    },
 }
 
 /// Commands that mutate local-only viewport/display state.
@@ -102,6 +110,22 @@ impl Scene {
         match cmd {
             Command::Document(doc_cmd) => {
                 // Handle Scene-level side effects for document commands.
+                // SetActiveLayout needs special ordering: apply doc state first,
+                // then rebuild derived. All others do side effects first, then apply.
+                if let DocumentCommand::SetActiveLayout { dataset_id, .. } = &doc_cmd {
+                    let dataset_id = dataset_id.clone();
+                    self.document.apply(doc_cmd);
+                    if let Some(content) = self.document.content_graphs.get(&dataset_id) {
+                        let layout = crate::scene::resolve_layout(
+                            content,
+                            self.document.registered_layouts.get(&dataset_id),
+                            self.document.active_layout_ids.get(&dataset_id),
+                        );
+                        let derived = crate::scene::build_derived_state(content, &layout);
+                        self.derived.insert(dataset_id, derived);
+                    }
+                    return;
+                }
                 match &doc_cmd {
                     DocumentCommand::RegisterDataset(reg) => {
                         let dataset_id = reg.content.dataset_id.clone();
@@ -131,7 +155,12 @@ impl Scene {
                             });
 
                         // Build derived state
-                        let derived = crate::scene::build_derived_state(&reg.content);
+                        let layout = crate::scene::resolve_layout(
+                            &reg.content,
+                            self.document.registered_layouts.get(&dataset_id),
+                            self.document.active_layout_ids.get(&dataset_id),
+                        );
+                        let derived = crate::scene::build_derived_state(&reg.content, &layout);
                         self.derived.insert(dataset_id, derived);
 
                         self.epochs.content += 1;
@@ -144,6 +173,13 @@ impl Scene {
 
                         self.epochs.content += 1;
                         self.epochs.layout += 1;
+                    }
+                    DocumentCommand::RegisterLayout { .. } => {
+                        // Document state update happens below via self.document.apply().
+                        // No derived rebuild needed for register alone.
+                    }
+                    DocumentCommand::SetActiveLayout { .. } => {
+                        unreachable!("handled above");
                     }
                 }
                 self.document.apply(doc_cmd);
@@ -818,5 +854,191 @@ mod tests {
         let settings: crate::scene::DatasetDisplaySettings = serde_json::from_str(json).unwrap();
         assert!(settings.channel_settings.is_empty());
         assert_eq!(settings.channel_blend_mode, crate::scene::BlendMode::Additive);
+    }
+
+    // --- Layout registration and switching tests ---
+
+    #[test]
+    fn register_layout_command_serde_round_trip() {
+        use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
+        let cmd = DocumentCommand::RegisterLayout {
+            dataset_id: DatasetId("ds1".into()),
+            layout: LayoutSpec {
+                id: LayoutId("custom".into()),
+                name: "Custom Layout".into(),
+                placements: vec![EntityPlacement {
+                    entity_id: EntityId("e1".into()),
+                    position: [10.0, 20.0],
+                }],
+            },
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"register_layout\""));
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::RegisterLayout { dataset_id, layout } => {
+                assert_eq!(dataset_id, DatasetId("ds1".into()));
+                assert_eq!(layout.id, LayoutId("custom".into()));
+                assert_eq!(layout.name, "Custom Layout");
+                assert_eq!(layout.placements.len(), 1);
+            }
+            _ => panic!("expected RegisterLayout"),
+        }
+    }
+
+    #[test]
+    fn set_active_layout_command_serde_round_trip() {
+        use lucida_content::LayoutId;
+        let cmd = DocumentCommand::SetActiveLayout {
+            dataset_id: DatasetId("ds1".into()),
+            layout_id: LayoutId("layout-2".into()),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"set_active_layout\""));
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::SetActiveLayout { dataset_id, layout_id } => {
+                assert_eq!(dataset_id, DatasetId("ds1".into()));
+                assert_eq!(layout_id, LayoutId("layout-2".into()));
+            }
+            _ => panic!("expected SetActiveLayout"),
+        }
+    }
+
+    #[test]
+    fn register_layout_makes_it_available() {
+        use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+
+        let layout = LayoutSpec {
+            id: LayoutId("new-layout".into()),
+            name: "New Layout".into(),
+            placements: vec![EntityPlacement {
+                entity_id: EntityId("ds1-entity".into()),
+                position: [100.0, 200.0],
+            }],
+        };
+        scene.apply(DocumentCommand::RegisterLayout {
+            dataset_id: DatasetId("ds1".into()),
+            layout,
+        }.into());
+
+        let ds_id = DatasetId("ds1".into());
+        assert!(scene.document.registered_layouts.contains_key(&ds_id));
+        let layouts = &scene.document.registered_layouts[&ds_id];
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].id, LayoutId("new-layout".into()));
+        assert_eq!(layouts[0].name, "New Layout");
+    }
+
+    #[test]
+    fn set_active_layout_rebuilds_derived_state() {
+        use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
+        let mut scene = Scene::new([800, 600]);
+
+        // Register a plate dataset with two members
+        let reg = test_helpers::make_plate_register_dataset(
+            "plate", "plate",
+            vec![
+                ("m1", [0.0, 0.0]),
+                ("m2", [256.0, 0.0]),
+            ],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 256, 256],
+        );
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+
+        let ds_id = DatasetId("plate".into());
+        // Verify initial positions
+        let derived = &scene.derived[&ds_id];
+        assert_eq!(derived.members[0].position, [0.0, 0.0]);
+        assert_eq!(derived.members[1].position, [256.0, 0.0]);
+
+        // Register a layout with different positions
+        let alt_layout = LayoutSpec {
+            id: LayoutId("alt".into()),
+            name: "Alternative".into(),
+            placements: vec![
+                EntityPlacement { entity_id: EntityId("m1".into()), position: [500.0, 500.0] },
+                EntityPlacement { entity_id: EntityId("m2".into()), position: [1000.0, 500.0] },
+            ],
+        };
+        scene.apply(DocumentCommand::RegisterLayout {
+            dataset_id: ds_id.clone(),
+            layout: alt_layout,
+        }.into());
+
+        // Set the alt layout as active
+        scene.apply(DocumentCommand::SetActiveLayout {
+            dataset_id: ds_id.clone(),
+            layout_id: LayoutId("alt".into()),
+        }.into());
+
+        // Verify positions changed
+        let derived = &scene.derived[&ds_id];
+        assert_eq!(derived.members[0].position, [500.0, 500.0]);
+        assert_eq!(derived.members[1].position, [1000.0, 500.0]);
+        assert_eq!(derived.active_layout.id, LayoutId("alt".into()));
+    }
+
+    #[test]
+    fn set_active_layout_updates_active_layout_ids() {
+        use lucida_content::LayoutId;
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+
+        let ds_id = DatasetId("ds1".into());
+        assert!(!scene.document.active_layout_ids.contains_key(&ds_id));
+
+        scene.apply(DocumentCommand::SetActiveLayout {
+            dataset_id: ds_id.clone(),
+            layout_id: LayoutId("some-layout".into()),
+        }.into());
+
+        assert_eq!(
+            scene.document.active_layout_ids[&ds_id],
+            LayoutId("some-layout".into()),
+        );
+    }
+
+    #[test]
+    fn unknown_layout_id_is_no_op_for_derived() {
+        use lucida_content::LayoutId;
+        let mut scene = Scene::new([800, 600]);
+
+        // Register a plate dataset with a known default layout
+        let reg = test_helpers::make_plate_register_dataset(
+            "plate", "plate",
+            vec![
+                ("m1", [0.0, 0.0]),
+                ("m2", [256.0, 0.0]),
+            ],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 256, 256],
+        );
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+
+        let ds_id = DatasetId("plate".into());
+        let positions_before: Vec<[f64; 2]> = scene.derived[&ds_id]
+            .members.iter().map(|m| m.position).collect();
+
+        // Set an unknown layout ID
+        scene.apply(DocumentCommand::SetActiveLayout {
+            dataset_id: ds_id.clone(),
+            layout_id: LayoutId("nonexistent".into()),
+        }.into());
+
+        // active_layout_ids should be updated
+        assert_eq!(
+            scene.document.active_layout_ids[&ds_id],
+            LayoutId("nonexistent".into()),
+        );
+        // But derived state should use fallback (default layout), positions unchanged
+        let positions_after: Vec<[f64; 2]> = scene.derived[&ds_id]
+            .members.iter().map(|m| m.position).collect();
+        assert_eq!(positions_before, positions_after);
     }
 }

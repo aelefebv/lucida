@@ -227,6 +227,8 @@ The CPU Cache's decode pipeline handles wire-format decompression and pixel-form
 
 ## 1. Canonical Content Graph
 
+> Full documentation: [docs/canonical-content-graph.md](docs/canonical-content-graph.md)
+
 The shared Rust data model for what datasets contain and how their spatial components relate. Produced by parsing OME-Zarr metadata (lucida-store), consumed by every client.
 
 The content graph says **what the dataset is**. It does not say what to load, how to present it, or what derived products exist.

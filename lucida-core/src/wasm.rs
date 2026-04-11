@@ -1,6 +1,6 @@
 use wasm_bindgen::prelude::*;
 
-use lucida_content::DatasetId;
+use lucida_content::{DatasetId, LayoutId, LayoutSpec};
 
 use crate::camera::{Camera, Arcball, ClipMode};
 use crate::command::Command;
@@ -731,6 +731,65 @@ impl WasmScene {
         self.inner.document.content_graphs.get(&ds_id)
             .map(|g| g.name.clone())
             .unwrap_or_else(|| id.to_string())
+    }
+
+    // --- Layout management ---
+
+    /// Register a new layout for a dataset. The layout is parsed from JSON.
+    pub fn register_layout(&mut self, dataset_id: &str, layout_json: &str) -> Result<(), JsError> {
+        let layout: LayoutSpec =
+            serde_json::from_str(layout_json).map_err(|e| JsError::new(&e.to_string()))?;
+        let cmd = Command::Document(crate::command::DocumentCommand::RegisterLayout {
+            dataset_id: DatasetId(dataset_id.to_string()),
+            layout,
+        });
+        self.inner.apply(cmd);
+        Ok(())
+    }
+
+    /// Set the active layout for a dataset, triggering a derived state rebuild.
+    pub fn set_active_layout(&mut self, dataset_id: &str, layout_id: &str) {
+        let cmd = Command::Document(crate::command::DocumentCommand::SetActiveLayout {
+            dataset_id: DatasetId(dataset_id.to_string()),
+            layout_id: LayoutId(layout_id.to_string()),
+        });
+        self.inner.apply(cmd);
+    }
+
+    /// Returns a JSON array of `{id, name}` for all available layouts
+    /// (source_layouts + registered_layouts) for a dataset.
+    pub fn available_layouts(&self, dataset_id: &str) -> String {
+        let ds_id = DatasetId(dataset_id.to_string());
+
+        #[derive(serde::Serialize)]
+        struct LayoutInfo {
+            id: String,
+            name: String,
+        }
+
+        let mut layouts = Vec::new();
+
+        // Source layouts from the content graph
+        if let Some(content) = self.inner.document.content_graphs.get(&ds_id) {
+            for l in &content.source_layouts {
+                layouts.push(LayoutInfo {
+                    id: l.id.0.clone(),
+                    name: l.name.clone(),
+                });
+            }
+        }
+
+        // Registered layouts
+        if let Some(registered) = self.inner.document.registered_layouts.get(&ds_id) {
+            for l in registered {
+                layouts.push(LayoutInfo {
+                    id: l.id.0.clone(),
+                    name: l.name.clone(),
+                });
+            }
+        }
+
+        serde_json::to_string(&layouts).unwrap()
     }
 
     // --- Minimap camera ---
