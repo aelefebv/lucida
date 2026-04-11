@@ -249,12 +249,26 @@ function App() {
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  const [lastClickScreen, setLastClickScreen] = useState<[number, number] | null>(null);
   const handleDebugToggle = useCallback(() => {
     setShowDebug(prev => {
       debugStats.enabled = !prev;
       return !prev;
     });
   }, []);
+  const handleDebugClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!showDebug) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const cssX = e.clientX - rect.left;
+    const cssY = e.clientY - rect.top;
+    // Slice sets viewport to CSS pixels; volume sets it to physical pixels.
+    // Read the actual camera mode from WASM, not React state (which may be stale).
+    const ws = scene.wasmSceneRef.current;
+    const mode = ws?.camera_mode?.() ?? "slice";
+    const is3d = mode === "arcball" || mode === "fly";
+    const scale = is3d ? (window.devicePixelRatio || 1) : 1;
+    setLastClickScreen([cssX * scale, cssY * scale]);
+  }, [showDebug, scene.wasmSceneRef]);
 
   const handleFileBrowserSelect = useCallback((path: string) => {
     datasets.handleUrlSubmit(path);
@@ -317,7 +331,7 @@ function App() {
             </ul>
           </div>
         )}
-        <div style={{ position: "relative", display: datasetsVersion > 0 ? "block" : "none", width: layout.canvasWidth }}>
+        <div style={{ position: "relative", display: datasetsVersion > 0 ? "block" : "none", width: layout.canvasWidth }} onClick={handleDebugClick}>
           <canvas
             ref={render.canvasRef}
             tabIndex={0}
@@ -402,7 +416,13 @@ function App() {
             <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
           )}
           <FpsCounter />
-          {showDebug && <DebugOverlay />}
+          {showDebug && (
+            <DebugOverlay
+              wasmSceneRef={scene.wasmSceneRef}
+              datasetId={selectedDatasetId}
+              lastClickScreen={lastClickScreen}
+            />
+          )}
           <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
         </div>
         {datasetsVersion > 0 && (

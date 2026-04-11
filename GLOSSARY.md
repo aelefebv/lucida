@@ -36,9 +36,23 @@ Top-level terms. Per-crate glossaries have more detail.
 
 ## Scene State
 
-**DatasetDerivedState** -- Per-dataset precomputed cache built on RegisterDataset. Contains volume transforms, active layout, and member states. Rebuilt on content changes, not serialized.
+**SceneEpochs** -- Typed epoch counters (`content`, `layout`, `view`, `selection`) on Scene. Bumped by commands. Primary invalidation mechanism for the pipeline — replaces ad-hoc generation counters as consumers are rewritten.
 
-**MemberState** -- Precomputed per image-bearing entity: position (composed from layout + transforms), volume transform, level geometries. Used by chunk planning to avoid scanning ContentGraph every frame.
+**ViewQueryResult** -- Compact per-entity geometric recommendations from Scene State. Contains visibility, projected screen size, centroid, ideal target LOD, and importance ranking. Produced by `Scene::view_query()`.
+
+**EntityQueryResult** -- One entry in a ViewQueryResult. Per-entity: visible, projected_diagonal_px, projected_area_px2, centroid_world, ideal_target_lod, importance.
+
+**RayHit** -- Result of `Scene::ray_pick()`. Closest entity intersected by a screen-space ray, with world-space hit position and distance.
+
+**DatasetDerivedState** -- Per-dataset precomputed cache built on RegisterDataset or SetActiveLayout. Contains volume transforms, active layout, and member states. Rebuilt on content or layout changes, not serialized.
+
+**MemberState** -- Precomputed per image-bearing entity: position (composed from layout + transforms), volume transform, level geometries. Used by chunk planning and view queries to avoid scanning ContentGraph every frame.
+
+## Layout System
+
+**RegisterLayout** -- DocumentCommand that adds a client-authored LayoutSpec to the shared layout registry. Available to all clients in the session.
+
+**SetActiveLayout** -- DocumentCommand that switches the active layout for a dataset. Rebuilds derived state (member positions). Shared — all clients see the same active layout.
 
 ## Geometry
 

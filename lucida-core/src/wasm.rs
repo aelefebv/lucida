@@ -630,6 +630,7 @@ impl WasmScene {
         }
     }
 
+
     // --- Layer display settings ---
 
     pub fn dataset_order(&self) -> String {
@@ -790,7 +791,7 @@ impl WasmScene {
 
         // Source layouts from the content graph
         if let Some(content) = self.inner.document.content_graphs.get(&ds_id) {
-            for l in &content.source_layouts {
+            for l in content.source_layouts() {
                 layouts.push(LayoutInfo {
                     id: l.id.0.clone(),
                     name: l.name.clone(),

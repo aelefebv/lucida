@@ -7,7 +7,7 @@ Multi-client volumetric microscopy viewer. Rust core shared across web (WASM), C
 ```
 lucida-content/    Canonical content model (entities, images, layouts, transforms)
 lucida-protocol/   Fetch descriptors + registration types (Proxied/Direct/Local)
-lucida-core/       Scene state, commands, geometric queries, protocol types (WASM + native)
+lucida-core/       Scene state, commands, epochs, geometric queries, ray picking (WASM + native)
 lucida-store/      Storage abstraction, OME-Zarr parsing, import pipeline
 lucida-server/     Tokio WebSocket server, session management, chunk serving
 lucida-cli/        CLI client (inspection + control)
@@ -70,4 +70,5 @@ Chunk request:
 ## Related
 
 - [DOMAINS.md](DOMAINS.md) — full domain model, cross-domain rules, pipeline architecture
+- [docs/canonical-content-graph.md](docs/canonical-content-graph.md) — canonical content graph documentation
 - [docs/import-pipeline-spec.md](docs/import-pipeline-spec.md) — import pipeline specification

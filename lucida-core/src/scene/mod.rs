@@ -280,28 +280,133 @@ impl Scene {
         Some(plans)
     }
 
+    /// Build the rendering model matrix for a member — the same transform
+    /// the GPU uses, including Y-flip, global normalization, and top-alignment.
+    ///
+    /// Returns (model, inv_model) in the camera's coordinate space.
+    pub fn rendering_transform(&self, member: &MemberState) -> (VolumeTransform, VolumeTransform) {
+        let level0 = match member.levels.first() {
+            Some(l) => l,
+            None => {
+                let id = VolumeTransform {
+                    model: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+                    inv_model: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+                    max_physical_extent: 1.0,
+                };
+                return (id.clone(), id);
+            }
+        };
+
+        let t = &member.volume_transform;
+        let max_phys = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+
+        // Recover voxel scale from volume transform
+        let scale_x = if vol_shape[2] > 0 { t.model[0] as f64 * max_phys / vol_shape[2] as f64 } else { 1.0 };
+        let scale_y = if vol_shape[1] > 0 { t.model[5] as f64 * max_phys / vol_shape[1] as f64 } else { 1.0 };
+        let scale_z = if vol_shape[0] > 0 { t.model[10] as f64 * max_phys / vol_shape[0] as f64 } else { 1.0 };
+
+        // Y-flip for 3D (Y-up convention)
+        let flipped_offset = [
+            member.position[0],
+            vol_shape[1] as f64 - member.position[1] - vol_shape[1] as f64,
+        ];
+        let mt = transform::compute_member_transform(
+            vol_shape,
+            [scale_z, scale_y, scale_x],
+            flipped_offset,
+            max_phys,
+        );
+
+        // Global correction for multi-dataset scenes
+        let global_max = self.global_max_physical_extent();
+        let correction = (max_phys / global_max) as f32;
+        let inv_correction = (global_max / max_phys) as f32;
+
+        let phys_y = t.model[5] as f64 * max_phys;
+        let global_max_y = self.global_max_physical_y();
+        let top_align = ((global_max_y - phys_y) / global_max) as f32;
+
+        // Forward model
+        let mut model = mt.model;
+        model[0] *= correction;
+        model[5] *= correction;
+        model[10] *= correction;
+        model[12] *= correction;
+        model[13] *= correction;
+        model[13] += top_align;
+
+        // Inverse model
+        let mut inv_model = mt.inv_model;
+        inv_model[0] *= inv_correction;
+        inv_model[5] *= inv_correction;
+        inv_model[10] *= inv_correction;
+        inv_model[13] -= top_align * inv_model[5];
+
+        let fwd = VolumeTransform { model, inv_model: [0.0; 16], max_physical_extent: max_phys };
+        let inv = VolumeTransform { model: [0.0; 16], inv_model, max_physical_extent: max_phys };
+        (fwd, inv)
+    }
+
     /// Pick the closest entity hit by a ray cast from screen coordinates.
+    ///
+    /// For Slice (2D) mode: tests the voxel-space ray against each member's
+    /// voxel-space AABB (position + shape). The Slice camera operates in
+    /// voxel coordinates, so the ray and member bounds are in the same space.
+    ///
+    /// For 3D modes (Arcball/Fly): uses the rendering transform (which
+    /// includes Y-flip, global correction, and top-alignment) so the ray
+    /// test matches what the camera actually sees.
     pub fn ray_pick(&self, dataset_id: &DatasetId, screen_x: f64, screen_y: f64) -> Option<crate::ray::RayHit> {
         let derived = self.derived.get(dataset_id)?;
         let world_ray = self.camera.unproject_ray(screen_x, screen_y);
+        let is_2d = matches!(self.camera, Camera::Slice(_));
         let mut closest: Option<crate::ray::RayHit> = None;
 
         for member in &derived.members {
-            // Transform ray to member-local space
-            let local_ray = crate::ray::transform_ray(&world_ray, &member.volume_transform.inv_model);
+            let level0 = match member.levels.first() {
+                Some(l) => l,
+                None => continue,
+            };
 
-            if let Some(t) = local_ray.intersect_unit_cube() {
-                let hit_local = [
-                    local_ray.origin[0] + t * local_ray.direction[0],
-                    local_ray.origin[1] + t * local_ray.direction[1],
-                    local_ray.origin[2] + t * local_ray.direction[2],
-                ];
-                let hit_world = crate::ray::transform_point(&hit_local, &member.volume_transform.model);
-                let dx = hit_world[0] - world_ray.origin[0];
-                let dy = hit_world[1] - world_ray.origin[1];
-                let dz = hit_world[2] - world_ray.origin[2];
-                let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+            let hit_result = if is_2d {
+                // Slice mode: ray and member positions are both in voxel space.
+                let pos_x = member.position[0];
+                let pos_y = member.position[1];
+                let fov_w = level0.shape[4] as f64;
+                let fov_h = level0.shape[3] as f64;
 
+                let rx = world_ray.origin[0];
+                let ry = world_ray.origin[1];
+
+                if rx >= pos_x && rx <= pos_x + fov_w
+                    && ry >= pos_y && ry <= pos_y + fov_h
+                {
+                    Some(([rx, ry, 0.0], 0.0))
+                } else {
+                    None
+                }
+            } else {
+                // 3D mode: use rendering transform to match camera space.
+                let (fwd, inv) = self.rendering_transform(member);
+
+                let local_ray = crate::ray::transform_ray(&world_ray, &inv.inv_model);
+
+                local_ray.intersect_unit_cube().map(|t| {
+                    let hit_local = [
+                        local_ray.origin[0] + t * local_ray.direction[0],
+                        local_ray.origin[1] + t * local_ray.direction[1],
+                        local_ray.origin[2] + t * local_ray.direction[2],
+                    ];
+                    let hit_world = crate::ray::transform_point(&hit_local, &fwd.model);
+                    let dx = hit_world[0] - world_ray.origin[0];
+                    let dy = hit_world[1] - world_ray.origin[1];
+                    let dz = hit_world[2] - world_ray.origin[2];
+                    (hit_world, (dx * dx + dy * dy + dz * dz).sqrt())
+                })
+            };
+
+            if let Some((hit_world, distance)) = hit_result {
                 if closest.as_ref().map_or(true, |c| distance < c.distance) {
                     closest = Some(crate::ray::RayHit {
                         entity_id: member.entity_id.clone(),
