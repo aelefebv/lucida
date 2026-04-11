@@ -63,32 +63,41 @@ The simple rule: if a function depends only on camera state, transforms, metadat
                   │                                             │
                   │  lucida-server                              │
                   │  ├─ Session management                      │
-                  │  ├─ Storage proxy + chunk serving            │
-                  │  ├─ Protocol types (shared with core)       │
+                  │  ├─ Import: import_dataset → ServerBinding  │
+                  │  ├─ Chunk serving via ChunkResolver         │
+                  │  ├─ Storage decompression (LZ4 → raw)       │
                   │  └─ Future: overview generation, sharding   │
+                  │                                             │
+                  │  lucida-protocol (shared Rust crate)        │
+                  │  ├─ ClientFetchDescriptor (Proxied/Direct)  │
+                  │  ├─ WireFormat (Raw/Lz4/Zstd)              │
+                  │  └─ RegisterDataset command                 │
                   │                                             │
                   │  lucida-content (shared Rust crate)         │
                   │  ├─ Canonical entities (image/well/field)   │
                   │  ├─ Canonical transforms (field→well, etc)  │
-                  │  ├─ Source layouts from metadata              │
-                  │  ├─ Multiscale metadata + chunk geometry     │
+                  │  ├─ Source layouts from metadata             │
+                  │  ├─ Multiscale metadata + chunk geometry    │
+                  │  ├─ Plate layout construction               │
                   │  └─ Layout value types (LayoutSpec)         │
                   │                                             │
-                  │  lucida-core (consumes lucida-content)      │
+                  │  lucida-core (consumes content + protocol)  │
                   │  ├─ Scene state: camera, viewport, view     │
+                  │  ├─ DocumentState (IndexMap of ContentGraph)│
+                  │  ├─ DatasetDerivedState (precomputed cache) │
                   │  ├─ Command & protocol types                │
-                  │  ├─ Active layout registration + selection  │
                   │  ├─ Geometric query engine:                 │
                   │  │  ├─ Transform composition                │
                   │  │  ├─ Frustum culling                      │
-                  │  │  ├─ Projected-size metrics                │
+                  │  │  ├─ Projected-size metrics               │
                   │  │  ├─ Ideal target LOD                     │
                   │  │  ├─ Ray intersection                     │
                   │  │  └─ Distance/importance ranking          │
-                  │  └─ Plate position computation              │
+                  │  └─ Chunk plan (per-image, uses derived)    │
                   │                                             │
-                  │  lucida-store (consumes lucida-content)     │
-                  │  └─ OME-Zarr parsing → lucida-content types │
+                  │  lucida-store (consumes content + protocol) │
+                  │  ├─ OME-Zarr parsing (parse module)         │
+                  │  └─ import_dataset → ImportResult            │
                   │                                             │
                   │  lucida-cli (consumes lucida-core)          │
                   │  └─ Command-line viewport control + inspect │
@@ -120,8 +129,9 @@ The simple rule: if a function depends only on camera state, transforms, metadat
 
 | Domain | Language | Clients | Why |
 |--------|----------|---------|-----|
-| **Canonical Content Graph** | Rust | All | Shared data model. Every client needs entities, transforms, layouts, metadata. |
-| **Scene State** | Rust | All | Geometric query engine over the content graph. Shared across web (WASM), CLI (native), Python (PyO3). |
+| **Canonical Content Graph** | Rust (`lucida-content`) | All | Shared data model. Every client needs entities, transforms, layouts, metadata. |
+| **Import Protocol** | Rust (`lucida-protocol`) | All | Fetch descriptors (`ClientFetchDescriptor`), wire format, `RegisterDataset`. Shared between store (producer) and clients (consumers). |
+| **Scene State** | Rust (`lucida-core`) | All | Geometric query engine over the content graph. `DocumentState` stores `ContentGraph`s; `DatasetDerivedState` caches hot-path lookups. Shared across web (WASM), CLI (native), Python (PyO3). |
 | **Collaboration** | Rust types + client transport | All | Wire protocol from shared Rust types. Transport in TS (web), Rust (CLI), Python (py). |
 | **Client UI/API** | Per client | Per client | React (web), clap (CLI), Python API (py). |
 | **Presentation Overlay** | TypeScript | Web only | Custom layouts, condition grids, browser-authored arrangements. |
@@ -182,7 +192,9 @@ LOD is not one decision — it is four, split across languages:
 | **Main thread → Worker** | `postMessage` + binary payloads | Structured clone with transfer/copy/shared-memory depending on deployment | Per frame (hot state), per epoch (cold state), per chunk (data) |
 | **Worker → Main thread** | `postMessage` | Structured clone | Wanted-set deltas, eviction reports, intensity samples, telemetry |
 | **Main thread → Decode workers** | `postMessage` + ArrayBuffer transfer | Zero-copy transfer | Per compressed chunk |
-| **Client → Server** | WebSocket + JSON/binary | Network serialization | Per command, per presence, per chunk request |
+| **Client → Server** | WebSocket + JSON/binary | Network serialization | Per command, per presence, per chunk request (`{ dataset_id, image_id, key }`) |
+| **Server → Client (import)** | `RegisterDataset { content: ContentGraph, fetch: ClientFetchDescriptor }` via command broadcast | JSON serialization | Per dataset open |
+| **Server → Client (chunks)** | Binary: `[client_id][key_len][composite_key][raw_bytes]`. Server decodes storage codec (LZ4 → raw). Wire format is `Raw` (phase 1). | Binary serialization | Per chunk response |
 
 ### What this means in practice
 
@@ -201,16 +213,16 @@ The shared Rust data model for what datasets contain and how their spatial compo
 
 The content graph says **what the dataset is**. It does not say what to load, how to present it, or what derived products exist.
 
-### Target crate: `lucida-content`
+### Crate: `lucida-content`
 
-Currently these types live inside lucida-core. The recommendation is to extract them into a dedicated `lucida-content` crate so that:
+Canonical content types live in `lucida-content`, a standalone crate with no lucida dependencies (only `serde`):
 
-- `lucida-store` parses OME-Zarr and produces `lucida-content` types
+- `lucida-store` parses OME-Zarr and produces `lucida-content` types via `import_dataset`
 - `lucida-core` consumes `lucida-content` for scene state and geometric queries
 - `lucida-server`, `lucida-cli`, and `lucida-py` all consume the same `lucida-content`
 - `lucida-web` consumes the WASM build of `lucida-core` (which re-exports content types)
 
-This keeps canonical metadata out of browser-only code and prevents lucida-core from becoming a grab bag.
+Fetch and registration types live in `lucida-protocol` (depends on `lucida-content`): `ClientFetchDescriptor`, `WireFormat`, `RegisterDataset`. Both `lucida-core` and `lucida-store` depend on `lucida-protocol` — neither depends on the other.
 
 ### Subdomains
 
@@ -249,7 +261,7 @@ The Rust geometric query engine. Owns viewer state and evaluates spatial queries
 
 | Subdomain | Owns | Shared across clients? |
 |-----------|------|----------------------|
-| **Document** | Dataset membership, volume scale, dataset metadata | Yes (synced via server) |
+| **Document** | `DocumentState` with `IndexMap<DatasetId, ContentGraph>`. Registration via `RegisterDataset`, derived indices (`DatasetDerivedState`) precomputed per dataset for hot-path queries. | Yes (synced via server) |
 | **View** | Camera, T/C/Z selection, view mode, channel settings, layer visibility | No (local per client) |
 | **Layout registration** | Registered `LayoutSpec` instances, active layout selection via `register_layout()` / `set_active_layout()` | Active layout is per-client; specs may be shared |
 | **Geometric queries** | Transform composition, frustum culling, projected-size metrics, ideal target LOD, ray intersection, distance/importance ranking — all evaluated against the active layout | Shared implementation (same Rust runs native on server, WASM in browser, PyO3 in Python) |

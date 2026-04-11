@@ -1,0 +1,73 @@
+# Lucida Architecture
+
+Multi-client volumetric microscopy viewer. Rust core shared across web (WASM), CLI, Python (PyO3), and server.
+
+## Workspace
+
+```
+lucida-content/    Canonical content model (entities, images, layouts, transforms)
+lucida-protocol/   Fetch descriptors + registration types (Proxied/Direct/Local)
+lucida-core/       Scene state, commands, geometric queries, protocol types (WASM + native)
+lucida-store/      Storage abstraction, OME-Zarr parsing, import pipeline
+lucida-server/     Tokio WebSocket server, session management, chunk serving
+lucida-cli/        CLI client (inspection + control)
+lucida-web/        React + WebGPU frontend (not in Cargo workspace)
+lucida-py/         Python bindings via PyO3 (excluded from workspace, built with maturin)
+```
+
+## Crate Dependency Graph
+
+```
+                lucida-content          (standalone, serde only)
+                  ↑       ↑
+           ┌──────┘       └──────┐
+      lucida-protocol            │
+        ↑       ↑                │
+   ┌────┘       └────┐           │
+lucida-core      lucida-store ───┘
+   ↑                ↑
+   └──┐         ┌───┘
+    lucida-server
+```
+
+`lucida-core` and `lucida-store` are siblings — neither depends on the other. `lucida-server` is where they converge.
+
+## Data Flow: Import Pipeline
+
+```
+OME-Zarr file/URL
+  → lucida-store::backend::open()           ObjectStore handle
+  → lucida-store::import::import_dataset()  ImportResult
+      ├── ContentGraph                       canonical dataset description
+      ├── ClientFetchDescriptor              how clients fetch chunks
+      └── ServerBindingSeed                  server-private storage metadata
+  → lucida-server::binding::ChunkResolver   compiled key→path mapper
+```
+
+## Data Flow: Runtime
+
+```
+Client sends OpenRemoteDataset { url }
+  → Server: open store, import_dataset → ImportResult
+  → Server: build ServerBinding (ChunkResolver + CachedStore)
+  → Server: broadcast RegisterDataset { content, fetch } to all clients
+  → Client: apply RegisterDataset to scene state (builds derived indices)
+  → Client: use ClientFetchDescriptor to set up fetch pipeline
+
+Chunk request:
+  → Client sends { dataset_id, image_id, key }
+  → Server: ChunkResolver.resolve(image_id, key) → object store path
+  → Server: read, decompress (WireFormat::Raw), send bytes
+```
+
+## Per-Crate Architecture Docs
+
+- [lucida-content/ARCHITECTURE.md](lucida-content/ARCHITECTURE.md)
+- [lucida-protocol/ARCHITECTURE.md](lucida-protocol/ARCHITECTURE.md)
+- [lucida-store/ARCHITECTURE.md](lucida-store/ARCHITECTURE.md)
+- [lucida-server/ARCHITECTURE.md](lucida-server/ARCHITECTURE.md)
+
+## Related
+
+- [DOMAINS.md](DOMAINS.md) — full domain model, cross-domain rules, pipeline architecture
+- [docs/import-pipeline-spec.md](docs/import-pipeline-spec.md) — import pipeline specification

@@ -4,7 +4,7 @@ import type { ChunkCoord, QualifiedChunkCoord, SharedChunkQueue } from "./zarr/c
 import { evaluateChunkPlanFor } from "./zarr/chunkPlan.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
 import type { UploadState } from "./uploadCommon.ts";
-import type { DatasetInfo } from "./zarr/metadata.ts";
+import type { ContentGraph } from "./contentTypes.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
 // --- Scene settings cache ---
@@ -156,7 +156,7 @@ export interface PlanFetchActions {
  */
 export function planAndFetchForDatasets(
   scene: WasmScene,
-  datasets: Map<string, { sharedQueue: SharedChunkQueue; info: DatasetInfo }>,
+  datasets: Map<string, { sharedQueue: SharedChunkQueue; content: ContentGraph }>,
   state: UploadState,
   actions: PlanFetchActions,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
@@ -171,7 +171,7 @@ export function planAndFetchForDatasets(
   const originalC = scene.c();
 
   for (const [dsId, ds] of datasets) {
-    const dsShape = ds.info.levels[0].shape;
+    const dsShape = ds.content.images[0].multiscale.levels[0].shape;
 
     // Determine which channels to iterate
     const channels = multiChannel
@@ -229,23 +229,23 @@ export function planAndFetchForDatasets(
         for (const mp of sortedPlans) {
           const tl = mp.needed[0]?.level ?? -1;
           debugStats.memberStats.push({
-            id: multiChannel ? compositeKey(mp.member_id, ch) : mp.member_id,
+            id: multiChannel ? compositeKey(mp.image_id, ch) : mp.image_id,
             level: tl,
-            numLevels: ds.info.levels.length,
+            numLevels: ds.content.images[0].multiscale.levels.length,
             chunksNeeded: mp.needed.length,
             chunksSent: state.sentToWorker.get(
-              multiChannel ? compositeKey(mp.member_id, ch) : mp.member_id
+              multiChannel ? compositeKey(mp.image_id, ch) : mp.image_id
             )?.size ?? 0,
           });
           if (tl >= 0) {
             debugStats.selectedLevel = tl;
-            debugStats.numLevels = ds.info.levels.length;
+            debugStats.numLevels = ds.content.images[0].multiscale.levels.length;
           }
         }
       }
 
       for (const mp of sortedPlans) {
-        const rawMemberId = mp.member_id;
+        const rawMemberId = mp.image_id;
         const memberId = multiChannel ? compositeKey(rawMemberId, ch) : rawMemberId;
 
         const mmPending = minimapPendingFetch.get(rawMemberId);

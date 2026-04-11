@@ -12,7 +12,7 @@ import {
   clearUploadStateForDataset,
   clearUploadStateForMembers,
 } from "./uploadCommon.ts";
-import type { DatasetInfo } from "./zarr/metadata.ts";
+import type { ContentGraph } from "./contentTypes.ts";
 
 /** Backward-compatible alias. */
 export type SliceState = UploadState;
@@ -109,8 +109,8 @@ function uploadAndRenderSlice(
   const canvasW = canvas.clientWidth;
   const canvasH = canvas.clientHeight;
 
-  const shouldSkipDataset = (cacheKey: string, ds: { info: DatasetInfo }) => {
-    const dsShape = ds.info.levels[0].shape;
+  const shouldSkipDataset = (cacheKey: string, ds: { content: ContentGraph }) => {
+    const dsShape = ds.content.images[0].multiscale.levels[0].shape;
     if (multiChannel) {
       // In multi-channel mode, cache keys are `${dsId}:ch${ch}` — the plan
       // phase already filtered channels, so nothing to skip here.
@@ -120,16 +120,17 @@ function uploadAndRenderSlice(
     return z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0];
   };
 
-  const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }, _dsId: string): MemberUploadActions | null => {
+  const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; content: ContentGraph }, _dsId: string): MemberUploadActions | null => {
     const level = mp.needed[0]?.level;
     if (level === undefined) return null;
 
-    const levelMeta = ds.info.levels[level];
+    const multiscale = ds.content.images[0].multiscale;
+    const levelMeta = multiscale.levels[level];
     if (!levelMeta) return null;
 
     const [, , , levelHeight, levelWidth] = levelMeta.shape;
-    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-    const fullResDepth = ds.info.levels[0].shape[2];
+    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
+    const fullResDepth = multiscale.levels[0].shape[2];
     const levelDepth = levelMeta.shape[2];
 
     // In multi-channel mode, memberId is a composite key; extract the channel
@@ -178,9 +179,9 @@ function uploadAndRenderSlice(
     const dsSettings = allSettings[dsId];
     if (!dsSettings || !dsSettings.visible) continue;
 
-    const dsShapeL = ds.info.levels[0].shape; // [T, C, Z, Y, X]
-    const fullResWidth = ds.info.levels[0].shape[4];
-    const fullResHeight = ds.info.levels[0].shape[3];
+    const dsShapeL = ds.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
+    const fullResWidth = dsShapeL[4];
+    const fullResHeight = dsShapeL[3];
 
     if (multiChannel) {
       // Multi-channel: emit one layer per (member, channel) with per-channel settings
@@ -198,11 +199,11 @@ function uploadAndRenderSlice(
 
         const planCacheKey = `${dsId}:ch${ch}`;
         const members: MemberChunkPlan[] = memberPlanCache.get(planCacheKey)
-          ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+          ?? [{ image_id: dsId, position: [0, 0], needed: [], prefetch: [] }];
 
         for (const mp of members) {
           layers.push({
-            datasetId: compositeKey(mp.member_id, ch),
+            datasetId: compositeKey(mp.image_id, ch),
             dataW: fullResWidth,
             dataH: fullResHeight,
             contrastMin: layerContrastMin,
@@ -221,7 +222,7 @@ function uploadAndRenderSlice(
       if (z >= dsShapeL[2] || c >= dsShapeL[1] || t >= dsShapeL[0]) continue;
 
       const members: MemberChunkPlan[] = memberPlanCache.get(dsId)
-        ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+        ?? [{ image_id: dsId, position: [0, 0], needed: [], prefetch: [] }];
 
       const chSettings = dsSettings.channel_settings?.[c];
       const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
@@ -231,7 +232,7 @@ function uploadAndRenderSlice(
 
       for (const mp of members) {
         layers.push({
-          datasetId: mp.member_id,
+          datasetId: mp.image_id,
           dataW: fullResWidth,
           dataH: fullResHeight,
           contrastMin: layerContrastMin,

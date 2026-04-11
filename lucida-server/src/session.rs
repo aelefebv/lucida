@@ -1,29 +1,22 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 
+use lucida_content::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, PresenceState, ServerMessage};
 use lucida_core::scene::{DisplayState, DocumentState, DatasetDisplaySettings};
 use lucida_core::view::ViewState;
-use lucida_store::cache::CachedStore;
+
+use crate::binding::ServerBinding;
 
 const HISTORY_CAPACITY: usize = 256;
-
-/// A server-hosted dataset entry: the cached storage backend plus the original
-/// axis names from the OME metadata (needed for chunk path mapping).
-#[derive(Clone)]
-pub struct ServerStore {
-    pub store: Arc<CachedStore>,
-    pub axes: Vec<String>,
-}
 
 pub struct Session {
     pub document: DocumentState,
     pub seq: u64,
     history: VecDeque<(u64, DocumentCommand)>,
-    /// Server-hosted datasets: dataset_id → cached StorageBackend + axes.
-    pub server_stores: HashMap<String, ServerStore>,
+    /// Server-hosted datasets: dataset_id → operational binding (store + resolver + cache).
+    pub server_bindings: HashMap<DatasetId, ServerBinding>,
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
 }
@@ -31,12 +24,10 @@ pub struct Session {
 impl Session {
     pub fn new() -> Self {
         Self {
-            document: DocumentState {
-                datasets: Vec::new(),
-            },
+            document: DocumentState::default(),
             seq: 0,
             history: VecDeque::with_capacity(HISTORY_CAPACITY),
-            server_stores: HashMap::new(),
+            server_bindings: HashMap::new(),
             clients: HashMap::new(),
         }
     }
@@ -119,8 +110,8 @@ impl Session {
     pub fn update_dataset_presence(
         &mut self,
         id: ClientId,
-        dataset_order: Vec<String>,
-        dataset_settings: HashMap<String, DatasetDisplaySettings>,
+        dataset_order: Vec<DatasetId>,
+        dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     ) {
         if let Some(presence) = self.clients.get_mut(&id) {
             presence.dataset_order = dataset_order;
@@ -186,6 +177,56 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lucida_content::*;
+    use lucida_protocol::*;
+
+    fn make_register(id: &str, name: &str) -> RegisterDataset {
+        let entity_id = EntityId(format!("{id}-entity"));
+        let image_id = ImageId(format!("{id}-image"));
+        let content = ContentGraph {
+            dataset_id: DatasetId(id.to_string()),
+            name: name.to_string(),
+            kind: DatasetKind::Single,
+            entities: vec![Entity {
+                id: entity_id.clone(),
+                kind: EntityKind::Image,
+                parent: None,
+                labels: EntityLabels {
+                    name: Some(name.to_string()),
+                    ..Default::default()
+                },
+            }],
+            transforms: vec![],
+            images: vec![ImageSpec {
+                image_id: image_id.clone(),
+                owner: entity_id,
+                multiscale: MultiscaleInfo {
+                    axes: vec![
+                        Axis { name: "z".into(), kind: AxisKind::Space },
+                        Axis { name: "y".into(), kind: AxisKind::Space },
+                        Axis { name: "x".into(), kind: AxisKind::Space },
+                    ],
+                    levels: vec![LevelGeometry {
+                        level_index: 0,
+                        shape: [1, 1, 10, 256, 256],
+                        chunk_shape: [1, 1, 1, 128, 128],
+                        grid_shape: [1, 1, 10, 2, 2],
+                        scale: [1.0, 1.0, 1.0, 1.0, 1.0],
+                    }],
+                    data_type: DataType::Uint16,
+                },
+            }],
+            source_layouts: vec![],
+            default_layout_id: None,
+        };
+        let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+            images: vec![ProxiedImageSpec {
+                image_id,
+                wire_format: WireFormat::Raw { data_type: DataType::Uint16 },
+            }],
+        });
+        RegisterDataset { content, fetch }
+    }
 
     #[test]
     fn new_session_starts_at_seq_zero() {
@@ -196,49 +237,25 @@ mod tests {
     #[test]
     fn apply_increments_seq() {
         let mut session = Session::new();
-        let seq = session.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: Default::default(),
-            layers: vec![],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        });
+        let reg = make_register("ds1", "test");
+        let seq = session.apply(DocumentCommand::RegisterDataset(reg));
         assert_eq!(seq, 1);
     }
 
     #[test]
     fn apply_mutates_document() {
         let mut session = Session::new();
-        session.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: Default::default(),
-            layers: vec![],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        });
-        assert_eq!(session.document.datasets.len(), 1);
-        assert_eq!(session.document.datasets[0].id, "ds1");
+        let reg = make_register("ds1", "test");
+        session.apply(DocumentCommand::RegisterDataset(reg));
+        assert_eq!(session.document.content_graphs.len(), 1);
+        assert!(session.document.content_graphs.contains_key(&DatasetId("ds1".into())));
     }
 
     #[test]
     fn snapshot_contains_current_state() {
         let mut session = Session::new();
-        session.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: Default::default(),
-            layers: vec![],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        });
+        let reg = make_register("ds1", "test");
+        session.apply(DocumentCommand::RegisterDataset(reg));
         let msg = session.snapshot(42);
         match msg {
             ServerMessage::Snapshot {
@@ -249,7 +266,7 @@ mod tests {
             } => {
                 assert_eq!(seq, 1);
                 assert_eq!(your_id, 42);
-                assert_eq!(document.datasets.len(), 1);
+                assert_eq!(document.content_graphs.len(), 1);
             }
             _ => panic!("expected Snapshot"),
         }
@@ -258,11 +275,9 @@ mod tests {
     #[test]
     fn history_ring_buffer_caps_at_256() {
         let mut session = Session::new();
-        for _ in 0..300 {
-            session.apply(DocumentCommand::SetVolumeScale {
-                shape: [1, 1, 1],
-                scale: [1.0, 1.0, 1.0],
-            });
+        for i in 0..300 {
+            let reg = make_register(&format!("ds-{i}"), "test");
+            session.apply(DocumentCommand::RegisterDataset(reg));
         }
         assert_eq!(session.history.len(), HISTORY_CAPACITY);
     }

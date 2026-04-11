@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use lucida_content::{DatasetId, ImageId};
+
 use crate::camera::Camera;
 use crate::command::DocumentCommand;
 use crate::scene::{DisplayState, DocumentState, DatasetDisplaySettings};
@@ -20,9 +22,9 @@ pub struct PresenceState {
     pub following: Option<ClientId>,
     pub cursor: Option<[f64; 2]>,
     #[serde(default)]
-    pub dataset_order: Vec<String>,
+    pub dataset_order: Vec<DatasetId>,
     #[serde(default)]
-    pub dataset_settings: HashMap<String, DatasetDisplaySettings>,
+    pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
 }
 
 /// Messages sent from a client to the server.
@@ -43,13 +45,13 @@ pub enum ClientMessage {
     Follow { target: Option<ClientId> },
     /// Layer presence update (ephemeral, latest-wins).
     DatasetPresence {
-        dataset_order: Vec<String>,
-        dataset_settings: HashMap<String, DatasetDisplaySettings>,
+        dataset_order: Vec<DatasetId>,
+        dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     },
     /// Remote-control another client by making them follow the sender.
     Steer { client: ClientId },
     /// Request the server open a Dataset from a URL.
-    /// The server reads metadata via a StorageBackend and broadcasts AddDataset.
+    /// The server reads metadata via a StorageBackend and broadcasts RegisterDataset.
     OpenRemoteDataset { url: String },
 }
 
@@ -94,8 +96,8 @@ pub enum ServerMessage {
     /// A peer's layer presence changed.
     DatasetPresenceUpdate {
         client_id: ClientId,
-        dataset_order: Vec<String>,
-        dataset_settings: HashMap<String, DatasetDisplaySettings>,
+        dataset_order: Vec<DatasetId>,
+        dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     },
     /// Sent when OpenRemoteDataset cannot be fulfilled.
     OpenDatasetFailed { url: String, error: String },
@@ -105,22 +107,18 @@ pub enum ServerMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChunkMessage {
-    /// Viewer → Server: request a chunk from the dataset's data source.
+    /// Viewer -> Server: request a chunk from the dataset's data source.
     ChunkRequest {
-        dataset_id: String,
+        dataset_id: DatasetId,
+        image_id: ImageId,
         key: String,
-        /// Store path prefix for plate FOV routing (e.g. "A/1/0").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        store_prefix: Option<String>,
     },
-    /// Server → Data source: fetch this chunk and send it to `client_id`.
+    /// Server -> Data source: fetch this chunk and send it to `client_id`.
     ChunkFetch {
         client_id: u64,
-        dataset_id: String,
+        dataset_id: DatasetId,
+        image_id: ImageId,
         key: String,
-        /// Store path prefix for plate FOV routing (e.g. "A/1/0").
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        store_prefix: Option<String>,
     },
 }
 
@@ -130,9 +128,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips() {
-        let doc = DocumentState {
-            datasets: Vec::new(),
-        };
+        let doc = DocumentState::default();
         let msg = ServerMessage::Snapshot {
             seq: 1,
             document: doc,
@@ -165,16 +161,17 @@ mod tests {
     #[test]
     fn chunk_request_round_trips() {
         let msg = ChunkMessage::ChunkRequest {
-            dataset_id: "ds1".into(),
+            dataset_id: DatasetId("ds1".into()),
+            image_id: ImageId("img1".into()),
             key: "0/0/0/0/0/0".into(),
-            store_prefix: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"chunk_request\""));
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ChunkMessage::ChunkRequest { dataset_id, key, .. } => {
-                assert_eq!(dataset_id, "ds1");
+            ChunkMessage::ChunkRequest { dataset_id, image_id, key } => {
+                assert_eq!(dataset_id, DatasetId("ds1".into()));
+                assert_eq!(image_id, ImageId("img1".into()));
                 assert_eq!(key, "0/0/0/0/0/0");
             }
             _ => panic!("expected ChunkRequest"),
@@ -185,43 +182,19 @@ mod tests {
     fn chunk_fetch_round_trips() {
         let msg = ChunkMessage::ChunkFetch {
             client_id: 42,
-            dataset_id: "ds1".into(),
+            dataset_id: DatasetId("ds1".into()),
+            image_id: ImageId("img1".into()),
             key: "1/0/0/2/3/4".into(),
-            store_prefix: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"chunk_fetch\""));
-        // store_prefix should be omitted when None
-        assert!(!json.contains("store_prefix"));
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ChunkMessage::ChunkFetch { client_id, dataset_id, key, store_prefix } => {
+            ChunkMessage::ChunkFetch { client_id, dataset_id, image_id, key } => {
                 assert_eq!(client_id, 42);
-                assert_eq!(dataset_id, "ds1");
+                assert_eq!(dataset_id, DatasetId("ds1".into()));
+                assert_eq!(image_id, ImageId("img1".into()));
                 assert_eq!(key, "1/0/0/2/3/4");
-                assert_eq!(store_prefix, None);
-            }
-            _ => panic!("expected ChunkFetch"),
-        }
-    }
-
-    #[test]
-    fn chunk_fetch_with_store_prefix_round_trips() {
-        let msg = ChunkMessage::ChunkFetch {
-            client_id: 7,
-            dataset_id: "plate1".into(),
-            key: "0/0/0/5/10".into(),
-            store_prefix: Some("A/1/0".into()),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"store_prefix\":\"A/1/0\""));
-        let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ChunkMessage::ChunkFetch { client_id, dataset_id, key, store_prefix } => {
-                assert_eq!(client_id, 7);
-                assert_eq!(dataset_id, "plate1");
-                assert_eq!(key, "0/0/0/5/10");
-                assert_eq!(store_prefix, Some("A/1/0".into()));
             }
             _ => panic!("expected ChunkFetch"),
         }
@@ -229,7 +202,7 @@ mod tests {
 
     #[test]
     fn command_broadcast_round_trips() {
-        let cmd = DocumentCommand::RemoveDataset { id: "ds1".into() };
+        let cmd = DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) };
         let msg = ServerMessage::CommandBroadcast { seq: 5, command: cmd };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -238,7 +211,7 @@ mod tests {
                 assert_eq!(seq, 5);
                 match command {
                     DocumentCommand::RemoveDataset { id } => {
-                        assert_eq!(id, "ds1");
+                        assert_eq!(id, DatasetId("ds1".into()));
                     }
                     _ => panic!("expected RemoveDataset command"),
                 }
@@ -249,17 +222,9 @@ mod tests {
 
     #[test]
     fn client_message_command_round_trips() {
+        let reg = crate::scene::test_helpers::make_register_dataset("ds1", "test", 1);
         let msg = ClientMessage::Command {
-            command: DocumentCommand::AddDataset {
-                id: "ds1".into(),
-                name: "test".into(),
-                kind: Default::default(),
-                layers: vec![],
-                volume_shape: None,
-                volume_scale: None,
-                members: Vec::new(),
-                client_metadata: None,
-            },
+            command: DocumentCommand::RegisterDataset(reg),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"command\""));

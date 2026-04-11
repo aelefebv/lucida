@@ -1,7 +1,7 @@
 /** Shared upload infrastructure for slice and volume render paths. */
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
-import type { DatasetInfo } from "./zarr/metadata.ts";
+import type { ContentGraph } from "./contentTypes.ts";
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { debugStats } from "./debug/debugStats.ts";
@@ -50,11 +50,11 @@ function resolveDatasetId(cacheKey: string): string {
 }
 
 export function uploadChunksForMembers(
-  datasets: Map<string, { sharedQueue: SharedChunkQueue; info: DatasetInfo }>,
+  datasets: Map<string, { sharedQueue: SharedChunkQueue; content: ContentGraph }>,
   memberPlanCache: Map<string, MemberChunkPlan[]>,
   state: UploadState,
-  shouldSkipDataset: (cacheKey: string, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }) => boolean,
-  createActions: (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }, dsId: string) => MemberUploadActions | null,
+  shouldSkipDataset: (cacheKey: string, ds: { sharedQueue: SharedChunkQueue; content: ContentGraph }) => boolean,
+  createActions: (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; content: ContentGraph }, dsId: string) => MemberUploadActions | null,
 ): boolean {
   let uploadBudget = MAIN_VIEW_UPLOAD_BUDGET_BYTES;
   let budgetExhausted = false;
@@ -75,8 +75,8 @@ export function uploadChunksForMembers(
       // in tickCommon's planAndFetchForDatasets.
       const isComposite = cacheKey !== dsId;
       const channelSuffix = isComposite ? cacheKey.substring(dsId.length) : "";
-      const memberId = isComposite ? `${mp.member_id}${channelSuffix}` : mp.member_id;
-      const rawMemberId = mp.member_id;
+      const memberId = isComposite ? `${mp.image_id}${channelSuffix}` : mp.image_id;
+      const rawMemberId = mp.image_id;
 
       const actions = createActions(memberId, mp, ds, dsId);
       if (!actions) continue;
@@ -96,7 +96,7 @@ export function uploadChunksForMembers(
       }
 
       if (!budgetExhausted) {
-        const fineDataType = ds.info.levels[mp.needed[0].level].dataType;
+        const fineDataType = ds.content.images[0].multiscale.data_type;
         const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
         for (const coord of mp.needed) {
           if (sentSet.has(coord.key)) continue;

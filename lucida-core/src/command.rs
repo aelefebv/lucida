@@ -1,33 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+use lucida_content::DatasetId;
+use lucida_protocol::RegisterDataset;
+
 use crate::camera::Camera;
-use crate::scene::{BlendMode, Colormap, DatasetKind, DatasetMember, Layer, RenderMode, Scene};
+use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
 
 /// Commands that mutate shared document state (datasets).
 /// These are sequenced, persisted, and broadcast to all clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DocumentCommand {
-    AddDataset {
-        id: String,
-        name: String,
-        #[serde(default)]
-        kind: DatasetKind,
-        layers: Vec<Layer>,
-        volume_shape: Option<[u32; 3]>,
-        volume_scale: Option<[f64; 3]>,
-        #[serde(default)]
-        members: Vec<DatasetMember>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        client_metadata: Option<serde_json::Value>,
-    },
-    RemoveDataset {
-        id: String,
-    },
-    SetVolumeScale {
-        shape: [u32; 3],
-        scale: [f64; 3],
-    },
+    RegisterDataset(RegisterDataset),
+    RemoveDataset { id: DatasetId },
 }
 
 /// Commands that mutate local-only viewport/display state.
@@ -118,30 +103,42 @@ impl Scene {
             Command::Document(doc_cmd) => {
                 // Handle Scene-level side effects for document commands.
                 match &doc_cmd {
-                    DocumentCommand::AddDataset { id, layers, .. } => {
-                        if !self.dataset_order.contains(id) {
-                            self.dataset_order.push(id.clone());
+                    DocumentCommand::RegisterDataset(reg) => {
+                        let dataset_id = reg.content.dataset_id.clone();
+
+                        // Dataset ordering
+                        if !self.dataset_order.contains(&dataset_id) {
+                            self.dataset_order.push(dataset_id.clone());
                         }
-                        self.dataset_settings
-                            .entry(id.clone())
-                            .or_insert_with(Default::default);
-                        // Lazy-initialize channel_settings from layer count.
-                        if let Some(s) = self.dataset_settings.get_mut(id) {
-                            if s.channel_settings.is_empty() {
-                                s.channel_settings = layers.iter().enumerate().map(|(i, _)| {
-                                    crate::scene::ChannelSettings {
+
+                        // Channel count from first image's C dimension
+                        let channel_count = reg.content.images.first()
+                            .and_then(|img| img.multiscale.levels.first())
+                            .map(|l| l.shape[1] as usize)
+                            .unwrap_or(1);
+
+                        // Display settings
+                        self.dataset_settings.entry(dataset_id.clone())
+                            .or_insert_with(|| {
+                                let mut s = crate::scene::DatasetDisplaySettings::default();
+                                s.channel_settings = (0..channel_count)
+                                    .map(|i| crate::scene::ChannelSettings {
                                         colormap: Colormap::default_for_channel(i),
                                         ..Default::default()
-                                    }
-                                }).collect();
-                            }
-                        }
+                                    })
+                                    .collect();
+                                s
+                            });
+
+                        // Build derived state
+                        let derived = crate::scene::build_derived_state(&reg.content);
+                        self.derived.insert(dataset_id, derived);
                     }
                     DocumentCommand::RemoveDataset { id } => {
                         self.dataset_order.retain(|s| s != id);
                         self.dataset_settings.remove(id);
+                        self.derived.remove(id);
                     }
-                    DocumentCommand::SetVolumeScale { .. } => {}
                 }
                 self.document.apply(doc_cmd);
             }
@@ -155,7 +152,7 @@ impl Scene {
             ViewportCommand::SetMode3D => self.set_mode_3d(),
             ViewportCommand::SetModeFly => self.set_mode_fly(),
             ViewportCommand::SetViewport { width, height } => {
-                self.camera.set_viewport(width, height)
+                self.inner_set_viewport(width, height)
             }
             ViewportCommand::Pan { dx, dy } => {
                 if let Camera::Slice(ref mut v) = self.camera {
@@ -209,26 +206,26 @@ impl Scene {
                 self.display.gamma = gamma;
             }
             ViewportCommand::SetDatasetOrder { order } => {
-                self.dataset_order = order;
+                self.dataset_order = order.into_iter().map(DatasetId).collect();
             }
             ViewportCommand::SetDatasetVisible { dataset_id, visible } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.visible = visible;
                 }
             }
             ViewportCommand::SetDatasetOpacity { dataset_id, opacity } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.opacity = opacity;
                 }
             }
             ViewportCommand::SetDatasetContrast { dataset_id, min, max } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.contrast_min = min;
                     s.contrast_max = max;
                 }
             }
             ViewportCommand::SetDatasetGamma { dataset_id, gamma } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.gamma = gamma;
                 }
             }
@@ -236,7 +233,7 @@ impl Scene {
                 dataset_id,
                 blend_mode,
             } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.blend_mode = blend_mode;
                 }
             }
@@ -244,7 +241,7 @@ impl Scene {
                 dataset_id,
                 render_mode,
             } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.render_mode = render_mode;
                 }
             }
@@ -252,29 +249,29 @@ impl Scene {
                 self.view.multi_channel = enabled;
             }
             ViewportCommand::SetChannelVisible { dataset_id, channel, visible } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).visible = visible;
                 }
             }
             ViewportCommand::SetChannelColormap { dataset_id, channel, colormap } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).colormap = colormap;
                 }
             }
             ViewportCommand::SetChannelContrast { dataset_id, channel, min, max } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     let ch = s.ensure_channel(channel as usize);
                     ch.contrast_min = min;
                     ch.contrast_max = max;
                 }
             }
             ViewportCommand::SetChannelGamma { dataset_id, channel, gamma } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).gamma = gamma;
                 }
             }
             ViewportCommand::SetChannelBlendMode { dataset_id, blend_mode } => {
-                if let Some(s) = self.dataset_settings.get_mut(&dataset_id) {
+                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.channel_blend_mode = blend_mode;
                 }
             }
@@ -285,6 +282,7 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::test_helpers;
 
     #[test]
     fn viewport_command_round_trips_through_json() {
@@ -305,20 +303,12 @@ mod tests {
 
     #[test]
     fn command_wrapper_round_trips_document() {
-        let cmd = Command::Document(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers: vec![],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        });
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        let cmd = Command::Document(DocumentCommand::RegisterDataset(reg));
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"add_dataset\""));
+        assert!(json.contains("\"type\":\"register_dataset\""));
         let parsed: Command = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, Command::Document(DocumentCommand::AddDataset { .. })));
+        assert!(matches!(parsed, Command::Document(DocumentCommand::RegisterDataset(_))));
     }
 
     #[test]
@@ -347,56 +337,37 @@ mod tests {
     }
 
     #[test]
-    fn add_dataset_command_round_trips() {
-        let cmd = DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test dataset".into(),
-            kind: DatasetKind::default(),
-            layers: vec![],
-            volume_shape: Some([100, 200, 300]),
-            volume_scale: Some([1.0, 0.5, 0.5]),
-            members: Vec::new(),
-            client_metadata: Some(serde_json::json!({"dtype": "uint16"})),
-        };
+    fn register_dataset_command_round_trips() {
+        let reg = test_helpers::make_register_dataset("ds1", "test dataset", 1);
+        let cmd = DocumentCommand::RegisterDataset(reg);
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"add_dataset\""));
+        assert!(json.contains("\"type\":\"register_dataset\""));
         let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            DocumentCommand::AddDataset { id, name, volume_shape, client_metadata, .. } => {
-                assert_eq!(id, "ds1");
-                assert_eq!(name, "test dataset");
-                assert_eq!(volume_shape, Some([100, 200, 300]));
-                assert!(client_metadata.is_some());
+            DocumentCommand::RegisterDataset(r) => {
+                assert_eq!(r.content.dataset_id, DatasetId("ds1".into()));
+                assert_eq!(r.content.name, "test dataset");
             }
-            _ => panic!("expected AddDataset"),
+            _ => panic!("expected RegisterDataset"),
         }
     }
 
     #[test]
     fn remove_dataset_command_round_trips() {
-        let cmd = DocumentCommand::RemoveDataset { id: "ds1".into() };
+        let cmd = DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"remove_dataset\""));
         let _parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
     }
 
     #[test]
-    fn apply_add_dataset_populates_scene() {
+    fn apply_register_dataset_populates_scene() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers: vec![],
-            volume_shape: Some([100, 200, 300]),
-            volume_scale: Some([1.0, 1.0, 1.0]),
-            members: Vec::new(),
-            client_metadata: None,
-        }.into());
-        assert_eq!(scene.document.datasets.len(), 1);
-        assert_eq!(scene.document.datasets[0].id, "ds1");
-        assert!(scene.document.datasets[0].volume_transform.is_some());
-        assert_eq!(scene.document.datasets[0].volume_shape, Some([100, 200, 300]));
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        assert_eq!(scene.document.content_graphs.len(), 1);
+        assert!(scene.document.content_graphs.contains_key(&DatasetId("ds1".into())));
+        assert!(scene.derived.contains_key(&DatasetId("ds1".into())));
     }
 
     #[test]
@@ -456,103 +427,50 @@ mod tests {
     #[test]
     fn apply_set_dataset_visible_updates_settings() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers: vec![],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        }.into());
-        assert!(scene.dataset_settings["ds1"].visible);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        assert!(scene.dataset_settings[&DatasetId("ds1".into())].visible);
         scene.apply(ViewportCommand::SetDatasetVisible { dataset_id: "ds1".into(), visible: false }.into());
-        assert!(!scene.dataset_settings["ds1"].visible);
+        assert!(!scene.dataset_settings[&DatasetId("ds1".into())].visible);
     }
 
     #[test]
     fn apply_set_dataset_opacity_updates_settings() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers: vec![],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        }.into());
-        assert_eq!(scene.dataset_settings["ds1"].opacity, 1.0);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        assert_eq!(scene.dataset_settings[&DatasetId("ds1".into())].opacity, 1.0);
         scene.apply(ViewportCommand::SetDatasetOpacity { dataset_id: "ds1".into(), opacity: 0.5 }.into());
-        assert_eq!(scene.dataset_settings["ds1"].opacity, 0.5);
+        assert_eq!(scene.dataset_settings[&DatasetId("ds1".into())].opacity, 0.5);
     }
 
     #[test]
     fn apply_remove_dataset_removes_from_scene() {
         let mut scene = Scene::new([800, 600]);
-        scene.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers: vec![],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        }.into());
-        assert_eq!(scene.document.datasets.len(), 1);
-        scene.apply(DocumentCommand::RemoveDataset { id: "ds1".into() }.into());
-        assert!(scene.document.datasets.is_empty());
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        assert_eq!(scene.document.content_graphs.len(), 1);
+        scene.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) }.into());
+        assert!(scene.document.content_graphs.is_empty());
     }
 
     #[test]
-    fn document_state_apply_add_dataset() {
-        let mut doc = crate::scene::DocumentState { datasets: Vec::new() };
-        doc.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers: vec![],
-            volume_shape: Some([100, 200, 300]),
-            volume_scale: Some([1.0, 1.0, 1.0]),
-            members: Vec::new(),
-            client_metadata: None,
-        });
-        assert_eq!(doc.datasets.len(), 1);
-        assert_eq!(doc.datasets[0].id, "ds1");
-        assert!(doc.datasets[0].volume_transform.is_some());
+    fn document_state_apply_register_dataset() {
+        let mut doc = crate::scene::DocumentState::default();
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        doc.apply(DocumentCommand::RegisterDataset(reg));
+        assert_eq!(doc.content_graphs.len(), 1);
+        assert!(doc.content_graphs.contains_key(&DatasetId("ds1".into())));
     }
 
     #[test]
     fn document_state_apply_remove_dataset() {
-        let mut doc = crate::scene::DocumentState { datasets: Vec::new() };
-        doc.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers: vec![],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        });
-        assert_eq!(doc.datasets.len(), 1);
-        doc.apply(DocumentCommand::RemoveDataset { id: "ds1".into() });
-        assert!(doc.datasets.is_empty());
-    }
-
-    #[test]
-    fn document_state_apply_set_volume_scale() {
-        let mut doc = crate::scene::DocumentState { datasets: Vec::new() };
-        doc.apply(DocumentCommand::SetVolumeScale {
-            shape: [100, 200, 300],
-            scale: [1.0, 0.5, 0.5],
-        });
-        assert_eq!(doc.datasets.len(), 1);
-        assert_eq!(doc.datasets[0].volume_shape, Some([100, 200, 300]));
-        assert!(doc.datasets[0].volume_transform.is_some());
+        let mut doc = crate::scene::DocumentState::default();
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        doc.apply(DocumentCommand::RegisterDataset(reg));
+        assert_eq!(doc.content_graphs.len(), 1);
+        doc.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) });
+        assert!(doc.content_graphs.is_empty());
     }
 
     #[test]
@@ -730,68 +648,33 @@ mod tests {
 
     #[test]
     fn apply_set_channel_colormap_updates_settings() {
-        use crate::scene::{Colormap, Layer};
+        use crate::scene::Colormap;
         let mut scene = Scene::new([800, 600]);
-        scene.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers: vec![
-                Layer {
-                    name: "ch0".into(),
-                    visible: true,
-                    num_levels: 1,
-                    chunk_size: [1, 256, 256],
-                    data_shape: [1, 256, 256],
-                    level_info: vec![],
-                },
-                Layer {
-                    name: "ch1".into(),
-                    visible: true,
-                    num_levels: 1,
-                    chunk_size: [1, 256, 256],
-                    data_shape: [1, 256, 256],
-                    level_info: vec![],
-                },
-            ],
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        }.into());
+        // Register a dataset with 2 channels
+        let reg = test_helpers::make_register_dataset("ds1", "test", 2);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
         // Verify default colormap assignments
-        assert_eq!(scene.dataset_settings["ds1"].channel_settings[0].colormap, Colormap::Magenta);
-        assert_eq!(scene.dataset_settings["ds1"].channel_settings[1].colormap, Colormap::Green);
+        let ds_id = DatasetId("ds1".into());
+        assert_eq!(scene.dataset_settings[&ds_id].channel_settings[0].colormap, Colormap::Magenta);
+        assert_eq!(scene.dataset_settings[&ds_id].channel_settings[1].colormap, Colormap::Green);
         // Apply SetChannelColormap
         scene.apply(ViewportCommand::SetChannelColormap {
             dataset_id: "ds1".into(),
             channel: 1,
             colormap: Colormap::Viridis,
         }.into());
-        assert_eq!(scene.dataset_settings["ds1"].channel_settings[1].colormap, Colormap::Viridis);
+        assert_eq!(scene.dataset_settings[&ds_id].channel_settings[1].colormap, Colormap::Viridis);
     }
 
     #[test]
-    fn add_dataset_initializes_channel_settings() {
-        use crate::scene::{Colormap, Layer};
+    fn register_dataset_initializes_channel_settings() {
+        use crate::scene::Colormap;
         let mut scene = Scene::new([800, 600]);
-        let layers = vec![
-            Layer { name: "DAPI".into(), visible: true, num_levels: 1, chunk_size: [1, 256, 256], data_shape: [1, 256, 256], level_info: vec![] },
-            Layer { name: "GFP".into(), visible: true, num_levels: 1, chunk_size: [1, 256, 256], data_shape: [1, 256, 256], level_info: vec![] },
-            Layer { name: "RFP".into(), visible: true, num_levels: 1, chunk_size: [1, 256, 256], data_shape: [1, 256, 256], level_info: vec![] },
-            Layer { name: "Cy5".into(), visible: true, num_levels: 1, chunk_size: [1, 256, 256], data_shape: [1, 256, 256], level_info: vec![] },
-        ];
-        scene.apply(DocumentCommand::AddDataset {
-            id: "ds1".into(),
-            name: "test".into(),
-            kind: DatasetKind::default(),
-            layers,
-            volume_shape: None,
-            volume_scale: None,
-            members: Vec::new(),
-            client_metadata: None,
-        }.into());
-        let ch = &scene.dataset_settings["ds1"].channel_settings;
+        // Register with 4 channels
+        let reg = test_helpers::make_register_dataset("ds1", "test", 4);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let ds_id = DatasetId("ds1".into());
+        let ch = &scene.dataset_settings[&ds_id].channel_settings;
         assert_eq!(ch.len(), 4);
         // Cycling: Magenta, Green, Cyan, Magenta
         assert_eq!(ch[0].colormap, Colormap::Magenta);

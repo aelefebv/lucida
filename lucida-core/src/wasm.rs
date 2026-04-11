@@ -1,8 +1,10 @@
 use wasm_bindgen::prelude::*;
 
+use lucida_content::DatasetId;
+
 use crate::camera::{Camera, Arcball, ClipMode};
 use crate::command::Command;
-use crate::scene::{DisplayState, DocumentState, Layer, DatasetDisplaySettings, LevelInfo, Scene};
+use crate::scene::{DisplayState, DocumentState, DatasetDisplaySettings, Scene};
 use crate::view::ViewState;
 
 #[wasm_bindgen]
@@ -27,43 +29,43 @@ impl WasmScene {
     // --- Command protocol ---
 
     pub fn load_snapshot(&mut self, json: &str) -> Result<(), JsError> {
-        let scene: crate::scene::Scene =
+        let mut scene: Scene =
             serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        scene.rebuild_derived();
         self.inner = scene;
         Ok(())
     }
 
-    /// Load only the document portion (datasets), preserving local camera/view/display.
+    /// Load only the document portion (content graphs), preserving local camera/view/display.
     pub fn load_document(&mut self, json: &str) -> Result<(), JsError> {
         let doc: DocumentState =
             serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
         self.inner.document = doc;
-        // Ensure dataset_order and dataset_settings are consistent with loaded datasets.
-        // add_dataset() does this automatically, but load_document() bypasses it.
-        for ds in &self.inner.document.datasets {
-            let id = ds.id.clone();
-            if !self.inner.dataset_order.contains(&id) {
+        // Rebuild derived state for all content graphs.
+        self.inner.rebuild_derived();
+        // Ensure dataset_order and dataset_settings are consistent.
+        for id in self.inner.document.content_graphs.keys() {
+            if !self.inner.dataset_order.contains(id) {
                 self.inner.dataset_order.push(id.clone());
             }
             self.inner
                 .dataset_settings
-                .entry(id)
+                .entry(id.clone())
                 .or_insert_with(Default::default);
         }
         // Remove stale entries for datasets no longer in the document.
-        let dataset_ids: std::collections::HashSet<&str> = self
+        let dataset_ids: std::collections::HashSet<&DatasetId> = self
             .inner
             .document
-            .datasets
-            .iter()
-            .map(|d| d.id.as_str())
+            .content_graphs
+            .keys()
             .collect();
         self.inner
             .dataset_order
-            .retain(|id| dataset_ids.contains(id.as_str()));
+            .retain(|id| dataset_ids.contains(id));
         self.inner
             .dataset_settings
-            .retain(|id, _| dataset_ids.contains(id.as_str()));
+            .retain(|id, _| dataset_ids.contains(id));
         Ok(())
     }
 
@@ -134,58 +136,6 @@ impl WasmScene {
 
     pub fn set_viewport(&mut self, width: u32, height: u32) {
         self.inner.camera.set_viewport(width, height);
-    }
-
-    // --- Layer management ---
-
-    /// Add a layer with chunk size and data shape in [Z, Y, X] order.
-    pub fn add_layer(
-        &mut self,
-        name: &str,
-        visible: bool,
-        num_levels: u32,
-        chunk_z: u32,
-        chunk_y: u32,
-        chunk_x: u32,
-        shape_z: u32,
-        shape_y: u32,
-        shape_x: u32,
-    ) {
-        self.inner.add_layer(Layer {
-            name: name.to_string(),
-            visible,
-            num_levels,
-            chunk_size: [chunk_z, chunk_y, chunk_x],
-            data_shape: [shape_z, shape_y, shape_x],
-            level_info: Vec::new(),
-        });
-    }
-
-    /// Set per-level shape and chunk size metadata for anisotropic pyramids.
-    ///
-    /// `shapes_flat` is `[z0,y0,x0, z1,y1,x1, ...]` — one [Z,Y,X] triple per level.
-    /// `chunks_flat` is the same layout for chunk sizes.
-    pub fn set_level_info(
-        &mut self,
-        layer_index: usize,
-        shapes_flat: &[u32],
-        chunks_flat: &[u32],
-    ) {
-        let layers = match self.inner.document.datasets.first_mut() {
-            Some(ds) => &mut ds.layers,
-            None => return,
-        };
-        if let Some(layer) = layers.get_mut(layer_index) {
-            let num_levels = shapes_flat.len() / 3;
-            let mut info = Vec::with_capacity(num_levels);
-            for i in 0..num_levels {
-                info.push(LevelInfo {
-                    shape: [shapes_flat[i * 3], shapes_flat[i * 3 + 1], shapes_flat[i * 3 + 2]],
-                    chunk_size: [chunks_flat[i * 3], chunks_flat[i * 3 + 1], chunks_flat[i * 3 + 2]],
-                });
-            }
-            layer.level_info = info;
-        }
     }
 
     // --- 2D camera methods ---
@@ -291,11 +241,12 @@ impl WasmScene {
                 serde_json::to_string(&bounds).unwrap()
             }
             Camera::Arcball(_) | Camera::Fly(_) => {
-                // Return the visible region xy_bounds for 3D
+                let vol_shape = self.inner.volume_shape();
+                let vol_transform = self.inner.volume_transform();
                 let region = self.inner.camera.visible_region(
                     &self.inner.view.z_range,
-                    self.inner.volume_transform(),
-                    self.inner.volume_shape(),
+                    vol_transform,
+                    vol_shape.as_ref(),
                 );
                 serde_json::to_string(&region.xy_bounds).unwrap()
             }
@@ -304,14 +255,24 @@ impl WasmScene {
 
     /// Debug helper: returns [effective_zoom, zoom_per_voxel] for a dataset.
     pub fn debug_lod_info(&self, dataset_id: &str) -> Vec<f64> {
-        let ds = match self.inner.dataset_by_id(dataset_id) {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let derived = match self.inner.derived.get(&ds_id) {
             Some(d) => d,
             None => return vec![0.0, 0.0],
         };
+        let member = match derived.members.first() {
+            Some(m) => m,
+            None => return vec![0.0, 0.0],
+        };
+        let level0 = match member.levels.first() {
+            Some(l) => l,
+            None => return vec![0.0, 0.0],
+        };
+        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
         let region = self.inner.camera.visible_region(
             &self.inner.view.z_range,
-            ds.volume_transform.as_ref(),
-            ds.volume_shape.as_ref(),
+            Some(&member.volume_transform),
+            Some(&vol_shape),
         );
         vec![self.inner.camera.effective_zoom(), region.effective_zoom]
     }
@@ -322,74 +283,64 @@ impl WasmScene {
     }
 
     pub fn chunk_plan_for(&self, dataset_id: &str) -> String {
-        let plans = self.inner.chunk_plan_for(dataset_id);
+        let ds_id = DatasetId(dataset_id.to_string());
+        let plans = self.inner.chunk_plan_for(&ds_id).unwrap_or_default();
         serde_json::to_string(&plans).unwrap()
     }
 
     /// Returns the full volume shape [Z, Y, X] for a dataset.
-    /// For plates, this is the full plate extent; for single datasets, the layer shape.
     pub fn dataset_volume_shape(&self, dataset_id: &str) -> Vec<u32> {
-        self.inner.dataset_by_id(dataset_id)
-            .and_then(|d| d.volume_shape)
-            .map(|s| s.to_vec())
-            .unwrap_or_else(|| {
-                self.inner.dataset_by_id(dataset_id)
-                    .and_then(|d| d.layers.first())
-                    .map(|l| l.data_shape.to_vec())
-                    .unwrap_or_else(|| vec![1, 1, 1])
-            })
+        let ds_id = DatasetId(dataset_id.to_string());
+        self.inner.derived.get(&ds_id)
+            .and_then(|d| d.members.first())
+            .and_then(|m| m.levels.first())
+            .map(|l| vec![l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
+            .unwrap_or_else(|| vec![1, 1, 1])
     }
 
     /// Returns the model matrix for a specific member of a dataset,
     /// with the member's position offset baked into the translation.
     pub fn member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
-        let dataset = match self.inner.dataset_by_id(dataset_id) {
-            Some(ds) => ds,
-            None => return vec![
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
-            ],
+        let identity = vec![
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let ds_id = DatasetId(dataset_id.to_string());
+        let derived = match self.inner.derived.get(&ds_id) {
+            Some(d) => d,
+            None => return identity,
         };
-        let member = dataset.effective_members().into_iter()
-            .find(|m| m.id == member_id);
-        let offset = match member {
-            Some(m) => m.position,
-            None => [0.0, 0.0],
+        let member = match derived.members.iter().find(|m| m.image_id.0 == member_id || m.entity_id.0 == member_id) {
+            Some(m) => m,
+            None => return identity,
         };
-        let vol_shape = dataset.volume_shape.unwrap_or([1, 1, 1]);
-        let t = match dataset.volume_transform.as_ref() {
-            Some(t) => t,
-            None => return vec![
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
-            ],
+        let level0 = match member.levels.first() {
+            Some(l) => l,
+            None => return identity,
         };
-        // Recover the original voxel scale from the volume transform.
-        // model[0] = phys_x / max_phys = (scale_x * vol_shape_x) / max_phys
-        // So scale_x = model[0] * max_phys / vol_shape_x
+
+        let t = &member.volume_transform;
         let max_phys = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
-        let scale_x = if vol_shape[2] > 0 { t.model[0] as f64 * max_phys / vol_shape[2] as f64 } else { 1.0 };
-        let scale_y = if vol_shape[1] > 0 { t.model[5] as f64 * max_phys / vol_shape[1] as f64 } else { 1.0 };
-        let scale_z = if vol_shape[0] > 0 { t.model[10] as f64 * max_phys / vol_shape[0] as f64 } else { 1.0 };
-        // Use the FOV shape (layer data_shape) for member transforms, not the
-        // plate extent (volume_shape). Each FOV renders at its actual size.
-        let fov_shape = dataset.layers.first()
-            .map(|l| l.data_shape)
-            .unwrap_or(vol_shape);
-        // Flip Y offset: member positions are in voxel space (Y=0 at top),
-        // but the 3D model matrix uses Y-up convention (Y=0 at bottom).
-        let flipped_offset = [offset[0], vol_shape[1] as f64 - offset[1] - fov_shape[1] as f64];
+        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+        let fov_shape = vol_shape;
+
+        // Recover voxel scale from volume transform
+        let scale_x = if fov_shape[2] > 0 { t.model[0] as f64 * max_phys / fov_shape[2] as f64 } else { 1.0 };
+        let scale_y = if fov_shape[1] > 0 { t.model[5] as f64 * max_phys / fov_shape[1] as f64 } else { 1.0 };
+        let scale_z = if fov_shape[0] > 0 { t.model[10] as f64 * max_phys / fov_shape[0] as f64 } else { 1.0 };
+
+        // Flip Y offset for 3D (Y-up convention)
+        let flipped_offset = [member.position[0], vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64];
         let mt = crate::transform::compute_member_transform(
             fov_shape,
             [scale_z, scale_y, scale_x],
             flipped_offset,
             max_phys,
         );
-        // Apply global correction for multi-dataset scenes (same as scene_model_matrix_for).
+
+        // Apply global correction for multi-dataset scenes
         let global_max = self.inner.global_max_physical_extent();
         let correction = (max_phys / global_max) as f32;
         let mut m = mt.model;
@@ -398,7 +349,7 @@ impl WasmScene {
         m[10] *= correction;
         m[12] *= correction;
         m[13] *= correction;
-        // Top-align: shift smaller datasets up so top edges match.
+        // Top-align
         let phys_y = t.model[5] as f64 * max_phys;
         let global_max_y = self.inner.global_max_physical_y();
         m[13] += ((global_max_y - phys_y) / global_max) as f32;
@@ -407,58 +358,49 @@ impl WasmScene {
 
     /// Returns the inverse model matrix for a specific member of a dataset.
     pub fn inv_member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
-        let dataset = match self.inner.dataset_by_id(dataset_id) {
-            Some(ds) => ds,
-            None => return vec![
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
-            ],
+        let identity = vec![
+            1.0, 0.0, 0.0, 0.0,
+            0.0, 1.0, 0.0, 0.0,
+            0.0, 0.0, 1.0, 0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ];
+        let ds_id = DatasetId(dataset_id.to_string());
+        let derived = match self.inner.derived.get(&ds_id) {
+            Some(d) => d,
+            None => return identity,
         };
-        let member = dataset.effective_members().into_iter()
-            .find(|m| m.id == member_id);
-        let offset = match member {
-            Some(m) => m.position,
-            None => [0.0, 0.0],
+        let member = match derived.members.iter().find(|m| m.image_id.0 == member_id || m.entity_id.0 == member_id) {
+            Some(m) => m,
+            None => return identity,
         };
-        let vol_shape = dataset.volume_shape.unwrap_or([1, 1, 1]);
-        let t = match dataset.volume_transform.as_ref() {
-            Some(t) => t,
-            None => return vec![
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
-            ],
+        let level0 = match member.levels.first() {
+            Some(l) => l,
+            None => return identity,
         };
+
+        let t = &member.volume_transform;
         let max_phys = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
-        let scale_x = if vol_shape[2] > 0 { t.model[0] as f64 * max_phys / vol_shape[2] as f64 } else { 1.0 };
-        let scale_y = if vol_shape[1] > 0 { t.model[5] as f64 * max_phys / vol_shape[1] as f64 } else { 1.0 };
-        let scale_z = if vol_shape[0] > 0 { t.model[10] as f64 * max_phys / vol_shape[0] as f64 } else { 1.0 };
-        let fov_shape = dataset.layers.first()
-            .map(|l| l.data_shape)
-            .unwrap_or(vol_shape);
-        // Flip Y offset (same as member_model_matrix).
-        let flipped_offset = [offset[0], vol_shape[1] as f64 - offset[1] - fov_shape[1] as f64];
+        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+        let fov_shape = vol_shape;
+
+        let scale_x = if fov_shape[2] > 0 { t.model[0] as f64 * max_phys / fov_shape[2] as f64 } else { 1.0 };
+        let scale_y = if fov_shape[1] > 0 { t.model[5] as f64 * max_phys / fov_shape[1] as f64 } else { 1.0 };
+        let scale_z = if fov_shape[0] > 0 { t.model[10] as f64 * max_phys / fov_shape[0] as f64 } else { 1.0 };
+
+        let flipped_offset = [member.position[0], vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64];
         let mt = crate::transform::compute_member_transform(
             fov_shape,
             [scale_z, scale_y, scale_x],
             flipped_offset,
             max_phys,
         );
-        // Apply inverse global correction for multi-dataset scenes.
+
         let global_max = self.inner.global_max_physical_extent();
         let inv_correction = (global_max / max_phys) as f32;
         let mut m = mt.inv_model;
         m[0] *= inv_correction;
         m[5] *= inv_correction;
         m[10] *= inv_correction;
-        // The member inv_model already contains -tx/sx and -ty/sy in m[12], m[13].
-        // After scaling the diagonal by inv_correction, the translation entries
-        // (which encode -offset/scale) are unchanged because the offset was
-        // already in the pre-correction coordinate system.
-        // Add inverse of Y-translation (top-align): -ta * corrected_inv_sy.
         let phys_y = t.model[5] as f64 * max_phys;
         let global_max_y = self.inner.global_max_physical_y();
         let ta = ((global_max_y - phys_y) / global_max) as f32;
@@ -518,17 +460,11 @@ impl WasmScene {
     }
 
     /// Compute the world-space bounding box diagonal of the volume.
-    /// This is sqrt(sx^2 + sy^2 + sz^2) where sx/sy/sz are the model matrix
-    /// scale factors (corrected for multi-dataset normalization).
-    /// Returns 1.0 if no volume transform is available.
     pub fn volume_diagonal(&self) -> f64 {
-        // Use the first dataset's scene model matrix (same as scene_model_matrix_for)
-        let ds = match self.inner.document.datasets.first() {
-            Some(d) => d,
-            None => return 1.0,
-        };
-        let t = match ds.volume_transform.as_ref() {
-            Some(t) => t,
+        let first_member = self.inner.derived.values().next()
+            .and_then(|d| d.members.first());
+        let t = match first_member {
+            Some(m) => &m.volume_transform,
             None => return 1.0,
         };
         let global_max = self.inner.global_max_physical_extent();
@@ -608,19 +544,6 @@ impl WasmScene {
         }
     }
 
-    pub fn set_volume_scale(
-        &mut self,
-        shape_z: u32,
-        shape_y: u32,
-        shape_x: u32,
-        scale_z: f64,
-        scale_y: f64,
-        scale_x: f64,
-    ) {
-        self.inner
-            .set_volume_scale([shape_z, shape_y, shape_x], [scale_z, scale_y, scale_x]);
-    }
-
     pub fn view_proj(&self) -> Vec<f32> {
         match &self.inner.camera {
             Camera::Arcball(v) => v.view_proj().to_vec(),
@@ -662,7 +585,6 @@ impl WasmScene {
     }
 
     /// Returns the ray-volume intersection point in [0,1]^3 local space for a dataset.
-    /// This is where the center-screen ray hits the volume bounding box.
     pub fn ray_hit_local(&self, dataset_id: &str) -> Vec<f32> {
         let inv_model_vec = self.inv_scene_model_matrix_for(dataset_id);
         let mut im = [0.0f64; 16];
@@ -696,7 +618,8 @@ impl WasmScene {
     }
 
     pub fn dataset_display_settings(&self, dataset_id: &str) -> String {
-        match self.inner.dataset_settings.get(dataset_id) {
+        let ds_id = DatasetId(dataset_id.to_string());
+        match self.inner.dataset_settings.get(&ds_id) {
             Some(s) => serde_json::to_string(s).unwrap(),
             None => serde_json::to_string(&DatasetDisplaySettings::default()).unwrap(),
         }
@@ -709,8 +632,8 @@ impl WasmScene {
     pub fn export_dataset_presence(&self) -> String {
         #[derive(serde::Serialize)]
         struct DatasetPresence<'a> {
-            dataset_order: &'a Vec<String>,
-            dataset_settings: &'a std::collections::HashMap<String, DatasetDisplaySettings>,
+            dataset_order: &'a Vec<DatasetId>,
+            dataset_settings: &'a std::collections::HashMap<DatasetId, DatasetDisplaySettings>,
         }
         let p = DatasetPresence {
             dataset_order: &self.inner.dataset_order,
@@ -722,8 +645,8 @@ impl WasmScene {
     pub fn import_dataset_presence(&mut self, json: &str) -> Result<(), JsError> {
         #[derive(serde::Deserialize)]
         struct DatasetPresence {
-            dataset_order: Vec<String>,
-            dataset_settings: std::collections::HashMap<String, DatasetDisplaySettings>,
+            dataset_order: Vec<DatasetId>,
+            dataset_settings: std::collections::HashMap<DatasetId, DatasetDisplaySettings>,
         }
         let p: DatasetPresence =
             serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
@@ -733,20 +656,24 @@ impl WasmScene {
     }
 
     pub fn scene_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
-        match self.inner.dataset_by_id(dataset_id).and_then(|d| d.volume_transform.as_ref()) {
-            Some(t) => {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let member = self.inner.derived.get(&ds_id)
+            .and_then(|d| d.members.first());
+        match member {
+            Some(m) => {
+                let t = &m.volume_transform;
                 let global_max = self.inner.global_max_physical_extent();
                 let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
                 let correction = (ds_max / global_max) as f32;
-                let mut m = t.model;
-                m[0] *= correction;
-                m[5] *= correction;
-                m[10] *= correction;
-                // Top-align: shift smaller datasets up so top edges match
+                let mut mat = t.model;
+                mat[0] *= correction;
+                mat[5] *= correction;
+                mat[10] *= correction;
+                // Top-align
                 let phys_y = t.model[5] as f64 * ds_max;
                 let global_max_y = self.inner.global_max_physical_y();
-                m[13] = ((global_max_y - phys_y) / global_max) as f32;
-                m.to_vec()
+                mat[13] = ((global_max_y - phys_y) / global_max) as f32;
+                mat.to_vec()
             }
             None => {
                 vec![
@@ -760,21 +687,24 @@ impl WasmScene {
     }
 
     pub fn inv_scene_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
-        match self.inner.dataset_by_id(dataset_id).and_then(|d| d.volume_transform.as_ref()) {
-            Some(t) => {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let member = self.inner.derived.get(&ds_id)
+            .and_then(|d| d.members.first());
+        match member {
+            Some(m) => {
+                let t = &m.volume_transform;
                 let global_max = self.inner.global_max_physical_extent();
                 let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
                 let inv_correction = (global_max / ds_max) as f32;
-                let mut m = t.inv_model;
-                m[0] *= inv_correction;
-                m[5] *= inv_correction;
-                m[10] *= inv_correction;
-                // Inverse of Y-translation: -ty * corrected_inv_sy
+                let mut mat = t.inv_model;
+                mat[0] *= inv_correction;
+                mat[5] *= inv_correction;
+                mat[10] *= inv_correction;
                 let phys_y = t.model[5] as f64 * ds_max;
                 let global_max_y = self.inner.global_max_physical_y();
                 let ty = ((global_max_y - phys_y) / global_max) as f32;
-                m[13] = -ty * m[5];
-                m.to_vec()
+                mat[13] = -ty * mat[5];
+                mat.to_vec()
             }
             None => {
                 vec![
@@ -788,14 +718,14 @@ impl WasmScene {
     }
 
     pub fn dataset_ids(&self) -> String {
-        let ids: Vec<&str> = self.inner.document.datasets.iter().map(|d| d.id.as_str()).collect();
+        let ids: Vec<&str> = self.inner.document.content_graphs.keys().map(|id| id.0.as_str()).collect();
         serde_json::to_string(&ids).unwrap()
     }
 
     pub fn dataset_name(&self, id: &str) -> String {
-        self.inner.document.datasets.iter()
-            .find(|d| d.id == id)
-            .map(|d| d.name.clone())
+        let ds_id = DatasetId(id.to_string());
+        self.inner.document.content_graphs.get(&ds_id)
+            .map(|g| g.name.clone())
             .unwrap_or_else(|| id.to_string())
     }
 
@@ -810,9 +740,6 @@ impl WasmScene {
     }
 
     /// Compute peer cursor geometry for GPU rendering + screen positions for labels.
-    ///
-    /// Input `peers_json`: array of `{"id": u64, "cursor": [f64,f64]|null, "mode": "slice"|"arcball"|"fly"}`
-    /// Returns JSON: `{"gpu": [[f32;8]], "labels": [{"id":u64,"sx":f64,"sy":f64}]}`
     pub fn compute_peer_cursors(&self, peers_json: &str, my_id: u32, screen_w: f64, screen_h: f64) -> String {
         let peers: Vec<crate::cursor::PeerInput> =
             serde_json::from_str(peers_json).unwrap_or_default();

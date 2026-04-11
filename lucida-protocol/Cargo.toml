@@ -1,0 +1,11 @@
+[package]
+name = "lucida-protocol"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+lucida-content = { path = "../lucida-content" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

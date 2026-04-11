@@ -1,0 +1,1080 @@
+//! Dataset import pipeline.
+//!
+//! Reads OME-Zarr metadata and produces a three-part [`ImportResult`] containing
+//! a [`ContentGraph`], [`ClientFetchDescriptor`], and [`ServerBindingSeed`].
+
+use std::sync::Arc;
+
+use object_store::ObjectStore;
+use object_store::path::Path;
+
+use lucida_content::*;
+use lucida_content::normalize::normalize_to_5d;
+use lucida_protocol::*;
+
+use crate::backend::StoreError;
+use crate::import_types::*;
+use crate::parse;
+
+/// Import a dataset from an OME-Zarr store.
+///
+/// Detects whether the root describes a plate or a single image and
+/// produces the appropriate [`ImportResult`].
+pub async fn import_dataset(
+    store: &Arc<dyn ObjectStore>,
+    id: &str,
+    name: &str,
+) -> Result<ImportResult, StoreError> {
+    let root_json = parse::read_zarr_json(store, "zarr.json").await?;
+
+    if root_json.pointer("/attributes/ome/plate").is_some() {
+        import_plate(store, id, name, &root_json).await
+    } else {
+        import_single_image(store, id, name, &root_json).await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Single image import
+// ---------------------------------------------------------------------------
+
+async fn import_single_image(
+    store: &Arc<dyn ObjectStore>,
+    id: &str,
+    name: &str,
+    root_json: &serde_json::Value,
+) -> Result<ImportResult, StoreError> {
+    let parsed = parse::parse_multiscales(root_json, "")?;
+    let axes_names = parsed.axes_names;
+    let level_entries = parsed.level_entries;
+
+    let level_metas = parse::read_level_metas(store, "", &level_entries).await?;
+
+    let data_type = parse_data_type(&level_metas[0].data_type)?;
+    let axes = build_axes(&axes_names);
+    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
+
+    let entity_id = EntityId(id.to_string());
+    let image_id = ImageId(id.to_string());
+
+    let entity = Entity {
+        id: entity_id.clone(),
+        kind: EntityKind::Image,
+        parent: None,
+        labels: EntityLabels {
+            name: Some(name.to_string()),
+            ..Default::default()
+        },
+    };
+
+    let image = ImageSpec {
+        image_id: image_id.clone(),
+        owner: entity_id.clone(),
+        multiscale: MultiscaleInfo {
+            axes,
+            levels,
+            data_type,
+        },
+    };
+
+    let default_layout_id = LayoutId("source".to_string());
+    let source_layout = LayoutSpec {
+        id: default_layout_id.clone(),
+        name: "Source".to_string(),
+        placements: vec![EntityPlacement {
+            entity_id: entity_id.clone(),
+            position: [0.0, 0.0],
+        }],
+    };
+
+    let content = ContentGraph {
+        dataset_id: DatasetId(id.to_string()),
+        name: name.to_string(),
+        kind: DatasetKind::Single,
+        entities: vec![entity],
+        transforms: vec![],
+        images: vec![image],
+        source_layouts: vec![source_layout],
+        default_layout_id: Some(default_layout_id),
+    };
+
+    let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        images: vec![ProxiedImageSpec {
+            image_id: image_id.clone(),
+            wire_format: WireFormat::Raw { data_type },
+        }],
+    });
+
+    let binding_seed = ServerBindingSeed {
+        images: vec![ImageBindingSeed {
+            image_id,
+            axes_names,
+            store_prefix: None,
+            storage_codecs: level_metas
+                .iter()
+                .enumerate()
+                .map(|(i, meta)| StorageCodecInfo {
+                    level_index: i as u32,
+                    codecs: meta.codecs.clone(),
+                })
+                .collect(),
+        }],
+    };
+
+    Ok(ImportResult {
+        content,
+        fetch,
+        binding_seed,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Plate import
+// ---------------------------------------------------------------------------
+
+async fn import_plate(
+    store: &Arc<dyn ObjectStore>,
+    id: &str,
+    name: &str,
+    root_json: &serde_json::Value,
+) -> Result<ImportResult, StoreError> {
+    let plate_json = root_json
+        .pointer("/attributes/ome/plate")
+        .ok_or_else(|| StoreError::Metadata("no ome.plate in root zarr.json".into()))?;
+
+    // Parse rows and columns.
+    let rows: Vec<String> = plate_json
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let columns: Vec<String> = plate_json
+        .get("columns")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let wells_json = plate_json
+        .get("wells")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| StoreError::Metadata("plate has no wells array".into()))?;
+
+    // Parse wells and FOVs.
+    struct WellParsed {
+        path: String,
+        row_index: u32,
+        column_index: u32,
+        fovs: Vec<FovParsed>,
+    }
+
+    struct FovParsed {
+        store_prefix: String,
+        translation: Option<Vec<f64>>,
+    }
+
+    let mut parsed_wells: Vec<WellParsed> = Vec::new();
+    let mut representative_fov_path: Option<String> = None;
+    let mut has_stage_positions = false;
+
+    for well_entry in wells_json {
+        let well_path = well_entry
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| StoreError::Metadata("well entry missing path".into()))?;
+        let row_index = well_entry
+            .get("rowIndex")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        let column_index = well_entry
+            .get("columnIndex")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        let well_meta_path = Path::from(format!("{well_path}/zarr.json"));
+        let well_bytes = store.get(&well_meta_path).await?.bytes().await?;
+        let well_json: serde_json::Value = serde_json::from_slice(&well_bytes)
+            .map_err(|e| StoreError::Metadata(format!("{well_path}: {e}")))?;
+
+        let images = well_json
+            .pointer("/attributes/ome/well/images")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                StoreError::Metadata(format!("{well_path}: no ome.well.images"))
+            })?;
+
+        let mut fovs: Vec<FovParsed> = Vec::new();
+        for image_entry in images {
+            let fov_path = image_entry
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0")
+                .to_string();
+            let store_prefix = format!("{well_path}/{fov_path}");
+
+            let translation = image_entry
+                .get("coordinateTransformations")
+                .and_then(|v| v.as_array())
+                .and_then(|transforms| {
+                    transforms.iter().find_map(|ct| {
+                        if ct.get("type").and_then(|v| v.as_str()) == Some("translation") {
+                            ct.get("translation")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| arr.iter().filter_map(|v| v.as_f64()).collect())
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+            if translation.is_some() {
+                has_stage_positions = true;
+            }
+
+            if representative_fov_path.is_none() {
+                representative_fov_path = Some(store_prefix.clone());
+            }
+
+            fovs.push(FovParsed {
+                store_prefix,
+                translation,
+            });
+        }
+
+        parsed_wells.push(WellParsed {
+            path: well_path.to_string(),
+            row_index,
+            column_index,
+            fovs,
+        });
+    }
+
+    // Read representative FOV multiscales.
+    let rep_path = representative_fov_path
+        .ok_or_else(|| StoreError::Metadata("plate has no FOVs".into()))?;
+
+    let rep_json = parse::read_zarr_json(store, &format!("{rep_path}/zarr.json")).await?;
+    let rep_parsed = parse::parse_multiscales(&rep_json, &format!("{rep_path}: "))?;
+    let axes_names = rep_parsed.axes_names;
+    let level_entries = rep_parsed.level_entries;
+
+    let level_metas = parse::read_level_metas(store, &rep_path, &level_entries).await?;
+
+    let (full_shape_5d, _full_chunk_5d) = parse::extract_full_res(&level_metas, &axes_names);
+
+    let data_type = parse_data_type(&level_metas[0].data_type)?;
+    let axes = build_axes(&axes_names);
+    let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
+
+    let positioning_mode = if has_stage_positions {
+        PositioningMode::Stage
+    } else {
+        PositioningMode::Grid
+    };
+
+    // Determine row/column labels for each well from row_index/column_index.
+    let find_row_label = |ri: u32| -> String {
+        rows.get(ri as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("{ri}"))
+    };
+    let find_col_label = |ci: u32| -> String {
+        columns.get(ci as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("{ci}"))
+    };
+
+    // Build entities, images, transforms, and binding seeds.
+    let mut entities: Vec<Entity> = Vec::new();
+    let mut images: Vec<ImageSpec> = Vec::new();
+    let mut transforms: Vec<TransformEdge> = Vec::new();
+    let mut fetch_images: Vec<ProxiedImageSpec> = Vec::new();
+    let mut binding_images: Vec<ImageBindingSeed> = Vec::new();
+
+    for well in &parsed_wells {
+        let well_entity_id = EntityId(format!("{id}:well:{}", well.path));
+
+        entities.push(Entity {
+            id: well_entity_id.clone(),
+            kind: EntityKind::Well,
+            parent: None,
+            labels: EntityLabels {
+                name: Some(format!(
+                    "{}/{}",
+                    find_row_label(well.row_index),
+                    find_col_label(well.column_index),
+                )),
+                well_row: Some(find_row_label(well.row_index)),
+                well_column: Some(find_col_label(well.column_index)),
+                row_index: Some(well.row_index),
+                column_index: Some(well.column_index),
+                ..Default::default()
+            },
+        });
+
+        // Collect stage translations for this well's FOVs to normalize them.
+        let stage_positions: Vec<Option<[f64; 2]>> = if has_stage_positions {
+            well.fovs
+                .iter()
+                .map(|fov| {
+                    fov.translation.as_ref().map(|t| {
+                        let len = t.len();
+                        if len >= 2 {
+                            // Last value is X, second-to-last is Y
+                            [t[len - 1], t[len - 2]]
+                        } else {
+                            [0.0, 0.0]
+                        }
+                    })
+                })
+                .collect()
+        } else {
+            vec![None; well.fovs.len()]
+        };
+
+        // Find minimum for normalization within this well.
+        let (min_x, min_y) = if has_stage_positions {
+            let mut mx = f64::MAX;
+            let mut my = f64::MAX;
+            for pos in &stage_positions {
+                if let Some([x, y]) = pos {
+                    mx = mx.min(*x);
+                    my = my.min(*y);
+                }
+            }
+            if mx == f64::MAX { mx = 0.0; }
+            if my == f64::MAX { my = 0.0; }
+            (mx, my)
+        } else {
+            (0.0, 0.0)
+        };
+
+        for (fi, fov) in well.fovs.iter().enumerate() {
+            let field_entity_id =
+                EntityId(format!("{id}:field:{}", fov.store_prefix));
+            let image_id = ImageId(format!("{id}:image:{}", fov.store_prefix));
+
+            entities.push(Entity {
+                id: field_entity_id.clone(),
+                kind: EntityKind::Field,
+                parent: Some(well_entity_id.clone()),
+                labels: EntityLabels {
+                    name: Some(format!("Field {}", fi)),
+                    field_index: Some(fi as u32),
+                    ..Default::default()
+                },
+            });
+
+            // Build field->well transform.
+            if has_stage_positions {
+                if let Some([x, y]) = stage_positions[fi] {
+                    transforms.push(TransformEdge {
+                        from: field_entity_id.clone(),
+                        to: well_entity_id.clone(),
+                        transform: AffineTransform::translation_2d(x - min_x, y - min_y),
+                    });
+                } else {
+                    transforms.push(TransformEdge {
+                        from: field_entity_id.clone(),
+                        to: well_entity_id.clone(),
+                        transform: AffineTransform::translation_2d(0.0, 0.0),
+                    });
+                }
+            }
+            // Grid transforms are built after all entities are created.
+
+            images.push(ImageSpec {
+                image_id: image_id.clone(),
+                owner: field_entity_id,
+                multiscale: MultiscaleInfo {
+                    axes: axes.clone(),
+                    levels: levels.clone(),
+                    data_type,
+                },
+            });
+
+            fetch_images.push(ProxiedImageSpec {
+                image_id: image_id.clone(),
+                wire_format: WireFormat::Raw { data_type },
+            });
+
+            binding_images.push(ImageBindingSeed {
+                image_id,
+                axes_names: axes_names.clone(),
+                store_prefix: Some(fov.store_prefix.clone()),
+                storage_codecs: level_metas
+                    .iter()
+                    .enumerate()
+                    .map(|(i, meta)| StorageCodecInfo {
+                        level_index: i as u32,
+                        codecs: meta.codecs.clone(),
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    // Build grid field transforms if not stage-positioned.
+    if !has_stage_positions {
+        let well_entities: Vec<&Entity> = entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Well)
+            .collect();
+        let field_entities: Vec<Entity> = entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Field)
+            .cloned()
+            .collect();
+
+        let grid_transforms = lucida_content::plate::build_grid_field_transforms(
+            &well_entities.iter().map(|e| (*e).clone()).collect::<Vec<_>>(),
+            &field_entities,
+            full_shape_5d,
+        )
+        .map_err(|e| StoreError::Metadata(e.to_string()))?;
+
+        transforms = grid_transforms;
+    }
+
+    // Build plate layout (places wells, not fields).
+    let source_layout =
+        lucida_content::plate::build_plate_layout(&entities, &rows, &columns, full_shape_5d);
+
+    let default_layout_id = source_layout.id.clone();
+
+    let content = ContentGraph {
+        dataset_id: DatasetId(id.to_string()),
+        name: name.to_string(),
+        kind: DatasetKind::Plate {
+            rows,
+            columns,
+            positioning_mode,
+            has_stage_positions,
+        },
+        entities,
+        transforms,
+        images,
+        source_layouts: vec![source_layout],
+        default_layout_id: Some(default_layout_id),
+    };
+
+    let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        images: fetch_images,
+    });
+
+    let binding_seed = ServerBindingSeed {
+        images: binding_images,
+    };
+
+    Ok(ImportResult {
+        content,
+        fetch,
+        binding_seed,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
+    match s {
+        "uint8" => Ok(DataType::Uint8),
+        "uint16" => Ok(DataType::Uint16),
+        "uint32" => Ok(DataType::Uint32),
+        "float32" => Ok(DataType::Float32),
+        "float64" => Ok(DataType::Float64),
+        other => Err(StoreError::Metadata(format!(
+            "unsupported data type: {other}"
+        ))),
+    }
+}
+
+fn build_axes(axes_names: &[String]) -> Vec<Axis> {
+    axes_names
+        .iter()
+        .map(|name| {
+            let kind = match name.to_lowercase().as_str() {
+                "t" => AxisKind::Time,
+                "c" => AxisKind::Channel,
+                _ => AxisKind::Space,
+            };
+            Axis {
+                name: name.clone(),
+                kind,
+            }
+        })
+        .collect()
+}
+
+fn build_level_geometries(
+    level_entries: &[parse::LevelEntry],
+    level_metas: &[parse::ArrayMeta],
+    axes_names: &[String],
+) -> Vec<LevelGeometry> {
+    level_entries
+        .iter()
+        .zip(level_metas.iter())
+        .enumerate()
+        .map(|(i, (entry, meta))| {
+            let shape = normalize_to_5d(&meta.shape, axes_names, 1);
+            let chunk_shape =
+                normalize_to_5d(&meta.chunk_grid.configuration.chunk_shape, axes_names, 1);
+            let grid_shape = std::array::from_fn(|d| shape[d].div_ceil(chunk_shape[d]));
+            LevelGeometry {
+                level_index: i as u32,
+                shape,
+                chunk_shape,
+                grid_shape,
+                scale: entry.scale,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("lucida_import_test_{}", std::process::id()))
+            .join(name);
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// Create a minimal OME-Zarr plate fixture.
+    fn create_plate_fixture(
+        dir: &std::path::Path,
+        plate_name: &str,
+        rows: &[&str],
+        columns: &[&str],
+        wells: &[(/*row*/&str, /*col*/&str, /*row_idx*/u32, /*col_idx*/u32, /*num_fovs*/u32)],
+        fov_shape: [u64; 5],
+        fov_chunk: [u64; 5],
+        num_levels: usize,
+    ) {
+        fs::create_dir_all(dir).unwrap();
+
+        let rows_json: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| serde_json::json!({"name": r}))
+            .collect();
+        let cols_json: Vec<serde_json::Value> = columns
+            .iter()
+            .map(|c| serde_json::json!({"name": c}))
+            .collect();
+        let wells_json: Vec<serde_json::Value> = wells
+            .iter()
+            .map(|(row, col, ri, ci, _)| {
+                serde_json::json!({
+                    "path": format!("{row}/{col}"),
+                    "rowIndex": ri,
+                    "columnIndex": ci,
+                })
+            })
+            .collect();
+
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "plate": {
+                        "version": "0.5",
+                        "name": plate_name,
+                        "rows": rows_json,
+                        "columns": cols_json,
+                        "wells": wells_json,
+                        "field_count": wells.iter().map(|w| w.4).max().unwrap_or(1),
+                    }
+                }
+            }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        for (row, col, _ri, _ci, num_fovs) in wells {
+            let well_dir = dir.join(row).join(col);
+            fs::create_dir_all(&well_dir).unwrap();
+
+            let row_dir = dir.join(row);
+            let row_meta = serde_json::json!({"zarr_format": 3, "node_type": "group"});
+            fs::write(
+                row_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&row_meta).unwrap(),
+            )
+            .unwrap();
+
+            let images: Vec<serde_json::Value> = (0..*num_fovs)
+                .map(|i| serde_json::json!({"path": i.to_string()}))
+                .collect();
+
+            let well_meta = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {
+                    "ome": {
+                        "version": "0.5",
+                        "well": { "images": images }
+                    }
+                }
+            });
+            fs::write(
+                well_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&well_meta).unwrap(),
+            )
+            .unwrap();
+
+            for i in 0..*num_fovs {
+                let fov_dir = well_dir.join(i.to_string());
+                fs::create_dir_all(&fov_dir).unwrap();
+
+                // Build multiscale datasets for each level.
+                let mut datasets = Vec::new();
+                for lvl in 0..num_levels {
+                    let scale_factor = (1u64 << lvl) as f64;
+                    datasets.push(serde_json::json!({
+                        "path": lvl.to_string(),
+                        "coordinateTransformations": [{
+                            "type": "scale",
+                            "scale": [1.0, 1.0, 1.0, scale_factor, scale_factor]
+                        }]
+                    }));
+                }
+
+                let fov_root = serde_json::json!({
+                    "zarr_format": 3,
+                    "node_type": "group",
+                    "attributes": {
+                        "ome": {
+                            "version": "0.5",
+                            "multiscales": [{
+                                "version": "0.5",
+                                "name": "image",
+                                "axes": [
+                                    {"name": "t", "type": "time"},
+                                    {"name": "c", "type": "channel"},
+                                    {"name": "z", "type": "space"},
+                                    {"name": "y", "type": "space"},
+                                    {"name": "x", "type": "space"}
+                                ],
+                                "datasets": datasets
+                            }]
+                        }
+                    }
+                });
+                fs::write(
+                    fov_dir.join("zarr.json"),
+                    serde_json::to_string_pretty(&fov_root).unwrap(),
+                )
+                .unwrap();
+
+                for lvl in 0..num_levels {
+                    let level_dir = fov_dir.join(lvl.to_string());
+                    fs::create_dir_all(&level_dir).unwrap();
+                    let scale = 1u64 << lvl;
+                    let level_shape = [
+                        fov_shape[0],
+                        fov_shape[1],
+                        fov_shape[2],
+                        (fov_shape[3] + scale - 1) / scale,
+                        (fov_shape[4] + scale - 1) / scale,
+                    ];
+                    let arr = serde_json::json!({
+                        "zarr_format": 3,
+                        "node_type": "array",
+                        "shape": level_shape,
+                        "data_type": "uint16",
+                        "chunk_grid": {
+                            "name": "regular",
+                            "configuration": { "chunk_shape": fov_chunk }
+                        },
+                        "codecs": [
+                            {"name": "bytes", "configuration": {"endian": "little"}},
+                            {"name": "numcodecs/lz4", "configuration": {"acceleration": 1}}
+                        ],
+                        "fill_value": 0
+                    });
+                    fs::write(
+                        level_dir.join("zarr.json"),
+                        serde_json::to_string_pretty(&arr).unwrap(),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_data_type() {
+        assert!(parse_data_type("complex128").is_err());
+    }
+
+    #[test]
+    fn supported_data_types() {
+        assert_eq!(parse_data_type("uint8").unwrap(), DataType::Uint8);
+        assert_eq!(parse_data_type("uint16").unwrap(), DataType::Uint16);
+        assert_eq!(parse_data_type("uint32").unwrap(), DataType::Uint32);
+        assert_eq!(parse_data_type("float32").unwrap(), DataType::Float32);
+        assert_eq!(parse_data_type("float64").unwrap(), DataType::Float64);
+    }
+
+    #[test]
+    fn axes_classification() {
+        let axes = build_axes(
+            &["t", "c", "z", "y", "x"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(axes.len(), 5);
+        assert_eq!(axes[0].kind, AxisKind::Time);
+        assert_eq!(axes[1].kind, AxisKind::Channel);
+        assert_eq!(axes[2].kind, AxisKind::Space);
+        assert_eq!(axes[3].kind, AxisKind::Space);
+        assert_eq!(axes[4].kind, AxisKind::Space);
+    }
+
+    #[tokio::test]
+    async fn import_single_image() {
+        let store = crate::backend::open(
+            &format!(
+                "{}/example_files/yeast_3d_mitochondria.ome.zarr",
+                env!("CARGO_MANIFEST_DIR").trim_end_matches("/lucida-store"),
+            ),
+        )
+        .unwrap();
+        let result = import_dataset(&store, "test-id", "Test Dataset")
+            .await
+            .unwrap();
+
+        // Verify content graph.
+        assert_eq!(result.content.dataset_id, DatasetId("test-id".into()));
+        assert_eq!(result.content.name, "Test Dataset");
+        assert!(matches!(result.content.kind, DatasetKind::Single));
+        assert_eq!(result.content.entities.len(), 1);
+        assert_eq!(result.content.entities[0].kind, EntityKind::Image);
+        assert_eq!(result.content.images.len(), 1);
+        assert_eq!(result.content.source_layouts.len(), 1);
+
+        // Verify multiscale.
+        let image = &result.content.images[0];
+        assert!(
+            image.multiscale.levels.len() >= 2,
+            "expected at least 2 levels, got {}",
+            image.multiscale.levels.len(),
+        );
+        let level0 = &image.multiscale.levels[0];
+        assert!(level0.shape[3] > 0, "Y should be > 0");
+        assert!(level0.shape[4] > 0, "X should be > 0");
+        // Verify grid_shape is correctly computed.
+        for d in 0..5 {
+            assert_eq!(
+                level0.grid_shape[d],
+                level0.shape[d].div_ceil(level0.chunk_shape[d]),
+            );
+        }
+
+        // Verify fetch is Proxied.
+        assert!(matches!(result.fetch, ClientFetchDescriptor::Proxied(_)));
+
+        // Verify binding seed.
+        assert_eq!(result.binding_seed.images.len(), 1);
+        assert!(result.binding_seed.images[0].store_prefix.is_none());
+
+        // Pretty-print for visual inspection.
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+    }
+
+    #[tokio::test]
+    async fn import_plate() {
+        let dir = temp_dir("import_plate");
+        create_plate_fixture(
+            &dir,
+            "test_plate",
+            &["A", "B"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 2), ("A", "2", 0, 1, 1), ("B", "1", 1, 0, 1)],
+            [1, 1, 10, 256, 256],
+            [1, 1, 1, 128, 128],
+            2,
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "plate-id", "Test Plate")
+            .await
+            .unwrap();
+
+        // Verify content graph.
+        assert!(matches!(result.content.kind, DatasetKind::Plate { .. }));
+
+        // Should have well entities and field entities.
+        let wells: Vec<_> = result
+            .content
+            .entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Well)
+            .collect();
+        let fields: Vec<_> = result
+            .content
+            .entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Field)
+            .collect();
+        assert_eq!(wells.len(), 3, "expected 3 wells");
+        assert_eq!(fields.len(), 4, "expected 4 fields total (2+1+1)");
+
+        // Every field should have a parent that is a well.
+        for field in &fields {
+            assert!(field.parent.is_some());
+            let parent_id = field.parent.as_ref().unwrap();
+            assert!(
+                wells.iter().any(|w| &w.id == parent_id),
+                "field parent {:?} should be a well",
+                parent_id,
+            );
+        }
+
+        // Should have transforms (field->well).
+        assert!(!result.content.transforms.is_empty());
+
+        // Should have one image per field.
+        assert_eq!(result.content.images.len(), fields.len());
+
+        // Fetch should be Proxied with one spec per image.
+        if let ClientFetchDescriptor::Proxied(ref proxied) = result.fetch {
+            assert_eq!(proxied.images.len(), fields.len());
+        } else {
+            panic!("Expected Proxied fetch descriptor");
+        }
+
+        // Binding seed should have one entry per image, each with store_prefix.
+        assert_eq!(result.binding_seed.images.len(), fields.len());
+        for img in &result.binding_seed.images {
+            assert!(img.store_prefix.is_some());
+        }
+
+        // Verify source layout places wells, not fields.
+        let layout = &result.content.source_layouts[0];
+        for placement in &layout.placements {
+            assert!(
+                wells.iter().any(|w| w.id == placement.entity_id),
+                "Layout should only place wells, not fields",
+            );
+        }
+
+        // Verify multiscale levels on images.
+        for image in &result.content.images {
+            assert_eq!(image.multiscale.levels.len(), 2, "expected 2 levels");
+            let l0 = &image.multiscale.levels[0];
+            assert_eq!(l0.shape, [1, 1, 10, 256, 256]);
+            assert_eq!(l0.chunk_shape, [1, 1, 1, 128, 128]);
+            for d in 0..5 {
+                assert_eq!(
+                    l0.grid_shape[d],
+                    l0.shape[d].div_ceil(l0.chunk_shape[d]),
+                );
+            }
+        }
+
+        // DatasetKind::Plate should carry correct metadata.
+        match &result.content.kind {
+            DatasetKind::Plate {
+                rows,
+                columns,
+                positioning_mode,
+                has_stage_positions,
+            } => {
+                assert_eq!(rows, &["A", "B"]);
+                assert_eq!(columns, &["1", "2"]);
+                assert_eq!(*positioning_mode, PositioningMode::Grid);
+                assert!(!has_stage_positions);
+            }
+            _ => panic!("expected Plate kind"),
+        }
+
+        // Pretty-print for visual inspection.
+        println!("{}", serde_json::to_string_pretty(&result).unwrap());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn import_plate_with_stage_positions() {
+        let dir = temp_dir("import_plate_stage");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Build plate root with stage translations on the FOVs.
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "plate": {
+                        "version": "0.5",
+                        "name": "stage_plate",
+                        "rows": [{"name": "A"}],
+                        "columns": [{"name": "1"}],
+                        "wells": [{"path": "A/1", "rowIndex": 0, "columnIndex": 0}]
+                    }
+                }
+            }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        // Well with stage-positioned FOVs.
+        let well_dir = dir.join("A").join("1");
+        fs::create_dir_all(&well_dir).unwrap();
+        let well_meta = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "well": {
+                        "images": [
+                            {
+                                "path": "0",
+                                "coordinateTransformations": [{
+                                    "type": "translation",
+                                    "translation": [0.0, 0.0, 0.0, 100.0, 200.0]
+                                }]
+                            },
+                            {
+                                "path": "1",
+                                "coordinateTransformations": [{
+                                    "type": "translation",
+                                    "translation": [0.0, 0.0, 0.0, 300.0, 600.0]
+                                }]
+                            }
+                        ]
+                    }
+                }
+            }
+        });
+        fs::write(
+            well_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&well_meta).unwrap(),
+        )
+        .unwrap();
+
+        // Write FOV multiscale metadata.
+        for i in 0..2u32 {
+            let fov_dir = well_dir.join(i.to_string());
+            fs::create_dir_all(&fov_dir).unwrap();
+            let fov_root = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {
+                    "ome": {
+                        "version": "0.5",
+                        "multiscales": [{
+                            "version": "0.5",
+                            "name": "image",
+                            "axes": [
+                                {"name": "t", "type": "time"},
+                                {"name": "c", "type": "channel"},
+                                {"name": "z", "type": "space"},
+                                {"name": "y", "type": "space"},
+                                {"name": "x", "type": "space"}
+                            ],
+                            "datasets": [{
+                                "path": "0",
+                                "coordinateTransformations": [{
+                                    "type": "scale",
+                                    "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+                                }]
+                            }]
+                        }]
+                    }
+                }
+            });
+            fs::write(
+                fov_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&fov_root).unwrap(),
+            )
+            .unwrap();
+
+            let level_dir = fov_dir.join("0");
+            fs::create_dir_all(&level_dir).unwrap();
+            let arr = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": [1, 1, 1, 128, 128],
+                "data_type": "uint16",
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": { "chunk_shape": [1, 1, 1, 64, 64] }
+                },
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "fill_value": 0
+            });
+            fs::write(
+                level_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&arr).unwrap(),
+            )
+            .unwrap();
+        }
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "stage-id", "Stage Plate")
+            .await
+            .unwrap();
+
+        // Should be a stage-positioned plate.
+        if let DatasetKind::Plate {
+            positioning_mode,
+            has_stage_positions,
+            ..
+        } = &result.content.kind
+        {
+            assert_eq!(*positioning_mode, PositioningMode::Stage);
+            assert!(*has_stage_positions);
+        } else {
+            panic!("expected Plate kind");
+        }
+
+        // Transforms should reflect normalized stage positions.
+        assert_eq!(result.content.transforms.len(), 2);
+        // FOV 0 translation [y=100, x=200] => position [x=200, y=100], normalized min.
+        // FOV 1 translation [y=300, x=600] => position [x=600, y=300].
+        // min_x=200, min_y=100 => FOV 0 at (0,0), FOV 1 at (400,200).
+        let t0 = &result.content.transforms[0];
+        let t1 = &result.content.transforms[1];
+        assert!((t0.transform.matrix[12]).abs() < 1e-9, "FOV 0 tx should be 0");
+        assert!((t0.transform.matrix[13]).abs() < 1e-9, "FOV 0 ty should be 0");
+        assert!(
+            (t1.transform.matrix[12] - 400.0).abs() < 1e-9,
+            "FOV 1 tx should be 400, got {}",
+            t1.transform.matrix[12],
+        );
+        assert!(
+            (t1.transform.matrix[13] - 200.0).abs() < 1e-9,
+            "FOV 1 ty should be 200, got {}",
+            t1.transform.matrix[13],
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

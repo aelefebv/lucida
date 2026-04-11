@@ -14,7 +14,7 @@ import {
   resetUploadState,
 } from "./uploadCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
-import type { DatasetInfo } from "./zarr/metadata.ts";
+import type { ContentGraph } from "./contentTypes.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 
 /**
@@ -185,22 +185,22 @@ function uploadAndRenderVolume(
   const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel } = plan;
   const { layerOrder, allSettings } = settings;
 
-  const shouldSkipDataset = (cacheKey: string, ds: { info: DatasetInfo }) => {
+  const shouldSkipDataset = (cacheKey: string, ds: { content: ContentGraph }) => {
     if (multiChannel) {
       // In multi-channel mode, the plan phase already filtered channels.
       return !ds;
     }
-    const dsShape = ds.info.levels[0].shape;
+    const dsShape = ds.content.images[0].multiscale.levels[0].shape;
     return viewC >= dsShape[1] || viewT >= dsShape[0];
   };
 
-  const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; info: DatasetInfo }, dsId: string): MemberUploadActions | null => {
+  const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; content: ContentGraph }, dsId: string): MemberUploadActions | null => {
     if (mp.needed.length === 0) return null;
 
     const targetLevel = mp.needed[0].level;
-    const levelMeta = ds.info.levels[targetLevel];
+    const levelMeta = ds.content.images[0].multiscale.levels[targetLevel];
     const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
-    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
 
     // In multi-channel mode, memberId is composite; extract channel
     const ch = multiChannel ? (parseChannel(memberId) ?? viewC) : viewC;
@@ -251,7 +251,7 @@ function uploadAndRenderVolume(
     const dsSettings = allSettings[dsId];
     if (!dsSettings || !dsSettings.visible) continue;
 
-    const dsShapeV = dsVol.info.levels[0].shape; // [T, C, Z, Y, X]
+    const dsShapeV = dsVol.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
 
     if (multiChannel) {
       // Multi-channel: emit one layer per (member, channel)
@@ -269,10 +269,10 @@ function uploadAndRenderVolume(
 
         const planCacheKey = `${dsId}:ch${ch}`;
         const members: MemberChunkPlan[] = memberPlanCache.get(planCacheKey)
-          ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+          ?? [{ image_id: dsId, position: [0, 0], needed: [], prefetch: [] }];
 
         for (const mp of members) {
-          const rawMemberId = mp.member_id;
+          const rawMemberId = mp.image_id;
           const compKey = compositeKey(rawMemberId, ch);
           const model = new Float32Array(scene.member_model_matrix(dsId, rawMemberId));
           const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, rawMemberId));
@@ -301,7 +301,7 @@ function uploadAndRenderVolume(
       if (viewC >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
 
       const members: MemberChunkPlan[] = memberPlanCache.get(dsId)
-        ?? [{ member_id: dsId, position: [0, 0], store_prefix: null, needed: [], prefetch: [] }];
+        ?? [{ image_id: dsId, position: [0, 0], needed: [], prefetch: [] }];
 
       const chSettings = dsSettings.channel_settings?.[viewC];
       const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
@@ -310,7 +310,7 @@ function uploadAndRenderVolume(
       const layerColormap = chSettings?.colormap ?? "gray";
 
       for (const mp of members) {
-        const memberId = mp.member_id;
+        const memberId = mp.image_id;
         const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
         const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
 

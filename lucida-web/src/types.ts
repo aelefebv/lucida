@@ -1,6 +1,5 @@
-import type { DatasetInfo } from "./zarr/metadata.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
-import type { PlateKind } from "./components/PlateSelector.tsx";
+import type { ContentGraph, ClientFetchDescriptor } from "./contentTypes.ts";
 
 export type ViewMode = "2d" | "3d";
 
@@ -11,21 +10,13 @@ export interface VolumeData {
   depth: number; // Z
 }
 
-/** A single member (well/field) within a plate-style dataset. */
-export interface DatasetMember {
-  id: string;
-  position: [number, number];
-  storePrefix: string | null;
-}
-
 /** State for a single dataset, either local or remote. */
 export interface DatasetState {
   id: string;
   name: string;
-  info: DatasetInfo;
+  content: ContentGraph;
+  fetch: ClientFetchDescriptor;
   sharedQueue: SharedChunkQueue;
-  kind?: PlateKind;
-  members: DatasetMember[];
 }
 
 /** Pending chunk request from a remote viewer. */
@@ -34,8 +25,12 @@ export interface PendingChunkResolve {
   reject: (err: Error) => void;
 }
 
+/**
+ * Map a data type string to its maximum intensity value.
+ * Handles both lowercase (legacy) and PascalCase (Rust serde DataType enum).
+ */
 export function dtypeMax(dtype: string): number {
-  switch (dtype) {
+  switch (dtype.toLowerCase()) {
     case "uint8": return 255;
     case "uint16": return 65535;
     case "uint32": return 4294967295;

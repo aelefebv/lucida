@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use lucida_content::LevelGeometry;
+
 use crate::camera::VisibleRegion;
 
 /// A chunk coordinate in the multiscale grid.
@@ -64,34 +66,36 @@ pub fn select_level(zoom: f64, num_levels: u32) -> u32 {
 
 /// Compute which chunk grid cells intersect the visible region's bounds and z range.
 ///
-/// `level_chunk_size` is [Z, Y, X] chunk size at the target level.
-/// `level_shape` is the data shape [Z, Y, X] at the target level.
-/// `full_shape` is the level-0 data shape [Z, Y, X] (for coord mapping to world space).
+/// `level_geo` is the geometry at the target level (shape, chunk_shape, grid_shape).
+/// `full_res_geo` is the level-0 geometry (for coord mapping to world space).
 pub fn visible_chunks(
     region: &VisibleRegion,
-    level_chunk_size: &[u32; 3],
-    level: u32,
+    level_geo: &LevelGeometry,
     t: u32,
     c: u32,
-    level_shape: &[u32; 3],
-    full_shape: &[u32; 3],
+    full_res_geo: &LevelGeometry,
 ) -> Vec<ChunkCoord> {
     let [min_x, min_y, max_x, max_y] = region.xy_bounds;
+    let level = level_geo.level_index;
+
+    // Extract Z/Y/X from 5D arrays (indices 2, 3, 4)
+    let (level_z, level_y, level_x) = (level_geo.shape[2], level_geo.shape[3], level_geo.shape[4]);
+    let (chunk_z, chunk_y, chunk_x) = (level_geo.chunk_shape[2], level_geo.chunk_shape[3], level_geo.chunk_shape[4]);
+    let (full_z, full_y, full_x) = (full_res_geo.shape[2], full_res_geo.shape[3], full_res_geo.shape[4]);
 
     // Per-axis scale: how many full-res voxels map to one level voxel
-    // Arrays are [Z, Y, X]: index 0=Z, 1=Y, 2=X
-    let scale_x = full_shape[2] as f64 / level_shape[2] as f64;
-    let scale_y = full_shape[1] as f64 / level_shape[1] as f64;
-    let scale_z = full_shape[0] as f64 / level_shape[0] as f64;
+    let scale_x = full_x as f64 / level_x as f64;
+    let scale_y = full_y as f64 / level_y as f64;
+    let scale_z = full_z as f64 / level_z as f64;
 
-    let chunk_world_x = level_chunk_size[2] as f64 * scale_x;
-    let chunk_world_y = level_chunk_size[1] as f64 * scale_y;
-    let chunk_world_z = level_chunk_size[0] as f64 * scale_z;
+    let chunk_world_x = chunk_x as f64 * scale_x;
+    let chunk_world_y = chunk_y as f64 * scale_y;
+    let chunk_world_z = chunk_z as f64 * scale_z;
 
-    // Max chunk index (exclusive) at this level — derived from actual level shape
-    let max_col = (level_shape[2] as f64 / level_chunk_size[2] as f64).ceil() as u32;
-    let max_row = (level_shape[1] as f64 / level_chunk_size[1] as f64).ceil() as u32;
-    let max_z = (level_shape[0] as f64 / level_chunk_size[0] as f64).ceil() as u32;
+    // Max chunk index (exclusive) — from precomputed grid_shape
+    let max_col = level_geo.grid_shape[4] as u32;  // X
+    let max_row = level_geo.grid_shape[3] as u32;  // Y
+    let max_z = level_geo.grid_shape[2] as u32;    // Z
 
     let col_start = (min_x / chunk_world_x).floor().max(0.0) as u32;
     let col_end = ((max_x / chunk_world_x).ceil().max(0.0) as u32).min(max_col);
@@ -105,7 +109,6 @@ pub fn visible_chunks(
     for z in z_start..z_end {
         for row in row_start..row_end {
             for col in col_start..col_end {
-                // Per-chunk frustum culling: reject chunks fully outside any frustum plane
                 if let Some(ref planes) = region.frustum_planes {
                     let cmin = [
                         col as f64 * chunk_world_x,
@@ -121,20 +124,12 @@ pub fn visible_chunks(
                         continue;
                     }
                 }
-                chunks.push(ChunkCoord {
-                    level,
-                    x: col,
-                    y: row,
-                    z,
-                    t,
-                    c,
-                });
+                chunks.push(ChunkCoord { level, x: col, y: row, z, t, c });
             }
         }
     }
 
-    // Sort center-out so the viewport center loads first.
-    // Use camera-derived sort center if available, otherwise fall back to grid midpoint.
+    // Sort center-out
     let (center_col, center_row, center_z) = match region.sort_center {
         Some([cx, cy, cz]) => (cx / chunk_world_x, cy / chunk_world_y, cz / chunk_world_z),
         None => (
@@ -162,29 +157,30 @@ pub fn visible_chunks(
 /// and `prefetch` contains the surrounding border chunks (XY only, Z unchanged).
 pub fn visible_and_prefetch_chunks(
     region: &VisibleRegion,
-    level_chunk_size: &[u32; 3],
-    level: u32,
+    level_geo: &LevelGeometry,
     t: u32,
     c: u32,
-    level_shape: &[u32; 3],
-    full_shape: &[u32; 3],
+    full_res_geo: &LevelGeometry,
 ) -> (Vec<ChunkCoord>, Vec<ChunkCoord>) {
     let [min_x, min_y, max_x, max_y] = region.xy_bounds;
+    let level = level_geo.level_index;
 
-    // Arrays are [Z, Y, X]: index 0=Z, 1=Y, 2=X
-    let scale_x = full_shape[2] as f64 / level_shape[2] as f64;
-    let scale_y = full_shape[1] as f64 / level_shape[1] as f64;
-    let scale_z = full_shape[0] as f64 / level_shape[0] as f64;
+    let (level_z, level_y, level_x) = (level_geo.shape[2], level_geo.shape[3], level_geo.shape[4]);
+    let (chunk_z, chunk_y, chunk_x) = (level_geo.chunk_shape[2], level_geo.chunk_shape[3], level_geo.chunk_shape[4]);
+    let (full_z, full_y, full_x) = (full_res_geo.shape[2], full_res_geo.shape[3], full_res_geo.shape[4]);
 
-    let chunk_world_x = level_chunk_size[2] as f64 * scale_x;
-    let chunk_world_y = level_chunk_size[1] as f64 * scale_y;
-    let chunk_world_z = level_chunk_size[0] as f64 * scale_z;
+    let scale_x = full_x as f64 / level_x as f64;
+    let scale_y = full_y as f64 / level_y as f64;
+    let scale_z = full_z as f64 / level_z as f64;
 
-    let max_col = (level_shape[2] as f64 / level_chunk_size[2] as f64).ceil() as u32;
-    let max_row = (level_shape[1] as f64 / level_chunk_size[1] as f64).ceil() as u32;
-    let max_z = (level_shape[0] as f64 / level_chunk_size[0] as f64).ceil() as u32;
+    let chunk_world_x = chunk_x as f64 * scale_x;
+    let chunk_world_y = chunk_y as f64 * scale_y;
+    let chunk_world_z = chunk_z as f64 * scale_z;
 
-    // Visible bounds (same as visible_chunks)
+    let max_col = level_geo.grid_shape[4] as u32;
+    let max_row = level_geo.grid_shape[3] as u32;
+    let max_z = level_geo.grid_shape[2] as u32;
+
     let col_start = (min_x / chunk_world_x).floor().max(0.0) as u32;
     let col_end = ((max_x / chunk_world_x).ceil().max(0.0) as u32).min(max_col);
     let row_start = (min_y / chunk_world_y).floor().max(0.0) as u32;
@@ -193,7 +189,6 @@ pub fn visible_and_prefetch_chunks(
     let z_start = (region.z_range.start as f64 / chunk_world_z).floor() as u32;
     let z_end = ((region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32).min(max_z);
 
-    // Expanded XY bounds (1-chunk border)
     let exp_col_start = col_start.saturating_sub(1);
     let exp_col_end = (col_end + 1).min(max_col);
     let exp_row_start = row_start.saturating_sub(1);
@@ -232,7 +227,6 @@ pub fn visible_and_prefetch_chunks(
         }
     }
 
-    // Sort both sets center-out
     let (center_col, center_row, center_z) = match region.sort_center {
         Some([cx, cy, cz]) => (cx / chunk_world_x, cy / chunk_world_y, cz / chunk_world_z),
         None => (
@@ -277,6 +271,20 @@ mod tests {
     use super::*;
     use crate::camera::Camera;
 
+    /// Helper to build a LevelGeometry from [Z, Y, X] arrays (old test convention).
+    fn geo(level: u32, shape_zyx: [u64; 3], chunk_zyx: [u64; 3]) -> LevelGeometry {
+        let shape = [1, 1, shape_zyx[0], shape_zyx[1], shape_zyx[2]];
+        let chunk_shape = [1, 1, chunk_zyx[0], chunk_zyx[1], chunk_zyx[2]];
+        let grid_shape = std::array::from_fn(|d| shape[d].div_ceil(chunk_shape[d]));
+        LevelGeometry {
+            level_index: level,
+            shape,
+            chunk_shape,
+            grid_shape,
+            scale: [1.0; 5],
+        }
+    }
+
     #[test]
     fn level_0_at_full_zoom() {
         assert_eq!(select_level(1.0, 5), 0);
@@ -301,9 +309,8 @@ mod tests {
     fn visible_chunks_at_origin() {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..1), None, None);
-        // [Z, Y, X]
-        let shape = [256, 4096, 4096];
-        let chunks = visible_chunks(&region, &[64, 256, 256], 0, 0, 0, &shape, &shape);
+        let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
+        let chunks = visible_chunks(&region, &g, 0, 0, &g);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].x, 0);
         assert_eq!(chunks[0].y, 0);
@@ -317,8 +324,8 @@ mod tests {
             v.center = [512.0, 512.0];
         }
         let region = cam.visible_region(&(0..1), None, None);
-        let shape = [256, 4096, 4096];
-        let chunks = visible_chunks(&region, &[64, 256, 256], 0, 0, 0, &shape, &shape);
+        let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
+        let chunks = visible_chunks(&region, &g, 0, 0, &g);
         assert_eq!(chunks.len(), 4);
     }
 
@@ -326,8 +333,8 @@ mod tests {
     fn z_slab_spans_multiple_chunks() {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..128), None, None);
-        let shape = [256, 4096, 4096];
-        let chunks = visible_chunks(&region, &[64, 256, 256], 0, 0, 0, &shape, &shape);
+        let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
+        let chunks = visible_chunks(&region, &g, 0, 0, &g);
         assert_eq!(chunks.len(), 2);
         let mut zs: Vec<u32> = chunks.iter().map(|c| c.z).collect();
         zs.sort();
@@ -352,8 +359,8 @@ mod tests {
     fn single_z_slice_maps_to_correct_chunk() {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(100..101), None, None);
-        let shape = [256, 4096, 4096];
-        let chunks = visible_chunks(&region, &[64, 256, 256], 0, 0, 0, &shape, &shape);
+        let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
+        let chunks = visible_chunks(&region, &g, 0, 0, &g);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].z, 1);
     }
@@ -365,10 +372,8 @@ mod tests {
             v.center = [512.0, 512.0];
         }
         let region = cam.visible_region(&(0..1), None, None);
-        let shape = [256, 4096, 4096];
-        let (needed, prefetch) = visible_and_prefetch_chunks(
-            &region, &[64, 256, 256], 0, 0, 0, &shape, &shape,
-        );
+        let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
+        let (needed, prefetch) = visible_and_prefetch_chunks(&region, &g, 0, 0, &g);
         let needed_set: std::collections::HashSet<_> =
             needed.iter().map(|c| (c.x, c.y, c.z)).collect();
         for c in &prefetch {
@@ -384,12 +389,9 @@ mod tests {
     fn prefetch_expands_xy() {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..1), None, None);
-        let shape = [256, 4096, 4096];
-        let (needed, prefetch) = visible_and_prefetch_chunks(
-            &region, &[64, 256, 256], 0, 0, 0, &shape, &shape,
-        );
+        let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
+        let (needed, prefetch) = visible_and_prefetch_chunks(&region, &g, 0, 0, &g);
         assert!(!prefetch.is_empty(), "prefetch should not be empty");
-        // All prefetch chunks must have x or y outside the needed bounds
         let min_nx = needed.iter().map(|c| c.x).min().unwrap();
         let max_nx = needed.iter().map(|c| c.x).max().unwrap();
         let min_ny = needed.iter().map(|c| c.y).min().unwrap();
@@ -407,10 +409,8 @@ mod tests {
     fn prefetch_does_not_expand_z() {
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..64), None, None);
-        let shape = [256, 4096, 4096];
-        let (needed, prefetch) = visible_and_prefetch_chunks(
-            &region, &[64, 256, 256], 0, 0, 0, &shape, &shape,
-        );
+        let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
+        let (needed, prefetch) = visible_and_prefetch_chunks(&region, &g, 0, 0, &g);
         let needed_zs: std::collections::HashSet<u32> = needed.iter().map(|c| c.z).collect();
         for c in &prefetch {
             assert!(
@@ -423,27 +423,21 @@ mod tests {
 
     #[test]
     fn prefetch_edge_clamping() {
-        // Camera at origin — prefetch shouldn't go negative
         let cam = Camera::new_2d([512, 512]);
         let region = cam.visible_region(&(0..1), None, None);
-        let shape = [256, 4096, 4096];
-        let (_, prefetch) = visible_and_prefetch_chunks(
-            &region, &[64, 256, 256], 0, 0, 0, &shape, &shape,
-        );
+        let g = geo(0, [256, 4096, 4096], [64, 256, 256]);
+        let (_, prefetch) = visible_and_prefetch_chunks(&region, &g, 0, 0, &g);
         for c in &prefetch {
-            assert!(c.x < 16); // max_col = ceil(4096/256) = 16
+            assert!(c.x < 16);
             assert!(c.y < 16);
         }
 
-        // Camera near data edge — prefetch shouldn't exceed max_col/max_row
         let mut cam2 = Camera::new_2d([512, 512]);
         if let Camera::Slice(ref mut v) = cam2 {
             v.center = [4000.0, 4000.0];
         }
         let region2 = cam2.visible_region(&(0..1), None, None);
-        let (_, prefetch2) = visible_and_prefetch_chunks(
-            &region2, &[64, 256, 256], 0, 0, 0, &shape, &shape,
-        );
+        let (_, prefetch2) = visible_and_prefetch_chunks(&region2, &g, 0, 0, &g);
         for c in &prefetch2 {
             assert!(c.x < 16, "prefetch x={} exceeds max_col", c.x);
             assert!(c.y < 16, "prefetch y={} exceeds max_row", c.y);
@@ -452,27 +446,13 @@ mod tests {
 
     #[test]
     fn anisotropic_level1_preserves_z_chunks() {
-        // Simulates a dataset with shape X=1024, Y=1024, Z=100, voxel spacing [1,1,10].
-        // At level 1, the pyramid generator only downsamples X/Y (not Z),
-        // so level_shape = [100, 512, 512], full_shape = [100, 1024, 1024] in [Z,Y,X].
         let cam = Camera::new_2d([512, 512]);
-        // View full Z range
         let region = cam.visible_region(&(0..100), None, None);
-        let full_shape = [100, 1024, 1024];
-        let level_shape = [100, 512, 512]; // Z unchanged at level 1
-        let level_chunk_size = [32, 32, 32];
-        let chunks = visible_chunks(
-            &region,
-            &level_chunk_size,
-            1,
-            0,
-            0,
-            &level_shape,
-            &full_shape,
-        );
-        // Z chunks at level 1: ceil(100/32) = 4
+        let full = geo(0, [100, 1024, 1024], [32, 32, 32]);
+        let level1 = geo(1, [100, 512, 512], [32, 32, 32]);
+        let chunks = visible_chunks(&region, &level1, 0, 0, &full);
         let max_z_chunk = chunks.iter().map(|c| c.z).max().unwrap();
-        assert_eq!(max_z_chunk, 3); // 0,1,2,3 = 4 chunks
+        assert_eq!(max_z_chunk, 3);
         let z_set: std::collections::HashSet<u32> = chunks.iter().map(|c| c.z).collect();
         assert_eq!(z_set.len(), 4);
     }

@@ -1,21 +1,63 @@
 import { useMemo } from "react";
-import type { DatasetMember } from "../types.ts";
+import type { ContentGraph, DatasetKind, Entity, LayoutSpec } from "../contentTypes.ts";
 
-/** Plate metadata from `DatasetKind::Plate`, as serialized by serde. */
+/** Plate metadata extracted from DatasetKind::Plate. */
 export interface PlateKind {
   rows: string[];
   columns: string[];
-  wells: { path: string; row_index: number; column_index: number }[];
-  positioning_mode: "stage" | "grid";
+  positioning_mode: string;
   has_stage_positions: boolean;
+}
+
+/** A positioned member for the plate grid. */
+interface PlacedMember {
+  id: string;
+  position: [number, number];
 }
 
 interface PlateSelectorProps {
   plateKind: PlateKind;
-  members: DatasetMember[];
+  members: PlacedMember[];
   plateName: string;
   onWellClick: (centerX: number, centerY: number) => void;
   onPositioningModeToggle?: () => void;
+}
+
+/**
+ * Extract PlateKind and positioned members from a ContentGraph.
+ * Returns null if the dataset is not a plate.
+ */
+export function extractPlateData(content: ContentGraph): { plateKind: PlateKind; members: PlacedMember[] } | null {
+  if (content.kind === "Single") return null;
+  if (typeof content.kind !== "object" || !("Plate" in content.kind)) return null;
+
+  const plate = (content.kind as Exclude<DatasetKind, "Single">).Plate;
+  const plateKind: PlateKind = {
+    rows: plate.rows,
+    columns: plate.columns,
+    positioning_mode: plate.positioning_mode,
+    has_stage_positions: plate.has_stage_positions,
+  };
+
+  // Derive members from entities + source_layouts placements
+  const members: PlacedMember[] = [];
+  const defaultLayout = content.source_layouts.find((l: LayoutSpec) => l.id === content.default_layout_id)
+    ?? content.source_layouts[0];
+  if (defaultLayout) {
+    for (const placement of defaultLayout.placements) {
+      const entity = content.entities.find((e: Entity) => e.id === placement.entity_id);
+      if (entity) {
+        members.push({ id: entity.id, position: placement.position });
+      }
+    }
+  } else {
+    // Fallback: use image IDs with zero position
+    for (const img of content.images) {
+      members.push({ id: img.image_id, position: [0, 0] });
+    }
+  }
+
+  return { plateKind, members };
 }
 
 const CELL_SIZE = 24;
@@ -31,29 +73,38 @@ export function PlateSelector({
   onWellClick,
   onPositioningModeToggle,
 }: PlateSelectorProps) {
-  // Build a set of populated wells and a lookup from well path to member positions.
-  // A well is populated if any member's storePrefix starts with the well path.
+  // Build a set of populated wells by matching entity IDs to well-like entities.
+  // A well is populated if any member belongs to it (entity parent or label-based).
   const wellMemberMap = useMemo(() => {
-    const map = new Map<string, DatasetMember[]>();
-    for (const well of plateKind.wells) {
-      const wellMembers = members.filter(
-        (m) => m.storePrefix !== null && m.storePrefix.startsWith(well.path)
-      );
-      if (wellMembers.length > 0) {
-        map.set(`${well.row_index},${well.column_index}`, wellMembers);
+    const map = new Map<string, PlacedMember[]>();
+    // For plate datasets, members are positioned by their layout placements.
+    // We group them by grid position (row, col).
+    const numCols = plateKind.columns.length;
+    for (let rowIdx = 0; rowIdx < plateKind.rows.length; rowIdx++) {
+      for (let colIdx = 0; colIdx < numCols; colIdx++) {
+        // Members whose index maps to this well position
+        const wellIdx = rowIdx * numCols + colIdx;
+        if (wellIdx < members.length) {
+          const key = `${rowIdx},${colIdx}`;
+          const existing = map.get(key) ?? [];
+          existing.push(members[wellIdx]);
+          map.set(key, existing);
+        }
       }
     }
     return map;
-  }, [plateKind.wells, members]);
+  }, [plateKind.rows, plateKind.columns, members]);
 
   // Build a well lookup by (row, col) for grid rendering
   const wellPathMap = useMemo(() => {
     const map = new Map<string, string>();
-    for (const well of plateKind.wells) {
-      map.set(`${well.row_index},${well.column_index}`, well.path);
+    for (let r = 0; r < plateKind.rows.length; r++) {
+      for (let c = 0; c < plateKind.columns.length; c++) {
+        map.set(`${r},${c}`, `${plateKind.rows[r]}/${plateKind.columns[c]}`);
+      }
     }
     return map;
-  }, [plateKind.wells]);
+  }, [plateKind.rows, plateKind.columns]);
 
   const handleWellClick = (rowIdx: number, colIdx: number) => {
     const key = `${rowIdx},${colIdx}`;
