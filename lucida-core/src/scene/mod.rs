@@ -274,6 +274,42 @@ impl Scene {
         Some(plans)
     }
 
+    /// Pick the closest entity hit by a ray cast from screen coordinates.
+    pub fn ray_pick(&self, dataset_id: &DatasetId, screen_x: f64, screen_y: f64) -> Option<crate::ray::RayHit> {
+        let derived = self.derived.get(dataset_id)?;
+        let world_ray = self.camera.unproject_ray(screen_x, screen_y);
+        let mut closest: Option<crate::ray::RayHit> = None;
+
+        for member in &derived.members {
+            // Transform ray to member-local space
+            let local_ray = crate::ray::transform_ray(&world_ray, &member.volume_transform.inv_model);
+
+            if let Some(t) = local_ray.intersect_unit_cube() {
+                let hit_local = [
+                    local_ray.origin[0] + t * local_ray.direction[0],
+                    local_ray.origin[1] + t * local_ray.direction[1],
+                    local_ray.origin[2] + t * local_ray.direction[2],
+                ];
+                let hit_world = crate::ray::transform_point(&hit_local, &member.volume_transform.model);
+                let dx = hit_world[0] - world_ray.origin[0];
+                let dy = hit_world[1] - world_ray.origin[1];
+                let dz = hit_world[2] - world_ray.origin[2];
+                let distance = (dx * dx + dy * dy + dz * dz).sqrt();
+
+                if closest.as_ref().map_or(true, |c| distance < c.distance) {
+                    closest = Some(crate::ray::RayHit {
+                        entity_id: member.entity_id.clone(),
+                        image_id: member.image_id.clone(),
+                        world_position: hit_world,
+                        distance,
+                    });
+                }
+            }
+        }
+
+        closest
+    }
+
     /// Rebuild derived state from the document's content graphs.
     /// Call this after deserializing a Scene (since derived is not serialized).
     pub fn rebuild_derived(&mut self) {
@@ -871,6 +907,34 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].image_id, ImageId("m1-image".into()));
         assert!(!plans[0].needed.is_empty());
+    }
+
+    #[test]
+    fn ray_pick_single_image_center() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        // Ray through viewport center should hit the single image
+        let hit = scene.ray_pick(&DatasetId::from("ds1"), 400.0, 300.0);
+        assert!(hit.is_some());
+        let h = hit.unwrap();
+        assert_eq!(h.entity_id, EntityId::from("ds1-entity"));
+    }
+
+    #[test]
+    fn ray_pick_miss() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        // Ray way off screen should miss
+        let hit = scene.ray_pick(&DatasetId::from("ds1"), -10000.0, -10000.0);
+        assert!(hit.is_none());
+    }
+
+    #[test]
+    fn ray_pick_nonexistent_dataset() {
+        let scene = Scene::new([800, 600]);
+        assert!(scene.ray_pick(&DatasetId::from("nope"), 400.0, 300.0).is_none());
     }
 
     #[test]

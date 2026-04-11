@@ -165,6 +165,26 @@ impl Camera {
         }
     }
 
+    /// Unproject screen coordinates to a world-space ray.
+    pub fn unproject_ray(&self, screen_x: f64, screen_y: f64) -> crate::ray::Ray {
+        match self {
+            Camera::Slice(s) => {
+                // 2D: ray goes straight into Z
+                let world_x =
+                    (screen_x - s.viewport[0] as f64 / 2.0) / s.zoom + s.center[0];
+                let world_y =
+                    (screen_y - s.viewport[1] as f64 / 2.0) / s.zoom + s.center[1];
+                crate::ray::Ray::new([world_x, world_y, -1000.0], [0.0, 0.0, 1.0])
+            }
+            Camera::Arcball(a) => {
+                unproject_screen_ray(screen_x, screen_y, a.viewport, &a.view_proj_f64())
+            }
+            Camera::Fly(f) => {
+                unproject_screen_ray(screen_x, screen_y, f.viewport, &f.view_proj_f64())
+            }
+        }
+    }
+
     /// Compute the visible region in voxel coordinates for chunk planning.
     ///
     /// - `view_z_range`: z range from ViewState (used in 2D mode)
@@ -962,6 +982,31 @@ fn rotation_matrix_to_quat(m: [[f64; 3]; 3]) -> [f64; 4] {
             (m[1][0] - m[0][1]) / s,
         ]
     }
+}
+
+/// Unproject screen coordinates to a world-space ray using a view-projection matrix.
+/// Computes the inverse VP, unprojects at near and far planes, and returns the ray.
+fn unproject_screen_ray(
+    screen_x: f64,
+    screen_y: f64,
+    viewport: [u32; 2],
+    view_proj: &[f64; 16],
+) -> crate::ray::Ray {
+    // Screen to NDC (reverse of the standard screen mapping)
+    let ndc_x = (screen_x / viewport[0] as f64) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (screen_y / viewport[1] as f64) * 2.0;
+
+    let inv_vp = invert4_f64(*view_proj);
+    let near_world = unproject(&[ndc_x, ndc_y, -1.0], &inv_vp);
+    let far_world = unproject(&[ndc_x, ndc_y, 1.0], &inv_vp);
+
+    let dir = [
+        far_world[0] - near_world[0],
+        far_world[1] - near_world[1],
+        far_world[2] - near_world[2],
+    ];
+
+    crate::ray::Ray::new(near_world, dir)
 }
 
 /// Closest point on an AABB to a given point (clamped to the box surface).
