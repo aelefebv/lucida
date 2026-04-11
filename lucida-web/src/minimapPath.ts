@@ -257,8 +257,8 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     // Slice view bounds (2D only)
     let sliceViewBounds: MinimapOverlayData["sliceViewBounds"] = null;
     if (mode === "slice") {
-      const mainW = canvas.clientWidth;
-      const mainH = canvas.clientHeight;
+      const mainW = Math.round(canvas.clientWidth * devicePixelRatio);
+      const mainH = Math.round(canvas.clientHeight * devicePixelRatio);
       const z = scene.zoom();
       const c = scene.center();
       const halfW = mainW / (2 * z);

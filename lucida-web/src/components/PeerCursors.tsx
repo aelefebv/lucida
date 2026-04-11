@@ -93,8 +93,11 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
+        const dpr = devicePixelRatio;
         const canvasW = canvas.clientWidth;
         const canvasH = canvas.clientHeight;
+        const physW = Math.round(canvasW * dpr);
+        const physH = Math.round(canvasH * dpr);
         const localIs3d = viewModeRef.current === "3d";
 
         // Build a lookup from client_id → label data from WASM
@@ -150,15 +153,16 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
           } else {
             if (lbl.voxel) {
               // 3D→2D: recompute from voxel coords for smooth camera tracking
-              screenX = (lbl.voxel[0] - centerX) * zoom + canvasW / 2;
-              screenY = (lbl.voxel[1] - centerY) * zoom + canvasH / 2;
+              // zoom/center are in physical-pixel space; divide by DPR for CSS positioning
+              screenX = ((lbl.voxel[0] - centerX) * zoom + physW / 2) / dpr;
+              screenY = ((lbl.voxel[1] - centerY) * zoom + physH / 2) / dpr;
             } else {
               // 2D→2D: recompute from peer cursor or camera center
               const [worldX, worldY] = isDefaulted
                 ? (peer.camera as { center?: [number, number] })?.center ?? [0, 0]
                 : peer.cursor!;
-              screenX = (worldX - centerX) * zoom + canvasW / 2;
-              screenY = (worldY - centerY) * zoom + canvasH / 2;
+              screenX = ((worldX - centerX) * zoom + physW / 2) / dpr;
+              screenY = ((worldY - centerY) * zoom + physH / 2) / dpr;
             }
           }
 

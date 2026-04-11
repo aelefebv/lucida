@@ -193,8 +193,9 @@ function App() {
         return { id: p.client_id, cursor: p.cursor, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: false };
       });
     const canvasEl = render.canvasRef.current;
-    const screenW = canvasEl?.clientWidth ?? 800;
-    const screenH = canvasEl?.clientHeight ?? 600;
+    const dpr = window.devicePixelRatio || 1;
+    const screenW = Math.round((canvasEl?.clientWidth ?? 800) * dpr);
+    const screenH = Math.round((canvasEl?.clientHeight ?? 600) * dpr);
     const resultJson = ws.compute_peer_cursors(JSON.stringify(peersArr), bridge.myId, screenW, screenH);
     const result = JSON.parse(resultJson) as {
       gpu: number[][];
@@ -259,16 +260,9 @@ function App() {
   const handleDebugClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!showDebug) return;
     const rect = e.currentTarget.getBoundingClientRect();
-    const cssX = e.clientX - rect.left;
-    const cssY = e.clientY - rect.top;
-    // Slice sets viewport to CSS pixels; volume sets it to physical pixels.
-    // Read the actual camera mode from WASM, not React state (which may be stale).
-    const ws = scene.wasmSceneRef.current;
-    const mode = ws?.camera_mode?.() ?? "slice";
-    const is3d = mode === "arcball" || mode === "fly";
-    const scale = is3d ? (window.devicePixelRatio || 1) : 1;
-    setLastClickScreen([cssX * scale, cssY * scale]);
-  }, [showDebug, scene.wasmSceneRef]);
+    const dpr = window.devicePixelRatio || 1;
+    setLastClickScreen([(e.clientX - rect.left) * dpr, (e.clientY - rect.top) * dpr]);
+  }, [showDebug]);
 
   const handleFileBrowserSelect = useCallback((path: string) => {
     datasets.handleUrlSubmit(path);

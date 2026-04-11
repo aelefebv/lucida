@@ -51,8 +51,9 @@ function planAndFetchSlice(
   scene.set_t(t);
   scene.set_c(c);
 
-  const canvasW = canvas.clientWidth;
-  const canvasH = canvas.clientHeight;
+  const dpr = devicePixelRatio;
+  const canvasW = Math.round(canvas.clientWidth * dpr);
+  const canvasH = Math.round(canvas.clientHeight * dpr);
   scene.set_viewport(canvasW, canvasH);
 
   // Viewport center for spatial priority (camera position in slice mode)
@@ -106,8 +107,9 @@ function uploadAndRenderSlice(
   const t = sliceT;
   const c = sliceC;
 
-  const canvasW = canvas.clientWidth;
-  const canvasH = canvas.clientHeight;
+  const dpr = devicePixelRatio;
+  const canvasW = Math.round(canvas.clientWidth * dpr);
+  const canvasH = Math.round(canvas.clientHeight * dpr);
 
   const shouldSkipDataset = (cacheKey: string, ds: { content: ContentGraph }) => {
     const dsShape = ds.content.images[0].multiscale.levels[0].shape;

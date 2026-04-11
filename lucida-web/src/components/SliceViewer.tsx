@@ -61,19 +61,22 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
 
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
-      // Always broadcast cursor in voxel coordinates
+      // All coordinates scaled to physical pixels to match WASM viewport
+      const dpr = devicePixelRatio;
       const rect = canvas.getBoundingClientRect();
-      const cursorX = e.clientX - rect.left;
-      const cursorY = e.clientY - rect.top;
+      const cursorX = (e.clientX - rect.left) * dpr;
+      const cursorY = (e.clientY - rect.top) * dpr;
       const zoom = scene.zoom();
       const centerArr = scene.center();
-      const worldX = (cursorX - canvas.clientWidth / 2) / zoom + centerArr[0];
-      const worldY = (cursorY - canvas.clientHeight / 2) / zoom + centerArr[1];
+      const halfW = canvas.clientWidth * dpr / 2;
+      const halfH = canvas.clientHeight * dpr / 2;
+      const worldX = (cursorX - halfW) / zoom + centerArr[0];
+      const worldY = (cursorY - halfH) / zoom + centerArr[1];
       sendCursor([worldX, worldY]);
 
       if (!dragging) return;
-      const dx = e.clientX - lastPos.current.x;
-      const dy = e.clientY - lastPos.current.y;
+      const dx = (e.clientX - lastPos.current.x) * dpr;
+      const dy = (e.clientY - lastPos.current.y) * dpr;
       lastPos.current = { x: e.clientX, y: e.clientY };
       const pdx = -dx;
       const pdy = -dy;
@@ -102,11 +105,12 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
     (e: WheelEvent) => {
       e.preventDefault();
 
+      const dpr = devicePixelRatio;
       const rect = canvas.getBoundingClientRect();
-      const cursorX = e.clientX - rect.left;
-      const cursorY = e.clientY - rect.top;
-      const canvasW = canvas.clientWidth;
-      const canvasH = canvas.clientHeight;
+      const cursorX = (e.clientX - rect.left) * dpr;
+      const cursorY = (e.clientY - rect.top) * dpr;
+      const canvasW = canvas.clientWidth * dpr;
+      const canvasH = canvas.clientHeight * dpr;
 
       const oldZoom = scene.zoom();
       const centerArr = scene.center();
