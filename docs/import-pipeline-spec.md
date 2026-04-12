@@ -10,7 +10,7 @@ How a filepath or GCS path becomes a registered dataset. The import pipeline cle
 2. **Canonical content describes what the dataset is.** It does not describe how to fetch it, where it's stored, or how to display it.
 3. **Fetch metadata describes how a client turns logical addresses into bytes.** It varies by client mode (proxied, direct, local) and does not contain storage internals.
 4. **Server binding is operational and private.** It owns live resources (object store handles, caches, compiled resolvers) and never crosses the wire.
-5. **Storage codec is not wire codec.** The server decodes storage compression and chooses what wire format to send. Phase 1: server decodes LZ4 from storage, sends `WireFormat::Raw` to clients.
+5. **Storage codec is not wire codec.** The server decodes storage compression and chooses what wire format to send. Each `WireFormat` variant (`Raw`, `Lz4`, `Zstd`) carries a `data_type: DataType` field so the client knows the pixel format of the response. Phase 1: server decodes LZ4 from storage, sends `WireFormat::Raw { data_type }` to clients.
 6. **Registration is an application-level event**, not the data model. It carries the import products but is not itself canonical content.
 
 ---
@@ -104,7 +104,7 @@ This spec covers the import pipeline — from "user provides a path" to "dataset
 - **Collaboration** — command sync and presence continue to work the same way, carrying `RegisterDataset`.
 - **Derived layouts** — condition grids, comparison views, and other client-authored layouts. These are expressed as `LayoutSpec` values and registered with scene state, but the authoring logic is a separate concern.
 - **Asset catalog** — overview/proxy product availability. This is a web-only overlay, separate from the canonical content graph.
-- **Direct or local fetch modes** — the initial implementation uses `Proxied` mode exclusively. `Direct` and `Local` variants are defined in the type system but are intentionally incomplete (see `DirectImageSpec` note in lucida-protocol) and should not be wired into runtime code paths until their addressing requirements are fully specified.
+- **Direct or local fetch modes** — the initial implementation uses `Proxied` mode exclusively. `Direct` and `Local` variants are structurally defined in the type system (with full serde round-trip coverage) but are not wired into any runtime code path. They should not be activated until their addressing and authentication requirements are fully specified.
 
 ---
 

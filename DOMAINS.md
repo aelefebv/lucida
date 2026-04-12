@@ -69,7 +69,7 @@ The simple rule: if a function depends only on camera state, transforms, metadat
                   │  └─ Future: overview generation, sharding   │
                   │                                             │
                   │  lucida-protocol (shared Rust crate)        │
-                  │  ├─ ClientFetchDescriptor (Proxied/Direct)  │
+                  │  ├─ ClientFetchDescriptor (Proxied/Direct/Local) │
                   │  ├─ WireFormat (Raw/Lz4/Zstd)              │
                   │  └─ RegisterDataset command                 │
                   │                                             │
@@ -159,14 +159,17 @@ The target output from WASM is something like:
 
 ```ts
 type ViewQueryResult = {
+  epochs: SceneEpochs;
   visibleEntities: Array<{
-    entityId: number;
-    kind: "well" | "field" | "image";
+    entityId: string;
+    imageId: string;
+    kind: "Well" | "Field" | "Image";
+    visible: boolean;
     projectedDiagonalPx: number;
     projectedAreaPx2: number;
     centroidWorld: [number, number, number];
     idealTargetLod: number;   // geometric recommendation only
-    visible: boolean;
+    importance: number;       // projectedAreaPx2 / distance — used by Planning for intra-lane priority
   }>;
 };
 ```

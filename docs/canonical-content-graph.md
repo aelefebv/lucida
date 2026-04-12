@@ -43,13 +43,15 @@ pub struct ContentGraph {
     pub dataset_id: DatasetId,
     pub name: String,
     pub kind: DatasetKind,
-    pub entities: Vec<Entity>,
-    pub transforms: Vec<TransformEdge>,
-    pub images: Vec<ImageSpec>,
-    pub source_layouts: Vec<LayoutSpec>,
+    entities: Vec<Entity>,           // access via .entities()
+    transforms: Vec<TransformEdge>,  // access via .transforms()
+    images: Vec<ImageSpec>,          // access via .images()
+    source_layouts: Vec<LayoutSpec>, // access via .source_layouts()
     pub default_layout_id: Option<LayoutId>,
 }
 ```
+
+The collection fields are private — constructed via `ContentGraph::new(...)` and accessed through getter methods that return shared slices (`&[Entity]`, `&[TransformEdge]`, etc.). This enforces immutability after construction.
 
 | Field | Purpose |
 |-------|---------|
