@@ -41,11 +41,31 @@ export function useDimensions({
     dimT = Math.max(dimT, shape[0]);
   }
 
-  // Clamp slider values when union dimensions shrink
+  // Clamp slider values when union dimensions shrink, and sync to WASM scene
   useEffect(() => {
-    if (z >= dimZ) setZ(dimZ - 1);
-    if (c >= dimC) setC(dimC - 1);
-    if (t >= dimT) setT(dimT - 1);
+    const scene = wasmSceneRef.current;
+    let clamped = false;
+    if (z >= dimZ) {
+      const newZ = dimZ - 1;
+      setZ(newZ);
+      if (scene) applyViewportCommand(scene, { type: "set_z", z: newZ });
+      clamped = true;
+    }
+    if (c >= dimC) {
+      const newC = dimC - 1;
+      setC(newC);
+      if (scene) applyViewportCommand(scene, { type: "set_c", c: newC });
+      clamped = true;
+    }
+    if (t >= dimT) {
+      const newT = dimT - 1;
+      setT(newT);
+      if (scene) applyViewportCommand(scene, { type: "set_t", t: newT });
+      clamped = true;
+    }
+    if (clamped) {
+      bridgeCallbacksRef.current.emitPresence();
+    }
   }, [dimZ, dimC, dimT]);
 
   const handleViewModeToggle = useCallback(() => {

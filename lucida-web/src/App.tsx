@@ -256,7 +256,8 @@ function App() {
       debugStats.enabled = !prev;
       return !prev;
     });
-  }, []);
+    render.loopRef.current?.markViewDirty();
+  }, [render.loopRef]);
   const handleDebugClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!showDebug) return;
     const rect = e.currentTarget.getBoundingClientRect();
