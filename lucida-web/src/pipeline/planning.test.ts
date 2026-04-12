@@ -383,7 +383,7 @@ describe("iterateChunks", () => {
     expect(channels).toEqual([0, 2, 3]);
   });
 
-  it("center-out sort places nearest chunk first", () => {
+  it("returns all visible chunks regardless of sort order", () => {
     // 4x1x1 grid so chunks are spread along X.
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 1024], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
@@ -395,7 +395,6 @@ describe("iterateChunks", () => {
     });
     const entry = makeDetailEntry("e0", "img0", 0, 0);
 
-    // sortCenter at x=960 (near the right edge, chunk col 3).
     const region = makeVisibleRegion({
       xyBounds: [0, 0, 1024, 256],
       sortCenter: [960, 128, 0],
@@ -404,10 +403,11 @@ describe("iterateChunks", () => {
     const cache = makeCacheState();
 
     const result = iterateChunks(entity, entry, region, selection, cache);
-    expect(result.length).toBeGreaterThan(1);
 
-    // First chunk should be the one closest to sortCenter (col 3).
-    expect(result[0].x).toBe(3);
+    // All 4 columns should be present.
+    expect(result).toHaveLength(4);
+    const xs = result.map((r) => r.x).sort();
+    expect(xs).toEqual([0, 1, 2, 3]);
   });
 
   it("entity position offsets the visible region correctly", () => {
@@ -639,6 +639,96 @@ describe("request scheduling", () => {
 // ---------------------------------------------------------------------------
 
 describe("plan()", () => {
+  it("center-out priority: chunks nearest view center have lowest priority", () => {
+    // 4x1x1 grid so chunks are spread along X (cols 0-3).
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 1024], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      imageId: "img0",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: 1.0,
+      position: [0, 0],
+    });
+
+    // sortCenter at x=960 (near chunk col 3).
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBounds: [0, 0, 1024, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: [960, 128, 0],
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+
+    const result = plan(snapshot);
+    const detailReqs = result.requests.filter((r) => r.lane === "detail");
+    expect(detailReqs.length).toBe(4);
+
+    // Detail requests should be sorted by priority (ascending).
+    // The chunk closest to sortCenter (col 3) should be first.
+    expect(detailReqs[0].x).toBe(3);
+    // The chunk farthest from sortCenter (col 0) should be last.
+    expect(detailReqs[3].x).toBe(0);
+  });
+
+  it("center-out priority respects entity position offset", () => {
+    // Entity at position [500, 0], 2x1 grid.
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 512], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      imageId: "img0",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: 1.0,
+      position: [500, 0],
+    });
+
+    // View center at x=900 → local x=400 → closer to col 1 (chunk center 384).
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBounds: [400, 0, 1100, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: null, // midpoint = [750, 128] → local x = 250
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+
+    const result = plan(snapshot);
+    const detailReqs = result.requests.filter((r) => r.lane === "detail");
+    expect(detailReqs.length).toBe(2);
+
+    // View midpoint local x = (400+1100)/2 - 500 = 250.
+    // Col 0 center = 128, col 1 center = 384.
+    // Col 1 (dist 134) is farther than col 0 (dist 122), so col 0 first.
+    expect(detailReqs[0].x).toBe(0);
+    expect(detailReqs[1].x).toBe(1);
+  });
+
   it("propagates request epoch", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({

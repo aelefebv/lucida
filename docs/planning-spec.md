@@ -30,8 +30,8 @@ Geometric query engine                      Policy + scheduling
     → VisibleRegion                           Subdomains:
   chunk::select_level()                         promote()
   chunk::visible_chunks()                       iterateChunks()
-  chunk::visible_and_prefetch_chunks()          sortCenterOut()
-  chunk::chunk_outside_frustum()                computePriority()
+  chunk::visible_and_prefetch_chunks()          computePriority()
+  chunk::chunk_outside_frustum()                chunkDistanceFromCenter()
 ```
 
 The Rust side answers: "given this camera and these entities, what is geometrically important?" The TypeScript side answers: "given what is important, what has been cached, and what the user is doing, what chunks should we request and in what order?"
@@ -103,6 +103,8 @@ interface RequestPlan {
   epochs: PlanningEpochs;      // Propagated with bumped requestEpoch
 }
 ```
+
+**Layout data:** V1's `RequestPlan` does not carry layout information. The Orchestrator reads layout from Scene State directly and pairs it with the active set for worker cold-state updates. DOMAINS.md describes the target where `RequestPlan` carries layout alongside the active set so the Orchestrator has a self-contained frame decision — ensuring the layout pushed to the worker is the same layout Planning computed against. This will matter when epoch-based plan caching is active: a cached `RequestPlan` must carry the layout it was computed from so the Orchestrator doesn't need to track which layout snapshot corresponds to which cached plan.
 
 ### Key Types
 
@@ -309,27 +311,7 @@ Iterating coarsest-first means seed LOD chunks appear earliest in the output —
 
 **Entity position offsets**: For multi-member datasets (plates), each entity sits at a composed position from layout placement + transform edges. The visible region is offset to local coordinates for grid cell computation, but chunk AABBs are tested in global space against frustum planes.
 
-### 4. Center-Out Sorting
-
-Chunks are sorted by distance from the sort center so that the most visually important chunks (center of screen) load first.
-
-```
-sortCenterOut(requests, region, entity)
-
-  1. Determine sort center in local coords:
-     - If region.sortCenter exists: offset by entity.position
-     - Otherwise: midpoint of visible region, offset by entity.position
-
-  2. Pre-compute chunk world sizes per level (handles anisotropic levels):
-     chunkWorld[level] = [chunkX × scaleX, chunkY × scaleY, chunkZ × scaleZ]
-
-  3. Sort by squared distance:
-     dist(req) = ((x+0.5) × cwX - centerX)² + ((y+0.5) × cwY - centerY)² + ...
-```
-
-Pre-computing chunk world sizes per level ensures correct sorting across LODs — different levels have different chunk dimensions, so a grid index at level 2 maps to a different world extent than the same index at level 0.
-
-### 5. Three-Lane Scheduling
+### 4. Three-Lane Scheduling
 
 Requests are organized into three priority lanes, separated by large numeric offsets to guarantee inter-lane ordering:
 
@@ -347,7 +329,7 @@ priority = laneOffset + (1 - importance) × 500 + distanceFromCenter × 10
 
 - **Lower = more urgent.** Detail lane requests always precede runway, which precedes overview.
 - **Importance** (from `view_query`): `projectedAreaPx2 / distance`. Larger on-screen entities closer to the camera are prioritized.
-- **Distance**: Chunks closer to the sort center are prioritized within a lane.
+- **Distance** (`chunkDistanceFromCenter()`): World-space distance from the chunk's center to the view center (sort center if available, otherwise visible region midpoint), offset by entity position into local coordinates. Chunk grid indices are converted to world-voxel positions using per-level chunk world sizes, so distance is comparable across LODs. Chunks closer to the view center load first.
 - **Runway depth**: Each future timepoint adds 100 to the lane offset (T+1 → 1100, T+2 → 1200), so nearer future frames load first.
 
 **Temporal runway**: For detail-promoted entities, Planning generates requests for the next `RUNWAY_DEPTH` (2) timepoints. These pre-warm the cache so scrubbing through T is smooth — the next timepoints' chunks arrive before the user scrubs to them.
@@ -515,7 +497,7 @@ The TypeScript `plan()` function replaces this with the full algorithm described
 
 | File | Role |
 |---|---|
-| `lucida-web/src/pipeline/planning.ts` | Planning domain: types, `plan()`, `promote()`, `iterateChunks()`, `sortCenterOut()`, `chunkOutsideFrustum()`, `chunkKey()`, test helpers |
+| `lucida-web/src/pipeline/planning.ts` | Planning domain: types, `plan()`, `promote()`, `iterateChunks()`, `chunkOutsideFrustum()`, `chunkKey()`, test helpers |
 | `lucida-web/src/pipeline/planning.test.ts` | 50+ tests: promotion, LOD ranges, hysteresis, frustum culling, cache filtering, multi-channel, center-out sort, entity position offsets, multi-LOD iteration, scheduling, temporal runway, importance weighting, epoch propagation |
 | `lucida-core/src/chunk.rs` | Rust chunk primitives: `ChunkCoord`, `select_level()`, `visible_chunks()`, `visible_and_prefetch_chunks()`, `chunk_outside_frustum()` |
 | `lucida-core/src/query.rs` | `ViewQueryResult`, `EntityQueryResult` types |
@@ -555,8 +537,8 @@ This spec covers the Planning domain — from "Orchestrator provides a snapshot"
 | D6 | Iterate coarsest-to-finest within detail range | Seed LOD chunks appear first in the output and are fetched first. This gives immediate coarse display while fine detail streams in — progressive refinement without explicit prioritization logic. |
 | D7 | Cache filtering during iteration, not post-hoc | Skipping cached chunks during grid iteration avoids generating thousands of requests only to filter them later. For large datasets with warm caches, this reduces plan() time significantly. |
 | D8 | Overview lane requests all entities, not just overview-promoted ones | Overview is a global fallback — every entity needs a coarsest-LOD representation for navigation and for the detail→overview fallback chain in rendering. Detail-promoted entities get both detail and overview requests. |
-| D9 | Center-out sort per entity, not globally | Each entity has its own position offset and potentially different chunk world sizes at each LOD. Sorting per-entity before merging into the global list produces correct spatial ordering. |
-| D10 | `chunkDistanceFromCenter()` uses grid indices as a rough proxy | The exact world-space distance isn't needed for intra-lane ordering — just a roughly center-out pattern. Grid indices are cheap to compute and sufficient for prioritization. |
+| D9 | Center-out distance computed per-chunk in world-space | `chunkDistanceFromCenter()` converts grid indices to world-voxel positions using per-level chunk world sizes, offsets by entity position, and measures distance from the view center. This produces correct center-out priority ordering across entities and LOD levels. |
+| D10 | Distance computed during priority assignment, not as a separate sort pass | Earlier versions sorted chunks center-out within `iterateChunks()`, but this ordering was discarded by the priority sort in `plan()` step 6. Computing distance directly in `chunkDistanceFromCenter()` for the priority formula avoids the wasted sort. |
 
 ---
 

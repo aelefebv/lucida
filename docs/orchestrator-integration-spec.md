@@ -340,7 +340,7 @@ Asset Catalog is not sequenced in M0–M4 because it is **orthogonal** — it sl
 ### M0 testing
 
 **Unit tests (vitest):**
-- Planning already has 27 tests with synthetic snapshots — these are unaffected
+- Planning already has 29 tests with synthetic snapshots (see [Planning Spec](planning-spec.md)) — these are unaffected
 - New tests for the Orchestrator:
   - Snapshot assembly: verify PlanningSnapshot is correctly built from mock WASM + cache state
   - Adapter translation: verify `RequestPlan → MemberChunkPlan[]` grouping and lane → needed/prefetch mapping

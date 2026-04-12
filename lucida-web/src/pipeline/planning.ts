@@ -404,9 +404,6 @@ export function iterateChunks(
     }
   }
 
-  // Sort center-out.
-  sortCenterOut(requests, visibleRegion, entity);
-
   return requests;
 }
 
@@ -516,72 +513,6 @@ function iterateGridCells(
       }
     }
   }
-}
-
-/**
- * Sort chunk requests center-out: chunks nearest the sort center come first.
- *
- * Computes world-voxel positions for each chunk so that cross-level sorting
- * is correct (different LOD levels have different chunk world sizes).
- * Uses the visible region's sortCenter if available, otherwise the visible
- * region midpoint.
- */
-function sortCenterOut(
-  requests: ChunkRequest[],
-  region: VisibleRegion,
-  entity: EntitySnapshot,
-): void {
-  if (requests.length <= 1) return;
-
-  // Sort center in local voxel coords.
-  let centerX: number;
-  let centerY: number;
-  let centerZ: number;
-
-  if (region.sortCenter !== null) {
-    centerX = region.sortCenter[0] - entity.position[0];
-    centerY = region.sortCenter[1] - entity.position[1];
-    centerZ = region.sortCenter[2];
-  } else {
-    centerX =
-      (region.xyBounds[0] + region.xyBounds[2]) / 2 - entity.position[0];
-    centerY =
-      (region.xyBounds[1] + region.xyBounds[3]) / 2 - entity.position[1];
-    centerZ = (region.zRange[0] + region.zRange[1]) / 2;
-  }
-
-  // Pre-compute chunk world sizes per level so we can convert grid indices
-  // to world-voxel positions during the sort.
-  const level0 = entity.levels[0];
-  const chunkWorldByLevel = new Map<number, [number, number, number]>();
-
-  for (const req of requests) {
-    if (chunkWorldByLevel.has(req.level)) continue;
-    const geo = entity.levels[req.level];
-    if (geo === undefined || level0 === undefined) {
-      chunkWorldByLevel.set(req.level, [1, 1, 1]);
-      continue;
-    }
-    chunkWorldByLevel.set(req.level, [
-      geo.chunk_shape[4] * (level0.shape[4] / geo.shape[4]),
-      geo.chunk_shape[3] * (level0.shape[3] / geo.shape[3]),
-      geo.chunk_shape[2] * (level0.shape[2] / geo.shape[2]),
-    ]);
-  }
-
-  requests.sort((a, b) => {
-    const cwA = chunkWorldByLevel.get(a.level)!;
-    const cwB = chunkWorldByLevel.get(b.level)!;
-    const da =
-      ((a.x + 0.5) * cwA[0] - centerX) ** 2 +
-      ((a.y + 0.5) * cwA[1] - centerY) ** 2 +
-      ((a.z + 0.5) * cwA[2] - centerZ) ** 2;
-    const db =
-      ((b.x + 0.5) * cwB[0] - centerX) ** 2 +
-      ((b.y + 0.5) * cwB[1] - centerY) ** 2 +
-      ((b.z + 0.5) * cwB[2] - centerZ) ** 2;
-    return da - db;
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -725,14 +656,49 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute a simple distance metric from a chunk's grid position to the
- * sort center.  Uses grid indices as a proxy — the exact world-space
- * distance isn't needed, just a roughly center-out ordering.
+ * Compute distance from a chunk's world-space center to the view center.
+ *
+ * Uses the visible region's sortCenter if available, otherwise the visible
+ * region midpoint — offset by entity position to get local coordinates.
+ * Converts grid indices to world-voxel positions using per-level chunk
+ * world sizes so that distance is comparable across LODs.
  */
 function chunkDistanceFromCenter(
   req: ChunkRequest,
-  _region: VisibleRegion,
-  _entity: EntitySnapshot,
+  region: VisibleRegion,
+  entity: EntitySnapshot,
 ): number {
-  return Math.sqrt(req.x * req.x + req.y * req.y + req.z * req.z);
+  // View center in local (entity-relative) voxel coords.
+  let centerX: number;
+  let centerY: number;
+  let centerZ: number;
+
+  if (region.sortCenter !== null) {
+    centerX = region.sortCenter[0] - entity.position[0];
+    centerY = region.sortCenter[1] - entity.position[1];
+    centerZ = region.sortCenter[2];
+  } else {
+    centerX =
+      (region.xyBounds[0] + region.xyBounds[2]) / 2 - entity.position[0];
+    centerY =
+      (region.xyBounds[1] + region.xyBounds[3]) / 2 - entity.position[1];
+    centerZ = (region.zRange[0] + region.zRange[1]) / 2;
+  }
+
+  // Compute chunk world size at this level.
+  const level0 = entity.levels[0];
+  const geo = entity.levels[req.level];
+  let cwX = 1;
+  let cwY = 1;
+  let cwZ = 1;
+  if (geo !== undefined && level0 !== undefined) {
+    cwX = geo.chunk_shape[4] * (level0.shape[4] / geo.shape[4]);
+    cwY = geo.chunk_shape[3] * (level0.shape[3] / geo.shape[3]);
+    cwZ = geo.chunk_shape[2] * (level0.shape[2] / geo.shape[2]);
+  }
+
+  const dx = (req.x + 0.5) * cwX - centerX;
+  const dy = (req.y + 0.5) * cwY - centerY;
+  const dz = (req.z + 0.5) * cwZ - centerZ;
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
