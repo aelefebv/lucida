@@ -10,11 +10,12 @@ use crate::transform::VolumeTransform;
 
 /// Axis-aligned bounding box in voxel space, plus effective zoom for LOD selection.
 /// This is what chunk planning needs — not a camera.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct VisibleRegion {
     /// [min_x, min_y, max_x, max_y] in voxel coordinates.
     pub xy_bounds: [f64; 4],
     /// Voxel z range.
+    #[serde(serialize_with = "serialize_range_as_array")]
     pub z_range: Range<u32>,
     /// For LOD selection: screen pixels per world unit at the focal plane.
     pub effective_zoom: f64,
@@ -24,6 +25,14 @@ pub struct VisibleRegion {
     /// Optional frustum planes in full-resolution voxel coordinates for per-chunk culling.
     /// Each plane is [a, b, c, d] where ax + by + cz + d >= 0 means inside.
     pub frustum_planes: Option<[[f64; 4]; 6]>,
+}
+
+fn serialize_range_as_array<S: serde::Serializer>(range: &Range<u32>, s: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeTuple;
+    let mut tup = s.serialize_tuple(2)?;
+    tup.serialize_element(&range.start)?;
+    tup.serialize_element(&range.end)?;
+    tup.end()
 }
 
 /// Clip mode for near-clip distance: plane (perpendicular to view direction)

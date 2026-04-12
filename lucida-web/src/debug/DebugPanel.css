@@ -1,21 +1,55 @@
-.debug-overlay {
-  position: absolute;
-  top: 28px;
-  left: 8px;
-  z-index: 20;
-  background: rgba(0, 0, 0, 0.75);
+.debug-panel {
+  width: 300px;
+  flex-shrink: 0;
+  background: #1a1a1a;
+  border-left: 1px solid #333;
+  display: flex;
+  flex-direction: column;
   color: #ccc;
   font-family: "SF Mono", "Menlo", "Monaco", monospace;
   font-size: 11px;
   line-height: 1.4;
-  padding: 6px 10px;
-  border-radius: 6px;
-  pointer-events: none;
-  min-width: 200px;
-  max-width: 320px;
-  backdrop-filter: blur(4px);
+  overflow: hidden;
 }
 
+.debug-tab-bar {
+  display: flex;
+  flex-direction: row;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.debug-tab {
+  flex: 1;
+  padding: 6px 8px;
+  background: transparent;
+  color: #888;
+  border: none;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+}
+
+.debug-tab:hover {
+  color: #ccc;
+  background: #252525;
+}
+
+.debug-tab.active {
+  color: #fff;
+  background: #333;
+}
+
+.debug-tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+/* Reuse existing section styles */
 .debug-section {
   margin-bottom: 4px;
   padding-bottom: 4px;

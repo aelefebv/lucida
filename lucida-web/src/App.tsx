@@ -9,7 +9,7 @@ import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
-import { DebugOverlay } from "./debug/DebugOverlay.tsx";
+import { DebugPanel } from "./debug/DebugPanel.tsx";
 import { debugStats } from "./debug/debugStats.ts";
 import type { VolumeData } from "./types.ts";
 import type { DatasetState, PendingChunkResolve } from "./types.ts";
@@ -325,99 +325,108 @@ function App() {
             </ul>
           </div>
         )}
-        <div style={{ position: "relative", display: datasetsVersion > 0 ? "block" : "none", width: layout.canvasWidth }} onClick={handleDebugClick}>
-          <canvas
-            ref={render.canvasRef}
-            tabIndex={0}
-            style={{
-              width: layout.canvasWidth,
-              height: layout.canvasHeight,
-              imageRendering: dims.viewMode === "2d" ? "pixelated" : "auto",
-              borderRadius: 8,
-              backgroundColor: "black",
-              display: "block",
-            }}
-          />
-          {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && (
-            <SliceViewer
-              z={dims.z}
-              t={dims.t}
-              c={dims.c}
-              scene={scene.wasmScene}
-              datasets={datasetsRef.current}
-              client={render.client}
-              canvas={render.canvasRef.current!}
-              remoteDocumentVersion={remoteDocumentVersion}
-              emitPresence={bridge.emitPresence}
-              breakFollow={bridge.breakFollow}
-              sendCursor={bridge.sendCursor}
-              loopRef={render.loopRef}
-              onLoopChange={render.setActiveLoop}
+        <div style={{ display: "flex", flexDirection: "row", width: layout.canvasWidth }}>
+          <div style={{
+            position: "relative",
+            display: datasetsVersion > 0 ? "block" : "none",
+            flex: 1,
+            minWidth: 0,
+          }} onClick={handleDebugClick}>
+            <canvas
+              ref={render.canvasRef}
+              tabIndex={0}
+              style={{
+                width: showDebug ? layout.canvasWidth - 300 : layout.canvasWidth,
+                height: layout.canvasHeight,
+                imageRendering: dims.viewMode === "2d" ? "pixelated" : "auto",
+                borderRadius: 8,
+                backgroundColor: "black",
+                display: "block",
+              }}
             />
-          )}
-          {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
-            const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
-            if (!ds) return null;
-            const plateData = extractPlateData(ds.content);
-            if (!plateData) return null;
-            return (
-              <PlateSelector
-                plateKind={plateData.plateKind}
-                members={plateData.members}
-                plateName={ds.name}
-                onWellClick={(cx, cy) => {
-                  const ws = scene.wasmSceneRef.current;
-                  if (!ws) return;
-                  applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
-                  bridge.emitPresence();
-                  render.loopRef.current?.markViewDirty();
-                }}
+            {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && (
+              <SliceViewer
+                z={dims.z}
+                t={dims.t}
+                c={dims.c}
+                scene={scene.wasmScene}
+                datasets={datasetsRef.current}
+                client={render.client}
+                canvas={render.canvasRef.current!}
+                remoteDocumentVersion={remoteDocumentVersion}
+                emitPresence={bridge.emitPresence}
+                breakFollow={bridge.breakFollow}
+                sendCursor={bridge.sendCursor}
+                loopRef={render.loopRef}
+                onLoopChange={render.setActiveLoop}
               />
-            );
-          })()}
-          {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && (
-            <VolumeViewer
-              scene={scene.wasmScene}
-              datasets={datasetsRef.current}
-              client={render.client}
-              canvas={render.canvasRef.current!}
-              remoteDocumentVersion={remoteDocumentVersion}
-              emitPresence={bridge.emitPresence}
-              breakFollow={bridge.breakFollow}
-              sendCursor={bridge.sendCursor}
-              t={dims.t}
-              c={dims.c}
-              loopRef={render.loopRef}
-              onLoopChange={render.setActiveLoop}
-              onCameraModeChange={handleCameraModeChange}
-            />
-          )}
-          {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
-            <PeerCursors
-              peers={bridge.peers}
-              myId={bridge.myId}
-              followTarget={bridge.followTarget}
-              wasmSceneRef={scene.wasmSceneRef}
-              canvas={render.canvasRef.current}
-              viewMode={dims.viewMode}
-              z={dims.z}
-              t={dims.t}
-              c={dims.c}
-              cursorLabels={cursorLabels}
-            />
-          )}
-          {render.clientReady && render.clientRef.current && (
-            <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
-          )}
-          <FpsCounter />
+            )}
+            {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
+              const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
+              if (!ds) return null;
+              const plateData = extractPlateData(ds.content);
+              if (!plateData) return null;
+              return (
+                <PlateSelector
+                  plateKind={plateData.plateKind}
+                  members={plateData.members}
+                  plateName={ds.name}
+                  onWellClick={(cx, cy) => {
+                    const ws = scene.wasmSceneRef.current;
+                    if (!ws) return;
+                    applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
+                    bridge.emitPresence();
+                    render.loopRef.current?.markViewDirty();
+                  }}
+                />
+              );
+            })()}
+            {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && (
+              <VolumeViewer
+                scene={scene.wasmScene}
+                datasets={datasetsRef.current}
+                client={render.client}
+                canvas={render.canvasRef.current!}
+                remoteDocumentVersion={remoteDocumentVersion}
+                emitPresence={bridge.emitPresence}
+                breakFollow={bridge.breakFollow}
+                sendCursor={bridge.sendCursor}
+                t={dims.t}
+                c={dims.c}
+                loopRef={render.loopRef}
+                onLoopChange={render.setActiveLoop}
+                onCameraModeChange={handleCameraModeChange}
+              />
+            )}
+            {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
+              <PeerCursors
+                peers={bridge.peers}
+                myId={bridge.myId}
+                followTarget={bridge.followTarget}
+                wasmSceneRef={scene.wasmSceneRef}
+                canvas={render.canvasRef.current}
+                viewMode={dims.viewMode}
+                z={dims.z}
+                t={dims.t}
+                c={dims.c}
+                cursorLabels={cursorLabels}
+              />
+            )}
+            {render.clientReady && render.clientRef.current && (
+              <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
+            )}
+            <FpsCounter />
+            <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
+          </div>
           {showDebug && (
-            <DebugOverlay
+            <DebugPanel
               wasmSceneRef={scene.wasmSceneRef}
               datasetId={selectedDatasetId}
               lastClickScreen={lastClickScreen}
+              datasets={datasetsRef.current}
+              style={{ height: layout.canvasHeight }}
             />
           )}
-          <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
         </div>
         {datasetsVersion > 0 && (
           <div className="dimension-controls" style={{ maxWidth: layout.canvasWidth }}>

@@ -7,11 +7,12 @@ Multi-client volumetric microscopy viewer. Rust core shared across web (WASM), C
 ```
 lucida-content/    Canonical content model (entities, images, layouts, transforms)
 lucida-protocol/   Fetch descriptors + registration types (Proxied/Direct/Local)
-lucida-core/       Scene state, commands, epochs, geometric queries, ray picking (WASM + native)
+lucida-core/       Scene state, commands, epochs, geometric queries, ray picking, VisibleRegion (WASM + native)
 lucida-store/      Storage abstraction, OME-Zarr parsing, import pipeline
 lucida-server/     Tokio WebSocket server, session management, chunk serving
 lucida-cli/        CLI client (inspection + control)
 lucida-web/        React + WebGPU frontend (not in Cargo workspace)
+                     pipeline/planning.ts  — Planning domain: pure function PlanningSnapshot → RequestPlan
 lucida-py/         Python bindings via PyO3 (excluded from workspace, built with maturin)
 ```
 
@@ -58,6 +59,13 @@ Chunk request:
   → Client sends { dataset_id, image_id, key }
   → Server: ChunkResolver.resolve(image_id, key) → object store path
   → Server: read, decompress (WireFormat::Raw), send bytes
+
+Planning cycle (web only, wired in step 7/Orchestrator):
+  → WASM: view_query() → ViewQueryResult (per-entity visibility, LOD, importance)
+  → WASM: visible_region() → VisibleRegion (viewport AABB, frustum planes)
+  → Orchestrator: assemble PlanningSnapshot from upstream domains
+  → plan(snapshot) → RequestPlan (prioritized chunk requests, active set, epochs)
+  → Orchestrator: feed RequestPlan to CPU Cache for fetching
 ```
 
 ## Per-Crate Architecture Docs

@@ -445,23 +445,54 @@ impl Scene {
 
         let mut results = Vec::with_capacity(derived.members.len());
 
-        for member in &derived.members {
-            let vt = &member.volume_transform;
-            let centroid = vt.world_centroid();
+        let is_2d = matches!(self.camera, Camera::Slice(_));
 
-            // Project all 8 corners to screen space
-            let corners = vt.world_corners();
+        for member in &derived.members {
+            let pos = member.position;
+
+            // Compute screen-space bounding box.
+            // 2D: corners in voxel space (pos to pos+fov_size).
+            // 3D: corners from rendering_transform (includes position, Y-flip, global correction).
             let mut screen_min = [f64::MAX, f64::MAX];
             let mut screen_max = [f64::MIN, f64::MIN];
             let mut any_visible = false;
 
-            for corner in &corners {
-                if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
-                    screen_min[0] = screen_min[0].min(sx);
-                    screen_min[1] = screen_min[1].min(sy);
-                    screen_max[0] = screen_max[0].max(sx);
-                    screen_max[1] = screen_max[1].max(sy);
-                    any_visible = true;
+            let centroid;
+
+            if is_2d {
+                let level0 = member.levels.first();
+                let (fw, fh, fd) = level0
+                    .map(|l| (l.shape[4] as f64, l.shape[3] as f64, l.shape[2] as f64))
+                    .unwrap_or((1.0, 1.0, 1.0));
+                centroid = [pos[0] + fw / 2.0, pos[1] + fh / 2.0, fd / 2.0];
+                let corners = [
+                    [pos[0], pos[1], 0.0],
+                    [pos[0] + fw, pos[1], 0.0],
+                    [pos[0], pos[1] + fh, 0.0],
+                    [pos[0] + fw, pos[1] + fh, 0.0],
+                ];
+                for corner in &corners {
+                    if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
+                        screen_min[0] = screen_min[0].min(sx);
+                        screen_min[1] = screen_min[1].min(sy);
+                        screen_max[0] = screen_max[0].max(sx);
+                        screen_max[1] = screen_max[1].max(sy);
+                        any_visible = true;
+                    }
+                }
+            } else {
+                let (rt, _) = self.rendering_transform(member);
+                let corners = rt.world_corners();
+                let rt_centroid = rt.world_centroid();
+                centroid = rt_centroid;
+                for corner in &corners {
+                    if let Some([sx, sy]) = self.camera.project_to_screen(*corner) {
+                        screen_min[0] = screen_min[0].min(sx);
+                        screen_min[1] = screen_min[1].min(sy);
+                        screen_max[0] = screen_max[0].max(sx);
+                        screen_max[1] = screen_max[1].max(sy);
+                        any_visible = true;
+                    }
                 }
             }
 

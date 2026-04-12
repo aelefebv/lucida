@@ -36,9 +36,11 @@ Top-level terms. Per-crate glossaries have more detail.
 
 ## Scene State
 
-**SceneEpochs** -- Typed epoch counters (`content`, `layout`, `view`, `selection`) on Scene. Bumped by commands. Primary invalidation mechanism for the pipeline — replaces ad-hoc generation counters as consumers are rewritten.
+**SceneEpochs** -- Typed epoch counters (`content`, `layout`, `view`, `selection`) on Scene. Bumped by commands. Primary invalidation mechanism for the pipeline — replaces ad-hoc generation counters as consumers are rewritten. Extended by PlanningEpochs with `asset` and `request` counters.
 
 **ViewQueryResult** -- Compact per-entity geometric recommendations from Scene State. Contains visibility, projected screen size, centroid, ideal target LOD, and importance ranking. Produced by `Scene::view_query()`.
+
+**VisibleRegion** -- Compact geometric output from WASM: viewport AABB in voxel space, Z range, effective zoom, optional sort center, optional frustum planes (3D only). Produced by `Camera::visible_region()`, exported via `WasmScene::visible_region()`. Used by Planning for spatial chunk culling — both 2D and 3D use the same code path.
 
 **EntityQueryResult** -- One entry in a ViewQueryResult. Per-entity: visible, projected_diagonal_px, projected_area_px2, centroid_world, ideal_target_lod, importance.
 
@@ -61,6 +63,28 @@ Top-level terms. Per-crate glossaries have more detail.
 **grid_shape** -- Precomputed `ceil(shape / chunk_shape)`. Avoids per-frame division in chunk iteration and LOD selection.
 
 **chunk_key** -- Canonical 5D key: `"level/t/c/z/y/x"`. Zeros for missing axes.
+
+## Planning
+
+**PlanningSnapshot** -- Full input to `plan()`. Assembled by the Orchestrator from Scene State (ViewQueryResult, VisibleRegion, epochs), content graph, asset catalog, selection state, CPU cache state, worker wanted-set, and previous active set.
+
+**RequestPlan** -- Output of `plan()`: prioritized chunk request list, active set, and propagated epoch tags.
+
+**plan()** -- Top-level pure function: `PlanningSnapshot → RequestPlan`. No I/O, no GPU, no network. Testable with synthetic snapshots.
+
+**Promotion** -- Representation selection: decides each entity's display tier (overview, proxy, or detail) based on projected screen size, with hysteresis to prevent flicker.
+
+**Representation** -- The display tier assigned to an entity: `"overview"` (coarsest LOD), `"proxy"` (placeholder until Asset Catalog), or `"detail"` (native chunks at target LOD).
+
+**ActiveSetEntry** -- Per-entity planning result: representation, targetLod, seedDetailLod, detailOwnedLodRange.
+
+**LOD range** -- Per promoted entity: `targetLod` (ideal finest level from WASM), `seedDetailLod` (coarsest detail-owned level, for progressive refinement), `detailOwnedLodRange` `[finest, coarsest]` inclusive.
+
+**Request lanes** -- Three-lane priority scheme: detail (highest, current frame), runway (medium, adjacent timepoints), overview (lowest, background seeding).
+
+**ChunkRequest** -- A single prioritized fetch entry: entity, level, T/C/Z/Y/X grid coords, lane, priority, chunkKey.
+
+**PlanningEpochs** -- Extends SceneEpochs with `asset` (from Asset Catalog, placeholder) and `request` (bumped per plan cycle).
 
 ## Per-Crate Glossaries
 

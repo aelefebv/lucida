@@ -1,7 +1,7 @@
 /**
  * Global debug stats sink.
  *
- * The render loop writes stats here during each tick. The DebugOverlay
+ * The render loop writes stats here during each tick. The DebugPanel
  * component polls them on a timer. This keeps instrumentation decoupled
  * from rendering — the only coupling is this flat, write-anywhere object.
  */

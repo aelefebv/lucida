@@ -178,6 +178,18 @@ This is small, stable, and cheap to pass across the WASM boundary. TypeScript th
 
 The same `ViewQueryResult` is available to Python (via PyO3) for headless viewport queries without needing to reimplement spatial math.
 
+A second compact geometric output is `VisibleRegion` — the camera's viewport bounds and optional frustum planes in voxel space (~28 floats). Planning uses this for spatial chunk culling. Both 2D and 3D use the same code path: the `VisibleRegion` encodes the camera mode in its data (frustum planes present for 3D, absent for 2D).
+
+```ts
+type VisibleRegion = {
+  xyBounds: [number, number, number, number]; // viewport AABB in voxel coords
+  zRange: [number, number];                   // visible Z range
+  effectiveZoom: number;                      // screen px per voxel
+  sortCenter: [number, number, number] | null; // center-out loading origin (3D)
+  frustumPlanes: [number, number, number, number][] | null; // 6 planes (3D)
+};
+```
+
 ### LOD decision split
 
 LOD is not one decision — it is four, split across languages:
@@ -450,21 +462,23 @@ Planning is a **pure function**: `PlanningSnapshot → RequestPlan`. It does not
 
 | Subdomain | Owns |
 |-----------|------|
-| **Promotion** | Representation selection (overview / proxy / detail), active set bounds, promotion/demotion hysteresis. Uses WASM projected-size metrics but applies its own thresholds and budgets |
+| **Promotion** | Representation selection (overview / proxy / detail), active set bounds, promotion/demotion hysteresis. Uses WASM projected-size metrics but applies its own thresholds and budgets. Note: `proxy` representation is a forward-compatible placeholder — V1 promotion is two-tier (overview / detail) until Asset Catalog (step 6) provides proxy availability |
 | **LOD range** | Per promoted entity: `targetLod` (from WASM ideal), `seedDetailLod` (coarsest detail-owned level), `detailOwnedLodRange`. Determines where detail ends and overview begins |
-| **Epoch tags** | Consumes epoch-tagged snapshot inputs and propagates epoch tags into `RequestPlan` outputs. Epoch definitions: `contentEpoch`, `layoutEpoch`, `viewEpoch`, `selectionEpoch`, `assetEpoch`, `requestEpoch` |
+| **Epoch tags** | Consumes epoch-tagged snapshot inputs and propagates epoch tags into `RequestPlan` outputs. Epoch definitions: `contentEpoch`, `layoutEpoch`, `viewEpoch`, `selectionEpoch`, `assetEpoch` (forward-compatible placeholder, provided by Asset Catalog step 6, 0 until then), `requestEpoch` (forward-compatible placeholder, bumped when Planning produces a new plan, 0 initially) |
 | **Request scheduling** | Three-lane prioritization (overview, exact detail, temporal runway). Chunk iteration, seed ordering, runway policy |
 
 **Boundary contract:**
 
 - **Inputs:** `PlanningSnapshot` — assembled by the Orchestrator, containing:
   - Geometric recommendations (`ViewQueryResult`)
+  - `VisibleRegion` (viewport bounds and optional frustum planes from WASM, for spatial chunk culling)
   - Content graph snapshot (canonical entities, multiscale metadata)
   - Active layout snapshot (materialized, epoch-tagged)
   - Asset catalog snapshot (product availability)
   - Selection state (T/C/Z, channel settings, render mode, interaction state)
   - CPU cache state (what's already cached)
   - Worker wanted-set snapshot (what the worker reports as missing)
+  - Previous active set (previous plan's active set, for promotion hysteresis — necessary because Planning is a pure function with no internal state)
 - **Outputs:** `RequestPlan` — prioritized request list (for CPU Cache via Orchestrator), plus active set + layout + epoch tags (for worker cold-state updates via Orchestrator).
 
 **How Planning uses geometric recommendations:**
@@ -758,12 +772,12 @@ The key principle: the content graph says what the dataset is. The scene says wh
 
 **During the pipeline rewrite, build in this order:**
 
-1. **Canonical Content Graph** — extract `lucida-content` crate with shared entity/transform/layout types.
-2. **Scene State updates** — `register_layout()` / `set_active_layout()`, `ViewQueryResult` geometric queries.
-3. **Presentation Overlay + Asset Catalog** — derived layouts expressed as `LayoutSpec`, asset catalog.
-4. **Planning** — promotion, epochs, request scheduling over content graph + geometric queries. Testable standalone with mock snapshots.
-5. **CPU Cache + Content Source** — fetch, decode, source abstraction.
-6. **Worker Protocol** — control/data/telemetry message shapes, epoch tagging.
+1. **Canonical Content Graph** — extract `lucida-content` crate with shared entity/transform/layout types. *(done)*
+2. **Scene State updates** — `register_layout()` / `set_active_layout()`, `ViewQueryResult` geometric queries, epoch system. *(done)*
+3. **Planning** — promotion, epochs, request scheduling over content graph + geometric queries. Testable standalone with mock snapshots.
+4. **CPU Cache + Content Source** — fetch, decode, source abstraction.
+5. **Worker Protocol** — control/data/telemetry message shapes, epoch tagging.
+6. **Presentation Overlay + Asset Catalog** — derived layouts expressed as `LayoutSpec`, asset catalog. Build alongside the Orchestrator since asset catalog feeds into PlanningSnapshot and derived layouts are browser-authored.
 7. **Orchestrator** — wires Planning to CPU Cache, Worker Protocol, and upstream domains. Snapshot assembly, lifecycle, telemetry fan-out.
 8. **GPU Residency** — atlas, page table, descriptors, wanted-set reporting.
 9. **Rendering** — shader dispatch, compositing, semantic fallback chain.

@@ -286,6 +286,47 @@ impl WasmScene {
         vec![self.inner.camera.effective_zoom(), region.effective_zoom]
     }
 
+    /// Returns the visible region for a dataset as JSON.
+    /// The region is computed using the first member's volume transform and shape,
+    /// giving the global viewport bounds before per-member position offsets.
+    pub fn visible_region(&self, dataset_id: &str) -> String {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let derived = match self.inner.derived.get(&ds_id) {
+            Some(d) => d,
+            None => return "null".to_string(),
+        };
+        let member = match derived.members.first() {
+            Some(m) => m,
+            None => return "null".to_string(),
+        };
+        let level0 = match member.levels.first() {
+            Some(l) => l,
+            None => return "null".to_string(),
+        };
+        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+        let region = self.inner.camera.visible_region(
+            &self.inner.view.z_range,
+            Some(&member.volume_transform),
+            Some(&vol_shape),
+        );
+        serde_json::to_string(&region).unwrap()
+    }
+
+    /// Returns member positions as JSON: `{"entity_id": [x, y], ...}`.
+    /// These are the composed layout+transform positions used by chunk planning.
+    pub fn member_positions(&self, dataset_id: &str) -> String {
+        let ds_id = DatasetId(dataset_id.to_string());
+        let derived = match self.inner.derived.get(&ds_id) {
+            Some(d) => d,
+            None => return "{}".to_string(),
+        };
+        let mut map = std::collections::HashMap::new();
+        for member in &derived.members {
+            map.insert(&member.entity_id.0, member.position);
+        }
+        serde_json::to_string(&map).unwrap()
+    }
+
     pub fn chunk_plan(&self) -> String {
         let plan = self.inner.chunk_plan();
         serde_json::to_string(&plan).unwrap()
