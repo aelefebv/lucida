@@ -14,6 +14,60 @@ export interface MemberStat {
   chunksSent: number;
 }
 
+/** Per-member debug data from the Orchestrator's adapter translation. */
+export interface OrchMemberDebug {
+  imageId: string;
+  position: [number, number];
+  neededCount: number;
+  prefetchCount: number;
+  /** Level selected by upload path: needed[0]?.level */
+  uploadLevel: number | undefined;
+  /** Breakdown: how many needed chunks at each level */
+  levelCounts: Record<number, number>;
+  /** True if needed[] contains chunks at more than one level */
+  mixedLevels: boolean;
+}
+
+/** Orchestrator debug snapshot, populated per planning cycle. */
+export interface OrchDebug {
+  /** Active set entries from plan() */
+  activeSet: Array<{
+    entityId: string;
+    representation: string;
+    targetLod: number;
+    seedDetailLod: number;
+    detailOwnedLodRange: [number, number];
+  }>;
+  /** Request counts by lane */
+  laneCount: { detail: number; runway: number; overview: number };
+  /** Request counts by level */
+  levelCount: Record<number, number>;
+  /** First N requests for inspection */
+  topRequests: Array<{
+    entityId: string;
+    level: number;
+    t: number; c: number; z: number; y: number; x: number;
+    lane: string;
+    priority: number;
+    chunkKey: string;
+  }>;
+  /** Per-member adapter output (what uploadCommon receives) */
+  members: OrchMemberDebug[];
+  /** True if any member has mixed levels in needed[] */
+  hasMixedLevels: boolean;
+  /** Whether this was an epoch cache hit (plan() skipped) */
+  epochCacheHit: boolean;
+  /** VisibleRegion from WASM (for coordinate debugging) */
+  visibleRegion: { xyBounds: [number, number, number, number]; zRange: [number, number]; effectiveZoom: number } | null;
+  /** First few entity positions + level0 shape (for overlap debugging) */
+  entityDiag: Array<{
+    entityId: string;
+    position: [number, number];
+    fullShape: [number, number] | null; // [fullX, fullY] from level 0
+    cachedKeys: number; // how many keys getCachedKeys returned
+  }>;
+}
+
 export interface DebugStats {
   enabled: boolean;
 
@@ -50,6 +104,21 @@ export interface DebugStats {
 
   // Mode
   mode: "slice" | "volume" | "";
+
+  // Orchestrator debug
+  orch: OrchDebug | null;
+
+  // Upload path debug (per frame)
+  uploadDebug: {
+    atlasConfigSent: boolean;
+    stateKey: string;
+    prevStateKey: string;
+    chunksAttempted: number;
+    chunksUploaded: number;
+    chunksCacheHit: number;
+    chunksCacheMiss: number;
+    chunksSentSkip: number;
+  } | null;
 }
 
 export const debugStats: DebugStats = {
@@ -72,6 +141,8 @@ export const debugStats: DebugStats = {
   planCacheMisses: 0,
   memberStats: [],
   mode: "",
+  orch: null,
+  uploadDebug: null,
 };
 
 /** Reset per-frame counters. Call at the start of each tick. */

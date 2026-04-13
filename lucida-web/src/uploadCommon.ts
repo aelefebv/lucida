@@ -1,7 +1,14 @@
 /** Shared upload infrastructure for slice and volume render paths. */
-import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
-import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
+import type { ChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { ContentGraph } from "./contentTypes.ts";
+
+/** A single member's chunk plan, consumed by the upload loop. */
+export interface MemberChunkPlan {
+  image_id: string;
+  position: [number, number];
+  needed: ChunkCoord[];
+  prefetch: ChunkCoord[];
+}
 import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { debugStats } from "./debug/debugStats.ts";
@@ -99,9 +106,17 @@ export function uploadChunksForMembers(
         const fineDataType = ds.content.images[0].multiscale.data_type;
         const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
         for (const coord of mp.needed) {
-          if (sentSet.has(coord.key)) continue;
+          if (debugStats.enabled && debugStats.uploadDebug) debugStats.uploadDebug.chunksAttempted++;
+          if (sentSet.has(coord.key)) {
+            if (debugStats.enabled && debugStats.uploadDebug) debugStats.uploadDebug.chunksSentSkip++;
+            continue;
+          }
           const buf = ds.sharedQueue.get(rawMemberId, coord.key);
-          if (!buf || buf.byteLength === 0) continue;
+          if (!buf || buf.byteLength === 0) {
+            if (debugStats.enabled && debugStats.uploadDebug) debugStats.uploadDebug.chunksCacheMiss++;
+            continue;
+          }
+          if (debugStats.enabled && debugStats.uploadDebug) debugStats.uploadDebug.chunksCacheHit++;
           const data = bufferToUint16(buf, fineDataType);
           chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
           sentSet.add(coord.key);

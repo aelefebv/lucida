@@ -6,6 +6,7 @@ import { DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
 import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
+import { Orchestrator } from "./pipeline/orchestrator.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 
 // Re-export types so downstream imports stay unchanged
@@ -27,6 +28,7 @@ export class RenderLoop {
   private sliceState: SliceState = createSliceState();
   private volumeState: VolumeState = createVolumeState();
   private minimapState: MinimapState = createMinimapState();
+  private orchestrator = new Orchestrator();
 
   private _renderScale = 1.0;
 
@@ -305,11 +307,11 @@ export class RenderLoop {
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.sliceState, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickSlice(ctx, this.sliceState, this.orchestrator, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
         this.dataDirty = true;
       }
     } else {
-      if (tickVolume(ctx, this.volumeState, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickVolume(ctx, this.volumeState, this.orchestrator, this.minimapState.pendingFetch, shouldRender)) {
         this.dataDirty = true;
       }
     }

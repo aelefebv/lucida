@@ -378,6 +378,13 @@ Each migration step gets its own test plan when its spec is written. The visual 
 | D10 | Dirty flags drive RAF scheduling; epochs drive plan caching inside Orchestrator | Complementary, not competing. Dirty flags answer "should we call the Orchestrator this frame?" Epochs answer "should the Orchestrator re-run plan()?" DOMAINS.md says epochs are the primary *correctness* mechanism — dirty flags are a scheduling mechanism. Dirty flags go away when the full Orchestrator lifecycle (DOMAINS.md step 7) is built. |
 | D11 | Minimap stays outside Orchestrator | Minimap is a separate viewport concern with its own coarse chunk needs. It continues appending fetch lists to SharedChunkQueue directly. Can be folded in later if needed. Not addressed in DOMAINS.md. |
 | D12 | Asset Catalog is orthogonal, slots in alongside Orchestrator | Per DOMAINS.md, Presentation Overlay + Asset Catalog should be built alongside the Orchestrator (step 6), not deferred after it. `assetEpoch` is already a forward-compatible placeholder (0) in Planning. Asset Catalog plugs into snapshot assembly when proxy products are needed. |
+| D13 | Pass empty cache state to `plan()` | The upload path (uploadCommon) manages its own `sentToWorker` tracking. If real cache state is passed, Planning skips cached chunks, they vanish from `memberPlanCache`, and the upload path never uploads them. Empty cache ensures all needed chunks appear in the plan. **Resolves at M2** when CPU Cache replaces uploadCommon and receives `RequestPlan` directly. |
+| D14 | Filter adapter output to single level per entity (`targetLod` only) | The upload path assumes `mp.needed[0]?.level` gives THE level for atlas config. Mixed levels cause wrong-scale rendering. Planning's multi-level `detailOwnedLodRange` is a forward-compatible feature for M4's semantic fallback chain. |
+| D15 | Single-channel `visibleChannels` in non-multiChannel mode | The upload path sends one atlas config per member with one channel value. Including multiple channels causes cross-channel contamination. Override of D5 for the adapter layer — Planning itself remains channel-aware. **Resolves at M2/M4** when the upload path supports multi-channel natively. |
+| D16 | `plan()` called once per dataset, not once per planning cycle | `view_query()` and `visible_region()` are per-dataset WASM calls with per-dataset coordinate systems. `PlanningSnapshot` is inherently per-dataset. `previousActiveSet` tracked per dataset for independent hysteresis. |
+| D17 | Re-submit fetch lists on epoch HIT frames | Without re-submission, chunks lost to `ensureFetched` abort/restart cycles during the MISS frame never get re-fetched. `ensureFetched` is idempotent (skips cached + in-flight). Aligns with DOMAINS.md 6.0: Orchestrator owns "Request plan application." |
+| D18 | Submit ALL filtered requests to `ensureFetched` (no cache pre-filter) | Pre-filtering cached chunks from the fetch submission interfered with `ensureFetched`'s abort/incremental logic and caused chunks to never be fetched. Let `ensureFetched` handle caching internally, matching the old path's behavior. |
+| D19 | All WASM direct setters bump appropriate epochs | WASM setters (`set_t`, `set_c`, `set_z`, `pan`, `zoom_by`, `arcball_rotate`, etc.) previously bypassed the epoch system (only the command path bumped epochs). Without epoch bumps, the Orchestrator returned stale cached plans after T/C/Z/camera changes. `set_viewport` uses a change guard to avoid spurious bumps on every frame. |
 
 ---
 
@@ -388,8 +395,19 @@ This spec was checked against DOMAINS.md for alignment. Key conformance points:
 - **Orchestrator does not own policy** (D1, D3) — it coordinates. Planning owns promotion/scheduling decisions.
 - **Planning remains a pure function** (D5) — receives complete PlanningSnapshot, returns RequestPlan. No side-channel reads.
 - **previousActiveSet flows through PlanningSnapshot** (D3) — Orchestrator holds it but passes it as an input, per DOMAINS.md 6.1.
-- **Cache state is a boundary query** (D4) — Orchestrator queries SharedChunkQueue during snapshot assembly, per DOMAINS.md 6.0.
+- **Cache state is a boundary query** (D4) — Orchestrator queries SharedChunkQueue during snapshot assembly, per DOMAINS.md 6.0. Note: in M0, empty cache is passed to `plan()` because the upload path requires all chunks in `memberPlanCache` (D13). `getCachedKeys()` is still called for debug diagnostics.
 - **No disallowed dependencies** — Orchestrator reads from Scene State and CPU Cache (allowed), invokes Planning (allowed), feeds results to CPU Cache via upload path (allowed).
 - **Ownership and replication rule** — previousActiveSet is an immutable snapshot. Cache state is an immutable snapshot. No mutable authoritative state crosses domain boundaries.
 - **WASM output boundary** — Rust/WASM emits compact `ViewQueryResult` and `VisibleRegion`. TypeScript (Planning) expands into requests using cache state and selection. No chunk plans cross the WASM boundary.
-- **Epoch-based correctness** — epochs drive replanning decisions. Stale plans are not re-applied. Future protocol formalization (M1) will add epoch tags to data deliveries.
+- **Epoch-based correctness** — epochs drive replanning decisions. Stale plans are not re-applied. All WASM direct setters now bump epochs (D19), matching the command path's behavior. Future protocol formalization (M1) will add epoch tags to data deliveries.
+
+### M0 adaptation summary
+
+Several decisions (D13–D18) are intentional deviations from the ideal DOMAINS.md architecture, caused by the existing upload pipeline's assumptions (single level per member, single channel per atlas config, sentToWorker-based dedup). These are documented with their resolution milestones:
+
+| Adaptation | Caused by | Resolves at |
+|---|---|---|
+| Empty cache to plan() (D13) | uploadCommon needs all chunks in memberPlanCache | M2 (CPU Cache) |
+| Single-level filter (D14) | Upload path assumes one level per atlas config | M4 (Rendering) |
+| Single-channel visibleChannels (D15) | Upload path sends one channel per atlas config | M2/M4 |
+| No cache pre-filter on fetch (D18) | ensureFetched abort logic incompatible with pre-filtering | M2 (CPU Cache) |

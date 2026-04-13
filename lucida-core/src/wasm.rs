@@ -114,14 +114,17 @@ impl WasmScene {
 
     pub fn set_mode_slice(&mut self) {
         self.inner.set_mode_2d();
+        self.inner.epochs.view += 1;
     }
 
     pub fn set_mode_arcball(&mut self) {
         self.inner.set_mode_3d();
+        self.inner.epochs.view += 1;
     }
 
     pub fn set_mode_fly(&mut self) {
         self.inner.set_mode_fly();
+        self.inner.epochs.view += 1;
     }
 
     pub fn camera_mode(&self) -> String {
@@ -135,7 +138,11 @@ impl WasmScene {
     // --- Shared viewport ---
 
     pub fn set_viewport(&mut self, width: u32, height: u32) {
+        let old = self.inner.camera.viewport();
         self.inner.camera.set_viewport(width, height);
+        if self.inner.camera.viewport() != old {
+            self.inner.epochs.view += 1;
+        }
     }
 
     // --- 2D camera methods ---
@@ -143,18 +150,21 @@ impl WasmScene {
     pub fn pan(&mut self, dx: f64, dy: f64) {
         if let Camera::Slice(ref mut v) = self.inner.camera {
             v.pan(dx, dy);
+            self.inner.epochs.view += 1;
         }
     }
 
     pub fn zoom_by(&mut self, factor: f64) {
         if let Camera::Slice(ref mut v) = self.inner.camera {
             v.zoom_by(factor);
+            self.inner.epochs.view += 1;
         }
     }
 
     pub fn set_center(&mut self, x: f64, y: f64) {
         if let Camera::Slice(ref mut v) = self.inner.camera {
             v.center = [x, y];
+            self.inner.epochs.view += 1;
         }
     }
 
@@ -169,25 +179,40 @@ impl WasmScene {
     pub fn set_zoom(&mut self, value: f64) {
         if let Camera::Slice(ref mut v) = self.inner.camera {
             v.zoom = value;
+            self.inner.epochs.view += 1;
         }
     }
 
     // --- View state ---
 
     pub fn set_z(&mut self, z: u32) {
+        let old = self.inner.view.z_range.clone();
         self.inner.view.set_z(z);
+        if self.inner.view.z_range != old {
+            self.inner.epochs.selection += 1;
+        }
     }
 
     pub fn set_z_range(&mut self, start: u32, end: u32) {
+        let old = self.inner.view.z_range.clone();
         self.inner.view.set_z_range(start..end);
+        if self.inner.view.z_range != old {
+            self.inner.epochs.selection += 1;
+        }
     }
 
     pub fn set_t(&mut self, t: u32) {
-        self.inner.view.t = t;
+        if self.inner.view.t != t {
+            self.inner.view.t = t;
+            self.inner.epochs.selection += 1;
+        }
     }
 
     pub fn set_c(&mut self, c: u32) {
-        self.inner.view.c = c;
+        if self.inner.view.c != c {
+            self.inner.view.c = c;
+            self.inner.epochs.selection += 1;
+        }
     }
 
     // --- Multi-channel ---
@@ -197,7 +222,10 @@ impl WasmScene {
     }
 
     pub fn set_multi_channel(&mut self, enabled: bool) {
-        self.inner.view.multi_channel = enabled;
+        if self.inner.view.multi_channel != enabled {
+            self.inner.view.multi_channel = enabled;
+            self.inner.epochs.selection += 1;
+        }
     }
 
     // --- Display state ---
@@ -463,18 +491,21 @@ impl WasmScene {
     pub fn arcball_rotate(&mut self, d_theta: f64, d_phi: f64) {
         if let Camera::Arcball(ref mut v) = self.inner.camera {
             v.rotate(d_theta, d_phi);
+            self.inner.epochs.view += 1;
         }
     }
 
     pub fn arcball_zoom(&mut self, delta: f64) {
         if let Camera::Arcball(ref mut v) = self.inner.camera {
             v.zoom(delta);
+            self.inner.epochs.view += 1;
         }
     }
 
     pub fn arcball_pan(&mut self, dx: f64, dy: f64) {
         if let Camera::Arcball(ref mut v) = self.inner.camera {
             v.pan(dx, dy);
+            self.inner.epochs.view += 1;
         }
     }
 
@@ -483,6 +514,7 @@ impl WasmScene {
     pub fn fly_tick(&mut self, dt: f64, forward: f64, right: f64, up: f64, yaw: f64, pitch: f64, roll: f64) {
         if let Camera::Fly(ref mut v) = self.inner.camera {
             v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
+            self.inner.epochs.view += 1;
         }
     }
 
@@ -553,8 +585,8 @@ impl WasmScene {
     pub fn set_clip_distance(&mut self, distance: f64) {
         let d = distance.max(0.0);
         match &mut self.inner.camera {
-            Camera::Arcball(v) => v.clip_distance = d,
-            Camera::Fly(v) => v.clip_distance = d,
+            Camera::Arcball(v) => { v.clip_distance = d; self.inner.epochs.selection += 1; }
+            Camera::Fly(v) => { v.clip_distance = d; self.inner.epochs.selection += 1; }
             Camera::Slice(_) => {}
         }
     }
@@ -565,8 +597,8 @@ impl WasmScene {
             _ => ClipMode::Plane,
         };
         match &mut self.inner.camera {
-            Camera::Arcball(v) => v.clip_mode = m,
-            Camera::Fly(v) => v.clip_mode = m,
+            Camera::Arcball(v) => { v.clip_mode = m; self.inner.epochs.selection += 1; }
+            Camera::Fly(v) => { v.clip_mode = m; self.inner.epochs.selection += 1; }
             Camera::Slice(_) => {}
         }
     }

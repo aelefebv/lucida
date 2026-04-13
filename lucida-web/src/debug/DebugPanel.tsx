@@ -23,7 +23,7 @@ import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
 
-type TabId = "render" | "scene" | "pick" | "planning";
+type TabId = "render" | "scene" | "pick" | "planning" | "orch";
 
 interface SceneQuerySnap {
   epochs: { content: number; layout: number; view: number; selection: number } | null;
@@ -260,6 +260,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "scene", label: "Scene" },
     { id: "pick", label: "Pick" },
     { id: "planning", label: "Planning" },
+    { id: "orch", label: "Orch" },
   ];
 
   return (
@@ -396,6 +397,199 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             ) : (
               <div className="debug-section">
                 <div style={{ color: "#666" }}>Click viewport to pick</div>
+              </div>
+            )}
+          </>
+        )}
+
+        {activeTab === "orch" && (
+          <>
+            {snap.orch ? (
+              <>
+                {/* Mixed levels warning */}
+                {snap.orch.hasMixedLevels && (
+                  <div className="debug-section" style={{ background: "#4a1111" }}>
+                    <div className="debug-warn" style={{ fontSize: 12 }}>
+                      MIXED LEVELS IN needed[]
+                    </div>
+                    <div style={{ fontSize: 10, color: "#f88" }}>
+                      Upload path uses needed[0].level for atlas config.
+                      Chunks at other levels will render at wrong scale or be dropped.
+                    </div>
+                  </div>
+                )}
+
+                {/* Epoch cache status */}
+                <div className="debug-section">
+                  <div className="debug-title">Orchestrator</div>
+                  <div>Epoch cache: {snap.orch.epochCacheHit ? "HIT (plan skipped)" : "MISS (re-planned)"}</div>
+                </div>
+
+                {/* Upload path debug */}
+                {snap.uploadDebug && (
+                  <div className="debug-section" style={{
+                    background: snap.uploadDebug.chunksCacheMiss > 0 ? "#4a3311" : undefined,
+                  }}>
+                    <div className="debug-title">Upload Path</div>
+                    <div>stateKey: {snap.uploadDebug.stateKey}</div>
+                    <div>prevStateKey: {snap.uploadDebug.prevStateKey}</div>
+                    <div>atlas config sent: {snap.uploadDebug.atlasConfigSent ? "YES" : "no"}</div>
+                    <div>
+                      chunks: {snap.uploadDebug.chunksAttempted} attempted,{" "}
+                      <span style={{ color: "#4f4" }}>{snap.uploadDebug.chunksUploaded} uploaded</span>,{" "}
+                      <span style={{ color: "#ff4" }}>{snap.uploadDebug.chunksSentSkip} sent-skip</span>,{" "}
+                      <span style={{ color: snap.uploadDebug.chunksCacheMiss > 0 ? "#f44" : "#888" }}>
+                        {snap.uploadDebug.chunksCacheMiss} cache-miss
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* Coordinate diagnostic */}
+                {snap.orch.visibleRegion && (
+                  <div className="debug-section">
+                    <div className="debug-title">Visible Region</div>
+                    <div>xy: [{snap.orch.visibleRegion.xyBounds.map(v => fmt(v, 0)).join(", ")}]</div>
+                    <div>z: [{snap.orch.visibleRegion.zRange.join(", ")}]</div>
+                    <div>zoom: {fmt(snap.orch.visibleRegion.effectiveZoom, 4)}</div>
+                  </div>
+                )}
+
+                {snap.orch.entityDiag.length > 0 && (
+                  <div className="debug-section">
+                    <div className="debug-title">Entity Coords (overlap check)</div>
+                    <div style={{ fontSize: 10, color: "#aaa", marginBottom: 4 }}>
+                      Overlap needs: region.xy offset by pos falls within [0, fullShape]
+                    </div>
+                    <div className="debug-member-list">
+                      {snap.orch.entityDiag.map((e) => {
+                        const vr = snap.orch!.visibleRegion;
+                        let overlapStatus = "?";
+                        if (vr && e.fullShape) {
+                          const localMinX = vr.xyBounds[0] - e.position[0];
+                          const localMinY = vr.xyBounds[1] - e.position[1];
+                          const localMaxX = vr.xyBounds[2] - e.position[0];
+                          const localMaxY = vr.xyBounds[3] - e.position[1];
+                          const overlaps = localMaxX > 0 && localMaxY > 0
+                            && localMinX < e.fullShape[0] && localMinY < e.fullShape[1];
+                          overlapStatus = overlaps ? "OK" : "NONE";
+                        }
+                        return (
+                          <div key={e.entityId} className="debug-member-row" style={{
+                            background: overlapStatus === "NONE" ? "#4a1111" : undefined,
+                          }}>
+                            <span className="debug-member-id" title={e.entityId}>
+                              {e.entityId.length > 12 ? "..." + e.entityId.slice(-10) : e.entityId}
+                            </span>
+                            <span>pos:[{e.position[0]},{e.position[1]}]</span>
+                            <span>full:[{e.fullShape ? e.fullShape.join(",") : "?"}]</span>
+                            <span style={{ color: e.cachedKeys > 0 ? "#ff4" : "#888" }}>
+                              cache:{e.cachedKeys}
+                            </span>
+                            <span style={{ color: overlapStatus === "NONE" ? "#f44" : "#4f4" }}>
+                              {overlapStatus}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Active Set */}
+                {snap.orch.activeSet.length > 0 && (
+                  <div className="debug-section">
+                    <div className="debug-title">
+                      Active Set ({snap.orch.activeSet.filter(e => e.representation === "detail").length} detail / {snap.orch.activeSet.filter(e => e.representation === "overview").length} overview)
+                    </div>
+                    <div className="debug-member-list">
+                      {snap.orch.activeSet.slice(0, 10).map((e) => (
+                        <div key={e.entityId} className="debug-member-row">
+                          <span className="debug-member-id" title={e.entityId}>
+                            {e.entityId.length > 12 ? "..." + e.entityId.slice(-10) : e.entityId}
+                          </span>
+                          <span style={{ color: e.representation === "detail" ? "#4f4" : "#88f" }}>
+                            {e.representation === "detail" ? "D" : "O"}
+                          </span>
+                          <span>target L{e.targetLod}</span>
+                          <span>range {e.detailOwnedLodRange[0]}-{e.detailOwnedLodRange[1]}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Request summary by lane and level */}
+                <div className="debug-section">
+                  <div className="debug-title">Requests</div>
+                  <div>
+                    <span style={{ color: "#4f4" }}>detail: {snap.orch.laneCount.detail}</span>
+                    {" "}
+                    <span style={{ color: "#ff4" }}>runway: {snap.orch.laneCount.runway}</span>
+                    {" "}
+                    <span style={{ color: "#88f" }}>overview: {snap.orch.laneCount.overview}</span>
+                  </div>
+                  <div style={{ marginTop: 4 }}>
+                    <span style={{ color: "#aaa" }}>By level: </span>
+                    {Object.entries(snap.orch.levelCount)
+                      .sort(([a], [b]) => Number(a) - Number(b))
+                      .map(([lvl, count]) => (
+                        <span key={lvl} style={{ marginRight: 8 }}>L{lvl}:{count}</span>
+                      ))}
+                  </div>
+                </div>
+
+                {/* Per-member adapter output */}
+                {snap.orch.members.length > 0 && (
+                  <div className="debug-section">
+                    <div className="debug-title">Members (adapter output)</div>
+                    <div className="debug-member-list">
+                      {snap.orch.members.slice(0, 10).map((m, i) => (
+                        <div key={`${m.imageId}-${i}`} className="debug-member-row" style={{
+                          background: m.mixedLevels ? "#4a1111" : undefined,
+                        }}>
+                          <span className="debug-member-id" title={m.imageId}>
+                            {m.imageId.length > 14 ? "..." + m.imageId.slice(-12) : m.imageId}
+                          </span>
+                          <span>uploadL{m.uploadLevel ?? "?"}</span>
+                          <span>n:{m.neededCount} p:{m.prefetchCount}</span>
+                          <span title={`Levels: ${JSON.stringify(m.levelCounts)}`}>
+                            {Object.entries(m.levelCounts).map(([l, c]) => `L${l}:${c}`).join(" ")}
+                          </span>
+                          {m.mixedLevels && <span style={{ color: "#f44" }}>MIX</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Top requests */}
+                {snap.orch.topRequests.length > 0 && (
+                  <div className="debug-section">
+                    <div className="debug-title">Top Requests</div>
+                    <div className="debug-member-list">
+                      {snap.orch.topRequests.map((r, i) => (
+                        <div key={`${r.chunkKey}-${i}`} className="debug-member-row">
+                          <span style={{
+                            color: r.lane === "detail" ? "#4f4" : r.lane === "runway" ? "#ff4" : "#88f",
+                            width: 14,
+                          }}>
+                            {r.lane === "detail" ? "D" : r.lane === "runway" ? "R" : "O"}
+                          </span>
+                          <span>L{r.level}</span>
+                          <span className="debug-member-id" title={r.chunkKey}>
+                            {r.chunkKey}
+                          </span>
+                          <span>p{fmt(r.priority, 0)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <div className="debug-section">
+                <div style={{ color: "#666" }}>Enable debug (D key) and load a dataset</div>
               </div>
             )}
           </>

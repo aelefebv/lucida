@@ -134,6 +134,13 @@ export class SharedChunkQueue {
     return this.fetchers.has(memberId);
   }
 
+  /** Return the set of cached chunk keys for a member. */
+  getCachedKeys(memberId: string): Set<string> {
+    const memberCache = this.cache.get(memberId);
+    if (!memberCache) return new Set();
+    return new Set(memberCache.keys());
+  }
+
   // --- Background fetching with incremental add/abort pattern ---
 
   /** Accept a unified, pre-prioritized fetch list covering all members. */

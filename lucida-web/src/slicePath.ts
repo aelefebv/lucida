@@ -1,10 +1,10 @@
 /** Slice render path: upload chunks + render multi-pass. */
 import type { ChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
-import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
+import type { MemberChunkPlan } from "./uploadCommon.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { planAndFetchForDatasets, getActiveChannels, compositeKey, parseChannel, stripChannelSuffix } from "./tickCommon.ts";
-import type { PlanFetchActions, SceneSettings } from "./tickCommon.ts";
+import { getActiveChannels, compositeKey, parseChannel } from "./tickCommon.ts";
+import type { SceneSettings } from "./tickCommon.ts";
 import {
   type UploadState,
   type MemberUploadActions,
@@ -13,6 +13,8 @@ import {
   clearUploadStateForMembers,
 } from "./uploadCommon.ts";
 import type { ContentGraph } from "./contentTypes.ts";
+import type { Orchestrator } from "./pipeline/orchestrator.ts";
+import { debugStats } from "./debug/debugStats.ts";
 
 /** Backward-compatible alias. */
 export type SliceState = UploadState;
@@ -26,65 +28,6 @@ interface SlicePlanResult {
   vpCx: number;
   vpCy: number;
   multiChannel: boolean;
-}
-
-/**
- * Plan+fetch phase: set scene params, evaluate chunk plans, build fetch
- * lists, and submit to ensureFetched.
- */
-function planAndFetchSlice(
-  ctx: TickContext,
-  state: SliceState,
-  sliceZ: number,
-  sliceT: number,
-  sliceC: number,
-  minimapPendingFetch: Map<string, ChunkCoord[]>,
-): SlicePlanResult | null {
-  const { scene, canvas, datasets } = ctx;
-
-  const z = sliceZ;
-  const t = sliceT;
-  const c = sliceC;
-  const multiChannel = scene.multi_channel();
-
-  scene.set_z(z);
-  scene.set_t(t);
-  scene.set_c(c);
-
-  const dpr = devicePixelRatio;
-  const canvasW = Math.round(canvas.clientWidth * dpr);
-  const canvasH = Math.round(canvas.clientHeight * dpr);
-  scene.set_viewport(canvasW, canvasH);
-
-  // Viewport center for spatial priority (camera position in slice mode)
-  const vpCenter = scene.center();
-  const vpCx = vpCenter[0];
-  const vpCy = vpCenter[1];
-
-  const actions: PlanFetchActions = {
-    shouldSkipDataset(dsShape: number[]) {
-      return z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0];
-    },
-
-    planCacheKey(_dsId: string) {
-      return `${vpCx.toFixed(4)}|${vpCy.toFixed(4)}|${canvasW}|${canvasH}|${t}|${c}|${z}`;
-    },
-
-    // Multi-channel overrides
-    shouldSkipChannel(dsShape: number[], ch: number) {
-      return z >= dsShape[2] || ch >= dsShape[1] || t >= dsShape[0];
-    },
-
-    planCacheKeyForChannel(_dsId: string, ch: number) {
-      return `${vpCx.toFixed(4)}|${vpCy.toFixed(4)}|${canvasW}|${canvasH}|${t}|${ch}|${z}`;
-    },
-
-  };
-
-  const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, vpCx, vpCy, multiChannel);
-  if (!result) return null;
-
-  return { memberPlanCache: result.memberPlanCache, settings: result.settings, vpCx, vpCy, multiChannel };
 }
 
 /**
@@ -122,6 +65,17 @@ function uploadAndRenderSlice(
     return z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0];
   };
 
+  const uploadDiag = debugStats.enabled ? {
+    atlasConfigSent: false,
+    stateKey: "",
+    prevStateKey: "",
+    chunksAttempted: 0,
+    chunksUploaded: 0,
+    chunksCacheHit: 0,
+    chunksCacheMiss: 0,
+    chunksSentSkip: 0,
+  } : null;
+
   const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; content: ContentGraph }, _dsId: string): MemberUploadActions | null => {
     const level = mp.needed[0]?.level;
     if (level === undefined) return null;
@@ -138,10 +92,17 @@ function uploadAndRenderSlice(
     // In multi-channel mode, memberId is a composite key; extract the channel
     const ch = multiChannel ? (parseChannel(memberId) ?? c) : c;
 
+    const sk = `${t}/${ch}/${z}/${level}`;
+    if (uploadDiag) {
+      uploadDiag.stateKey = sk;
+      uploadDiag.prevStateKey = state.prevStateKey.get(memberId) ?? "(none)";
+    }
+
     return {
-      stateKey: `${t}/${ch}/${z}/${level}`,
+      stateKey: sk,
 
       sendAtlasConfig() {
+        if (uploadDiag) uploadDiag.atlasConfigSent = true;
         client.sliceAtlasConfig(
           memberId, level, z, t, ch,
           levelWidth, levelHeight,
@@ -150,6 +111,7 @@ function uploadAndRenderSlice(
       },
 
       sendFineChunks(chunks) {
+        if (uploadDiag) uploadDiag.chunksUploaded += chunks.length;
         client.sliceChunkData(
           memberId, chunks,
           level, z, t, ch,
@@ -160,6 +122,9 @@ function uploadAndRenderSlice(
       },
     };
   };
+
+  // Set BEFORE upload loop so uploadCommon's counters go to the right object
+  if (uploadDiag) debugStats.uploadDebug = uploadDiag;
 
   const budgetExhausted = uploadChunksForMembers(
     datasets, memberPlanCache, state, shouldSkipDataset, createActions,
@@ -263,14 +228,36 @@ function uploadAndRenderSlice(
 export function tickSlice(
   ctx: TickContext,
   state: SliceState,
+  orchestrator: Orchestrator,
   sliceZ: number,
   sliceT: number,
   sliceC: number,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
-  const planResult = planAndFetchSlice(ctx, state, sliceZ, sliceT, sliceC, minimapPendingFetch);
-  if (!planResult) return false;
+  const { scene, canvas } = ctx;
+
+  // Set scene params before orchestrator queries WASM state
+  scene.set_z(sliceZ);
+  scene.set_t(sliceT);
+  scene.set_c(sliceC);
+  const dpr = devicePixelRatio;
+  const canvasW = Math.round(canvas.clientWidth * dpr);
+  const canvasH = Math.round(canvas.clientHeight * dpr);
+  scene.set_viewport(canvasW, canvasH);
+
+  const orchResult = orchestrator.planAndFetch(ctx, minimapPendingFetch);
+  if (!orchResult) return false;
+
+  const vpCenter = scene.center();
+  const planResult: SlicePlanResult = {
+    memberPlanCache: orchResult.memberPlanCache,
+    settings: orchResult.settings,
+    vpCx: vpCenter[0],
+    vpCy: vpCenter[1],
+    multiChannel: orchResult.multiChannel,
+  };
+
   return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult, shouldRender);
 }
 

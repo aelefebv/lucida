@@ -1,10 +1,10 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
-import type { MemberChunkPlan } from "./zarr/chunkPlan.ts";
+import type { MemberChunkPlan } from "./uploadCommon.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { planAndFetchForDatasets, getActiveChannels, compositeKey, parseChannel } from "./tickCommon.ts";
-import type { PlanFetchActions, DatasetSettings } from "./tickCommon.ts";
+import { getActiveChannels, compositeKey, parseChannel } from "./tickCommon.ts";
+import type { DatasetSettings } from "./tickCommon.ts";
 import {
   type UploadState,
   type MemberUploadActions,
@@ -16,6 +16,7 @@ import {
 import { debugStats } from "./debug/debugStats.ts";
 import type { ContentGraph } from "./contentTypes.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
+import type { Orchestrator } from "./pipeline/orchestrator.ts";
 
 /**
  * Project a well's [0,1]³ unit-cube AABB to screen space and return a scissor rect.
@@ -93,83 +94,6 @@ interface PlanResult {
   multiChannel: boolean;
 }
 
-/**
- * Plan+fetch phase: evaluate chunk plans, build fetch lists,
- * and submit to ensureFetched. Returns data needed by upload+render, or null
- * if there's nothing to do.
- */
-function planAndFetchVolume(
-  ctx: TickContext,
-  state: VolumeState,
-  minimapPendingFetch: Map<string, ChunkCoord[]>,
-): PlanResult | null {
-  const { scene, datasets } = ctx;
-  const multiChannel = scene.multi_channel();
-
-  // Use full-res viewport for chunk planning so LOD selection isn't affected
-  // by renderScale (which drops to 0.25 during interaction). This prevents
-  // the level from flip-flopping and clearing the chunk cache on every drag.
-  const fullW = Math.round(ctx.canvas.clientWidth * devicePixelRatio);
-  const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
-  scene.set_viewport(fullW, fullH);
-
-  const canvasW = Math.round(fullW * ctx.renderScale);
-  const canvasH = Math.round(fullH * ctx.renderScale);
-
-  const viewT = scene.t();
-  const viewC = scene.c();
-
-  const eye = new Float32Array(scene.eye_position());
-  const fwd = new Float32Array(scene.camera_forward());
-  const hitLocals = new Map<string, [number, number, number]>();
-
-  const actions: PlanFetchActions = {
-    shouldSkipDataset(dsShape: number[]) {
-      return viewC >= dsShape[1] || viewT >= dsShape[0];
-    },
-
-    planCacheKey(_dsId: string) {
-      return `${eye[0].toFixed(4)}|${eye[1].toFixed(4)}|${eye[2].toFixed(4)}|${fwd[0].toFixed(4)}|${fwd[1].toFixed(4)}|${fwd[2].toFixed(4)}|${fullW}|${fullH}|${viewT}|${viewC}`;
-    },
-
-    onMemberProcessed(memberId, _mp, dsId) {
-      const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
-      hitLocals.set(memberId, hitLocal);
-    },
-
-    // Multi-channel overrides
-    shouldSkipChannel(dsShape: number[], ch: number) {
-      return ch >= dsShape[1] || viewT >= dsShape[0];
-    },
-
-    planCacheKeyForChannel(_dsId: string, ch: number) {
-      return `${eye[0].toFixed(4)}|${eye[1].toFixed(4)}|${eye[2].toFixed(4)}|${fwd[0].toFixed(4)}|${fwd[1].toFixed(4)}|${fwd[2].toFixed(4)}|${fullW}|${fullH}|${viewT}|${ch}`;
-    },
-
-  };
-
-  const result = planAndFetchForDatasets(scene, datasets, state, actions, minimapPendingFetch, eye[0], eye[1], multiChannel);
-  if (!result) return null;
-
-  if (debugStats.enabled) {
-    // Record LOD debug info from first dataset
-    const firstDsId = result.settings.layerOrder[0];
-    if (firstDsId) {
-      const lodInfo = scene.debug_lod_info(firstDsId);
-      debugStats.effectiveZoom = lodInfo[0];
-      debugStats.zoomPerVoxel = lodInfo[1];
-    }
-    debugStats.activeChannels = multiChannel
-      ? getActiveChannels(result.settings.allSettings[result.settings.layerOrder[0]]).length
-      : 1;
-  }
-
-  return {
-    memberPlanCache: result.memberPlanCache,
-    settings: result.settings,
-    eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel,
-  };
-}
 
 /**
  * Upload+render phase: send chunk plans to worker, build layer params,
@@ -351,13 +275,77 @@ function uploadAndRenderVolume(
 export function tickVolume(
   ctx: TickContext,
   state: VolumeState,
+  orchestrator: Orchestrator,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
+  const { scene } = ctx;
+
+  // Use full-res viewport for chunk planning so LOD selection isn't affected
+  // by renderScale (which drops to 0.25 during interaction).
+  const fullW = Math.round(ctx.canvas.clientWidth * devicePixelRatio);
+  const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
+  scene.set_viewport(fullW, fullH);
+
+  const canvasW = Math.round(fullW * ctx.renderScale);
+  const canvasH = Math.round(fullH * ctx.renderScale);
+
   const t0 = debugStats.enabled ? performance.now() : 0;
-  const planResult = planAndFetchVolume(ctx, state, minimapPendingFetch);
+  const orchResult = orchestrator.planAndFetch(ctx, minimapPendingFetch);
   if (debugStats.enabled) debugStats.planTimeMs = performance.now() - t0;
-  if (!planResult) return false;
+  if (!orchResult) return false;
+
+  // Volume-specific rendering state
+  const eye = new Float32Array(scene.eye_position());
+  const hitLocals = new Map<string, [number, number, number]>();
+
+  // Compute ray hit locals per member for volume rendering
+  for (const [dsId] of ctx.datasets) {
+    const plans = orchResult.memberPlanCache.get(dsId);
+    if (plans) {
+      for (const mp of plans) {
+        const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
+        hitLocals.set(mp.image_id, hitLocal);
+      }
+    }
+    // Multi-channel: check composite keys too
+    if (orchResult.multiChannel) {
+      for (const [key, plans] of orchResult.memberPlanCache) {
+        if (key.startsWith(`${dsId}:ch`)) {
+          for (const mp of plans) {
+            const rawId = mp.image_id.replace(/:ch\d+$/, "");
+            if (!hitLocals.has(mp.image_id)) {
+              const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
+              hitLocals.set(mp.image_id, hitLocal);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (debugStats.enabled) {
+    const firstDsId = orchResult.settings.layerOrder[0];
+    if (firstDsId) {
+      const lodInfo = scene.debug_lod_info(firstDsId);
+      debugStats.effectiveZoom = lodInfo[0];
+      debugStats.zoomPerVoxel = lodInfo[1];
+    }
+    debugStats.activeChannels = orchResult.multiChannel
+      ? getActiveChannels(orchResult.settings.allSettings[orchResult.settings.layerOrder[0]]).length
+      : 1;
+  }
+
+  const viewT = scene.t();
+  const viewC = scene.c();
+
+  const planResult: PlanResult = {
+    memberPlanCache: orchResult.memberPlanCache,
+    settings: orchResult.settings,
+    eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC,
+    multiChannel: orchResult.multiChannel,
+  };
+
   const t1 = debugStats.enabled ? performance.now() : 0;
   const result = uploadAndRenderVolume(ctx, state, planResult, shouldRender);
   if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
