@@ -777,10 +777,10 @@ The key principle: the content graph says what the dataset is. The scene says wh
 
 1. **Canonical Content Graph** — extract `lucida-content` crate with shared entity/transform/layout types. *(done)*
 2. **Scene State updates** — `register_layout()` / `set_active_layout()`, `ViewQueryResult` geometric queries, epoch system. *(done)*
-3. **Planning** — promotion, epochs, request scheduling over content graph + geometric queries. Testable standalone with mock snapshots.
+3. **Planning** — promotion, epochs, request scheduling over content graph + geometric queries. Testable standalone with mock snapshots. *(done)*
 4. **CPU Cache + Content Source** — fetch, decode, source abstraction.
 5. **Worker Protocol** — control/data/telemetry message shapes, epoch tagging.
 6. **Presentation Overlay + Asset Catalog** — derived layouts expressed as `LayoutSpec`, asset catalog. Build alongside the Orchestrator since asset catalog feeds into PlanningSnapshot and derived layouts are browser-authored.
-7. **Orchestrator** — wires Planning to CPU Cache, Worker Protocol, and upstream domains. Snapshot assembly, lifecycle, telemetry fan-out.
+7. **Orchestrator** — wires Planning to CPU Cache, Worker Protocol, and upstream domains. Snapshot assembly, lifecycle, telemetry fan-out. *(done — thin M0 adapter, see `docs/orchestrator-integration-spec.md`)*
 8. **GPU Residency** — atlas, page table, descriptors, wanted-set reporting.
 9. **Rendering** — shader dispatch, compositing, semantic fallback chain.

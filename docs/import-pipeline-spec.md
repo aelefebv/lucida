@@ -1,5 +1,7 @@
 # Import Pipeline Specification
 
+> **Status:** Implemented (803a3a5). `lucida-content` and `lucida-protocol` crates live. Three-output import model operational.
+
 How a filepath or GCS path becomes a registered dataset. The import pipeline cleanly separates canonical content, client-visible fetch metadata, and server-private storage binding.
 
 ---

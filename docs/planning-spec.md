@@ -1,5 +1,7 @@
 # Planning Specification
 
+> **Status:** Implemented (36b04e4). `plan()` pure function, promotion with hysteresis, three-lane scheduling, 27 unit tests. Wired into live render loop via Orchestrator (18a892b).
+
 How visible entities and camera state become prioritized chunk requests. The Planning domain is a pure function — `PlanningSnapshot → RequestPlan` — that decides what to load, at what priority, for which entities. It does not fetch data, manage GPU state, or read from other domains directly.
 
 See also: [DOMAINS.md](../DOMAINS.md) section 6.1, [Orchestrator Integration Spec](orchestrator-integration-spec.md), [GLOSSARY.md](../GLOSSARY.md).

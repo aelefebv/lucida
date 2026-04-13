@@ -1,5 +1,7 @@
 # Orchestrator Integration Spec
 
+> **Status:** M0 implemented (18a892b). Planning drives live render loop. Old planning path deleted. M1–M4 remain.
+
 How the Planning domain gets wired into the live render loop, and the incremental migration path from the current monolithic pipeline to the DOMAINS.md architecture.
 
 This spec does not re-define domain boundaries or contracts — DOMAINS.md is authoritative for that. This spec covers **how we get from here to there**: the adapter surface, the migration sequence, what gets deleted when, and what you can visually verify at each step.
