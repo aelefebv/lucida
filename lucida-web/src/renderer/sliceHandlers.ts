@@ -8,6 +8,8 @@ import { SLICE_ATLAS_BUDGET } from "./workerProtocol.ts";
 import { createSliceTexture, writeSliceRegion } from "./gpuContext.ts";
 import type { CompositeLayer } from "./layerCompositor.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
+import type { PlanningEpochs } from "../pipeline/planning.ts";
+import { isStaleDelivery } from "./epochCheck.ts";
 
 interface SliceAtlasState {
   texture: GPUTexture;
@@ -129,16 +131,20 @@ export function handleSliceAtlasConfig(ctx: WorkerCtx, msg: SliceAtlasConfigMess
   atlasPerDataset.set(datasetId, newAtlas);
 }
 
-export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage): void {
+export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage, currentEpochs: PlanningEpochs | null): void {
   const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
 
-  let atlas = atlasPerDataset.get(datasetId);
-  if (!atlas || atlas.level !== level || atlas.z !== z || atlas.t !== t || atlas.c !== c
-      || atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
-    if (atlas) destroySliceAtlas(atlas);
-    atlas = createSliceAtlas(ctx.device, levelWidth, levelHeight, chunkX, chunkY, level, z, t, c);
-    atlasPerDataset.set(datasetId, atlas);
+  // Drop entire batch if stale
+  if (isStaleDelivery(msg.epochs, currentEpochs)) {
+    const skippedKeys = msg.chunks.map(c => c.key);
+    if (skippedKeys.length > 0) {
+      ctx.post({ type: "chunksEvicted", datasetId: msg.datasetId, keys: [], skipped: skippedKeys });
+    }
+    return;
   }
+
+  let atlas = atlasPerDataset.get(datasetId);
+  if (!atlas) return; // No atlas config received yet — wait for it
 
   // Map full-res Z to level Z
   const levelZ = Math.min(

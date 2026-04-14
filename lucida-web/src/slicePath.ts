@@ -5,6 +5,7 @@ import type { MemberChunkPlan } from "./uploadCommon.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { getActiveChannels, compositeKey, parseChannel } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
+import type { PlanningEpochs } from "./pipeline/planning.ts";
 import {
   type UploadState,
   type MemberUploadActions,
@@ -28,6 +29,7 @@ interface SlicePlanResult {
   vpCx: number;
   vpCy: number;
   multiChannel: boolean;
+  epochs: PlanningEpochs;
 }
 
 /**
@@ -44,7 +46,7 @@ function uploadAndRenderSlice(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
-  const { memberPlanCache, settings, multiChannel } = planResult;
+  const { memberPlanCache, settings, multiChannel, epochs } = planResult;
 
   const z = sliceZ;
   const t = sliceT;
@@ -107,6 +109,7 @@ function uploadAndRenderSlice(
           memberId, level, z, t, ch,
           levelWidth, levelHeight,
           chunkX, chunkY,
+          epochs,
         );
       },
 
@@ -118,6 +121,7 @@ function uploadAndRenderSlice(
           levelWidth, levelHeight,
           chunkX, chunkY, chunkZ,
           fullResDepth, levelDepth, z,
+          epochs,
         );
       },
     };
@@ -256,6 +260,7 @@ export function tickSlice(
     vpCx: vpCenter[0],
     vpCy: vpCenter[1],
     multiChannel: orchResult.multiChannel,
+    epochs: orchResult.epochs,
   };
 
   return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult, shouldRender);

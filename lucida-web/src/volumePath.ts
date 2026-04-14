@@ -17,6 +17,7 @@ import { debugStats } from "./debug/debugStats.ts";
 import type { ContentGraph } from "./contentTypes.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { Orchestrator } from "./pipeline/orchestrator.ts";
+import type { PlanningEpochs } from "./pipeline/planning.ts";
 
 /**
  * Project a well's [0,1]³ unit-cube AABB to screen space and return a scissor rect.
@@ -92,6 +93,7 @@ interface PlanResult {
   viewT: number;
   viewC: number;
   multiChannel: boolean;
+  epochs: PlanningEpochs;
 }
 
 
@@ -106,7 +108,7 @@ function uploadAndRenderVolume(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, datasets } = ctx;
-  const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel } = plan;
+  const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel, epochs } = plan;
   const { layerOrder, allSettings } = settings;
 
   const shouldSkipDataset = (cacheKey: string, ds: { content: ContentGraph }) => {
@@ -139,6 +141,7 @@ function uploadAndRenderVolume(
           memberId, targetLevel, viewT, ch,
           widthFull, heightFull, depthFull,
           chunkX, chunkY, chunkZ,
+          epochs,
         );
       },
 
@@ -149,6 +152,7 @@ function uploadAndRenderVolume(
           widthFull, heightFull, depthFull,
           chunkX, chunkY, chunkZ,
           hitLocal,
+          epochs,
         );
       },
     };
@@ -344,6 +348,7 @@ export function tickVolume(
     settings: orchResult.settings,
     eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC,
     multiChannel: orchResult.multiChannel,
+    epochs: orchResult.epochs,
   };
 
   const t1 = debugStats.enabled ? performance.now() : 0;

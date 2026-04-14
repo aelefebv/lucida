@@ -7,6 +7,7 @@ import type {
   MinimapLayerParams,
   WorkerToMainMessage,
 } from "./workerProtocol.ts";
+import type { PlanningEpochs } from "../pipeline/planning.ts";
 
 export class RenderClient {
   private worker: Worker;
@@ -69,9 +70,11 @@ export class RenderClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
+    epochs: PlanningEpochs,
   ) {
     this.worker.postMessage({
       type: "volumeAtlasConfig",
+      epochs,
       datasetId,
       level, t, c,
       levelWidth, levelHeight, levelDepth,
@@ -92,6 +95,7 @@ export class RenderClient {
     chunkY: number,
     chunkZ: number,
     hitLocal: [number, number, number],
+    epochs: PlanningEpochs,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: VolumeChunk[] = chunks.map(chunk => {
@@ -102,6 +106,7 @@ export class RenderClient {
     this.worker.postMessage(
       {
         type: "volumeChunkData",
+        epochs,
         datasetId,
         chunks: workerChunks,
         level, t, c,
@@ -122,9 +127,11 @@ export class RenderClient {
     levelHeight: number,
     chunkX: number,
     chunkY: number,
+    epochs: PlanningEpochs,
   ) {
     this.worker.postMessage({
       type: "sliceAtlasConfig",
+      epochs,
       datasetId,
       level, z, t, c,
       levelWidth, levelHeight,
@@ -147,6 +154,7 @@ export class RenderClient {
     fullResDepth: number,
     levelDepth: number,
     fullResZ: number,
+    epochs: PlanningEpochs,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: SliceChunk[] = chunks.map(chunk => {
@@ -157,6 +165,7 @@ export class RenderClient {
     this.worker.postMessage(
       {
         type: "sliceChunkData",
+        epochs,
         datasetId,
         chunks: workerChunks,
         level, z, t, c,

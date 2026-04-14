@@ -10,6 +10,7 @@ import { handleSliceAtlasConfig, handleSliceChunkData, handleSliceRenderMultiPas
 import { handleVolumeAtlasConfig, handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 import { getColormapData } from "../colormaps.ts";
+import type { PlanningEpochs } from "../pipeline/planning.ts";
 
 let device: GPUDevice;
 let context: GPUCanvasContext;
@@ -19,6 +20,8 @@ let sliceRenderer: SliceRenderer | null = null;
 let volumeRenderer: VolumeRenderer | null = null;
 let compositor: LayerCompositor | null = null;
 let cursorRenderer: CursorRenderer | null = null;
+
+let currentEpochs: PlanningEpochs | null = null;
 
 // LUT texture cache for colormap rendering
 const lutCache = new Map<string, GPUTexture>();
@@ -136,20 +139,22 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       }
 
       case "sliceAtlasConfig":
+        currentEpochs = msg.epochs;
         handleSliceAtlasConfig(ctx, msg);
         break;
       case "sliceChunkData":
-        handleSliceChunkData(ctx, msg);
+        handleSliceChunkData(ctx, msg, currentEpochs);
         break;
       case "sliceRenderMultiPass":
         handleSliceRenderMultiPass(ctx, msg);
         break;
 
       case "volumeAtlasConfig":
+        currentEpochs = msg.epochs;
         handleVolumeAtlasConfig(ctx, msg);
         break;
       case "volumeChunkData":
-        handleVolumeChunkData(ctx, msg);
+        handleVolumeChunkData(ctx, msg, currentEpochs);
         break;
       case "volumeRenderMultiPass":
         handleVolumeRenderMultiPass(ctx, msg);
@@ -185,6 +190,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
 
       case "destroy":
+        currentEpochs = null;
         destroyAllSliceResources();
         destroyAllVolumeResources();
         destroyAllMinimapResources();

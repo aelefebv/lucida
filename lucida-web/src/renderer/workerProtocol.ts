@@ -1,5 +1,7 @@
 /** Discriminated-union message types for main <-> render worker communication. */
 
+import type { PlanningEpochs } from "../pipeline/planning.ts";
+
 /** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
 export const VOLUME_ATLAS_BUDGET = 512 * 1024 * 1024; // 512 MB
 
@@ -29,6 +31,7 @@ export interface SliceChunk {
 
 export interface SliceAtlasConfigMessage {
   type: "sliceAtlasConfig";
+  epochs: PlanningEpochs;
   datasetId: string;
   level: number;
   z: number;
@@ -42,6 +45,7 @@ export interface SliceAtlasConfigMessage {
 
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
+  epochs: PlanningEpochs;
   datasetId: string;
   chunks: SliceChunk[];
   level: number;
@@ -68,6 +72,7 @@ export interface VolumeChunk {
 
 export interface VolumeAtlasConfigMessage {
   type: "volumeAtlasConfig";
+  epochs: PlanningEpochs;
   datasetId: string;
   level: number;
   t: number;
@@ -82,6 +87,7 @@ export interface VolumeAtlasConfigMessage {
 
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
+  epochs: PlanningEpochs;
   datasetId: string;
   chunks: VolumeChunk[];
   level: number;

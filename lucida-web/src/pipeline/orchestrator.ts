@@ -31,6 +31,7 @@ export interface OrchestratorResult {
   memberPlanCache: Map<string, MemberChunkPlan[]>;
   settings: SceneSettings;
   multiChannel: boolean;
+  epochs: PlanningEpochs;
 }
 
 export class Orchestrator {
@@ -383,7 +384,7 @@ export class Orchestrator {
 
     // Step 5 — Cache and return
     this.lastEpochs = currentEpochs;
-    this.cachedResult = { memberPlanCache, settings, multiChannel };
+    this.cachedResult = { memberPlanCache, settings, multiChannel, epochs: currentEpochs };
     return this.cachedResult;
   }
 

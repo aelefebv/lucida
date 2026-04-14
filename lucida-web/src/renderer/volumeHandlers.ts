@@ -7,6 +7,8 @@ import type {
 import { VOLUME_ATLAS_BUDGET } from "./workerProtocol.ts";
 import { writeVolumeChunk } from "./gpuContext.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
+import type { PlanningEpochs } from "../pipeline/planning.ts";
+import { isStaleDelivery } from "./epochCheck.ts";
 
 interface AtlasState {
   texture: GPUTexture;
@@ -159,17 +161,20 @@ export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: VolumeAtlasConfigMe
   atlasPerDataset.set(datasetId, newAtlas);
 }
 
-export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessage): void {
+export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessage, currentEpochs: PlanningEpochs | null): void {
   const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
-  let atlas = atlasPerDataset.get(datasetId);
-  if (!atlas || atlas.level !== level || atlas.t !== t || atlas.c !== c
-      || atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
-    if (atlas) destroyAtlas(atlas);
-    atlas = createVolumeAtlas(ctx.device, levelWidth, levelHeight, levelDepth,
-      chunkX, chunkY, chunkZ, level, t, c);
-    atlasPerDataset.set(datasetId, atlas);
+  // Drop entire batch if stale
+  if (isStaleDelivery(msg.epochs, currentEpochs)) {
+    const skippedKeys = msg.chunks.map(c => c.key);
+    if (skippedKeys.length > 0) {
+      ctx.post({ type: "chunksEvicted", datasetId: msg.datasetId, keys: [], skipped: skippedKeys });
+    }
+    return;
   }
+
+  let atlas = atlasPerDataset.get(datasetId);
+  if (!atlas) return; // No atlas config received yet — wait for it
 
   rayHitPerDataset.set(datasetId, msg.hitLocal);
 

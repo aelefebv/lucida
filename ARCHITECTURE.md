@@ -66,6 +66,13 @@ Planning cycle (web only, wired in step 7/Orchestrator):
   → Orchestrator: assemble PlanningSnapshot from upstream domains
   → plan(snapshot) → RequestPlan (prioritized chunk requests, active set, epochs)
   → Orchestrator: feed RequestPlan to CPU Cache for fetching
+
+Worker protocol (main thread → GPU worker):
+  → Atlas config messages carry PlanningEpochs (establish worker's "current" epoch)
+  → Chunk data messages carry PlanningEpochs (epoch data was fetched under)
+  → Worker compares delivery epochs against current: drops stale batches
+  → Staleness = delivery.selectionEpoch < current or delivery.contentEpoch < current
+  → Stale drops reported back as "skipped" via chunksEvicted message
 ```
 
 ## Per-Crate Architecture Docs
