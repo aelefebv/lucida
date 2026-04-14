@@ -9,6 +9,7 @@ import { writeVolumeChunk } from "./gpuContext.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 import type { PlanningEpochs } from "../pipeline/planning.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
+import { asUint16 } from "./dataTypeUtil.ts";
 
 interface AtlasState {
   texture: GPUTexture;
@@ -208,7 +209,7 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
     const sy = Math.floor(slotIndex / atlas.slotsX) % atlas.slotsY;
     const sz = Math.floor(slotIndex / (atlas.slotsX * atlas.slotsY));
 
-    const data = new Uint16Array(chunk.data);
+    const data = asUint16(chunk.data, chunk.dataType);
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;
     const zOff = sz * chunkZ;

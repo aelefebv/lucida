@@ -10,6 +10,7 @@ import type { CompositeLayer } from "./layerCompositor.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 import type { PlanningEpochs } from "../pipeline/planning.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
+import { asUint16, asUint16Slice } from "./dataTypeUtil.ts";
 
 interface SliceAtlasState {
   texture: GPUTexture;
@@ -161,9 +162,11 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
   for (const chunk of msg.chunks) {
     if (atlas.slots.has(chunk.key)) continue;
     if (chunk.z !== targetChunkZ) continue;
-    const data = new Uint16Array(chunk.data);
 
-    const r = sampleIntensityRange(data, perChunkSamples);
+    // Sample intensity from raw data (works for both uint8 and uint16)
+    const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
+    const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
+    const r = sampleIntensityRange(rawView, perChunkSamples);
     if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
     if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
 
@@ -193,7 +196,8 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
     const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
     const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
     const sliceOffset = localZ * chunkY * chunkX;
-    const sliceData = data.subarray(sliceOffset, sliceOffset + chunkY * chunkX);
+    // Convert only the 2D slice to uint16 for GPU upload (small allocation)
+    const sliceData = asUint16Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX);
 
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;

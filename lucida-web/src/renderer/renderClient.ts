@@ -84,7 +84,7 @@ export class RenderClient {
 
   volumeChunkData(
     datasetId: string,
-    chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
+    chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
     level: number,
     t: number,
     c: number,
@@ -99,9 +99,9 @@ export class RenderClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: VolumeChunk[] = chunks.map(chunk => {
-      const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength);
+      const buf = chunk.data.slice(0);
       transferList.push(buf);
-      return { data: buf, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
+      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
     });
     this.worker.postMessage(
       {
@@ -141,7 +141,7 @@ export class RenderClient {
 
   sliceChunkData(
     datasetId: string,
-    chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
+    chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
     level: number,
     z: number,
     t: number,
@@ -158,9 +158,9 @@ export class RenderClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: SliceChunk[] = chunks.map(chunk => {
-      const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength);
+      const buf = chunk.data.slice(0);
       transferList.push(buf);
-      return { data: buf, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
+      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
     });
     this.worker.postMessage(
       {

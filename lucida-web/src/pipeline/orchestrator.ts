@@ -567,7 +567,8 @@ export class Orchestrator {
     if (sentSet.has(delivery.chunkKey)) return 0;
 
     const chunkData = {
-      data: new Uint16Array(delivery.data),
+      data: delivery.data,
+      dataType: delivery.dataType,
       x: delivery.x, y: delivery.y, z: delivery.z,
       key: delivery.chunkKey,
     };

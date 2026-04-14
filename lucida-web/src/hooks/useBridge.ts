@@ -292,7 +292,16 @@ export function useBridge({
             { datasetId, imageId, chunkKey: coord.key },
             signal ?? new AbortSignal(),
           );
-          return decodePool.decode(result.bytes, result.wireFormat, result.dataType);
+          const decoded = await decodePool.decode(result.bytes, result.wireFormat, result.dataType);
+          // SharedChunkQueue (minimap path) expects uint16 data.
+          // Expand uint8 here — only coarsest-level chunks use this path, so buffers are small.
+          if (result.dataType.toLowerCase() === "uint8") {
+            const src = new Uint8Array(decoded);
+            const dst = new Uint16Array(src.length);
+            dst.set(src);
+            return dst.buffer;
+          }
+          return decoded;
         };
 
         sharedQueue.registerMember(imageId, remoteFetcher);

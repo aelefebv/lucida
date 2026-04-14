@@ -23,6 +23,7 @@ export interface ResizeMessage {
 
 export interface SliceChunk {
   data: ArrayBuffer;
+  dataType: string;
   x: number;
   y: number;
   z: number;
@@ -64,6 +65,7 @@ export interface SliceChunkDataMessage {
 
 export interface VolumeChunk {
   data: ArrayBuffer;
+  dataType: string;
   x: number;
   y: number;
   z: number;

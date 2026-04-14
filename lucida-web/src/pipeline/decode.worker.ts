@@ -18,6 +18,13 @@ interface DecodeRequest {
 interface DecodeResponse {
   id: number;
   data: ArrayBuffer;
+  error?: undefined;
+}
+
+interface DecodeError {
+  id: number;
+  data?: undefined;
+  error: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,12 +101,10 @@ function decompress(bytes: ArrayBuffer, wireFormat: WireFormat): ArrayBuffer | P
 
 function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
   switch (dataType.toLowerCase()) {
-    case "uint8": {
-      const src = new Uint8Array(buf);
-      const dst = new Uint16Array(src.length);
-      dst.set(src);
-      return dst.buffer;
-    }
+    case "uint8":
+      // Pass through raw uint8 data — conversion to uint16 happens at GPU upload
+      // to avoid doubling memory in the decode worker.
+      return buf;
     case "bool": {
       const src = new Uint8Array(buf);
       const dst = new Uint16Array(src.length);
@@ -118,11 +123,16 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
 
 self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
   const { id, bytes, wireFormat, dataType } = e.data;
-  const decompressed = await decompress(bytes, wireFormat);
-  const data = normalize(decompressed, dataType);
-  (self as unknown as Worker).postMessage({ id, data } satisfies DecodeResponse, [data]);
+  try {
+    const decompressed = await decompress(bytes, wireFormat);
+    const data = normalize(decompressed, dataType);
+    (self as unknown as Worker).postMessage({ id, data } satisfies DecodeResponse, [data]);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    (self as unknown as Worker).postMessage({ id, error: message } satisfies DecodeError);
+  }
 };
 
 // Re-export for direct testing (imported as a module, not as a worker)
 export { decompressLz4, normalize };
-export type { DecodeRequest, DecodeResponse };
+export type { DecodeRequest, DecodeResponse, DecodeError };

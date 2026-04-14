@@ -23,9 +23,14 @@ export function defaultPoolSize(): number {
 // Pool worker bookkeeping
 // ---------------------------------------------------------------------------
 
+interface PendingEntry {
+  resolve: (data: ArrayBuffer) => void;
+  reject: (err: Error) => void;
+}
+
 interface PoolWorker {
   worker: Worker;
-  pending: Map<number, (data: ArrayBuffer) => void>;
+  pending: Map<number, PendingEntry>;
   activeCount: number;
 }
 
@@ -43,31 +48,35 @@ export class DecodePool {
       const w = new Worker(new URL("./decode.worker.ts", import.meta.url), {
         type: "module",
       });
-      const pending = new Map<number, (data: ArrayBuffer) => void>();
+      const pending = new Map<number, PendingEntry>();
       const entry: PoolWorker = { worker: w, pending, activeCount: 0 };
-      w.onmessage = (e: MessageEvent<{ id: number; data: ArrayBuffer }>) => {
-        const { id, data } = e.data;
-        const resolve = pending.get(id);
-        if (resolve) {
+      w.onmessage = (e: MessageEvent<{ id: number; data?: ArrayBuffer; error?: string }>) => {
+        const { id, data, error } = e.data;
+        const p = pending.get(id);
+        if (p) {
           pending.delete(id);
           entry.activeCount--;
-          resolve(data);
+          if (error) {
+            p.reject(new Error(error));
+          } else {
+            p.resolve(data!);
+          }
         }
       };
       return entry;
     });
   }
 
-  /** Decode raw wire-format bytes into a GPU-ready Uint16 buffer. */
+  /** Decode raw wire-format bytes. Returns data in its native format (uint8 stays uint8). */
   decode(bytes: ArrayBuffer, wireFormat: WireFormat, dataType: string): Promise<ArrayBuffer> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const id = this.nextId++;
       // Pick least-busy worker
       let best = this.pool[0];
       for (let i = 1; i < this.pool.length; i++) {
         if (this.pool[i].activeCount < best.activeCount) best = this.pool[i];
       }
-      best.pending.set(id, resolve);
+      best.pending.set(id, { resolve, reject });
       best.activeCount++;
       best.worker.postMessage({ id, bytes, wireFormat, dataType }, [bytes]);
     });
