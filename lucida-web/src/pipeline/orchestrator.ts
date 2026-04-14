@@ -186,7 +186,7 @@ export class Orchestrator {
         entities,
         visibleRegion,
         selection,
-        cacheState: { cached: new Map() },
+        cacheState: { cached: new Map(), inFlight: new Map() },
         workerWantedSet: { resident: new Map() },
         previousActiveSet: this.previousActiveSet.get(dsId) ?? [],
         assetCatalog: null,

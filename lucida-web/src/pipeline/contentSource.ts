@@ -1,10 +1,12 @@
 /**
  * Content Source — resolves logical chunk requests to physical bytes via the network.
  *
- * Transport only. Returns raw wire-format bytes. Does not decode, normalize, or cache.
+ * Transport only. Returns raw wire-format bytes alongside transport metadata.
+ * Does not decode, normalize, or cache.
  */
 
 import type { WireFormat } from "../contentTypes.ts";
+import { extractDataType } from "./decodePool.ts";
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -14,11 +16,16 @@ export interface FetchRequest {
   datasetId: string;
   imageId: string;
   chunkKey: string;       // canonical "level/t/c/z/y/x"
-  wireFormat: WireFormat;  // from ClientFetchDescriptor
+}
+
+export interface FetchResult {
+  bytes: ArrayBuffer;
+  wireFormat: WireFormat;
+  dataType: string;
 }
 
 export interface ContentSource {
-  fetch(request: FetchRequest, signal: AbortSignal): Promise<ArrayBuffer>;
+  fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult>;
 }
 
 // ---------------------------------------------------------------------------
@@ -35,11 +42,17 @@ interface PendingRequest {
 
 export class ProxiedContentSource implements ContentSource {
   private pending = new Map<string, PendingRequest>();
+  private imageWireFormats = new Map<string, WireFormat>();
 
   constructor(
     private sendMessage: (json: string) => void,
     private timeoutMs = DEFAULT_TIMEOUT_MS,
   ) {}
+
+  /** Register an image's wire format. Called during dataset setup. */
+  registerImage(imageId: string, wireFormat: WireFormat): void {
+    this.imageWireFormats.set(imageId, wireFormat);
+  }
 
   /** Route binary chunk data from bridge. Called by the onChunkData handler. */
   handleChunkData(key: string, data: ArrayBuffer): void {
@@ -73,18 +86,23 @@ export class ProxiedContentSource implements ContentSource {
   }
 
   /** Fetch raw wire-format bytes for a chunk. */
-  fetch(request: FetchRequest, signal: AbortSignal): Promise<ArrayBuffer> {
+  fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult> {
     const { datasetId, imageId, chunkKey } = request;
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
+    const wireFormat = this.imageWireFormats.get(imageId);
+    if (!wireFormat) {
+      return Promise.reject(new Error(`No wire format registered for image ${imageId}`));
+    }
+    const dataType = extractDataType(wireFormat);
 
-    return new Promise<ArrayBuffer>((resolve, reject) => {
+    return new Promise<FetchResult>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pending.delete(compositeKey);
         reject(new Error(`Chunk ${chunkKey} timed out`));
       }, this.timeoutMs);
 
       this.pending.set(compositeKey, {
-        resolve: (data) => { clearTimeout(timeoutId); resolve(data); },
+        resolve: (bytes) => { clearTimeout(timeoutId); resolve({ bytes, wireFormat, dataType }); },
         reject: (err) => { clearTimeout(timeoutId); reject(err); },
         timeoutId,
       });

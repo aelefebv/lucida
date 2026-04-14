@@ -104,6 +104,8 @@ export interface SelectionState {
 export interface CacheStateSnapshot {
   /** entityId -> set of chunk keys currently cached. */
   cached: Map<string, Set<string>>;
+  /** entityId -> set of chunk keys currently being fetched. */
+  inFlight: Map<string, Set<string>>;
 }
 
 export interface WorkerWantedSetSnapshot {
@@ -302,7 +304,7 @@ export function createSyntheticSnapshot(
       renderMode: "slice",
       interactionState: "idle",
     },
-    cacheState: { cached: new Map() },
+    cacheState: { cached: new Map(), inFlight: new Map() },
     workerWantedSet: { resident: new Map() },
     previousActiveSet: [],
     assetCatalog: null,

@@ -5,7 +5,7 @@ import type { ChunkFetcher } from "../zarr/chunkStore.ts";
 import { SharedChunkQueue } from "../zarr/chunkStore.ts";
 import type { DatasetState } from "../types.ts";
 import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
-import { DecodePool, extractDataType } from "../pipeline/decodePool.ts";
+import { DecodePool } from "../pipeline/decodePool.ts";
 import { ProxiedContentSource } from "../pipeline/contentSource.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 
@@ -283,13 +283,13 @@ export function useBridge({
     if ("Proxied" in fetchDesc) {
       for (const spec of fetchDesc.Proxied.images) {
         const imageId = spec.image_id;
+        contentSourceRef.current!.registerImage(imageId, spec.wire_format);
         const remoteFetcher: ChunkFetcher = async (coord, signal) => {
-          const rawBytes = await contentSourceRef.current!.fetch(
-            { datasetId, imageId, chunkKey: coord.key, wireFormat: spec.wire_format },
+          const result = await contentSourceRef.current!.fetch(
+            { datasetId, imageId, chunkKey: coord.key },
             signal ?? new AbortSignal(),
           );
-          const dataType = extractDataType(spec.wire_format);
-          return decodePool.decode(rawBytes, spec.wire_format, dataType);
+          return decodePool.decode(result.bytes, result.wireFormat, result.dataType);
         };
 
         sharedQueue.registerMember(imageId, remoteFetcher);

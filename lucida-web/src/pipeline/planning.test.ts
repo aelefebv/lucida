@@ -214,7 +214,7 @@ function makeSelection(overrides?: Partial<SelectionState>): SelectionState {
 function makeCacheState(
   entries?: [string, Set<string>][],
 ): CacheStateSnapshot {
-  return { cached: new Map(entries ?? []) };
+  return { cached: new Map(entries ?? []), inFlight: new Map() };
 }
 
 /** Default detail active-set entry for an entity. */
@@ -508,7 +508,7 @@ describe("request scheduling", () => {
         renderMode: "slice",
         interactionState: "idle",
       },
-      cacheState: { cached: new Map() },
+      cacheState: { cached: new Map(), inFlight: new Map() },
     });
   }
 
@@ -583,7 +583,7 @@ describe("request scheduling", () => {
         renderMode: "slice",
         interactionState: "idle",
       },
-      cacheState: { cached: new Map() },
+      cacheState: { cached: new Map(), inFlight: new Map() },
     });
 
     const result = plan(snapshot);
@@ -802,7 +802,7 @@ describe("plan()", () => {
         renderMode: "slice",
         interactionState: "idle",
       },
-      cacheState: { cached: new Map() },
+      cacheState: { cached: new Map(), inFlight: new Map() },
     });
 
     const result = plan(snapshot);
