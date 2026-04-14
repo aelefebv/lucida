@@ -604,6 +604,81 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
+  // getCached
+  // =========================================================================
+
+  describe("getCached", () => {
+    it("returns cached detail entry", async () => {
+      const { cache, source } = createTestCache();
+      const req = makeRequest({ x: 0, y: 0, z: 0 });
+      cache.submit(makePlan([req]));
+
+      source.resolve("entity-1/image-1/0/0/0/0/0/0", new ArrayBuffer(64), "uint16");
+      await flush();
+
+      const result = cache.getCached("entity-1", "0/0/0/0/0/0");
+      expect(result).not.toBeNull();
+      expect(result!.entityId).toBe("entity-1");
+      expect(result!.imageId).toBe("image-1");
+      expect(result!.chunkKey).toBe("0/0/0/0/0/0");
+      expect(result!.lane).toBe("detail");
+      expect(result!.dataType).toBe("uint16");
+      expect(result!.data.byteLength).toBe(64);
+    });
+
+    it("returns null for missing chunk", () => {
+      const { cache } = createTestCache();
+      expect(cache.getCached("no-such-entity", "0/0/0/0/0/0")).toBeNull();
+    });
+
+    it("returns entry after drain", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      const req = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
+      cache.submit(makePlan([req]));
+      await flush();
+
+      // Drain removes from ready queue but NOT from cache
+      cache.drain(Infinity);
+
+      const result = cache.getCached("entity-1", "0/0/0/0/0/0");
+      expect(result).not.toBeNull();
+      expect(result!.entityId).toBe("entity-1");
+      expect(result!.chunkKey).toBe("0/0/0/0/0/0");
+    });
+
+    it("returns null after eviction", async () => {
+      const budget = 200;
+      const { cache, source } = createTestCache({ detailBudgetBytes: budget });
+      source.autoResolveBytes = 100;
+
+      // Insert 2 chunks (200 bytes = budget, oldest first)
+      const first = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
+      cache.submit(makePlan([first]));
+      await flush();
+
+      const second = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
+      cache.submit(makePlan([first, second]));
+      await flush();
+
+      // Both cached at this point
+      expect(cache.getCached("entity-1", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCached("entity-1", "0/0/0/0/0/1")).not.toBeNull();
+
+      // Insert a third chunk to trigger eviction (300 > 200)
+      const third = makeRequest({ x: 2, chunkKey: "0/0/0/0/0/2" });
+      cache.submit(makePlan([first, second, third]));
+      await flush();
+
+      // Oldest chunk should have been evicted
+      expect(cache.getCached("entity-1", "0/0/0/0/0/0")).toBeNull();
+      // Newer chunks should still be cached
+      expect(cache.getCached("entity-1", "0/0/0/0/0/1")).not.toBeNull();
+      expect(cache.getCached("entity-1", "0/0/0/0/0/2")).not.toBeNull();
+    });
+  });
+
+  // =========================================================================
   // Reset
   // =========================================================================
 

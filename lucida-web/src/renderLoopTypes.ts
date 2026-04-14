@@ -3,6 +3,7 @@ import type { WasmScene } from "lucida-core";
 import type { ContentGraph } from "./contentTypes.ts";
 import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
+import type { CpuCache } from "./pipeline/cpuCache.ts";
 
 export interface DatasetEntry {
   sharedQueue: SharedChunkQueue;
@@ -51,4 +52,5 @@ export interface TickContext {
   canvas: HTMLCanvasElement;
   mode: "slice" | "volume";
   renderScale: number;
+  cpuCache?: CpuCache;
 }

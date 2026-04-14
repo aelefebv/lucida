@@ -1,26 +1,19 @@
 /** Slice render path: upload chunks + render multi-pass. */
-import type { ChunkCoord, SharedChunkQueue } from "./zarr/chunkStore.ts";
+import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./uploadCommon.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { getActiveChannels, compositeKey, parseChannel } from "./tickCommon.ts";
+import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
-import {
-  type UploadState,
-  type MemberUploadActions,
-  uploadChunksForMembers,
-  clearUploadStateForDataset,
-  clearUploadStateForMembers,
-} from "./uploadCommon.ts";
-import type { ContentGraph } from "./contentTypes.ts";
 import type { Orchestrator } from "./pipeline/orchestrator.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
-/** Backward-compatible alias. */
-export type SliceState = UploadState;
+/** SliceState — empty after S5.3 migration to Orchestrator delivery. */
+export type SliceState = Record<string, never>;
 
-export { createUploadState as createSliceState } from "./uploadCommon.ts";
+export function createSliceState(): SliceState { return {}; }
 
 /** Result of the plan+fetch phase, passed to the upload+render phase. */
 interface SlicePlanResult {
@@ -33,12 +26,12 @@ interface SlicePlanResult {
 }
 
 /**
- * Upload+render phase: upload fine chunks within budget, build layer
+ * Upload+render phase: deliver decoded chunks via Orchestrator, build layer
  * params, and render.
  */
 function uploadAndRenderSlice(
   ctx: TickContext,
-  state: SliceState,
+  orchestrator: Orchestrator,
   sliceZ: number,
   sliceT: number,
   sliceC: number,
@@ -46,7 +39,7 @@ function uploadAndRenderSlice(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
-  const { memberPlanCache, settings, multiChannel, epochs } = planResult;
+  const { memberPlanCache, settings, multiChannel } = planResult;
 
   const z = sliceZ;
   const t = sliceT;
@@ -56,83 +49,8 @@ function uploadAndRenderSlice(
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
 
-  const shouldSkipDataset = (cacheKey: string, ds: { content: ContentGraph }) => {
-    const dsShape = ds.content.images[0].multiscale.levels[0].shape;
-    if (multiChannel) {
-      // In multi-channel mode, cache keys are `${dsId}:ch${ch}` — the plan
-      // phase already filtered channels, so nothing to skip here.
-      // But we still need to validate the dataset exists.
-      return !ds;
-    }
-    return z >= dsShape[2] || c >= dsShape[1] || t >= dsShape[0];
-  };
-
-  const uploadDiag = debugStats.enabled ? {
-    atlasConfigSent: false,
-    stateKey: "",
-    prevStateKey: "",
-    chunksAttempted: 0,
-    chunksUploaded: 0,
-    chunksCacheHit: 0,
-    chunksCacheMiss: 0,
-    chunksSentSkip: 0,
-  } : null;
-
-  const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; content: ContentGraph }, _dsId: string): MemberUploadActions | null => {
-    const level = mp.needed[0]?.level;
-    if (level === undefined) return null;
-
-    const multiscale = ds.content.images[0].multiscale;
-    const levelMeta = multiscale.levels[level];
-    if (!levelMeta) return null;
-
-    const [, , , levelHeight, levelWidth] = levelMeta.shape;
-    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-    const fullResDepth = multiscale.levels[0].shape[2];
-    const levelDepth = levelMeta.shape[2];
-
-    // In multi-channel mode, memberId is a composite key; extract the channel
-    const ch = multiChannel ? (parseChannel(memberId) ?? c) : c;
-
-    const sk = `${t}/${ch}/${z}/${level}`;
-    if (uploadDiag) {
-      uploadDiag.stateKey = sk;
-      uploadDiag.prevStateKey = state.prevStateKey.get(memberId) ?? "(none)";
-    }
-
-    return {
-      stateKey: sk,
-
-      sendAtlasConfig() {
-        if (uploadDiag) uploadDiag.atlasConfigSent = true;
-        client.sliceAtlasConfig(
-          memberId, level, z, t, ch,
-          levelWidth, levelHeight,
-          chunkX, chunkY,
-          epochs,
-        );
-      },
-
-      sendFineChunks(chunks) {
-        if (uploadDiag) uploadDiag.chunksUploaded += chunks.length;
-        client.sliceChunkData(
-          memberId, chunks,
-          level, z, t, ch,
-          levelWidth, levelHeight,
-          chunkX, chunkY, chunkZ,
-          fullResDepth, levelDepth, z,
-          epochs,
-        );
-      },
-    };
-  };
-
-  // Set BEFORE upload loop so uploadCommon's counters go to the right object
-  if (uploadDiag) debugStats.uploadDebug = uploadDiag;
-
-  const budgetExhausted = uploadChunksForMembers(
-    datasets, memberPlanCache, state, shouldSkipDataset, createActions,
-  );
+  // Use Orchestrator delivery loop instead of uploadChunksForMembers
+  const budgetExhausted = orchestrator.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, sliceZ);
 
   if (!shouldRender) return budgetExhausted;
 
@@ -231,7 +149,6 @@ function uploadAndRenderSlice(
  */
 export function tickSlice(
   ctx: TickContext,
-  state: SliceState,
   orchestrator: Orchestrator,
   sliceZ: number,
   sliceT: number,
@@ -263,14 +180,10 @@ export function tickSlice(
     epochs: orchResult.epochs,
   };
 
-  return uploadAndRenderSlice(ctx, state, sliceZ, sliceT, sliceC, planResult, shouldRender);
+  return uploadAndRenderSlice(ctx, orchestrator, sliceZ, sliceT, sliceC, planResult, shouldRender);
 }
 
-export function clearSliceForDataset(state: SliceState, dsId: string): void {
-  clearUploadStateForDataset(state, dsId);
-}
+export function clearSliceForDataset(_state: SliceState, _dsId: string): void {}
 
 /** Clear member-keyed entries for all members of a dataset. */
-export function clearSliceForMembers(state: SliceState, memberIds: string[]): void {
-  clearUploadStateForMembers(state, memberIds);
-}
+export function clearSliceForMembers(_state: SliceState, _memberIds: string[]): void {}

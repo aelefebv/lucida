@@ -7,6 +7,7 @@ import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { Orchestrator } from "./pipeline/orchestrator.ts";
+import type { CpuCache } from "./pipeline/cpuCache.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 
 // Re-export types so downstream imports stay unchanged
@@ -29,6 +30,8 @@ export class RenderLoop {
   private volumeState: VolumeState = createVolumeState();
   private minimapState: MinimapState = createMinimapState();
   private orchestrator = new Orchestrator();
+  private cpuCache: CpuCache | null = null;
+  private cpuCacheUnsub: (() => void) | null = null;
 
   private _renderScale = 1.0;
 
@@ -60,17 +63,10 @@ export class RenderLoop {
       }));
     }
 
-    // When the worker evicts or skips chunks, update sentToWorker so they can be
-    // re-sent. Evictions (chunks removed from atlas) trigger a new tick so the
-    // main thread can re-send them. Skipped chunks (rejected because too far)
-    // are just removed from sentToWorker without triggering re-sends.
+    // When the worker evicts or skips chunks, update the orchestrator's delivery
+    // tracking so they can be re-sent. Evictions trigger a new tick.
     this.client.onChunksEvicted = (datasetId: string, evicted: string[], skipped: string[]) => {
-      const sentSet = this.sliceState.sentToWorker.get(datasetId)
-        ?? this.volumeState.sentToWorker.get(datasetId);
-      if (sentSet) {
-        for (const key of evicted) sentSet.delete(key);
-        for (const key of skipped) sentSet.delete(key);
-      }
+      this.orchestrator.handleChunksEvicted(datasetId, evicted, skipped);
       if (evicted.length > 0) {
         this.dataDirty = true;
         this.scheduleIfNeeded();
@@ -87,10 +83,24 @@ export class RenderLoop {
       this.rafId = null;
     }
     this.client.onChunksEvicted = null;
+    this.cpuCacheUnsub?.();
+    this.cpuCacheUnsub = null;
+    this.cpuCache = null;
     for (const unsub of this.unsubs.values()) {
       unsub();
     }
     this.unsubs.clear();
+  }
+
+  setCpuCache(cache: CpuCache): void {
+    if (this.cpuCache === cache) return;
+    // Unsubscribe from previous cache
+    this.cpuCacheUnsub?.();
+    this.cpuCache = cache;
+    this.cpuCacheUnsub = cache.subscribe(() => {
+      this.dataDirty = true;
+      this.scheduleIfNeeded();
+    });
   }
 
   addDataset(id: string, sharedQueue: SharedChunkQueue, content: ContentGraph): void {
@@ -122,9 +132,11 @@ export class RenderLoop {
     clearSliceForMembers(this.sliceState, memberIds);
     clearMinimapForDataset(this.minimapState, id);
 
-    // Remove GPU resources for this dataset's members
+    // Remove GPU + orchestrator resources for this dataset's members
     this.client.removeLayerResources(id);
+    this.orchestrator.clearMemberResources(id);
     for (const mid of memberIds) {
+      this.orchestrator.clearMemberResources(mid);
       this.client.removeLayerResources(mid);
     }
 
@@ -156,56 +168,23 @@ export class RenderLoop {
     if (mc === this.prevMultiChannel) return;
     this.prevMultiChannel = mc;
 
-    // Collect all keys that match the old mode's pattern and remove them
-    const states = [this.sliceState, this.volumeState];
-    for (const st of states) {
-      const keysToRemove: string[] = [];
-      for (const key of st.prevStateKey.keys()) {
-        const isComposite = /:ch\d+$/.test(key);
-        if (mc && !isComposite) {
-          // Switching TO multi-channel: clean up non-composite keys
-          keysToRemove.push(key);
-        } else if (!mc && isComposite) {
-          // Switching FROM multi-channel: clean up composite keys
-          keysToRemove.push(key);
-        }
-      }
-      for (const key of keysToRemove) {
+    const trackedIds = this.orchestrator.getTrackedMemberIds();
+    for (const key of trackedIds) {
+      const isComposite = /:ch\d+$/.test(key);
+      if ((mc && !isComposite) || (!mc && isComposite)) {
         this.client.removeLayerResources(key);
-        st.prevStateKey.delete(key);
-        st.sentToWorker.delete(key);
-      }
-
-      // Also clean up composite-keyed plan cache entries
-      const planKeysToRemove: string[] = [];
-      for (const key of st.planCache.keys()) {
-        const isComposite = /:ch\d+$/.test(key);
-        if (mc && !isComposite) {
-          planKeysToRemove.push(key);
-        } else if (!mc && isComposite) {
-          planKeysToRemove.push(key);
-        }
-      }
-      for (const key of planKeysToRemove) {
-        st.planCache.delete(key);
+        this.orchestrator.clearMemberResources(key);
       }
     }
   }
 
-  /** Collect member IDs associated with a dataset from state maps. */
+  /** Collect member IDs associated with a dataset from orchestrator tracking. */
   private collectMemberIds(dsId: string): string[] {
     const ids = new Set<string>();
-    // Check volume and slice state maps for keys that belong to this dataset.
-    // For single datasets, image_id === dataset_id (already cleaned by clearFor*Dataset).
-    // For plates, member IDs are prefixed with the dataset ID (e.g. "dsId:A/1/0").
     const prefix = dsId + ":";
-    for (const key of this.volumeState.prevStateKey.keys()) {
+    for (const key of this.orchestrator.getTrackedMemberIds()) {
       if (key === dsId || key.startsWith(prefix)) ids.add(key);
     }
-    for (const key of this.sliceState.prevStateKey.keys()) {
-      if (key === dsId || key.startsWith(prefix)) ids.add(key);
-    }
-    // Remove the dsId itself since clearFor*Dataset already handles it
     ids.delete(dsId);
     return [...ids];
   }
@@ -269,6 +248,7 @@ export class RenderLoop {
       canvas: this.canvas,
       mode: this.mode,
       renderScale: this._renderScale,
+      cpuCache: this.cpuCache ?? undefined,
     };
   }
 
@@ -307,11 +287,11 @@ export class RenderLoop {
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.sliceState, this.orchestrator, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickSlice(ctx, this.orchestrator, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
         this.dataDirty = true;
       }
     } else {
-      if (tickVolume(ctx, this.volumeState, this.orchestrator, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickVolume(ctx, this.orchestrator, this.minimapState.pendingFetch, shouldRender)) {
         this.dataDirty = true;
       }
     }

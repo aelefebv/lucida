@@ -81,22 +81,8 @@ export function compositeKey(memberId: string, channel: number): string {
 }
 
 /**
- * Parse the channel index from a composite member key.
- * Returns undefined for non-composite keys.
- */
-export function parseChannel(key: string): number | undefined {
-  const match = key.match(/:ch(\d+)$/);
-  return match ? Number(match[1]) : undefined;
-}
-
-/**
  * Strip the channel suffix from a composite key to recover the original member ID.
  */
 export function stripChannelSuffix(key: string): string {
   return key.replace(/:ch\d+$/, "");
-}
-
-/** Flip Y between unit space (Y-up: 0=bottom) and image space (Y-down: 0=top). */
-export function flipY(p: [number, number, number]): [number, number, number] {
-  return [p[0], 1.0 - p[1], p[2]];
 }

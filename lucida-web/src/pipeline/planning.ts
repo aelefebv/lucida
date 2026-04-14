@@ -148,6 +148,8 @@ export interface RequestPlan {
 }
 
 export interface ChunkRequest {
+  /** Actual dataset ID (set by orchestrator; falls back to entityId if unset). */
+  datasetId?: string;
   entityId: string;
   imageId: string;
   level: number;

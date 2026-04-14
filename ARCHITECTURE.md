@@ -66,6 +66,9 @@ Planning cycle (web only, wired in step 7/Orchestrator):
   → Orchestrator: assemble PlanningSnapshot from upstream domains
   → plan(snapshot) → RequestPlan (prioritized chunk requests, active set, epochs)
   → Orchestrator: feed RequestPlan to CPU Cache for fetching
+  → CpuCache: fetch via ContentSource, decode via DecodePool, cache decoded buffers
+  → Orchestrator: drain ready deliveries from CpuCache, send to worker
+  → Orchestrator: re-send evicted-but-cached chunks via getCached()
 
 Worker protocol (main thread → GPU worker):
   → Atlas config messages carry PlanningEpochs (establish worker's "current" epoch)

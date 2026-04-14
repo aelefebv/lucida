@@ -132,6 +132,13 @@ function App() {
 
   // --- Side-effect hooks ---
 
+  // Wire up CpuCache whenever the RenderLoop is recreated (e.g. mode switch)
+  useEffect(() => {
+    if (render.activeLoop && bridge.cpuCacheRef.current) {
+      render.activeLoop.setCpuCache(bridge.cpuCacheRef.current);
+    }
+  }, [render.activeLoop]);
+
   useIntensityBatcher({
     clientReady: render.clientReady,
     clientRef: render.clientRef,

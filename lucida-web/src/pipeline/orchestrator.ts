@@ -8,7 +8,7 @@ import type { TickContext } from "../renderLoopTypes.ts";
 import type { ChunkCoord, QualifiedChunkCoord } from "../zarr/chunkStore.ts";
 import type { MemberChunkPlan } from "../uploadCommon.ts";
 import type { SceneSettings } from "../tickCommon.ts";
-import type { ImageSpec } from "../contentTypes.ts";
+import type { ImageSpec, ContentGraph } from "../contentTypes.ts";
 import {
   getSceneSettings,
   getActiveChannels,
@@ -25,6 +25,7 @@ import type {
   SelectionState,
   ChunkRequest,
 } from "./planning.ts";
+import type { ReadyDelivery } from "./cpuCache.ts";
 import { debugStats, type OrchDebug, type OrchMemberDebug } from "../debug/debugStats.ts";
 
 export interface OrchestratorResult {
@@ -45,6 +46,12 @@ export class Orchestrator {
   private _lastCachedKeyCounts = new Map<string, number>();
   /** Last per-dataset fetch lists, re-submitted on epoch HIT to retry missing chunks. */
   private _lastFetchLists = new Map<string, QualifiedChunkCoord[]>();
+  /** Last filtered requests, re-submitted on epoch HIT to CpuCache. */
+  private _lastFilteredRequests: ChunkRequest[] = [];
+
+  // Delivery state (replaces UploadState from uploadCommon at S5.3)
+  private deliverySentToWorker = new Map<string, Set<string>>();
+  private deliveryPrevStateKey = new Map<string, string>();
 
   planAndFetch(
     ctx: TickContext,
@@ -77,6 +84,14 @@ export class Orchestrator {
           ds.sharedQueue.ensureFetched(fetchList);
         }
       }
+      // Re-submit to CpuCache so it can retry failed/cancelled fetches
+      if (ctx.cpuCache && this._lastFilteredRequests.length > 0) {
+        ctx.cpuCache.submit({
+          requests: this._lastFilteredRequests,
+          activeSet: [...(this.previousActiveSet.values())].flat(),
+          epochs: this.lastEpochs!,
+        });
+      }
       this.submitMinimapFetches(ctx, minimapPendingFetch);
       if (debugStats.enabled && debugStats.orch) {
         debugStats.orch.epochCacheHit = true;
@@ -96,9 +111,10 @@ export class Orchestrator {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
 
-      // 3b. View query
+      // 3b. View query — may return null if dataset not yet registered in scene
       const vqJson = ctx.scene.view_query(dsId);
       const vq = JSON.parse(vqJson);
+      if (!vq || !vq.visible_entities) continue;
 
       // 3c. Member positions
       const posJson = ctx.scene.member_positions(dsId);
@@ -212,6 +228,22 @@ export class Orchestrator {
         return target !== undefined && r.level === target;
       });
 
+      this._lastFilteredRequests = filteredRequests;
+
+      // Annotate requests with the real dataset ID (entityId may differ for plates)
+      for (const req of filteredRequests) {
+        req.datasetId = dsId;
+      }
+
+      // Submit to CpuCache for fetching
+      if (ctx.cpuCache) {
+        ctx.cpuCache.submit({
+          requests: filteredRequests,
+          activeSet: result.activeSet,
+          epochs: currentEpochs,
+        });
+      }
+
       const translated = translateRequestPlan(filteredRequests, entities, multiChannel);
 
       if (multiChannel) {
@@ -232,22 +264,7 @@ export class Orchestrator {
         memberPlanCache.set(dsId, allPlans);
       }
 
-      // 3j. Fetch submission — submit ALL filtered requests. ensureFetched
-      // handles caching internally (skips has() hits and in-flight requests).
-      // No pre-filtering here — matches the old path's behavior.
-      const qualifiedCoords: QualifiedChunkCoord[] = filteredRequests.map(
-        (req) => ({
-          level: req.level,
-          x: req.x,
-          y: req.y,
-          z: req.z,
-          t: req.t,
-          c: req.c,
-          key: req.chunkKey,
-          memberId: req.imageId,
-        }),
-      );
-
+      // 3j. Fetch submission
       const minimapCoords: QualifiedChunkCoord[] = [];
       for (const entity of entities) {
         const pending = minimapPendingFetch.get(entity.imageId);
@@ -258,10 +275,31 @@ export class Orchestrator {
         }
       }
 
-      const allCoords = [...qualifiedCoords, ...minimapCoords];
-      this._lastFetchLists.set(dsId, allCoords);
-      if (allCoords.length > 0) {
-        ds.sharedQueue.ensureFetched(allCoords);
+      if (ctx.cpuCache) {
+        // CpuCache handles main-view fetching; only submit minimap to SharedChunkQueue
+        this._lastFetchLists.set(dsId, minimapCoords);
+        if (minimapCoords.length > 0) {
+          ds.sharedQueue.ensureFetched(minimapCoords);
+        }
+      } else {
+        // No CpuCache: SharedChunkQueue handles everything
+        const qualifiedCoords: QualifiedChunkCoord[] = filteredRequests.map(
+          (req) => ({
+            level: req.level,
+            x: req.x,
+            y: req.y,
+            z: req.z,
+            t: req.t,
+            c: req.c,
+            key: req.chunkKey,
+            memberId: req.imageId,
+          }),
+        );
+        const allCoords = [...qualifiedCoords, ...minimapCoords];
+        this._lastFetchLists.set(dsId, allCoords);
+        if (allCoords.length > 0) {
+          ds.sharedQueue.ensureFetched(allCoords);
+        }
       }
 
       const channelCount = multiChannel ? visibleChannels.length : 1;
@@ -386,6 +424,176 @@ export class Orchestrator {
     this.lastEpochs = currentEpochs;
     this.cachedResult = { memberPlanCache, settings, multiChannel, epochs: currentEpochs };
     return this.cachedResult;
+  }
+
+  /**
+   * Deliver decoded chunks to the GPU worker via RenderClient.
+   * Replaces uploadChunksForMembers() -- called from slicePath/volumePath after S5.3.
+   */
+  deliverToWorker(
+    ctx: TickContext,
+    budget: number,
+    sliceZ: number | null,
+  ): boolean {
+    const multiChannel = ctx.scene.multi_channel();
+    const epochs = this.lastEpochs ?? { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+    let remaining = budget;
+    let budgetExhausted = false;
+
+    // Drain new deliveries from CpuCache
+    if (!ctx.cpuCache) return false;
+    const deliveries = ctx.cpuCache.drain(budget);
+
+    // Send each delivery to the worker (skip runway — pre-cached for future timepoints)
+    for (const delivery of deliveries) {
+      if (delivery.lane === "runway") continue;
+      const sent = this.sendDeliveryToWorker(ctx, delivery, multiChannel, sliceZ, epochs);
+      if (sent > 0) {
+        remaining -= sent;
+        if (remaining <= 0) {
+          budgetExhausted = true;
+          break;
+        }
+      }
+    }
+
+    // Re-send evicted chunks (budget permitting).
+    // Use _lastFilteredRequests (target-level only) to avoid flipping the atlas
+    // config between levels, which clears the sent set and causes flickering.
+    if (!budgetExhausted && this._lastFilteredRequests.length > 0) {
+      for (const req of this._lastFilteredRequests) {
+        if (budgetExhausted) break;
+        if (req.lane === "runway") continue;
+        const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
+        const ss = this.deliverySentToWorker.get(wid);
+        if (ss?.has(req.chunkKey)) continue;
+
+        const cached = ctx.cpuCache.getCached(req.entityId, req.chunkKey);
+        if (!cached) continue;
+
+        const sent = this.sendDeliveryToWorker(ctx, cached, multiChannel, sliceZ, epochs);
+        if (sent > 0) {
+          remaining -= sent;
+          if (remaining <= 0) budgetExhausted = true;
+        }
+      }
+    }
+
+    return deliveries.length > 0 || budgetExhausted;
+  }
+
+  /** Remove evicted/skipped chunk keys from the sent-to-worker tracking. */
+  handleChunksEvicted(workerMemberId: string, evicted: string[], skipped: string[]): void {
+    const sentSet = this.deliverySentToWorker.get(workerMemberId);
+    if (sentSet) {
+      for (const key of evicted) sentSet.delete(key);
+      for (const key of skipped) sentSet.delete(key);
+    }
+  }
+
+  /** Get all tracked worker member IDs (for multi-channel transition cleanup). */
+  getTrackedMemberIds(): string[] {
+    return [...new Set([...this.deliveryPrevStateKey.keys(), ...this.deliverySentToWorker.keys()])];
+  }
+
+  /** Clear all delivery state for a member (e.g. on dataset removal). */
+  clearMemberResources(workerMemberId: string): void {
+    this.deliveryPrevStateKey.delete(workerMemberId);
+    this.deliverySentToWorker.delete(workerMemberId);
+  }
+
+  /**
+   * Send a single delivery to the GPU worker, emitting atlas config if the
+   * state key changed and the chunk data itself.  Returns bytes sent (0 if skipped).
+   */
+  private sendDeliveryToWorker(
+    ctx: TickContext,
+    delivery: ReadyDelivery,
+    multiChannel: boolean,
+    sliceZ: number | null,
+    epochs: PlanningEpochs,
+  ): number {
+    const viewMode = ctx.mode;
+    const workerMemberId = multiChannel ? `${delivery.imageId}:ch${delivery.c}` : delivery.imageId;
+
+    // Find dataset for this delivery
+    let dsContent: ContentGraph | null = null;
+    let dsId = "";
+    for (const [id, ds] of ctx.datasets) {
+      if (ds.content.images.some(img => img.image_id === delivery.imageId)) {
+        dsContent = ds.content;
+        dsId = id;
+        break;
+      }
+    }
+    if (!dsContent) return 0;
+
+    const imageSpec = dsContent.images.find(img => img.image_id === delivery.imageId);
+    if (!imageSpec) return 0;
+    const levelMeta = imageSpec.multiscale.levels[delivery.level];
+    if (!levelMeta) return 0;
+
+    const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;    // [T, C, Z, Y, X]
+    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
+
+    // Build state key and check for atlas config change
+    const stateKey = viewMode === "slice"
+      ? `${delivery.t}/${delivery.c}/${sliceZ}/${delivery.level}`
+      : `${delivery.t}/${delivery.c}/${delivery.level}`;
+
+    if (stateKey !== this.deliveryPrevStateKey.get(workerMemberId)) {
+      if (viewMode === "slice") {
+        ctx.client.sliceAtlasConfig(
+          workerMemberId, delivery.level, sliceZ!, delivery.t, delivery.c,
+          levelWidth, levelHeight, chunkX, chunkY, epochs,
+        );
+      } else {
+        ctx.client.volumeAtlasConfig(
+          workerMemberId, delivery.level, delivery.t, delivery.c,
+          levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ, epochs,
+        );
+      }
+      this.deliveryPrevStateKey.set(workerMemberId, stateKey);
+      this.deliverySentToWorker.delete(workerMemberId);
+    }
+
+    // Send chunk data if not already sent
+    let sentSet = this.deliverySentToWorker.get(workerMemberId);
+    if (!sentSet) {
+      sentSet = new Set();
+      this.deliverySentToWorker.set(workerMemberId, sentSet);
+    }
+
+    if (sentSet.has(delivery.chunkKey)) return 0;
+
+    const chunkData = {
+      data: new Uint16Array(delivery.data),
+      x: delivery.x, y: delivery.y, z: delivery.z,
+      key: delivery.chunkKey,
+    };
+
+    if (viewMode === "slice") {
+      const fullResDepth = imageSpec.multiscale.levels[0].shape[2];
+      ctx.client.sliceChunkData(
+        workerMemberId, [chunkData],
+        delivery.level, sliceZ!, delivery.t, delivery.c,
+        levelWidth, levelHeight, chunkX, chunkY, chunkZ,
+        fullResDepth, levelDepth, sliceZ!,
+        epochs,
+      );
+    } else {
+      const hitLocal = Array.from(ctx.scene.ray_hit_local_image(dsId)) as [number, number, number];
+      ctx.client.volumeChunkData(
+        workerMemberId, [chunkData],
+        delivery.level, delivery.t, delivery.c,
+        levelWidth, levelHeight, levelDepth,
+        chunkX, chunkY, chunkZ, hitLocal,
+        epochs,
+      );
+    }
+
+    sentSet.add(delivery.chunkKey);
+    return delivery.data.byteLength;
   }
 
   /** Submit minimap fetch lists for all datasets without re-planning. */

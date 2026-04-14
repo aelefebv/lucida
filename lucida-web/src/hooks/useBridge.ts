@@ -7,6 +7,7 @@ import type { DatasetState } from "../types.ts";
 import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
 import { ProxiedContentSource } from "../pipeline/contentSource.ts";
+import { CpuCache } from "../pipeline/cpuCache.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 
 const decodePool = new DecodePool();
@@ -58,6 +59,7 @@ export function useBridge({
 }: Params) {
   const bridgeRef = useRef<Bridge | null>(null);
   const contentSourceRef = useRef<ProxiedContentSource | null>(null);
+  const cpuCacheRef = useRef<CpuCache | null>(null);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
@@ -73,6 +75,7 @@ export function useBridge({
       (json) => bridgeRef.current?.send(json),
     );
     contentSourceRef.current = contentSource;
+    cpuCacheRef.current = new CpuCache(contentSource, decodePool);
 
     const handlers: BridgeHandlers = {
       onSnapshot: (_seq, documentJson, snapshotPeers, yourId) => {
@@ -326,6 +329,9 @@ export function useBridge({
     }
 
     loopRef.current?.addDataset(datasetId, sharedQueue, content);
+    if (cpuCacheRef.current && loopRef.current) {
+      loopRef.current.setCpuCache(cpuCacheRef.current);
+    }
 
     const coarsestLevel = firstImage?.multiscale.levels[firstImage.multiscale.levels.length - 1];
     if (coarsestLevel) {
@@ -425,6 +431,7 @@ export function useBridge({
   return {
     bridgeRef,
     contentSourceRef,
+    cpuCacheRef,
     peers,
     myId,
     followTarget,

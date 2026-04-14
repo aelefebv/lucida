@@ -3,19 +3,10 @@ import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { MemberChunkPlan } from "./uploadCommon.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { getActiveChannels, compositeKey, parseChannel } from "./tickCommon.ts";
+import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
-import {
-  type UploadState,
-  type MemberUploadActions,
-  uploadChunksForMembers,
-  clearUploadStateForDataset,
-  clearUploadStateForMembers,
-  resetUploadState,
-} from "./uploadCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
-import type { ContentGraph } from "./contentTypes.ts";
-import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { Orchestrator } from "./pipeline/orchestrator.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
 
@@ -75,10 +66,10 @@ function computeScissorRect(
   return [x, y, w, h];
 }
 
-/** Backward-compatible alias. */
-export type VolumeState = UploadState;
+/** VolumeState — empty after S5.3 migration to Orchestrator delivery. */
+export type VolumeState = Record<string, never>;
 
-export { createUploadState as createVolumeState } from "./uploadCommon.ts";
+export function createVolumeState(): VolumeState { return {}; }
 
 /** Data passed from the plan+fetch phase to the upload+render phase. */
 interface PlanResult {
@@ -98,69 +89,21 @@ interface PlanResult {
 
 
 /**
- * Upload+render phase: send chunk plans to worker, build layer params,
- * and render. Returns true if more work remains.
+ * Upload+render phase: deliver decoded chunks via Orchestrator, build layer
+ * params, and render. Returns true if more work remains.
  */
 function uploadAndRenderVolume(
   ctx: TickContext,
-  state: VolumeState,
+  orchestrator: Orchestrator,
   plan: PlanResult,
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, datasets } = ctx;
-  const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel, epochs } = plan;
+  const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel } = plan;
   const { layerOrder, allSettings } = settings;
 
-  const shouldSkipDataset = (cacheKey: string, ds: { content: ContentGraph }) => {
-    if (multiChannel) {
-      // In multi-channel mode, the plan phase already filtered channels.
-      return !ds;
-    }
-    const dsShape = ds.content.images[0].multiscale.levels[0].shape;
-    return viewC >= dsShape[1] || viewT >= dsShape[0];
-  };
-
-  const createActions = (memberId: string, mp: MemberChunkPlan, ds: { sharedQueue: SharedChunkQueue; content: ContentGraph }, dsId: string): MemberUploadActions | null => {
-    if (mp.needed.length === 0) return null;
-
-    const targetLevel = mp.needed[0].level;
-    const levelMeta = ds.content.images[0].multiscale.levels[targetLevel];
-    const [, , depthFull, heightFull, widthFull] = levelMeta.shape;
-    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-
-    // In multi-channel mode, memberId is composite; extract channel
-    const ch = multiChannel ? (parseChannel(memberId) ?? viewC) : viewC;
-
-    const hitLocal = hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
-
-    return {
-      stateKey: `${viewT}/${ch}/${targetLevel}`,
-
-      sendAtlasConfig() {
-        client.volumeAtlasConfig(
-          memberId, targetLevel, viewT, ch,
-          widthFull, heightFull, depthFull,
-          chunkX, chunkY, chunkZ,
-          epochs,
-        );
-      },
-
-      sendFineChunks(chunks) {
-        client.volumeChunkData(
-          memberId, chunks,
-          targetLevel, viewT, ch,
-          widthFull, heightFull, depthFull,
-          chunkX, chunkY, chunkZ,
-          hitLocal,
-          epochs,
-        );
-      },
-    };
-  };
-
-  const budgetExhausted = uploadChunksForMembers(
-    datasets, memberPlanCache, state, shouldSkipDataset, createActions,
-  );
+  // Use Orchestrator delivery loop instead of uploadChunksForMembers
+  const budgetExhausted = orchestrator.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
 
   if (!shouldRender) return budgetExhausted;
 
@@ -278,7 +221,6 @@ function uploadAndRenderVolume(
  */
 export function tickVolume(
   ctx: TickContext,
-  state: VolumeState,
   orchestrator: Orchestrator,
   minimapPendingFetch: Map<string, ChunkCoord[]>,
   shouldRender: boolean = true,
@@ -352,20 +294,14 @@ export function tickVolume(
   };
 
   const t1 = debugStats.enabled ? performance.now() : 0;
-  const result = uploadAndRenderVolume(ctx, state, planResult, shouldRender);
+  const result = uploadAndRenderVolume(ctx, orchestrator, planResult, shouldRender);
   if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
   return result;
 }
 
-export function clearVolumeForDataset(state: VolumeState, dsId: string): void {
-  clearUploadStateForDataset(state, dsId);
-}
+export function clearVolumeForDataset(_state: VolumeState, _dsId: string): void {}
 
 /** Clear member-keyed entries for all members of a dataset. */
-export function clearVolumeForMembers(state: VolumeState, memberIds: string[]): void {
-  clearUploadStateForMembers(state, memberIds);
-}
+export function clearVolumeForMembers(_state: VolumeState, _memberIds: string[]): void {}
 
-export function resetVolumeState(state: VolumeState): void {
-  resetUploadState(state);
-}
+export function resetVolumeState(_state: VolumeState): void {}

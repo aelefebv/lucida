@@ -144,6 +144,9 @@ export class CpuCache {
   // Monotonic counter for LRU ordering
   private insertCounter = 0;
 
+  // Listeners notified when new chunks become ready
+  private listeners: (() => void)[] = [];
+
   // Telemetry
   private totalHits = 0;
   private totalRequests = 0;
@@ -304,6 +307,47 @@ export class CpuCache {
     };
   }
 
+  /**
+   * Look up a cached chunk by entity and chunk key.
+   * Returns a ReadyDelivery if the chunk is in the detail or overview cache, null otherwise.
+   * Used by the Orchestrator for re-sending chunks evicted from the worker.
+   */
+  getCached(entityId: string, chunkKey: string): ReadyDelivery | null {
+    const entry =
+      this.detailCache.get(entityId)?.get(chunkKey) ??
+      this.overviewCache.get(entityId)?.get(chunkKey) ??
+      null;
+    if (!entry) return null;
+    return {
+      entityId: entry.entityId,
+      imageId: entry.imageId,
+      level: entry.level,
+      t: entry.t,
+      c: entry.c,
+      z: entry.z,
+      y: entry.y,
+      x: entry.x,
+      chunkKey: entry.chunkKey,
+      data: entry.data,
+      dataType: entry.dataType,
+      epochs: entry.epochs,
+      lane: entry.lane,
+    };
+  }
+
+  /** Register a listener called when new chunks become ready. Returns unsubscribe function. */
+  subscribe(listener: () => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      const idx = this.listeners.indexOf(listener);
+      if (idx >= 0) this.listeners.splice(idx, 1);
+    };
+  }
+
+  private notifyListeners(): void {
+    for (const l of this.listeners) l();
+  }
+
   /** Clear all caches, cancel all fetches. */
   reset(): void {
     // Cancel all in-flight
@@ -326,6 +370,9 @@ export class CpuCache {
     this.epochHistory = [];
     this.failures.clear();
     this.insertCounter = 0;
+
+    // Clear listeners
+    this.listeners = [];
 
     // Reset telemetry
     this.totalHits = 0;
@@ -375,7 +422,7 @@ export class CpuCache {
     let result: FetchResult;
     try {
       result = await this.source.fetch(
-        { datasetId: req.entityId, imageId: req.imageId, chunkKey: req.chunkKey },
+        { datasetId: req.datasetId ?? req.entityId, imageId: req.imageId, chunkKey: req.chunkKey },
         controller.signal,
       );
     } catch (err: unknown) {
@@ -485,6 +532,9 @@ export class CpuCache {
       epochs: cacheEntry.epochs,
       lane,
     });
+
+    // Notify listeners that a new chunk is ready
+    this.notifyListeners();
 
     // Start next pending fetch
     this.startFetches();
