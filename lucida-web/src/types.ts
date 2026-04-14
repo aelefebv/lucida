@@ -19,11 +19,6 @@ export interface DatasetState {
   sharedQueue: SharedChunkQueue;
 }
 
-/** Pending chunk request from a remote viewer. */
-export interface PendingChunkResolve {
-  resolve: (data: ArrayBuffer) => void;
-  reject: (err: Error) => void;
-}
 
 /**
  * Map a data type string to its maximum intensity value.

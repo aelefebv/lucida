@@ -3,9 +3,13 @@ import type { WasmScene } from "lucida-core";
 import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
 import type { ChunkFetcher } from "../zarr/chunkStore.ts";
 import { SharedChunkQueue } from "../zarr/chunkStore.ts";
-import type { DatasetState, PendingChunkResolve } from "../types.ts";
+import type { DatasetState } from "../types.ts";
 import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
+import { DecodePool, extractDataType } from "../pipeline/decodePool.ts";
+import { ProxiedContentSource } from "../pipeline/contentSource.ts";
 import type { RenderLoop } from "../renderLoop.ts";
+
+const decodePool = new DecodePool();
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { VolumeData } from "../types.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
@@ -17,7 +21,6 @@ interface Params {
   ensureScene: () => WasmScene;
   loopRef: React.RefObject<RenderLoop | null>;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
-  pendingChunkRequests: React.RefObject<Map<string, PendingChunkResolve>>;
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
   // From useDatasetSettings (called before)
   bumpLayerSettingsVersion: () => void;
@@ -41,7 +44,6 @@ export function useBridge({
   ensureScene,
   loopRef,
   datasetsRef,
-  pendingChunkRequests,
   datasetCallbacksRef,
   bumpLayerSettingsVersion,
   initLayerMaps,
@@ -55,6 +57,7 @@ export function useBridge({
   bumpRemoteDocumentVersion,
 }: Params) {
   const bridgeRef = useRef<Bridge | null>(null);
+  const contentSourceRef = useRef<ProxiedContentSource | null>(null);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
@@ -65,6 +68,11 @@ export function useBridge({
 
   useEffect(() => {
     if (!wasmReady || bridgeRef.current) return;
+
+    const contentSource = new ProxiedContentSource(
+      (json) => bridgeRef.current?.send(json),
+    );
+    contentSourceRef.current = contentSource;
 
     const handlers: BridgeHandlers = {
       onSnapshot: (_seq, documentJson, snapshotPeers, yourId) => {
@@ -138,11 +146,7 @@ export function useBridge({
       },
       onAck: (_seq) => {},
       onChunkData: (key, data) => {
-        const pending = pendingChunkRequests.current.get(key);
-        if (pending) {
-          pendingChunkRequests.current.delete(key);
-          pending.resolve(data);
-        }
+        contentSource.handleChunkData(key, data);
       },
       onPeerJoined: (clientId, presence) => {
         setPeers(prev => {
@@ -265,10 +269,7 @@ export function useBridge({
       },
       onDisconnect: () => {
         setRemoteDatasetLoading(false);
-        for (const [, pending] of pendingChunkRequests.current) {
-          pending.reject(new Error("Bridge disconnected"));
-        }
-        pendingChunkRequests.current.clear();
+        contentSource.rejectAll();
       },
     };
     bridgeRef.current = new Bridge(handlers);
@@ -276,7 +277,6 @@ export function useBridge({
 
   function setupFetchPipeline(content: ContentGraph, fetchDesc: ClientFetchDescriptor) {
     const datasetId = content.dataset_id;
-    const CHUNK_TIMEOUT_MS = 10_000;
 
     const sharedQueue = new SharedChunkQueue();
 
@@ -284,44 +284,12 @@ export function useBridge({
       for (const spec of fetchDesc.Proxied.images) {
         const imageId = spec.image_id;
         const remoteFetcher: ChunkFetcher = async (coord, signal) => {
-          const compositeKey = `${datasetId}/${imageId}/${coord.key}`;
-          const rawBytes = await new Promise<ArrayBuffer>((resolve, reject) => {
-            const timeoutId = setTimeout(() => {
-              pendingChunkRequests.current.delete(compositeKey);
-              reject(new Error(`Chunk ${coord.key} timed out`));
-            }, CHUNK_TIMEOUT_MS);
-
-            pendingChunkRequests.current.set(compositeKey, {
-              resolve: (data) => { clearTimeout(timeoutId); resolve(data); },
-              reject: (err) => { clearTimeout(timeoutId); reject(err); },
-            });
-
-            bridgeRef.current?.send(JSON.stringify({
-              type: "chunk_request",
-              dataset_id: datasetId,
-              image_id: imageId,
-              key: coord.key,
-            }));
-
-            signal?.addEventListener("abort", () => {
-              clearTimeout(timeoutId);
-              pendingChunkRequests.current.delete(compositeKey);
-              reject(new DOMException("Aborted", "AbortError"));
-            });
-          });
-
-          // Decode wire format. Phase 1: server sends Raw (decompressed).
-          // Future: if wire format is Lz4/Zstd, client decompresses here.
-          const wf = spec.wire_format;
-          if ("Lz4" in wf) {
-            const { decompressLz4 } = await import("../zarr/lz4.ts");
-            return decompressLz4(rawBytes);
-          } else if ("Zstd" in wf) {
-            const fzstd = await import("fzstd");
-            return fzstd.decompress(new Uint8Array(rawBytes)).buffer;
-          }
-          // Raw — already decompressed, return as ArrayBuffer
-          return rawBytes;
+          const rawBytes = await contentSourceRef.current!.fetch(
+            { datasetId, imageId, chunkKey: coord.key, wireFormat: spec.wire_format },
+            signal ?? new AbortSignal(),
+          );
+          const dataType = extractDataType(spec.wire_format);
+          return decodePool.decode(rawBytes, spec.wire_format, dataType);
         };
 
         sharedQueue.registerMember(imageId, remoteFetcher);
@@ -456,6 +424,7 @@ export function useBridge({
 
   return {
     bridgeRef,
+    contentSourceRef,
     peers,
     myId,
     followTarget,

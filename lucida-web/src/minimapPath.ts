@@ -1,7 +1,6 @@
 /** Minimap render path: overview seeding + render + overlay callback. */
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
-import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 
@@ -115,7 +114,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
             const buf = ds.sharedQueue.get(memberId, chunkKey) ?? null;
             if (buf && buf.byteLength > 0) {
               available.push({
-                data: bufferToUint16(buf, multiscale.data_type),
+                data: new Uint16Array(buf),
                 x: ix, y: iy, z: iz, key: chunkKey,
               });
               uploaded.add(chunkKey);

@@ -9,7 +9,6 @@ export interface MemberChunkPlan {
   needed: ChunkCoord[];
   prefetch: ChunkCoord[];
 }
-import { bufferToUint16 } from "./zarr/dtypeConvert.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
@@ -103,7 +102,6 @@ export function uploadChunksForMembers(
       }
 
       if (!budgetExhausted) {
-        const fineDataType = ds.content.images[0].multiscale.data_type;
         const chunksToSend: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
         for (const coord of mp.needed) {
           if (debugStats.enabled && debugStats.uploadDebug) debugStats.uploadDebug.chunksAttempted++;
@@ -117,7 +115,7 @@ export function uploadChunksForMembers(
             continue;
           }
           if (debugStats.enabled && debugStats.uploadDebug) debugStats.uploadDebug.chunksCacheHit++;
-          const data = bufferToUint16(buf, fineDataType);
+          const data = new Uint16Array(buf);
           chunksToSend.push({ data, x: coord.x, y: coord.y, z: coord.z, key: coord.key });
           sentSet.add(coord.key);
           uploadBudget -= buf.byteLength;

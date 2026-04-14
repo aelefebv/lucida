@@ -12,7 +12,7 @@ import { applyViewportCommand } from "./applyAndSend.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
 import { debugStats } from "./debug/debugStats.ts";
 import type { VolumeData } from "./types.ts";
-import type { DatasetState, PendingChunkResolve } from "./types.ts";
+import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
 import { useLayout } from "./hooks/useLayout.ts";
@@ -32,8 +32,6 @@ function App() {
 
   // Shared refs used by multiple hooks
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
-  const pendingChunkRequests = useRef<Map<string, PendingChunkResolve>>(new Map());
-
   // Lifted state — shared across hooks that can't own it due to call ordering
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
   const [datasetsVersion, setDatasetsVersion] = useState(0);
@@ -86,7 +84,6 @@ function App() {
     ensureScene: scene.ensureScene,
     loopRef: render.loopRef,
     datasetsRef,
-    pendingChunkRequests,
     datasetCallbacksRef,
     bumpLayerSettingsVersion: layers.bumpLayerSettingsVersion,
     initLayerMaps: layers.initLayerMaps,
@@ -128,12 +125,7 @@ function App() {
         return prev;
       });
       setVolumeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
-      for (const [key, pending] of pendingChunkRequests.current) {
-        if (key.startsWith(id + "/")) {
-          pending.reject(new Error("Dataset removed"));
-          pendingChunkRequests.current.delete(key);
-        }
-      }
+      bridge.contentSourceRef.current?.rejectDataset(id);
       bumpDatasetsVersion();
     },
   };
