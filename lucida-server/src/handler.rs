@@ -281,6 +281,8 @@ pub async fn handle_client(
                                         &unicast_routes_clone,
                                     ).await;
                                 });
+                            } else {
+                                eprintln!("server: no binding for dataset {dataset_id} (chunk {key} dropped)");
                             }
                         }
                         ChunkMessage::ChunkFetch { .. } => {

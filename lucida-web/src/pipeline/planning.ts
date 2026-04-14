@@ -587,10 +587,13 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
+    const maxT = entity.levels[0]?.grid_shape[0] ?? 0;
     for (let dt = 1; dt <= RUNWAY_DEPTH; dt++) {
+      const nextT = snapshot.selection.t + dt;
+      if (nextT >= maxT) break;
       const runwaySelection: SelectionState = {
         ...snapshot.selection,
-        t: snapshot.selection.t + dt,
+        t: nextT,
       };
 
       const chunks = iterateChunks(
