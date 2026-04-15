@@ -480,7 +480,7 @@ describe("iterateChunks", () => {
 describe("request scheduling", () => {
   /** Reusable single-entity snapshot for scheduling tests. */
   function makeSchedulingSnapshot(): PlanningSnapshot {
-    const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
+    const level0 = makeLevelGeo(0, [20, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
@@ -760,7 +760,7 @@ describe("plan()", () => {
 
   it("full integration: two entities, three lanes, sorted output", () => {
     // Entity 1: large projected diagonal -> detail
-    const level0A = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
+    const level0A = makeLevelGeo(0, [20, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const entityDetail = createSyntheticEntity({
       entityId: "detail-entity",
       imageId: "img-detail",
@@ -773,7 +773,7 @@ describe("plan()", () => {
     });
 
     // Entity 2: small projected diagonal -> overview
-    const level0B = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
+    const level0B = makeLevelGeo(0, [20, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const entityOverview = createSyntheticEntity({
       entityId: "overview-entity",
       imageId: "img-overview",
