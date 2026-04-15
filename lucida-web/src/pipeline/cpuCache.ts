@@ -63,6 +63,8 @@ export interface CacheTelemetry {
   detailBudget: number;
   overviewBytes: number;
   overviewBudget: number;
+  maxConcurrentFetches: number;
+  maxBytesInFlight: number;
   inFlightCount: number;
   inFlightBytes: number;
   queueDepth: number;
@@ -290,6 +292,8 @@ export class CpuCache {
       detailBudget: this.config.detailBudgetBytes,
       overviewBytes: this.overviewBytes,
       overviewBudget: this.config.overviewBudgetBytes,
+      maxConcurrentFetches: this.config.maxConcurrentFetches,
+      maxBytesInFlight: this.config.maxBytesInFlight,
       inFlightCount: this.inFlight.size,
       inFlightBytes: this.inFlightBytes,
       queueDepth: this.pendingQueue.length,
@@ -305,6 +309,11 @@ export class CpuCache {
         ? this.decodeTimes.reduce((a, b) => a + b, 0) / this.decodeTimes.length
         : 0,
     };
+  }
+
+  /** Update configuration at runtime (e.g. from debug panel). */
+  updateConfig(partial: Partial<CpuCacheConfig>): void {
+    Object.assign(this.config, partial);
   }
 
   /**

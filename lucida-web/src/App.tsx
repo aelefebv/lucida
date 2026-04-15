@@ -424,6 +424,7 @@ function App() {
               datasetId={selectedDatasetId}
               lastClickScreen={lastClickScreen}
               datasets={datasetsRef.current}
+              cpuCacheRef={bridge.cpuCacheRef}
               style={{ height: layout.canvasHeight }}
             />
           )}

@@ -99,3 +99,41 @@
   color: #666;
   font-style: italic;
 }
+
+.debug-bar-track {
+  height: 8px;
+  background: #333;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 2px 0;
+}
+
+.debug-bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.2s ease;
+}
+
+.debug-config-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.debug-config-input {
+  width: 64px;
+  padding: 1px 4px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  border-radius: 3px;
+  color: #ccc;
+  font-family: inherit;
+  font-size: 10px;
+  text-align: right;
+}
+
+.debug-config-input:focus {
+  outline: none;
+  border-color: #4a9eff;
+}

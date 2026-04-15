@@ -569,7 +569,7 @@ Codec-agnostic worker pool: Raw/LZ4/Zstd decompression + pixel-format normalizat
 
 ---
 
-### S2: Content Source
+### S2: Content Source ✅
 
 **Files:** `contentSource.ts`
 
@@ -581,7 +581,7 @@ Codec-agnostic worker pool: Raw/LZ4/Zstd decompression + pixel-format normalizat
 
 ---
 
-### S3: Cache + Fetch Scheduler
+### S3: Cache + Fetch Scheduler ✅
 
 **Files:** `cpuCache.ts`, `cpuCache.test.ts`
 
@@ -603,7 +603,7 @@ The core logic, built in three sub-steps within the same file:
 
 ---
 
-### S4: Debug Panel Cache Tab
+### S4: Debug Panel Cache Tab ✅
 
 **Files:** Extend existing debug panel
 
@@ -613,7 +613,7 @@ Add cache tab reading from `cpuCache.telemetry()`, following the pattern of the 
 
 ---
 
-### S5: Orchestrator Integration (M2 Swap)
+### S5: Orchestrator Integration (M2 Swap) ✅
 
 **Files:** Modify `orchestrator.ts`, delete legacy files
 

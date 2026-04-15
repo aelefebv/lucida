@@ -19,11 +19,12 @@ import type {
   RequestPlan,
   PlanningEpochs,
 } from "../pipeline/planning.ts";
+import type { CpuCache, CacheTelemetry } from "../pipeline/cpuCache.ts";
 import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
 
-type TabId = "render" | "scene" | "pick" | "planning" | "orch";
+type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch";
 
 interface SceneQuerySnap {
   epochs: { content: number; layout: number; view: number; selection: number } | null;
@@ -54,6 +55,7 @@ interface DebugPanelProps {
   datasetId?: string | null;
   lastClickScreen?: [number, number] | null;
   datasets: Map<string, { sharedQueue: any; content: ContentGraph }>;
+  cpuCacheRef?: React.RefObject<CpuCache | null>;
   style?: React.CSSProperties;
 }
 
@@ -67,7 +69,7 @@ function fmtBytes(bytes: number): string {
   return `${bytes}B`;
 }
 
-export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets, style }: DebugPanelProps) {
+export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets, cpuCacheRef, style }: DebugPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("render");
   const [snap, setSnap] = useState<DebugStats>({ ...debugStats });
 
@@ -88,9 +90,16 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     entityPositions: [string, [number, number]][];
   } | null>(null);
 
+  // Cache tab state
+  const [cacheTelemetry, setCacheTelemetry] = useState<CacheTelemetry | null>(null);
+
   useEffect(() => {
     const id = setInterval(() => {
       setSnap({ ...debugStats, memberStats: [...debugStats.memberStats] });
+
+      // Poll cache telemetry
+      const cache = cpuCacheRef?.current;
+      if (cache) setCacheTelemetry(cache.telemetry());
 
       // Poll scene query data if available
       const ws = wasmSceneRef?.current;
@@ -235,7 +244,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [wasmSceneRef, datasetId, datasets]);
+  }, [wasmSceneRef, datasetId, datasets, cpuCacheRef]);
 
   // Ray pick on click
   useEffect(() => {
@@ -260,6 +269,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "scene", label: "Scene" },
     { id: "pick", label: "Pick" },
     { id: "planning", label: "Planning" },
+    { id: "cache", label: "Cache" },
     { id: "orch", label: "Orch" },
   ];
 
@@ -397,6 +407,149 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             ) : (
               <div className="debug-section">
                 <div style={{ color: "#666" }}>Click viewport to pick</div>
+              </div>
+            )}
+          </>
+        )}
+
+        {activeTab === "cache" && (
+          <>
+            {cacheTelemetry ? (
+              <>
+                {/* Budget */}
+                <div className="debug-section">
+                  <div className="debug-title">Budget</div>
+                  {(() => {
+                    const detailPct = cacheTelemetry.detailBudget > 0
+                      ? Math.min(100, Math.round((cacheTelemetry.detailBytes / cacheTelemetry.detailBudget) * 100))
+                      : 0;
+                    const overviewPct = cacheTelemetry.overviewBudget > 0
+                      ? Math.min(100, Math.round((cacheTelemetry.overviewBytes / cacheTelemetry.overviewBudget) * 100))
+                      : 0;
+                    return (
+                      <>
+                        <div>Detail: {fmtBytes(cacheTelemetry.detailBytes)} / {fmtBytes(cacheTelemetry.detailBudget)} ({detailPct}%)</div>
+                        <div className="debug-bar-track">
+                          <div className="debug-bar-fill" style={{ width: `${detailPct}%`, background: "#4f4" }} />
+                        </div>
+                        <div>Overview: {fmtBytes(cacheTelemetry.overviewBytes)} / {fmtBytes(cacheTelemetry.overviewBudget)} ({overviewPct}%)</div>
+                        <div className="debug-bar-track">
+                          <div className="debug-bar-fill" style={{ width: `${overviewPct}%`, background: "#88f" }} />
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+
+                {/* Fetch */}
+                <div className="debug-section">
+                  <div className="debug-title">Fetch</div>
+                  <div>In-flight: {cacheTelemetry.inFlightCount} reqs, {fmtBytes(cacheTelemetry.inFlightBytes)}</div>
+                  <div>Queue: {cacheTelemetry.queueDepth}</div>
+                </div>
+
+                {/* Hit Rate */}
+                <div className="debug-section">
+                  <div className="debug-title">Hit Rate</div>
+                  <div>{fmt(cacheTelemetry.hitRate * 100, 1)}%</div>
+                </div>
+
+                {/* Eviction */}
+                <div className="debug-section">
+                  <div className="debug-title">Eviction</div>
+                  <div>
+                    Mode:{" "}
+                    <span style={{
+                      color: cacheTelemetry.interactionMode === "panning" ? "#4f4"
+                        : cacheTelemetry.interactionMode === "scrubbing" ? "#ff4"
+                        : "#888",
+                    }}>
+                      {cacheTelemetry.interactionMode}
+                    </span>
+                  </div>
+                  <div>Tier order: {cacheTelemetry.evictionTierOrder.join(" > ")}</div>
+                  <div>Evictions/s: {fmt(cacheTelemetry.evictionsPerSec, 1)}</div>
+                </div>
+
+                {/* Errors */}
+                <div className="debug-section" style={{
+                  background: (cacheTelemetry.failedChunks.transient > 0 || cacheTelemetry.failedChunks.permanent > 0) ? "#4a1111" : undefined,
+                }}>
+                  <div className="debug-title">Errors</div>
+                  <div>
+                    Transient: {cacheTelemetry.failedChunks.transient}{" "}
+                    Permanent: {cacheTelemetry.failedChunks.permanent}
+                  </div>
+                  {cacheTelemetry.lastError && (
+                    <div style={{ color: "#f88", fontSize: 10, wordBreak: "break-all" }}>
+                      {cacheTelemetry.lastError}
+                    </div>
+                  )}
+                </div>
+
+                {/* Decode */}
+                <div className="debug-section">
+                  <div className="debug-title">Decode</div>
+                  <div>Workers: {cacheTelemetry.decodeWorkersBusy} / {cacheTelemetry.decodeWorkersTotal}</div>
+                  <div>Avg: {fmt(cacheTelemetry.avgDecodeMs, 2)}ms</div>
+                </div>
+
+                {/* Config */}
+                <div className="debug-section">
+                  <div className="debug-title">Config</div>
+                  <div className="debug-config-row">
+                    <span>Detail budget (MB)</span>
+                    <input
+                      className="debug-config-input"
+                      type="number"
+                      value={Math.round(cacheTelemetry.detailBudget / (1024 * 1024))}
+                      onChange={e => {
+                        const mb = Number(e.target.value);
+                        if (mb > 0) cpuCacheRef?.current?.updateConfig({ detailBudgetBytes: mb * 1024 * 1024 });
+                      }}
+                    />
+                  </div>
+                  <div className="debug-config-row">
+                    <span>Overview budget (MB)</span>
+                    <input
+                      className="debug-config-input"
+                      type="number"
+                      value={Math.round(cacheTelemetry.overviewBudget / (1024 * 1024))}
+                      onChange={e => {
+                        const mb = Number(e.target.value);
+                        if (mb > 0) cpuCacheRef?.current?.updateConfig({ overviewBudgetBytes: mb * 1024 * 1024 });
+                      }}
+                    />
+                  </div>
+                  <div className="debug-config-row">
+                    <span>Max fetches</span>
+                    <input
+                      className="debug-config-input"
+                      type="number"
+                      value={cacheTelemetry.maxConcurrentFetches}
+                      onChange={e => {
+                        const v = Number(e.target.value);
+                        if (v > 0) cpuCacheRef?.current?.updateConfig({ maxConcurrentFetches: v });
+                      }}
+                    />
+                  </div>
+                  <div className="debug-config-row">
+                    <span>Max in-flight (MB)</span>
+                    <input
+                      className="debug-config-input"
+                      type="number"
+                      value={Math.round(cacheTelemetry.maxBytesInFlight / (1024 * 1024))}
+                      onChange={e => {
+                        const mb = Number(e.target.value);
+                        if (mb > 0) cpuCacheRef?.current?.updateConfig({ maxBytesInFlight: mb * 1024 * 1024 });
+                      }}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="debug-section">
+                <div style={{ color: "#666" }}>Cache data not available</div>
               </div>
             )}
           </>
