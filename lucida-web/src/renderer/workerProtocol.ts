@@ -1,6 +1,6 @@
 /** Discriminated-union message types for main <-> render worker communication. */
 
-import type { PlanningEpochs } from "../pipeline/planning.ts";
+import type { PlanningEpochs, VisibleRegion } from "../pipeline/planning.ts";
 
 /** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
 export const VOLUME_ATLAS_BUDGET = 512 * 1024 * 1024; // 512 MB
@@ -123,6 +123,7 @@ export interface VolumeLayerParams {
 
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
+  epochs: PlanningEpochs;
   layers: VolumeLayerParams[];
   invViewProj: Float32Array;
   eye: Float32Array;
@@ -155,6 +156,7 @@ export interface SliceLayerParams {
 
 export interface SliceRenderMultiPassMessage {
   type: "sliceRenderMultiPass";
+  epochs: PlanningEpochs;
   layers: SliceLayerParams[];
   zoom: number;
   cx: number;
@@ -230,6 +232,30 @@ export interface DestroyMessage {
   type: "destroy";
 }
 
+// --- Cold state (main → worker, per epoch change) ---
+
+export interface ColdStateActiveEntry {
+  entityId: string;
+  imageId: string;
+  targetLod: number;
+  detailOwnedLodRange: [number, number]; // [finest, coarsest]
+  levels: Array<{
+    level: number;
+    chunkShape: [number, number, number]; // [Z, Y, X]
+    gridShape: [number, number, number];  // chunks per axis
+  }>;
+}
+
+export interface ColdStateMessage {
+  type: "coldState";
+  epochs: PlanningEpochs;
+  currentT: number;
+  visibleChannels: number[];
+  visibleRegion: VisibleRegion;
+  activeSet: ColdStateActiveEntry[];
+  viewMode: "slice" | "volume";
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
@@ -246,7 +272,8 @@ export type MainToWorkerMessage =
   | MinimapUploadOverviewChunksForLayerMessage
   | RemoveLayerResourcesMessage
   | UpdateCursorDataMessage
-  | DestroyMessage;
+  | DestroyMessage
+  | ColdStateMessage;
 
 // --- Worker -> Main ---
 
@@ -275,8 +302,15 @@ export interface ChunksEvictedMessage {
   skipped?: string[];
 }
 
+export interface WantedSetDeltaMessage {
+  type: "wantedSetDelta";
+  epochs: PlanningEpochs;
+  missing: Array<{ entityId: string; chunkKey: string }>;
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | ErrorMessage
   | IntensityRangeMessage
-  | ChunksEvictedMessage;
+  | ChunksEvictedMessage
+  | WantedSetDeltaMessage;

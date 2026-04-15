@@ -192,7 +192,7 @@ describe("epoch caching", () => {
     return {
       scene,
       datasets,
-      client: {} as any,
+      client: { coldState: vi.fn() } as any,
       canvas: { clientWidth: 800, clientHeight: 600 } as any,
       mode: "slice",
       renderScale: 1,
@@ -399,7 +399,7 @@ describe("multi-dataset planning", () => {
     return {
       scene,
       datasets,
-      client: {} as any,
+      client: { coldState: vi.fn() } as any,
       canvas: { clientWidth: 800, clientHeight: 600 } as any,
       mode: "slice",
       renderScale: 1,

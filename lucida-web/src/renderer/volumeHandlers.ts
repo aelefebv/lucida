@@ -11,7 +11,7 @@ import type { PlanningEpochs } from "../pipeline/planning.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16 } from "./dataTypeUtil.ts";
 
-interface AtlasState {
+export interface AtlasState {
   texture: GPUTexture;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
@@ -29,6 +29,10 @@ interface AtlasState {
 }
 
 const atlasPerDataset = new Map<string, AtlasState>();
+
+export function getVolumeAtlases(): Map<string, AtlasState> {
+  return atlasPerDataset;
+}
 
 // Shared depth texture for volume rendering (used by cursor renderer for occlusion)
 let depthTexture: GPUTexture | null = null;
@@ -241,6 +245,7 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
 
   if (evictedKeys.length > 0 || skippedKeys.length > 0) {
     ctx.post({ type: "chunksEvicted", datasetId, keys: evictedKeys, skipped: skippedKeys });
+    ctx.postWantedSet();
   }
 
   if (intensityChanged) {

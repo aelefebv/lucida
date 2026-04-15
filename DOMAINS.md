@@ -779,7 +779,7 @@ The key principle: the content graph says what the dataset is. The scene says wh
 2. **Scene State updates** — `register_layout()` / `set_active_layout()`, `ViewQueryResult` geometric queries, epoch system. *(done)*
 3. **Planning** — promotion, epochs, request scheduling over content graph + geometric queries. Testable standalone with mock snapshots. *(done)*
 4. **CPU Cache + Content Source** — fetch, decode, source abstraction. *(done — CpuCache is primary fetch+delivery path, MemberChunkPlan adapter deleted, see `docs/cpu-cache-spec.md`)*
-5. **Worker Protocol** — control/data/telemetry message shapes, epoch tagging.
+5. **Worker Protocol** — control/data/telemetry message shapes, epoch tagging. *(done — cold state, wanted-set loop, requestEpoch, see PRD #378)*
 6. **Presentation Overlay + Asset Catalog** — derived layouts expressed as `LayoutSpec`, asset catalog. Build alongside the Orchestrator since asset catalog feeds into PlanningSnapshot and derived layouts are browser-authored.
 7. **Orchestrator** — wires Planning to CPU Cache, Worker Protocol, and upstream domains. Snapshot assembly, lifecycle, telemetry fan-out. *(done — M0+M2, see `docs/orchestrator-integration-spec.md`)*
 8. **GPU Residency** — atlas, page table, descriptors, wanted-set reporting.

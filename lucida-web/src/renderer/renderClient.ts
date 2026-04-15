@@ -6,6 +6,7 @@ import type {
   SliceLayerParams,
   MinimapLayerParams,
   WorkerToMainMessage,
+  ColdStateMessage,
 } from "./workerProtocol.ts";
 import type { PlanningEpochs } from "../pipeline/planning.ts";
 
@@ -15,6 +16,7 @@ export class RenderClient {
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ((datasetId: string, evicted: string[], skipped: string[]) => void) | null = null;
+  onWantedSetDelta: ((epochs: PlanningEpochs, missing: Array<{ entityId: string; chunkKey: string }>) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -50,6 +52,8 @@ export class RenderClient {
       this.onIntensityRange(msg.datasetId, msg.min, msg.max);
     } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
       this.onChunksEvicted(msg.datasetId, msg.keys, msg.skipped ?? []);
+    } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
+      this.onWantedSetDelta(msg.epochs, msg.missing);
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
     }
@@ -177,6 +181,10 @@ export class RenderClient {
     );
   }
 
+  coldState(msg: ColdStateMessage) {
+    this.worker.postMessage(msg);
+  }
+
   volumeRenderMultiPass(
     layers: VolumeLayerParams[],
     invViewProj: Float32Array,
@@ -185,6 +193,7 @@ export class RenderClient {
     canvasH: number,
     fullW: number,
     fullH: number,
+    epochs: PlanningEpochs,
     viewProj?: Float32Array,
     camForward?: Float32Array,
     clipDistance?: number,
@@ -192,6 +201,7 @@ export class RenderClient {
   ) {
     this.worker.postMessage({
       type: "volumeRenderMultiPass",
+      epochs,
       layers, invViewProj, eye,
       canvasW, canvasH, fullW, fullH, viewProj,
       camForward, clipDistance, clipMode,
@@ -205,9 +215,11 @@ export class RenderClient {
     cy: number,
     canvasW: number,
     canvasH: number,
+    epochs: PlanningEpochs,
   ) {
     this.worker.postMessage({
       type: "sliceRenderMultiPass",
+      epochs,
       layers, zoom, cx, cy,
       canvasW, canvasH,
     });

@@ -202,7 +202,7 @@ function uploadAndRenderVolume(
     debugStats.renderPassCount = layers.length;
   }
 
-  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, viewProj, camForward, clipDistance, clipMode);
+  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode);
 
   return budgetExhausted;
 }

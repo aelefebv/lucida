@@ -86,6 +86,16 @@ Top-level terms. Per-crate glossaries have more detail.
 
 **PlanningEpochs** -- Extends SceneEpochs with `asset` (from Asset Catalog, placeholder) and `request` (bumped per plan cycle).
 
+**requestEpoch** -- Monotonic counter bumped each time `plan()` produces a new `RequestPlan`. Carried on all main→worker messages so the worker can distinguish one plan generation from another.
+
+**Cold state** -- Per-epoch-change message (`ColdStateMessage`) sent from the orchestrator to the GPU worker carrying the active set, visible region, current T, visible channels, and view mode. Enables the worker to compute its wanted-set.
+
+**ColdStateMessage** -- Main→worker message carrying cold state. Sent on content/layout/selection epoch change, after `plan()` produces a new active set.
+
+**Wanted-set** -- The set of chunks the GPU worker reports as missing — the diff between what it should have (derived from cold state + visible region) and what it actually has in its atlas. Computed by `computeWantedSet()`.
+
+**WantedSetDeltaMessage** -- Worker→main message carrying the wanted-set: an array of `{ entityId, chunkKey }` entries for chunks the worker needs but doesn't have. Sent after cold state arrival and after eviction.
+
 ## Per-Crate Glossaries
 
 - [lucida-content/GLOSSARY.md](lucida-content/GLOSSARY.md)

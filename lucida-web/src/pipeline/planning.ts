@@ -44,7 +44,7 @@ export interface PlanningEpochs {
   selection: number;
   /** Placeholder — always 0 until Asset Catalog (step 6). */
   asset: number;
-  /** Placeholder — always 0 initially. */
+  /** Bumped when Planning produces a new request plan. */
   request: number;
 }
 
@@ -109,8 +109,8 @@ export interface CacheStateSnapshot {
 }
 
 export interface WorkerWantedSetSnapshot {
-  /** entityId -> set of chunk keys resident on the GPU worker. */
-  resident: Map<string, Set<string>>;
+  /** entityId -> set of chunk keys the GPU worker reports as missing. */
+  missing: Map<string, Set<string>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -307,7 +307,7 @@ export function createSyntheticSnapshot(
       interactionState: "idle",
     },
     cacheState: { cached: new Map(), inFlight: new Map() },
-    workerWantedSet: { resident: new Map() },
+    workerWantedSet: { missing: new Map() },
     previousActiveSet: [],
     assetCatalog: null,
     ...overrides,

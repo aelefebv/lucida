@@ -220,7 +220,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 visibleRegion,
                 selection,
                 cacheState: { cached: new Map(), inFlight: new Map() },
-                workerWantedSet: { resident: new Map() },
+                workerWantedSet: { missing: new Map() },
                 previousActiveSet: prevActiveSetRef.current,
                 assetCatalog: null,
               };

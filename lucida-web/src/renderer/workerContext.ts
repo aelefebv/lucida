@@ -17,4 +17,6 @@ export interface WorkerCtx {
   getDummy3DTexture(): GPUTexture;
   getOrCreateLUT(name: string): GPUTexture;
   post(msg: WorkerToMainMessage): void;
+  /** Recompute and post wanted-set delta after eviction. */
+  postWantedSet(): void;
 }

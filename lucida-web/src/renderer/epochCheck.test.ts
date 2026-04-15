@@ -52,4 +52,10 @@ describe("isStaleDelivery", () => {
     const current = makeEpochs({ selection: 1 });
     expect(isStaleDelivery(delivery, current)).toBe(false);
   });
+
+  it("older requestEpoch only → not stale", () => {
+    const delivery = makeEpochs({ request: 0 });
+    const current = makeEpochs({ request: 5 });
+    expect(isStaleDelivery(delivery, current)).toBe(false);
+  });
 });

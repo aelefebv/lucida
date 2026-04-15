@@ -12,7 +12,7 @@ import type { PlanningEpochs } from "../pipeline/planning.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16, asUint16Slice } from "./dataTypeUtil.ts";
 
-interface SliceAtlasState {
+export interface SliceAtlasState {
   texture: GPUTexture;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
@@ -30,6 +30,10 @@ interface SliceAtlasState {
 }
 
 const atlasPerDataset = new Map<string, SliceAtlasState>();
+
+export function getSliceAtlases(): Map<string, SliceAtlasState> {
+  return atlasPerDataset;
+}
 
 // Last known viewport center in [0,1] UV space per dataset
 const cameraUVPerDataset = new Map<string, [number, number]>();
@@ -220,6 +224,7 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
 
   if (evictedKeys.length > 0 || skippedKeys.length > 0) {
     ctx.post({ type: "chunksEvicted", datasetId, keys: evictedKeys, skipped: skippedKeys });
+    ctx.postWantedSet();
   }
 
   if (intensityChanged) {

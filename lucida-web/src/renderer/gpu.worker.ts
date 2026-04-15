@@ -1,13 +1,14 @@
 /** WebGPU render worker — thin dispatcher to handler modules. */
-import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.ts";
+import type { MainToWorkerMessage, WorkerToMainMessage, ColdStateMessage } from "./workerProtocol.ts";
 import { initGPU, createOffscreenTarget } from "./gpuContext.ts";
 import { SliceRenderer } from "./sliceRenderer.ts";
 import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import { handleSliceAtlasConfig, handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./sliceHandlers.ts";
-import { handleVolumeAtlasConfig, handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources } from "./volumeHandlers.ts";
+import { handleSliceAtlasConfig, handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases } from "./sliceHandlers.ts";
+import { handleVolumeAtlasConfig, handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases } from "./volumeHandlers.ts";
+import { computeWantedSet } from "./wantedSet.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 import { getColormapData } from "../colormaps.ts";
 import type { PlanningEpochs } from "../pipeline/planning.ts";
@@ -22,6 +23,7 @@ let compositor: LayerCompositor | null = null;
 let cursorRenderer: CursorRenderer | null = null;
 
 let currentEpochs: PlanningEpochs | null = null;
+let currentColdState: ColdStateMessage | null = null;
 
 // LUT texture cache for colormap rendering
 const lutCache = new Map<string, GPUTexture>();
@@ -89,6 +91,13 @@ function post(msg: WorkerToMainMessage) {
   self.postMessage(msg);
 }
 
+/** Compute and post wanted-set delta from current cold state + atlas state. */
+function postWantedSet() {
+  if (!currentColdState || !currentEpochs) return;
+  const result = computeWantedSet(currentColdState, getVolumeAtlases(), getSliceAtlases());
+  post({ type: "wantedSetDelta", epochs: currentEpochs, missing: result.missing });
+}
+
 let ctx: WorkerCtx;
 
 self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
@@ -126,6 +135,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           getDummy3DTexture,
           getOrCreateLUT,
           post,
+          postWantedSet,
         };
         post({ type: "ready" });
         break;
@@ -183,6 +193,12 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
+      case "coldState":
+        currentColdState = msg;
+        currentEpochs = msg.epochs;
+        postWantedSet();
+        break;
+
       case "removeLayerResources":
         removeSliceResources(msg.datasetId);
         removeVolumeResources(msg.datasetId);
@@ -191,6 +207,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
 
       case "destroy":
         currentEpochs = null;
+        currentColdState = null;
         destroyAllSliceResources();
         destroyAllVolumeResources();
         destroyAllMinimapResources();

@@ -6,7 +6,8 @@
 
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { SceneSettings } from "../tickCommon.ts";
-import type { ImageSpec, ContentGraph } from "../contentTypes.ts";
+import type { ImageSpec, ContentGraph, LevelGeometry } from "../contentTypes.ts";
+import type { ColdStateActiveEntry, ColdStateMessage } from "../renderer/workerProtocol.ts";
 import {
   getSceneSettings,
   getActiveChannels,
@@ -65,6 +66,9 @@ export class Orchestrator {
   // Delivery state — tracks what's been sent to the GPU worker
   private deliverySentToWorker = new Map<string, Set<string>>();
   private deliveryPrevStateKey = new Map<string, string>();
+
+  /** Wanted-set from the GPU worker — entityId → Set<chunkKey> of missing chunks. */
+  private workerWantedSet = new Map<string, Set<string>>();
 
   planAndFetch(
     ctx: TickContext,
@@ -209,7 +213,7 @@ export class Orchestrator {
         visibleRegion,
         selection,
         cacheState: { cached: new Map(), inFlight: new Map() },
-        workerWantedSet: { resident: new Map() },
+        workerWantedSet: { missing: new Map() },
         previousActiveSet: this.previousActiveSet.get(dsId) ?? [],
         assetCatalog: null,
       };
@@ -232,6 +236,9 @@ export class Orchestrator {
       });
 
       this._lastFilteredRequests = filteredRequests;
+
+      // Send cold state to the worker so it knows the full planning context
+      this.sendColdState(result.activeSet, entities, selection, visibleRegion, currentEpochs, ctx);
 
       // Annotate requests with the real dataset ID (entityId may differ for plates)
       for (const req of filteredRequests) {
@@ -459,6 +466,19 @@ export class Orchestrator {
     }
   }
 
+  /** Process a wanted-set delta from the GPU worker. */
+  handleWantedSetDelta(missing: Array<{ entityId: string; chunkKey: string }>): void {
+    this.workerWantedSet.clear();
+    for (const { entityId, chunkKey } of missing) {
+      let set = this.workerWantedSet.get(entityId);
+      if (!set) {
+        set = new Set();
+        this.workerWantedSet.set(entityId, set);
+      }
+      set.add(chunkKey);
+    }
+  }
+
   /** Get all tracked worker member IDs (for multi-channel transition cleanup). */
   getTrackedMemberIds(): string[] {
     return [...new Set([...this.deliveryPrevStateKey.keys(), ...this.deliverySentToWorker.keys()])];
@@ -595,6 +615,53 @@ export class Orchestrator {
       }
     }
     return requests;
+  }
+
+  /** Build and send a ColdStateMessage to the GPU worker. */
+  private sendColdState(
+    activeSet: ActiveSetEntry[],
+    entities: EntitySnapshot[],
+    selection: SelectionState,
+    visibleRegion: VisibleRegion,
+    epochs: PlanningEpochs,
+    ctx: TickContext,
+  ): void {
+    const entityById = new Map(entities.map(e => [e.entityId, e]));
+
+    const coldActiveSet: ColdStateActiveEntry[] = activeSet.map(entry => {
+      const entity = entityById.get(entry.entityId);
+      const levels = (entity?.levels ?? []).map((lvl: LevelGeometry, idx: number) => {
+        const chunkShape: [number, number, number] = [
+          lvl.chunk_shape[2], lvl.chunk_shape[3], lvl.chunk_shape[4],
+        ];
+        const gridShape: [number, number, number] = [
+          Math.ceil(lvl.shape[2] / lvl.chunk_shape[2]),
+          Math.ceil(lvl.shape[3] / lvl.chunk_shape[3]),
+          Math.ceil(lvl.shape[4] / lvl.chunk_shape[4]),
+        ];
+        return { level: idx, chunkShape, gridShape };
+      });
+
+      return {
+        entityId: entry.entityId,
+        imageId: entry.imageId,
+        targetLod: entry.targetLod,
+        detailOwnedLodRange: entry.detailOwnedLodRange,
+        levels,
+      };
+    });
+
+    const msg: ColdStateMessage = {
+      type: "coldState",
+      epochs,
+      currentT: selection.t,
+      visibleChannels: selection.visibleChannels,
+      visibleRegion,
+      activeSet: coldActiveSet,
+      viewMode: selection.renderMode,
+    };
+
+    ctx.client.coldState(msg);
   }
 }
 

@@ -132,7 +132,7 @@ function uploadAndRenderSlice(
   }
 
   client.resize(canvasW, canvasH);
-  client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH);
+  client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs);
 
   return budgetExhausted;
 }

@@ -2,6 +2,7 @@
 import type { ContentGraph } from "./contentTypes.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+import type { PlanningEpochs } from "./pipeline/planning.ts";
 import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
@@ -64,6 +65,16 @@ export class RenderLoop {
       }
     };
 
+    // When the worker reports its wanted-set, update the orchestrator and
+    // schedule a tick so wanted chunks can be delivered from CpuCache.
+    this.client.onWantedSetDelta = (_epochs, missing) => {
+      this.orchestrator.handleWantedSetDelta(missing);
+      if (missing.length > 0) {
+        this.dataDirty = true;
+        this.scheduleIfNeeded();
+      }
+    };
+
     this.viewDirty = true;
     this.scheduleIfNeeded();
   }
@@ -74,6 +85,7 @@ export class RenderLoop {
       this.rafId = null;
     }
     this.client.onChunksEvicted = null;
+    this.client.onWantedSetDelta = null;
     this.cpuCacheUnsub?.();
     this.cpuCacheUnsub = null;
     this.cpuCache = null;
@@ -131,13 +143,14 @@ export class RenderLoop {
     if (this.datasets.size === 0) {
       const w = this.canvas.clientWidth;
       const h = this.canvas.clientHeight;
+      const zeroEpochs: PlanningEpochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
       this.client.resize(w, h);
       if (this.mode === "slice") {
-        this.client.sliceRenderMultiPass([], 1, 0, 0, w, h);
+        this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs);
       } else {
         const identity = new Float32Array(16);
         identity[0] = identity[5] = identity[10] = identity[15] = 1;
-        this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, identity, new Float32Array([0, 0, -1]), 0, 0);
+        this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, zeroEpochs, identity, new Float32Array([0, 0, -1]), 0, 0);
       }
     }
 

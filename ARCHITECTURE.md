@@ -73,9 +73,18 @@ Planning cycle (web only, wired in step 7/Orchestrator):
 Worker protocol (main thread → GPU worker):
   → Atlas config messages carry PlanningEpochs (establish worker's "current" epoch)
   → Chunk data messages carry PlanningEpochs (epoch data was fetched under)
+  → Render messages carry PlanningEpochs (for staleness metadata)
+  → Cold state message (ColdStateMessage) sent on epoch change: active set,
+    visible region, current T, visible channels, view mode
   → Worker compares delivery epochs against current: drops stale batches
   → Staleness = delivery.selectionEpoch < current or delivery.contentEpoch < current
   → Stale drops reported back as "skipped" via chunksEvicted message
+
+Worker protocol (GPU worker → main thread):
+  → chunksEvicted: evicted + skipped chunk keys (triggers re-delivery)
+  → intensityRange: min/max intensity for auto-contrast
+  → wantedSetDelta: chunks the worker needs but doesn't have (computed from
+    cold state + atlas state via computeWantedSet()), triggers delivery tick
 ```
 
 ## Per-Crate Architecture Docs
