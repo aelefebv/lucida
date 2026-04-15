@@ -90,7 +90,7 @@ export class Orchestrator {
         }
       }
       // Re-submit to CpuCache so it can retry failed/cancelled fetches
-      if (ctx.cpuCache && this._lastFilteredRequests.length > 0) {
+      if (this._lastFilteredRequests.length > 0) {
         ctx.cpuCache.submit({
           requests: this._lastFilteredRequests,
           activeSet: [...(this.previousActiveSet.values())].flat(),
@@ -197,7 +197,7 @@ export class Orchestrator {
       // chunks, _lastFilteredRequests would miss them and re-send would break.
       // CpuCache.submit() deduplicates internally, so no double-fetching occurs.
       for (const entity of entities) {
-        const cachedKeys = ctx.cpuCache?.snapshot().cached.get(entity.entityId);
+        const cachedKeys = ctx.cpuCache.snapshot().cached.get(entity.entityId);
         this._lastCachedKeyCounts.set(entity.entityId, cachedKeys?.size ?? 0);
       }
 
@@ -238,13 +238,11 @@ export class Orchestrator {
       }
 
       // Submit to CpuCache for fetching
-      if (ctx.cpuCache) {
-        ctx.cpuCache.submit({
-          requests: filteredRequests,
-          activeSet: result.activeSet,
-          epochs: currentEpochs,
-        });
-      }
+      ctx.cpuCache.submit({
+        requests: filteredRequests,
+        activeSet: result.activeSet,
+        epochs: currentEpochs,
+      });
 
       // 3j. Build member roster from active set for render layer construction.
       // The roster lists promoted entities with their imageId and position —
@@ -270,31 +268,10 @@ export class Orchestrator {
         }
       }
 
-      if (ctx.cpuCache) {
-        // CpuCache handles main-view fetching; only submit minimap to SharedChunkQueue
-        this._lastFetchLists.set(dsId, minimapCoords);
-        if (minimapCoords.length > 0) {
-          ds.sharedQueue.ensureFetched(minimapCoords);
-        }
-      } else {
-        // No CpuCache: SharedChunkQueue handles everything
-        const qualifiedCoords: QualifiedChunkCoord[] = filteredRequests.map(
-          (req) => ({
-            level: req.level,
-            x: req.x,
-            y: req.y,
-            z: req.z,
-            t: req.t,
-            c: req.c,
-            key: req.chunkKey,
-            memberId: req.imageId,
-          }),
-        );
-        const allCoords = [...qualifiedCoords, ...minimapCoords];
-        this._lastFetchLists.set(dsId, allCoords);
-        if (allCoords.length > 0) {
-          ds.sharedQueue.ensureFetched(allCoords);
-        }
+      // CpuCache handles main-view fetching; only submit minimap to SharedChunkQueue
+      this._lastFetchLists.set(dsId, minimapCoords);
+      if (minimapCoords.length > 0) {
+        ds.sharedQueue.ensureFetched(minimapCoords);
       }
 
       const channelCount = multiChannel ? visibleChannels.length : 1;
@@ -430,7 +407,6 @@ export class Orchestrator {
     let budgetExhausted = false;
 
     // Drain new deliveries from CpuCache
-    if (!ctx.cpuCache) return false;
     const deliveries = ctx.cpuCache.drain(budget);
 
     // Send each delivery to the worker (skip runway — pre-cached for future timepoints)

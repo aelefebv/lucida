@@ -52,5 +52,5 @@ export interface TickContext {
   canvas: HTMLCanvasElement;
   mode: "slice" | "volume";
   renderScale: number;
-  cpuCache?: CpuCache;
+  cpuCache: CpuCache;
 }

@@ -248,7 +248,7 @@ export class RenderLoop {
       canvas: this.canvas,
       mode: this.mode,
       renderScale: this._renderScale,
-      cpuCache: this.cpuCache ?? undefined,
+      cpuCache: this.cpuCache!,
     };
   }
 

@@ -2,10 +2,25 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { SharedChunkQueue } from "../zarr/chunkStore.ts";
 import type { ContentGraph } from "../contentTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
+import type { CpuCache } from "./cpuCache.ts";
+import type { TickContext } from "../renderLoopTypes.ts";
 
 // ---------------------------------------------------------------------------
 // Mock factories
 // ---------------------------------------------------------------------------
+
+function createMockCpuCache(): CpuCache {
+  return {
+    submit: vi.fn(),
+    drain: vi.fn(() => []),
+    snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
+    getCached: vi.fn(() => null),
+    telemetry: vi.fn(),
+    updateConfig: vi.fn(),
+    subscribe: vi.fn(() => () => {}),
+    reset: vi.fn(),
+  } as unknown as CpuCache;
+}
 
 interface MockSceneConfig {
   epochs: { content: number; layout: number; view: number; selection: number };
@@ -196,6 +211,7 @@ describe("epoch caching", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as any,
       mode: "slice",
       renderScale: 1,
+      cpuCache: createMockCpuCache(),
     } as unknown as TickContext;
   }
 
@@ -406,6 +422,7 @@ describe("multi-dataset planning", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as any,
       mode: "slice",
       renderScale: 1,
+      cpuCache: createMockCpuCache(),
     } as unknown as TickContext;
   }
 
