@@ -1,14 +1,14 @@
 /** Minimap render path: overview seeding + render + overlay callback. */
-import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+import type { MinimapChunkCoord } from "./pipeline/orchestrator.ts";
 
 export interface MinimapState {
   overviewKey: Map<string, string>;
   overviewUploaded: Map<string, Set<string>>;
   overviewSeeded: Set<string>;
-  pendingFetch: Map<string, ChunkCoord[]>;
+  pendingFetch: Map<string, MinimapChunkCoord[]>;
   enabled: boolean;
   size: number;
   overlayCallback: ((data: MinimapOverlayData) => void) | null;
@@ -93,7 +93,8 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
     const totalChunks = nz * ny * nx;
 
     // Iterate per-member so each FOV gets its own minimap overview texture.
-    for (const memberId of ds.sharedQueue.memberIds()) {
+    for (const img of ds.content.images) {
+      const memberId = img.image_id;
       const overviewKey = `${memberId}/${coarsestIdx}/${t}/${c}`;
 
       if (state.overviewKey.get(memberId) !== overviewKey) {
@@ -114,14 +115,23 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
             const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
             if (uploaded.has(chunkKey)) continue;
 
-            const buf = ds.sharedQueue.get(memberId, chunkKey) ?? null;
-            if (buf && buf.byteLength > 0) {
+            const cached = ctx.cpuCache.getCached(memberId, chunkKey);
+            if (cached && cached.data.byteLength > 0) {
+              // GPU expects uint16 — expand uint8 if needed
+              let u16: Uint16Array;
+              if (cached.dataType.toLowerCase() === "uint8") {
+                const src = new Uint8Array(cached.data);
+                u16 = new Uint16Array(src.length);
+                u16.set(src);
+              } else {
+                u16 = new Uint16Array(cached.data);
+              }
               available.push({
-                data: new Uint16Array(buf),
+                data: u16,
                 x: ix, y: iy, z: iz, key: chunkKey,
               });
               uploaded.add(chunkKey);
-              budgetRemaining -= buf.byteLength;
+              budgetRemaining -= cached.data.byteLength;
               if (budgetRemaining <= 0) break;
             } else {
               missing.push({ level: coarsestIdx, x: ix, y: iy, z: iz, t, c, key: chunkKey });
@@ -207,7 +217,8 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     const settings = allSettings[dsId];
     if (!settings || !settings.visible) continue;
 
-    for (const memberId of ds.sharedQueue.memberIds()) {
+    for (const img of ds.content.images) {
+      const memberId = img.image_id;
       const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
       const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
 
@@ -248,7 +259,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       // Find the parent dataset for this member
       let shape: number[] | undefined;
       for (const [, ds] of datasets) {
-        if (ds.sharedQueue.hasMember(layer.datasetId)) {
+        if (ds.content.images.some(img => img.image_id === layer.datasetId)) {
           shape = ds.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
           break;
         }

@@ -112,11 +112,7 @@ function App() {
     removeDataset: (id: string) => {
       render.loopRef.current?.removeDataset(id);
       render.clientRef.current?.removeLayerResources(id);
-      const ds = datasetsRef.current.get(id);
-      if (ds) {
-        ds.sharedQueue.destroy();
-        datasetsRef.current.delete(id);
-      }
+      datasetsRef.current.delete(id);
       layers.cleanupLayerMaps(id);
       setSelectedDatasetId(prev => {
         if (prev === id) {

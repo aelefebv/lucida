@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { SharedChunkQueue } from "../zarr/chunkStore.ts";
 import type { ContentGraph } from "../contentTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import type { CpuCache } from "./cpuCache.ts";
@@ -120,20 +119,6 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
   } as unknown;
 }
 
-function createMockSharedQueue(
-  cachedKeys?: Map<string, Set<string>>,
-): SharedChunkQueue {
-  return {
-    getCachedKeys: (memberId: string) =>
-      cachedKeys?.get(memberId) ?? new Set(),
-    ensureFetched: vi.fn(),
-    setConcurrency: vi.fn(),
-    registerMember: vi.fn(),
-    removeMember: vi.fn(),
-    memberIds: () => (cachedKeys ?? new Map()).keys(),
-  } as unknown as SharedChunkQueue;
-}
-
 function createMockContent(): ContentGraph {
   return {
     dataset_id: "ds1",
@@ -219,13 +204,12 @@ describe("epoch caching", () => {
     const scene = createMockScene({
       epochs: { content: 1, layout: 1, view: 1, selection: 1, ...epochOverrides },
     });
-    const queue = createMockSharedQueue();
     const content = createMockContent();
     const datasets = new Map<string, DatasetEntry>([
-      ["ds1", { sharedQueue: queue, content }],
+      ["ds1", { content }],
     ]);
 
-    return { scene, datasets, queue, content };
+    return { scene, datasets, content };
   }
 
   const emptyMinimap = new Map<string, never[]>();
@@ -402,12 +386,9 @@ describe("multi-dataset planning", () => {
       ],
     } as unknown as ContentGraph;
 
-    const queue1 = createMockSharedQueue();
-    const queue2 = createMockSharedQueue();
-
     return new Map<string, DatasetEntry>([
-      ["ds1", { sharedQueue: queue1, content: content1 }],
-      ["ds2", { sharedQueue: queue2, content: content2 }],
+      ["ds1", { content: content1 }],
+      ["ds2", { content: content2 }],
     ]);
   }
 

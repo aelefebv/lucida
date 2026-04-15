@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
-import type { ChunkFetcher } from "../zarr/chunkStore.ts";
-import { SharedChunkQueue } from "../zarr/chunkStore.ts";
 import type { DatasetState } from "../types.ts";
 import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
@@ -281,30 +279,9 @@ export function useBridge({
   function setupFetchPipeline(content: ContentGraph, fetchDesc: ClientFetchDescriptor) {
     const datasetId = content.dataset_id;
 
-    const sharedQueue = new SharedChunkQueue();
-
     if ("Proxied" in fetchDesc) {
       for (const spec of fetchDesc.Proxied.images) {
-        const imageId = spec.image_id;
-        contentSourceRef.current!.registerImage(imageId, spec.wire_format);
-        const remoteFetcher: ChunkFetcher = async (coord, signal) => {
-          const result = await contentSourceRef.current!.fetch(
-            { datasetId, imageId, chunkKey: coord.key },
-            signal ?? new AbortSignal(),
-          );
-          const decoded = await decodePool.decode(result.bytes, result.wireFormat, result.dataType);
-          // SharedChunkQueue (minimap path) expects uint16 data.
-          // Expand uint8 here — only coarsest-level chunks use this path, so buffers are small.
-          if (result.dataType.toLowerCase() === "uint8") {
-            const src = new Uint8Array(decoded);
-            const dst = new Uint16Array(src.length);
-            dst.set(src);
-            return dst.buffer;
-          }
-          return decoded;
-        };
-
-        sharedQueue.registerMember(imageId, remoteFetcher);
+        contentSourceRef.current!.registerImage(spec.image_id, spec.wire_format);
       }
     }
 
@@ -313,7 +290,6 @@ export function useBridge({
       name: content.name,
       content,
       fetch: fetchDesc,
-      sharedQueue,
     });
 
     initLayerMaps(datasetId);
@@ -337,7 +313,7 @@ export function useBridge({
       }
     }
 
-    loopRef.current?.addDataset(datasetId, sharedQueue, content);
+    loopRef.current?.addDataset(datasetId, content);
     if (cpuCacheRef.current && loopRef.current) {
       loopRef.current.setCpuCache(cpuCacheRef.current);
     }

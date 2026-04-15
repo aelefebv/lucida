@@ -1,6 +1,5 @@
 /** Pull-based render loop: coalesces chunk arrivals into a single RAF tick. */
 import type { ContentGraph } from "./contentTypes.ts";
-import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
 import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
@@ -15,7 +14,7 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 
 export class RenderLoop {
   private scene: RenderLoopOptions["scene"];
-  private datasets: Map<string, { sharedQueue: SharedChunkQueue; content: ContentGraph }>;
+  private datasets: Map<string, { content: ContentGraph }>;
   private client: RenderLoopOptions["client"];
   private canvas: HTMLCanvasElement;
   private mode: "slice" | "volume";
@@ -47,7 +46,7 @@ export class RenderLoop {
     this.scene = opts.scene;
     this.datasets = new Map();
     for (const [id, entry] of opts.datasets) {
-      this.datasets.set(id, { sharedQueue: entry.sharedQueue, content: entry.content });
+      this.datasets.set(id, { content: entry.content });
     }
     this.client = opts.client;
     this.canvas = opts.canvas;
@@ -55,14 +54,6 @@ export class RenderLoop {
   }
 
   start(): void {
-    // Subscribe to each dataset's shared queue
-    for (const [id, ds] of this.datasets) {
-      this.unsubs.set(id, ds.sharedQueue.subscribe(() => {
-        this.dataDirty = true;
-        this.scheduleIfNeeded();
-      }));
-    }
-
     // When the worker evicts or skips chunks, update the orchestrator's delivery
     // tracking so they can be re-sent. Evictions trigger a new tick.
     this.client.onChunksEvicted = (datasetId: string, evicted: string[], skipped: string[]) => {
@@ -103,12 +94,8 @@ export class RenderLoop {
     });
   }
 
-  addDataset(id: string, sharedQueue: SharedChunkQueue, content: ContentGraph): void {
-    this.datasets.set(id, { sharedQueue, content });
-    this.unsubs.set(id, sharedQueue.subscribe(() => {
-      this.dataDirty = true;
-      this.scheduleIfNeeded();
-    }));
+  addDataset(id: string, content: ContentGraph): void {
+    this.datasets.set(id, { content });
     this.viewDirty = true;
     this.scheduleIfNeeded();
   }
@@ -256,6 +243,13 @@ export class RenderLoop {
     this.rafId = null;  // clear so scheduleIfNeeded can re-schedule
 
     if (!this.viewDirty && !this.dataDirty) return;
+
+    // CpuCache not yet wired (brief window between RenderLoop start and setCpuCache).
+    // Reschedule — setCpuCache will mark dirty and trigger another tick.
+    if (!this.cpuCache) {
+      this.scheduleIfNeeded();
+      return;
+    }
 
     const now = performance.now();
     if (debugStats.enabled) {

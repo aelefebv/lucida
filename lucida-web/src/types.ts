@@ -1,4 +1,3 @@
-import type { SharedChunkQueue } from "./zarr/chunkStore.ts";
 import type { ContentGraph, ClientFetchDescriptor } from "./contentTypes.ts";
 
 export type ViewMode = "2d" | "3d";
@@ -16,7 +15,6 @@ export interface DatasetState {
   name: string;
   content: ContentGraph;
   fetch: ClientFetchDescriptor;
-  sharedQueue: SharedChunkQueue;
 }
 
 

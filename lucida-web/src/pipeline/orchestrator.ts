@@ -5,7 +5,6 @@
  */
 
 import type { TickContext } from "../renderLoopTypes.ts";
-import type { ChunkCoord, QualifiedChunkCoord } from "../zarr/chunkStore.ts";
 import type { SceneSettings } from "../tickCommon.ts";
 import type { ImageSpec, ContentGraph } from "../contentTypes.ts";
 import {
@@ -40,6 +39,17 @@ export interface OrchestratorResult {
   epochs: PlanningEpochs;
 }
 
+/** Lightweight chunk coordinate for minimap pending fetches. */
+export interface MinimapChunkCoord {
+  level: number;
+  x: number;
+  y: number;
+  z: number;
+  t: number;
+  c: number;
+  key: string;
+}
+
 export class Orchestrator {
   private previousActiveSet = new Map<string, ActiveSetEntry[]>();
   private lastEpochs: PlanningEpochs | null = null;
@@ -49,8 +59,6 @@ export class Orchestrator {
   private _lastVisibleRegion: VisibleRegion | null = null;
   private _lastEntities: EntitySnapshot[] = [];
   private _lastCachedKeyCounts = new Map<string, number>();
-  /** Last per-dataset fetch lists, re-submitted on epoch HIT to retry missing chunks. */
-  private _lastFetchLists = new Map<string, QualifiedChunkCoord[]>();
   /** Last filtered requests, re-submitted on epoch HIT to CpuCache. */
   private _lastFilteredRequests: ChunkRequest[] = [];
 
@@ -60,7 +68,7 @@ export class Orchestrator {
 
   planAndFetch(
     ctx: TickContext,
-    minimapPendingFetch: Map<string, ChunkCoord[]>,
+    minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   ): OrchestratorResult | null {
     // Step 1 — Epoch check
     const rawEpochs = JSON.parse(ctx.scene.epochs());
@@ -81,23 +89,16 @@ export class Orchestrator {
       currentEpochs.view === this.lastEpochs.view &&
       currentEpochs.selection === this.lastEpochs.selection
     ) {
-      // Re-submit fetches on HIT frames: ensureFetched is idempotent
-      // (skips cached + in-flight), but retries anything that was lost.
-      for (const [dsId, ds] of ctx.datasets) {
-        const fetchList = this._lastFetchLists.get(dsId);
-        if (fetchList && fetchList.length > 0) {
-          ds.sharedQueue.ensureFetched(fetchList);
-        }
-      }
-      // Re-submit to CpuCache so it can retry failed/cancelled fetches
-      if (this._lastFilteredRequests.length > 0) {
+      // Re-submit detail + minimap in one call so they don't cancel each other
+      const minimapReqs = this.collectMinimapRequests(ctx, minimapPendingFetch);
+      const allRequests = [...this._lastFilteredRequests, ...minimapReqs];
+      if (allRequests.length > 0) {
         ctx.cpuCache.submit({
-          requests: this._lastFilteredRequests,
+          requests: allRequests,
           activeSet: [...(this.previousActiveSet.values())].flat(),
           epochs: this.lastEpochs!,
         });
       }
-      this.submitMinimapFetches(ctx, minimapPendingFetch);
       if (debugStats.enabled && debugStats.orch) {
         debugStats.orch.epochCacheHit = true;
       }
@@ -237,16 +238,7 @@ export class Orchestrator {
         req.datasetId = dsId;
       }
 
-      // Submit to CpuCache for fetching
-      ctx.cpuCache.submit({
-        requests: filteredRequests,
-        activeSet: result.activeSet,
-        epochs: currentEpochs,
-      });
-
       // 3j. Build member roster from active set for render layer construction.
-      // The roster lists promoted entities with their imageId and position —
-      // render paths use this to create layer params independent of chunk requests.
       const entityById = new Map(entities.map(e => [e.entityId, e]));
       const rosterEntries: MemberRosterEntry[] = [];
       for (const entry of result.activeSet) {
@@ -257,25 +249,36 @@ export class Orchestrator {
       }
       memberRoster.set(dsId, rosterEntries);
 
-      // 3k. Fetch submission
-      const minimapCoords: QualifiedChunkCoord[] = [];
+      // 3k. Collect minimap pending fetches as overview-lane requests
+      const minimapRequests: ChunkRequest[] = [];
       for (const entity of entities) {
         const pending = minimapPendingFetch.get(entity.imageId);
         if (pending) {
           for (const coord of pending) {
-            minimapCoords.push({ ...coord, memberId: entity.imageId });
+            minimapRequests.push({
+              entityId: entity.entityId,
+              imageId: entity.imageId,
+              level: coord.level,
+              t: coord.t,
+              c: coord.c,
+              z: coord.z,
+              y: coord.y,
+              x: coord.x,
+              lane: "overview",
+              priority: 2000,
+              chunkKey: coord.key,
+              datasetId: dsId,
+            });
           }
         }
       }
 
-      // CpuCache handles main-view fetching; only submit minimap to SharedChunkQueue
-      this._lastFetchLists.set(dsId, minimapCoords);
-      if (minimapCoords.length > 0) {
-        ds.sharedQueue.ensureFetched(minimapCoords);
-      }
-
-      const channelCount = multiChannel ? visibleChannels.length : 1;
-      ds.sharedQueue.setConcurrency(Math.min(12 * channelCount, 48));
+      // Submit detail + minimap requests in a single call so they don't cancel each other
+      ctx.cpuCache.submit({
+        requests: [...filteredRequests, ...minimapRequests],
+        activeSet: result.activeSet,
+        epochs: currentEpochs,
+      });
 
       // Debug stats
       if (debugStats.enabled) {
@@ -562,23 +565,36 @@ export class Orchestrator {
     return delivery.data.byteLength;
   }
 
-  /** Submit minimap fetch lists for all datasets without re-planning. */
-  private submitMinimapFetches(
+  /** Collect minimap pending fetches as overview-lane ChunkRequests (no submit). */
+  private collectMinimapRequests(
     ctx: TickContext,
-    minimapPendingFetch: Map<string, ChunkCoord[]>,
-  ): void {
-    for (const [, ds] of ctx.datasets) {
-      for (const memberId of ds.sharedQueue.memberIds()) {
-        const pending = minimapPendingFetch.get(memberId);
+    minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
+  ): ChunkRequest[] {
+    const requests: ChunkRequest[] = [];
+    for (const [dsId, ds] of ctx.datasets) {
+      for (const img of ds.content.images) {
+        const pending = minimapPendingFetch.get(img.image_id);
         if (pending && pending.length > 0) {
-          const coords: QualifiedChunkCoord[] = pending.map((coord) => ({
-            ...coord,
-            memberId,
-          }));
-          ds.sharedQueue.ensureFetched(coords);
+          for (const coord of pending) {
+            requests.push({
+              entityId: img.image_id,
+              imageId: img.image_id,
+              level: coord.level,
+              t: coord.t,
+              c: coord.c,
+              z: coord.z,
+              y: coord.y,
+              x: coord.x,
+              lane: "overview",
+              priority: 2000,
+              chunkKey: coord.key,
+              datasetId: dsId,
+            });
+          }
         }
       }
     }
+    return requests;
   }
 }
 

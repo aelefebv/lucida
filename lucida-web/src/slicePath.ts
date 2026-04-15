@@ -1,12 +1,11 @@
 /** Slice render path: upload chunks + render multi-pass. */
-import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
-import type { Orchestrator, MemberRosterEntry } from "./pipeline/orchestrator.ts";
+import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
 /** SliceState — empty after S5.3 migration to Orchestrator delivery. */
@@ -148,7 +147,7 @@ export function tickSlice(
   sliceZ: number,
   sliceT: number,
   sliceC: number,
-  minimapPendingFetch: Map<string, ChunkCoord[]>,
+  minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
   const { scene, canvas } = ctx;

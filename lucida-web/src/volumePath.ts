@@ -1,12 +1,11 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
-import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
-import type { Orchestrator, MemberRosterEntry } from "./pipeline/orchestrator.ts";
+import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
 
 /**
@@ -215,7 +214,7 @@ function uploadAndRenderVolume(
 export function tickVolume(
   ctx: TickContext,
   orchestrator: Orchestrator,
-  minimapPendingFetch: Map<string, ChunkCoord[]>,
+  minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
   const { scene } = ctx;
