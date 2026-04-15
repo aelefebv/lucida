@@ -490,7 +490,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 {/* Decode */}
                 <div className="debug-section">
                   <div className="debug-title">Decode</div>
-                  <div>Workers: {cacheTelemetry.decodeWorkersBusy} / {cacheTelemetry.decodeWorkersTotal}</div>
+                  <div>{fmt(cacheTelemetry.decodesPerSec, 1)} chunks/s ({cacheTelemetry.decodeWorkersTotal} workers)</div>
                   <div>Avg: {fmt(cacheTelemetry.avgDecodeMs, 2)}ms</div>
                 </div>
 

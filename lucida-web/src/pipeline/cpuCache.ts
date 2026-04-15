@@ -74,7 +74,7 @@ export interface CacheTelemetry {
   evictionTierOrder: string[];
   failedChunks: { transient: number; permanent: number };
   lastError: string | null;
-  decodeWorkersBusy: number;
+  decodesPerSec: number;
   decodeWorkersTotal: number;
   avgDecodeMs: number;
 }
@@ -152,12 +152,19 @@ export class CpuCache {
   // Telemetry
   private totalHits = 0;
   private totalRequests = 0;
-  private evictionCount = 0;
-  private lastEvictionTime = 0;
+  private evictionsSinceSnapshot = 0;
+  private lastTelemetryTime = performance.now();
   private lastError: string | null = null;
   private decodeTimes: number[] = [];
   private transientFailures = 0;
   private permanentFailures = 0;
+
+  // Running average of decoded chunk sizes for in-flight byte estimation
+  private avgDecodedBytes = 0;
+  private completedFetches = 0;
+
+  // Decode throughput tracking
+  private decodesSinceSnapshot = 0;
 
   // Current epochs (for failure clearing)
   private currentEpochs: PlanningEpochs = {
@@ -284,7 +291,13 @@ export class CpuCache {
   /** Current stats for debug panel. */
   telemetry(): CacheTelemetry {
     const now = performance.now();
-    const elapsed = (now - this.lastEvictionTime) / 1000 || 1;
+    const elapsed = (now - this.lastTelemetryTime) / 1000 || 1;
+    const evictionsPerSec = this.evictionsSinceSnapshot / elapsed;
+    const decodesPerSec = this.decodesSinceSnapshot / elapsed;
+    this.evictionsSinceSnapshot = 0;
+    this.decodesSinceSnapshot = 0;
+    this.lastTelemetryTime = now;
+
     const mode = this.detectInteractionMode();
 
     return {
@@ -298,12 +311,12 @@ export class CpuCache {
       inFlightBytes: this.inFlightBytes,
       queueDepth: this.pendingQueue.length,
       hitRate: this.totalRequests > 0 ? this.totalHits / this.totalRequests : 0,
-      evictionsPerSec: this.evictionCount / elapsed,
+      evictionsPerSec,
       interactionMode: mode,
       evictionTierOrder: this.getTierOrder(mode),
       failedChunks: { transient: this.transientFailures, permanent: this.permanentFailures },
       lastError: this.lastError,
-      decodeWorkersBusy: this.decode.activeCount(),
+      decodesPerSec,
       decodeWorkersTotal: this.decode.size,
       avgDecodeMs: this.decodeTimes.length > 0
         ? this.decodeTimes.reduce((a, b) => a + b, 0) / this.decodeTimes.length
@@ -386,12 +399,15 @@ export class CpuCache {
     // Reset telemetry
     this.totalHits = 0;
     this.totalRequests = 0;
-    this.evictionCount = 0;
-    this.lastEvictionTime = 0;
+    this.evictionsSinceSnapshot = 0;
+    this.decodesSinceSnapshot = 0;
+    this.lastTelemetryTime = performance.now();
     this.lastError = null;
     this.decodeTimes = [];
     this.transientFailures = 0;
     this.permanentFailures = 0;
+    this.avgDecodedBytes = 0;
+    this.completedFetches = 0;
   }
 
   // =========================================================================
@@ -412,9 +428,9 @@ export class CpuCache {
   private startSingleFetch(req: ChunkRequest): void {
     const key = this.compositeKey(req);
     const controller = new AbortController();
-    // Estimate: we don't know size until response arrives. Use 0 for concurrency-based throttling.
-    // Bytes-in-flight is updated when the response size is known.
-    const entry: InFlightEntry = { request: req, controller, estimatedBytes: 0 };
+    const estimate = this.avgDecodedBytes;
+    const entry: InFlightEntry = { request: req, controller, estimatedBytes: estimate };
+    this.inFlightBytes += estimate;
     this.inFlight.set(key, entry);
 
     this.fetchAndDecode(req, controller, key).catch(() => {
@@ -460,17 +476,23 @@ export class CpuCache {
       if (isPermanent) this.permanentFailures++;
       else this.transientFailures++;
       this.lastError = message;
+      const failedEntry = this.inFlight.get(key);
+      if (failedEntry) this.inFlightBytes -= failedEntry.estimatedBytes;
       this.inFlight.delete(key);
       return;
     }
 
-    // Update in-flight bytes tracking
+    // Correct in-flight bytes from estimate to actual
     const responseBytes = result.bytes.byteLength;
     const inFlightEntry = this.inFlight.get(key);
     if (inFlightEntry) {
+      this.inFlightBytes += responseBytes - inFlightEntry.estimatedBytes;
       inFlightEntry.estimatedBytes = responseBytes;
-      this.inFlightBytes += responseBytes;
     }
+
+    // Update running average for future estimates
+    this.completedFetches++;
+    this.avgDecodedBytes += (responseBytes - this.avgDecodedBytes) / this.completedFetches;
 
     // Decode
     let decoded: ArrayBuffer;
@@ -479,6 +501,7 @@ export class CpuCache {
       decoded = await this.decode.decode(result.bytes, result.wireFormat, result.dataType);
       this.decodeTimes.push(performance.now() - t0);
       if (this.decodeTimes.length > 100) this.decodeTimes.shift();
+      this.decodesSinceSnapshot++;
     } catch (err: unknown) {
       this.lastError = err instanceof Error ? err.message : String(err);
       this.inFlightBytes -= responseBytes;
@@ -654,8 +677,7 @@ export class CpuCache {
     }
     if (cacheType === "detail") this.detailBytes -= entry.sizeBytes;
     else this.overviewBytes -= entry.sizeBytes;
-    this.evictionCount++;
-    this.lastEvictionTime = performance.now();
+    this.evictionsSinceSnapshot++;
   }
 
   private collectEntries(cache: Map<string, Map<string, CacheEntry>>): CacheEntry[] {

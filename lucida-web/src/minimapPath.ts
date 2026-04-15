@@ -14,6 +14,8 @@ export interface MinimapState {
   overlayCallback: ((data: MinimapOverlayData) => void) | null;
   /** Hash of inputs that affect minimap output — skip render if unchanged. */
   lastRenderKey: string | null;
+  /** Set by tickMinimapOverview when new chunks are uploaded to GPU. */
+  uploadGeneration: number;
 }
 
 export function createMinimapState(): MinimapState {
@@ -26,6 +28,7 @@ export function createMinimapState(): MinimapState {
     size: 200,
     overlayCallback: null,
     lastRenderKey: null,
+    uploadGeneration: 0,
   };
 }
 
@@ -141,6 +144,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
           levelWidth, levelHeight, levelDepth,
           chunkX, chunkY, chunkZ,
         );
+        state.uploadGeneration++;
       }
 
       if (uploaded.size >= totalChunks) {
@@ -165,12 +169,13 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const theta = scene.camera_theta();
   const phi = scene.camera_phi();
 
-  // Build a key from minimap-relevant state; skip if unchanged
+  // Build a key from minimap-relevant state; skip if unchanged.
+  // uploadGeneration ensures we re-render when new overview chunks arrive.
   const settingsSnap = scene.all_dataset_settings();
   const orderSnap = scene.dataset_order();
   // In volume mode, the main camera position affects the frustum overlay
   const mainCamSnap = mode === "volume" ? `${scene.eye_position()}` : `${scene.zoom()}|${scene.center()}`;
-  const renderKey = `${theta}|${phi}|${mode}|${sliceZ}|${mainCamSnap}|${orderSnap}|${settingsSnap}`;
+  const renderKey = `${theta}|${phi}|${mode}|${sliceZ}|${mainCamSnap}|${orderSnap}|${settingsSnap}|${state.uploadGeneration}`;
   if (renderKey === state.lastRenderKey) return;
   state.lastRenderKey = renderKey;
 
