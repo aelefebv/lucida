@@ -1,13 +1,12 @@
 /** Slice render path: upload chunks + render multi-pass. */
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
-import type { MemberChunkPlan } from "./uploadCommon.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
-import type { Orchestrator } from "./pipeline/orchestrator.ts";
+import type { Orchestrator, MemberRosterEntry } from "./pipeline/orchestrator.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
 /** SliceState — empty after S5.3 migration to Orchestrator delivery. */
@@ -17,7 +16,7 @@ export function createSliceState(): SliceState { return {}; }
 
 /** Result of the plan+fetch phase, passed to the upload+render phase. */
 interface SlicePlanResult {
-  memberPlanCache: Map<string, MemberChunkPlan[]>;
+  memberRoster: Map<string, MemberRosterEntry[]>;
   settings: SceneSettings;
   vpCx: number;
   vpCy: number;
@@ -39,7 +38,7 @@ function uploadAndRenderSlice(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
-  const { memberPlanCache, settings, multiChannel } = planResult;
+  const { memberRoster, settings, multiChannel } = planResult;
 
   const z = sliceZ;
   const t = sliceT;
@@ -72,6 +71,9 @@ function uploadAndRenderSlice(
     const fullResWidth = dsShapeL[4];
     const fullResHeight = dsShapeL[3];
 
+    const members = memberRoster.get(dsId)
+      ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
+
     if (multiChannel) {
       // Multi-channel: emit one layer per (member, channel) with per-channel settings
       const activeChannels = getActiveChannels(dsSettings);
@@ -86,13 +88,9 @@ function uploadAndRenderSlice(
         const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
         const layerColormap = chSettings?.colormap ?? "gray";
 
-        const planCacheKey = `${dsId}:ch${ch}`;
-        const members: MemberChunkPlan[] = memberPlanCache.get(planCacheKey)
-          ?? [{ image_id: dsId, position: [0, 0], needed: [], prefetch: [] }];
-
-        for (const mp of members) {
+        for (const m of members) {
           layers.push({
-            datasetId: compositeKey(mp.image_id, ch),
+            datasetId: compositeKey(m.imageId, ch),
             dataW: fullResWidth,
             dataH: fullResHeight,
             contrastMin: layerContrastMin,
@@ -101,17 +99,14 @@ function uploadAndRenderSlice(
             opacity: dsSettings.opacity,
             blendMode: channelBlend,
             colormap: layerColormap,
-            offsetX: mp.position[0],
-            offsetY: mp.position[1],
+            offsetX: m.position[0],
+            offsetY: m.position[1],
           });
         }
       }
     } else {
-      // Single-channel: existing behavior
+      // Single-channel
       if (z >= dsShapeL[2] || c >= dsShapeL[1] || t >= dsShapeL[0]) continue;
-
-      const members: MemberChunkPlan[] = memberPlanCache.get(dsId)
-        ?? [{ image_id: dsId, position: [0, 0], needed: [], prefetch: [] }];
 
       const chSettings = dsSettings.channel_settings?.[c];
       const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
@@ -119,9 +114,9 @@ function uploadAndRenderSlice(
       const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
       const layerColormap = chSettings?.colormap ?? "gray";
 
-      for (const mp of members) {
+      for (const m of members) {
         layers.push({
-          datasetId: mp.image_id,
+          datasetId: m.imageId,
           dataW: fullResWidth,
           dataH: fullResHeight,
           contrastMin: layerContrastMin,
@@ -130,8 +125,8 @@ function uploadAndRenderSlice(
           opacity: dsSettings.opacity,
           blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
           colormap: layerColormap,
-          offsetX: mp.position[0],
-          offsetY: mp.position[1],
+          offsetX: m.position[0],
+          offsetY: m.position[1],
         });
       }
     }
@@ -172,7 +167,7 @@ export function tickSlice(
 
   const vpCenter = scene.center();
   const planResult: SlicePlanResult = {
-    memberPlanCache: orchResult.memberPlanCache,
+    memberRoster: orchResult.memberRoster,
     settings: orchResult.settings,
     vpCx: vpCenter[0],
     vpCy: vpCenter[1],

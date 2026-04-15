@@ -1,6 +1,6 @@
 # CPU Cache + Content Source Specification
 
-> **Status:** Not implemented. Spec phase. Replaces `SharedChunkQueue`, `uploadCommon.ts`, `tickCommon.ts`, and the M0 adapter layer in the Orchestrator.
+> **Status:** Implemented (S1–S5). CpuCache is the primary fetch+delivery path. `uploadCommon.ts`, `MemberChunkPlan`, and `translateRequestPlan()` deleted. `SharedChunkQueue` remains for minimap only (deleted at S5.4).
 
 CPU Cache + Content Source is domain 6.2 of the pipeline ([DOMAINS.md](../DOMAINS.md) section 6.2). It sits between Planning (which produces logical asset requests as a `RequestPlan`) and the Worker Protocol (which delivers decoded buffers to the GPU worker). It owns:
 
@@ -386,20 +386,15 @@ Debug panel:
 
 The `uploadBudget` passed to `drain()` is the per-frame upload budget — how many bytes the Orchestrator is willing to deliver to the worker this frame. This is distinct from `maxBytesInFlight` (a fetch-side throttle on concurrent network requests). The Orchestrator owns the drain budget and may vary it by context (e.g., larger budget for the main view, smaller for minimap).
 
-### What Dies at M2
-
-When CPU Cache is wired into the Orchestrator:
+### What Died at M2
 
 | Deleted | Replaced by |
 |---------|-------------|
-| `SharedChunkQueue` (chunkStore.ts) | `CpuCache` |
-| `uploadChunksForMembers()` (uploadCommon.ts) | `CpuCache.drain()` + direct worker delivery |
-| `UploadState`, `MemberUploadActions` (uploadCommon.ts) | `CpuCache` internal state |
-| `compositeKey()`, `parseChannel()`, `stripChannelSuffix()` (tickCommon.ts) | Canonical chunk identity (C is a key dimension) |
+| `uploadCommon.ts` (`MemberChunkPlan` type) | `MemberRosterEntry` in orchestrator.ts — render layers built from active set, not chunk requests |
 | `translateRequestPlan()` (orchestrator.ts M0 adapter) | `CpuCache.submit()` takes `RequestPlan` directly |
-| `sentToWorker` tracking (uploadCommon.ts) | `CpuCache.drain()` returns only new deliveries |
-| `MemberChunkPlan` type | `RequestPlan` flows directly |
 | LZ4-specific worker pool (lz4Client.ts, lz4.worker.ts) | Codec-agnostic decode pool |
+
+**Still alive (minimap path):** `SharedChunkQueue` (chunkStore.ts) — used for minimap coarse chunk fetching. Deleted at S5.4 when minimap is transitioned to its own fetch path or CpuCache overview lane.
 
 ---
 

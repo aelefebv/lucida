@@ -51,7 +51,7 @@ export interface OrchDebug {
     priority: number;
     chunkKey: string;
   }>;
-  /** Per-member adapter output (what uploadCommon receives) */
+  /** Per-member roster entry (for debug display) */
   members: OrchMemberDebug[];
   /** True if any member has mixed levels in needed[] */
   hasMixedLevels: boolean;

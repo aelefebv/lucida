@@ -1,6 +1,6 @@
 # Orchestrator Integration Spec
 
-> **Status:** M0 implemented (18a892b). Planning drives live render loop. Old planning path deleted. M1–M4 remain.
+> **Status:** M0+M2 implemented. Planning drives live render loop. CpuCache is primary fetch+delivery path. `MemberChunkPlan` adapter deleted, render layers built from `MemberRosterEntry` roster. M1/M3/M4 remain.
 
 How the Planning domain gets wired into the live render loop, and the incremental migration path from the current monolithic pipeline to the DOMAINS.md architecture.
 
@@ -286,18 +286,15 @@ This is queried by the Orchestrator during snapshot assembly and passed into `Pl
 
 ---
 
-### M2: CPU Cache replaces SharedChunkQueue + uploadCommon
+### M2: CPU Cache replaces uploadCommon ✅
 
-**What:** Domain-separated cache with content source abstraction. The Orchestrator passes `RequestPlan` directly to CPU Cache instead of going through the `MemberChunkPlan` adapter.
+**What:** Domain-separated cache with content source abstraction. The Orchestrator passes `RequestPlan` directly to CPU Cache. Render layers built from `MemberRosterEntry` roster (active set + entity positions) instead of `MemberChunkPlan`.
 
-**Replaces:** `SharedChunkQueue`, `uploadCommon.ts`, the `MemberChunkPlan` adapter in the Orchestrator.
+**Deleted:** `uploadCommon.ts`, `MemberChunkPlan` type, `translateRequestPlan()` adapter.
 
-**Visual verification:**
-- Same fetch behavior: concurrent requests, abort-on-view-change, LRU eviction
-- Cache state now queryable by Planning directly (no `getCachedKeys` adapter needed)
-- Fetch concurrency and spatial priority preserved
+**Still alive:** `SharedChunkQueue` (minimap path only). Deleted at S5.4.
 
-**Deletion target:** `SharedChunkQueue`, `uploadCommon.ts`, `MemberChunkPlan` type, Orchestrator's `RequestPlan → MemberChunkPlan` adapter.
+**Note:** `PlanningSnapshot.cacheState` remains empty maps — the re-send loop in `deliverToWorker()` iterates `_lastFilteredRequests` which must contain ALL target-level chunks (including cached) for re-sending after worker eviction. Wiring real cache state requires reworking re-send to iterate the chunk grid directly.
 
 ---
 

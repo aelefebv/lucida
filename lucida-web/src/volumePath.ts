@@ -1,13 +1,12 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
 import type { ChunkCoord } from "./zarr/chunkStore.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
-import type { MemberChunkPlan } from "./uploadCommon.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
-import type { Orchestrator } from "./pipeline/orchestrator.ts";
+import type { Orchestrator, MemberRosterEntry } from "./pipeline/orchestrator.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
 
 /**
@@ -73,7 +72,7 @@ export function createVolumeState(): VolumeState { return {}; }
 
 /** Data passed from the plan+fetch phase to the upload+render phase. */
 interface PlanResult {
-  memberPlanCache: Map<string, MemberChunkPlan[]>;
+  memberRoster: Map<string, MemberRosterEntry[]>;
   settings: { layerOrder: string[]; allSettings: Record<string, DatasetSettings> };
   eye: Float32Array;
   hitLocals: Map<string, [number, number, number]>;
@@ -99,7 +98,7 @@ function uploadAndRenderVolume(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, datasets } = ctx;
-  const { memberPlanCache, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel } = plan;
+  const { memberRoster, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel } = plan;
   const { layerOrder, allSettings } = settings;
 
   // Use Orchestrator delivery loop instead of uploadChunksForMembers
@@ -124,6 +123,9 @@ function uploadAndRenderVolume(
 
     const dsShapeV = dsVol.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
 
+    const members = memberRoster.get(dsId)
+      ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
+
     if (multiChannel) {
       // Multi-channel: emit one layer per (member, channel)
       const activeChannels = getActiveChannels(dsSettings);
@@ -138,15 +140,10 @@ function uploadAndRenderVolume(
         const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
         const layerColormap = chSettings?.colormap ?? "gray";
 
-        const planCacheKey = `${dsId}:ch${ch}`;
-        const members: MemberChunkPlan[] = memberPlanCache.get(planCacheKey)
-          ?? [{ image_id: dsId, position: [0, 0], needed: [], prefetch: [] }];
-
-        for (const mp of members) {
-          const rawMemberId = mp.image_id;
-          const compKey = compositeKey(rawMemberId, ch);
-          const model = new Float32Array(scene.member_model_matrix(dsId, rawMemberId));
-          const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, rawMemberId));
+        for (const m of members) {
+          const compKey = compositeKey(m.imageId, ch);
+          const model = new Float32Array(scene.member_model_matrix(dsId, m.imageId));
+          const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, m.imageId));
 
           const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
           if (!scissorRect) continue; // well fully off-screen
@@ -168,11 +165,8 @@ function uploadAndRenderVolume(
         }
       }
     } else {
-      // Single-channel: existing behavior
+      // Single-channel
       if (viewC >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
-
-      const members: MemberChunkPlan[] = memberPlanCache.get(dsId)
-        ?? [{ image_id: dsId, position: [0, 0], needed: [], prefetch: [] }];
 
       const chSettings = dsSettings.channel_settings?.[viewC];
       const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
@@ -180,19 +174,18 @@ function uploadAndRenderVolume(
       const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
       const layerColormap = chSettings?.colormap ?? "gray";
 
-      for (const mp of members) {
-        const memberId = mp.image_id;
-        const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
-        const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
+      for (const m of members) {
+        const model = new Float32Array(scene.member_model_matrix(dsId, m.imageId));
+        const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, m.imageId));
 
         const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
         if (!scissorRect) continue; // well fully off-screen
 
         layers.push({
-          datasetId: memberId,
+          datasetId: m.imageId,
           modelMatrix: model,
           invModelMatrix: invModel,
-          rayHitLocal: hitLocals.get(memberId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number],
+          rayHitLocal: hitLocals.get(m.imageId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number],
           contrastMin: layerContrastMin,
           contrastMax: layerContrastMax,
           gamma: layerGamma,
@@ -247,23 +240,18 @@ export function tickVolume(
 
   // Compute ray hit locals per member for volume rendering
   for (const [dsId] of ctx.datasets) {
-    const plans = orchResult.memberPlanCache.get(dsId);
-    if (plans) {
-      for (const mp of plans) {
-        const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
-        hitLocals.set(mp.image_id, hitLocal);
-      }
-    }
-    // Multi-channel: check composite keys too
-    if (orchResult.multiChannel) {
-      for (const [key, plans] of orchResult.memberPlanCache) {
-        if (key.startsWith(`${dsId}:ch`)) {
-          for (const mp of plans) {
-            const rawId = mp.image_id.replace(/:ch\d+$/, "");
-            if (!hitLocals.has(mp.image_id)) {
-              const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
-              hitLocals.set(mp.image_id, hitLocal);
-            }
+    const roster = orchResult.memberRoster.get(dsId);
+    if (!roster) continue;
+    for (const m of roster) {
+      const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
+      hitLocals.set(m.imageId, hitLocal);
+      // Multi-channel: also key by composite key for each visible channel
+      if (orchResult.multiChannel) {
+        const dsSettings = orchResult.settings.allSettings[dsId];
+        if (dsSettings) {
+          const activeChannels = getActiveChannels(dsSettings);
+          for (const ch of activeChannels) {
+            hitLocals.set(compositeKey(m.imageId, ch), hitLocal);
           }
         }
       }
@@ -286,7 +274,7 @@ export function tickVolume(
   const viewC = scene.c();
 
   const planResult: PlanResult = {
-    memberPlanCache: orchResult.memberPlanCache,
+    memberRoster: orchResult.memberRoster,
     settings: orchResult.settings,
     eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC,
     multiChannel: orchResult.multiChannel,

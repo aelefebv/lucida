@@ -504,14 +504,19 @@ export class CpuCache {
       this.decodesSinceSnapshot++;
     } catch (err: unknown) {
       this.lastError = err instanceof Error ? err.message : String(err);
-      this.inFlightBytes -= responseBytes;
-      this.inFlight.delete(key);
+      // Guard: submit() may have already cancelled this entry during decode
+      if (this.inFlight.has(key)) {
+        this.inFlightBytes -= responseBytes;
+        this.inFlight.delete(key);
+      }
       return;
     }
 
-    // Remove from in-flight
-    this.inFlightBytes -= responseBytes;
-    this.inFlight.delete(key);
+    // Remove from in-flight (guard: submit() may have cancelled during decode)
+    if (this.inFlight.has(key)) {
+      this.inFlightBytes -= responseBytes;
+      this.inFlight.delete(key);
+    }
 
     // Check if still wanted (might have been cancelled during decode)
     // We still cache it since the work is done

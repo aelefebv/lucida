@@ -1,19 +1,17 @@
 /**
  * Orchestrator — assembles PlanningSnapshot from live WASM scene state,
- * invokes plan(), and translates the output into MemberChunkPlan[] for
- * the existing upload pipeline.
+ * invokes plan(), and routes the output to CpuCache for fetching and
+ * delivery to the GPU worker.
  */
 
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { ChunkCoord, QualifiedChunkCoord } from "../zarr/chunkStore.ts";
-import type { MemberChunkPlan } from "../uploadCommon.ts";
 import type { SceneSettings } from "../tickCommon.ts";
 import type { ImageSpec, ContentGraph } from "../contentTypes.ts";
 import {
   getSceneSettings,
   getActiveChannels,
   compositeKey,
-  stripChannelSuffix,
 } from "../tickCommon.ts";
 import { plan } from "./planning.ts";
 import type {
@@ -28,8 +26,15 @@ import type {
 import type { ReadyDelivery } from "./cpuCache.ts";
 import { debugStats, type OrchDebug, type OrchMemberDebug } from "../debug/debugStats.ts";
 
+/** A visible member for render layer construction. */
+export interface MemberRosterEntry {
+  imageId: string;
+  position: [number, number];
+}
+
 export interface OrchestratorResult {
-  memberPlanCache: Map<string, MemberChunkPlan[]>;
+  /** Per-dataset roster of members that need render layers, keyed by dsId. */
+  memberRoster: Map<string, MemberRosterEntry[]>;
   settings: SceneSettings;
   multiChannel: boolean;
   epochs: PlanningEpochs;
@@ -49,7 +54,7 @@ export class Orchestrator {
   /** Last filtered requests, re-submitted on epoch HIT to CpuCache. */
   private _lastFilteredRequests: ChunkRequest[] = [];
 
-  // Delivery state (replaces UploadState from uploadCommon at S5.3)
+  // Delivery state — tracks what's been sent to the GPU worker
   private deliverySentToWorker = new Map<string, Set<string>>();
   private deliveryPrevStateKey = new Map<string, string>();
 
@@ -104,7 +109,7 @@ export class Orchestrator {
     const multiChannel = ctx.scene.multi_channel();
 
     // Step 3 — Per-dataset loop
-    const memberPlanCache = new Map<string, MemberChunkPlan[]>();
+    const memberRoster = new Map<string, MemberRosterEntry[]>();
 
     for (const [dsId, ds] of ctx.datasets) {
       // 3a. Skip invisible datasets
@@ -186,18 +191,17 @@ export class Orchestrator {
         interactionState: "idle",
       };
 
-      // 3g. Cache state
-      const cached = new Map<string, Set<string>>();
+      // 3g. Cache state — pass empty maps so Planning emits ALL needed chunks.
+      // The re-send loop (deliverToWorker) iterates _lastFilteredRequests to
+      // re-send worker-evicted chunks from CpuCache. If Planning filtered cached
+      // chunks, _lastFilteredRequests would miss them and re-send would break.
+      // CpuCache.submit() deduplicates internally, so no double-fetching occurs.
       for (const entity of entities) {
-        const keys = ds.sharedQueue.getCachedKeys(entity.imageId);
-        cached.set(entity.entityId, keys);
-        this._lastCachedKeyCounts.set(entity.entityId, keys.size);
+        const cachedKeys = ctx.cpuCache?.snapshot().cached.get(entity.entityId);
+        this._lastCachedKeyCounts.set(entity.entityId, cachedKeys?.size ?? 0);
       }
 
-      // 3h. Plan — use empty cache state so all needed chunks appear in the plan.
-      // The upload path manages its own sentToWorker tracking; if we skip cached
-      // chunks here, they vanish from memberPlanCache and never get uploaded.
-      // Real cache state is used below for fetch submission only.
+      // 3h. Plan
       const snapshot: PlanningSnapshot = {
         epochs: currentEpochs,
         entities,
@@ -216,9 +220,7 @@ export class Orchestrator {
       this._lastVisibleRegion = visibleRegion;
       this._lastEntities = entities;
 
-      // 3i. Adapter — convert RequestPlan to MemberChunkPlan[]
-      // Filter to single level per entity: the upload path can only handle one atlas
-      // config (one level's dimensions) per member. Multi-level rendering requires M4.
+      // 3i. Filter to single level per entity for atlas config (M4 adds multi-level).
       const targetLevelByEntity = new Map<string, number>();
       for (const entry of result.activeSet) {
         targetLevelByEntity.set(entry.entityId, entry.targetLod);
@@ -244,27 +246,20 @@ export class Orchestrator {
         });
       }
 
-      const translated = translateRequestPlan(filteredRequests, entities, multiChannel);
-
-      if (multiChannel) {
-        for (const [memberKey, plans] of translated) {
-          const channelMatch = memberKey.match(/:ch(\d+)$/);
-          if (channelMatch) {
-            const planCacheKey = `${dsId}:ch${channelMatch[1]}`;
-            const existing = memberPlanCache.get(planCacheKey) ?? [];
-            existing.push(...plans);
-            memberPlanCache.set(planCacheKey, existing);
-          }
+      // 3j. Build member roster from active set for render layer construction.
+      // The roster lists promoted entities with their imageId and position —
+      // render paths use this to create layer params independent of chunk requests.
+      const entityById = new Map(entities.map(e => [e.entityId, e]));
+      const rosterEntries: MemberRosterEntry[] = [];
+      for (const entry of result.activeSet) {
+        const entity = entityById.get(entry.entityId);
+        if (entity) {
+          rosterEntries.push({ imageId: entity.imageId, position: entity.position });
         }
-      } else {
-        const allPlans: MemberChunkPlan[] = [];
-        for (const plans of translated.values()) {
-          allPlans.push(...plans);
-        }
-        memberPlanCache.set(dsId, allPlans);
       }
+      memberRoster.set(dsId, rosterEntries);
 
-      // 3j. Fetch submission
+      // 3k. Fetch submission
       const minimapCoords: QualifiedChunkCoord[] = [];
       for (const entity of entities) {
         const pending = minimapPendingFetch.get(entity.imageId);
@@ -347,23 +342,17 @@ export class Orchestrator {
         epochCacheHit: false,
       };
 
-      // Aggregate from memberPlanCache (post-adapter)
-      for (const [_key, plans] of memberPlanCache) {
-        for (const mp of plans) {
-          const levelCounts: Record<number, number> = {};
-          for (const c of mp.needed) {
-            levelCounts[c.level] = (levelCounts[c.level] ?? 0) + 1;
-          }
-          const mixedLevels = Object.keys(levelCounts).length > 1;
-          if (mixedLevels) orchDebug.hasMixedLevels = true;
+      // Aggregate from member roster
+      for (const [_key, entries] of memberRoster) {
+        for (const m of entries) {
           orchDebug.members.push({
-            imageId: mp.image_id,
-            position: mp.position,
-            neededCount: mp.needed.length,
-            prefetchCount: mp.prefetch.length,
-            uploadLevel: mp.needed[0]?.level,
-            levelCounts,
-            mixedLevels,
+            imageId: m.imageId,
+            position: m.position,
+            neededCount: 0,
+            prefetchCount: 0,
+            uploadLevel: undefined,
+            levelCounts: {},
+            mixedLevels: false,
           });
         }
       }
@@ -422,7 +411,7 @@ export class Orchestrator {
 
     // Step 5 — Cache and return
     this.lastEpochs = currentEpochs;
-    this.cachedResult = { memberPlanCache, settings, multiChannel, epochs: currentEpochs };
+    this.cachedResult = { memberRoster, settings, multiChannel, epochs: currentEpochs };
     return this.cachedResult;
   }
 
@@ -617,81 +606,3 @@ export class Orchestrator {
   }
 }
 
-/**
- * Convert ChunkRequest[] into MemberChunkPlan[] grouped by member key.
- * Detail + overview lanes → needed, runway lane → prefetch.
- * Exported for unit testing.
- */
-export function translateRequestPlan(
-  requests: ChunkRequest[],
-  entities: EntitySnapshot[],
-  multiChannel: boolean,
-): Map<string, MemberChunkPlan[]> {
-  const entityPositions = new Map<string, [number, number]>();
-  const entityByImageId = new Map<string, EntitySnapshot>();
-  for (const entity of entities) {
-    entityPositions.set(entity.entityId, entity.position);
-    entityByImageId.set(entity.imageId, entity);
-  }
-
-  const memberRequests = new Map<
-    string,
-    { needed: ChunkCoord[]; prefetch: ChunkCoord[] }
-  >();
-
-  for (const req of requests) {
-    const memberKey = multiChannel
-      ? compositeKey(req.imageId, req.c)
-      : req.imageId;
-
-    let entry = memberRequests.get(memberKey);
-    if (!entry) {
-      entry = { needed: [], prefetch: [] };
-      memberRequests.set(memberKey, entry);
-    }
-
-    const coord: ChunkCoord = {
-      level: req.level,
-      x: req.x,
-      y: req.y,
-      z: req.z,
-      t: req.t,
-      c: req.c,
-      key: req.chunkKey,
-    };
-
-    // detail + overview are immediately needed; runway is speculative prefetch
-    if (req.lane === "runway") {
-      entry.prefetch.push(coord);
-    } else {
-      entry.needed.push(coord);
-    }
-  }
-
-  const result = new Map<string, MemberChunkPlan[]>();
-
-  for (const [memberKey, { needed, prefetch }] of memberRequests) {
-    const rawImageId = multiChannel
-      ? stripChannelSuffix(memberKey)
-      : memberKey;
-    const entity = entityByImageId.get(rawImageId);
-    const position = entity
-      ? (entityPositions.get(entity.entityId) ?? [0, 0])
-      : [0, 0];
-
-    const plan: MemberChunkPlan = {
-      image_id: rawImageId,
-      position: position as [number, number],
-      needed,
-      prefetch,
-    };
-
-    // Map key is the composite key (for multi-channel grouping),
-    // but image_id stays raw so uploadCommon can append channel suffix itself.
-    const existing = result.get(memberKey) ?? [];
-    existing.push(plan);
-    result.set(memberKey, existing);
-  }
-
-  return result;
-}
