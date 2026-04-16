@@ -244,6 +244,16 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
   let atlas = atlasPerDataset.get(datasetId);
   if (!atlas) return; // No atlas config received yet — wait for it
 
+  // Debug: detect grid dims mismatch that could cause wrong chunk rendering
+  const expectedGridX = Math.ceil(levelWidth / chunkX);
+  const expectedGridY = Math.ceil(levelHeight / chunkY);
+  if (atlas.gridX !== expectedGridX || atlas.gridY !== expectedGridY) {
+    console.warn(`[sliceChunkData] grid mismatch for ${datasetId}: atlas=[${atlas.gridX},${atlas.gridY}] expected=[${expectedGridX},${expectedGridY}] level=${level} atlas.level=${atlas.level}`);
+  }
+  if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
+    console.warn(`[sliceChunkData] chunkDims mismatch for ${datasetId}: atlas=[${atlas.chunkX},${atlas.chunkY}] msg=[${chunkX},${chunkY}]`);
+  }
+
   // Store Z metadata on first arrival (used by remapSliceIndirection)
   if (atlas.chunkZ == null) {
     atlas.chunkZ = chunkZ;

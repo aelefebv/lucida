@@ -266,6 +266,17 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
   let atlas = atlasPerDataset.get(datasetId);
   if (!atlas) return; // No atlas config received yet — wait for it
 
+  // Debug: detect grid dims mismatch that could cause wrong chunk rendering
+  const expectedGridX = Math.ceil(levelWidth / chunkX);
+  const expectedGridY = Math.ceil(levelHeight / chunkY);
+  const expectedGridZ = Math.ceil(levelDepth / chunkZ);
+  if (atlas.gridX !== expectedGridX || atlas.gridY !== expectedGridY || atlas.gridZ !== expectedGridZ) {
+    console.warn(`[volumeChunkData] grid mismatch for ${datasetId}: atlas=[${atlas.gridX},${atlas.gridY},${atlas.gridZ}] expected=[${expectedGridX},${expectedGridY},${expectedGridZ}] level=${level} atlas.level=${atlas.level}`);
+  }
+  if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
+    console.warn(`[volumeChunkData] chunkDims mismatch for ${datasetId}: atlas=[${atlas.chunkX},${atlas.chunkY},${atlas.chunkZ}] msg=[${chunkX},${chunkY},${chunkZ}]`);
+  }
+
   rayHitPerDataset.set(datasetId, msg.hitLocal);
 
   let intensityChanged = false;

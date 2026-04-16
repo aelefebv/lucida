@@ -418,12 +418,22 @@ export class Orchestrator {
     let remaining = budget;
     let budgetExhausted = false;
 
+    // Build target level map from current plan for LOD filtering
+    const targetLevelByImage = new Map<string, number>();
+    for (const req of this._lastFilteredRequests) {
+      targetLevelByImage.set(req.imageId, req.level);
+    }
+
     // Drain new deliveries from CpuCache
     const deliveries = ctx.cpuCache.drain(budget);
 
-    // Send each delivery to the worker (skip runway — pre-cached for future timepoints)
+    // Send each delivery to the worker.
+    // Skip runway (pre-cached for future timepoints), overview (minimap path),
+    // and wrong-LOD chunks (stale requests from a previous plan).
     for (const delivery of deliveries) {
-      if (delivery.lane === "runway") continue;
+      if (delivery.lane === "runway" || delivery.lane === "overview") continue;
+      const target = targetLevelByImage.get(delivery.imageId);
+      if (target === undefined || delivery.level !== target) continue;
       const sent = this.sendDeliveryToWorker(ctx, delivery, multiChannel, sliceZ, epochs);
       if (sent > 0) {
         remaining -= sent;
