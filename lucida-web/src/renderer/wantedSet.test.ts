@@ -251,11 +251,18 @@ describe("computeWantedSet", () => {
         zRange: [0, 64], // full Z range in visible region (ignored for slice)
       }),
     });
-    // Atlas is in slice mode at z=10 (chunk index 0 since 10/32 = 0)
-    const atlas = makeAtlas({ z: 10 });
-    const sliceAtlases = new Map([["img", atlas]]);
+    // Slice now uses shared pools too. Pool keyed by datasetId+chunkdims, with "img" as the only entity.
+    const atlas: AtlasSnapshot = {
+      slots: new Map(),
+      entityMetas: new Map([
+        ["img", [{ level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 }]],
+      ]),
+      z: 10,
+    };
+    const sliceAtlases = new Map([["ds-0:32x32", atlas]]);
+    const memberToPool = new Map([["img", "ds-0:32x32"]]);
 
-    const result = computeWantedSet(coldState, new Map(), sliceAtlases);
+    const result = computeWantedSet(coldState, new Map(), sliceAtlases, memberToPool);
 
     // Only Z chunk 0 (containing slice z=10), 2x2 in XY = 4 chunks
     expect(result.missing).toHaveLength(4);

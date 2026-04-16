@@ -86,10 +86,14 @@ export function computeWantedSet(
         if (entityLodMetas === undefined) continue;
         useCompositeKey = true;
       } else {
-        atlas = sliceAtlases.get(memberId);
+        // Slice — shared pool (SP-3), same lookup pattern as volume
+        const poolKey = memberToPool?.get(memberId);
+        if (!poolKey) continue;
+        atlas = sliceAtlases.get(poolKey);
         if (atlas === undefined) continue;
-        entityLodMetas = atlas.lodMetas;
+        entityLodMetas = atlas.entityMetas?.get(memberId);
         if (entityLodMetas === undefined) continue;
+        useCompositeKey = true;
       }
 
       const atlasLodByLevel = new Map(entityLodMetas.map((m) => [m.level, m]));

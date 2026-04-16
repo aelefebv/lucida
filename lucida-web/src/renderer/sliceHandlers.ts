@@ -9,31 +9,36 @@ import type { CompositeLayer } from "./layerCompositor.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 import type { PlanningEpochs } from "../pipeline/planning.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
-import { asUint16, asUint16Slice } from "./dataTypeUtil.ts";
-import { parseChunkKey, type LodIndirectionMeta } from "./volumeHandlers.ts";
+import { asUint16Slice } from "./dataTypeUtil.ts";
+import { parseChunkKey, parseCompositeKey, makeCompositeKey, type LodIndirectionMeta } from "./volumeHandlers.ts";
+
+/** Per-entity Z metadata for slice mode (drives Z-chunk filtering and re-slice detection). */
+export interface SliceEntityZInfo {
+  chunkZ: number;
+  fullResDepth: number;
+  levelDepth: number;
+}
 
 export interface SliceAtlasState {
   texture: GPUTexture;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
-  slots: Map<string, number>;     // chunkKey → slotIndex (insertion-order = LRU)
-  slotGridIdx: Int32Array<ArrayBuffer>;        // slotIndex → gridIdx (for eviction cleanup)
+  /** Composite keys "memberId|chunkKey" → slotIndex (insertion-order = LRU). */
+  slots: Map<string, number>;
+  /** slotIndex → globalGridIdx (for eviction cleanup). */
+  slotGridIdx: Int32Array<ArrayBuffer>;
   freeSlots: number[];
   totalSlots: number;
+  /** Shared slot pool dimensions. */
   chunkX: number; chunkY: number;
-  gridX: number; gridY: number;
   slotsX: number; slotsY: number;
-  levelWidth: number; levelHeight: number;
-  level: number; z: number; t: number; c: number;
-  /** Chunk Z dimension — set from first chunk data arrival. */
-  chunkZ: number | null;
-  /** Full-resolution depth — set from first chunk data arrival. */
-  fullResDepth: number | null;
-  /** Level depth — set from first chunk data arrival. */
-  levelDepth: number | null;
-  /** Per-LOD indirection sections (same type as volume, Z dim used for Z-chunk filtering). */
-  lodMetas: LodIndirectionMeta[];
-  /** Chunk keys with stale 2D slice data after a Z change. Cleared as chunks are re-uploaded. */
+  /** Per-entity LOD sections (absolute offsets into the shared flat indirection buffer). */
+  entityMetas: Map<string, LodIndirectionMeta[]>;
+  /** Per-entity Z info (chunkZ, fullResDepth, levelDepth) — set from first chunk arrival per entity. */
+  entityZInfo: Map<string, SliceEntityZInfo>;
+  /** Current T, C, full-res Z — pool-wide. */
+  z: number; t: number; c: number;
+  /** Composite keys with stale 2D slice data after a Z change. */
   staleSliceKeys: Set<string> | null;
   intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
@@ -45,12 +50,23 @@ export function getSliceAtlases(): Map<string, SliceAtlasState> {
   return atlasPerDataset;
 }
 
-// Last known viewport center in [0,1] UV space per dataset
-const cameraUVPerDataset = new Map<string, [number, number]>();
+/** Last known viewport center in [0,1] UV space per ENTITY (memberId). */
+const cameraUVPerEntity = new Map<string, [number, number]>();
+
+/** Compute target chunk Z for an entity given current full-res Z. */
+function computeTargetChunkZ(zInfo: SliceEntityZInfo | undefined, currentZ: number): number | null {
+  if (!zInfo || zInfo.chunkZ <= 0) return null;
+  const levelZ = Math.min(
+    Math.floor((currentZ / Math.max(zInfo.fullResDepth - 1, 1)) * Math.max(zInfo.levelDepth - 1, 1)),
+    zInfo.levelDepth - 1,
+  );
+  return Math.floor(levelZ / zInfo.chunkZ);
+}
 
 /**
- * Remap the 2D indirection buffer to show only chunks matching the current state.
- * Also filters by Z: only maps chunks whose Z grid coordinate matches the target slice.
+ * Remap the 2D indirection buffer for the current state.
+ * Walks composite slot keys, looks up each entity's lodMetas + Z info,
+ * and writes chunks matching current T/C and target Z into per-entity sections.
  */
 export function remapSliceIndirection(
   atlas: SliceAtlasState,
@@ -61,31 +77,27 @@ export function remapSliceIndirection(
   atlas.indirectionData.fill(0xFFFFFFFF);
   atlas.slotGridIdx.fill(-1);
 
-  // Compute target chunk Z if we have the needed metadata
-  let targetChunkZ: number | null = null;
-  if (atlas.chunkZ != null && atlas.fullResDepth != null && atlas.levelDepth != null && atlas.chunkZ > 0) {
-    const levelZ = Math.min(
-      Math.floor((currentZ / Math.max(atlas.fullResDepth - 1, 1)) * Math.max(atlas.levelDepth - 1, 1)),
-      atlas.levelDepth - 1,
-    );
-    targetChunkZ = Math.floor(levelZ / atlas.chunkZ);
-  }
+  for (const [compositeKey, slotIndex] of atlas.slots) {
+    const parsedComposite = parseCompositeKey(compositeKey);
+    if (!parsedComposite) continue;
 
-  const metaByLevel = new Map(atlas.lodMetas.map(m => [m.level, m]));
+    const lodMetas = atlas.entityMetas.get(parsedComposite.memberId);
+    if (!lodMetas) continue; // entity no longer in active set
 
-  for (const [key, slotIndex] of atlas.slots) {
-    const parsed = parseChunkKey(key);
-    if (!parsed) continue;
-    if (parsed.t !== currentT) continue;
-    if (parsed.c !== currentC) continue;
-    if (targetChunkZ !== null && parsed.z !== targetChunkZ) continue;
+    const chunk = parseChunkKey(parsedComposite.chunkKey);
+    if (!chunk) continue;
+    if (chunk.t !== currentT) continue;
+    if (chunk.c !== currentC) continue;
 
-    const meta = metaByLevel.get(parsed.level);
+    // Z filter (per entity)
+    const targetChunkZ = computeTargetChunkZ(atlas.entityZInfo.get(parsedComposite.memberId), currentZ);
+    if (targetChunkZ !== null && chunk.z !== targetChunkZ) continue;
+
+    const meta = lodMetas.find(m => m.level === chunk.level);
     if (!meta) continue;
 
     const [, , lodGridX] = meta.gridDims;
-    const [, lodGridY] = meta.gridDims;
-    const globalIdx = meta.offset + parsed.y * lodGridX + parsed.x;
+    const globalIdx = meta.offset + chunk.y * lodGridX + chunk.x;
     if (globalIdx >= 0 && globalIdx < atlas.indirectionData.length) {
       atlas.indirectionData[globalIdx] = slotIndex;
       atlas.slotGridIdx[slotIndex] = globalIdx;
@@ -95,15 +107,12 @@ export function remapSliceIndirection(
   atlas.indirectionDirty = true;
 }
 
+/** Create a shared slice pool. Indirection sized later from entityMetas. */
 function createSliceAtlas(
   device: GPUDevice,
-  levelW: number, levelH: number,
   chunkX: number, chunkY: number,
-  level: number, z: number, t: number, c: number,
+  z: number, t: number, c: number,
 ): SliceAtlasState {
-  const gridX = Math.ceil(levelW / chunkX);
-  const gridY = Math.ceil(levelH / chunkY);
-
   const chunkTexels = chunkX * chunkY;
   const maxSlots = Math.floor(SLICE_ATLAS_BUDGET / (chunkTexels * 2));
   const slotsPerAxis = Math.floor(Math.sqrt(maxSlots));
@@ -116,12 +125,11 @@ function createSliceAtlas(
 
   const texture = createSliceTexture(device, atlasW, atlasH, null);
 
-  const indirectionSize = gridX * gridY;
-  const indirectionData = new Uint32Array(indirectionSize);
-  indirectionData.fill(0xFFFFFFFF);
-
+  // Indirection sized later by cold state handler
+  const indirectionData = new Uint32Array(1);
+  indirectionData[0] = 0xFFFFFFFF;
   const indirectionBuf = device.createBuffer({
-    size: Math.max(indirectionSize * 4, 4),
+    size: 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(indirectionBuf, 0, indirectionData);
@@ -132,21 +140,15 @@ function createSliceAtlas(
   const slotGridIdx = new Int32Array(totalSlots);
   slotGridIdx.fill(-1);
 
-  const lodMetas: LodIndirectionMeta[] = [{
-    level, gridDims: [1, gridY, gridX], chunkDims: [1, chunkY, chunkX],
-    levelDims: [1, levelH, levelW], offset: 0,
-  }];
-
   return {
     texture, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY,
-    gridX, gridY,
     slotsX, slotsY,
-    lodMetas,
-    levelWidth: levelW, levelHeight: levelH,
-    level, z, t, c,
-    chunkZ: null, fullResDepth: null, levelDepth: null, staleSliceKeys: null,
+    entityMetas: new Map(),
+    entityZInfo: new Map(),
+    z, t, c,
+    staleSliceKeys: null,
     intensityMin: 65535, intensityMax: 0,
     indirectionDirty: true,
   };
@@ -157,122 +159,133 @@ function destroySliceAtlas(atlas: SliceAtlasState): void {
   atlas.indirectionBuf.destroy();
 }
 
-/** Squared distance from a chunk grid coordinate to a reference point in [0,1] UV space. */
+/**
+ * Get or create a shared slice pool with the given chunk dims.
+ * Cold state handler sets entityMetas and resizes indirection afterward.
+ */
+export function getOrCreateSlicePool(
+  ctx: WorkerCtx,
+  poolKey: string,
+  chunkX: number, chunkY: number,
+  z: number, t: number, c: number,
+): SliceAtlasState {
+  const existing = atlasPerDataset.get(poolKey);
+  if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY) {
+    // Mark stale on Z change before updating z
+    if (z !== existing.z && existing.slots.size > 0) {
+      existing.staleSliceKeys = new Set(existing.slots.keys());
+    }
+    existing.z = z;
+    existing.t = t;
+    existing.c = c;
+    return existing;
+  }
+  if (existing) destroySliceAtlas(existing);
+  const newAtlas = createSliceAtlas(ctx.device, chunkX, chunkY, z, t, c);
+  atlasPerDataset.set(poolKey, newAtlas);
+  return newAtlas;
+}
+
+/** Resize the slice pool's indirection to the new total size. */
+export function resizeSliceIndirection(ctx: WorkerCtx, atlas: SliceAtlasState, totalEntries: number): void {
+  if (totalEntries === atlas.indirectionData.length) return;
+  atlas.indirectionData = new Uint32Array(totalEntries);
+  atlas.indirectionBuf.destroy();
+  atlas.indirectionBuf = ctx.device.createBuffer({
+    size: Math.max(totalEntries * 4, 4),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+}
+
+/** Squared distance from a chunk grid coordinate to a reference UV. Uses entity-specific level dims. */
 function chunkDistSq2D(
-  atlas: SliceAtlasState, cx: number, cy: number,
+  lodMeta: LodIndirectionMeta,
+  cx: number, cy: number,
   cam: [number, number],
 ): number {
-  const px = (cx + 0.5) * atlas.chunkX / atlas.levelWidth;
-  const py = (cy + 0.5) * atlas.chunkY / atlas.levelHeight;
+  const [, levelH, levelW] = lodMeta.levelDims;
+  const [, , chunkX] = lodMeta.chunkDims;
+  const [, chunkY] = lodMeta.chunkDims;
+  const px = (cx + 0.5) * chunkX / Math.max(levelW, 1);
+  const py = (cy + 0.5) * chunkY / Math.max(levelH, 1);
   const dx = px - cam[0];
   const dy = py - cam[1];
   return dx * dx + dy * dy;
 }
 
-/** Find the best eviction candidate: prefer stale (unmapped) chunks, then farthest mapped chunk. */
-function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): { key: string; dist: number } {
+/** Find the best eviction candidate: prefer stale, then farthest. Per-entity distance reference. */
+function findFarthestSlot2D(atlas: SliceAtlasState): { key: string; dist: number } {
   let farthestKey = "";
   let maxDist = -1;
 
-  for (const [key, slotIdx] of atlas.slots) {
+  for (const [compositeKey, slotIdx] of atlas.slots) {
     const gridIdx = atlas.slotGridIdx[slotIdx];
     if (gridIdx < 0) {
-      // Stale chunk (not mapped in indirection) — always prefer for eviction
-      return { key, dist: Infinity };
+      return { key: compositeKey, dist: Infinity };
     }
 
-    // Parse chunk key for coordinates — works correctly with multi-LOD indirection
-    const parsed = parseChunkKey(key);
+    const parsed = parseCompositeKey(compositeKey);
     if (!parsed) continue;
+    const lodMetas = atlas.entityMetas.get(parsed.memberId);
+    if (!lodMetas) {
+      return { key: compositeKey, dist: Infinity };
+    }
+    const chunk = parseChunkKey(parsed.chunkKey);
+    if (!chunk) continue;
+    const lodMeta = lodMetas.find(m => m.level === chunk.level);
+    if (!lodMeta) continue;
 
-    const dist = chunkDistSq2D(atlas, parsed.x, parsed.y, cam);
+    const cam = cameraUVPerEntity.get(parsed.memberId) ?? [0.5, 0.5];
+    const dist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
 
     if (dist > maxDist) {
       maxDist = dist;
-      farthestKey = key;
+      farthestKey = compositeKey;
     }
   }
 
   return { key: farthestKey, dist: maxDist };
 }
 
-export function handleSliceAtlasConfig(ctx: WorkerCtx, msg: {
-  datasetId: string; level: number; z: number; t: number; c: number;
-  levelWidth: number; levelHeight: number; chunkX: number; chunkY: number;
-}): void {
-  const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY } = msg;
+export function handleSliceChunkData(
+  ctx: WorkerCtx,
+  msg: SliceChunkDataMessage,
+  currentEpochs: PlanningEpochs | null,
+  poolKey: string,
+  memberId: string,
+): void {
+  const { level, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
 
-  const atlas = atlasPerDataset.get(datasetId);
-
-  if (atlas && atlas.chunkX === chunkX && atlas.chunkY === chunkY) {
-    // Chunk dims match — remap instead of rebuild. Atlas slots stay intact.
-    // If Z changed, mark all existing slots as needing re-slice
-    if (z !== atlas.z && atlas.slots.size > 0) {
-      atlas.staleSliceKeys = new Set(atlas.slots.keys());
-    }
-    atlas.level = level;
-    atlas.z = z;
-    atlas.t = t;
-    atlas.c = c;
-    atlas.levelWidth = levelWidth;
-    atlas.levelHeight = levelHeight;
-
-    const newGridX = Math.ceil(levelWidth / chunkX);
-    const newGridY = Math.ceil(levelHeight / chunkY);
-    const newGridSize = newGridX * newGridY;
-
-    if (newGridSize !== atlas.gridX * atlas.gridY) {
-      atlas.indirectionData = new Uint32Array(newGridSize);
-      atlas.indirectionBuf.destroy();
-      atlas.indirectionBuf = ctx.device.createBuffer({
-        size: Math.max(newGridSize * 4, 4),
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-    }
-    atlas.gridX = newGridX;
-    atlas.gridY = newGridY;
-
-    remapSliceIndirection(atlas, t, c, z);
-    return;
-  }
-
-  // No atlas or chunk dims changed — create new
-  if (atlas) destroySliceAtlas(atlas);
-  const newAtlas = createSliceAtlas(ctx.device, levelWidth, levelHeight, chunkX, chunkY, level, z, t, c);
-  atlasPerDataset.set(datasetId, newAtlas);
-}
-
-export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage, currentEpochs: PlanningEpochs | null): void {
-  const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
-
-  // Drop entire batch if stale
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     const skippedKeys = msg.chunks.map(c => c.key);
     if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", datasetId: msg.datasetId, keys: [], skipped: skippedKeys });
+      ctx.post({ type: "chunksEvicted", datasetId: memberId, keys: [], skipped: skippedKeys });
     }
     return;
   }
 
-  let atlas = atlasPerDataset.get(datasetId);
-  if (!atlas) return; // No atlas config received yet — wait for it
+  const atlas = atlasPerDataset.get(poolKey);
+  if (!atlas) return;
 
-  // Debug: detect chunk dims mismatch (atlas created for different chunk size)
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
-    console.warn(`[sliceChunkData] chunkDims mismatch for ${datasetId}: atlas=[${atlas.chunkX},${atlas.chunkY}] msg=[${chunkX},${chunkY}] level=${level}`);
+    console.warn(`[sliceChunkData] chunkDims mismatch for ${memberId}: pool=[${atlas.chunkX},${atlas.chunkY}] msg=[${chunkX},${chunkY}] level=${level}`);
   }
-  if (!atlas.lodMetas.some(m => m.level === level)) {
-    console.warn(`[sliceChunkData] no lodMeta for level ${level} in ${datasetId}, atlas has levels [${atlas.lodMetas.map(m => m.level).join(",")}]`);
+  const entityLodMetas = atlas.entityMetas.get(memberId);
+  if (!entityLodMetas) {
+    console.warn(`[sliceChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
+    return;
+  }
+  const lodMeta = entityLodMetas.find(m => m.level === level);
+  if (!lodMeta) {
+    console.warn(`[sliceChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
+    return;
   }
 
-  // Store Z metadata on first arrival (used by remapSliceIndirection)
-  if (atlas.chunkZ == null) {
-    atlas.chunkZ = chunkZ;
-    atlas.fullResDepth = fullResDepth;
-    atlas.levelDepth = levelDepth;
+  // Store per-entity Z metadata on first arrival
+  if (!atlas.entityZInfo.has(memberId)) {
+    atlas.entityZInfo.set(memberId, { chunkZ, fullResDepth, levelDepth });
   }
 
-  // Map full-res Z to level Z
   const levelZ = Math.min(
     Math.floor((fullResZ / Math.max(fullResDepth - 1, 1)) * Math.max(levelDepth - 1, 1)),
     levelDepth - 1,
@@ -286,33 +299,30 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
 
   for (const chunk of msg.chunks) {
     if (chunk.z !== targetChunkZ) continue;
+    const compositeKey = makeCompositeKey(memberId, chunk.key);
 
-    // Check if chunk already exists — skip unless it has stale slice data from a Z change
-    const existingSlot = atlas.slots.get(chunk.key);
+    const existingSlot = atlas.slots.get(compositeKey);
     if (existingSlot !== undefined) {
-      if (!atlas.staleSliceKeys?.has(chunk.key)) continue; // up-to-date, skip
-      atlas.staleSliceKeys.delete(chunk.key); // will be re-sliced below
+      if (!atlas.staleSliceKeys?.has(compositeKey)) continue;
+      atlas.staleSliceKeys.delete(compositeKey);
     }
 
-    // Sample intensity from raw data (works for both uint8 and uint16)
     const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
     const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
     const r = sampleIntensityRange(rawView, perChunkSamples);
     if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
     if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
 
-    // Allocate a slot (reuse existing if re-slicing)
     let slotIndex: number;
     if (existingSlot !== undefined) {
-      slotIndex = existingSlot; // reuse same slot for re-slice
+      slotIndex = existingSlot;
     } else if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;
     } else {
-      // Only evict if the incoming chunk is closer than the farthest in the atlas.
-      const cam = cameraUVPerDataset.get(datasetId) ?? [0.5, 0.5];
-      const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(atlas, cam);
+      const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(atlas);
       if (!evictKey) continue;
-      const incomingDist = chunkDistSq2D(atlas, chunk.x, chunk.y, cam);
+      const cam = cameraUVPerEntity.get(memberId) ?? [0.5, 0.5];
+      const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
       if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
@@ -325,49 +335,63 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
 
     const sx = slotIndex % atlas.slotsX;
     const sy = Math.floor(slotIndex / atlas.slotsX);
-
     const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
     const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
     const sliceOffset = localZ * chunkY * chunkX;
-    // Convert only the 2D slice to uint16 for GPU upload (small allocation)
     const sliceData = asUint16Slice(chunk.data, chunk.dataType, sliceOffset, chunkY * chunkX);
 
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;
     writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
 
-    // Find the correct LOD section in the indirection buffer
-    const lodMeta = atlas.lodMetas.find(m => m.level === level);
-    const [, , lodGridX] = lodMeta ? lodMeta.gridDims : [1, atlas.gridY, atlas.gridX];
-    const lodOffset = lodMeta ? lodMeta.offset : 0;
-    const globalIdx = lodOffset + chunk.y * lodGridX + chunk.x;
+    // Write to entity's per-LOD section
+    const [, , lodGridX] = lodMeta.gridDims;
+    const globalIdx = lodMeta.offset + chunk.y * lodGridX + chunk.x;
     if (globalIdx < atlas.indirectionData.length) {
       atlas.indirectionData[globalIdx] = slotIndex;
       atlas.slotGridIdx[slotIndex] = globalIdx;
     }
-    atlas.slots.set(chunk.key, slotIndex);
+    atlas.slots.set(compositeKey, slotIndex);
     atlas.indirectionDirty = true;
   }
 
-  // Report chunks from the batch that the atlas did not keep (rejected as too far, wrong Z, etc.)
+  // Report evicted/skipped, demuxed by member
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
-    if (!atlas.slots.has(chunk.key)) {
+    const compositeKey = makeCompositeKey(memberId, chunk.key);
+    if (!atlas.slots.has(compositeKey)) {
       skippedKeys.push(chunk.key);
     }
   }
 
   if (evictedKeys.length > 0 || skippedKeys.length > 0) {
-    ctx.post({ type: "chunksEvicted", datasetId, keys: evictedKeys, skipped: skippedKeys });
+    const evictedByMember = new Map<string, string[]>();
+    for (const ck of evictedKeys) {
+      const parsed = parseCompositeKey(ck);
+      if (!parsed) continue;
+      const arr = evictedByMember.get(parsed.memberId) ?? [];
+      arr.push(parsed.chunkKey);
+      evictedByMember.set(parsed.memberId, arr);
+    }
+    for (const [evMember, evKeys] of evictedByMember) {
+      ctx.post({ type: "chunksEvicted", datasetId: evMember, keys: evKeys, skipped: [] });
+    }
+    if (skippedKeys.length > 0) {
+      ctx.post({ type: "chunksEvicted", datasetId: memberId, keys: [], skipped: skippedKeys });
+    }
     ctx.postWantedSet();
   }
 
   if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId, min: atlas.intensityMin, max: atlas.intensityMax });
+    ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
   }
 }
 
-export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMultiPassMessage): void {
+export function handleSliceRenderMultiPass(
+  ctx: WorkerCtx,
+  msg: SliceRenderMultiPassMessage,
+  layerToPool: (memberId: string) => { poolKey: string } | null,
+): void {
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
@@ -379,32 +403,39 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
   const renderedLayers: CompositeLayer[] = [];
 
   for (const layer of msg.layers) {
-    const atlas = atlasPerDataset.get(layer.datasetId);
+    const memberId = layer.datasetId;
+    const resolved = layerToPool(memberId);
+    if (!resolved) continue;
+    const atlas = atlasPerDataset.get(resolved.poolKey);
     if (!atlas) continue;
+    const entityLodMetas = atlas.entityMetas.get(memberId);
+    if (!entityLodMetas) continue;
 
-    // Update viewport center in [0,1] UV space for distance-based eviction.
-    // Adjust by member position offset so the atlas eviction sees member-local coords.
     const ox = layer.offsetX ?? 0;
     const oy = layer.offsetY ?? 0;
-    cameraUVPerDataset.set(layer.datasetId, [
+    cameraUVPerEntity.set(memberId, [
       (msg.cx - ox) / layer.dataW,
       (msg.cy - oy) / layer.dataH,
     ]);
 
     const idx = renderedLayers.length;
 
-    // Flush indirection data to GPU only if chunks changed since last render
     if (atlas.indirectionDirty) {
       ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
       atlas.indirectionDirty = false;
     }
+
+    // Use target LOD's dims for legacy single-LOD uniforms
+    const targetMeta = entityLodMetas[0];
+    const [, tGridY, tGridX] = targetMeta.gridDims;
+    const [, tLevelH, tLevelW] = targetMeta.levelDims;
     renderer.setAtlas(
       atlas.texture, atlas.indirectionBuf,
       [atlas.chunkX, atlas.chunkY],
-      [atlas.gridX, atlas.gridY],
+      [tGridX, tGridY],
       [atlas.slotsX, atlas.slotsY],
-      [atlas.levelWidth, atlas.levelHeight],
-      atlas.lodMetas,
+      [tLevelW, tLevelH],
+      entityLodMetas,
     );
 
     const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");
@@ -431,17 +462,17 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
   }
 }
 
-export function removeSliceResources(datasetId: string): void {
-  const atlas = atlasPerDataset.get(datasetId);
+export function removeSliceResources(idOrMember: string): void {
+  const atlas = atlasPerDataset.get(idOrMember);
   if (atlas) {
     destroySliceAtlas(atlas);
-    atlasPerDataset.delete(datasetId);
+    atlasPerDataset.delete(idOrMember);
   }
-  cameraUVPerDataset.delete(datasetId);
+  cameraUVPerEntity.delete(idOrMember);
 }
 
 export function destroyAllSliceResources(): void {
   for (const atlas of atlasPerDataset.values()) destroySliceAtlas(atlas);
   atlasPerDataset.clear();
-  cameraUVPerDataset.clear();
+  cameraUVPerEntity.clear();
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseChunkKey, remapIndirection, type AtlasState, type LodIndirectionMeta } from "./volumeHandlers.ts";
-import { remapSliceIndirection, type SliceAtlasState } from "./sliceHandlers.ts";
+import { remapSliceIndirection, type SliceAtlasState, type SliceEntityZInfo } from "./sliceHandlers.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,40 +39,46 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
   };
 }
 
-/** Create a minimal SliceAtlasState for testing (no GPU resources).
- *  Slice still uses single-entity atlases until SP-3. */
-function makeSliceAtlas(overrides?: Partial<SliceAtlasState>): SliceAtlasState {
-  const gridX = 4, gridY = 4;
+/** Create a minimal SliceAtlasState for testing (no GPU resources). */
+function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?: string; entityZInfo?: SliceAtlasState["entityZInfo"] }): SliceAtlasState {
   const totalSlots = 16;
-  const lodMetas: LodIndirectionMeta[] = overrides?.lodMetas ?? [{
-    level: 0, gridDims: [1, gridY, gridX], chunkDims: [32, 32, 32],
-    levelDims: [64, 128, 128], offset: 0,
-  }];
-  const totalIndirection = lodMetas.reduce((sum, m) => sum + m.gridDims[1] * m.gridDims[2], 0);
+  const defaultMember = overrides?.defaultMember ?? "memA";
+  const entityMetas: Map<string, LodIndirectionMeta[]> = overrides?.entityMetas ?? new Map([
+    [defaultMember, [{
+      level: 0, gridDims: [1, 4, 4], chunkDims: [32, 32, 32],
+      levelDims: [64, 128, 128], offset: 0,
+    }]],
+  ]);
+  let totalIndirection = 0;
+  for (const metas of entityMetas.values()) {
+    for (const m of metas) totalIndirection += m.gridDims[1] * m.gridDims[2];
+  }
+  const entityZInfo = overrides?.entityZInfo ?? new Map([
+    [defaultMember, { chunkZ: 32, fullResDepth: 64, levelDepth: 64 }],
+  ]);
   return {
     texture: null as any,
     indirectionBuf: null as any,
-    indirectionData: new Uint32Array(totalIndirection).fill(0xFFFFFFFF),
+    indirectionData: new Uint32Array(Math.max(totalIndirection, 1)).fill(0xFFFFFFFF),
     slots: new Map(),
     slotGridIdx: new Int32Array(totalSlots).fill(-1),
     freeSlots: [],
     totalSlots,
     chunkX: 32, chunkY: 32,
-    gridX, gridY,
     slotsX: 4, slotsY: 4,
-    lodMetas,
-    levelWidth: 128, levelHeight: 128,
-    level: 0, z: 0, t: 0, c: 0,
-    chunkZ: 32, fullResDepth: 64, levelDepth: 64,
+    entityMetas,
+    entityZInfo,
+    z: 0, t: 0, c: 0,
+    staleSliceKeys: null,
     intensityMin: 65535, intensityMax: 0,
     indirectionDirty: false,
     ...overrides,
   };
 }
 
-/** Insert a fake chunk into a (legacy single-entity) slice atlas's slots map. */
-function insertSliceChunk(atlas: { slots: Map<string, number> }, level: number, t: number, c: number, z: number, y: number, x: number, slotIndex: number) {
-  atlas.slots.set(`${level}/${t}/${c}/${z}/${y}/${x}`, slotIndex);
+/** Insert a fake chunk into a shared-pool slice atlas's slots map (composite key). */
+function insertSliceChunk(atlas: { slots: Map<string, number> }, level: number, t: number, c: number, z: number, y: number, x: number, slotIndex: number, memberId: string = "memA") {
+  atlas.slots.set(`${memberId}|${level}/${t}/${c}/${z}/${y}/${x}`, slotIndex);
 }
 
 /** Insert a fake chunk into a shared-pool atlas's slots map (composite key). */
@@ -197,12 +203,12 @@ describe("remapSliceIndirection", () => {
     expect(atlas.indirectionData[0]).toBe(1);  // Z chunk 0 still in atlas
   });
 
-  it("no Z metadata → empty indirection (no crash)", () => {
-    const atlas = makeSliceAtlas({ chunkZ: null, fullResDepth: null, levelDepth: null });
+  it("no Z metadata → Z filter skipped → chunks still map", () => {
+    // Empty entityZInfo means computeTargetChunkZ returns null → Z filter is skipped
+    const atlas = makeSliceAtlas({ entityZInfo: new Map() });
     insertSliceChunk(atlas, 0, 0, 0, 0, 0, 0, 1);
 
     remapSliceIndirection(atlas, 0, 0, 0);
-    // With no Z metadata, Z filter is skipped → chunks still map
     expect(atlas.indirectionData[0]).toBe(1);
   });
 });

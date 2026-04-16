@@ -6,7 +6,7 @@ import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases, handleSliceAtlasConfig, remapSliceIndirection } from "./sliceHandlers.ts";
+import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases, getOrCreateSlicePool, resizeSliceIndirection, remapSliceIndirection } from "./sliceHandlers.ts";
 import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, getOrCreateVolumePool, resizeIndirection, remapIndirection, type LodIndirectionMeta } from "./volumeHandlers.ts";
 import type { ColdStateActiveEntry } from "./workerProtocol.ts";
 import { computeWantedSet } from "./wantedSet.ts";
@@ -156,11 +156,19 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
-      case "sliceChunkData":
-        handleSliceChunkData(ctx, msg, currentEpochs);
+      case "sliceChunkData": {
+        const memberId = msg.datasetId;
+        const poolKey = memberToPool.get(memberId);
+        if (!poolKey) break;
+        handleSliceChunkData(ctx, msg, currentEpochs, poolKey, memberId);
         break;
+      }
       case "sliceRenderMultiPass":
-        handleSliceRenderMultiPass(ctx, msg);
+        handleSliceRenderMultiPass(ctx, msg, (memberId) => {
+          const poolKey = memberToPool.get(memberId);
+          if (!poolKey) return null;
+          return { poolKey };
+        });
         break;
 
       case "volumeChunkData": {
@@ -308,107 +316,84 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
             remapIndirection(atlas, msg.currentT, group.channel);
           }
         } else {
-          // Slice mode — kept as per-member atlases until SP-3
-          for (const entry of msg.activeSet) {
-            const members: Array<{ memberId: string; channel: number }> = [];
-            if (isMultiCh) {
-              for (const ch of msg.visibleChannels) {
-                members.push({ memberId: `${entry.imageId}:ch${ch}`, channel: ch });
+          // Slice mode — multi-pool by (channel, chunk dims), same pattern as volume
+          const channels = isMultiCh ? msg.visibleChannels : [msg.visibleChannels[0]];
+
+          interface SlicePoolGroup {
+            poolKey: string;
+            channel: number;
+            chunkDims: [number, number]; // [Y, X] for slice (2D)
+            entries: Array<{ entry: typeof msg.activeSet[0]; memberId: string }>;
+          }
+          const groups = new Map<string, SlicePoolGroup>();
+
+          for (const channel of channels) {
+            for (const entry of msg.activeSet) {
+              const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
+              if (!targetLevel) continue;
+              const [, chunkY, chunkX] = targetLevel.chunkShape;
+              const chunkDimsKey = `${chunkX}x${chunkY}`;
+              const poolKey = isMultiCh
+                ? `${msg.datasetId}:ch${channel}:${chunkDimsKey}`
+                : `${msg.datasetId}:${chunkDimsKey}`;
+              const memberId = isMultiCh ? `${entry.imageId}:ch${channel}` : entry.imageId;
+
+              memberToPool.set(memberId, poolKey);
+
+              let group = groups.get(poolKey);
+              if (!group) {
+                group = { poolKey, channel, chunkDims: [chunkY, chunkX], entries: [] };
+                groups.set(poolKey, group);
               }
-            } else {
-              members.push({ memberId: entry.imageId, channel: msg.visibleChannels[0] });
+              group.entries.push({ entry, memberId });
+            }
+          }
+
+          for (const group of groups.values()) {
+            const [pcY, pcX] = group.chunkDims;
+            const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
+            let offset = 0;
+
+            for (const { entry, memberId } of group.entries) {
+              const [finest, coarsest] = entry.detailOwnedLodRange;
+              const entityLodMetas: LodIndirectionMeta[] = [];
+              for (let lvl = finest; lvl <= coarsest; lvl++) {
+                const lm = entry.levels.find(l => l.level === lvl);
+                if (!lm) continue;
+                const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
+                if (lChunkX !== pcX || lChunkY !== pcY) continue;
+                const [lGridZ, lGridY, lGridX] = lm.gridShape;
+                const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
+                entityLodMetas.push({
+                  level: lvl,
+                  gridDims: [lGridZ, lGridY, lGridX],
+                  chunkDims: [lChunkZ, lChunkY, lChunkX],
+                  levelDims: [lLevelD, lLevelH, lLevelW],
+                  offset,
+                });
+                offset += lGridX * lGridY; // 2D indirection
+              }
+              if (entityLodMetas.length === 0) {
+                const targetLevel = entry.levels.find(l => l.level === entry.targetLod)!;
+                const [tChunkZ, tChunkY, tChunkX] = targetLevel.chunkShape;
+                const [tGridZ, tGridY, tGridX] = targetLevel.gridShape;
+                const [tLevelD, tLevelH, tLevelW] = targetLevel.levelDims;
+                entityLodMetas.push({
+                  level: entry.targetLod,
+                  gridDims: [tGridZ, tGridY, tGridX],
+                  chunkDims: [tChunkZ, tChunkY, tChunkX],
+                  levelDims: [tLevelD, tLevelH, tLevelW],
+                  offset,
+                });
+                offset += tGridX * tGridY;
+              }
+              newEntityMetas.set(memberId, entityLodMetas);
             }
 
-            const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
-            if (!targetLevel) continue;
-            const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
-            const [gridZ, gridY, gridX] = targetLevel.gridShape;
-            const [levelD, levelH, levelW] = targetLevel.levelDims;
-
-            for (const { memberId, channel } of members) {
-              // Slice mode
-              const atlas = getSliceAtlases().get(memberId);
-              if (!atlas) {
-                handleSliceAtlasConfig(ctx, {
-
-                  epochs: msg.epochs,
-                  datasetId: memberId,
-                  level: entry.targetLod, z: msg.currentZ, t: msg.currentT, c: channel,
-                  levelWidth: levelW, levelHeight: levelH,
-                  chunkX, chunkY,
-                });
-              } else if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
-                handleSliceAtlasConfig(ctx, {
-
-                  epochs: msg.epochs,
-                  datasetId: memberId,
-                  level: entry.targetLod, z: msg.currentZ, t: msg.currentT, c: channel,
-                  levelWidth: levelW, levelHeight: levelH,
-                  chunkX, chunkY,
-                });
-              } else {
-                // Update Z metadata from cold state
-                if (atlas.chunkZ == null) atlas.chunkZ = chunkZ;
-                if (atlas.fullResDepth == null) atlas.fullResDepth = levelD;
-                if (atlas.levelDepth == null) atlas.levelDepth = levelD;
-                // Mark stale on Z change
-                if (msg.currentZ !== atlas.z && atlas.slots.size > 0) {
-                  atlas.staleSliceKeys = new Set(atlas.slots.keys());
-                }
-                atlas.level = entry.targetLod;
-                atlas.z = msg.currentZ;
-                atlas.t = msg.currentT;
-                atlas.c = channel;
-                atlas.levelWidth = levelW;
-                atlas.levelHeight = levelH;
-                atlas.gridX = gridX;
-                atlas.gridY = gridY;
-
-                // Build multi-LOD lodMetas for slice (2D — gridDims Z=1)
-                const [slFinest, slCoarsest] = entry.detailOwnedLodRange;
-                const sliceLodMetas: LodIndirectionMeta[] = [];
-                let slOffset = 0;
-                for (let lvl = slFinest; lvl <= slCoarsest; lvl++) {
-                  const lm = entry.levels.find(l => l.level === lvl);
-                  if (!lm) continue;
-                  const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
-                  if (lChunkX !== chunkX || lChunkY !== chunkY) continue;
-                  const [lGridZ, lGridY, lGridX] = lm.gridShape;
-                  const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
-                  sliceLodMetas.push({
-                    level: lvl,
-                    gridDims: [lGridZ, lGridY, lGridX],
-                    chunkDims: [lChunkZ, lChunkY, lChunkX],
-                    levelDims: [lLevelD, lLevelH, lLevelW],
-                    offset: slOffset,
-                  });
-                  slOffset += lGridX * lGridY; // 2D indirection for slice
-                }
-                if (sliceLodMetas.length === 0) {
-                  sliceLodMetas.push({
-                    level: entry.targetLod,
-                    gridDims: [1, gridY, gridX],
-                    chunkDims: [chunkZ, chunkY, chunkX],
-                    levelDims: [levelD, levelH, levelW],
-                    offset: 0,
-                  });
-                  slOffset = gridX * gridY;
-                }
-                atlas.lodMetas = sliceLodMetas;
-
-                const totalSliceIndirection = slOffset;
-                if (totalSliceIndirection !== atlas.indirectionData.length) {
-                  atlas.indirectionData = new Uint32Array(totalSliceIndirection);
-                  atlas.indirectionBuf.destroy();
-                  atlas.indirectionBuf = device.createBuffer({
-                    size: Math.max(totalSliceIndirection * 4, 4),
-                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-                  });
-                }
-
-                remapSliceIndirection(atlas, msg.currentT, channel, msg.currentZ);
-              }
-            }
+            const atlas = getOrCreateSlicePool(ctx, group.poolKey, pcX, pcY, msg.currentZ, msg.currentT, group.channel);
+            atlas.entityMetas = newEntityMetas;
+            resizeSliceIndirection(ctx, atlas, offset);
+            remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ);
           }
         }
 
