@@ -11,6 +11,7 @@ import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 import type { PlanningEpochs } from "../pipeline/planning.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16, asUint16Slice } from "./dataTypeUtil.ts";
+import { parseChunkKey } from "./volumeHandlers.ts";
 
 export interface SliceAtlasState {
   texture: GPUTexture;
@@ -25,6 +26,14 @@ export interface SliceAtlasState {
   slotsX: number; slotsY: number;
   levelWidth: number; levelHeight: number;
   level: number; z: number; t: number; c: number;
+  /** Chunk Z dimension — set from first chunk data arrival. */
+  chunkZ: number | null;
+  /** Full-resolution depth — set from first chunk data arrival. */
+  fullResDepth: number | null;
+  /** Level depth — set from first chunk data arrival. */
+  levelDepth: number | null;
+  /** Chunk keys with stale 2D slice data after a Z change. Cleared as chunks are re-uploaded. */
+  staleSliceKeys: Set<string> | null;
   intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
 }
@@ -37,6 +46,50 @@ export function getSliceAtlases(): Map<string, SliceAtlasState> {
 
 // Last known viewport center in [0,1] UV space per dataset
 const cameraUVPerDataset = new Map<string, [number, number]>();
+
+/**
+ * Remap the 2D indirection buffer to show only chunks matching the current state.
+ * Also filters by Z: only maps chunks whose Z grid coordinate matches the target slice.
+ */
+export function remapSliceIndirection(
+  atlas: SliceAtlasState,
+  currentT: number,
+  currentC: number,
+  currentZ: number,
+  detailLevels: number[],
+): void {
+  atlas.indirectionData.fill(0xFFFFFFFF);
+  atlas.slotGridIdx.fill(-1);
+
+  // Compute target chunk Z if we have the needed metadata
+  let targetChunkZ: number | null = null;
+  if (atlas.chunkZ != null && atlas.fullResDepth != null && atlas.levelDepth != null && atlas.chunkZ > 0) {
+    const levelZ = Math.min(
+      Math.floor((currentZ / Math.max(atlas.fullResDepth - 1, 1)) * Math.max(atlas.levelDepth - 1, 1)),
+      atlas.levelDepth - 1,
+    );
+    targetChunkZ = Math.floor(levelZ / atlas.chunkZ);
+  }
+
+  const levelSet = new Set(detailLevels);
+
+  for (const [key, slotIndex] of atlas.slots) {
+    const parsed = parseChunkKey(key);
+    if (!parsed) continue;
+    if (parsed.t !== currentT) continue;
+    if (parsed.c !== currentC) continue;
+    if (!levelSet.has(parsed.level)) continue;
+    if (targetChunkZ !== null && parsed.z !== targetChunkZ) continue;
+
+    const gridIdx = parsed.y * atlas.gridX + parsed.x;
+    if (gridIdx >= 0 && gridIdx < atlas.indirectionData.length) {
+      atlas.indirectionData[gridIdx] = slotIndex;
+      atlas.slotGridIdx[slotIndex] = gridIdx;
+    }
+  }
+
+  atlas.indirectionDirty = true;
+}
 
 function createSliceAtlas(
   device: GPUDevice,
@@ -83,6 +136,7 @@ function createSliceAtlas(
     slotsX, slotsY,
     levelWidth: levelW, levelHeight: levelH,
     level, z, t, c,
+    chunkZ: null, fullResDepth: null, levelDepth: null, staleSliceKeys: null,
     intensityMin: 65535, intensityMax: 0,
     indirectionDirty: true,
   };
@@ -105,14 +159,17 @@ function chunkDistSq2D(
   return dx * dx + dy * dy;
 }
 
-/** Find the occupied slot whose chunk center is farthest from the viewport center. */
+/** Find the best eviction candidate: prefer stale (unmapped) chunks, then farthest mapped chunk. */
 function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): { key: string; dist: number } {
   let farthestKey = "";
   let maxDist = -1;
 
   for (const [key, slotIdx] of atlas.slots) {
     const gridIdx = atlas.slotGridIdx[slotIdx];
-    if (gridIdx < 0) continue;
+    if (gridIdx < 0) {
+      // Stale chunk (not mapped in indirection) — always prefer for eviction
+      return { key, dist: Infinity };
+    }
 
     const cx = gridIdx % atlas.gridX;
     const cy = Math.floor(gridIdx / atlas.gridX);
@@ -131,6 +188,40 @@ export function handleSliceAtlasConfig(ctx: WorkerCtx, msg: SliceAtlasConfigMess
   const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY } = msg;
 
   const atlas = atlasPerDataset.get(datasetId);
+
+  if (atlas && atlas.chunkX === chunkX && atlas.chunkY === chunkY) {
+    // Chunk dims match — remap instead of rebuild. Atlas slots stay intact.
+    // If Z changed, mark all existing slots as needing re-slice
+    if (z !== atlas.z && atlas.slots.size > 0) {
+      atlas.staleSliceKeys = new Set(atlas.slots.keys());
+    }
+    atlas.level = level;
+    atlas.z = z;
+    atlas.t = t;
+    atlas.c = c;
+    atlas.levelWidth = levelWidth;
+    atlas.levelHeight = levelHeight;
+
+    const newGridX = Math.ceil(levelWidth / chunkX);
+    const newGridY = Math.ceil(levelHeight / chunkY);
+    const newGridSize = newGridX * newGridY;
+
+    if (newGridSize !== atlas.gridX * atlas.gridY) {
+      atlas.indirectionData = new Uint32Array(newGridSize);
+      atlas.indirectionBuf.destroy();
+      atlas.indirectionBuf = ctx.device.createBuffer({
+        size: Math.max(newGridSize * 4, 4),
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+    }
+    atlas.gridX = newGridX;
+    atlas.gridY = newGridY;
+
+    remapSliceIndirection(atlas, t, c, z, [level]);
+    return;
+  }
+
+  // No atlas or chunk dims changed — create new
   if (atlas) destroySliceAtlas(atlas);
   const newAtlas = createSliceAtlas(ctx.device, levelWidth, levelHeight, chunkX, chunkY, level, z, t, c);
   atlasPerDataset.set(datasetId, newAtlas);
@@ -151,6 +242,13 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
   let atlas = atlasPerDataset.get(datasetId);
   if (!atlas) return; // No atlas config received yet — wait for it
 
+  // Store Z metadata on first arrival (used by remapSliceIndirection)
+  if (atlas.chunkZ == null) {
+    atlas.chunkZ = chunkZ;
+    atlas.fullResDepth = fullResDepth;
+    atlas.levelDepth = levelDepth;
+  }
+
   // Map full-res Z to level Z
   const levelZ = Math.min(
     Math.floor((fullResZ / Math.max(fullResDepth - 1, 1)) * Math.max(levelDepth - 1, 1)),
@@ -164,8 +262,14 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
   const evictedKeys: string[] = [];
 
   for (const chunk of msg.chunks) {
-    if (atlas.slots.has(chunk.key)) continue;
     if (chunk.z !== targetChunkZ) continue;
+
+    // Check if chunk already exists — skip unless it has stale slice data from a Z change
+    const existingSlot = atlas.slots.get(chunk.key);
+    if (existingSlot !== undefined) {
+      if (!atlas.staleSliceKeys?.has(chunk.key)) continue; // up-to-date, skip
+      atlas.staleSliceKeys.delete(chunk.key); // will be re-sliced below
+    }
 
     // Sample intensity from raw data (works for both uint8 and uint16)
     const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
@@ -174,9 +278,11 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
     if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
     if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
 
-    // Allocate a slot
+    // Allocate a slot (reuse existing if re-slicing)
     let slotIndex: number;
-    if (atlas.freeSlots.length > 0) {
+    if (existingSlot !== undefined) {
+      slotIndex = existingSlot; // reuse same slot for re-slice
+    } else if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;
     } else {
       // Only evict if the incoming chunk is closer than the farthest in the atlas.

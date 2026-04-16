@@ -403,6 +403,74 @@ export class Orchestrator {
   }
 
   /**
+   * Ensure atlas config is current for all tracked members.
+   * Triggers remap in the worker when T/C/Z/LOD changed, even when no chunks are ready.
+   */
+  private syncAtlasState(ctx: TickContext, sliceZ: number | null, epochs: PlanningEpochs): void {
+    if (this._lastFilteredRequests.length === 0) return;
+    const multiChannel = ctx.scene.multi_channel();
+    const seen = new Set<string>();
+    for (const req of this._lastFilteredRequests) {
+      const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
+      if (seen.has(wid)) continue;
+      seen.add(wid);
+      this.updateAtlasConfigIfNeeded(ctx, wid, req, sliceZ, epochs);
+    }
+  }
+
+  /**
+   * Check state key for a member and send atlas config if it changed (triggering remap).
+   * Returns true if atlas config was sent.
+   */
+  private updateAtlasConfigIfNeeded(
+    ctx: TickContext,
+    workerMemberId: string,
+    req: { imageId: string; level: number; t: number; c: number },
+    sliceZ: number | null,
+    epochs: PlanningEpochs,
+  ): boolean {
+    const viewMode = ctx.mode;
+    const stateKey = viewMode === "slice"
+      ? `${req.t}/${req.c}/${sliceZ}/${req.level}`
+      : `${req.t}/${req.c}/${req.level}`;
+
+    if (stateKey === this.deliveryPrevStateKey.get(workerMemberId)) return false;
+
+    // Find image spec for this member
+    let dsContent: ContentGraph | null = null;
+    for (const [, ds] of ctx.datasets) {
+      if (ds.content.images.some(img => img.image_id === req.imageId)) {
+        dsContent = ds.content;
+        break;
+      }
+    }
+    if (!dsContent) return false;
+
+    const imageSpec = dsContent.images.find(img => img.image_id === req.imageId);
+    if (!imageSpec) return false;
+    const levelMeta = imageSpec.multiscale.levels[req.level];
+    if (!levelMeta) return false;
+
+    const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
+    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
+
+    if (viewMode === "slice") {
+      ctx.client.sliceAtlasConfig(
+        workerMemberId, req.level, sliceZ!, req.t, req.c,
+        levelWidth, levelHeight, chunkX, chunkY, epochs,
+      );
+    } else {
+      ctx.client.volumeAtlasConfig(
+        workerMemberId, req.level, req.t, req.c,
+        levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ, epochs,
+      );
+    }
+    this.deliveryPrevStateKey.set(workerMemberId, stateKey);
+    this.deliverySentToWorker.delete(workerMemberId);
+    return true;
+  }
+
+  /**
    * Deliver decoded chunks to the GPU worker via RenderClient.
    * Replaces uploadChunksForMembers() -- called from slicePath/volumePath after S5.3.
    */
@@ -415,6 +483,9 @@ export class Orchestrator {
     const epochs = this.lastEpochs ?? { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
     let remaining = budget;
     let budgetExhausted = false;
+
+    // Ensure atlas config is current for all members (triggers remap even with no deliveries)
+    this.syncAtlasState(ctx, sliceZ, epochs);
 
     // Drain new deliveries from CpuCache
     const deliveries = ctx.cpuCache.drain(budget);
@@ -524,26 +595,8 @@ export class Orchestrator {
     const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;    // [T, C, Z, Y, X]
     const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
 
-    // Build state key and check for atlas config change
-    const stateKey = viewMode === "slice"
-      ? `${delivery.t}/${delivery.c}/${sliceZ}/${delivery.level}`
-      : `${delivery.t}/${delivery.c}/${delivery.level}`;
-
-    if (stateKey !== this.deliveryPrevStateKey.get(workerMemberId)) {
-      if (viewMode === "slice") {
-        ctx.client.sliceAtlasConfig(
-          workerMemberId, delivery.level, sliceZ!, delivery.t, delivery.c,
-          levelWidth, levelHeight, chunkX, chunkY, epochs,
-        );
-      } else {
-        ctx.client.volumeAtlasConfig(
-          workerMemberId, delivery.level, delivery.t, delivery.c,
-          levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ, epochs,
-        );
-      }
-      this.deliveryPrevStateKey.set(workerMemberId, stateKey);
-      this.deliverySentToWorker.delete(workerMemberId);
-    }
+    // Ensure atlas config is current (triggers remap if state changed)
+    this.updateAtlasConfigIfNeeded(ctx, workerMemberId, delivery, sliceZ, epochs);
 
     // Send chunk data if not already sent
     let sentSet = this.deliverySentToWorker.get(workerMemberId);

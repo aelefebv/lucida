@@ -28,6 +28,52 @@ export interface AtlasState {
   indirectionDirty: boolean;
 }
 
+/** Parse a chunk key "level/t/c/z/y/x" into its components. */
+export function parseChunkKey(key: string): { level: number; t: number; c: number; z: number; y: number; x: number } | null {
+  const parts = key.split("/");
+  if (parts.length !== 6) return null;
+  return {
+    level: parseInt(parts[0], 10),
+    t: parseInt(parts[1], 10),
+    c: parseInt(parts[2], 10),
+    z: parseInt(parts[3], 10),
+    y: parseInt(parts[4], 10),
+    x: parseInt(parts[5], 10),
+  };
+}
+
+/**
+ * Remap the indirection buffer to show only chunks matching the current state.
+ * Chunks for other T/C/level remain in atlas.slots but are unmapped (0xFFFFFFFF).
+ */
+export function remapIndirection(
+  atlas: AtlasState,
+  currentT: number,
+  currentC: number,
+  detailLevels: number[],
+): void {
+  atlas.indirectionData.fill(0xFFFFFFFF);
+  atlas.slotGridIdx.fill(-1);
+
+  const levelSet = new Set(detailLevels);
+
+  for (const [key, slotIndex] of atlas.slots) {
+    const parsed = parseChunkKey(key);
+    if (!parsed) continue;
+    if (parsed.t !== currentT) continue;
+    if (parsed.c !== currentC) continue;
+    if (!levelSet.has(parsed.level)) continue;
+
+    const gridIdx = parsed.z * atlas.gridY * atlas.gridX + parsed.y * atlas.gridX + parsed.x;
+    if (gridIdx >= 0 && gridIdx < atlas.indirectionData.length) {
+      atlas.indirectionData[gridIdx] = slotIndex;
+      atlas.slotGridIdx[slotIndex] = gridIdx;
+    }
+  }
+
+  atlas.indirectionDirty = true;
+}
+
 const atlasPerDataset = new Map<string, AtlasState>();
 
 export function getVolumeAtlases(): Map<string, AtlasState> {
@@ -132,14 +178,17 @@ function chunkDistSq(
   return dx * dx + dy * dy + dz * dz;
 }
 
-/** Find the occupied slot whose chunk center is farthest from the ray hit point. */
+/** Find the best eviction candidate: prefer stale (unmapped) chunks, then farthest mapped chunk. */
 function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): { key: string; dist: number } {
   let farthestKey = "";
   let maxDist = -1;
 
   for (const [key, slotIdx] of atlas.slots) {
     const gridIdx = atlas.slotGridIdx[slotIdx];
-    if (gridIdx < 0) continue;
+    if (gridIdx < 0) {
+      // Stale chunk (not mapped in indirection) — always prefer for eviction
+      return { key, dist: Infinity };
+    }
 
     const cx = gridIdx % atlas.gridX;
     const cy = Math.floor(gridIdx / atlas.gridX) % atlas.gridY;
@@ -160,6 +209,39 @@ export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: VolumeAtlasConfigMe
   const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
   const atlas = atlasPerDataset.get(datasetId);
+
+  if (atlas && atlas.chunkX === chunkX && atlas.chunkY === chunkY && atlas.chunkZ === chunkZ) {
+    // Chunk dims match — remap instead of rebuild. Atlas slots stay intact.
+    atlas.level = level;
+    atlas.t = t;
+    atlas.c = c;
+    atlas.levelWidth = levelWidth;
+    atlas.levelHeight = levelHeight;
+    atlas.levelDepth = levelDepth;
+
+    const newGridX = Math.ceil(levelWidth / chunkX);
+    const newGridY = Math.ceil(levelHeight / chunkY);
+    const newGridZ = Math.ceil(levelDepth / chunkZ);
+    const newGridSize = newGridX * newGridY * newGridZ;
+
+    // Resize indirection if grid dims changed (different LOD = different grid)
+    if (newGridSize !== atlas.gridX * atlas.gridY * atlas.gridZ) {
+      atlas.indirectionData = new Uint32Array(newGridSize);
+      atlas.indirectionBuf.destroy();
+      atlas.indirectionBuf = ctx.device.createBuffer({
+        size: Math.max(newGridSize * 4, 4),
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+    }
+    atlas.gridX = newGridX;
+    atlas.gridY = newGridY;
+    atlas.gridZ = newGridZ;
+
+    remapIndirection(atlas, t, c, [level]);
+    return;
+  }
+
+  // No atlas or chunk dims changed — create new
   if (atlas) destroyAtlas(atlas);
   const newAtlas = createVolumeAtlas(ctx.device, levelWidth, levelHeight, levelDepth,
     chunkX, chunkY, chunkZ, level, t, c);
