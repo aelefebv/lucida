@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseChunkKey, remapIndirection, type AtlasState } from "./volumeHandlers.ts";
+import { parseChunkKey, remapIndirection, type AtlasState, type LodIndirectionMeta } from "./volumeHandlers.ts";
 import { remapSliceIndirection, type SliceAtlasState } from "./sliceHandlers.ts";
 
 // ---------------------------------------------------------------------------
@@ -10,15 +10,21 @@ import { remapSliceIndirection, type SliceAtlasState } from "./sliceHandlers.ts"
 function makeVolumeAtlas(overrides?: Partial<AtlasState>): AtlasState {
   const gridX = 4, gridY = 4, gridZ = 2;
   const totalSlots = 32;
+  const lodMetas: LodIndirectionMeta[] = overrides?.lodMetas ?? [{
+    level: 0, gridDims: [gridZ, gridY, gridX], chunkDims: [32, 32, 32],
+    levelDims: [64, 128, 128], offset: 0,
+  }];
+  const totalIndirection = lodMetas.reduce((sum, m) => sum + m.gridDims[0] * m.gridDims[1] * m.gridDims[2], 0);
   return {
     texture: null as any,
     indirectionBuf: null as any,
-    indirectionData: new Uint32Array(gridX * gridY * gridZ).fill(0xFFFFFFFF),
+    indirectionData: new Uint32Array(totalIndirection).fill(0xFFFFFFFF),
     slots: new Map(),
     slotGridIdx: new Int32Array(totalSlots).fill(-1),
     freeSlots: [],
     totalSlots,
     chunkX: 32, chunkY: 32, chunkZ: 32,
+    lodMetas,
     gridX, gridY, gridZ,
     slotsX: 4, slotsY: 4, slotsZ: 2,
     levelWidth: 128, levelHeight: 128, levelDepth: 64,
@@ -33,10 +39,15 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState>): AtlasState {
 function makeSliceAtlas(overrides?: Partial<SliceAtlasState>): SliceAtlasState {
   const gridX = 4, gridY = 4;
   const totalSlots = 16;
+  const lodMetas: LodIndirectionMeta[] = overrides?.lodMetas ?? [{
+    level: 0, gridDims: [1, gridY, gridX], chunkDims: [32, 32, 32],
+    levelDims: [64, 128, 128], offset: 0,
+  }];
+  const totalIndirection = lodMetas.reduce((sum, m) => sum + m.gridDims[1] * m.gridDims[2], 0);
   return {
     texture: null as any,
     indirectionBuf: null as any,
-    indirectionData: new Uint32Array(gridX * gridY).fill(0xFFFFFFFF),
+    indirectionData: new Uint32Array(totalIndirection).fill(0xFFFFFFFF),
     slots: new Map(),
     slotGridIdx: new Int32Array(totalSlots).fill(-1),
     freeSlots: [],
@@ -44,6 +55,7 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState>): SliceAtlasState {
     chunkX: 32, chunkY: 32,
     gridX, gridY,
     slotsX: 4, slotsY: 4,
+    lodMetas,
     levelWidth: 128, levelHeight: 128,
     level: 0, z: 0, t: 0, c: 0,
     chunkZ: 32, fullResDepth: 64, levelDepth: 64,
@@ -83,7 +95,7 @@ describe("remapIndirection (volume)", () => {
     insertChunk(atlas, 0, 5, 0, 0, 1, 2, 10);  // T=5
     insertChunk(atlas, 0, 6, 0, 0, 2, 3, 11);  // T=6
 
-    remapIndirection(atlas, 5, 0, [0]);
+    remapIndirection(atlas, 5, 0);
 
     // T=5 chunk should be mapped
     const gridIdx5 = 0 * 4 * 4 + 1 * 4 + 2;
@@ -101,7 +113,7 @@ describe("remapIndirection (volume)", () => {
     insertChunk(atlas, 0, 0, 0, 0, 0, 0, 1);  // C=0
     insertChunk(atlas, 0, 0, 2, 0, 1, 0, 2);  // C=2
 
-    remapIndirection(atlas, 0, 0, [0]);
+    remapIndirection(atlas, 0, 0);
 
     expect(atlas.indirectionData[0]).toBe(1);  // C=0 mapped
     const gridIdx2 = 0 * 4 * 4 + 1 * 4 + 0;
@@ -113,7 +125,7 @@ describe("remapIndirection (volume)", () => {
     insertChunk(atlas, 0, 0, 0, 0, 0, 0, 1);  // LOD 0
     insertChunk(atlas, 1, 0, 0, 0, 0, 1, 2);  // LOD 1
 
-    remapIndirection(atlas, 0, 0, [0]);
+    remapIndirection(atlas, 0, 0);
 
     expect(atlas.indirectionData[0]).toBe(1);     // LOD 0 mapped
     expect(atlas.indirectionData[1]).toBe(0xFFFFFFFF);  // LOD 1 not mapped
@@ -125,17 +137,17 @@ describe("remapIndirection (volume)", () => {
     insertChunk(atlas, 0, 6, 0, 0, 0, 0, 11);
 
     // Remap to T=6
-    remapIndirection(atlas, 6, 0, [0]);
+    remapIndirection(atlas, 6, 0);
     expect(atlas.indirectionData[0]).toBe(11);
 
     // Switch back to T=5
-    remapIndirection(atlas, 5, 0, [0]);
+    remapIndirection(atlas, 5, 0);
     expect(atlas.indirectionData[0]).toBe(10);  // T=5 chunk still in atlas
   });
 
   it("empty atlas produces all-sentinel indirection", () => {
     const atlas = makeVolumeAtlas();
-    remapIndirection(atlas, 0, 0, [0]);
+    remapIndirection(atlas, 0, 0);
     for (let i = 0; i < atlas.indirectionData.length; i++) {
       expect(atlas.indirectionData[i]).toBe(0xFFFFFFFF);
     }
@@ -154,7 +166,7 @@ describe("remapSliceIndirection", () => {
     insertChunk(atlas, 0, 6, 0, 0, 1, 2, 4);  // T=6, Z=0
     insertChunk(atlas, 0, 5, 0, 1, 1, 2, 5);  // T=5, Z=1 (wrong Z)
 
-    remapSliceIndirection(atlas, 5, 0, 16, [0]);
+    remapSliceIndirection(atlas, 5, 0, 16);
 
     const gridIdx = 1 * 4 + 2;
     expect(atlas.indirectionData[gridIdx]).toBe(3);  // T=5, Z=0 mapped
@@ -168,10 +180,10 @@ describe("remapSliceIndirection", () => {
     insertChunk(atlas, 0, 0, 0, 0, 0, 0, 1);  // Z chunk 0
     insertChunk(atlas, 0, 0, 0, 1, 0, 0, 2);  // Z chunk 1
 
-    remapSliceIndirection(atlas, 0, 0, 48, [0]);
+    remapSliceIndirection(atlas, 0, 0, 48);
     expect(atlas.indirectionData[0]).toBe(2);  // Z chunk 1 mapped
 
-    remapSliceIndirection(atlas, 0, 0, 16, [0]);
+    remapSliceIndirection(atlas, 0, 0, 16);
     expect(atlas.indirectionData[0]).toBe(1);  // Z chunk 0 still in atlas
   });
 
@@ -179,7 +191,7 @@ describe("remapSliceIndirection", () => {
     const atlas = makeSliceAtlas({ chunkZ: null, fullResDepth: null, levelDepth: null });
     insertChunk(atlas, 0, 0, 0, 0, 0, 0, 1);
 
-    remapSliceIndirection(atlas, 0, 0, 0, [0]);
+    remapSliceIndirection(atlas, 0, 0, 0);
     // With no Z metadata, Z filter is skipped → chunks still map
     expect(atlas.indirectionData[0]).toBe(1);
   });

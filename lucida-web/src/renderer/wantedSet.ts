@@ -11,17 +11,14 @@ import type { ColdStateMessage } from "./workerProtocol.ts";
 
 /** Minimal atlas state interface — only the fields needed for wanted-set computation. */
 export interface AtlasSnapshot {
-  level: number;
-  t: number;
-  c: number;
   z?: number; // only for slice atlases
   slots: Map<string, number>; // chunkKey -> slotIndex
-  gridX: number;
-  gridY: number;
-  gridZ: number;
-  chunkX: number;
-  chunkY: number;
-  chunkZ: number;
+  lodMetas: Array<{
+    level: number;
+    gridDims: [number, number, number];   // [Z, Y, X]
+    chunkDims: [number, number, number];  // [Z, Y, X]
+    offset: number;
+  }>;
 }
 
 export interface WantedSetResult {
@@ -71,44 +68,56 @@ export function computeWantedSet(
       const atlas = atlases.get(memberId);
       if (atlas === undefined) continue; // atlas config hasn't arrived yet
 
-      // Find level metadata matching the atlas level.
-      const levelMeta = entry.levels.find((l) => l.level === atlas.level);
-      if (levelMeta === undefined) continue;
+      // Build a lookup for which levels the atlas actually covers.
+      const atlasLodByLevel = new Map(
+        atlas.lodMetas.map((m) => [m.level, m]),
+      );
 
-      const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
-      const [gridZ, gridY, gridX] = levelMeta.gridShape;
+      // Iterate all detail-owned LODs for this entry.
+      const [finest, coarsest] = entry.detailOwnedLodRange;
+      for (let lvl = finest; lvl <= coarsest; lvl++) {
+        // Atlas must cover this level.
+        if (!atlasLodByLevel.has(lvl)) continue;
 
-      // Compute chunk coordinate bounds from visible region.
-      const [minVoxX, minVoxY, maxVoxX, maxVoxY] =
-        coldState.visibleRegion.xyBounds;
+        // Find cold-state level metadata for enumeration bounds.
+        const levelMeta = entry.levels.find((l) => l.level === lvl);
+        if (levelMeta === undefined) continue;
 
-      const colStart = Math.max(0, Math.floor(minVoxX / chunkX));
-      const colEnd = Math.min(gridX, Math.ceil(maxVoxX / chunkX));
-      const rowStart = Math.max(0, Math.floor(minVoxY / chunkY));
-      const rowEnd = Math.min(gridY, Math.ceil(maxVoxY / chunkY));
+        const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
+        const [gridZ, gridY, gridX] = levelMeta.gridShape;
 
-      let zStart: number;
-      let zEnd: number;
+        // Compute chunk coordinate bounds from visible region.
+        const [minVoxX, minVoxY, maxVoxX, maxVoxY] =
+          coldState.visibleRegion.xyBounds;
 
-      if (coldState.viewMode === "slice") {
-        // Single slice: only the chunk containing atlas.z
-        const sliceZ = atlas.z ?? 0;
-        const chunkIdx = Math.floor(sliceZ / chunkZ);
-        zStart = Math.max(0, chunkIdx);
-        zEnd = Math.min(gridZ, chunkIdx + 1);
-      } else {
-        // Volume: Z range from visible region
-        zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRange[0] / chunkZ));
-        zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRange[1] / chunkZ));
-      }
+        const colStart = Math.max(0, Math.floor(minVoxX / chunkX));
+        const colEnd = Math.min(gridX, Math.ceil(maxVoxX / chunkX));
+        const rowStart = Math.max(0, Math.floor(minVoxY / chunkY));
+        const rowEnd = Math.min(gridY, Math.ceil(maxVoxY / chunkY));
 
-      // Enumerate expected chunks and check atlas residency.
-      for (let iz = zStart; iz < zEnd; iz++) {
-        for (let iy = rowStart; iy < rowEnd; iy++) {
-          for (let ix = colStart; ix < colEnd; ix++) {
-            const key = `${atlas.level}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
-            if (!atlas.slots.has(key)) {
-              missing.push({ entityId: entry.entityId, chunkKey: key });
+        let zStart: number;
+        let zEnd: number;
+
+        if (coldState.viewMode === "slice") {
+          // Single slice: only the chunk containing the current Z
+          const sliceZ = atlas.z ?? 0;
+          const chunkIdx = Math.floor(sliceZ / chunkZ);
+          zStart = Math.max(0, chunkIdx);
+          zEnd = Math.min(gridZ, chunkIdx + 1);
+        } else {
+          // Volume: Z range from visible region
+          zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRange[0] / chunkZ));
+          zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRange[1] / chunkZ));
+        }
+
+        // Enumerate expected chunks and check atlas residency.
+        for (let iz = zStart; iz < zEnd; iz++) {
+          for (let iy = rowStart; iy < rowEnd; iy++) {
+            for (let ix = colStart; ix < colEnd; ix++) {
+              const key = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
+              if (!atlas.slots.has(key)) {
+                missing.push({ entityId: entry.entityId, chunkKey: key });
+              }
             }
           }
         }

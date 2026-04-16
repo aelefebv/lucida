@@ -10,7 +10,7 @@ import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 import type { PlanningEpochs } from "../pipeline/planning.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16, asUint16Slice } from "./dataTypeUtil.ts";
-import { parseChunkKey } from "./volumeHandlers.ts";
+import { parseChunkKey, type LodIndirectionMeta } from "./volumeHandlers.ts";
 
 export interface SliceAtlasState {
   texture: GPUTexture;
@@ -31,6 +31,8 @@ export interface SliceAtlasState {
   fullResDepth: number | null;
   /** Level depth — set from first chunk data arrival. */
   levelDepth: number | null;
+  /** Per-LOD indirection sections (same type as volume, Z dim used for Z-chunk filtering). */
+  lodMetas: LodIndirectionMeta[];
   /** Chunk keys with stale 2D slice data after a Z change. Cleared as chunks are re-uploaded. */
   staleSliceKeys: Set<string> | null;
   intensityMin: number; intensityMax: number;
@@ -55,7 +57,6 @@ export function remapSliceIndirection(
   currentT: number,
   currentC: number,
   currentZ: number,
-  detailLevels: number[],
 ): void {
   atlas.indirectionData.fill(0xFFFFFFFF);
   atlas.slotGridIdx.fill(-1);
@@ -70,20 +71,24 @@ export function remapSliceIndirection(
     targetChunkZ = Math.floor(levelZ / atlas.chunkZ);
   }
 
-  const levelSet = new Set(detailLevels);
+  const metaByLevel = new Map(atlas.lodMetas.map(m => [m.level, m]));
 
   for (const [key, slotIndex] of atlas.slots) {
     const parsed = parseChunkKey(key);
     if (!parsed) continue;
     if (parsed.t !== currentT) continue;
     if (parsed.c !== currentC) continue;
-    if (!levelSet.has(parsed.level)) continue;
     if (targetChunkZ !== null && parsed.z !== targetChunkZ) continue;
 
-    const gridIdx = parsed.y * atlas.gridX + parsed.x;
-    if (gridIdx >= 0 && gridIdx < atlas.indirectionData.length) {
-      atlas.indirectionData[gridIdx] = slotIndex;
-      atlas.slotGridIdx[slotIndex] = gridIdx;
+    const meta = metaByLevel.get(parsed.level);
+    if (!meta) continue;
+
+    const [, , lodGridX] = meta.gridDims;
+    const [, lodGridY] = meta.gridDims;
+    const globalIdx = meta.offset + parsed.y * lodGridX + parsed.x;
+    if (globalIdx >= 0 && globalIdx < atlas.indirectionData.length) {
+      atlas.indirectionData[globalIdx] = slotIndex;
+      atlas.slotGridIdx[slotIndex] = globalIdx;
     }
   }
 
@@ -127,12 +132,18 @@ function createSliceAtlas(
   const slotGridIdx = new Int32Array(totalSlots);
   slotGridIdx.fill(-1);
 
+  const lodMetas: LodIndirectionMeta[] = [{
+    level, gridDims: [1, gridY, gridX], chunkDims: [1, chunkY, chunkX],
+    levelDims: [1, levelH, levelW], offset: 0,
+  }];
+
   return {
     texture, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY,
     gridX, gridY,
     slotsX, slotsY,
+    lodMetas,
     levelWidth: levelW, levelHeight: levelH,
     level, z, t, c,
     chunkZ: null, fullResDepth: null, levelDepth: null, staleSliceKeys: null,
@@ -170,9 +181,11 @@ function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): { ke
       return { key, dist: Infinity };
     }
 
-    const cx = gridIdx % atlas.gridX;
-    const cy = Math.floor(gridIdx / atlas.gridX);
-    const dist = chunkDistSq2D(atlas, cx, cy, cam);
+    // Parse chunk key for coordinates — works correctly with multi-LOD indirection
+    const parsed = parseChunkKey(key);
+    if (!parsed) continue;
+
+    const dist = chunkDistSq2D(atlas, parsed.x, parsed.y, cam);
 
     if (dist > maxDist) {
       maxDist = dist;
@@ -219,7 +232,7 @@ export function handleSliceAtlasConfig(ctx: WorkerCtx, msg: {
     atlas.gridX = newGridX;
     atlas.gridY = newGridY;
 
-    remapSliceIndirection(atlas, t, c, z, [level]);
+    remapSliceIndirection(atlas, t, c, z);
     return;
   }
 
@@ -244,14 +257,12 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
   let atlas = atlasPerDataset.get(datasetId);
   if (!atlas) return; // No atlas config received yet — wait for it
 
-  // Debug: detect grid dims mismatch that could cause wrong chunk rendering
-  const expectedGridX = Math.ceil(levelWidth / chunkX);
-  const expectedGridY = Math.ceil(levelHeight / chunkY);
-  if (atlas.gridX !== expectedGridX || atlas.gridY !== expectedGridY) {
-    console.warn(`[sliceChunkData] grid mismatch for ${datasetId}: atlas=[${atlas.gridX},${atlas.gridY}] expected=[${expectedGridX},${expectedGridY}] level=${level} atlas.level=${atlas.level}`);
-  }
+  // Debug: detect chunk dims mismatch (atlas created for different chunk size)
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
-    console.warn(`[sliceChunkData] chunkDims mismatch for ${datasetId}: atlas=[${atlas.chunkX},${atlas.chunkY}] msg=[${chunkX},${chunkY}]`);
+    console.warn(`[sliceChunkData] chunkDims mismatch for ${datasetId}: atlas=[${atlas.chunkX},${atlas.chunkY}] msg=[${chunkX},${chunkY}] level=${level}`);
+  }
+  if (!atlas.lodMetas.some(m => m.level === level)) {
+    console.warn(`[sliceChunkData] no lodMeta for level ${level} in ${datasetId}, atlas has levels [${atlas.lodMetas.map(m => m.level).join(",")}]`);
   }
 
   // Store Z metadata on first arrival (used by remapSliceIndirection)
@@ -325,9 +336,15 @@ export function handleSliceChunkData(ctx: WorkerCtx, msg: SliceChunkDataMessage,
     const yOff = sy * chunkY;
     writeSliceRegion(ctx.device, atlas.texture, sliceData, chunkX, xOff, yOff, chunkW, chunkH);
 
-    const gridIdx = chunk.y * atlas.gridX + chunk.x;
-    atlas.indirectionData[gridIdx] = slotIndex;
-    atlas.slotGridIdx[slotIndex] = gridIdx;
+    // Find the correct LOD section in the indirection buffer
+    const lodMeta = atlas.lodMetas.find(m => m.level === level);
+    const [, , lodGridX] = lodMeta ? lodMeta.gridDims : [1, atlas.gridY, atlas.gridX];
+    const lodOffset = lodMeta ? lodMeta.offset : 0;
+    const globalIdx = lodOffset + chunk.y * lodGridX + chunk.x;
+    if (globalIdx < atlas.indirectionData.length) {
+      atlas.indirectionData[globalIdx] = slotIndex;
+      atlas.slotGridIdx[slotIndex] = globalIdx;
+    }
     atlas.slots.set(chunk.key, slotIndex);
     atlas.indirectionDirty = true;
   }

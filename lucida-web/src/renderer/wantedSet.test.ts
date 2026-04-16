@@ -47,6 +47,7 @@ function makeActiveEntry(
         level: 0,
         chunkShape: [32, 32, 32], // [Z, Y, X]
         gridShape: [2, 4, 4], // 64 deep, 128 high, 128 wide
+        levelDims: [64, 128, 128],
       },
     ],
     ...overrides,
@@ -60,6 +61,7 @@ function makeColdState(
     type: "coldState",
     epochs: makeEpochs(),
     currentT: 0,
+    currentZ: 0,
     visibleChannels: [0],
     visibleRegion: makeVisibleRegion(),
     activeSet: [makeActiveEntry()],
@@ -70,16 +72,10 @@ function makeColdState(
 
 function makeAtlas(overrides?: Partial<AtlasSnapshot>): AtlasSnapshot {
   return {
-    level: 0,
-    t: 0,
-    c: 0,
     slots: new Map(),
-    gridX: 4,
-    gridY: 4,
-    gridZ: 2,
-    chunkX: 32,
-    chunkY: 32,
-    chunkZ: 32,
+    lodMetas: [
+      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+    ],
     ...overrides,
   };
 }
@@ -186,8 +182,8 @@ describe("computeWantedSet", () => {
       }),
     });
     // Separate atlases for each channel
-    const ch0Atlas = makeAtlas({ c: 0 }); // empty
-    const ch2Atlas = makeAtlas({ c: 2 }); // empty
+    const ch0Atlas = makeAtlas(); // empty
+    const ch2Atlas = makeAtlas(); // empty
     const volumeAtlases = new Map<string, AtlasSnapshot>([
       ["img:ch0", ch0Atlas],
       ["img:ch2", ch2Atlas],
@@ -240,5 +236,114 @@ describe("computeWantedSet", () => {
     const result = computeWantedSet(coldState, new Map(), new Map());
 
     expect(result.missing).toHaveLength(0);
+  });
+
+  it("multi-LOD wanted-set: missing chunks across LODs 0, 1, 2", () => {
+    // Visible region covers 1x1 in XY, 1 in Z at each LOD
+    const coldState = makeColdState({
+      visibleRegion: makeVisibleRegion({
+        xyBounds: [0, 0, 32, 32],
+        zRange: [0, 32],
+      }),
+      activeSet: [
+        makeActiveEntry({
+          detailOwnedLodRange: [0, 2],
+          levels: [
+            { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+            { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+            { level: 2, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+          ],
+        }),
+      ],
+    });
+    // Atlas covers all 3 LODs; has some LOD 0, some LOD 1, no LOD 2
+    const slots = new Map<string, number>();
+    slots.set("0/0/0/0/0/0", 0); // LOD 0 present
+    slots.set("1/0/0/0/0/0", 1); // LOD 1 present
+    // LOD 2: nothing present
+    const atlas = makeAtlas({
+      slots,
+      lodMetas: [
+        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+        { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 32 },
+        { level: 2, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 64 },
+      ],
+    });
+    const volumeAtlases = new Map([["img", atlas]]);
+
+    const result = computeWantedSet(coldState, volumeAtlases, new Map());
+
+    // Each LOD visible region = 1 chunk.  LOD 0 present, LOD 1 present, LOD 2 missing => 1 missing
+    // Wait — LOD 0 chunk "0/0/0/0/0/0" is present, LOD 1 chunk "1/0/0/0/0/0" is present,
+    // LOD 2 chunk "2/0/0/0/0/0" is missing => 1 missing.
+    expect(result.missing).toHaveLength(1);
+    expect(result.missing[0].chunkKey).toBe("2/0/0/0/0/0");
+  });
+
+  it("single-LOD fallback: only target LOD in wanted-set", () => {
+    const coldState = makeColdState({
+      visibleRegion: makeVisibleRegion({
+        xyBounds: [0, 0, 32, 32],
+        zRange: [0, 32],
+      }),
+      activeSet: [
+        makeActiveEntry({
+          detailOwnedLodRange: [0, 2],
+          levels: [
+            { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+            { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+            { level: 2, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+          ],
+        }),
+      ],
+    });
+    // Atlas lodMetas only covers LOD 1 (e.g., chunk dims don't match across LODs)
+    const atlas = makeAtlas({
+      lodMetas: [
+        { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+      ],
+    });
+    const volumeAtlases = new Map([["img", atlas]]);
+
+    const result = computeWantedSet(coldState, volumeAtlases, new Map());
+
+    // Only LOD 1 is in atlas lodMetas, so only LOD 1 chunks appear in wanted-set
+    expect(result.missing).toHaveLength(1);
+    expect(result.missing[0].chunkKey).toMatch(/^1\//);
+  });
+
+  it("coarser LODs have smaller grids: fewer chunks in wanted-set", () => {
+    // Large visible region to cover full grids
+    const coldState = makeColdState({
+      visibleRegion: makeVisibleRegion({
+        xyBounds: [0, 0, 256, 256],
+        zRange: [0, 32],
+      }),
+      activeSet: [
+        makeActiveEntry({
+          detailOwnedLodRange: [0, 1],
+          levels: [
+            { level: 0, chunkShape: [32, 32, 32], gridShape: [1, 8, 8], levelDims: [32, 256, 256] },
+            { level: 1, chunkShape: [32, 32, 32], gridShape: [1, 4, 4], levelDims: [32, 128, 128] },
+          ],
+        }),
+      ],
+    });
+    const atlas = makeAtlas({
+      lodMetas: [
+        { level: 0, gridDims: [1, 8, 8], chunkDims: [32, 32, 32], offset: 0 },
+        { level: 1, gridDims: [1, 4, 4], chunkDims: [32, 32, 32], offset: 64 },
+      ],
+    });
+    const volumeAtlases = new Map([["img", atlas]]);
+
+    const result = computeWantedSet(coldState, volumeAtlases, new Map());
+
+    // LOD 0: 8x8x1 = 64 chunks, LOD 1: 4x4x1 = 16 chunks => 80 total
+    const lod0 = result.missing.filter((m) => m.chunkKey.startsWith("0/"));
+    const lod1 = result.missing.filter((m) => m.chunkKey.startsWith("1/"));
+    expect(lod0).toHaveLength(64);
+    expect(lod1).toHaveLength(16);
+    expect(result.missing).toHaveLength(80);
   });
 });

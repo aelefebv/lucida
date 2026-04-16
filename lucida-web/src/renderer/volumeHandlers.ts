@@ -10,17 +10,29 @@ import type { PlanningEpochs } from "../pipeline/planning.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16 } from "./dataTypeUtil.ts";
 
+/** Per-LOD indirection section metadata. */
+export interface LodIndirectionMeta {
+  level: number;
+  gridDims: [number, number, number];   // [Z, Y, X]
+  chunkDims: [number, number, number];  // [Z, Y, X]
+  levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
+  offset: number;                       // entry offset into flat indirection buffer
+}
+
 export interface AtlasState {
   texture: GPUTexture;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
   slots: Map<string, number>;     // chunkKey → slotIndex (insertion-order = LRU)
-  slotGridIdx: Int32Array<ArrayBuffer>;        // slotIndex → gridIdx (for eviction cleanup)
+  slotGridIdx: Int32Array<ArrayBuffer>;        // slotIndex → globalGridIdx (for eviction cleanup)
   freeSlots: number[];            // available slot indices (stack)
   totalSlots: number;
   chunkX: number; chunkY: number; chunkZ: number;
-  gridX: number; gridY: number; gridZ: number;
   slotsX: number; slotsY: number; slotsZ: number;
+  /** Per-LOD indirection sections. Sorted finest→coarsest. */
+  lodMetas: LodIndirectionMeta[];
+  /** Target LOD's grid dims (convenience for chunk data handler). */
+  gridX: number; gridY: number; gridZ: number;
   levelWidth: number; levelHeight: number; levelDepth: number;
   level: number; t: number; c: number;
   intensityMin: number; intensityMax: number;
@@ -43,30 +55,33 @@ export function parseChunkKey(key: string): { level: number; t: number; c: numbe
 
 /**
  * Remap the indirection buffer to show only chunks matching the current state.
- * Chunks for other T/C/level remain in atlas.slots but are unmapped (0xFFFFFFFF).
+ * Writes chunks into the correct per-LOD section based on lodMetas.
+ * Chunks for other T/C or levels not in lodMetas remain in atlas.slots but are unmapped.
  */
 export function remapIndirection(
   atlas: AtlasState,
   currentT: number,
   currentC: number,
-  detailLevels: number[],
 ): void {
   atlas.indirectionData.fill(0xFFFFFFFF);
   atlas.slotGridIdx.fill(-1);
 
-  const levelSet = new Set(detailLevels);
+  const metaByLevel = new Map(atlas.lodMetas.map(m => [m.level, m]));
 
   for (const [key, slotIndex] of atlas.slots) {
     const parsed = parseChunkKey(key);
     if (!parsed) continue;
     if (parsed.t !== currentT) continue;
     if (parsed.c !== currentC) continue;
-    if (!levelSet.has(parsed.level)) continue;
 
-    const gridIdx = parsed.z * atlas.gridY * atlas.gridX + parsed.y * atlas.gridX + parsed.x;
-    if (gridIdx >= 0 && gridIdx < atlas.indirectionData.length) {
-      atlas.indirectionData[gridIdx] = slotIndex;
-      atlas.slotGridIdx[slotIndex] = gridIdx;
+    const meta = metaByLevel.get(parsed.level);
+    if (!meta) continue;
+
+    const [gridZ, gridY, gridX] = meta.gridDims;
+    const globalIdx = meta.offset + parsed.z * gridY * gridX + parsed.y * gridX + parsed.x;
+    if (globalIdx >= 0 && globalIdx < atlas.indirectionData.length) {
+      atlas.indirectionData[globalIdx] = slotIndex;
+      atlas.slotGridIdx[slotIndex] = globalIdx;
     }
   }
 
@@ -145,10 +160,18 @@ function createVolumeAtlas(
   const slotGridIdx = new Int32Array(totalSlots);
   slotGridIdx.fill(-1);
 
+  const lodMetas: LodIndirectionMeta[] = [{
+    level, gridDims: [gridZ, gridY, gridX],
+    chunkDims: [chunkZ, chunkY, chunkX],
+    levelDims: [levelD, levelH, levelW],
+    offset: 0,
+  }];
+
   return {
     texture, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
+    lodMetas,
     gridX, gridY, gridZ,
     slotsX, slotsY, slotsZ,
     levelWidth: levelW, levelHeight: levelH, levelDepth: levelD,
@@ -189,11 +212,11 @@ function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): { k
       return { key, dist: Infinity };
     }
 
-    const cx = gridIdx % atlas.gridX;
-    const cy = Math.floor(gridIdx / atlas.gridX) % atlas.gridY;
-    const cz = Math.floor(gridIdx / (atlas.gridX * atlas.gridY));
+    // Parse chunk key for coordinates — works correctly with multi-LOD indirection
+    const parsed = parseChunkKey(key);
+    if (!parsed) continue;
 
-    const dist = chunkDistSq(atlas, cx, cy, cz, cam);
+    const dist = chunkDistSq(atlas, parsed.x, parsed.y, parsed.z, cam);
 
     if (dist > maxDist) {
       maxDist = dist;
@@ -240,7 +263,7 @@ export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: {
     atlas.gridY = newGridY;
     atlas.gridZ = newGridZ;
 
-    remapIndirection(atlas, t, c, [level]);
+    remapIndirection(atlas, t, c);
     return;
   }
 
@@ -266,15 +289,13 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
   let atlas = atlasPerDataset.get(datasetId);
   if (!atlas) return; // No atlas config received yet — wait for it
 
-  // Debug: detect grid dims mismatch that could cause wrong chunk rendering
-  const expectedGridX = Math.ceil(levelWidth / chunkX);
-  const expectedGridY = Math.ceil(levelHeight / chunkY);
-  const expectedGridZ = Math.ceil(levelDepth / chunkZ);
-  if (atlas.gridX !== expectedGridX || atlas.gridY !== expectedGridY || atlas.gridZ !== expectedGridZ) {
-    console.warn(`[volumeChunkData] grid mismatch for ${datasetId}: atlas=[${atlas.gridX},${atlas.gridY},${atlas.gridZ}] expected=[${expectedGridX},${expectedGridY},${expectedGridZ}] level=${level} atlas.level=${atlas.level}`);
-  }
+  // Debug: detect chunk dims mismatch (atlas created for different chunk size)
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
-    console.warn(`[volumeChunkData] chunkDims mismatch for ${datasetId}: atlas=[${atlas.chunkX},${atlas.chunkY},${atlas.chunkZ}] msg=[${chunkX},${chunkY},${chunkZ}]`);
+    console.warn(`[volumeChunkData] chunkDims mismatch for ${datasetId}: atlas=[${atlas.chunkX},${atlas.chunkY},${atlas.chunkZ}] msg=[${chunkX},${chunkY},${chunkZ}] level=${level}`);
+  }
+  // Debug: ensure this level has an indirection section
+  if (!atlas.lodMetas.some(m => m.level === level)) {
+    console.warn(`[volumeChunkData] no lodMeta for level ${level} in ${datasetId}, atlas has levels [${atlas.lodMetas.map(m => m.level).join(",")}]`);
   }
 
   rayHitPerDataset.set(datasetId, msg.hitLocal);
@@ -319,9 +340,15 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
 
     writeVolumeChunk(ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
 
-    const gridIdx = chunk.z * atlas.gridY * atlas.gridX + chunk.y * atlas.gridX + chunk.x;
-    atlas.indirectionData[gridIdx] = slotIndex;
-    atlas.slotGridIdx[slotIndex] = gridIdx;
+    // Find the correct LOD section in the indirection buffer
+    const lodMeta = atlas.lodMetas.find(m => m.level === level);
+    const [, lodGridY, lodGridX] = lodMeta ? lodMeta.gridDims : [atlas.gridZ, atlas.gridY, atlas.gridX];
+    const lodOffset = lodMeta ? lodMeta.offset : 0;
+    const globalIdx = lodOffset + chunk.z * lodGridY * lodGridX + chunk.y * lodGridX + chunk.x;
+    if (globalIdx < atlas.indirectionData.length) {
+      atlas.indirectionData[globalIdx] = slotIndex;
+      atlas.slotGridIdx[slotIndex] = globalIdx;
+    }
     atlas.slots.set(chunkKey, slotIndex);
     atlas.indirectionDirty = true;
 

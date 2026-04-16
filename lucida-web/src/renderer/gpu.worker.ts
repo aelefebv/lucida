@@ -7,7 +7,7 @@ import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases, handleSliceAtlasConfig, remapSliceIndirection } from "./sliceHandlers.ts";
-import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, handleVolumeAtlasConfig, remapIndirection } from "./volumeHandlers.ts";
+import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, handleVolumeAtlasConfig, remapIndirection, type LodIndirectionMeta } from "./volumeHandlers.ts";
 import type { ColdStateActiveEntry } from "./workerProtocol.ts";
 import { computeWantedSet } from "./wantedSet.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
@@ -233,26 +233,63 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
                   chunkX, chunkY, chunkZ,
                 });
               } else {
-                // Same chunk dims — remap
+                // Same chunk dims — compute multi-LOD indirection and remap
                 atlas.level = entry.targetLod;
                 atlas.t = msg.currentT;
                 atlas.c = channel;
                 atlas.levelWidth = levelW;
                 atlas.levelHeight = levelH;
                 atlas.levelDepth = levelD;
-                const newGridSize = gridX * gridY * gridZ;
-                if (newGridSize !== atlas.gridX * atlas.gridY * atlas.gridZ) {
-                  atlas.indirectionData = new Uint32Array(newGridSize);
-                  atlas.indirectionBuf.destroy();
-                  atlas.indirectionBuf = device.createBuffer({
-                    size: Math.max(newGridSize * 4, 4),
-                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-                  });
-                }
                 atlas.gridX = gridX;
                 atlas.gridY = gridY;
                 atlas.gridZ = gridZ;
-                remapIndirection(atlas, msg.currentT, channel, [entry.targetLod]);
+
+                // Build multi-LOD lodMetas for all detail-owned levels with matching chunk dims
+                const [finest, coarsest] = entry.detailOwnedLodRange;
+                const newLodMetas: LodIndirectionMeta[] = [];
+                let offset = 0;
+                for (let lvl = finest; lvl <= coarsest; lvl++) {
+                  const lm = entry.levels.find(l => l.level === lvl);
+                  if (!lm) continue;
+                  const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
+                  // Only include levels with matching chunk dims (multi-LOD constraint)
+                  if (lChunkX !== chunkX || lChunkY !== chunkY || lChunkZ !== chunkZ) continue;
+                  const [lGridZ, lGridY, lGridX] = lm.gridShape;
+                  const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
+                  newLodMetas.push({
+                    level: lvl,
+                    gridDims: [lGridZ, lGridY, lGridX],
+                    chunkDims: [lChunkZ, lChunkY, lChunkX],
+                    levelDims: [lLevelD, lLevelH, lLevelW],
+                    offset,
+                  });
+                  offset += lGridX * lGridY * lGridZ;
+                }
+                // Fallback: at least include target LOD
+                if (newLodMetas.length === 0) {
+                  newLodMetas.push({
+                    level: entry.targetLod,
+                    gridDims: [gridZ, gridY, gridX],
+                    chunkDims: [chunkZ, chunkY, chunkX],
+                    levelDims: [levelD, levelH, levelW],
+                    offset: 0,
+                  });
+                  offset = gridX * gridY * gridZ;
+                }
+                atlas.lodMetas = newLodMetas;
+
+                // Resize indirection buffer for total multi-LOD size
+                const totalIndirectionSize = offset;
+                if (totalIndirectionSize !== atlas.indirectionData.length) {
+                  atlas.indirectionData = new Uint32Array(totalIndirectionSize);
+                  atlas.indirectionBuf.destroy();
+                  atlas.indirectionBuf = device.createBuffer({
+                    size: Math.max(totalIndirectionSize * 4, 4),
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                  });
+                }
+
+                remapIndirection(atlas, msg.currentT, channel);
               }
             } else {
               // Slice mode
@@ -290,18 +327,52 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
                 atlas.c = channel;
                 atlas.levelWidth = levelW;
                 atlas.levelHeight = levelH;
-                const newGridSize = gridX * gridY;
-                if (newGridSize !== atlas.gridX * atlas.gridY) {
-                  atlas.indirectionData = new Uint32Array(newGridSize);
+                atlas.gridX = gridX;
+                atlas.gridY = gridY;
+
+                // Build multi-LOD lodMetas for slice (2D — gridDims Z=1)
+                const [slFinest, slCoarsest] = entry.detailOwnedLodRange;
+                const sliceLodMetas: LodIndirectionMeta[] = [];
+                let slOffset = 0;
+                for (let lvl = slFinest; lvl <= slCoarsest; lvl++) {
+                  const lm = entry.levels.find(l => l.level === lvl);
+                  if (!lm) continue;
+                  const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
+                  if (lChunkX !== chunkX || lChunkY !== chunkY) continue;
+                  const [lGridZ, lGridY, lGridX] = lm.gridShape;
+                  const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
+                  sliceLodMetas.push({
+                    level: lvl,
+                    gridDims: [lGridZ, lGridY, lGridX],
+                    chunkDims: [lChunkZ, lChunkY, lChunkX],
+                    levelDims: [lLevelD, lLevelH, lLevelW],
+                    offset: slOffset,
+                  });
+                  slOffset += lGridX * lGridY; // 2D indirection for slice
+                }
+                if (sliceLodMetas.length === 0) {
+                  sliceLodMetas.push({
+                    level: entry.targetLod,
+                    gridDims: [1, gridY, gridX],
+                    chunkDims: [chunkZ, chunkY, chunkX],
+                    levelDims: [levelD, levelH, levelW],
+                    offset: 0,
+                  });
+                  slOffset = gridX * gridY;
+                }
+                atlas.lodMetas = sliceLodMetas;
+
+                const totalSliceIndirection = slOffset;
+                if (totalSliceIndirection !== atlas.indirectionData.length) {
+                  atlas.indirectionData = new Uint32Array(totalSliceIndirection);
                   atlas.indirectionBuf.destroy();
                   atlas.indirectionBuf = device.createBuffer({
-                    size: Math.max(newGridSize * 4, 4),
+                    size: Math.max(totalSliceIndirection * 4, 4),
                     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
                   });
                 }
-                atlas.gridX = gridX;
-                atlas.gridY = gridY;
-                remapSliceIndirection(atlas, msg.currentT, channel, msg.currentZ, [entry.targetLod]);
+
+                remapSliceIndirection(atlas, msg.currentT, channel, msg.currentZ);
               }
             }
           }
