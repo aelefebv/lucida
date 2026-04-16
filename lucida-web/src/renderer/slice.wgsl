@@ -7,6 +7,11 @@ struct Uniforms {
   gridDims: vec4u,           // offset 96  (16 bytes) — xy=grid dimensions
   atlasSlotDims: vec4u,      // offset 112 (16 bytes) — xy=slots per axis = 128 total
   memberScreenSize: vec4f,   // offset 128 (16 bytes) — xy=member pixel size on screen
+  lodParams: vec4u,          // offset 144 (16 bytes) — x=numLods, y=targetLodIdx
+  lodGridDims: array<vec4u, 4>,   // offset 160 (64 bytes) — xy=gridDims, w=indirection offset
+  lodChunkDims: array<vec4u, 4>,  // offset 224 (64 bytes) — xy=chunkDims
+  lodLevelDims: array<vec4f, 4>,  // offset 288 (64 bytes) — xy=level voxel dimensions
+  // total = 352 bytes
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -60,40 +65,50 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   let gamma = u.intensityRange.z;
   let layerOpacity = u.intensityRange.w;
 
-  // Compute virtual texel coordinate from UV and level texture dimensions
-  let levelDims = vec2u(u.chunkDims.z, u.chunkDims.w); // levelDims packed in chunkDims.zw
-  let texCoord = vec2i(
-    clamp(i32(texUV.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
-    clamp(i32(texUV.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
-  );
+  // Multi-LOD atlas lookup with fallback
+  let numLods = u.lodParams.x;
+  let targetIdx = u.lodParams.y;
+  var chunkVal = 0xFFFFFFFFu;
 
-  // Atlas lookup
-  let chunkCoord = vec2u(
-    u32(texCoord.x) / u.chunkDims.x,
-    u32(texCoord.y) / u.chunkDims.y,
-  );
-  let gridIdx = chunkCoord.y * u.gridDims.x + chunkCoord.x;
-  let slot = indirection[gridIdx];
+  for (var i = targetIdx; i < numLods; i++) {
+    let levelDims = vec2u(u32(u.lodLevelDims[i].x), u32(u.lodLevelDims[i].y));
+    let chunkDims = vec2u(u.lodChunkDims[i].x, u.lodChunkDims[i].y);
+    let gridDims = vec2u(u.lodGridDims[i].x, u.lodGridDims[i].y);
+    let offset = u.lodGridDims[i].w;
 
-  if (slot == 0xFFFFFFFFu) {
-    // Chunk not loaded — show as empty
-    return vec4f(0.0, 0.0, 0.0, 0.0);
+    let texCoord = vec2i(
+      clamp(i32(texUV.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
+      clamp(i32(texUV.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
+    );
+
+    let chunkCoord = vec2u(
+      u32(texCoord.x) / chunkDims.x,
+      u32(texCoord.y) / chunkDims.y,
+    );
+    let gridIdx = offset + chunkCoord.y * gridDims.x + chunkCoord.x;
+    let slot = indirection[gridIdx];
+
+    if (slot != 0xFFFFFFFFu) {
+      let slotCoord = vec2u(
+        slot % u.atlasSlotDims.x,
+        slot / u.atlasSlotDims.x,
+      );
+      let localTexel = vec2u(
+        u32(texCoord.x) % chunkDims.x,
+        u32(texCoord.y) % chunkDims.y,
+      );
+      let atlasCoord = vec2i(
+        i32(slotCoord.x * chunkDims.x + localTexel.x),
+        i32(slotCoord.y * chunkDims.y + localTexel.y),
+      );
+      chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
+      break;
+    }
   }
 
-  // Decode slot to atlas position
-  let slotCoord = vec2u(
-    slot % u.atlasSlotDims.x,
-    slot / u.atlasSlotDims.x,
-  );
-  let localTexel = vec2u(
-    u32(texCoord.x) % u.chunkDims.x,
-    u32(texCoord.y) % u.chunkDims.y,
-  );
-  let atlasCoord = vec2i(
-    i32(slotCoord.x * u.chunkDims.x + localTexel.x),
-    i32(slotCoord.y * u.chunkDims.y + localTexel.y),
-  );
-  let chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
+  if (chunkVal == 0xFFFFFFFFu) {
+    return vec4f(0.0, 0.0, 0.0, 0.0);
+  }
   let normalized = pow(clamp((f32(chunkVal) - intensityMin) / range, 0.0, 1.0), gamma);
   let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
   return vec4f(color * layerOpacity, layerOpacity);

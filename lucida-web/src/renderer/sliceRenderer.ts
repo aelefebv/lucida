@@ -1,14 +1,20 @@
 /** WebGPU pipeline for 2D slice rendering with GPU-side u16 normalization. */
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
+import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 
-// Uniform buffer layout (128 bytes):
+// Uniform buffer layout (352 bytes):
 //   offset 0:   transform      mat4x4f   (64B) — screen UV → texture UV
 //   offset 64:  intensityRange vec4f     (16B) — x=min, y=max, z=gamma, w=opacity
 //   offset 80:  chunkDims      vec4u     (16B) — x=chunkX, y=chunkY, z=levelWidth, w=levelHeight
 //   offset 96:  gridDims       vec4u     (16B) — x=gridX, y=gridY
 //   offset 112: atlasSlotDims  vec4u     (16B) — x=slotsX, y=slotsY
-const UNIFORM_SIZE = 144;
+//   offset 128: memberScreenSize vec4f  (16B) — xy=member pixel size
+//   offset 144: lodParams      vec4u     (16B) — x=numLods, y=targetLodIdx
+//   offset 160: lodGridDims    vec4u[4]  (64B) — xy=gridDims, w=offset
+//   offset 224: lodChunkDims   vec4u[4]  (64B) — xy=chunkDims
+//   offset 288: lodLevelDims   vec4f[4]  (64B) — xy=levelDims
+const UNIFORM_SIZE = 352;
 
 export class SliceRenderer {
   private device: GPUDevice;
@@ -32,6 +38,7 @@ export class SliceRenderer {
   private gridDims = [1, 1];
   private atlasSlotDims = [1, 1];
   private levelDims = [1, 1];
+  private lodMetas: LodIndirectionMeta[] = [];
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -135,6 +142,7 @@ export class SliceRenderer {
     gridDims: [number, number],
     atlasSlotDims: [number, number],
     levelDims: [number, number],
+    lodMetas?: LodIndirectionMeta[],
   ) {
     this.atlasTexture = texture;
     this.indirectionBuffer = indirectionBuf;
@@ -142,6 +150,7 @@ export class SliceRenderer {
     this.gridDims = gridDims;
     this.atlasSlotDims = atlasSlotDims;
     this.levelDims = levelDims;
+    this.lodMetas = lodMetas ?? [];
     this.rebuildBindGroup();
   }
 
@@ -204,6 +213,25 @@ export class SliceRenderer {
     const memberScreenW = dataW * zoom;
     const memberScreenH = dataH * zoom;
     uniformData.set([memberScreenW, memberScreenH, 0, 0], 32); // memberScreenSize at 128B = 32 f32s
+
+    // Multi-LOD per-LOD metadata
+    const numLods = Math.min(this.lodMetas.length, 4);
+    u32View.set([numLods > 0 ? numLods : 1, 0, 0, 0], 36); // lodParams at 144B = 36 u32s
+    for (let i = 0; i < 4; i++) {
+      const m = i < numLods ? this.lodMetas[i] : null;
+      const base40 = 40 + i * 4; // lodGridDims at 160B = 40 u32s, stride 4
+      u32View.set(m ? [m.gridDims[2], m.gridDims[1], 0, m.offset] : [0, 0, 0, 0], base40);
+      const base56 = 56 + i * 4; // lodChunkDims at 224B = 56 u32s
+      u32View.set(m ? [m.chunkDims[2], m.chunkDims[1], 0, 0] : [0, 0, 0, 0], base56);
+      const base72 = 72 + i * 4; // lodLevelDims at 288B = 72 f32s
+      uniformData.set(m ? [m.levelDims[2], m.levelDims[1], 0, 0] : [0, 0, 0, 0], base72);
+    }
+    // If no lodMetas, use single-LOD fallback from atlas params
+    if (numLods === 0) {
+      u32View.set([this.gridDims[0], this.gridDims[1], 0, 0], 40);
+      u32View.set([this.chunkDims[0], this.chunkDims[1], 0, 0], 56);
+      uniformData.set([this.levelDims[0], this.levelDims[1], 0, 0], 72);
+    }
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }

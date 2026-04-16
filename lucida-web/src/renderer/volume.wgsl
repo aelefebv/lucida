@@ -14,7 +14,11 @@ struct Uniforms {
   viewProj: mat4x4f,          // offset 304 (64 bytes)
   camForward: vec4f,          // offset 368 (16 bytes) — xyz=camera forward dir
   clipParams: vec4f,          // offset 384 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
-  // total = 400 bytes
+  lodParams: vec4u,           // offset 400 (16 bytes) — x=numLods, y=targetLodIdx
+  lodGridDims: array<vec4u, 4>,   // offset 416 (64 bytes) — xyz=gridDims, w=indirection offset
+  lodChunkDims: array<vec4u, 4>,  // offset 480 (64 bytes) — xyz=chunkDims
+  lodLevelDims: array<vec4f, 4>,  // offset 544 (64 bytes) — xyz=level voxel dimensions
+  // total = 608 bytes
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -51,39 +55,56 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
   return vec2f(tNear, tFar);
 }
 
-fn sampleVolume(texCoord: vec3i) -> u32 {
-  // Compute chunk grid coordinate
-  let chunkCoord = vec3u(
-    u32(texCoord.x) / u.chunkDims.x,
-    u32(texCoord.y) / u.chunkDims.y,
-    u32(texCoord.z) / u.chunkDims.z,
-  );
-  let gridIdx = chunkCoord.z * u.gridDims.y * u.gridDims.x
-              + chunkCoord.y * u.gridDims.x
-              + chunkCoord.x;
-  let slot = indirection[gridIdx];
+// Sample from the atlas with multi-LOD fallback.
+// pos is in [0,1]³ local space. Tries target LOD first, then coarser LODs.
+fn sampleWithFallback(pos: vec3f) -> u32 {
+  let numLods = u.lodParams.x;
+  let targetIdx = u.lodParams.y;
 
-  if (slot == 0xFFFFFFFFu) {
-    return 0xFFFFFFFFu; // chunk not loaded
+  for (var i = targetIdx; i < numLods; i++) {
+    let levelDims = u.lodLevelDims[i].xyz;
+    let chunkDims = u.lodChunkDims[i].xyz;
+    let gridDims = u.lodGridDims[i].xyz;
+    let offset = u.lodGridDims[i].w;
+
+    // Scale [0,1] position to this LOD's voxel space (Y-flipped for image convention)
+    let texCoord = vec3i(
+      clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1),
+      clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1),
+      clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1),
+    );
+
+    let chunkCoord = vec3u(
+      u32(texCoord.x) / chunkDims.x,
+      u32(texCoord.y) / chunkDims.y,
+      u32(texCoord.z) / chunkDims.z,
+    );
+    let gridIdx = offset + chunkCoord.z * gridDims.y * gridDims.x
+                + chunkCoord.y * gridDims.x
+                + chunkCoord.x;
+    let slot = indirection[gridIdx];
+
+    if (slot != 0xFFFFFFFFu) {
+      let slotCoord = vec3u(
+        slot % u.atlasSlotDims.x,
+        (slot / u.atlasSlotDims.x) % u.atlasSlotDims.y,
+        slot / (u.atlasSlotDims.x * u.atlasSlotDims.y),
+      );
+      let localTexel = vec3u(
+        u32(texCoord.x) % chunkDims.x,
+        u32(texCoord.y) % chunkDims.y,
+        u32(texCoord.z) % chunkDims.z,
+      );
+      let atlasCoord = vec3i(
+        i32(slotCoord.x * chunkDims.x + localTexel.x),
+        i32(slotCoord.y * chunkDims.y + localTexel.y),
+        i32(slotCoord.z * chunkDims.z + localTexel.z),
+      );
+      return textureLoad(volumeTex, atlasCoord, 0).r;
+    }
   }
 
-  // Decode slot index to atlas grid position
-  let slotCoord = vec3u(
-    slot % u.atlasSlotDims.x,
-    (slot / u.atlasSlotDims.x) % u.atlasSlotDims.y,
-    slot / (u.atlasSlotDims.x * u.atlasSlotDims.y),
-  );
-  let localTexel = vec3u(
-    u32(texCoord.x) % u.chunkDims.x,
-    u32(texCoord.y) % u.chunkDims.y,
-    u32(texCoord.z) % u.chunkDims.z,
-  );
-  let atlasCoord = vec3i(
-    i32(slotCoord.x * u.chunkDims.x + localTexel.x),
-    i32(slotCoord.y * u.chunkDims.y + localTexel.y),
-    i32(slotCoord.z * u.chunkDims.z + localTexel.z),
-  );
-  return textureLoad(volumeTex, atlasCoord, 0).r;
+  return 0xFFFFFFFFu;
 }
 
 struct FsOut {
@@ -198,14 +219,8 @@ fn fs(input: VSOut) -> FsOut {
     if (renderMode == 1 && maxVal >= 0.98) { break; } // early termination (MIP)
 
     let pos = ro + rd * t;
-    // Map [0,1] position to texel coordinates (flip Y to match 2D image convention)
-    let texCoord = vec3i(
-      clamp(i32(pos.x * f32(dims.x)), 0, dims.x - 1),
-      clamp(i32((1.0 - pos.y) * f32(dims.y)), 0, dims.y - 1),
-      clamp(i32(pos.z * f32(dims.z)), 0, dims.z - 1),
-    );
 
-    var val = sampleVolume(texCoord);
+    var val = sampleWithFallback(pos);
     if (val == 0xFFFFFFFFu) {
       t += adaptiveStep;
       continue;

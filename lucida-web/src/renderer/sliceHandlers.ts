@@ -404,6 +404,7 @@ export function handleSliceRenderMultiPass(ctx: WorkerCtx, msg: SliceRenderMulti
       [atlas.gridX, atlas.gridY],
       [atlas.slotsX, atlas.slotsY],
       [atlas.levelWidth, atlas.levelHeight],
+      atlas.lodMetas,
     );
 
     const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");

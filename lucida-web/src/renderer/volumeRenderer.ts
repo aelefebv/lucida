@@ -2,7 +2,9 @@
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
-// Uniform buffer layout (400 bytes):
+import type { LodIndirectionMeta } from "./volumeHandlers.ts";
+
+// Uniform buffer layout (608 bytes):
 //   offset 0:   invViewProj     mat4x4f   (64B)
 //   offset 64:  modelMatrix     mat4x4f   (64B)
 //   offset 128: invModelMatrix  mat4x4f   (64B)
@@ -15,8 +17,12 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 //   offset 288: atlasSlotDims   vec4u     (16B)
 //   offset 304: viewProj        mat4x4f   (64B)
 //   offset 368: camForward      vec4f     (16B)
-//   offset 384: clipParams      vec4f     (16B) = 400 total
-const UNIFORM_SIZE = 400;
+//   offset 384: clipParams      vec4f     (16B)
+//   offset 400: lodParams       vec4u     (16B) — x=numLods, y=targetLodIdx
+//   offset 416: lodGridDims     vec4u[4]  (64B) — xyz=gridDims, w=offset
+//   offset 480: lodChunkDims    vec4u[4]  (64B) — xyz=chunkDims
+//   offset 544: lodLevelDims    vec4f[4]  (64B) — xyz=levelDims
+const UNIFORM_SIZE = 608;
 
 export class VolumeRenderer {
   private device: GPUDevice;
@@ -37,6 +43,7 @@ export class VolumeRenderer {
   private chunkDims = [1, 1, 1];
   private gridDims = [1, 1, 1];
   private atlasSlotDims = [1, 1, 1];
+  private lodMetas: LodIndirectionMeta[] = [];
   private viewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private camForward: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private clipDistance = 0;
@@ -139,11 +146,13 @@ export class VolumeRenderer {
     gridDims: [number, number, number],
     atlasSlotDims: [number, number, number],
     volumeDims: [number, number, number],
+    lodMetas?: LodIndirectionMeta[],
   ) {
     this.volumeDims = volumeDims;
     this.chunkDims = chunkDims;
     this.gridDims = gridDims;
     this.atlasSlotDims = atlasSlotDims;
+    this.lodMetas = lodMetas ?? [];
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -261,6 +270,25 @@ export class VolumeRenderer {
 
     // clipParams at 384B = 96 floats (x=clipDist, y=clipMode, z=0, w=0)
     uniformData.set([this.clipDistance, this.clipMode, 0, 0], 96);
+
+    // Multi-LOD per-LOD metadata
+    const numLods = Math.min(this.lodMetas.length, 4);
+    u32View.set([numLods > 0 ? numLods : 1, 0, 0, 0], 100); // lodParams at 400B = 100 u32s
+    for (let i = 0; i < 4; i++) {
+      const m = i < numLods ? this.lodMetas[i] : null;
+      const base104 = 104 + i * 4; // lodGridDims at 416B = 104 u32s, stride 4
+      u32View.set(m ? [m.gridDims[2], m.gridDims[1], m.gridDims[0], m.offset] : [0, 0, 0, 0], base104);
+      const base120 = 120 + i * 4; // lodChunkDims at 480B = 120 u32s
+      u32View.set(m ? [m.chunkDims[2], m.chunkDims[1], m.chunkDims[0], 0] : [0, 0, 0, 0], base120);
+      const base136 = 136 + i * 4; // lodLevelDims at 544B = 136 f32s
+      uniformData.set(m ? [m.levelDims[2], m.levelDims[1], m.levelDims[0], 0] : [0, 0, 0, 0], base136);
+    }
+    // If no lodMetas, use single-LOD fallback from atlas params
+    if (numLods === 0) {
+      u32View.set([this.gridDims[0], this.gridDims[1], this.gridDims[2], 0], 104);
+      u32View.set([this.chunkDims[0], this.chunkDims[1], this.chunkDims[2], 0], 120);
+      uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 136);
+    }
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

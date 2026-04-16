@@ -408,6 +408,7 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
       [atlas.gridX, atlas.gridY, atlas.gridZ],
       [atlas.slotsX, atlas.slotsY, atlas.slotsZ],
       [atlas.levelWidth, atlas.levelHeight, atlas.levelDepth],
+      atlas.lodMetas,
     );
 
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
