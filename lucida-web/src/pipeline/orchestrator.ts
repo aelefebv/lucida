@@ -238,7 +238,7 @@ export class Orchestrator {
       this._lastFilteredRequests = filteredRequests;
 
       // Send cold state to the worker — drives atlas creation/remap + wanted-set
-      this.sendColdState(result.activeSet, entities, selection, visibleRegion, currentEpochs, ctx);
+      this.sendColdState(dsId, result.activeSet, entities, selection, visibleRegion, currentEpochs, ctx);
       // Clear delivery tracking so chunks are re-sent for the new state
       this.deliverySentToWorker.clear();
 
@@ -609,6 +609,7 @@ export class Orchestrator {
 
   /** Build and send a ColdStateMessage to the GPU worker. */
   private sendColdState(
+    dsId: string,
     activeSet: ActiveSetEntry[],
     entities: EntitySnapshot[],
     selection: SelectionState,
@@ -647,6 +648,7 @@ export class Orchestrator {
     const msg: ColdStateMessage = {
       type: "coldState",
       epochs,
+      datasetId: dsId,
       currentT: selection.t,
       currentZ: selection.z,
       visibleChannels: selection.visibleChannels,

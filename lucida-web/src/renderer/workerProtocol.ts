@@ -221,6 +221,7 @@ export interface ColdStateActiveEntry {
 export interface ColdStateMessage {
   type: "coldState";
   epochs: PlanningEpochs;
+  datasetId: string;
   currentT: number;
   currentZ: number;
   visibleChannels: number[];

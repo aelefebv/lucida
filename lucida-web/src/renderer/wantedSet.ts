@@ -9,16 +9,23 @@ import type { ColdStateMessage } from "./workerProtocol.ts";
 // Types
 // ---------------------------------------------------------------------------
 
-/** Minimal atlas state interface — only the fields needed for wanted-set computation. */
+/** Per-LOD metadata for an entity in a shared pool. */
+export interface AtlasLodMeta {
+  level: number;
+  gridDims: [number, number, number];   // [Z, Y, X]
+  chunkDims: [number, number, number];  // [Z, Y, X]
+  offset: number;
+}
+
+/** Minimal shared-pool atlas state for wanted-set computation. */
 export interface AtlasSnapshot {
-  z?: number; // only for slice atlases
-  slots: Map<string, number>; // chunkKey -> slotIndex
-  lodMetas: Array<{
-    level: number;
-    gridDims: [number, number, number];   // [Z, Y, X]
-    chunkDims: [number, number, number];  // [Z, Y, X]
-    offset: number;
-  }>;
+  z?: number; // only for slice atlases (single-entity for now until SP-3)
+  /** Slots keyed by composite "memberId|chunkKey" (volume) or plain chunkKey (slice). */
+  slots: Map<string, number>;
+  /** Per-entity LOD sections (volume shared pool). */
+  entityMetas?: Map<string, AtlasLodMeta[]>;
+  /** Single-entity LOD metas (slice — until SP-3 makes slice shared too). */
+  lodMetas?: AtlasLodMeta[];
 }
 
 export interface WantedSetResult {
@@ -39,6 +46,7 @@ export function computeWantedSet(
   coldState: ColdStateMessage,
   volumeAtlases: Map<string, AtlasSnapshot>,
   sliceAtlases: Map<string, AtlasSnapshot>,
+  memberToPool?: Map<string, string>,
 ): WantedSetResult {
   const missing: Array<{ entityId: string; chunkKey: string }> = [];
 
@@ -47,8 +55,6 @@ export function computeWantedSet(
   }
 
   const isMultiChannel = coldState.visibleChannels.length > 1;
-  const atlases =
-    coldState.viewMode === "volume" ? volumeAtlases : sliceAtlases;
 
   for (const entry of coldState.activeSet) {
     // Build the list of (workerMemberId, channel) pairs for this entry.
@@ -65,28 +71,40 @@ export function computeWantedSet(
     }
 
     for (const { memberId, channel } of members) {
-      const atlas = atlases.get(memberId);
-      if (atlas === undefined) continue; // atlas config hasn't arrived yet
+      // Look up atlas. Volume uses shared pools (keyed by poolKey from memberToPool).
+      // Slice still uses per-member atlases (keyed by memberId) until SP-3.
+      let atlas: AtlasSnapshot | undefined;
+      let entityLodMetas: AtlasLodMeta[] | undefined;
+      let useCompositeKey = false;
 
-      // Build a lookup for which levels the atlas actually covers.
-      const atlasLodByLevel = new Map(
-        atlas.lodMetas.map((m) => [m.level, m]),
-      );
+      if (coldState.viewMode === "volume") {
+        const poolKey = memberToPool?.get(memberId);
+        if (!poolKey) continue;
+        atlas = volumeAtlases.get(poolKey);
+        if (atlas === undefined) continue;
+        entityLodMetas = atlas.entityMetas?.get(memberId);
+        if (entityLodMetas === undefined) continue;
+        useCompositeKey = true;
+      } else {
+        atlas = sliceAtlases.get(memberId);
+        if (atlas === undefined) continue;
+        entityLodMetas = atlas.lodMetas;
+        if (entityLodMetas === undefined) continue;
+      }
+
+      const atlasLodByLevel = new Map(entityLodMetas.map((m) => [m.level, m]));
 
       // Iterate all detail-owned LODs for this entry.
       const [finest, coarsest] = entry.detailOwnedLodRange;
       for (let lvl = finest; lvl <= coarsest; lvl++) {
-        // Atlas must cover this level.
         if (!atlasLodByLevel.has(lvl)) continue;
 
-        // Find cold-state level metadata for enumeration bounds.
         const levelMeta = entry.levels.find((l) => l.level === lvl);
         if (levelMeta === undefined) continue;
 
         const [chunkZ, chunkY, chunkX] = levelMeta.chunkShape;
         const [gridZ, gridY, gridX] = levelMeta.gridShape;
 
-        // Compute chunk coordinate bounds from visible region.
         const [minVoxX, minVoxY, maxVoxX, maxVoxY] =
           coldState.visibleRegion.xyBounds;
 
@@ -99,24 +117,22 @@ export function computeWantedSet(
         let zEnd: number;
 
         if (coldState.viewMode === "slice") {
-          // Single slice: only the chunk containing the current Z
           const sliceZ = atlas.z ?? 0;
           const chunkIdx = Math.floor(sliceZ / chunkZ);
           zStart = Math.max(0, chunkIdx);
           zEnd = Math.min(gridZ, chunkIdx + 1);
         } else {
-          // Volume: Z range from visible region
           zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRange[0] / chunkZ));
           zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRange[1] / chunkZ));
         }
 
-        // Enumerate expected chunks and check atlas residency.
         for (let iz = zStart; iz < zEnd; iz++) {
           for (let iy = rowStart; iy < rowEnd; iy++) {
             for (let ix = colStart; ix < colEnd; ix++) {
-              const key = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
-              if (!atlas.slots.has(key)) {
-                missing.push({ entityId: entry.entityId, chunkKey: key });
+              const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
+              const slotKey = useCompositeKey ? `${memberId}|${chunkKey}` : chunkKey;
+              if (!atlas.slots.has(slotKey)) {
+                missing.push({ entityId: entry.entityId, chunkKey });
               }
             }
           }

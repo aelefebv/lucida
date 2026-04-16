@@ -23,18 +23,19 @@ export interface AtlasState {
   texture: GPUTexture;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
-  slots: Map<string, number>;     // chunkKey → slotIndex (insertion-order = LRU)
-  slotGridIdx: Int32Array<ArrayBuffer>;        // slotIndex → globalGridIdx (for eviction cleanup)
+  /** Composite keys "memberId:chunkKey" → slotIndex (insertion-order = LRU). */
+  slots: Map<string, number>;
+  /** slotIndex → globalGridIdx (for eviction cleanup). */
+  slotGridIdx: Int32Array<ArrayBuffer>;
   freeSlots: number[];            // available slot indices (stack)
   totalSlots: number;
+  /** Shared slot pool dimensions (same chunk dims for all entities in this pool). */
   chunkX: number; chunkY: number; chunkZ: number;
   slotsX: number; slotsY: number; slotsZ: number;
-  /** Per-LOD indirection sections. Sorted finest→coarsest. */
-  lodMetas: LodIndirectionMeta[];
-  /** Target LOD's grid dims (convenience for chunk data handler). */
-  gridX: number; gridY: number; gridZ: number;
-  levelWidth: number; levelHeight: number; levelDepth: number;
-  level: number; t: number; c: number;
+  /** Per-entity LOD sections. memberId → array of per-LOD indirection meta with absolute offsets. */
+  entityMetas: Map<string, LodIndirectionMeta[]>;
+  /** Current T and C — shared across all entities in this pool (one cold state per dataset). */
+  t: number; c: number;
   intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
 }
@@ -53,10 +54,36 @@ export function parseChunkKey(key: string): { level: number; t: number; c: numbe
   };
 }
 
+/** Build composite slot key "memberId|chunkKey" for shared pool. */
+export function makeCompositeKey(memberId: string, chunkKey: string): string {
+  return `${memberId}|${chunkKey}`;
+}
+
+/**
+ * Derive the shared pool key from a memberId and its datasetId.
+ * Single-channel: memberId="imageId", poolKey="datasetId"
+ * Multi-channel: memberId="imageId:chN", poolKey="datasetId:chN"
+ */
+export function derivePoolKey(memberId: string, datasetId: string): string {
+  const colonIdx = memberId.indexOf(":");
+  if (colonIdx >= 0) {
+    return `${datasetId}${memberId.substring(colonIdx)}`;
+  }
+  return datasetId;
+}
+
+/** Parse composite slot key. Returns null if not a composite key. */
+export function parseCompositeKey(key: string): { memberId: string; chunkKey: string } | null {
+  const sep = key.indexOf("|");
+  if (sep < 0) return null;
+  return { memberId: key.substring(0, sep), chunkKey: key.substring(sep + 1) };
+}
+
 /**
  * Remap the indirection buffer to show only chunks matching the current state.
- * Writes chunks into the correct per-LOD section based on lodMetas.
- * Chunks for other T/C or levels not in lodMetas remain in atlas.slots but are unmapped.
+ * Iterates composite slot keys, looks up each entity's lodMetas, and writes
+ * chunks into the correct per-entity per-LOD section. Chunks for other T/C
+ * or entities not in entityMetas remain in atlas.slots but are unmapped.
  */
 export function remapIndirection(
   atlas: AtlasState,
@@ -66,19 +93,23 @@ export function remapIndirection(
   atlas.indirectionData.fill(0xFFFFFFFF);
   atlas.slotGridIdx.fill(-1);
 
-  const metaByLevel = new Map(atlas.lodMetas.map(m => [m.level, m]));
-
-  for (const [key, slotIndex] of atlas.slots) {
-    const parsed = parseChunkKey(key);
+  for (const [compositeKey, slotIndex] of atlas.slots) {
+    const parsed = parseCompositeKey(compositeKey);
     if (!parsed) continue;
-    if (parsed.t !== currentT) continue;
-    if (parsed.c !== currentC) continue;
 
-    const meta = metaByLevel.get(parsed.level);
+    const lodMetas = atlas.entityMetas.get(parsed.memberId);
+    if (!lodMetas) continue; // entity no longer in active set
+
+    const chunk = parseChunkKey(parsed.chunkKey);
+    if (!chunk) continue;
+    if (chunk.t !== currentT) continue;
+    if (chunk.c !== currentC) continue;
+
+    const meta = lodMetas.find(m => m.level === chunk.level);
     if (!meta) continue;
 
-    const [gridZ, gridY, gridX] = meta.gridDims;
-    const globalIdx = meta.offset + parsed.z * gridY * gridX + parsed.y * gridX + parsed.x;
+    const [, gridY, gridX] = meta.gridDims;
+    const globalIdx = meta.offset + chunk.z * gridY * gridX + chunk.y * gridX + chunk.x;
     if (globalIdx >= 0 && globalIdx < atlas.indirectionData.length) {
       atlas.indirectionData[globalIdx] = slotIndex;
       atlas.slotGridIdx[slotIndex] = globalIdx;
@@ -111,20 +142,16 @@ function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture
   depthH = h;
   return depthTexture;
 }
-// Last known ray-volume hit point in local [0,1]³ space per dataset (persists across atlas recreations).
+// Last known ray-volume hit point in local [0,1]³ space per ENTITY (memberId).
 // Chunks closest to this point are kept; farthest are evicted first.
-const rayHitPerDataset = new Map<string, [number, number, number]>();
+const rayHitPerEntity = new Map<string, [number, number, number]>();
 
+/** Create a shared atlas pool. Indirection is sized later from entityMetas. */
 function createVolumeAtlas(
   device: GPUDevice,
-  levelW: number, levelH: number, levelD: number,
   chunkX: number, chunkY: number, chunkZ: number,
-  level: number, t: number, c: number,
+  t: number, c: number,
 ): AtlasState {
-  const gridX = Math.ceil(levelW / chunkX);
-  const gridY = Math.ceil(levelH / chunkY);
-  const gridZ = Math.ceil(levelD / chunkZ);
-
   const chunkTexels = chunkX * chunkY * chunkZ;
   const maxSlots = Math.floor(VOLUME_ATLAS_BUDGET / (chunkTexels * 2));
   const slotsPerAxis = Math.floor(Math.cbrt(maxSlots));
@@ -144,12 +171,11 @@ function createVolumeAtlas(
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
 
-  const indirectionSize = gridX * gridY * gridZ;
-  const indirectionData = new Uint32Array(indirectionSize);
-  indirectionData.fill(0xFFFFFFFF);
-
+  // Indirection starts at minimum size; cold state handler resizes after computing entityMetas.
+  const indirectionData = new Uint32Array(1);
+  indirectionData[0] = 0xFFFFFFFF;
   const indirectionBuf = device.createBuffer({
-    size: Math.max(indirectionSize * 4, 4),
+    size: 4,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
   device.queue.writeBuffer(indirectionBuf, 0, indirectionData);
@@ -160,22 +186,13 @@ function createVolumeAtlas(
   const slotGridIdx = new Int32Array(totalSlots);
   slotGridIdx.fill(-1);
 
-  const lodMetas: LodIndirectionMeta[] = [{
-    level, gridDims: [gridZ, gridY, gridX],
-    chunkDims: [chunkZ, chunkY, chunkX],
-    levelDims: [levelD, levelH, levelW],
-    offset: 0,
-  }];
-
   return {
     texture, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
-    lodMetas,
-    gridX, gridY, gridZ,
     slotsX, slotsY, slotsZ,
-    levelWidth: levelW, levelHeight: levelH, levelDepth: levelD,
-    level, t, c,
+    entityMetas: new Map(),
+    t, c,
     intensityMin: 65535, intensityMax: 0,
     indirectionDirty: true,
   };
@@ -186,136 +203,161 @@ function destroyAtlas(atlas: AtlasState): void {
   atlas.indirectionBuf.destroy();
 }
 
-/** Squared distance from a chunk grid coordinate to a reference point in [0,1] volume space. */
+/**
+ * Squared distance from a chunk grid coordinate to a reference point in [0,1] entity-local space.
+ * Uses the chunk's own LOD dims (from lodMeta) for normalization since LODs may have different grids.
+ */
 function chunkDistSq(
-  atlas: AtlasState, cx: number, cy: number, cz: number,
+  lodMeta: LodIndirectionMeta,
+  cx: number, cy: number, cz: number,
   cam: [number, number, number],
 ): number {
-  const px = (cx + 0.5) * atlas.chunkX / atlas.levelWidth;
-  const py = (cy + 0.5) * atlas.chunkY / atlas.levelHeight;
-  const pz = (cz + 0.5) * atlas.chunkZ / atlas.levelDepth;
+  const [, levelH, levelW] = lodMeta.levelDims;
+  const [, , chunkX] = lodMeta.chunkDims;
+  const [, chunkY] = lodMeta.chunkDims;
+  const [chunkZ] = lodMeta.chunkDims;
+  const levelD = lodMeta.levelDims[0];
+  const px = (cx + 0.5) * chunkX / Math.max(levelW, 1);
+  const py = (cy + 0.5) * chunkY / Math.max(levelH, 1);
+  const pz = (cz + 0.5) * chunkZ / Math.max(levelD, 1);
   const dx = px - cam[0];
   const dy = py - cam[1];
   const dz = pz - cam[2];
   return dx * dx + dy * dy + dz * dz;
 }
 
-/** Find the best eviction candidate: prefer stale (unmapped) chunks, then farthest mapped chunk. */
-function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): { key: string; dist: number } {
+/**
+ * Find the best eviction candidate: prefer stale (unmapped) chunks, then farthest mapped chunk.
+ * Distance reference is per-entity (rayHitPerEntity).
+ */
+function findFarthestSlot(atlas: AtlasState): { key: string; dist: number } {
   let farthestKey = "";
   let maxDist = -1;
 
-  for (const [key, slotIdx] of atlas.slots) {
+  for (const [compositeKey, slotIdx] of atlas.slots) {
     const gridIdx = atlas.slotGridIdx[slotIdx];
     if (gridIdx < 0) {
       // Stale chunk (not mapped in indirection) — always prefer for eviction
-      return { key, dist: Infinity };
+      return { key: compositeKey, dist: Infinity };
     }
 
-    // Parse chunk key for coordinates — works correctly with multi-LOD indirection
-    const parsed = parseChunkKey(key);
+    const parsed = parseCompositeKey(compositeKey);
     if (!parsed) continue;
+    const lodMetas = atlas.entityMetas.get(parsed.memberId);
+    if (!lodMetas) {
+      // Entity gone from active set — prefer for eviction
+      return { key: compositeKey, dist: Infinity };
+    }
+    const chunk = parseChunkKey(parsed.chunkKey);
+    if (!chunk) continue;
+    const lodMeta = lodMetas.find(m => m.level === chunk.level);
+    if (!lodMeta) continue;
 
-    const dist = chunkDistSq(atlas, parsed.x, parsed.y, parsed.z, cam);
+    const cam = rayHitPerEntity.get(parsed.memberId) ?? [0.5, 0.5, 0.5];
+    const dist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
 
     if (dist > maxDist) {
       maxDist = dist;
-      farthestKey = key;
+      farthestKey = compositeKey;
     }
   }
 
   return { key: farthestKey, dist: maxDist };
 }
 
-export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: {
-  datasetId: string; level: number; t: number; c: number;
-  levelWidth: number; levelHeight: number; levelDepth: number;
-  chunkX: number; chunkY: number; chunkZ: number;
-}): void {
-  const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
-
-  const atlas = atlasPerDataset.get(datasetId);
-
-  if (atlas && atlas.chunkX === chunkX && atlas.chunkY === chunkY && atlas.chunkZ === chunkZ) {
-    // Chunk dims match — remap instead of rebuild. Atlas slots stay intact.
-    atlas.level = level;
-    atlas.t = t;
-    atlas.c = c;
-    atlas.levelWidth = levelWidth;
-    atlas.levelHeight = levelHeight;
-    atlas.levelDepth = levelDepth;
-
-    const newGridX = Math.ceil(levelWidth / chunkX);
-    const newGridY = Math.ceil(levelHeight / chunkY);
-    const newGridZ = Math.ceil(levelDepth / chunkZ);
-    const newGridSize = newGridX * newGridY * newGridZ;
-
-    // Resize indirection if grid dims changed (different LOD = different grid)
-    if (newGridSize !== atlas.gridX * atlas.gridY * atlas.gridZ) {
-      atlas.indirectionData = new Uint32Array(newGridSize);
-      atlas.indirectionBuf.destroy();
-      atlas.indirectionBuf = ctx.device.createBuffer({
-        size: Math.max(newGridSize * 4, 4),
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-    }
-    atlas.gridX = newGridX;
-    atlas.gridY = newGridY;
-    atlas.gridZ = newGridZ;
-
-    remapIndirection(atlas, t, c);
-    return;
+/**
+ * Get or create a shared volume atlas pool for the given (poolKey, chunk dims).
+ * Returns the pool. Cold state handler is responsible for setting entityMetas
+ * and resizing the indirection buffer afterward.
+ */
+export function getOrCreateVolumePool(
+  ctx: WorkerCtx,
+  poolKey: string,
+  chunkX: number, chunkY: number, chunkZ: number,
+  t: number, c: number,
+): AtlasState {
+  const existing = atlasPerDataset.get(poolKey);
+  if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.chunkZ === chunkZ) {
+    existing.t = t;
+    existing.c = c;
+    return existing;
   }
-
-  // No atlas or chunk dims changed — create new
-  if (atlas) destroyAtlas(atlas);
-  const newAtlas = createVolumeAtlas(ctx.device, levelWidth, levelHeight, levelDepth,
-    chunkX, chunkY, chunkZ, level, t, c);
-  atlasPerDataset.set(datasetId, newAtlas);
+  if (existing) destroyAtlas(existing);
+  const newAtlas = createVolumeAtlas(ctx.device, chunkX, chunkY, chunkZ, t, c);
+  atlasPerDataset.set(poolKey, newAtlas);
+  return newAtlas;
 }
 
-export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessage, currentEpochs: PlanningEpochs | null): void {
-  const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+/**
+ * Resize the indirection buffer to match a new total size (sum of all entity LOD sections).
+ * Called by cold state handler after computing entityMetas with absolute offsets.
+ */
+export function resizeIndirection(ctx: WorkerCtx, atlas: AtlasState, totalEntries: number): void {
+  if (totalEntries === atlas.indirectionData.length) return;
+  atlas.indirectionData = new Uint32Array(totalEntries);
+  atlas.indirectionBuf.destroy();
+  atlas.indirectionBuf = ctx.device.createBuffer({
+    size: Math.max(totalEntries * 4, 4),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+}
+
+export function handleVolumeChunkData(
+  ctx: WorkerCtx,
+  msg: VolumeChunkDataMessage,
+  currentEpochs: PlanningEpochs | null,
+  poolKey: string,
+  memberId: string,
+): void {
+  const { level, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
   // Drop entire batch if stale
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     const skippedKeys = msg.chunks.map(c => c.key);
     if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", datasetId: msg.datasetId, keys: [], skipped: skippedKeys });
+      ctx.post({ type: "chunksEvicted", datasetId: memberId, keys: [], skipped: skippedKeys });
     }
     return;
   }
 
-  let atlas = atlasPerDataset.get(datasetId);
-  if (!atlas) return; // No atlas config received yet — wait for it
+  const atlas = atlasPerDataset.get(poolKey);
+  if (!atlas) return; // pool not yet created by cold state handler
 
-  // Debug: detect chunk dims mismatch (atlas created for different chunk size)
+  // Debug: detect chunk dims mismatch (pool created for different chunk size)
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
-    console.warn(`[volumeChunkData] chunkDims mismatch for ${datasetId}: atlas=[${atlas.chunkX},${atlas.chunkY},${atlas.chunkZ}] msg=[${chunkX},${chunkY},${chunkZ}] level=${level}`);
+    console.warn(`[volumeChunkData] chunkDims mismatch for ${memberId}: pool=[${atlas.chunkX},${atlas.chunkY},${atlas.chunkZ}] msg=[${chunkX},${chunkY},${chunkZ}] level=${level}`);
   }
-  // Debug: ensure this level has an indirection section
-  if (!atlas.lodMetas.some(m => m.level === level)) {
-    console.warn(`[volumeChunkData] no lodMeta for level ${level} in ${datasetId}, atlas has levels [${atlas.lodMetas.map(m => m.level).join(",")}]`);
+  // Look up entity's lodMetas
+  const entityLodMetas = atlas.entityMetas.get(memberId);
+  if (!entityLodMetas) {
+    console.warn(`[volumeChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
+    return;
+  }
+  const lodMeta = entityLodMetas.find(m => m.level === level);
+  if (!lodMeta) {
+    console.warn(`[volumeChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
+    return;
   }
 
-  rayHitPerDataset.set(datasetId, msg.hitLocal);
+  rayHitPerEntity.set(memberId, msg.hitLocal);
 
   let intensityChanged = false;
   const totalChunks = msg.chunks.length;
   const evictedKeys: string[] = [];
+  const insertedKeys: string[] = []; // composite keys we successfully inserted
 
   for (const chunk of msg.chunks) {
-    const chunkKey = chunk.key;
-    if (atlas.slots.has(chunkKey)) continue;
+    const compositeKey = makeCompositeKey(memberId, chunk.key);
+    if (atlas.slots.has(compositeKey)) continue;
 
     let slotIndex: number;
     if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;
     } else {
-      const cam = rayHitPerDataset.get(datasetId) ?? [0.5, 0.5, 0.5];
-      const { key: evictKey, dist: farthestDist } = findFarthestSlot(atlas, cam);
+      const { key: evictKey, dist: farthestDist } = findFarthestSlot(atlas);
       if (!evictKey) continue;
-      const incomingDist = chunkDistSq(atlas, chunk.x, chunk.y, chunk.z, cam);
+      const cam = rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5];
+      const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
       if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
@@ -340,16 +382,15 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
 
     writeVolumeChunk(ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
 
-    // Find the correct LOD section in the indirection buffer
-    const lodMeta = atlas.lodMetas.find(m => m.level === level);
-    const [, lodGridY, lodGridX] = lodMeta ? lodMeta.gridDims : [atlas.gridZ, atlas.gridY, atlas.gridX];
-    const lodOffset = lodMeta ? lodMeta.offset : 0;
-    const globalIdx = lodOffset + chunk.z * lodGridY * lodGridX + chunk.y * lodGridX + chunk.x;
+    // Write to entity's per-LOD indirection section (absolute offset)
+    const [, lodGridY, lodGridX] = lodMeta.gridDims;
+    const globalIdx = lodMeta.offset + chunk.z * lodGridY * lodGridX + chunk.y * lodGridX + chunk.x;
     if (globalIdx < atlas.indirectionData.length) {
       atlas.indirectionData[globalIdx] = slotIndex;
       atlas.slotGridIdx[slotIndex] = globalIdx;
     }
-    atlas.slots.set(chunkKey, slotIndex);
+    atlas.slots.set(compositeKey, slotIndex);
+    insertedKeys.push(compositeKey);
     atlas.indirectionDirty = true;
 
     const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
@@ -358,25 +399,48 @@ export function handleVolumeChunkData(ctx: WorkerCtx, msg: VolumeChunkDataMessag
     if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
   }
 
-  // Report chunks from the batch that the atlas did not keep (rejected as too far, etc.)
+  // Report chunks from the batch that the pool did not keep
   const skippedKeys: string[] = [];
   for (const chunk of msg.chunks) {
-    if (!atlas.slots.has(chunk.key)) {
-      skippedKeys.push(chunk.key);
+    const compositeKey = makeCompositeKey(memberId, chunk.key);
+    if (!atlas.slots.has(compositeKey)) {
+      skippedKeys.push(chunk.key); // report bare chunk key (not composite) for orchestrator
     }
   }
 
+  // Report evicted/skipped chunks. Convert composite eviction keys back to (memberId, chunkKey)
+  // so the orchestrator can clear the right delivery tracking.
   if (evictedKeys.length > 0 || skippedKeys.length > 0) {
-    ctx.post({ type: "chunksEvicted", datasetId, keys: evictedKeys, skipped: skippedKeys });
+    // Group evicted keys by memberId (each entity has its own delivery tracking)
+    const evictedByMember = new Map<string, string[]>();
+    for (const ck of evictedKeys) {
+      const parsed = parseCompositeKey(ck);
+      if (!parsed) continue;
+      const arr = evictedByMember.get(parsed.memberId) ?? [];
+      arr.push(parsed.chunkKey);
+      evictedByMember.set(parsed.memberId, arr);
+    }
+    // Report evictions per member
+    for (const [evMember, evKeys] of evictedByMember) {
+      ctx.post({ type: "chunksEvicted", datasetId: evMember, keys: evKeys, skipped: [] });
+    }
+    // Report skipped (this batch's member only)
+    if (skippedKeys.length > 0) {
+      ctx.post({ type: "chunksEvicted", datasetId: memberId, keys: [], skipped: skippedKeys });
+    }
     ctx.postWantedSet();
   }
 
   if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId, min: atlas.intensityMin, max: atlas.intensityMax });
+    ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
   }
 }
 
-export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMultiPassMessage): void {
+export function handleVolumeRenderMultiPass(
+  ctx: WorkerCtx,
+  msg: VolumeRenderMultiPassMessage,
+  layerToPool: (memberId: string) => { poolKey: string } | null,
+): void {
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
@@ -390,10 +454,15 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
   let isFirstLayer = true;
 
   for (const layer of msg.layers) {
-    const atlas = atlasPerDataset.get(layer.datasetId);
+    const memberId = layer.datasetId;
+    const resolved = layerToPool(memberId);
+    if (!resolved) continue;
+    const atlas = atlasPerDataset.get(resolved.poolKey);
     if (!atlas) continue;
+    const entityLodMetas = atlas.entityMetas.get(memberId);
+    if (!entityLodMetas) continue;
 
-    rayHitPerDataset.set(layer.datasetId, layer.rayHitLocal);
+    rayHitPerEntity.set(memberId, layer.rayHitLocal);
 
     const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");
     renderer.setColormapTexture(lutTex);
@@ -402,13 +471,18 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
       ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
       atlas.indirectionDirty = false;
     }
+    // Use target LOD's dims for the legacy single-LOD uniforms (gridX/Y/Z, levelWidth/Height/Depth).
+    // Multi-LOD fallback uses entityLodMetas which has per-LOD info.
+    const targetMeta = entityLodMetas[0]; // first is target (finest)
+    const [tGridZ, tGridY, tGridX] = targetMeta.gridDims;
+    const [tLevelD, tLevelH, tLevelW] = targetMeta.levelDims;
     renderer.setAtlas(
       atlas.texture, atlas.indirectionBuf,
       [atlas.chunkX, atlas.chunkY, atlas.chunkZ],
-      [atlas.gridX, atlas.gridY, atlas.gridZ],
+      [tGridX, tGridY, tGridZ],
       [atlas.slotsX, atlas.slotsY, atlas.slotsZ],
-      [atlas.levelWidth, atlas.levelHeight, atlas.levelDepth],
-      atlas.lodMetas,
+      [tLevelW, tLevelH, tLevelD],
+      entityLodMetas,
     );
 
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
@@ -442,19 +516,23 @@ export function handleVolumeRenderMultiPass(ctx: WorkerCtx, msg: VolumeRenderMul
   }
 }
 
-export function removeVolumeResources(datasetId: string): void {
-  const atlas = atlasPerDataset.get(datasetId);
+/**
+ * Remove resources for a removed entity or dataset.
+ * Pass either a poolKey (removes the whole pool) or a memberId (removes per-entity state).
+ */
+export function removeVolumeResources(idOrMember: string): void {
+  const atlas = atlasPerDataset.get(idOrMember);
   if (atlas) {
     destroyAtlas(atlas);
-    atlasPerDataset.delete(datasetId);
+    atlasPerDataset.delete(idOrMember);
   }
-  rayHitPerDataset.delete(datasetId);
+  rayHitPerEntity.delete(idOrMember);
 }
 
 export function destroyAllVolumeResources(): void {
   for (const atlas of atlasPerDataset.values()) destroyAtlas(atlas);
   atlasPerDataset.clear();
-  rayHitPerDataset.clear();
+  rayHitPerEntity.clear();
   depthTexture?.destroy();
   depthTexture = null;
 }

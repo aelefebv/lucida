@@ -7,7 +7,7 @@ import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases, handleSliceAtlasConfig, remapSliceIndirection } from "./sliceHandlers.ts";
-import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, handleVolumeAtlasConfig, remapIndirection, type LodIndirectionMeta } from "./volumeHandlers.ts";
+import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, getOrCreateVolumePool, resizeIndirection, remapIndirection, type LodIndirectionMeta } from "./volumeHandlers.ts";
 import type { ColdStateActiveEntry } from "./workerProtocol.ts";
 import { computeWantedSet } from "./wantedSet.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
@@ -25,6 +25,13 @@ let cursorRenderer: CursorRenderer | null = null;
 
 let currentEpochs: PlanningEpochs | null = null;
 let currentColdState: ColdStateMessage | null = null;
+
+/** Map from worker member ID (imageId or imageId:chN) to the dataset ID it belongs to. */
+const memberToDataset = new Map<string, string>();
+
+/** Map from worker member ID to the shared pool key it currently belongs to.
+ *  Pool key encodes chunk dims so fields with different target LODs use different pools. */
+const memberToPool = new Map<string, string>();
 
 // LUT texture cache for colormap rendering
 const lutCache = new Map<string, GPUTexture>();
@@ -95,7 +102,7 @@ function post(msg: WorkerToMainMessage) {
 /** Compute and post wanted-set delta from current cold state + atlas state. */
 function postWantedSet() {
   if (!currentColdState || !currentEpochs) return;
-  const result = computeWantedSet(currentColdState, getVolumeAtlases(), getSliceAtlases());
+  const result = computeWantedSet(currentColdState, getVolumeAtlases(), getSliceAtlases(), memberToPool);
   post({ type: "wantedSetDelta", epochs: currentEpochs, missing: result.missing });
 }
 
@@ -156,11 +163,22 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         handleSliceRenderMultiPass(ctx, msg);
         break;
 
-      case "volumeChunkData":
-        handleVolumeChunkData(ctx, msg, currentEpochs);
+      case "volumeChunkData": {
+        const memberId = msg.datasetId; // protocol still names it datasetId; orchestrator sends memberId here
+        const poolKey = memberToPool.get(memberId);
+        if (!poolKey) {
+          // No pool registered yet (cold state hasn't arrived for this member)
+          break;
+        }
+        handleVolumeChunkData(ctx, msg, currentEpochs, poolKey, memberId);
         break;
+      }
       case "volumeRenderMultiPass":
-        handleVolumeRenderMultiPass(ctx, msg);
+        handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
+          const poolKey = memberToPool.get(memberId);
+          if (!poolKey) return null;
+          return { poolKey };
+        });
         break;
 
       case "minimapInit":
@@ -192,106 +210,122 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
 
         // Manage atlases from cold state — create, remap, or rebuild as needed
         const isMultiCh = msg.visibleChannels.length > 1;
+
+        // First pass: register member→dataset mappings for all entries
         for (const entry of msg.activeSet) {
-          const members: Array<{ memberId: string; channel: number }> = [];
           if (isMultiCh) {
             for (const ch of msg.visibleChannels) {
-              members.push({ memberId: `${entry.imageId}:ch${ch}`, channel: ch });
+              memberToDataset.set(`${entry.imageId}:ch${ch}`, msg.datasetId);
             }
           } else {
-            members.push({ memberId: entry.imageId, channel: msg.visibleChannels[0] });
+            memberToDataset.set(entry.imageId, msg.datasetId);
+          }
+        }
+
+        if (msg.viewMode === "volume") {
+          // Multi-pool: group entries by (channel, chunk dims). Pools have unique chunk dims,
+          // so fields with different target LODs end up in different pools.
+          // poolKey = datasetId[:chN]:chunkDimsKey
+          const channels = isMultiCh ? msg.visibleChannels : [msg.visibleChannels[0]];
+
+          // Group entries by (channel, chunk dims key) → list of (entry, memberId)
+          interface PoolGroup {
+            poolKey: string;
+            channel: number;
+            chunkDims: [number, number, number]; // [Z, Y, X]
+            entries: Array<{ entry: typeof msg.activeSet[0]; memberId: string }>;
+          }
+          const groups = new Map<string, PoolGroup>();
+
+          for (const channel of channels) {
+            for (const entry of msg.activeSet) {
+              const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
+              if (!targetLevel) continue;
+              const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
+              const chunkDimsKey = `${chunkX}x${chunkY}x${chunkZ}`;
+              const poolKey = isMultiCh
+                ? `${msg.datasetId}:ch${channel}:${chunkDimsKey}`
+                : `${msg.datasetId}:${chunkDimsKey}`;
+              const memberId = isMultiCh ? `${entry.imageId}:ch${channel}` : entry.imageId;
+
+              memberToPool.set(memberId, poolKey);
+
+              let group = groups.get(poolKey);
+              if (!group) {
+                group = { poolKey, channel, chunkDims: [chunkZ, chunkY, chunkX], entries: [] };
+                groups.set(poolKey, group);
+              }
+              group.entries.push({ entry, memberId });
+            }
           }
 
-          // Use target LOD level metadata for atlas dimensions
-          const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
-          if (!targetLevel) continue;
-          const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
-          const [gridZ, gridY, gridX] = targetLevel.gridShape;
-          const [levelD, levelH, levelW] = targetLevel.levelDims;
+          // Build each pool with its grouped entries
+          for (const group of groups.values()) {
+            const [pcZ, pcY, pcX] = group.chunkDims;
+            const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
+            let offset = 0;
 
-          for (const { memberId, channel } of members) {
-            if (msg.viewMode === "volume") {
-              const atlas = getVolumeAtlases().get(memberId);
-              if (!atlas) {
-                // First time — create atlas
-                handleVolumeAtlasConfig(ctx, {
-
-                  epochs: msg.epochs,
-                  datasetId: memberId,
-                  level: entry.targetLod, t: msg.currentT, c: channel,
-                  levelWidth: levelW, levelHeight: levelH, levelDepth: levelD,
-                  chunkX, chunkY, chunkZ,
+            for (const { entry, memberId } of group.entries) {
+              // Build per-entity LOD sections (only LODs with matching chunk dims)
+              const [finest, coarsest] = entry.detailOwnedLodRange;
+              const entityLodMetas: LodIndirectionMeta[] = [];
+              for (let lvl = finest; lvl <= coarsest; lvl++) {
+                const lm = entry.levels.find(l => l.level === lvl);
+                if (!lm) continue;
+                const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
+                if (lChunkX !== pcX || lChunkY !== pcY || lChunkZ !== pcZ) continue;
+                const [lGridZ, lGridY, lGridX] = lm.gridShape;
+                const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
+                entityLodMetas.push({
+                  level: lvl,
+                  gridDims: [lGridZ, lGridY, lGridX],
+                  chunkDims: [lChunkZ, lChunkY, lChunkX],
+                  levelDims: [lLevelD, lLevelH, lLevelW],
+                  offset,
                 });
-              } else if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
-                // Chunk dims changed — rebuild
-                handleVolumeAtlasConfig(ctx, {
-
-                  epochs: msg.epochs,
-                  datasetId: memberId,
-                  level: entry.targetLod, t: msg.currentT, c: channel,
-                  levelWidth: levelW, levelHeight: levelH, levelDepth: levelD,
-                  chunkX, chunkY, chunkZ,
+                offset += lGridX * lGridY * lGridZ;
+              }
+              // Fallback: include target LOD only (no multi-LOD across mismatched dims)
+              if (entityLodMetas.length === 0) {
+                const targetLevel = entry.levels.find(l => l.level === entry.targetLod)!;
+                const [tGridZ, tGridY, tGridX] = targetLevel.gridShape;
+                const [tLevelD, tLevelH, tLevelW] = targetLevel.levelDims;
+                entityLodMetas.push({
+                  level: entry.targetLod,
+                  gridDims: [tGridZ, tGridY, tGridX],
+                  chunkDims: [pcZ, pcY, pcX],
+                  levelDims: [tLevelD, tLevelH, tLevelW],
+                  offset,
                 });
-              } else {
-                // Same chunk dims — compute multi-LOD indirection and remap
-                atlas.level = entry.targetLod;
-                atlas.t = msg.currentT;
-                atlas.c = channel;
-                atlas.levelWidth = levelW;
-                atlas.levelHeight = levelH;
-                atlas.levelDepth = levelD;
-                atlas.gridX = gridX;
-                atlas.gridY = gridY;
-                atlas.gridZ = gridZ;
+                offset += tGridX * tGridY * tGridZ;
+              }
+              newEntityMetas.set(memberId, entityLodMetas);
+            }
 
-                // Build multi-LOD lodMetas for all detail-owned levels with matching chunk dims
-                const [finest, coarsest] = entry.detailOwnedLodRange;
-                const newLodMetas: LodIndirectionMeta[] = [];
-                let offset = 0;
-                for (let lvl = finest; lvl <= coarsest; lvl++) {
-                  const lm = entry.levels.find(l => l.level === lvl);
-                  if (!lm) continue;
-                  const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
-                  // Only include levels with matching chunk dims (multi-LOD constraint)
-                  if (lChunkX !== chunkX || lChunkY !== chunkY || lChunkZ !== chunkZ) continue;
-                  const [lGridZ, lGridY, lGridX] = lm.gridShape;
-                  const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
-                  newLodMetas.push({
-                    level: lvl,
-                    gridDims: [lGridZ, lGridY, lGridX],
-                    chunkDims: [lChunkZ, lChunkY, lChunkX],
-                    levelDims: [lLevelD, lLevelH, lLevelW],
-                    offset,
-                  });
-                  offset += lGridX * lGridY * lGridZ;
-                }
-                // Fallback: at least include target LOD
-                if (newLodMetas.length === 0) {
-                  newLodMetas.push({
-                    level: entry.targetLod,
-                    gridDims: [gridZ, gridY, gridX],
-                    chunkDims: [chunkZ, chunkY, chunkX],
-                    levelDims: [levelD, levelH, levelW],
-                    offset: 0,
-                  });
-                  offset = gridX * gridY * gridZ;
-                }
-                atlas.lodMetas = newLodMetas;
-
-                // Resize indirection buffer for total multi-LOD size
-                const totalIndirectionSize = offset;
-                if (totalIndirectionSize !== atlas.indirectionData.length) {
-                  atlas.indirectionData = new Uint32Array(totalIndirectionSize);
-                  atlas.indirectionBuf.destroy();
-                  atlas.indirectionBuf = device.createBuffer({
-                    size: Math.max(totalIndirectionSize * 4, 4),
-                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-                  });
-                }
-
-                remapIndirection(atlas, msg.currentT, channel);
+            const atlas = getOrCreateVolumePool(ctx, group.poolKey, pcX, pcY, pcZ, msg.currentT, group.channel);
+            atlas.entityMetas = newEntityMetas;
+            resizeIndirection(ctx, atlas, offset);
+            remapIndirection(atlas, msg.currentT, group.channel);
+          }
+        } else {
+          // Slice mode — kept as per-member atlases until SP-3
+          for (const entry of msg.activeSet) {
+            const members: Array<{ memberId: string; channel: number }> = [];
+            if (isMultiCh) {
+              for (const ch of msg.visibleChannels) {
+                members.push({ memberId: `${entry.imageId}:ch${ch}`, channel: ch });
               }
             } else {
+              members.push({ memberId: entry.imageId, channel: msg.visibleChannels[0] });
+            }
+
+            const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
+            if (!targetLevel) continue;
+            const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
+            const [gridZ, gridY, gridX] = targetLevel.gridShape;
+            const [levelD, levelH, levelW] = targetLevel.levelDims;
+
+            for (const { memberId, channel } of members) {
               // Slice mode
               const atlas = getSliceAtlases().get(memberId);
               if (!atlas) {
@@ -391,6 +425,8 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       case "destroy":
         currentEpochs = null;
         currentColdState = null;
+        memberToDataset.clear();
+        memberToPool.clear();
         destroyAllSliceResources();
         destroyAllVolumeResources();
         destroyAllMinimapResources();
