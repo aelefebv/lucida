@@ -8,6 +8,7 @@ import type { TickContext } from "../renderLoopTypes.ts";
 import type { SceneSettings } from "../tickCommon.ts";
 import type { ImageSpec, ContentGraph, LevelGeometry } from "../contentTypes.ts";
 import type { ColdStateActiveEntry, ColdStateMessage } from "../renderer/workerProtocol.ts";
+// Note: atlas config messages eliminated — worker manages atlases from cold state
 import {
   getSceneSettings,
   getActiveChannels,
@@ -65,7 +66,6 @@ export class Orchestrator {
 
   // Delivery state — tracks what's been sent to the GPU worker
   private deliverySentToWorker = new Map<string, Set<string>>();
-  private deliveryPrevStateKey = new Map<string, string>();
 
   /** Wanted-set from the GPU worker — entityId → Set<chunkKey> of missing chunks. */
   private workerWantedSet = new Map<string, Set<string>>();
@@ -237,8 +237,10 @@ export class Orchestrator {
 
       this._lastFilteredRequests = filteredRequests;
 
-      // Send cold state to the worker so it knows the full planning context
+      // Send cold state to the worker — drives atlas creation/remap + wanted-set
       this.sendColdState(result.activeSet, entities, selection, visibleRegion, currentEpochs, ctx);
+      // Clear delivery tracking so chunks are re-sent for the new state
+      this.deliverySentToWorker.clear();
 
       // Annotate requests with the real dataset ID (entityId may differ for plates)
       for (const req of filteredRequests) {
@@ -403,74 +405,6 @@ export class Orchestrator {
   }
 
   /**
-   * Ensure atlas config is current for all tracked members.
-   * Triggers remap in the worker when T/C/Z/LOD changed, even when no chunks are ready.
-   */
-  private syncAtlasState(ctx: TickContext, sliceZ: number | null, epochs: PlanningEpochs): void {
-    if (this._lastFilteredRequests.length === 0) return;
-    const multiChannel = ctx.scene.multi_channel();
-    const seen = new Set<string>();
-    for (const req of this._lastFilteredRequests) {
-      const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
-      if (seen.has(wid)) continue;
-      seen.add(wid);
-      this.updateAtlasConfigIfNeeded(ctx, wid, req, sliceZ, epochs);
-    }
-  }
-
-  /**
-   * Check state key for a member and send atlas config if it changed (triggering remap).
-   * Returns true if atlas config was sent.
-   */
-  private updateAtlasConfigIfNeeded(
-    ctx: TickContext,
-    workerMemberId: string,
-    req: { imageId: string; level: number; t: number; c: number },
-    sliceZ: number | null,
-    epochs: PlanningEpochs,
-  ): boolean {
-    const viewMode = ctx.mode;
-    const stateKey = viewMode === "slice"
-      ? `${req.t}/${req.c}/${sliceZ}/${req.level}`
-      : `${req.t}/${req.c}/${req.level}`;
-
-    if (stateKey === this.deliveryPrevStateKey.get(workerMemberId)) return false;
-
-    // Find image spec for this member
-    let dsContent: ContentGraph | null = null;
-    for (const [, ds] of ctx.datasets) {
-      if (ds.content.images.some(img => img.image_id === req.imageId)) {
-        dsContent = ds.content;
-        break;
-      }
-    }
-    if (!dsContent) return false;
-
-    const imageSpec = dsContent.images.find(img => img.image_id === req.imageId);
-    if (!imageSpec) return false;
-    const levelMeta = imageSpec.multiscale.levels[req.level];
-    if (!levelMeta) return false;
-
-    const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
-    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-
-    if (viewMode === "slice") {
-      ctx.client.sliceAtlasConfig(
-        workerMemberId, req.level, sliceZ!, req.t, req.c,
-        levelWidth, levelHeight, chunkX, chunkY, epochs,
-      );
-    } else {
-      ctx.client.volumeAtlasConfig(
-        workerMemberId, req.level, req.t, req.c,
-        levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ, epochs,
-      );
-    }
-    this.deliveryPrevStateKey.set(workerMemberId, stateKey);
-    this.deliverySentToWorker.delete(workerMemberId);
-    return true;
-  }
-
-  /**
    * Deliver decoded chunks to the GPU worker via RenderClient.
    * Replaces uploadChunksForMembers() -- called from slicePath/volumePath after S5.3.
    */
@@ -483,9 +417,6 @@ export class Orchestrator {
     const epochs = this.lastEpochs ?? { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
     let remaining = budget;
     let budgetExhausted = false;
-
-    // Ensure atlas config is current for all members (triggers remap even with no deliveries)
-    this.syncAtlasState(ctx, sliceZ, epochs);
 
     // Drain new deliveries from CpuCache
     const deliveries = ctx.cpuCache.drain(budget);
@@ -552,12 +483,11 @@ export class Orchestrator {
 
   /** Get all tracked worker member IDs (for multi-channel transition cleanup). */
   getTrackedMemberIds(): string[] {
-    return [...new Set([...this.deliveryPrevStateKey.keys(), ...this.deliverySentToWorker.keys()])];
+    return [...this.deliverySentToWorker.keys()];
   }
 
   /** Clear all delivery state for a member (e.g. on dataset removal). */
   clearMemberResources(workerMemberId: string): void {
-    this.deliveryPrevStateKey.delete(workerMemberId);
     this.deliverySentToWorker.delete(workerMemberId);
   }
 
@@ -594,9 +524,6 @@ export class Orchestrator {
 
     const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;    // [T, C, Z, Y, X]
     const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-
-    // Ensure atlas config is current (triggers remap if state changed)
-    this.updateAtlasConfigIfNeeded(ctx, workerMemberId, delivery, sliceZ, epochs);
 
     // Send chunk data if not already sent
     let sentSet = this.deliverySentToWorker.get(workerMemberId);
@@ -692,7 +619,10 @@ export class Orchestrator {
           Math.ceil(lvl.shape[3] / lvl.chunk_shape[3]),
           Math.ceil(lvl.shape[4] / lvl.chunk_shape[4]),
         ];
-        return { level: idx, chunkShape, gridShape };
+        const levelDims: [number, number, number] = [
+          lvl.shape[2], lvl.shape[3], lvl.shape[4],
+        ];
+        return { level: idx, chunkShape, gridShape, levelDims };
       });
 
       return {
@@ -708,6 +638,7 @@ export class Orchestrator {
       type: "coldState",
       epochs,
       currentT: selection.t,
+      currentZ: selection.z,
       visibleChannels: selection.visibleChannels,
       visibleRegion,
       activeSet: coldActiveSet,

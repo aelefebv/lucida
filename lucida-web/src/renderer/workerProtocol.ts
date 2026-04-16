@@ -30,20 +30,6 @@ export interface SliceChunk {
   key: string;
 }
 
-export interface SliceAtlasConfigMessage {
-  type: "sliceAtlasConfig";
-  epochs: PlanningEpochs;
-  datasetId: string;
-  level: number;
-  z: number;
-  t: number;
-  c: number;
-  levelWidth: number;
-  levelHeight: number;
-  chunkX: number;
-  chunkY: number;
-}
-
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: PlanningEpochs;
@@ -70,21 +56,6 @@ export interface VolumeChunk {
   y: number;
   z: number;
   key: string;
-}
-
-export interface VolumeAtlasConfigMessage {
-  type: "volumeAtlasConfig";
-  epochs: PlanningEpochs;
-  datasetId: string;
-  level: number;
-  t: number;
-  c: number;
-  levelWidth: number;
-  levelHeight: number;
-  levelDepth: number;
-  chunkX: number;
-  chunkY: number;
-  chunkZ: number;
 }
 
 export interface VolumeChunkDataMessage {
@@ -243,6 +214,7 @@ export interface ColdStateActiveEntry {
     level: number;
     chunkShape: [number, number, number]; // [Z, Y, X]
     gridShape: [number, number, number];  // chunks per axis
+    levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
   }>;
 }
 
@@ -250,6 +222,7 @@ export interface ColdStateMessage {
   type: "coldState";
   epochs: PlanningEpochs;
   currentT: number;
+  currentZ: number;
   visibleChannels: number[];
   visibleRegion: VisibleRegion;
   activeSet: ColdStateActiveEntry[];
@@ -259,9 +232,7 @@ export interface ColdStateMessage {
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
-  | SliceAtlasConfigMessage
   | SliceChunkDataMessage
-  | VolumeAtlasConfigMessage
   | VolumeChunkDataMessage
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage

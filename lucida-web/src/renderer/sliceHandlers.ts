@@ -1,6 +1,5 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
-  SliceAtlasConfigMessage,
   SliceChunkDataMessage,
   SliceRenderMultiPassMessage,
 } from "./workerProtocol.ts";
@@ -184,7 +183,10 @@ function findFarthestSlot2D(atlas: SliceAtlasState, cam: [number, number]): { ke
   return { key: farthestKey, dist: maxDist };
 }
 
-export function handleSliceAtlasConfig(ctx: WorkerCtx, msg: SliceAtlasConfigMessage): void {
+export function handleSliceAtlasConfig(ctx: WorkerCtx, msg: {
+  datasetId: string; level: number; z: number; t: number; c: number;
+  levelWidth: number; levelHeight: number; chunkX: number; chunkY: number;
+}): void {
   const { datasetId, level, z, t, c, levelWidth, levelHeight, chunkX, chunkY } = msg;
 
   const atlas = atlasPerDataset.get(datasetId);

@@ -6,8 +6,9 @@ import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx } from "./workerContext.ts";
-import { handleSliceAtlasConfig, handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases } from "./sliceHandlers.ts";
-import { handleVolumeAtlasConfig, handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases } from "./volumeHandlers.ts";
+import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases, handleSliceAtlasConfig, remapSliceIndirection } from "./sliceHandlers.ts";
+import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, handleVolumeAtlasConfig, remapIndirection } from "./volumeHandlers.ts";
+import type { ColdStateActiveEntry } from "./workerProtocol.ts";
 import { computeWantedSet } from "./wantedSet.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 import { getColormapData } from "../colormaps.ts";
@@ -148,10 +149,6 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
-      case "sliceAtlasConfig":
-        currentEpochs = msg.epochs;
-        handleSliceAtlasConfig(ctx, msg);
-        break;
       case "sliceChunkData":
         handleSliceChunkData(ctx, msg, currentEpochs);
         break;
@@ -159,10 +156,6 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         handleSliceRenderMultiPass(ctx, msg);
         break;
 
-      case "volumeAtlasConfig":
-        currentEpochs = msg.epochs;
-        handleVolumeAtlasConfig(ctx, msg);
-        break;
       case "volumeChunkData":
         handleVolumeChunkData(ctx, msg, currentEpochs);
         break;
@@ -193,11 +186,130 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
       }
 
-      case "coldState":
+      case "coldState": {
         currentColdState = msg;
         currentEpochs = msg.epochs;
+
+        // Manage atlases from cold state — create, remap, or rebuild as needed
+        const isMultiCh = msg.visibleChannels.length > 1;
+        for (const entry of msg.activeSet) {
+          const members: Array<{ memberId: string; channel: number }> = [];
+          if (isMultiCh) {
+            for (const ch of msg.visibleChannels) {
+              members.push({ memberId: `${entry.imageId}:ch${ch}`, channel: ch });
+            }
+          } else {
+            members.push({ memberId: entry.imageId, channel: msg.visibleChannels[0] });
+          }
+
+          // Use target LOD level metadata for atlas dimensions
+          const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
+          if (!targetLevel) continue;
+          const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
+          const [gridZ, gridY, gridX] = targetLevel.gridShape;
+          const [levelD, levelH, levelW] = targetLevel.levelDims;
+
+          for (const { memberId, channel } of members) {
+            if (msg.viewMode === "volume") {
+              const atlas = getVolumeAtlases().get(memberId);
+              if (!atlas) {
+                // First time — create atlas
+                handleVolumeAtlasConfig(ctx, {
+
+                  epochs: msg.epochs,
+                  datasetId: memberId,
+                  level: entry.targetLod, t: msg.currentT, c: channel,
+                  levelWidth: levelW, levelHeight: levelH, levelDepth: levelD,
+                  chunkX, chunkY, chunkZ,
+                });
+              } else if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
+                // Chunk dims changed — rebuild
+                handleVolumeAtlasConfig(ctx, {
+
+                  epochs: msg.epochs,
+                  datasetId: memberId,
+                  level: entry.targetLod, t: msg.currentT, c: channel,
+                  levelWidth: levelW, levelHeight: levelH, levelDepth: levelD,
+                  chunkX, chunkY, chunkZ,
+                });
+              } else {
+                // Same chunk dims — remap
+                atlas.level = entry.targetLod;
+                atlas.t = msg.currentT;
+                atlas.c = channel;
+                atlas.levelWidth = levelW;
+                atlas.levelHeight = levelH;
+                atlas.levelDepth = levelD;
+                const newGridSize = gridX * gridY * gridZ;
+                if (newGridSize !== atlas.gridX * atlas.gridY * atlas.gridZ) {
+                  atlas.indirectionData = new Uint32Array(newGridSize);
+                  atlas.indirectionBuf.destroy();
+                  atlas.indirectionBuf = device.createBuffer({
+                    size: Math.max(newGridSize * 4, 4),
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                  });
+                }
+                atlas.gridX = gridX;
+                atlas.gridY = gridY;
+                atlas.gridZ = gridZ;
+                remapIndirection(atlas, msg.currentT, channel, [entry.targetLod]);
+              }
+            } else {
+              // Slice mode
+              const atlas = getSliceAtlases().get(memberId);
+              if (!atlas) {
+                handleSliceAtlasConfig(ctx, {
+
+                  epochs: msg.epochs,
+                  datasetId: memberId,
+                  level: entry.targetLod, z: msg.currentZ, t: msg.currentT, c: channel,
+                  levelWidth: levelW, levelHeight: levelH,
+                  chunkX, chunkY,
+                });
+              } else if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
+                handleSliceAtlasConfig(ctx, {
+
+                  epochs: msg.epochs,
+                  datasetId: memberId,
+                  level: entry.targetLod, z: msg.currentZ, t: msg.currentT, c: channel,
+                  levelWidth: levelW, levelHeight: levelH,
+                  chunkX, chunkY,
+                });
+              } else {
+                // Update Z metadata from cold state
+                if (atlas.chunkZ == null) atlas.chunkZ = chunkZ;
+                if (atlas.fullResDepth == null) atlas.fullResDepth = levelD;
+                if (atlas.levelDepth == null) atlas.levelDepth = levelD;
+                // Mark stale on Z change
+                if (msg.currentZ !== atlas.z && atlas.slots.size > 0) {
+                  atlas.staleSliceKeys = new Set(atlas.slots.keys());
+                }
+                atlas.level = entry.targetLod;
+                atlas.z = msg.currentZ;
+                atlas.t = msg.currentT;
+                atlas.c = channel;
+                atlas.levelWidth = levelW;
+                atlas.levelHeight = levelH;
+                const newGridSize = gridX * gridY;
+                if (newGridSize !== atlas.gridX * atlas.gridY) {
+                  atlas.indirectionData = new Uint32Array(newGridSize);
+                  atlas.indirectionBuf.destroy();
+                  atlas.indirectionBuf = device.createBuffer({
+                    size: Math.max(newGridSize * 4, 4),
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+                  });
+                }
+                atlas.gridX = gridX;
+                atlas.gridY = gridY;
+                remapSliceIndirection(atlas, msg.currentT, channel, msg.currentZ, [entry.targetLod]);
+              }
+            }
+          }
+        }
+
         postWantedSet();
         break;
+      }
 
       case "removeLayerResources":
         removeSliceResources(msg.datasetId);

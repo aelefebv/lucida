@@ -1,6 +1,5 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
-  VolumeAtlasConfigMessage,
   VolumeChunkDataMessage,
   VolumeRenderMultiPassMessage,
 } from "./workerProtocol.ts";
@@ -205,7 +204,11 @@ function findFarthestSlot(atlas: AtlasState, cam: [number, number, number]): { k
   return { key: farthestKey, dist: maxDist };
 }
 
-export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: VolumeAtlasConfigMessage): void {
+export function handleVolumeAtlasConfig(ctx: WorkerCtx, msg: {
+  datasetId: string; level: number; t: number; c: number;
+  levelWidth: number; levelHeight: number; levelDepth: number;
+  chunkX: number; chunkY: number; chunkZ: number;
+}): void {
   const { datasetId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
 
   const atlas = atlasPerDataset.get(datasetId);

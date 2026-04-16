@@ -63,29 +63,6 @@ export class RenderClient {
     this.worker.postMessage({ type: "resize", width, height });
   }
 
-  volumeAtlasConfig(
-    datasetId: string,
-    level: number,
-    t: number,
-    c: number,
-    levelWidth: number,
-    levelHeight: number,
-    levelDepth: number,
-    chunkX: number,
-    chunkY: number,
-    chunkZ: number,
-    epochs: PlanningEpochs,
-  ) {
-    this.worker.postMessage({
-      type: "volumeAtlasConfig",
-      epochs,
-      datasetId,
-      level, t, c,
-      levelWidth, levelHeight, levelDepth,
-      chunkX, chunkY, chunkZ,
-    });
-  }
-
   volumeChunkData(
     datasetId: string,
     chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
@@ -119,28 +96,6 @@ export class RenderClient {
       },
       transferList,
     );
-  }
-
-  sliceAtlasConfig(
-    datasetId: string,
-    level: number,
-    z: number,
-    t: number,
-    c: number,
-    levelWidth: number,
-    levelHeight: number,
-    chunkX: number,
-    chunkY: number,
-    epochs: PlanningEpochs,
-  ) {
-    this.worker.postMessage({
-      type: "sliceAtlasConfig",
-      epochs,
-      datasetId,
-      level, z, t, c,
-      levelWidth, levelHeight,
-      chunkX, chunkY,
-    });
   }
 
   sliceChunkData(
