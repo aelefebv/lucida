@@ -565,13 +565,20 @@ export function handleVolumeRenderMultiPass(
         entityLodMetas,
       );
     } else {
-      // S8: well-as-proxy with no chunk atlas — bind dummies. The
-      // shader's well-as-proxy short-circuit ignores chunk binding 1
-      // and indirection 2, but WebGPU still requires valid resources.
+      // S8: well-as-proxy with no chunk atlas — bind dummies for the
+      // shader's chunk path (short-circuited by renderMode==1).
+      // volumeDims must reflect the proxy's voxel resolution: the volume
+      // renderer derives ray-march stepSize from it, and [1,1,1] yields
+      // ~3 samples/ray → alpha barely accumulates in translucent
+      // compositing → proxy renders dim/desaturated.
       const dummyChunk = ctx.getDummy3DTexture();
+      // wellProxyDims is [Z, Y, X]; setAtlas takes volumeDims as [X, Y, Z].
+      const proxyVolumeDims: [number, number, number] = [
+        wellProxyDims[2], wellProxyDims[1], wellProxyDims[0],
+      ];
       renderer.setAtlas(
         dummyChunk, getDummyIndirection(ctx.device),
-        [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1],
+        [1, 1, 1], [1, 1, 1], [1, 1, 1], proxyVolumeDims,
         [],
       );
     }
