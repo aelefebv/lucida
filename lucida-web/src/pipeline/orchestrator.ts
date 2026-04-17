@@ -435,9 +435,17 @@ export class Orchestrator {
 
       // Send cold state to the worker — drives atlas creation/remap + wanted-set
       this.sendColdState(dsId, result.activeSet, entities, selection, visibleRegion, currentEpochs, ctx);
-      // Clear delivery tracking so chunks + proxies are re-sent for the new state
+      // Clear chunk delivery tracking so chunks are re-sent for the new state.
+      // Worker rebuilds slice/volume atlas pools on each cold state, so all
+      // chunks must be re-uploaded to fill the rebuilt atlases.
       this.deliverySentToWorker.clear();
-      this.proxyDeliveredToWorker.clear();
+      // Note: proxy delivery tracking is NOT cleared here. Worker proxy pools
+      // persist across cold states (they're created lazily in getOrCreateProxyPool
+      // and only destroyed on dataset removal). Re-sending proxies on every full
+      // plan would upload-spam them every time a view epoch bumps (e.g., wheel
+      // scroll). When the worker actually evicts a proxy, its wantedSetDelta
+      // reports it as missing and handleWantedSetDelta clears the per-entry
+      // tracking, triggering re-delivery on the next tick.
 
       // Annotate requests with the real dataset ID (entityId may differ for plates)
       for (const req of filteredRequests) {
@@ -797,6 +805,16 @@ export class Orchestrator {
   /** Clear all delivery state for a member (e.g. on dataset removal). */
   clearMemberResources(workerMemberId: string): void {
     this.deliverySentToWorker.delete(workerMemberId);
+    // Drop proxy delivery tracking entries scoped to this member's dataset
+    // so a re-add of the same dataset doesn't skip resends. Keys are
+    // `${datasetId}|${entityId}|${kind}|${t}|${c}` — workerMemberId is
+    // either a datasetId, an imageId, or `${imageId}:ch${c}`. We do a
+    // best-effort prefix match on datasetId-shaped keys; benign if no
+    // match (the worker recreates pools on next request anyway).
+    const prefix = `${workerMemberId}|`;
+    for (const key of this.proxyDeliveredToWorker) {
+      if (key.startsWith(prefix)) this.proxyDeliveredToWorker.delete(key);
+    }
   }
 
   /**

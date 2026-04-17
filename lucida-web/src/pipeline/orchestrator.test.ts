@@ -650,18 +650,13 @@ describe("proxy delivery tracking", () => {
     expect(proxyAssetData).toHaveBeenCalledTimes(2);
   });
 
-  it("proxyDeliveredToWorker cleared on full plan", async () => {
-    // Use full planAndFetch path: bump epoch to force a non-cache-hit
-    // tick so `proxyDeliveredToWorker.clear()` runs at the start of
-    // the per-dataset loop.
-    const planningModule = await import("./planning.ts");
-    const planSpy = vi.fn(planningModule.plan);
-    vi.doMock("./planning.ts", async () => {
-      const actual = await import("./planning.ts");
-      return { ...actual, plan: planSpy };
-    });
-    const { Orchestrator: OrchClass } = await import("./orchestrator.ts");
-    const orch = new OrchClass();
+  it("proxyDeliveredToWorker persists across full plans (worker proxy pools survive cold state)", async () => {
+    // Worker proxy pools are not rebuilt on cold state (only chunk atlases
+    // are). Re-sending proxies on every full plan would upload-spam them
+    // every time a view epoch bumps (e.g., wheel scroll). Worker eviction
+    // is reported via wantedSetDelta; that's the only signal that should
+    // clear the tracking.
+    const orch = new Orchestrator();
 
     const scene = createMockScene({
       epochs: { content: 1, layout: 1, view: 1, selection: 1 },
@@ -681,13 +676,11 @@ describe("proxy delivery tracking", () => {
       assetCatalog: new AssetCatalog({ apply_asset_catalog_delta: () => {} }),
     } as unknown as TickContext;
 
-    // Pre-populate the delivered set as if a previous tick had sent.
     orch.getProxyDeliveredKeys().add("ds1|x|FieldProxy3D|0|0");
     expect(orch.getProxyDeliveredKeys().size).toBe(1);
 
-    // Drive a full plan tick; the per-dataset loop clears the set.
     orch.planAndFetch(ctx, new Map());
-    expect(orch.getProxyDeliveredKeys().size).toBe(0);
+    expect(orch.getProxyDeliveredKeys().size).toBe(1);
   });
 
   it("handleWantedSetDelta with proxy entries clears delivered tracking", () => {
