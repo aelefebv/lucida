@@ -203,3 +203,4 @@ lucida-core/pkg/
 /Cargo.lock
 
 .claude/
+/.claude
