@@ -67,11 +67,18 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
     // Reset proxy state in case a previous main-view draw left renderMode
     // != 0 — otherwise the minimap would short-circuit to a sentinel
     // proxy slot and render empty.
-    renderer.setProxyParams(0, null, 0xFFFFFFFF, [1, 1, 1], null, 0xFFFFFFFF, [1, 1, 1]);
+    renderer.setProxyParams(0, null, null);
     renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
-    renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
-    renderer.setOpacity(1.0);
-    renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye);
+    renderer.setMatrices(msg.invViewProj, msg.eye);
+    // M1+M2: bind a transient single-entity descriptor so the shader's
+    // descriptor reads return the minimap layer's model matrix, single
+    // LOD over the full overview volume, plus the minimap layer's
+    // contrast/gamma (opacity hard-wired to 1.0 for minimap).
+    renderer.setTransientDescriptor(
+      layer.modelMatrix, layer.invModelMatrix,
+      [overview.width, overview.height, overview.depth],
+      layer.contrastMin, layer.contrastMax, layer.gamma, 1.0,
+    );
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
     ctx.device.queue.submit([layerEncoder.finish()]);

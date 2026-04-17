@@ -21,6 +21,8 @@ interface SlicePlanResult {
   vpCy: number;
   multiChannel: boolean;
   epochs: PlanningEpochs;
+  /** M1: per-dataset memberId → entity index map. */
+  entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
 /**
@@ -37,7 +39,7 @@ function uploadAndRenderSlice(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
-  const { memberRoster, settings, multiChannel } = planResult;
+  const { memberRoster, settings, multiChannel, entityIndexByDataset } = planResult;
 
   const z = sliceZ;
   const t = sliceT;
@@ -72,6 +74,7 @@ function uploadAndRenderSlice(
 
     const members = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
+    const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
 
     if (multiChannel) {
       // Multi-channel: emit one layer per (member, channel) with per-channel settings
@@ -81,32 +84,25 @@ function uploadAndRenderSlice(
       for (const ch of activeChannels) {
         if (z >= dsShapeL[2] || ch >= dsShapeL[1] || t >= dsShapeL[0]) continue;
 
-        const chSettings = dsSettings.channel_settings?.[ch];
-        const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
-        const layerContrastMax = chSettings?.contrast_max ?? dsSettings.contrast_max;
-        const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
-        const layerColormap = chSettings?.colormap ?? "gray";
-
         for (const m of members) {
           // S8 fix: synthesized well-as-proxy entries carry their own
           // dataW/dataH (the well's world-space AABB footprint). Fall back
           // to the dataset's full-res image dims for normal field entries.
           const layerDataW = m.dataW ?? fullResWidth;
           const layerDataH = m.dataH ?? fullResHeight;
+          const compKey = compositeKey(m.imageId, ch);
+          const entityIndex = indexByMember.get(compKey);
+          if (entityIndex === undefined) continue;
           layers.push({
-            datasetId: compositeKey(m.imageId, ch),
+            datasetId: compKey,
             dataW: layerDataW,
             dataH: layerDataH,
-            contrastMin: layerContrastMin,
-            contrastMax: layerContrastMax,
-            gamma: layerGamma,
-            opacity: dsSettings.opacity,
             blendMode: channelBlend,
-            colormap: layerColormap,
             offsetX: m.position[0],
             offsetY: m.position[1],
             entityId: m.entityId,
             mode: m.mode,
+            entityIndex,
           });
         }
       }
@@ -114,31 +110,23 @@ function uploadAndRenderSlice(
       // Single-channel
       if (z >= dsShapeL[2] || c >= dsShapeL[1] || t >= dsShapeL[0]) continue;
 
-      const chSettings = dsSettings.channel_settings?.[c];
-      const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
-      const layerContrastMax = chSettings?.contrast_max ?? dsSettings.contrast_max;
-      const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
-      const layerColormap = chSettings?.colormap ?? "gray";
-
       for (const m of members) {
         // S8 fix: synthesized well-as-proxy entries carry their own
         // dataW/dataH (the well's world-space AABB footprint).
         const layerDataW = m.dataW ?? fullResWidth;
         const layerDataH = m.dataH ?? fullResHeight;
+        const entityIndex = indexByMember.get(m.imageId);
+        if (entityIndex === undefined) continue;
         layers.push({
           datasetId: m.imageId,
           dataW: layerDataW,
           dataH: layerDataH,
-          contrastMin: layerContrastMin,
-          contrastMax: layerContrastMax,
-          gamma: layerGamma,
-          opacity: dsSettings.opacity,
           blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
-          colormap: layerColormap,
           offsetX: m.position[0],
           offsetY: m.position[1],
           entityId: m.entityId,
           mode: m.mode,
+          entityIndex,
         });
       }
     }
@@ -185,6 +173,7 @@ export function tickSlice(
     vpCy: vpCenter[1],
     multiChannel: orchResult.multiChannel,
     epochs: orchResult.epochs,
+    entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
   return uploadAndRenderSlice(ctx, orchestrator, sliceZ, sliceT, sliceC, planResult, shouldRender);

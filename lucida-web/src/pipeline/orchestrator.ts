@@ -10,9 +10,13 @@ import type { ImageSpec, ContentGraph, LevelGeometry } from "../contentTypes.ts"
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
+  ColdStateDisplayState,
+  ViewHotStateMessage,
   MissingChunk as MissingChunkLite,
   MissingProxy as MissingProxyLite,
 } from "../renderer/workerProtocol.ts";
+import type { DatasetSettings } from "../tickCommon.ts";
+import { computeMemberIndexMap, iterateColdMembers } from "../renderer/descriptorBuffer.ts";
 // Note: atlas config messages eliminated — worker manages atlases from cold state
 import {
   getSceneSettings,
@@ -80,6 +84,14 @@ export interface OrchestratorResult {
   settings: SceneSettings;
   multiChannel: boolean;
   epochs: PlanningEpochs;
+  /**
+   * M1 (DOMAINS step 8a): per-dataset memberId → entity index map. Both
+   * the worker (when building the descriptor buffer) and the render
+   * paths (when assembling layers) read from this map. Computed
+   * deterministically from the same `cold.activeSet × cold.visibleChannels`
+   * iteration the worker uses, so indices agree by construction.
+   */
+  entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
 /** Lightweight chunk coordinate for minimap pending fetches. */
@@ -205,6 +217,12 @@ export class Orchestrator {
   private lastEpochs: PlanningEpochs | null = null;
   private cachedResult: OrchestratorResult | null = null;
   private requestEpoch = 0;
+  /**
+   * M3 (DOMAINS step 8a): per-dataset last-emitted viewEpoch. Tracked so
+   * `viewHotState` only fires when the camera-ray pick may have moved.
+   * Cleared on dataset removal.
+   */
+  private lastViewEpochByDataset = new Map<string, number>();
   private _lastRequests: ChunkRequest[] = [];
   private _lastVisibleRegion: VisibleRegion | null = null;
   private _lastEntities: EntitySnapshot[] = [];
@@ -277,6 +295,7 @@ export class Orchestrator {
 
     // Step 3 — Per-dataset loop
     const memberRoster = new Map<string, MemberRosterEntry[]>();
+    const entityIndexByDataset = new Map<string, Map<string, number>>();
 
     for (const [dsId, ds] of ctx.datasets) {
       // 3a. Skip invisible datasets
@@ -418,13 +437,6 @@ export class Orchestrator {
       });
 
       this._lastFilteredRequests = filteredRequests;
-
-      // Send cold state to the worker — drives atlas creation/remap + wanted-set
-      this.sendColdState(dsId, result.activeSet, entities, selection, visibleRegion, currentEpochs, ctx);
-      // Clear chunk delivery tracking so chunks are re-sent for the new state.
-      // Worker rebuilds slice/volume atlas pools on each cold state, so all
-      // chunks must be re-uploaded to fill the rebuilt atlases.
-      this.deliverySentToWorker.clear();
       // Note: proxy delivery tracking is NOT cleared here. Worker proxy pools
       // persist across cold states (they're created lazily in getOrCreateProxyPool
       // and only destroyed on dataset removal). Re-sending proxies on every full
@@ -483,6 +495,48 @@ export class Orchestrator {
         }
       }
       memberRoster.set(dsId, rosterEntries);
+
+      // M1: build a model-matrix lookup keyed by entityId so cold state
+      // includes precomputed model matrices (worker can't query WASM,
+      // and `well-as-proxy` matrices were already synthesised here).
+      const matricesByEntity = new Map<string, { model: Float32Array; inv: Float32Array }>();
+      for (const r of rosterEntries) {
+        if (!r.entityId) continue;
+        const model = r.modelMatrix
+          ?? new Float32Array(ctx.scene.member_model_matrix(dsId, r.imageId));
+        const inv = r.invModelMatrix
+          ?? new Float32Array(ctx.scene.inv_member_model_matrix(dsId, r.imageId));
+        matricesByEntity.set(r.entityId, { model, inv });
+      }
+
+      // Send cold state to the worker — drives atlas creation/remap +
+      // wanted-set + descriptor buffer build. M2: passes dataset
+      // settings so per-channel display state (contrast/gamma/opacity/
+      // colormap) gets baked into descriptor entries.
+      const coldMsg = this.sendColdState(
+        dsId, result.activeSet, entities, selection, visibleRegion,
+        currentEpochs, ctx, matricesByEntity, dsSettings,
+      );
+      // M1: compute the same memberId → entityIndex map the worker
+      // builds from cold state. Both sides converge by construction
+      // because they walk the same canonical iteration order.
+      entityIndexByDataset.set(dsId, computeMemberIndexMap(coldMsg));
+
+      // M3: emit viewEpoch hot-state with per-entity ray-pick coords.
+      // Posted before subsequent render messages so the worker's
+      // `rayHitPerEntity` is current when chunk-data eviction fires.
+      // Keyed by memberId (imageId or imageId:chN) — same convention
+      // chunk-data uses for `findFarthestSlot` distance lookups.
+      const lastView = this.lastViewEpochByDataset.get(dsId);
+      if (lastView !== currentEpochs.view) {
+        this.sendViewHotState(dsId, coldMsg, ctx, currentEpochs);
+        this.lastViewEpochByDataset.set(dsId, currentEpochs.view);
+      }
+
+      // Clear chunk delivery tracking so chunks are re-sent for the new state.
+      // Worker rebuilds slice/volume atlas pools on each cold state, so all
+      // chunks must be re-uploaded to fill the rebuilt atlases.
+      this.deliverySentToWorker.clear();
 
       // 3k. Collect minimap pending fetches as overview-lane requests
       const minimapRequests: ChunkRequest[] = [];
@@ -630,7 +684,7 @@ export class Orchestrator {
 
     // Step 5 — Cache and return
     this.lastEpochs = currentEpochs;
-    this.cachedResult = { memberRoster, settings, multiChannel, epochs: currentEpochs };
+    this.cachedResult = { memberRoster, settings, multiChannel, epochs: currentEpochs, entityIndexByDataset };
     return this.cachedResult;
   }
 
@@ -801,6 +855,11 @@ export class Orchestrator {
     for (const key of this.proxyDeliveredToWorker) {
       if (key.startsWith(prefix)) this.proxyDeliveredToWorker.delete(key);
     }
+    // M3: drop the cached lastViewEpoch entry. If `workerMemberId` is a
+    // bare datasetId this clears the right entry; for imageId-shaped IDs
+    // it's a no-op (the dataset entry survives, which is correct — the
+    // dataset itself wasn't removed).
+    this.lastViewEpochByDataset.delete(workerMemberId);
   }
 
   /**
@@ -819,11 +878,9 @@ export class Orchestrator {
 
     // Find dataset for this delivery
     let dsContent: ContentGraph | null = null;
-    let dsId = "";
-    for (const [id, ds] of ctx.datasets) {
+    for (const [, ds] of ctx.datasets) {
       if (ds.content.images.some(img => img.image_id === delivery.imageId)) {
         dsContent = ds.content;
-        dsId = id;
         break;
       }
     }
@@ -863,12 +920,11 @@ export class Orchestrator {
         epochs,
       );
     } else {
-      const hitLocal = Array.from(ctx.scene.ray_hit_local_image(dsId)) as [number, number, number];
       ctx.client.volumeChunkData(
         workerMemberId, [chunkData],
         delivery.level, delivery.t, delivery.c,
         levelWidth, levelHeight, levelDepth,
-        chunkX, chunkY, chunkZ, hitLocal,
+        chunkX, chunkY, chunkZ,
         epochs,
       );
     }
@@ -980,7 +1036,8 @@ export class Orchestrator {
     });
   }
 
-  /** Build and send a ColdStateMessage to the GPU worker. */
+  /** Build and send a ColdStateMessage to the GPU worker. Returns the
+   *  message so the caller can derive a deterministic entity-index map. */
   private sendColdState(
     dsId: string,
     activeSet: ActiveSetEntry[],
@@ -989,8 +1046,39 @@ export class Orchestrator {
     visibleRegion: VisibleRegion,
     epochs: PlanningEpochs,
     ctx: TickContext,
-  ): void {
+    matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>,
+    dsSettings: DatasetSettings | undefined,
+  ): ColdStateMessage {
     const entityById = new Map(entities.map(e => [e.entityId, e]));
+
+    const identityMatrix = (): Float32Array => {
+      const m = new Float32Array(16);
+      m[0] = m[5] = m[10] = m[15] = 1;
+      return m;
+    };
+
+    // M2: build per-channel display state once per cold-state assembly.
+    // Single-channel: lone visible channel falls back to dataset-level
+    // contrast/gamma when no per-channel override exists. Multi-channel:
+    // each visible channel gets its own override (already validated by
+    // the planning entry-iteration above). Mirrors the source the old
+    // per-frame layer params used in volumePath.ts / slicePath.ts.
+    const opacity = dsSettings?.opacity ?? 1;
+    const dsContrastMin = dsSettings?.contrast_min ?? 0;
+    const dsContrastMax = dsSettings?.contrast_max ?? 65535;
+    const dsGamma = dsSettings?.gamma ?? 1;
+    const displayStateByChannel: Record<number, ColdStateDisplayState> = {};
+    for (const ch of selection.visibleChannels) {
+      const chSettings = dsSettings?.channel_settings?.[ch];
+      displayStateByChannel[ch] = {
+        contrastMin: chSettings?.contrast_min ?? dsContrastMin,
+        contrastMax: chSettings?.contrast_max ?? dsContrastMax,
+        gamma: chSettings?.gamma ?? dsGamma,
+        opacity,
+        colormapName: chSettings?.colormap ?? "gray",
+        channelMask: 1 << (ch & 31),
+      };
+    }
 
     const coldActiveSet: ColdStateActiveEntry[] = activeSet.map(entry => {
       const entity = entityById.get(entry.entityId);
@@ -1016,6 +1104,16 @@ export class Orchestrator {
       const parentWellId =
         entity?.kind === "Field" ? (entity.parentId ?? null) : null;
 
+      // M1: precomputed model matrices. For field entries, sourced from
+      // `scene.member_model_matrix`; for `well-as-proxy` entries, from
+      // `synthesizeWellRosterEntry`'s AABB. Falls back to identity for
+      // entries without a roster match (defensive — descriptor entries
+      // for missing roster members would render at the unit cube, which
+      // is a clear visual failure rather than a silent off-screen one).
+      const matrices = matricesByEntity.get(entry.entityId);
+      const modelMatrix = matrices?.model ?? identityMatrix();
+      const invModelMatrix = matrices?.inv ?? identityMatrix();
+
       return {
         entityId: entry.entityId,
         imageId: entry.imageId,
@@ -1027,6 +1125,9 @@ export class Orchestrator {
         proxyAvailable: entry.proxyAvailable,
         wellProxyAvailable: entry.wellProxyAvailable,
         parentWellId,
+        modelMatrix,
+        invModelMatrix,
+        displayStateByChannel,
       };
     });
 
@@ -1043,6 +1144,38 @@ export class Orchestrator {
     };
 
     ctx.client.coldState(msg);
+    return msg;
+  }
+
+  /**
+   * M3 (DOMAINS step 8a): build and send a viewEpoch hot-state message.
+   * Walks the same canonical iteration as `buildDescriptorBuffer` so the
+   * memberIds match what the worker uses to key chunk-eviction distance
+   * lookups. One ray-pick per dataset (the WASM scene's
+   * `ray_hit_local_image` is a per-dataset query) replicated to every
+   * member, including per-channel composite keys.
+   */
+  private sendViewHotState(
+    dsId: string,
+    cold: ColdStateMessage,
+    ctx: TickContext,
+    epochs: PlanningEpochs,
+  ): void {
+    const hit = Array.from(ctx.scene.ray_hit_local_image(dsId)) as [number, number, number];
+    const rayHitsByEntity: Array<[string, [number, number, number]]> = [];
+    const seen = new Set<string>();
+    for (const { memberId } of iterateColdMembers(cold)) {
+      if (seen.has(memberId)) continue;
+      seen.add(memberId);
+      rayHitsByEntity.push([memberId, hit]);
+    }
+    const msg: ViewHotStateMessage = {
+      type: "viewHotState",
+      epochs,
+      datasetId: dsId,
+      rayHitsByEntity,
+    };
+    ctx.client.viewHotState(msg);
   }
 }
 

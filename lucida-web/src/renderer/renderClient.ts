@@ -7,6 +7,7 @@ import type {
   MinimapLayerParams,
   WorkerToMainMessage,
   ColdStateMessage,
+  ViewHotStateMessage,
   MissingChunk,
   MissingProxy,
 } from "./workerProtocol.ts";
@@ -81,7 +82,6 @@ export class RenderClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
-    hitLocal: [number, number, number],
     epochs: PlanningEpochs,
   ) {
     const transferList: ArrayBuffer[] = [];
@@ -98,7 +98,7 @@ export class RenderClient {
         chunks: workerChunks,
         level, t, c,
         levelWidth, levelHeight, levelDepth,
-        chunkX, chunkY, chunkZ, hitLocal,
+        chunkX, chunkY, chunkZ,
       },
       transferList,
     );
@@ -143,6 +143,15 @@ export class RenderClient {
   }
 
   coldState(msg: ColdStateMessage) {
+    this.worker.postMessage(msg);
+  }
+
+  /**
+   * M3 (DOMAINS step 8a): post a viewEpoch hot-state message. Sent
+   * before the corresponding render message so chunk eviction has the
+   * latest ray-pick coords.
+   */
+  viewHotState(msg: ViewHotStateMessage) {
     this.worker.postMessage(msg);
   }
 

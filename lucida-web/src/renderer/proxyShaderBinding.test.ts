@@ -105,75 +105,43 @@ describe("proxy slot origin math (shader ↔ proxyAtlas.ts)", () => {
 // Uniform buffer packing offsets (volume + slice)
 // ---------------------------------------------------------------------------
 
-describe("renderer uniform layouts (S8 proxy fields)", () => {
-  // These constants mirror what's in volumeRenderer.ts / sliceRenderer.ts
-  // and the corresponding WGSL `Uniforms` structs. Updating one without
-  // updating the other would corrupt the GPU-side reads, so we lock
-  // both ends to the same numbers here.
-  const VOLUME_UNIFORM_SIZE = 656;
-  const VOLUME_PROXY_PARAMS_OFFSET_BYTES = 608;
-  const VOLUME_FIELD_DIMS_OFFSET_BYTES = 624;
-  const VOLUME_WELL_DIMS_OFFSET_BYTES = 640;
+describe("renderer uniform layouts (M2: per-frame proxyParams)", () => {
+  // M1 (DOMAINS step 8a): proxy slot indices and dims moved into the
+  // per-entity descriptor buffer. The per-frame uniform carries
+  // proxyParams.x = renderMode.
+  // M2: per-entity contrast/gamma/opacity also moved into the descriptor
+  // buffer, shrinking the uniform layout by one vec4 (16B) on volume and
+  // by one vec4 on slice. These constants mirror volumeRenderer.ts and
+  // sliceRenderer.ts.
+  const VOLUME_UNIFORM_SIZE = 256;
+  const VOLUME_PROXY_PARAMS_OFFSET_BYTES = 240;
 
-  const SLICE_UNIFORM_SIZE = 400;
-  const SLICE_PROXY_PARAMS_OFFSET_BYTES = 352;
-  const SLICE_FIELD_DIMS_OFFSET_BYTES = 368;
-  const SLICE_WELL_DIMS_OFFSET_BYTES = 384;
+  const SLICE_UNIFORM_SIZE = 128;
+  const SLICE_PROXY_PARAMS_OFFSET_BYTES = 112;
 
-  it("volume offsets are 16-byte aligned and within UNIFORM_SIZE", () => {
-    for (const off of [
-      VOLUME_PROXY_PARAMS_OFFSET_BYTES,
-      VOLUME_FIELD_DIMS_OFFSET_BYTES,
-      VOLUME_WELL_DIMS_OFFSET_BYTES,
-    ]) {
-      expect(off % 16).toBe(0);
-      expect(off + 16).toBeLessThanOrEqual(VOLUME_UNIFORM_SIZE);
-    }
-    // Three back-to-back vec4u (16B each) starting at 608 must fit:
-    expect(VOLUME_PROXY_PARAMS_OFFSET_BYTES + 48).toBe(VOLUME_UNIFORM_SIZE);
+  it("volume proxyParams is 16-byte aligned and tail of UNIFORM_SIZE", () => {
+    expect(VOLUME_PROXY_PARAMS_OFFSET_BYTES % 16).toBe(0);
+    expect(VOLUME_PROXY_PARAMS_OFFSET_BYTES + 16).toBe(VOLUME_UNIFORM_SIZE);
   });
 
-  it("slice offsets are 16-byte aligned and within UNIFORM_SIZE", () => {
-    for (const off of [
-      SLICE_PROXY_PARAMS_OFFSET_BYTES,
-      SLICE_FIELD_DIMS_OFFSET_BYTES,
-      SLICE_WELL_DIMS_OFFSET_BYTES,
-    ]) {
-      expect(off % 16).toBe(0);
-      expect(off + 16).toBeLessThanOrEqual(SLICE_UNIFORM_SIZE);
-    }
-    expect(SLICE_PROXY_PARAMS_OFFSET_BYTES + 48).toBe(SLICE_UNIFORM_SIZE);
+  it("slice proxyParams is 16-byte aligned and tail of UNIFORM_SIZE", () => {
+    expect(SLICE_PROXY_PARAMS_OFFSET_BYTES % 16).toBe(0);
+    expect(SLICE_PROXY_PARAMS_OFFSET_BYTES + 16).toBe(SLICE_UNIFORM_SIZE);
   });
 
-  it("u32-view indices match byte offsets / 4 (sanity check the renderer math)", () => {
-    expect(VOLUME_PROXY_PARAMS_OFFSET_BYTES / 4).toBe(152);
-    expect(VOLUME_FIELD_DIMS_OFFSET_BYTES / 4).toBe(156);
-    expect(VOLUME_WELL_DIMS_OFFSET_BYTES / 4).toBe(160);
-    expect(SLICE_PROXY_PARAMS_OFFSET_BYTES / 4).toBe(88);
-    expect(SLICE_FIELD_DIMS_OFFSET_BYTES / 4).toBe(92);
-    expect(SLICE_WELL_DIMS_OFFSET_BYTES / 4).toBe(96);
+  it("u32-view indices match byte offsets / 4", () => {
+    expect(VOLUME_PROXY_PARAMS_OFFSET_BYTES / 4).toBe(60);
+    expect(SLICE_PROXY_PARAMS_OFFSET_BYTES / 4).toBe(28);
   });
 
-  it("packs renderMode + slot indices + dims into the proxyParams vec4u layout", () => {
-    // Replay the renderer's u32 packing into a fresh buffer at the
-    // expected offset and confirm we can round-trip it.
+  it("renderMode survives round-trip through proxyParams.x", () => {
     const buf = new ArrayBuffer(VOLUME_UNIFORM_SIZE);
     const u32 = new Uint32Array(buf);
-
     const renderMode = 2;
-    const fieldSlot = 5;
-    const wellSlot = 0xFFFFFFFF;
-    u32.set([renderMode, fieldSlot >>> 0, wellSlot >>> 0, 0], 152);
-
-    expect(u32[152]).toBe(renderMode);
-    expect(u32[153]).toBe(fieldSlot);
-    expect(u32[154]).toBe(0xFFFFFFFF);
-    expect(u32[155]).toBe(0);
-
-    const fieldDims: [number, number, number] = [16, 32, 64];
-    u32.set([fieldDims[0], fieldDims[1], fieldDims[2], 0], 156);
-    expect(u32[156]).toBe(16);
-    expect(u32[157]).toBe(32);
-    expect(u32[158]).toBe(64);
+    u32.set([renderMode, 0, 0, 0], 60);
+    expect(u32[60]).toBe(renderMode);
+    expect(u32[61]).toBe(0);
+    expect(u32[62]).toBe(0);
+    expect(u32[63]).toBe(0);
   });
 });

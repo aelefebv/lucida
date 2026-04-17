@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { parseChunkKey, remapIndirection, type AtlasState, type LodIndirectionMeta } from "./volumeHandlers.ts";
+import { parseChunkKey, remapIndirection, applyViewHotState, getRayHitForMember, type AtlasState, type LodIndirectionMeta } from "./volumeHandlers.ts";
 import { remapSliceIndirection, type SliceAtlasState, type SliceEntityZInfo } from "./sliceHandlers.ts";
+import type { ViewHotStateMessage } from "./workerProtocol.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -264,5 +265,50 @@ describe("remapIndirection (shared volume pool)", () => {
 
     // entA mapped, entC skipped (no entityMeta)
     expect(atlas.indirectionData[0]).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M3: applyViewHotState (rayHitPerEntity population)
+// ---------------------------------------------------------------------------
+
+describe("applyViewHotState (M3)", () => {
+  function makeMsg(
+    rayHitsByEntity: Array<[string, [number, number, number]]>,
+  ): ViewHotStateMessage {
+    return {
+      type: "viewHotState",
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+      datasetId: "ds1",
+      rayHitsByEntity,
+    };
+  }
+
+  it("populates rayHitPerEntity for each entry", () => {
+    applyViewHotState(makeMsg([
+      ["m3-entA", [0.1, 0.2, 0.3]],
+      ["m3-entB", [0.4, 0.5, 0.6]],
+    ]));
+    expect(getRayHitForMember("m3-entA")).toEqual([0.1, 0.2, 0.3]);
+    expect(getRayHitForMember("m3-entB")).toEqual([0.4, 0.5, 0.6]);
+  });
+
+  it("latest message wins for the same entity (idempotent overwrite)", () => {
+    applyViewHotState(makeMsg([["m3-entC", [0.1, 0.1, 0.1]]]));
+    applyViewHotState(makeMsg([["m3-entC", [0.9, 0.9, 0.9]]]));
+    expect(getRayHitForMember("m3-entC")).toEqual([0.9, 0.9, 0.9]);
+  });
+
+  it("supports multi-channel composite memberId keying (imageId:chN)", () => {
+    applyViewHotState(makeMsg([
+      ["m3-img:ch0", [0.2, 0.2, 0.2]],
+      ["m3-img:ch1", [0.7, 0.7, 0.7]],
+    ]));
+    expect(getRayHitForMember("m3-img:ch0")).toEqual([0.2, 0.2, 0.2]);
+    expect(getRayHitForMember("m3-img:ch1")).toEqual([0.7, 0.7, 0.7]);
+  });
+
+  it("entries not yet seen return undefined (handlers fall back to [0.5,0.5,0.5])", () => {
+    expect(getRayHitForMember("m3-never-seen")).toBeUndefined();
   });
 });

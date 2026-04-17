@@ -74,7 +74,6 @@ interface PlanResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
   settings: { layerOrder: string[]; allSettings: Record<string, DatasetSettings> };
   eye: Float32Array;
-  hitLocals: Map<string, [number, number, number]>;
   canvasW: number;
   canvasH: number;
   fullW: number;
@@ -83,6 +82,8 @@ interface PlanResult {
   viewC: number;
   multiChannel: boolean;
   epochs: PlanningEpochs;
+  /** M1: per-dataset memberId → entity index map. */
+  entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
 
@@ -97,7 +98,7 @@ function uploadAndRenderVolume(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, datasets } = ctx;
-  const { memberRoster, settings, eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel } = plan;
+  const { memberRoster, settings, eye, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel, entityIndexByDataset } = plan;
   const { layerOrder, allSettings } = settings;
 
   // Use Orchestrator delivery loop instead of uploadChunksForMembers
@@ -124,6 +125,7 @@ function uploadAndRenderVolume(
 
     const members = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
+    const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
 
     if (multiChannel) {
       // Multi-channel: emit one layer per (member, channel)
@@ -133,41 +135,28 @@ function uploadAndRenderVolume(
       for (const ch of activeChannels) {
         if (ch >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
 
-        const chSettings = dsSettings.channel_settings?.[ch];
-        const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
-        const layerContrastMax = chSettings?.contrast_max ?? dsSettings.contrast_max;
-        const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
-        const layerColormap = chSettings?.colormap ?? "gray";
-
         for (const m of members) {
           const compKey = compositeKey(m.imageId, ch);
-          // S8: well-as-proxy entries pass the well's entity id with a
-          // precomputed model matrix (the orchestrator synthesised it
-          // from constituent fields' AABBs). Field-mode entries pass the
-          // field's entity id and look up its model matrix from WASM.
+          // M1: model matrix is in the descriptor; CPU side still needs
+          // it for the scissor rect projection. Same source as M1 cold
+          // state (synthesised for well-as-proxy, scene query for fields).
           const model = m.modelMatrix
             ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
-          const invModel = m.invModelMatrix
-            ?? new Float32Array(scene.inv_member_model_matrix(dsId, m.imageId));
 
           const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
           if (!scissorRect) continue; // well fully off-screen
 
+          const entityIndex = indexByMember.get(compKey);
+          if (entityIndex === undefined) continue;
+
           layers.push({
             datasetId: compKey,
-            modelMatrix: model,
-            invModelMatrix: invModel,
-            rayHitLocal: hitLocals.get(compKey) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number],
-            contrastMin: layerContrastMin,
-            contrastMax: layerContrastMax,
-            gamma: layerGamma,
-            opacity: dsSettings.opacity,
             blendMode: channelBlend,
             renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
-            colormap: layerColormap,
             scissorRect,
             entityId: m.entityId,
             mode: m.mode,
+            entityIndex,
           });
         }
       }
@@ -175,36 +164,24 @@ function uploadAndRenderVolume(
       // Single-channel
       if (viewC >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
 
-      const chSettings = dsSettings.channel_settings?.[viewC];
-      const layerContrastMin = chSettings?.contrast_min ?? dsSettings.contrast_min;
-      const layerContrastMax = chSettings?.contrast_max ?? dsSettings.contrast_max;
-      const layerGamma = chSettings?.gamma ?? dsSettings.gamma;
-      const layerColormap = chSettings?.colormap ?? "gray";
-
       for (const m of members) {
         const model = m.modelMatrix
           ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
-        const invModel = m.invModelMatrix
-          ?? new Float32Array(scene.inv_member_model_matrix(dsId, m.imageId));
 
         const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
         if (!scissorRect) continue; // well fully off-screen
 
+        const entityIndex = indexByMember.get(m.imageId);
+        if (entityIndex === undefined) continue;
+
         layers.push({
           datasetId: m.imageId,
-          modelMatrix: model,
-          invModelMatrix: invModel,
-          rayHitLocal: hitLocals.get(m.imageId) ?? Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number],
-          contrastMin: layerContrastMin,
-          contrastMax: layerContrastMax,
-          gamma: layerGamma,
-          opacity: dsSettings.opacity,
           blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
           renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
-          colormap: layerColormap,
           scissorRect,
           entityId: m.entityId,
           mode: m.mode,
+          entityIndex,
         });
       }
     }
@@ -245,29 +222,10 @@ export function tickVolume(
   if (debugStats.enabled) debugStats.planTimeMs = performance.now() - t0;
   if (!orchResult) return false;
 
-  // Volume-specific rendering state
+  // Volume-specific rendering state. Camera position drives ray-marching
+  // in the shader (different from `rayHitLocal`, which is residency-only
+  // and emitted by the orchestrator on viewEpoch advance — see M3).
   const eye = new Float32Array(scene.eye_position());
-  const hitLocals = new Map<string, [number, number, number]>();
-
-  // Compute ray hit locals per member for volume rendering
-  for (const [dsId] of ctx.datasets) {
-    const roster = orchResult.memberRoster.get(dsId);
-    if (!roster) continue;
-    for (const m of roster) {
-      const hitLocal = Array.from(scene.ray_hit_local_image(dsId)) as [number, number, number];
-      hitLocals.set(m.imageId, hitLocal);
-      // Multi-channel: also key by composite key for each visible channel
-      if (orchResult.multiChannel) {
-        const dsSettings = orchResult.settings.allSettings[dsId];
-        if (dsSettings) {
-          const activeChannels = getActiveChannels(dsSettings);
-          for (const ch of activeChannels) {
-            hitLocals.set(compositeKey(m.imageId, ch), hitLocal);
-          }
-        }
-      }
-    }
-  }
 
   if (debugStats.enabled) {
     const firstDsId = orchResult.settings.layerOrder[0];
@@ -287,9 +245,10 @@ export function tickVolume(
   const planResult: PlanResult = {
     memberRoster: orchResult.memberRoster,
     settings: orchResult.settings,
-    eye, hitLocals, canvasW, canvasH, fullW, fullH, viewT, viewC,
+    eye, canvasW, canvasH, fullW, fullH, viewT, viewC,
     multiChannel: orchResult.multiChannel,
     epochs: orchResult.epochs,
+    entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
   const t1 = debugStats.enabled ? performance.now() : 0;

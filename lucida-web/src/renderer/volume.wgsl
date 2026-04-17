@@ -2,31 +2,67 @@
 
 struct Uniforms {
   invViewProj: mat4x4f,      // offset 0   (64 bytes)
-  modelMatrix: mat4x4f,      // offset 64  (64 bytes)
-  invModelMatrix: mat4x4f,   // offset 128 (64 bytes)
-  cameraPos: vec4f,           // offset 192 (16 bytes)
-  volumeDims: vec4f,          // offset 208 (16 bytes)
-  intensityRange: vec4f,      // offset 224 (16 bytes)
-  displayParams: vec4f,       // offset 240 (16 bytes) — x=gamma
-  chunkDims: vec4u,           // offset 256 (16 bytes) — xyz=chunk dimensions
-  gridDims: vec4u,            // offset 272 (16 bytes) — xyz=grid dimensions
-  atlasSlotDims: vec4u,       // offset 288 (16 bytes) — xyz=slots per axis
-  viewProj: mat4x4f,          // offset 304 (64 bytes)
-  camForward: vec4f,          // offset 368 (16 bytes) — xyz=camera forward dir
-  clipParams: vec4f,          // offset 384 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
-  lodParams: vec4u,           // offset 400 (16 bytes) — x=numLods, y=targetLodIdx
-  lodGridDims: array<vec4u, 4>,   // offset 416 (64 bytes) — xyz=gridDims, w=indirection offset
-  lodChunkDims: array<vec4u, 4>,  // offset 480 (64 bytes) — xyz=chunkDims
-  lodLevelDims: array<vec4f, 4>,  // offset 544 (64 bytes) — xyz=level voxel dimensions
-  // S8: proxy fallback — see proxyAtlas.ts for slot layout (1-D-along-X).
-  // Slot dim convention matches proxyAtlas slotDims = [Z, Y, X]:
-  //   proxyDims.x = Z, proxyDims.y = Y, proxyDims.z = X
-  // proxyParams: x=renderMode (0=detailOnly, 1=proxyDirect/well-as-proxy,
-  //   2=detailWithProxyFallback), y=fieldProxySlotIndex, z=wellProxySlotIndex (0xFFFFFFFF if absent), w=reserved.
-  proxyParams: vec4u,         // offset 608 (16 bytes)
-  fieldProxyDims: vec4u,      // offset 624 (16 bytes) — xyz = (Z, Y, X), w = reserved
-  wellProxyDims: vec4u,       // offset 640 (16 bytes) — xyz = (Z, Y, X), w = reserved
-  // total = 656 bytes
+  cameraPos: vec4f,           // offset 64  (16 bytes)
+  volumeDims: vec4f,          // offset 80  (16 bytes)
+  // M2: stepInfo.x=opacityScale (translucent compositing constant),
+  // stepInfo.y=stepSize, stepInfo.z=renderMode (0=translucent,1=MIP),
+  // stepInfo.w=reserved. Per-entity contrast/gamma/opacity moved into
+  // the descriptor buffer.
+  stepInfo: vec4f,            // offset 96  (16 bytes)
+  atlasSlotDims: vec4u,       // offset 112 (16 bytes) — xyz=slots per axis
+  viewProj: mat4x4f,          // offset 128 (64 bytes)
+  camForward: vec4f,          // offset 192 (16 bytes) — xyz=camera forward dir
+  clipParams: vec4f,          // offset 208 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
+  // M1: lodParams.x = targetLodIdx; lodCount comes from the descriptor
+  // buffer. renderMode (proxyParams.x in legacy layout) stays per-draw.
+  // proxyParams: x=renderMode (0=detailOnly, 1=well-as-proxy,
+  //   2=detailWithProxyFallback), yzw=reserved.
+  lodParams: vec4u,           // offset 224 (16 bytes) — x=targetLodIdx
+  proxyParams: vec4u,         // offset 240 (16 bytes)
+  // total = 256 bytes
+};
+
+// M1: per-draw uniform with the entity index into entityDescriptors.
+struct EntityRef { index: vec4u }; // x = entity index
+
+// M1: per-entity descriptor. Layout matches descriptorBuffer.ts.
+struct LodInfo {
+  level: u32,
+  indirectionOffset: u32,
+  _pad0: u32,
+  _pad1: u32,
+  gridDims: vec3<u32>,
+  _pad2: u32,
+  chunkDims: vec3<u32>,
+  _pad3: u32,
+  levelDims: vec3<u32>,
+  _pad4: u32,
+};
+
+struct EntityDescriptor {
+  modelMatrix: mat4x4<f32>,
+  invModelMatrix: mat4x4<f32>,
+  channelMask: u32,
+  fieldProxyPoolIndex: u32,
+  fieldProxySlotIndex: u32,
+  wellProxyPoolIndex: u32,
+  wellProxySlotIndex: u32,
+  _pad_proxy0: u32,
+  _pad_proxy1: u32,
+  _pad_proxy2: u32,
+  fieldProxyDims: vec3<u32>,
+  _pad_field: u32,
+  wellProxyDims: vec3<u32>,
+  _pad_well: u32,
+  contrastMin: f32,
+  contrastMax: f32,
+  gamma: f32,
+  opacity: f32,
+  colormapLutIndex: u32,
+  lodCount: u32,
+  _pad_tail0: u32,
+  _pad_tail1: u32,
+  lods: array<LodInfo, 8>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -39,6 +75,10 @@ struct Uniforms {
 // Y=dims.y, Z=dims.x), matching `proxySlotOrigin()` in proxyAtlas.ts.
 @group(0) @binding(5) var fieldProxyTex: texture_3d<u32>;
 @group(0) @binding(6) var wellProxyTex: texture_3d<u32>;
+
+// M1: per-dataset descriptor table + per-draw entity index.
+@group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
+@group(1) @binding(1) var<uniform> currentEntity: EntityRef;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -79,7 +119,10 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
 //
 // Returns 0xFFFFFFFFu if the slot index is the sentinel; otherwise the
 // raw u16 voxel value (zero-extended into u32).
-fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec4u, frac: vec3f) -> u32 {
+//
+// M1: dims is now read straight from the descriptor as a vec3<u32>
+// (fieldProxyDims / wellProxyDims) — same Z/Y/X convention.
+fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f) -> u32 {
   if (slotIdx == 0xFFFFFFFFu) {
     return 0xFFFFFFFFu;
   }
@@ -105,25 +148,30 @@ fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec4u, frac: vec3f) -> 
 // well-as-proxy at far zoom).
 //
 // pos is in [0,1]³ local space. Tries target LOD first, then coarser LODs.
+//
+// M1: lod array, proxy slot indices and proxy dims all come from the
+// per-entity descriptor; renderMode and targetLodIdx remain per-draw.
 fn sampleWithFallback(pos: vec3f) -> u32 {
   let renderMode = u.proxyParams.x;
-  let fieldSlot = u.proxyParams.y;
-  let wellSlot = u.proxyParams.z;
+  let entity = entityDescriptors[currentEntity.index.x];
+  let fieldSlot = entity.fieldProxySlotIndex;
+  let wellSlot = entity.wellProxySlotIndex;
 
   // S8: well-as-proxy short-circuit. Skip indirection; one direct sample
   // from the well's proxy slot. This is the major FPS win at far zoom.
   if (renderMode == 1u) {
-    return sampleProxy(wellProxyTex, wellSlot, u.wellProxyDims, pos);
+    return sampleProxy(wellProxyTex, wellSlot, entity.wellProxyDims, pos);
   }
 
-  let numLods = u.lodParams.x;
-  let targetIdx = u.lodParams.y;
+  let numLods = entity.lodCount;
+  let targetIdx = u.lodParams.x;
 
   for (var i = targetIdx; i < numLods; i++) {
-    let levelDims = u.lodLevelDims[i].xyz;
-    let chunkDims = u.lodChunkDims[i].xyz;
-    let gridDims = u.lodGridDims[i].xyz;
-    let offset = u.lodGridDims[i].w;
+    let lod = entity.lods[i];
+    let levelDims = vec3f(f32(lod.levelDims.x), f32(lod.levelDims.y), f32(lod.levelDims.z));
+    let chunkDims = lod.chunkDims;
+    let gridDims = lod.gridDims;
+    let offset = lod.indirectionOffset;
 
     // Scale [0,1] position to this LOD's voxel space (Y-flipped for image convention)
     let texCoord = vec3i(
@@ -176,11 +224,11 @@ fn sampleWithFallback(pos: vec3f) -> u32 {
   // well's own proxy at well-local coords.
   if (renderMode == 2u) {
     if (fieldSlot != 0xFFFFFFFFu) {
-      let v = sampleProxy(fieldProxyTex, fieldSlot, u.fieldProxyDims, pos);
+      let v = sampleProxy(fieldProxyTex, fieldSlot, entity.fieldProxyDims, pos);
       if (v != 0xFFFFFFFFu) { return v; }
     }
     if (wellSlot != 0xFFFFFFFFu) {
-      let v = sampleProxy(wellProxyTex, wellSlot, u.wellProxyDims, pos);
+      let v = sampleProxy(wellProxyTex, wellSlot, entity.wellProxyDims, pos);
       if (v != 0xFFFFFFFFu) { return v; }
     }
   }
@@ -195,6 +243,8 @@ struct FsOut {
 
 @fragment
 fn fs(input: VSOut) -> FsOut {
+  let entity = entityDescriptors[currentEntity.index.x];
+
   // Reconstruct ray in world space from NDC
   let clipNear = vec4f(input.ndc, -1.0, 1.0);
   let clipFar = vec4f(input.ndc, 1.0, 1.0);
@@ -207,8 +257,8 @@ fn fs(input: VSOut) -> FsOut {
   let worldRd = normalize(worldFar.xyz - worldNear.xyz);
 
   // Transform ray into local [0,1]^3 space via invModelMatrix
-  let localRo4 = u.invModelMatrix * vec4f(worldRo, 1.0);
-  let localRd4 = u.invModelMatrix * vec4f(worldRd, 0.0);
+  let localRo4 = entity.invModelMatrix * vec4f(worldRo, 1.0);
+  let localRd4 = entity.invModelMatrix * vec4f(worldRd, 0.0);
   let ro = localRo4.xyz;
   let rd = normalize(localRd4.xyz);
 
@@ -239,7 +289,7 @@ fn fs(input: VSOut) -> FsOut {
         if (t_world > 0.0) {
           // Convert world-space hit point to local-space t parameter
           let worldHitPt = worldRo + worldRd * t_world;
-          let localHitPt = (u.invModelMatrix * vec4f(worldHitPt, 1.0)).xyz;
+          let localHitPt = (entity.invModelMatrix * vec4f(worldHitPt, 1.0)).xyz;
           let localT = dot(localHitPt - ro, rd) / dot(rd, rd);
           tStart = max(tStart, localT);
         }
@@ -256,7 +306,7 @@ fn fs(input: VSOut) -> FsOut {
         let t_world = (-b_coeff + sqrt(disc)) / (2.0 * a_coeff);
         if (t_world > 0.0) {
           let worldHitPt = worldRo + worldRd * t_world;
-          let localHitPt = (u.invModelMatrix * vec4f(worldHitPt, 1.0)).xyz;
+          let localHitPt = (entity.invModelMatrix * vec4f(worldHitPt, 1.0)).xyz;
           let localT = dot(localHitPt - ro, rd) / dot(rd, rd);
           tStart = max(tStart, localT);
         }
@@ -273,13 +323,14 @@ fn fs(input: VSOut) -> FsOut {
   }
 
   let dims = vec3i(u.volumeDims.xyz);
-  let intensityMin = u.intensityRange.x;
-  let intensityMax = u.intensityRange.y;
-  let opacityScale = u.intensityRange.z;
-  let stepSize = u.intensityRange.w;
+  // M2: per-entity display state from the descriptor buffer.
+  let intensityMin = entity.contrastMin;
+  let intensityMax = entity.contrastMax;
+  let opacityScale = u.stepInfo.x;
+  let stepSize = u.stepInfo.y;
 
   let range = intensityMax - intensityMin;
-  let renderMode = i32(u.displayParams.z);
+  let renderMode = i32(u.stepInfo.z);
 
   let rayLen = tEnd - tStart;
   let adaptiveStep = max(stepSize, rayLen / 512.0);
@@ -308,12 +359,11 @@ fn fs(input: VSOut) -> FsOut {
     }
     if (val == 0u) { t += adaptiveStep; continue; }
     let rawVal = f32(val);
-    let gamma = u.displayParams.x;
-    let normalized = pow(clamp((rawVal - intensityMin) / range, 0.0, 1.0), gamma);
+    let normalized = pow(clamp((rawVal - intensityMin) / range, 0.0, 1.0), entity.gamma);
 
     // Record depth at first significant sample
     if (!depthRecorded && normalized > 0.01) {
-      let worldHit = u.modelMatrix * vec4f(pos, 1.0);
+      let worldHit = entity.modelMatrix * vec4f(pos, 1.0);
       let clipHit = u.viewProj * worldHit;
       // Remap from clip [-1,1] to viewport [0,1] to match rasterizer depth
       hitDepth = clipHit.z / clipHit.w * 0.5 + 0.5;
@@ -334,8 +384,8 @@ fn fs(input: VSOut) -> FsOut {
     t += adaptiveStep;
   }
 
-  // Pre-multiply by layer opacity for compositing
-  let layerOpacity = u.displayParams.y;
+  // M2: layer opacity from descriptor.
+  let layerOpacity = entity.opacity;
   var out: FsOut;
   out.depth = hitDepth;
   if (renderMode == 1) {

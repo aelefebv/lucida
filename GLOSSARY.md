@@ -94,9 +94,15 @@ Top-level terms. Per-crate glossaries have more detail.
 
 **requestEpoch** -- Monotonic counter bumped each time `plan()` produces a new `RequestPlan`. Carried on all main→worker messages so the worker can distinguish one plan generation from another.
 
-**Cold state** -- Per-epoch-change message (`ColdStateMessage`) sent from the orchestrator to the GPU worker carrying the active set, visible region, current T, visible channels, and view mode. Enables the worker to compute its wanted-set.
+**Cold state** -- Per-epoch-change message (`ColdStateMessage`) sent from the orchestrator to the GPU worker carrying the active set (with per-entity model matrices and per-channel display state), visible region, current T, visible channels, and view mode. Drives both wanted-set computation and per-dataset descriptor buffer construction.
 
-**ColdStateMessage** -- Main→worker message carrying cold state. Sent on content/layout/selection epoch change, after `plan()` produces a new active set.
+**ColdStateMessage** -- Main→worker message carrying cold state. Sent on content/layout/selection epoch change, after `plan()` produces a new active set. Each `ColdStateActiveEntry` carries `modelMatrix`/`invModelMatrix` and `displayStateByChannel` so the worker can serialize descriptors without WASM access.
+
+**EntityDescriptor** -- 736-byte WGSL struct holding per-entity GPU state: model matrix + inverse, channel mask, field/well proxy handles (`(poolIndex, slotIndex)` + dims), contrast/gamma/opacity, colormap LUT index, LOD count, and 8 fixed `LodInfo` slots (level, indirection offset, grid/chunk/level dims). Sourced from cold state, read by slice and volume shaders via storage buffer.
+
+**EntityDescriptorIndex** -- Per-dataset worker-side state holding the descriptor `GPUBuffer` plus mapping tables: `indexByMember` (memberId → entity index), `proxyPoolIndexByKey` + `proxyPoolsByIndex` (poolKey ↔ dense pool array), `colormapNameByMember` (for per-draw LUT binding). Built deterministically from cold state by `buildDescriptorBuffer()`; orchestrator and worker converge on the same indices via shared `iterateColdMembers()` iteration.
+
+**ViewHotStateMessage** -- Main→worker message carrying per-entity ray-pick coords (`rayHitsByEntity`) for chunk eviction prioritization. Emitted when `epochs.view` advances. Replaces the per-frame `rayHitLocal`/`hitLocal` fields previously embedded in render and chunk-data messages.
 
 **Wanted-set** -- The set of chunks the GPU worker reports as missing — the diff between what it should have (derived from cold state + visible region) and what it actually has in its atlas. Computed by `computeWantedSet()`.
 

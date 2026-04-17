@@ -1,50 +1,49 @@
 /** WebGPU pipeline for volume ray marching. */
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
+import {
+  DESCRIPTOR_ENTRY_SIZE,
+  DESCRIPTOR_LODS_OFFSET,
+  DESCRIPTOR_LOD_INFO_SIZE,
+  DESCRIPTOR_SENTINEL_INDEX,
+} from "./descriptorBuffer.ts";
 
 import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 
-// Uniform buffer layout (656 bytes):
+// Uniform buffer layout (256 bytes — M2 strips per-entity contrast/gamma/
+// opacity that moved into the descriptor buffer):
 //   offset 0:   invViewProj     mat4x4f   (64B)
-//   offset 64:  modelMatrix     mat4x4f   (64B)
-//   offset 128: invModelMatrix  mat4x4f   (64B)
-//   offset 192: cameraPos       vec4f     (16B)
-//   offset 208: volumeDims      vec4f     (16B)
-//   offset 224: intensityRange  vec4f     (16B)
-//   offset 240: displayParams   vec4f     (16B)
-//   offset 256: chunkDims       vec4u     (16B)
-//   offset 272: gridDims        vec4u     (16B)
-//   offset 288: atlasSlotDims   vec4u     (16B)
-//   offset 304: viewProj        mat4x4f   (64B)
-//   offset 368: camForward      vec4f     (16B)
-//   offset 384: clipParams      vec4f     (16B)
-//   offset 400: lodParams       vec4u     (16B) — x=numLods, y=targetLodIdx
-//   offset 416: lodGridDims     vec4u[4]  (64B) — xyz=gridDims, w=offset
-//   offset 480: lodChunkDims    vec4u[4]  (64B) — xyz=chunkDims
-//   offset 544: lodLevelDims    vec4f[4]  (64B) — xyz=levelDims
-//   offset 608: proxyParams     vec4u     (16B) — x=renderMode, y=fieldSlot, z=wellSlot
-//   offset 624: fieldProxyDims  vec4u     (16B) — xyz=(Z,Y,X)
-//   offset 640: wellProxyDims   vec4u     (16B) — xyz=(Z,Y,X)
-const UNIFORM_SIZE = 656;
+//   offset 64:  cameraPos       vec4f     (16B)
+//   offset 80:  volumeDims      vec4f     (16B)
+//   offset 96:  stepInfo        vec4f     (16B) — x=opacityScale, y=stepSize, z=renderMode
+//   offset 112: atlasSlotDims   vec4u     (16B)
+//   offset 128: viewProj        mat4x4f   (64B)
+//   offset 192: camForward      vec4f     (16B)
+//   offset 208: clipParams      vec4f     (16B)
+//   offset 224: lodParams       vec4u     (16B) — x=targetLodIdx
+//   offset 240: proxyParams     vec4u     (16B) — x=renderMode
+const UNIFORM_SIZE = 256;
+
+/** M1: 16-byte uniform with the entity index for the current draw. */
+const ENTITY_REF_SIZE = 16;
 
 export class VolumeRenderer {
   private device: GPUDevice;
   private pipeline: GPURenderPipeline;
   private uniformBuffer: GPUBuffer;
+  private entityRefBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
+  private descriptorBindGroupLayout: GPUBindGroupLayout;
   private bindGroup: GPUBindGroup | null = null;
+  private descriptorBindGroup: GPUBindGroup | null = null;
+  private currentDescriptorBuffer: GPUBuffer | null = null;
+  /** M1: single-entity descriptor used by minimap + other call sites
+   *  that aren't backed by cold-state. Lazily allocated. */
+  private transientDescriptorBuffer: GPUBuffer | null = null;
   private volumeDims = [1, 1, 1];
-  private intensityMin = 0;
-  private intensityMax = 65535;
-  private gamma = 1.0;
-  private opacity = 1.0;
   private renderMode = 0;
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
-  private modelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
-  private invModelMatrix: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private eyePos: Float32Array<ArrayBufferLike> = new Float32Array(3);
-  private chunkDims = [1, 1, 1];
-  private gridDims = [1, 1, 1];
   private atlasSlotDims = [1, 1, 1];
   private lodMetas: LodIndirectionMeta[] = [];
   private viewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
@@ -54,17 +53,13 @@ export class VolumeRenderer {
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
-  // S8: proxy fallback bindings + uniform values. Default to "no proxy"
-  // (renderMode=0, sentinel slot indices) so legacy callers see unchanged
-  // behaviour. The dummy 1×1×1 texture binds when no real proxy is set.
+  // S8: proxy textures for binding. M1 keeps texture binding CPU-side
+  // (descriptor only carries pool/slot indices, not the GPU texture
+  // handle); slot indices and dims live in the descriptor.
   private fieldProxyTexture: GPUTexture | null = null;
   private wellProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
   private renderModeProxy = 0; // 0=detailOnly, 1=well-as-proxy, 2=detailWithProxyFallback
-  private fieldProxySlotIndex = 0xFFFFFFFF;
-  private wellProxySlotIndex = 0xFFFFFFFF;
-  private fieldProxyDims: [number, number, number] = [1, 1, 1]; // [Z, Y, X]
-  private wellProxyDims: [number, number, number] = [1, 1, 1];  // [Z, Y, X]
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -112,8 +107,24 @@ export class VolumeRenderer {
       ],
     });
 
+    // M1: per-dataset descriptor table + per-draw entity index.
+    this.descriptorBindGroupLayout = device.createBindGroupLayout({
+      entries: [
+        {
+          binding: 0,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "read-only-storage" },
+        },
+        {
+          binding: 1,
+          visibility: GPUShaderStage.FRAGMENT,
+          buffer: { type: "uniform" },
+        },
+      ],
+    });
+
     const pipelineLayout = device.createPipelineLayout({
-      bindGroupLayouts: [this.bindGroupLayout],
+      bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
     });
 
     this.pipeline = device.createRenderPipeline({
@@ -136,9 +147,10 @@ export class VolumeRenderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // Default to identity
-    this.modelMatrix[0] = this.modelMatrix[5] = this.modelMatrix[10] = this.modelMatrix[15] = 1;
-    this.invModelMatrix[0] = this.invModelMatrix[5] = this.invModelMatrix[10] = this.invModelMatrix[15] = 1;
+    this.entityRefBuffer = device.createBuffer({
+      size: ENTITY_REF_SIZE,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
 
     // Default 1x1 white LUT (renders grayscale when no colormap is set)
     this.lutTexture = device.createTexture({
@@ -180,45 +192,30 @@ export class VolumeRenderer {
   }
 
   /**
-   * S8: configure proxy textures + per-entity descriptor for the next
-   * draw. Call before `setAtlas()` (which rebuilds the bind group), or
-   * pass `null` textures to fall back to the dummy.
-   *
-   * - `mode = 0` keeps legacy chunk-only behaviour.
-   * - `mode = 1` (well-as-proxy) uses `wellTexture` + `wellSlotIndex`.
-   * - `mode = 2` (detail with proxy fallback) uses both as the shader
-   *   sees fit; sentinel slot indices skip individual fallbacks.
+   * S8: configure proxy textures + renderMode for the next draw. Slot
+   * indices and dims live in the per-entity descriptor (M1) — the
+   * texture binding still needs to be set CPU-side because WebGPU bind
+   * groups can't carry an index-into-texture-array directly without a
+   * texture-array binding (future optimization).
    */
   setProxyParams(
     mode: number,
     fieldTexture: GPUTexture | null,
-    fieldSlotIndex: number,
-    fieldDims: [number, number, number],
     wellTexture: GPUTexture | null,
-    wellSlotIndex: number,
-    wellDims: [number, number, number],
   ) {
     this.renderModeProxy = mode;
     this.fieldProxyTexture = fieldTexture;
-    this.fieldProxySlotIndex = fieldSlotIndex;
-    this.fieldProxyDims = fieldDims;
     this.wellProxyTexture = wellTexture;
-    this.wellProxySlotIndex = wellSlotIndex;
-    this.wellProxyDims = wellDims;
   }
 
   setAtlas(
     texture: GPUTexture,
     indirectionBuf: GPUBuffer,
-    chunkDims: [number, number, number],
-    gridDims: [number, number, number],
     atlasSlotDims: [number, number, number],
     volumeDims: [number, number, number],
     lodMetas?: LodIndirectionMeta[],
   ) {
     this.volumeDims = volumeDims;
-    this.chunkDims = chunkDims;
-    this.gridDims = gridDims;
     this.atlasSlotDims = atlasSlotDims;
     this.lodMetas = lodMetas ?? [];
     const dummyProxy = this.getDummyProxyTexture();
@@ -238,6 +235,87 @@ export class VolumeRenderer {
     });
   }
 
+  /**
+   * M1: bind the per-dataset entity descriptor buffer and write the
+   * entity index for the next draw. Rebuilds the descriptor bind group
+   * if the buffer pointer changed (cold-state churn → buffer recreated).
+   */
+  setDescriptorBinding(descriptorBuffer: GPUBuffer, entityIndex: number) {
+    if (this.currentDescriptorBuffer !== descriptorBuffer || !this.descriptorBindGroup) {
+      this.currentDescriptorBuffer = descriptorBuffer;
+      this.descriptorBindGroup = this.device.createBindGroup({
+        layout: this.descriptorBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: descriptorBuffer } },
+          { binding: 1, resource: { buffer: this.entityRefBuffer } },
+        ],
+      });
+    }
+    const refData = new Uint32Array([entityIndex >>> 0, 0, 0, 0]);
+    this.device.queue.writeBuffer(this.entityRefBuffer, 0, refData);
+  }
+
+  /**
+   * M1: bind a single-entity transient descriptor for callers that
+   * don't have a cold-state-backed descriptor buffer (minimap path).
+   * Writes `modelMatrix` + `invModelMatrix` and one LOD slot covering
+   * the full volume.
+   *
+   * M2: callers also pass display state (contrast/gamma/opacity) since
+   * the shader reads it from the descriptor. Minimap supplies its own
+   * values so the contrast slider still affects the minimap.
+   */
+  setTransientDescriptor(
+    modelMatrix: Float32Array,
+    invModelMatrix: Float32Array,
+    volumeDims: [number, number, number],
+    contrastMin: number,
+    contrastMax: number,
+    gamma: number,
+    opacity: number,
+  ) {
+    if (!this.transientDescriptorBuffer) {
+      this.transientDescriptorBuffer = this.device.createBuffer({
+        size: DESCRIPTOR_ENTRY_SIZE,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+    }
+    const cpu = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    const f32 = new Float32Array(cpu);
+    const u32 = new Uint32Array(cpu);
+    if (modelMatrix.length === 16) f32.set(modelMatrix, 0);
+    if (invModelMatrix.length === 16) f32.set(invModelMatrix, 16);
+    // Sentinel proxy handles, no proxy dims.
+    u32[33] = DESCRIPTOR_SENTINEL_INDEX;
+    u32[34] = DESCRIPTOR_SENTINEL_INDEX;
+    u32[35] = DESCRIPTOR_SENTINEL_INDEX;
+    u32[36] = DESCRIPTOR_SENTINEL_INDEX;
+    u32[40] = 1; u32[41] = 1; u32[42] = 1;
+    u32[44] = 1; u32[45] = 1; u32[46] = 1;
+    f32[48] = contrastMin;
+    f32[49] = contrastMax;
+    f32[50] = gamma;
+    f32[51] = opacity;
+    // Single LOD covering the full volume (single-slot atlas).
+    u32[53] = 1; // lodCount
+    const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4;
+    u32[lodsBaseU32 + 0] = 0; // level
+    u32[lodsBaseU32 + 1] = 0; // indirectionOffset
+    // gridDims = 1×1×1
+    u32[lodsBaseU32 + 4] = 1; u32[lodsBaseU32 + 5] = 1; u32[lodsBaseU32 + 6] = 1;
+    // chunkDims = volumeDims (full volume = single chunk)
+    u32[lodsBaseU32 + 8] = volumeDims[0]; u32[lodsBaseU32 + 9] = volumeDims[1]; u32[lodsBaseU32 + 10] = volumeDims[2];
+    // levelDims = volumeDims
+    u32[lodsBaseU32 + 12] = volumeDims[0]; u32[lodsBaseU32 + 13] = volumeDims[1]; u32[lodsBaseU32 + 14] = volumeDims[2];
+    // Zero out unused LOD slots.
+    for (let i = 1; i < 8; i++) {
+      const base = lodsBaseU32 + i * (DESCRIPTOR_LOD_INFO_SIZE / 4);
+      for (let s = 0; s < DESCRIPTOR_LOD_INFO_SIZE / 4; s++) u32[base + s] = 0;
+    }
+    this.device.queue.writeBuffer(this.transientDescriptorBuffer, 0, cpu);
+    this.setDescriptorBinding(this.transientDescriptorBuffer, 0);
+  }
+
   /** Wrap a monolithic texture as a single-slot atlas (used by minimap). */
   setVolume(texture: GPUTexture, width: number, height: number, depth: number) {
     if (!this.singleSlotIndirectionBuf) {
@@ -249,32 +327,19 @@ export class VolumeRenderer {
       this.device.queue.writeBuffer(this.singleSlotIndirectionBuf, 0, data);
     }
     this.setAtlas(texture, this.singleSlotIndirectionBuf,
-      [width, height, depth], [1, 1, 1], [1, 1, 1], [width, height, depth]);
-  }
-
-  setIntensityRange(min: number, max: number) {
-    this.intensityMin = min;
-    this.intensityMax = max;
-  }
-
-  setDisplayParams(min: number, max: number, gamma: number) {
-    this.intensityMin = min;
-    this.intensityMax = max;
-    this.gamma = gamma;
-  }
-
-  setOpacity(v: number) {
-    this.opacity = v;
+      [1, 1, 1], [width, height, depth]);
   }
 
   setRenderMode(mode: number) {
     this.renderMode = mode;
   }
 
+  /**
+   * M1: per-frame matrices. Model + invModel moved into the descriptor
+   * buffer; this only carries view-projection / eye / clip params.
+   */
   setMatrices(
     invViewProj: Float32Array<ArrayBufferLike>,
-    model: Float32Array<ArrayBufferLike>,
-    invModel: Float32Array<ArrayBufferLike>,
     eye: Float32Array<ArrayBufferLike>,
     viewProj?: Float32Array<ArrayBufferLike>,
     camForward?: Float32Array<ArrayBufferLike>,
@@ -282,8 +347,6 @@ export class VolumeRenderer {
     clipMode?: number,
   ) {
     this.invViewProj = invViewProj;
-    this.modelMatrix = model;
-    this.invModelMatrix = invModel;
     this.eyePos = eye;
     if (viewProj) this.viewProj = viewProj;
     if (camForward) this.camForward = camForward;
@@ -314,7 +377,7 @@ export class VolumeRenderer {
   }
 
   renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, depthView?: GPUTextureView, isFirstLayer?: boolean, targetWidth?: number, targetHeight?: number, scissorRect?: [number, number, number, number]) {
-    if (!this.bindGroup) return;
+    if (!this.bindGroup || !this.descriptorBindGroup) return;
 
     // Compute step size based on volume dimensions
     const maxDim = Math.max(...this.volumeDims);
@@ -322,62 +385,32 @@ export class VolumeRenderer {
 
     const uniformData = new Float32Array(UNIFORM_SIZE / 4);
     uniformData.set(this.invViewProj, 0);                       // mat4 at offset 0
-    uniformData.set(this.modelMatrix, 16);                      // mat4 at offset 64B = 16 floats
-    uniformData.set(this.invModelMatrix, 32);                   // mat4 at offset 128B = 32 floats
-    uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], 48); // cameraPos at 192B = 48 floats
-    uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 52); // volumeDims at 208B = 52 floats
-    uniformData.set([this.intensityMin, this.intensityMax, 0.08, stepSize], 56); // intensityRange at 224B = 56 floats
-    uniformData.set([this.gamma, this.opacity, this.renderMode, 0], 60); // displayParams at 240B = 60 floats
+    uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], 16); // cameraPos at 64B = 16 floats
+    uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 20); // volumeDims at 80B = 20 floats
+    // M2: stepInfo = (opacityScale, stepSize, renderMode, _). Per-entity
+    // contrast/gamma/opacity moved into the descriptor buffer.
+    uniformData.set([0.08, stepSize, this.renderMode, 0], 24); // stepInfo at 96B = 24 floats
 
-    // Atlas params (u32 written via Uint32Array view)
+    // Atlas slot dims (u32 written via Uint32Array view)
     const u32View = new Uint32Array(uniformData.buffer);
-    u32View.set([this.chunkDims[0], this.chunkDims[1], this.chunkDims[2], 0], 64);   // chunkDims at 256B = 64 u32s
-    u32View.set([this.gridDims[0], this.gridDims[1], this.gridDims[2], 0], 68);      // gridDims at 272B = 68 u32s
-    u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], this.atlasSlotDims[2], 0], 72); // atlasSlotDims at 288B = 72 u32s
+    u32View.set([this.atlasSlotDims[0], this.atlasSlotDims[1], this.atlasSlotDims[2], 0], 28); // atlasSlotDims at 112B = 28 u32s
 
-    // viewProj at 304B = 76 floats
-    uniformData.set(this.viewProj, 76);
+    // viewProj at 128B = 32 floats
+    uniformData.set(this.viewProj, 32);
 
-    // camForward at 368B = 92 floats
-    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], 92);
+    // camForward at 192B = 48 floats
+    uniformData.set([this.camForward[0], this.camForward[1], this.camForward[2], 0], 48);
 
-    // clipParams at 384B = 96 floats (x=clipDist, y=clipMode, z=0, w=0)
-    uniformData.set([this.clipDistance, this.clipMode, 0, 0], 96);
+    // clipParams at 208B = 52 floats
+    uniformData.set([this.clipDistance, this.clipMode, 0, 0], 52);
 
-    // Multi-LOD per-LOD metadata
-    const numLods = Math.min(this.lodMetas.length, 4);
-    u32View.set([numLods > 0 ? numLods : 1, 0, 0, 0], 100); // lodParams at 400B = 100 u32s
-    for (let i = 0; i < 4; i++) {
-      const m = i < numLods ? this.lodMetas[i] : null;
-      const base104 = 104 + i * 4; // lodGridDims at 416B = 104 u32s, stride 4
-      u32View.set(m ? [m.gridDims[2], m.gridDims[1], m.gridDims[0], m.offset] : [0, 0, 0, 0], base104);
-      const base120 = 120 + i * 4; // lodChunkDims at 480B = 120 u32s
-      u32View.set(m ? [m.chunkDims[2], m.chunkDims[1], m.chunkDims[0], 0] : [0, 0, 0, 0], base120);
-      const base136 = 136 + i * 4; // lodLevelDims at 544B = 136 f32s
-      uniformData.set(m ? [m.levelDims[2], m.levelDims[1], m.levelDims[0], 0] : [0, 0, 0, 0], base136);
-    }
-    // If no lodMetas, use single-LOD fallback from atlas params
-    if (numLods === 0) {
-      u32View.set([this.gridDims[0], this.gridDims[1], this.gridDims[2], 0], 104);
-      u32View.set([this.chunkDims[0], this.chunkDims[1], this.chunkDims[2], 0], 120);
-      uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 136);
-    }
+    // M1: lodParams.x = targetLodIdx (always 0 — descriptor lods are
+    // already trimmed to start at finest LOD). lodCount comes from
+    // descriptor.
+    u32View.set([0, 0, 0, 0], 56); // lodParams at 224B = 56 u32s
 
-    // S8: proxy params at offset 608B (= 152 u32s).
-    //   proxyParams: x=renderMode, y=fieldSlot, z=wellSlot, w=reserved.
-    //   fieldProxyDims / wellProxyDims: xyz=(Z, Y, X), w=reserved.
-    u32View.set(
-      [this.renderModeProxy, this.fieldProxySlotIndex >>> 0, this.wellProxySlotIndex >>> 0, 0],
-      152,
-    );
-    u32View.set(
-      [this.fieldProxyDims[0], this.fieldProxyDims[1], this.fieldProxyDims[2], 0],
-      156,
-    );
-    u32View.set(
-      [this.wellProxyDims[0], this.wellProxyDims[1], this.wellProxyDims[2], 0],
-      160,
-    );
+    // M1: proxyParams.x = renderMode; rest reserved.
+    u32View.set([this.renderModeProxy, 0, 0, 0], 60); // proxyParams at 240B = 60 u32s
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 
@@ -408,6 +441,7 @@ export class VolumeRenderer {
     }
     pass.setPipeline(this.pipeline);
     pass.setBindGroup(0, this.bindGroup);
+    pass.setBindGroup(1, this.descriptorBindGroup);
     pass.draw(3); // full-screen triangle
     pass.end();
   }

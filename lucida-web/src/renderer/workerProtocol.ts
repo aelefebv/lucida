@@ -72,7 +72,6 @@ export interface VolumeChunkDataMessage {
   chunkX: number;
   chunkY: number;
   chunkZ: number;
-  hitLocal: [number, number, number];
 }
 
 /**
@@ -103,16 +102,8 @@ export interface ProxyAssetDataMessage {
 
 export interface VolumeLayerParams {
   datasetId: string;
-  modelMatrix: Float32Array;
-  invModelMatrix: Float32Array;
-  rayHitLocal: [number, number, number];
-  contrastMin: number;
-  contrastMax: number;
-  gamma: number;
-  opacity: number;
   blendMode: "alpha" | "additive" | "max";
   renderMode: "translucent" | "max_intensity";
-  colormap?: string;
   scissorRect?: [number, number, number, number];
   /**
    * S8: per-entity id used by the worker to look up the proxy descriptor
@@ -131,6 +122,11 @@ export interface VolumeLayerParams {
    *   - undefined / `detailOnly`     → renderMode = 0 (legacy chunk-only)
    */
   mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
+  /**
+   * M1 (DOMAINS step 8a): index into the per-dataset entity descriptor
+   * buffer. Required for the worker to resolve descriptor + display state.
+   */
+  entityIndex: number;
 }
 
 export interface VolumeRenderMultiPassMessage {
@@ -154,12 +150,7 @@ export interface SliceLayerParams {
   datasetId: string;
   dataW: number;
   dataH: number;
-  contrastMin: number;
-  contrastMax: number;
-  gamma: number;
-  opacity: number;
   blendMode: "alpha" | "additive" | "max";
-  colormap?: string;
   /** Member position offset in voxels along X (default 0). */
   offsetX?: number;
   /** Member position offset in voxels along Y (default 0). */
@@ -168,6 +159,8 @@ export interface SliceLayerParams {
   entityId?: string;
   /** S8: see {@link VolumeLayerParams.mode}. */
   mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
+  /** M1: see {@link VolumeLayerParams.entityIndex}. */
+  entityIndex: number;
 }
 
 export interface SliceRenderMultiPassMessage {
@@ -287,6 +280,49 @@ export interface ColdStateActiveEntry {
    * for non-field entries.
    */
   parentWellId?: string | null;
+  /**
+   * M1 (DOMAINS step 8a): precomputed column-major model matrix mapping
+   * the entity's `[0,1]^3` unit cube to world space. The orchestrator
+   * derives this from `scene.member_model_matrix` for field entries and
+   * synthesises it from the well AABB for `well-as-proxy` entries (see
+   * `synthesizeWellRosterEntry` in orchestrator.ts). The worker writes
+   * this directly into the descriptor buffer; render messages no longer
+   * carry per-frame model matrices.
+   */
+  modelMatrix: Float32Array;
+  /** M1: inverse of {@link modelMatrix}. */
+  invModelMatrix: Float32Array;
+  /**
+   * M2 (DOMAINS step 8a): per-channel display state, keyed by channel
+   * index. Iteration yields one descriptor entry per (entry, channel),
+   * so the worker indexes this map by `cold.visibleChannels[ch]` for
+   * each yielded combination. Single-channel mode populates the lone
+   * active channel; multi-channel composite populates each visible
+   * channel with its own contrast/gamma/opacity/colormap. Display-state
+   * changes bump `epochs.selection`, which re-runs the orchestrator and
+   * re-emits cold state — this map is the worker's sole source of
+   * display state for the descriptor buffer.
+   */
+  displayStateByChannel: Record<number, ColdStateDisplayState>;
+}
+
+/**
+ * M2: per-channel display state in cold state. The worker writes these
+ * fields into the GPU `EntityDescriptor` and resolves `colormapName` to
+ * a CPU-side LUT texture binding per draw (the descriptor's
+ * `colormapLutIndex` is informational; option A in PRD #432 §3).
+ *
+ * `channelMask` is a single-bit-per-active-channel flag used as a
+ * forward-compatibility marker; the existing `imageId:chN` memberId
+ * encoding fully captures channel selection in M2.
+ */
+export interface ColdStateDisplayState {
+  contrastMin: number;
+  contrastMax: number;
+  gamma: number;
+  opacity: number;
+  colormapName: string;
+  channelMask: number;
 }
 
 export interface ColdStateMessage {
@@ -299,6 +335,22 @@ export interface ColdStateMessage {
   visibleRegion: VisibleRegion;
   activeSet: ColdStateActiveEntry[];
   viewMode: "slice" | "volume";
+}
+
+/**
+ * M3 (DOMAINS step 8a): per-viewEpoch hot-state delivery of camera-ray
+ * pick coordinates for chunk eviction prioritization. Residency-only
+ * (CPU-side) — never read by the shader. The orchestrator emits one
+ * message per dataset when `epochs.view` advances; the worker writes
+ * each entry into `rayHitPerEntity` so subsequent chunk-data messages
+ * can use it for `findFarthestSlot`'s distance metric.
+ */
+export interface ViewHotStateMessage {
+  type: "viewHotState";
+  epochs: PlanningEpochs;
+  datasetId: string;
+  /** Per-entity ray-pick local coords for chunk eviction prioritization. */
+  rayHitsByEntity: Array<[entityId: string, hit: [number, number, number]]>;
 }
 
 export type MainToWorkerMessage =
@@ -317,7 +369,8 @@ export type MainToWorkerMessage =
   | RemoveLayerResourcesMessage
   | UpdateCursorDataMessage
   | DestroyMessage
-  | ColdStateMessage;
+  | ColdStateMessage
+  | ViewHotStateMessage;
 
 // --- Worker -> Main ---
 

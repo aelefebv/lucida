@@ -421,6 +421,16 @@ export function handleSliceRenderMultiPass(
     const memberId = layer.datasetId;
     const resolved = layerToPool(memberId);
     if (!resolved) continue;
+
+    // M1+M2: per-dataset descriptor + entity index (orchestrator-
+    // computed; converges with the worker's descriptor build by
+    // canonical iteration order).
+    const descIndex = resolved.datasetId
+      ? ctx.lookupEntityDescriptor(resolved.datasetId)
+      : null;
+    if (!descIndex) continue;
+    const entityIndex = layer.entityIndex;
+
     const isWellAsProxy = layer.mode === "well-as-proxy";
     const atlas = resolved.poolKey ? atlasPerDataset.get(resolved.poolKey) ?? null : null;
     let entityLodMetas: LodIndirectionMeta[] | null = null;
@@ -447,17 +457,15 @@ export function handleSliceRenderMultiPass(
       atlas.indirectionDirty = false;
     }
 
-    // S8: resolve proxy descriptor (same flow as volumeHandlers).
+    // M1: resolve proxy texture handles via the descriptor's dense pool
+    // array. Slot indices + dims come from the GPU descriptor.
     const desc = layer.entityId
       ? ctx.lookupProxyDescriptor(layer.entityId)
       : null;
     let renderModeProxy = 0;
     let fieldProxyTexture: GPUTexture | null = null;
-    let fieldProxySlotIndex = 0xFFFFFFFF;
-    let fieldProxyDims: [number, number, number] = [1, 1, 1];
     let wellProxyTexture: GPUTexture | null = null;
-    let wellProxySlotIndex = 0xFFFFFFFF;
-    let wellProxyDims: [number, number, number] = [1, 1, 1];
+    let wellProxySlotResident = false;
 
     if (layer.mode === "well-as-proxy") {
       renderModeProxy = 1;
@@ -468,46 +476,31 @@ export function handleSliceRenderMultiPass(
       renderModeProxy = 2;
     }
 
-    if (desc && resolved.datasetId) {
+    if (desc) {
       if (desc.fieldProxyHandle) {
-        const pool = ctx.lookupProxyPool(resolved.datasetId, desc.fieldProxyHandle.poolKey);
-        if (pool) {
-          fieldProxyTexture = pool.texture;
-          fieldProxySlotIndex = desc.fieldProxyHandle.slotIndex;
-          fieldProxyDims = pool.slotDims;
+        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.fieldProxyHandle.poolKey);
+        if (poolIdx !== undefined) {
+          fieldProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
         }
       }
       if (desc.wellProxyHandle) {
-        const pool = ctx.lookupProxyPool(resolved.datasetId, desc.wellProxyHandle.poolKey);
-        if (pool) {
-          wellProxyTexture = pool.texture;
-          wellProxySlotIndex = desc.wellProxyHandle.slotIndex;
-          wellProxyDims = pool.slotDims;
+        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.wellProxyHandle.poolKey);
+        if (poolIdx !== undefined) {
+          wellProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
+          wellProxySlotResident = true;
         }
       }
     }
 
     // Skip well-as-proxy layers when their proxy isn't resident yet.
-    if (renderModeProxy === 1 && wellProxySlotIndex === 0xFFFFFFFF) continue;
+    if (renderModeProxy === 1 && !wellProxySlotResident) continue;
 
-    renderer.setProxyParams(
-      renderModeProxy,
-      fieldProxyTexture, fieldProxySlotIndex, fieldProxyDims,
-      wellProxyTexture, wellProxySlotIndex, wellProxyDims,
-    );
+    renderer.setProxyParams(renderModeProxy, fieldProxyTexture, wellProxyTexture);
 
     if (atlas && entityLodMetas) {
-      // Use target LOD's dims for legacy single-LOD uniforms
-      const targetMeta = entityLodMetas[0];
-      const [, tGridY, tGridX] = targetMeta.gridDims;
-      const [, tLevelH, tLevelW] = targetMeta.levelDims;
       renderer.setAtlas(
         atlas.texture, atlas.indirectionBuf,
-        [atlas.chunkX, atlas.chunkY],
-        [tGridX, tGridY],
         [atlas.slotsX, atlas.slotsY],
-        [tLevelW, tLevelH],
-        entityLodMetas,
       );
     } else {
       // S8: well-as-proxy without a chunk atlas — bind the slice
@@ -515,16 +508,17 @@ export function handleSliceRenderMultiPass(
       // valid. The shader's renderMode == 1 branch ignores them.
       renderer.setAtlas(
         ctx.getDummyTexture(), getDummySliceIndirection(ctx.device),
-        [1, 1], [1, 1], [1, 1], [1, 1],
-        [],
+        [1, 1],
       );
     }
 
-    const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");
+    // M2: colormap from descriptor's CPU mirror; contrast/gamma/opacity
+    // are read by the shader straight from the descriptor.
+    const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
+    const lutTex = ctx.getOrCreateLUT(colormapName);
     renderer.setColormapTexture(lutTex);
-    renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
-    renderer.setOpacity(layer.opacity);
     renderer.setTransform(msg.zoom, msg.cx - ox, msg.cy - oy, msg.canvasW, msg.canvasH, layer.dataW, layer.dataH);
+    renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(pool[idx].createView(), layerEncoder);
     ctx.device.queue.submit([layerEncoder.finish()]);

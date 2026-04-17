@@ -9,7 +9,7 @@ import type {
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
 import type { PlanningEpochs, ProxyRequest } from "./planning.ts";
-import type { MissingProxy } from "../renderer/workerProtocol.ts";
+import type { ColdStateMessage, MissingProxy } from "../renderer/workerProtocol.ts";
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
 function createMockAssetCatalog(): AssetCatalog {
@@ -128,6 +128,17 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     set_c: () => {},
     center: () => new Float32Array([512, 512]),
     zoom: () => 1.0,
+    member_model_matrix: () => {
+      const m = new Float32Array(16);
+      m[0] = m[5] = m[10] = m[15] = 1;
+      return m;
+    },
+    inv_member_model_matrix: () => {
+      const m = new Float32Array(16);
+      m[0] = m[5] = m[10] = m[15] = 1;
+      return m;
+    },
+    ray_hit_local_image: () => new Float32Array([0.5, 0.5, 0.5]),
   } as unknown;
 }
 
@@ -204,7 +215,7 @@ describe("epoch caching", () => {
     return {
       scene,
       datasets,
-      client: { coldState: vi.fn() } as any,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as any,
       canvas: { clientWidth: 800, clientHeight: 600 } as any,
       mode: "slice",
       renderScale: 1,
@@ -412,7 +423,7 @@ describe("multi-dataset planning", () => {
     return {
       scene,
       datasets,
-      client: { coldState: vi.fn() } as any,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as any,
       canvas: { clientWidth: 800, clientHeight: 600 } as any,
       mode: "slice",
       renderScale: 1,
@@ -587,6 +598,7 @@ describe("proxy delivery tracking", () => {
       datasets: new Map(),
       client: {
         coldState: vi.fn(),
+        viewHotState: vi.fn(),
         proxyAssetData: opts.proxyAssetDataMock ?? vi.fn(),
       } as unknown,
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
@@ -668,7 +680,7 @@ describe("proxy delivery tracking", () => {
     const ctx = {
       scene,
       datasets,
-      client: { coldState: vi.fn() } as unknown,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown,
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
       mode: "slice",
       renderScale: 1,
@@ -700,5 +712,278 @@ describe("proxy delivery tracking", () => {
     orch.handleWantedSetDelta([missing]);
 
     expect(orch.getProxyDeliveredKeys().has(key)).toBe(false);
+  });
+});
+
+// ===========================================================================
+// 4. M2: cold-state display state propagation
+// ===========================================================================
+
+describe("cold-state display state (M2)", () => {
+  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const orchestratorModule = await import("./orchestrator.ts");
+    Orchestrator = orchestratorModule.Orchestrator;
+  });
+
+  function makeCtxWithSpy(
+    scene: unknown,
+    datasets: Map<string, DatasetEntry>,
+    coldStateSpy: ReturnType<typeof vi.fn>,
+  ): TickContext {
+    return {
+      scene,
+      datasets,
+      client: { coldState: coldStateSpy, viewHotState: vi.fn() } as unknown,
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
+    } as unknown as TickContext;
+  }
+
+  it("populates displayStateByChannel from per-channel settings on the active channel", () => {
+    const orch = new Orchestrator();
+    const scene = createMockScene({
+      c: 1,
+      allSettings: {
+        ds1: {
+          visible: true,
+          opacity: 0.6,
+          contrast_min: 0,
+          contrast_max: 65535,
+          gamma: 1,
+          blend_mode: "alpha",
+          channel_settings: [
+            { visible: true, colormap: "magenta", contrast_min: 10, contrast_max: 100, gamma: 1.1 },
+            { visible: true, colormap: "viridis", contrast_min: 50, contrast_max: 500, gamma: 1.5 },
+          ],
+          channel_blend_mode: "additive",
+        },
+      },
+    });
+    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const coldStateSpy = vi.fn();
+    orch.planAndFetch(makeCtxWithSpy(scene, datasets, coldStateSpy), new Map());
+
+    expect(coldStateSpy).toHaveBeenCalledTimes(1);
+    const cold = coldStateSpy.mock.calls[0][0] as ColdStateMessage;
+    expect(cold.activeSet.length).toBeGreaterThan(0);
+    const ds = cold.activeSet[0].displayStateByChannel[1];
+    expect(ds).toBeDefined();
+    expect(ds.contrastMin).toBe(50);
+    expect(ds.contrastMax).toBe(500);
+    expect(ds.gamma).toBe(1.5);
+    expect(ds.opacity).toBe(0.6);
+    expect(ds.colormapName).toBe("viridis");
+    expect(ds.channelMask).toBe(1 << 1);
+  });
+
+  it("contrast change re-emits cold state when selectionEpoch bumps", async () => {
+    // The dataset-settings cache is generation-keyed (`bumpSettingsGeneration`)
+    // — the real codepath bumps it via `useDatasetSettings`. We bump
+    // explicitly between the two ticks so the second `getSceneSettings`
+    // call observes the new contrast value.
+    const { bumpSettingsGeneration } = await import("../tickCommon.ts");
+    const orch = new Orchestrator();
+    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const sceneA = createMockScene({
+      epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+      allSettings: {
+        ds1: {
+          visible: true,
+          opacity: 1,
+          contrast_min: 0,
+          contrast_max: 1000,
+          gamma: 1,
+          blend_mode: "alpha",
+          channel_settings: [],
+          channel_blend_mode: "additive",
+        },
+      },
+    });
+    const sceneB = createMockScene({
+      epochs: { content: 1, layout: 1, view: 1, selection: 2 },
+      allSettings: {
+        ds1: {
+          visible: true,
+          opacity: 1,
+          contrast_min: 0,
+          contrast_max: 9999,
+          gamma: 1,
+          blend_mode: "alpha",
+          channel_settings: [],
+          channel_blend_mode: "additive",
+        },
+      },
+    });
+    const spyA = vi.fn();
+    const spyB = vi.fn();
+    orch.planAndFetch(makeCtxWithSpy(sceneA, datasets, spyA), new Map());
+    bumpSettingsGeneration();
+    orch.planAndFetch(makeCtxWithSpy(sceneB, datasets, spyB), new Map());
+
+    expect(spyA).toHaveBeenCalledTimes(1);
+    expect(spyB).toHaveBeenCalledTimes(1);
+    const coldA = spyA.mock.calls[0][0] as ColdStateMessage;
+    const coldB = spyB.mock.calls[0][0] as ColdStateMessage;
+    expect(coldA.activeSet[0].displayStateByChannel[0].contrastMax).toBe(1000);
+    expect(coldB.activeSet[0].displayStateByChannel[0].contrastMax).toBe(9999);
+    expect(coldB.epochs.selection).toBe(2);
+  });
+
+  it("multi-channel emits per-channel display state for every visible channel", () => {
+    const orch = new Orchestrator();
+    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const scene = createMockScene({
+      multiChannel: true,
+      allSettings: {
+        ds1: {
+          visible: true,
+          opacity: 1,
+          contrast_min: 0,
+          contrast_max: 1,
+          gamma: 1,
+          blend_mode: "alpha",
+          channel_settings: [
+            { visible: true, colormap: "magenta", contrast_min: 0, contrast_max: 100, gamma: 1 },
+            { visible: true, colormap: "green",   contrast_min: 0, contrast_max: 200, gamma: 1.2 },
+          ],
+          channel_blend_mode: "additive",
+        },
+      },
+    });
+    const spy = vi.fn();
+    orch.planAndFetch(makeCtxWithSpy(scene, datasets, spy), new Map());
+    const cold = spy.mock.calls[0][0] as ColdStateMessage;
+    expect(cold.visibleChannels).toEqual([0, 1]);
+    const dsByCh = cold.activeSet[0].displayStateByChannel;
+    expect(dsByCh[0].colormapName).toBe("magenta");
+    expect(dsByCh[0].contrastMax).toBe(100);
+    expect(dsByCh[1].colormapName).toBe("green");
+    expect(dsByCh[1].contrastMax).toBe(200);
+  });
+});
+
+// ===========================================================================
+// 5. M3: viewHotState emission (per-viewEpoch ray-pick coords)
+// ===========================================================================
+
+describe("viewHotState emission (M3)", () => {
+  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const orchestratorModule = await import("./orchestrator.ts");
+    Orchestrator = orchestratorModule.Orchestrator;
+  });
+
+  function makeCtxWithViewHotSpy(
+    scene: unknown,
+    datasets: Map<string, DatasetEntry>,
+    viewHotSpy: ReturnType<typeof vi.fn>,
+  ): TickContext {
+    return {
+      scene,
+      datasets,
+      client: { coldState: vi.fn(), viewHotState: viewHotSpy } as unknown,
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
+    } as unknown as TickContext;
+  }
+
+  it("emits one viewHotState message per dataset on initial plan", () => {
+    const orch = new Orchestrator();
+    const scene = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const viewHotSpy = vi.fn();
+    orch.planAndFetch(makeCtxWithViewHotSpy(scene, datasets, viewHotSpy), new Map());
+    expect(viewHotSpy).toHaveBeenCalledTimes(1);
+    const msg = viewHotSpy.mock.calls[0][0];
+    expect(msg.type).toBe("viewHotState");
+    expect(msg.datasetId).toBe("ds1");
+    expect(msg.epochs.view).toBe(1);
+    expect(msg.rayHitsByEntity.length).toBeGreaterThan(0);
+  });
+
+  it("uses ray hits sourced from scene.ray_hit_local_image", () => {
+    const orch = new Orchestrator();
+    const customScene = createMockScene();
+    (customScene as unknown as { ray_hit_local_image: () => Float32Array }).ray_hit_local_image =
+      () => new Float32Array([0.25, 0.5, 0.75]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const viewHotSpy = vi.fn();
+    orch.planAndFetch(makeCtxWithViewHotSpy(customScene, datasets, viewHotSpy), new Map());
+    const msg = viewHotSpy.mock.calls[0][0];
+    expect(msg.rayHitsByEntity[0][1]).toEqual([0.25, 0.5, 0.75]);
+  });
+
+  it("does not re-emit viewHotState when viewEpoch is unchanged across ticks", async () => {
+    const orch = new Orchestrator();
+    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const sceneA = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+    const viewHotA = vi.fn();
+    orch.planAndFetch(makeCtxWithViewHotSpy(sceneA, datasets, viewHotA), new Map());
+    expect(viewHotA).toHaveBeenCalledTimes(1);
+
+    // Selection epoch bumps but view epoch does NOT — re-plan happens but
+    // hot state should be skipped since the camera-ray pick can't have
+    // moved without a viewEpoch advance.
+    const { bumpSettingsGeneration } = await import("../tickCommon.ts");
+    bumpSettingsGeneration();
+    const sceneB = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 2 } });
+    const viewHotB = vi.fn();
+    orch.planAndFetch(makeCtxWithViewHotSpy(sceneB, datasets, viewHotB), new Map());
+    expect(viewHotB).not.toHaveBeenCalled();
+  });
+
+  it("re-emits viewHotState when viewEpoch advances", () => {
+    const orch = new Orchestrator();
+    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const sceneA = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+    const viewHotA = vi.fn();
+    orch.planAndFetch(makeCtxWithViewHotSpy(sceneA, datasets, viewHotA), new Map());
+    expect(viewHotA).toHaveBeenCalledTimes(1);
+
+    const sceneB = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
+    const viewHotB = vi.fn();
+    orch.planAndFetch(makeCtxWithViewHotSpy(sceneB, datasets, viewHotB), new Map());
+    expect(viewHotB).toHaveBeenCalledTimes(1);
+    expect(viewHotB.mock.calls[0][0].epochs.view).toBe(2);
+  });
+
+  it("multi-channel emits one rayHit entry per (member, channel) composite", () => {
+    const orch = new Orchestrator();
+    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const scene = createMockScene({
+      multiChannel: true,
+      allSettings: {
+        ds1: {
+          visible: true,
+          opacity: 1,
+          contrast_min: 0,
+          contrast_max: 1,
+          gamma: 1,
+          blend_mode: "alpha",
+          channel_settings: [
+            { visible: true, colormap: "magenta", contrast_min: 0, contrast_max: 100, gamma: 1 },
+            { visible: true, colormap: "green",   contrast_min: 0, contrast_max: 200, gamma: 1.2 },
+          ],
+          channel_blend_mode: "additive",
+        },
+      },
+    });
+    const viewHotSpy = vi.fn();
+    orch.planAndFetch(makeCtxWithViewHotSpy(scene, datasets, viewHotSpy), new Map());
+    const msg = viewHotSpy.mock.calls[0][0];
+    const memberIds = msg.rayHitsByEntity.map((e: [string, unknown]) => e[0]);
+    expect(memberIds).toContain("img-0:ch0");
+    expect(memberIds).toContain("img-0:ch1");
   });
 });

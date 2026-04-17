@@ -2,27 +2,59 @@
 
 struct Uniforms {
   transform: mat4x4f,       // offset 0   (64 bytes) — inverse pan/zoom (screen UV → texture UV)
-  intensityRange: vec4f,     // offset 64  (16 bytes) — x=min, y=max, z=gamma, w=opacity
-  chunkDims: vec4u,          // offset 80  (16 bytes) — xy=chunk dimensions
-  gridDims: vec4u,           // offset 96  (16 bytes) — xy=grid dimensions
-  atlasSlotDims: vec4u,      // offset 112 (16 bytes) — xy=slots per axis = 128 total
-  memberScreenSize: vec4f,   // offset 128 (16 bytes) — xy=member pixel size on screen
-  lodParams: vec4u,          // offset 144 (16 bytes) — x=numLods, y=targetLodIdx
-  lodGridDims: array<vec4u, 4>,   // offset 160 (64 bytes) — xy=gridDims, w=indirection offset
-  lodChunkDims: array<vec4u, 4>,  // offset 224 (64 bytes) — xy=chunkDims
-  lodLevelDims: array<vec4f, 4>,  // offset 288 (64 bytes) — xy=level voxel dimensions
-  // S8: proxy fallback. Slice samples a fixed Z plane within each
-  // proxy slot; we use the slot's Z midpoint for the MVP. A proper
-  // mapping from the dataset's current Z to the proxy's Z scale is a
-  // follow-up (the proxy's Z extent is not generally aligned to the
-  // dataset's full-res Z).
-  // proxyParams: x=renderMode (0=detailOnly, 1=proxyDirect/well-as-proxy,
-  //   2=detailWithProxyFallback), y=fieldProxySlotIndex,
-  //   z=wellProxySlotIndex (0xFFFFFFFF if absent), w=reserved.
-  proxyParams: vec4u,         // offset 352 (16 bytes)
-  fieldProxyDims: vec4u,      // offset 368 (16 bytes) — xyz = (Z, Y, X)
-  wellProxyDims: vec4u,       // offset 384 (16 bytes) — xyz = (Z, Y, X)
-  // total = 400 bytes
+  atlasSlotDims: vec4u,      // offset 64  (16 bytes) — xy=slots per axis = 128 total
+  memberScreenSize: vec4f,   // offset 80  (16 bytes) — xy=member pixel size on screen
+  // M1: lodParams.x = targetLodIdx; lodCount comes from descriptor.
+  lodParams: vec4u,          // offset 96  (16 bytes) — x=targetLodIdx
+  // S8 / M1: proxy fallback. Slice samples a fixed Z plane within each
+  // proxy slot; we use the slot's Z midpoint for the MVP. proxyParams.x
+  // drives the renderMode branch; slot indices and dims are now in the
+  // descriptor.
+  proxyParams: vec4u,         // offset 112 (16 bytes) — x=renderMode
+  // total = 128 bytes
+};
+
+// M1: per-draw uniform with the entity index into entityDescriptors.
+struct EntityRef { index: vec4u };
+
+// M1: per-entity descriptor. Layout matches descriptorBuffer.ts.
+struct LodInfo {
+  level: u32,
+  indirectionOffset: u32,
+  _pad0: u32,
+  _pad1: u32,
+  gridDims: vec3<u32>,
+  _pad2: u32,
+  chunkDims: vec3<u32>,
+  _pad3: u32,
+  levelDims: vec3<u32>,
+  _pad4: u32,
+};
+
+struct EntityDescriptor {
+  modelMatrix: mat4x4<f32>,
+  invModelMatrix: mat4x4<f32>,
+  channelMask: u32,
+  fieldProxyPoolIndex: u32,
+  fieldProxySlotIndex: u32,
+  wellProxyPoolIndex: u32,
+  wellProxySlotIndex: u32,
+  _pad_proxy0: u32,
+  _pad_proxy1: u32,
+  _pad_proxy2: u32,
+  fieldProxyDims: vec3<u32>,
+  _pad_field: u32,
+  wellProxyDims: vec3<u32>,
+  _pad_well: u32,
+  contrastMin: f32,
+  contrastMax: f32,
+  gamma: f32,
+  opacity: f32,
+  colormapLutIndex: u32,
+  lodCount: u32,
+  _pad_tail0: u32,
+  _pad_tail1: u32,
+  lods: array<LodInfo, 8>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -34,6 +66,10 @@ struct Uniforms {
 // one Z plane within the slot region.
 @group(0) @binding(5) var fieldProxyTex: texture_3d<u32>;
 @group(0) @binding(6) var wellProxyTex: texture_3d<u32>;
+
+// M1: per-dataset descriptor table + per-draw entity index.
+@group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
+@group(1) @binding(1) var<uniform> currentEntity: EntityRef;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -56,7 +92,10 @@ fn vs(@builtin(vertex_index) vid: u32) -> VSOut {
 // Z midpoint — see header comment on `wellProxyTex` for the rationale and
 // follow-up note. Slot layout (1-D-along-X) and dim convention match
 // `proxyAtlas.ts` (`slotDims: [Z, Y, X]` → `dims.x=Z, dims.y=Y, dims.z=X`).
-fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec4u, uv: vec2f) -> u32 {
+//
+// M1: dims is now read straight from the descriptor as a vec3<u32> —
+// same Z/Y/X convention.
+fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f) -> u32 {
   if (slotIdx == 0xFFFFFFFFu) {
     return 0xFFFFFFFFu;
   }
@@ -97,32 +136,35 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     return vec4f(0.3, 0.3, 0.3, 1.0);
   }
 
-  let intensityMin = u.intensityRange.x;
-  let intensityMax = u.intensityRange.y;
-  let range = intensityMax - intensityMin;
-  let gamma = u.intensityRange.z;
-  let layerOpacity = u.intensityRange.w;
-
   let renderMode = u.proxyParams.x;
-  let fieldSlot = u.proxyParams.y;
-  let wellSlot = u.proxyParams.z;
+  let entity = entityDescriptors[currentEntity.index.x];
+  let fieldSlot = entity.fieldProxySlotIndex;
+  let wellSlot = entity.wellProxySlotIndex;
+
+  // M2: per-entity display state from the descriptor buffer.
+  let intensityMin = entity.contrastMin;
+  let intensityMax = entity.contrastMax;
+  let range = intensityMax - intensityMin;
+  let gamma = entity.gamma;
+  let layerOpacity = entity.opacity;
 
   var chunkVal = 0xFFFFFFFFu;
 
   // S8: well-as-proxy short-circuit. Sample the well's proxy directly
   // at the slot's Z midpoint; skip indirection.
   if (renderMode == 1u) {
-    chunkVal = sampleProxy2D(wellProxyTex, wellSlot, u.wellProxyDims, texUV);
+    chunkVal = sampleProxy2D(wellProxyTex, wellSlot, entity.wellProxyDims, texUV);
   } else {
     // Multi-LOD atlas lookup with fallback
-    let numLods = u.lodParams.x;
-    let targetIdx = u.lodParams.y;
+    let numLods = entity.lodCount;
+    let targetIdx = u.lodParams.x;
 
     for (var i = targetIdx; i < numLods; i++) {
-      let levelDims = vec2u(u32(u.lodLevelDims[i].x), u32(u.lodLevelDims[i].y));
-      let chunkDims = vec2u(u.lodChunkDims[i].x, u.lodChunkDims[i].y);
-      let gridDims = vec2u(u.lodGridDims[i].x, u.lodGridDims[i].y);
-      let offset = u.lodGridDims[i].w;
+      let lod = entity.lods[i];
+      let levelDims = vec2u(lod.levelDims.x, lod.levelDims.y);
+      let chunkDims = vec2u(lod.chunkDims.x, lod.chunkDims.y);
+      let gridDims = vec2u(lod.gridDims.x, lod.gridDims.y);
+      let offset = lod.indirectionOffset;
 
       let texCoord = vec2i(
         clamp(i32(texUV.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
@@ -161,11 +203,11 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     // non-blank. The intended visual win is renderMode == 1 above.
     if (chunkVal == 0xFFFFFFFFu && renderMode == 2u) {
       if (fieldSlot != 0xFFFFFFFFu) {
-        let v = sampleProxy2D(fieldProxyTex, fieldSlot, u.fieldProxyDims, texUV);
+        let v = sampleProxy2D(fieldProxyTex, fieldSlot, entity.fieldProxyDims, texUV);
         if (v != 0xFFFFFFFFu) { chunkVal = v; }
       }
       if (chunkVal == 0xFFFFFFFFu && wellSlot != 0xFFFFFFFFu) {
-        let v = sampleProxy2D(wellProxyTex, wellSlot, u.wellProxyDims, texUV);
+        let v = sampleProxy2D(wellProxyTex, wellSlot, entity.wellProxyDims, texUV);
         if (v != 0xFFFFFFFFu) { chunkVal = v; }
       }
     }

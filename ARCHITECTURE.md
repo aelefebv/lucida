@@ -74,9 +74,15 @@ Planning cycle (web only, wired in step 7/Orchestrator):
 Worker protocol (main thread → GPU worker):
   → Atlas config messages carry PlanningEpochs (establish worker's "current" epoch)
   → Chunk data messages carry PlanningEpochs (epoch data was fetched under)
-  → Render messages carry PlanningEpochs (for staleness metadata)
-  → Cold state message (ColdStateMessage) sent on epoch change: active set,
-    visible region, current T, visible channels, view mode
+  → Render messages carry PlanningEpochs + entityIndex; per-entity state
+    (model matrix, proxy handles, LOD geometry, contrast/gamma/opacity/colormap)
+    lives in the descriptor buffer, not in render messages
+  → Cold state message (ColdStateMessage) sent on epoch change: active set with
+    per-entity model matrices and per-channel display state, visible region,
+    current T, visible channels, view mode. Drives per-dataset
+    EntityDescriptor[] storage buffer construction (buildDescriptorBuffer)
+  → View hot-state message (ViewHotStateMessage) sent on viewEpoch advance:
+    per-entity ray-pick coords for chunk eviction prioritization
   → Worker compares delivery epochs against current: drops stale batches
   → Staleness = delivery.selectionEpoch < current or delivery.contentEpoch < current
   → Stale drops reported back as "skipped" via chunksEvicted message

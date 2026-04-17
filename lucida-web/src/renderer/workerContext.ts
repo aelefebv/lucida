@@ -4,6 +4,7 @@ import type { LayerCompositor } from "./layerCompositor.ts";
 import type { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerToMainMessage } from "./workerProtocol.ts";
 import type { ProxyAtlasState, ProxyHandle } from "./proxyAtlas.ts";
+import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
 
 /**
  * S8: per-entity proxy descriptor — handles into the GPU proxy atlases.
@@ -43,4 +44,12 @@ export interface WorkerCtx {
    * to fetch the GPU texture + slot dims for binding.
    */
   lookupProxyPool(datasetId: string, poolKey: string): ProxyAtlasState | null;
+  /**
+   * M1 (DOMAINS step 8a): look up the per-dataset entity descriptor
+   * buffer + index maps. Returns null until the first cold state for
+   * this dataset arrives. Render handlers bind `idx.buffer` plus a small
+   * uniform with the layer's `entityIndex`; the shader reads
+   * `entityDescriptors[currentEntity.x]` for matrix and per-LOD geometry.
+   */
+  lookupEntityDescriptor(datasetId: string): EntityDescriptorIndex | null;
 }

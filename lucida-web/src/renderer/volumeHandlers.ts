@@ -2,6 +2,7 @@ import type { WorkerCtx } from "./workerContext.ts";
 import type {
   VolumeChunkDataMessage,
   VolumeRenderMultiPassMessage,
+  ViewHotStateMessage,
 } from "./workerProtocol.ts";
 import { VOLUME_ATLAS_BUDGET } from "./workerProtocol.ts";
 import { writeVolumeChunk } from "./gpuContext.ts";
@@ -159,7 +160,25 @@ function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture
 }
 // Last known ray-volume hit point in local [0,1]³ space per ENTITY (memberId).
 // Chunks closest to this point are kept; farthest are evicted first.
+// Populated by `applyViewHotState` on viewEpoch advance (M3); chunk-data
+// and render handlers read it for `findFarthestSlot` distance metrics.
 const rayHitPerEntity = new Map<string, [number, number, number]>();
+
+/**
+ * M3 (DOMAINS step 8a): apply a viewEpoch hot-state message. Updates the
+ * `rayHitPerEntity` map so chunk eviction prioritization stays in sync
+ * with the camera ray-pick. Latest message wins per entity.
+ */
+export function applyViewHotState(msg: ViewHotStateMessage): void {
+  for (const [entityId, hit] of msg.rayHitsByEntity) {
+    rayHitPerEntity.set(entityId, hit);
+  }
+}
+
+/** Test-only: read the per-entity ray-pick map. */
+export function getRayHitForMember(memberId: string): [number, number, number] | undefined {
+  return rayHitPerEntity.get(memberId);
+}
 
 /** Create a shared atlas pool. Indirection is sized later from entityMetas. */
 function createVolumeAtlas(
@@ -354,8 +373,6 @@ export function handleVolumeChunkData(
     return;
   }
 
-  rayHitPerEntity.set(memberId, msg.hitLocal);
-
   let intensityChanged = false;
   const totalChunks = msg.chunks.length;
   const evictedKeys: string[] = [];
@@ -473,6 +490,15 @@ export function handleVolumeRenderMultiPass(
     const resolved = layerToPool(memberId);
     if (!resolved) continue;
 
+    // M1+M2: descriptor buffer covers all members for this dataset;
+    // entity index is computed by the orchestrator (and threaded into
+    // the layer params) — both sides converge by construction.
+    const descIndex = resolved.datasetId
+      ? ctx.lookupEntityDescriptor(resolved.datasetId)
+      : null;
+    if (!descIndex) continue;
+    const entityIndex = layer.entityIndex;
+
     // S8: well-as-proxy entries don't have a chunk pool — we render with
     // a dummy chunk atlas + indirection but a real proxy texture binding.
     const isWellAsProxy = layer.mode === "well-as-proxy";
@@ -484,10 +510,12 @@ export function handleVolumeRenderMultiPass(
     if (!isWellAsProxy) {
       // Field-mode: chunk atlas + per-entity LOD meta required.
       if (!atlas || !entityLodMetas) continue;
-      rayHitPerEntity.set(memberId, layer.rayHitLocal);
     }
 
-    const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");
+    // M2: colormap name lives in the descriptor's CPU mirror (set by
+    // cold state). Resolve it per draw to bind the right LUT texture.
+    const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
+    const lutTex = ctx.getOrCreateLUT(colormapName);
     renderer.setColormapTexture(lutTex);
 
     if (atlas && atlas.indirectionDirty) {
@@ -495,19 +523,18 @@ export function handleVolumeRenderMultiPass(
       atlas.indirectionDirty = false;
     }
 
-    // S8: resolve proxy descriptor for this layer's entity. Falls back
-    // to "no proxy" (sentinel slot indices, dummy texture) when the
-    // entity has no descriptor yet.
+    // M1: pool index + slot index live in the descriptor; CPU side only
+    // needs the texture handle for binding. Read the pool by walking the
+    // dense `proxyPoolsByIndex` array (resolved via the entity's CPU-side
+    // proxy descriptor mirror).
     const desc = layer.entityId
       ? ctx.lookupProxyDescriptor(layer.entityId)
       : null;
     let renderModeProxy = 0; // 0 = legacy chunk-only
     let fieldProxyTexture: GPUTexture | null = null;
-    let fieldProxySlotIndex = 0xFFFFFFFF;
-    let fieldProxyDims: [number, number, number] = [1, 1, 1];
     let wellProxyTexture: GPUTexture | null = null;
-    let wellProxySlotIndex = 0xFFFFFFFF;
-    let wellProxyDims: [number, number, number] = [1, 1, 1];
+    let wellProxySlotResident = false;
+    let wellSlotDimsForVolumeFallback: [number, number, number] = [1, 1, 1];
 
     if (layer.mode === "well-as-proxy") {
       renderModeProxy = 1;
@@ -518,21 +545,20 @@ export function handleVolumeRenderMultiPass(
       renderModeProxy = 2;
     }
 
-    if (desc && resolved.datasetId) {
+    if (desc) {
       if (desc.fieldProxyHandle) {
-        const pool = ctx.lookupProxyPool(resolved.datasetId, desc.fieldProxyHandle.poolKey);
-        if (pool) {
-          fieldProxyTexture = pool.texture;
-          fieldProxySlotIndex = desc.fieldProxyHandle.slotIndex;
-          fieldProxyDims = pool.slotDims;
+        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.fieldProxyHandle.poolKey);
+        if (poolIdx !== undefined) {
+          fieldProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
         }
       }
       if (desc.wellProxyHandle) {
-        const pool = ctx.lookupProxyPool(resolved.datasetId, desc.wellProxyHandle.poolKey);
-        if (pool) {
+        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.wellProxyHandle.poolKey);
+        if (poolIdx !== undefined) {
+          const pool = descIndex.proxyPoolsByIndex[poolIdx];
           wellProxyTexture = pool.texture;
-          wellProxySlotIndex = desc.wellProxyHandle.slotIndex;
-          wellProxyDims = pool.slotDims;
+          wellProxySlotResident = true;
+          wellSlotDimsForVolumeFallback = pool.slotDims;
         }
       }
     }
@@ -540,26 +566,19 @@ export function handleVolumeRenderMultiPass(
     // For well-as-proxy mode, if no well proxy is resident yet, the
     // shader returns 0xFFFFFFFFu (transparent) — skip the draw to avoid
     // a flashing empty rect.
-    if (renderModeProxy === 1 && wellProxySlotIndex === 0xFFFFFFFF) {
+    if (renderModeProxy === 1 && !wellProxySlotResident) {
       isFirstLayer = false;
       continue;
     }
 
-    renderer.setProxyParams(
-      renderModeProxy,
-      fieldProxyTexture, fieldProxySlotIndex, fieldProxyDims,
-      wellProxyTexture, wellProxySlotIndex, wellProxyDims,
-    );
+    renderer.setProxyParams(renderModeProxy, fieldProxyTexture, wellProxyTexture);
 
     if (atlas && entityLodMetas) {
       // Field-mode (or fallback) path: real chunk atlas + LOD metadata.
       const targetMeta = entityLodMetas[0]; // first is target (finest)
-      const [tGridZ, tGridY, tGridX] = targetMeta.gridDims;
       const [tLevelD, tLevelH, tLevelW] = targetMeta.levelDims;
       renderer.setAtlas(
         atlas.texture, atlas.indirectionBuf,
-        [atlas.chunkX, atlas.chunkY, atlas.chunkZ],
-        [tGridX, tGridY, tGridZ],
         [atlas.slotsX, atlas.slotsY, atlas.slotsZ],
         [tLevelW, tLevelH, tLevelD],
         entityLodMetas,
@@ -572,21 +591,23 @@ export function handleVolumeRenderMultiPass(
       // ~3 samples/ray → alpha barely accumulates in translucent
       // compositing → proxy renders dim/desaturated.
       const dummyChunk = ctx.getDummy3DTexture();
-      // wellProxyDims is [Z, Y, X]; setAtlas takes volumeDims as [X, Y, Z].
+      // wellSlotDimsForVolumeFallback is [Z, Y, X]; setAtlas takes
+      // volumeDims as [X, Y, Z].
       const proxyVolumeDims: [number, number, number] = [
-        wellProxyDims[2], wellProxyDims[1], wellProxyDims[0],
+        wellSlotDimsForVolumeFallback[2],
+        wellSlotDimsForVolumeFallback[1],
+        wellSlotDimsForVolumeFallback[0],
       ];
       renderer.setAtlas(
         dummyChunk, getDummyIndirection(ctx.device),
-        [1, 1, 1], [1, 1, 1], [1, 1, 1], proxyVolumeDims,
+        [1, 1, 1], proxyVolumeDims,
         [],
       );
     }
 
-    renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
-    renderer.setOpacity(layer.opacity);
     renderer.setRenderMode(layer.renderMode === "max_intensity" ? 1 : 0);
-    renderer.setMatrices(msg.invViewProj, layer.modelMatrix, layer.invModelMatrix, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
+    renderer.setMatrices(msg.invViewProj, msg.eye, msg.viewProj, msg.camForward, msg.clipDistance, msg.clipMode);
+    renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
     const depth = ensureDepthTexture(ctx.device, msg.canvasW, msg.canvasH);
     const depthView = depth.createView();
 
