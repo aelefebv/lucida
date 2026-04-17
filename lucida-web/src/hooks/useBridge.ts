@@ -6,6 +6,7 @@ import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
 import { ProxiedContentSource } from "../pipeline/contentSource.ts";
 import { CpuCache } from "../pipeline/cpuCache.ts";
+import { derivedBuildersFor } from "../pipeline/layoutBuilders.ts";
 import { Session } from "../session.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
@@ -110,6 +111,24 @@ export function useBridge({
               // WASM side; this keeps the mirror consistent.
               const catalog = doc.asset_catalogs?.[dsId] ?? { entries: [] };
               sessionRef.current?.ensureAssetCatalog()?.applyInitial(dsId, catalog);
+
+              // Auto-register browser-authored derived layouts and seed the
+              // registry's active id from the snapshot's document state.
+              // Re-registration is idempotent thanks to lucida-core's
+              // RegisterLayout dedupe.
+              const registry = sessionRef.current?.ensureLayoutRegistry();
+              if (registry) {
+                const sendCmd = (json: string) => sessionRef.current?.bridge.sendCommand(json);
+                for (const spec of derivedBuildersFor(content as ContentGraph)) {
+                  registry.register(dsId, spec, sendCmd);
+                }
+                registry.refresh(dsId);
+                const snapActive =
+                  (doc.active_layout_ids as Record<string, string> | undefined)?.[dsId];
+                const fallback = (content as ContentGraph).default_layout_id;
+                const activeId = snapActive ?? fallback;
+                if (activeId) registry.setActiveLocal(dsId, activeId);
+              }
             }
           }
 
@@ -144,12 +163,46 @@ export function useBridge({
             // in S3; populated by S5 once the server actually sends data.
             const catalog = cmd.catalog ?? { entries: [] };
             sessionRef.current?.ensureAssetCatalog()?.applyInitial(cmd.content.dataset_id, catalog);
+
+            // Auto-register browser-authored derived layouts. RegisterLayout
+            // is idempotent in lucida-core (issue #425), so peers that
+            // already registered the same id don't accumulate duplicates.
+            const registry = sessionRef.current?.ensureLayoutRegistry();
+            if (registry) {
+              const sendCmd = (json: string) => sessionRef.current?.bridge.sendCommand(json);
+              const content = cmd.content as ContentGraph;
+              for (const spec of derivedBuildersFor(content)) {
+                registry.register(content.dataset_id, spec, sendCmd);
+              }
+              const activeId =
+                content.default_layout_id ?? content.source_layouts[0]?.id;
+              if (activeId) {
+                registry.setActive(content.dataset_id, activeId, sendCmd);
+              }
+            }
+
             setRemoteDatasetLoading(false);
             setWasmScene(scene);
           }
           if (cmd.type === "remove_dataset") {
             datasetCallbacksRef.current.removeDataset(cmd.id);
             sessionRef.current?.ensureAssetCatalog()?.removeDataset(cmd.id);
+            sessionRef.current?.ensureLayoutRegistry()?.removeDataset(cmd.id);
+          }
+          if (cmd.type === "register_layout" || cmd.type === "set_active_layout") {
+            // Inbound layout broadcast: refresh the mirror so peers' changes
+            // appear locally. setActiveLocal updates the active id without
+            // re-broadcasting (the WASM side already applied via apply_command
+            // above). markViewDirty so the GPU canvas re-renders without
+            // requiring local user interaction.
+            const registry = sessionRef.current?.ensureLayoutRegistry();
+            if (registry && cmd.dataset_id) {
+              registry.refresh(cmd.dataset_id);
+              if (cmd.type === "set_active_layout" && cmd.layout_id) {
+                registry.setActiveLocal(cmd.dataset_id, cmd.layout_id);
+              }
+              loopRef.current?.markViewDirty();
+            }
           }
           bumpRemoteDocumentVersion();
         } catch (e) {

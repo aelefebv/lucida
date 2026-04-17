@@ -1,5 +1,7 @@
 import { ContrastControls } from "./ContrastControls.tsx";
 import { ColormapSelector } from "./ColormapSelector.tsx";
+import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
+import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
 import "./LayerPanel.css";
 
 export interface LayerInfo {
@@ -49,6 +51,9 @@ interface Props {
   viewModeToggle: { label: string; onClick: () => void } | null;
   cameraModeToggle: { label: string; onClick: () => void } | null;
   debugToggle?: { label: string; active: boolean; onClick: () => void };
+  layoutRegistry: LayoutRegistry | null;
+  sendCommand: (json: string) => void;
+  onLayoutChange?: () => void;
   style?: React.CSSProperties;
 }
 
@@ -80,6 +85,9 @@ export function LayerPanel({
   viewModeToggle,
   cameraModeToggle,
   debugToggle,
+  layoutRegistry,
+  sendCommand,
+  onLayoutChange,
   style,
 }: Props) {
   return (
@@ -148,6 +156,12 @@ export function LayerPanel({
               </div>
               {isExpanded && (
                 <div className="layer-detail" onClick={(e) => e.stopPropagation()}>
+                  <LayoutSwitcher
+                    datasetId={layer.id}
+                    registry={layoutRegistry}
+                    sendCommand={sendCommand}
+                    onAfterChange={onLayoutChange}
+                  />
                   {multiChannel && layer.channelSettings ? (
                     <>
                       {layer.channelSettings.map((ch, chIdx) => (

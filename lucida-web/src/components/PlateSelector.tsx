@@ -27,9 +27,18 @@ interface PlateSelectorProps {
 
 /**
  * Extract PlateKind and positioned members from a ContentGraph.
+ *
+ * `activeLayoutPlacements`, when provided and non-empty, takes precedence
+ * over the source default layout. Use this to make click-to-pan reflect
+ * the currently active (possibly browser-authored) layout — the visual
+ * row/col grid stays anchored to the plate's logical structure either way.
+ *
  * Returns null if the dataset is not a plate.
  */
-export function extractPlateData(content: ContentGraph): { plateKind: PlateKind; members: PlacedMember[] } | null {
+export function extractPlateData(
+  content: ContentGraph,
+  activeLayoutPlacements?: { entity_id: string; position: [number, number] }[] | null,
+): { plateKind: PlateKind; members: PlacedMember[] } | null {
   if (content.kind === "Single") return null;
   if (typeof content.kind !== "object" || !("Plate" in content.kind)) return null;
 
@@ -41,12 +50,19 @@ export function extractPlateData(content: ContentGraph): { plateKind: PlateKind;
     has_stage_positions: plate.has_stage_positions,
   };
 
-  // Derive members from entities + source_layouts placements
+  // Derive members from entities + the supplied placements (or fall back
+  // to the source default layout if none provided).
   const members: PlacedMember[] = [];
-  const defaultLayout = content.source_layouts.find((l: LayoutSpec) => l.id === content.default_layout_id)
-    ?? content.source_layouts[0];
-  if (defaultLayout) {
-    for (const placement of defaultLayout.placements) {
+  const placements: { entity_id: string; position: [number, number] }[] | undefined =
+    activeLayoutPlacements && activeLayoutPlacements.length > 0
+      ? activeLayoutPlacements
+      : (
+          content.source_layouts.find((l: LayoutSpec) => l.id === content.default_layout_id)
+          ?? content.source_layouts[0]
+        )?.placements;
+
+  if (placements) {
+    for (const placement of placements) {
       const entity = content.entities.find((e: Entity) => e.id === placement.entity_id);
       if (entity) {
         const labels = entity.labels as Record<string, unknown>;

@@ -229,10 +229,10 @@ impl DocumentState {
                 self.remove_dataset(&id);
             }
             DocumentCommand::RegisterLayout { dataset_id, layout } => {
-                self.registered_layouts
-                    .entry(dataset_id)
-                    .or_default()
-                    .push(layout);
+                let layouts = self.registered_layouts.entry(dataset_id).or_default();
+                if !layouts.iter().any(|l| l.id == layout.id) {
+                    layouts.push(layout);
+                }
             }
             DocumentCommand::SetActiveLayout { dataset_id, layout_id } => {
                 self.active_layout_ids.insert(dataset_id, layout_id);

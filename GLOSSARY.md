@@ -52,9 +52,15 @@ Top-level terms. Per-crate glossaries have more detail.
 
 ## Layout System
 
-**RegisterLayout** -- DocumentCommand that adds a client-authored LayoutSpec to the shared layout registry. Available to all clients in the session.
+**RegisterLayout** -- DocumentCommand that adds a client-authored LayoutSpec to the shared layout registry. Available to all clients in the session. Idempotent on `LayoutSpec.id` — re-registering the same id is a no-op.
 
 **SetActiveLayout** -- DocumentCommand that switches the active layout for a dataset. Rebuilds derived state (member positions). Shared — all clients see the same active layout.
+
+**LayoutRegistry** -- Web-side mirror class (`lucida-web/src/pipeline/layoutRegistry.ts`) that tracks per-dataset available layouts and the active layout id. Forwards `register`/`setActive` through `wasmScene.apply_command` AND broadcasts via `sendCommand`. Exposes `subscribe()` + `getVersion()` for `useSyncExternalStore`. Stores derived `LayoutSpec` values locally so PlateSelector can read placements without a WASM round-trip.
+
+**Derived layout builders** -- Pure functions in `lucida-web/src/pipeline/layoutBuilders.ts` that take a `ContentGraph` and return a `LayoutSpec`. Today: `buildPlateGridLayout` (mirrors source), `buildDenseSquareLayout` (packs entities into a `ceil(sqrt(N))` grid). `derivedBuildersFor()` returns the array applicable to a given dataset; the bridge auto-registers them on dataset open.
+
+**LayoutSwitcher** -- React dropdown component (`lucida-web/src/components/LayoutSwitcher.tsx`) rendered per-layer in `LayerPanel`. Reads the registry via `useSyncExternalStore`, renders nothing when only one layout is available.
 
 ## Geometry
 

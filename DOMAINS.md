@@ -300,7 +300,7 @@ The Rust geometric query engine. Owns viewer state and evaluates spatial queries
 |-----------|------|----------------------|
 | **Document** | Dataset registry mapping dataset IDs to content graphs. Registration via commands, precomputed per-dataset caches for hot-path queries. | Yes (synced via server) |
 | **View** | Camera, T/C/Z selection, view mode, channel settings, layer visibility | No (local per client) |
-| **Layout registration** | Registered `LayoutSpec` instances, active layout selection via `register_layout()` / `set_active_layout()` | Active layout is per-client; specs may be shared |
+| **Layout registration** | Registered `LayoutSpec` instances, active layout selection via `register_layout()` / `set_active_layout()` | Active layout and specs are both shared (broadcast via SetActiveLayout / RegisterLayout document commands) |
 | **Geometric queries** | Transform composition, frustum culling, projected-size metrics, ideal target LOD, ray intersection, distance/importance ranking — all evaluated against the active layout | Shared implementation (same Rust runs native on server, WASM in browser, PyO3 in Python) |
 
 ### Boundary contract
@@ -781,7 +781,7 @@ The key principle: the content graph says what the dataset is. The scene says wh
 3. **Planning** — promotion, epochs, request scheduling over content graph + geometric queries. Testable standalone with mock snapshots. *(done)*
 4. **CPU Cache + Content Source** — fetch, decode, source abstraction. *(done — CpuCache is primary fetch+delivery path, MemberChunkPlan adapter deleted, see `docs/cpu-cache-spec.md`)*
 5. **Worker Protocol** — control/data/telemetry message shapes, epoch tagging. *(done — cold state, wanted-set loop, requestEpoch, see PRD #378)*
-6. **Presentation Overlay + Asset Catalog** — derived layouts expressed as `LayoutSpec`, asset catalog. Build alongside the Orchestrator since asset catalog feeds into PlanningSnapshot and derived layouts are browser-authored.
+6. **Presentation Overlay + Asset Catalog** — derived layouts expressed as `LayoutSpec`, asset catalog. Build alongside the Orchestrator since asset catalog feeds into PlanningSnapshot and derived layouts are browser-authored. *(done — Asset Catalog: pipeline/assetCatalog.ts; derived layouts via LayoutRegistry + LayoutSwitcher, see #424)*
 7. **Orchestrator** — wires Planning to CPU Cache, Worker Protocol, and upstream domains. Snapshot assembly, lifecycle, telemetry fan-out. *(done — M0+M2, see `docs/orchestrator-integration-spec.md`)*
 8. **GPU Residency** — atlas, page table, descriptors, wanted-set reporting. *(done — persistent atlas, multi-LOD indirection, shader fallback, cold-state-driven management, see PRD #383; shared atlas pools per (dataset, channel, chunk dims) for plate FPS, see PRD #393)* Deferred from initial implementation: per-entity descriptor buffers (model matrix, channel mask, proxy handle, page table base — currently render params are passed per-frame in render messages), overview proxy sampling via direct handle (needs Asset Catalog from step 6), temporal runway management (adjacent-T pages physically resident but unmapped — currently handled by natural eviction).
 9. **Rendering** — shader dispatch, compositing, semantic fallback chain. Deferred from GPU Residency step: full proxy→detail fallback (overview proxy as fallback below detail-owned range — needs Asset Catalog and descriptor buffers).

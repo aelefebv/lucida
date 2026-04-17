@@ -3,6 +3,7 @@ import type { ProxiedContentSource } from "./pipeline/contentSource.ts";
 import type { CpuCache } from "./pipeline/cpuCache.ts";
 import type { DecodePool } from "./pipeline/decodePool.ts";
 import { AssetCatalog } from "./pipeline/assetCatalog.ts";
+import { LayoutRegistry } from "./pipeline/layoutRegistry.ts";
 import type { WasmScene } from "lucida-core";
 
 /**
@@ -11,8 +12,8 @@ import type { WasmScene } from "lucida-core";
  * mode switches (which recreate RenderLoop) cannot lose this state.
  *
  * Eager fields are constructed with the Session. Lazy fields (`scene`,
- * `assetCatalog`) become non-null after the first server snapshot —
- * consumers must null-guard or call `ensureAssetCatalog()`.
+ * `assetCatalog`, `layoutRegistry`) become non-null after the first server
+ * snapshot — consumers must null-guard or call the corresponding ensure*().
  *
  * If you're adding new persistent state and it should survive a 2D↔3D
  * toggle, it goes here. If it's tied to a specific worker / canvas / GPU
@@ -26,6 +27,7 @@ export class Session {
 
   scene: WasmScene | null = null;
   assetCatalog: AssetCatalog | null = null;
+  layoutRegistry: LayoutRegistry | null = null;
 
   constructor(opts: {
     bridge: Bridge;
@@ -52,5 +54,16 @@ export class Session {
     if (!this.scene) return null;
     this.assetCatalog = new AssetCatalog(this.scene);
     return this.assetCatalog;
+  }
+
+  /**
+   * Lazy-construct LayoutRegistry after WasmScene is available. Returns null
+   * if scene is not yet set.
+   */
+  ensureLayoutRegistry(): LayoutRegistry | null {
+    if (this.layoutRegistry) return this.layoutRegistry;
+    if (!this.scene) return null;
+    this.layoutRegistry = new LayoutRegistry(this.scene);
+    return this.layoutRegistry;
   }
 }

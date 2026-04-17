@@ -12,7 +12,8 @@ lucida-store/      Storage abstraction, OME-Zarr parsing, import pipeline
 lucida-server/     Tokio WebSocket server, session management, chunk serving
 lucida-cli/        CLI client (inspection + control)
 lucida-web/        React + WebGPU frontend (not in Cargo workspace)
-                     pipeline/planning.ts  — Planning domain: pure function PlanningSnapshot → RequestPlan
+                     pipeline/planning.ts        — Planning domain: pure function PlanningSnapshot → RequestPlan
+                     pipeline/layoutRegistry.ts  — Mirror of WASM-side registered_layouts + active id; auto-registered derived layouts (Plate grid, Dense square)
 lucida-py/         Python bindings via PyO3 (excluded from workspace, built with maturin)
 ```
 

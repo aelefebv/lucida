@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
@@ -100,6 +100,16 @@ function App() {
   const datasets = useDatasets({
     sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,
   });
+
+  // Layout registry — null until WasmScene is set up; subscribe so the
+  // PlateSelector and LayoutSwitcher re-derive on layout changes (local or
+  // peer). The version counter is the stable snapshot for useSyncExternalStore.
+  const layoutRegistry = bridge.sessionRef.current?.ensureLayoutRegistry() ?? null;
+  useSyncExternalStore(
+    (cb) => layoutRegistry?.subscribe(cb) ?? (() => {}),
+    () => layoutRegistry?.getVersion() ?? 0,
+    () => 0,
+  );
 
   // Populate callback refs — runs during render, before effects fire
   bridgeCallbacksRef.current = {
@@ -318,6 +328,9 @@ function App() {
         viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
         cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
         debugToggle={{ label: "Debug", active: showDebug, onClick: handleDebugToggle }}
+        layoutRegistry={layoutRegistry}
+        sendCommand={bridge.sendCommand}
+        onLayoutChange={() => render.loopRef.current?.markViewDirty()}
         style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
       />
       <div className="sidebar-resize-handle" onPointerDown={layout.handleSidebarResizeDown} />
@@ -385,7 +398,14 @@ function App() {
             {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
               const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
               if (!ds) return null;
-              const plateData = extractPlateData(ds.content);
+              // Resolve the active layout's placements: derived layouts
+              // come from the registry, source layouts from the content graph.
+              const activeId = layoutRegistry?.activeId(ds.id) ?? ds.content.default_layout_id;
+              const activePlacements =
+                (activeId ? layoutRegistry?.getSpec(ds.id, activeId)?.placements : null)
+                ?? (activeId ? ds.content.source_layouts.find((l) => l.id === activeId)?.placements : null)
+                ?? null;
+              const plateData = extractPlateData(ds.content, activePlacements);
               if (!plateData) return null;
               return (
                 <PlateSelector

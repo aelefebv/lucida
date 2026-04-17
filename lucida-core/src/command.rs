@@ -130,6 +130,7 @@ impl Scene {
                         let derived = crate::scene::build_derived_state(content, &layout);
                         self.derived.insert(dataset_id, derived);
                     }
+                    self.epochs.layout += 1;
                     return;
                 }
                 match &doc_cmd {
@@ -182,7 +183,11 @@ impl Scene {
                     }
                     DocumentCommand::RegisterLayout { .. } => {
                         // Document state update happens below via self.document.apply().
-                        // No derived rebuild needed for register alone.
+                        // No derived rebuild needed for register alone (a registered
+                        // layout doesn't take effect until SetActiveLayout selects it),
+                        // but bump layout epoch so consumers (e.g., LayoutSwitcher
+                        // populating its dropdown) see the new option promptly.
+                        self.epochs.layout += 1;
                     }
                     DocumentCommand::SetActiveLayout { .. } => {
                         unreachable!("handled above");
@@ -1092,6 +1097,37 @@ mod tests {
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].id, LayoutId("new-layout".into()));
         assert_eq!(layouts[0].name, "New Layout");
+    }
+
+    #[test]
+    fn register_layout_dedupes_by_id() {
+        use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let ds_id = DatasetId("ds1".into());
+
+        let spec = LayoutSpec {
+            id: LayoutId("derived:dense".into()),
+            name: "Dense".into(),
+            placements: vec![EntityPlacement {
+                entity_id: EntityId("ds1-entity".into()),
+                position: [0.0, 0.0],
+            }],
+        };
+
+        scene.apply(DocumentCommand::RegisterLayout {
+            dataset_id: ds_id.clone(),
+            layout: spec.clone(),
+        }.into());
+        scene.apply(DocumentCommand::RegisterLayout {
+            dataset_id: ds_id.clone(),
+            layout: spec.clone(),
+        }.into());
+
+        let layouts = &scene.document.registered_layouts[&ds_id];
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].id, LayoutId("derived:dense".into()));
     }
 
     #[test]
