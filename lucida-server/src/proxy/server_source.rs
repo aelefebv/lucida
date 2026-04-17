@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lucida_content::{
-    AffineTransform, ContentGraph, EntityId, EntityKind, ImageId, ImageSpec,
+    ContentGraph, EntityId, EntityKind, ImageId, ImageSpec, VoxelTransform,
 };
 use lucida_proxy::{FieldVolume, ProxyKind, ProxySourceData, ProxySpec, SourceError};
 use lucida_store::cache::CachedStore;
@@ -42,7 +42,7 @@ struct VolumeKey {
 struct OwnedFieldVolume {
     data: Vec<u16>,
     dims: [u32; 3],
-    voxel_to_image: AffineTransform,
+    voxel_to_image: VoxelTransform,
 }
 
 impl ServerProxySource {
@@ -64,7 +64,7 @@ impl ServerProxySource {
         level: usize,
         data: Vec<u16>,
         dims: [u32; 3],
-        voxel_to_image: AffineTransform,
+        voxel_to_image: VoxelTransform,
     ) {
         self.volumes.insert(
             VolumeKey {
@@ -240,7 +240,7 @@ async fn fetch_dense_volume(
     level: usize,
     store: &Arc<CachedStore>,
     resolver: &ChunkResolver,
-) -> Result<(Vec<u16>, [u32; 3], AffineTransform), BuildSourceError> {
+) -> Result<(Vec<u16>, [u32; 3], VoxelTransform), BuildSourceError> {
     let level_geom = image
         .multiscale
         .levels
@@ -376,14 +376,12 @@ async fn fetch_dense_volume(
     let sx = scale_axis(level0.shape[4], level_x);
     let sy = scale_axis(level0.shape[3], level_y);
     let sz = scale_axis(level0.shape[2], level_z);
-    let level_voxel_to_image = AffineTransform {
-        matrix: [
-            sx,  0.0, 0.0, 0.0,
-            0.0, sy,  0.0, 0.0,
-            0.0, 0.0, sz,  0.0,
-            0.0, 0.0, 0.0, 1.0,
-        ],
-    };
+    let level_voxel_to_image = VoxelTransform::from_voxel_matrix([
+        sx,  0.0, 0.0, 0.0,
+        0.0, sy,  0.0, 0.0,
+        0.0, 0.0, sz,  0.0,
+        0.0, 0.0, 0.0, 1.0,
+    ]);
 
     // Compose with any explicit owner→owner self-edge if present (none today,
     // but preserves forward-compatibility with future content-graph emitters).
@@ -395,27 +393,28 @@ async fn fetch_dense_volume(
 
 /// Compose `owner_self ∘ level_scale` (apply level scale first, then any
 /// self-edge transform). Returns just `level_scale` if `owner_self` is identity.
-fn compose_self_edge(owner_self: &AffineTransform, level_scale: &AffineTransform) -> AffineTransform {
+fn compose_self_edge(owner_self: &VoxelTransform, level_scale: &VoxelTransform) -> VoxelTransform {
     if is_identity(owner_self) {
         return level_scale.clone();
     }
     // 4x4 column-major: result[col][row] = sum_k owner_self[k][row] * level_scale[col][k]
+    let owner_m = owner_self.matrix();
+    let level_m = level_scale.matrix();
     let mut out = [0.0f64; 16];
     for col in 0..4 {
         for row in 0..4 {
             let mut acc = 0.0;
             for k in 0..4 {
-                acc += owner_self.matrix[k * 4 + row] * level_scale.matrix[col * 4 + k];
+                acc += owner_m[k * 4 + row] * level_m[col * 4 + k];
             }
             out[col * 4 + row] = acc;
         }
     }
-    AffineTransform { matrix: out }
+    VoxelTransform::from_voxel_matrix(out)
 }
 
-fn is_identity(t: &AffineTransform) -> bool {
-    let id = AffineTransform::identity();
-    t.matrix == id.matrix
+fn is_identity(t: &VoxelTransform) -> bool {
+    t.matrix() == VoxelTransform::identity().matrix()
 }
 
 /// Try to find a `voxel → image-local` transform. The current import
@@ -423,13 +422,13 @@ fn is_identity(t: &AffineTransform) -> bool {
 /// image-owner` self-edge (used elsewhere in the graph) and fall back to
 /// identity. Identity is the right behavior for single-field datasets and
 /// matches the test fixtures.
-fn find_voxel_to_image(content: &ContentGraph, owner: &EntityId) -> AffineTransform {
+fn find_voxel_to_image(content: &ContentGraph, owner: &EntityId) -> VoxelTransform {
     content
         .transforms()
         .iter()
         .find(|edge| &edge.from == owner && &edge.to == owner)
         .map(|edge| edge.transform.clone())
-        .unwrap_or_else(AffineTransform::identity)
+        .unwrap_or_else(VoxelTransform::identity)
 }
 
 /// Errors from [`build_server_proxy_source`]. Mapped onto

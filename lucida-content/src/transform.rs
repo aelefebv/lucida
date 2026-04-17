@@ -2,11 +2,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::EntityId;
 
+/// An entity-to-entity affine transform expressed in **voxel units** of the
+/// `from` entity's full-resolution image.
+///
+/// Translations and scales in the `transform` matrix are interpreted as
+/// counts of source-entity full-res voxels. Producers reading from
+/// physical-unit metadata (e.g., OME-Zarr stage coordinates in microns)
+/// **must** convert at the call site before constructing the
+/// [`VoxelTransform`]. The canonical constructor is
+/// [`VoxelTransform::from_voxel_translation_2d`].
+///
+/// This contract was previously documentation-only; it is now enforced by
+/// the type. See PRD #418.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransformEdge {
     pub from: EntityId,
     pub to: EntityId,
-    pub transform: AffineTransform,
+    pub transform: VoxelTransform,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,5 +50,61 @@ impl AffineTransform {
                 tx,  ty,  0.0, 1.0,
             ],
         }
+    }
+}
+
+/// A column-major 4x4 affine transform whose translations and scales are
+/// expressed in **voxel units** of the source entity's full-resolution image.
+///
+/// `VoxelTransform` is a unit-tagged newtype around [`AffineTransform`].
+/// The inner matrix is private — construction goes through one of the
+/// dedicated `from_voxel_*` constructors so that callers must explicitly
+/// acknowledge the unit. A previous bug (issues #408 / #409) had a
+/// producer construct an edge with physical units (microns) where
+/// consumers expected voxel units; this newtype prevents that class of
+/// bug at compile time.
+///
+/// The serde representation is `#[serde(transparent)]` so the wire format
+/// is byte-compatible with `AffineTransform`: `{ "matrix": [16 floats] }`.
+///
+/// ```compile_fail
+/// use lucida_content::{VoxelTransform, AffineTransform};
+/// let _: VoxelTransform = AffineTransform::identity();
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct VoxelTransform {
+    inner: AffineTransform,
+}
+
+impl VoxelTransform {
+    /// Identity transform (no-op).
+    pub fn identity() -> Self {
+        Self {
+            inner: AffineTransform::identity(),
+        }
+    }
+
+    /// Pure 2D translation in voxel units of the source entity's
+    /// full-resolution image.
+    pub fn from_voxel_translation_2d(tx: f64, ty: f64) -> Self {
+        Self {
+            inner: AffineTransform::translation_2d(tx, ty),
+        }
+    }
+
+    /// Construct from a raw column-major 4x4 matrix whose components are
+    /// already expressed in voxel units of the source entity's full-resolution
+    /// image. Use this when building scale or composed transforms from math
+    /// you've already done in the right unit.
+    pub fn from_voxel_matrix(matrix: [f64; 16]) -> Self {
+        Self {
+            inner: AffineTransform { matrix },
+        }
+    }
+
+    /// Borrow the underlying column-major 4x4 matrix.
+    pub fn matrix(&self) -> &[f64; 16] {
+        &self.inner.matrix
     }
 }

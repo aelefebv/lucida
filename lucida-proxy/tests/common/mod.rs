@@ -6,9 +6,8 @@
 use std::collections::HashMap;
 
 use lucida_content::{
-    AffineTransform, Axis, AxisKind, ContentGraph, DataType, DatasetId, DatasetKind, Entity,
-    EntityId, EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo,
-    TransformEdge,
+    Axis, AxisKind, ContentGraph, DataType, DatasetId, DatasetKind, Entity, EntityId, EntityKind,
+    EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo, TransformEdge, VoxelTransform,
 };
 use lucida_proxy::{FieldVolume, ProxySourceData, SourceError};
 
@@ -22,7 +21,7 @@ pub struct MockSource {
 pub struct StoredVolume {
     pub data: Vec<u16>,
     pub dims: [u32; 3],
-    pub voxel_to_image: AffineTransform,
+    pub voxel_to_image: VoxelTransform,
 }
 
 impl MockSource {
@@ -34,7 +33,7 @@ impl MockSource {
         level: usize,
         data: Vec<u16>,
         dims: [u32; 3],
-        voxel_to_image: AffineTransform,
+        voxel_to_image: VoxelTransform,
     ) {
         self.volumes.insert(
             (image_id.to_string(), t, c, level),
@@ -168,7 +167,7 @@ pub fn well_graph_with_fields(
         transforms.push(TransformEdge {
             from: fid.clone(),
             to: well_eid.clone(),
-            transform: AffineTransform::translation_2d(f.translation_xy[0], f.translation_xy[1]),
+            transform: VoxelTransform::from_voxel_translation_2d(f.translation_xy[0], f.translation_xy[1]),
         });
 
         images.push(ImageSpec {

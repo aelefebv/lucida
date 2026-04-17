@@ -1,7 +1,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use lucida_content::{AffineTransform, EntityId};
+use lucida_content::{EntityId, VoxelTransform};
 use lucida_proxy::{
     ALGORITHM_VERSION, ProxyDtype, ProxyKind, ProxySpec, generate_proxy,
 };
@@ -30,7 +30,7 @@ fn downsample_256_to_128_x_gradient() {
         0, // level 0 chosen because no smaller level exists; also picks here
         gradient_volume_x(dims_in),
         dims_in,
-        AffineTransform::identity(),
+        VoxelTransform::identity(),
     );
 
     let spec = ProxySpec {
@@ -93,7 +93,7 @@ fn downsample_anisotropic_proportional_scaling() {
         0,
         vec![42u16; (64 * 256 * 128) as usize],
         dims_in,
-        AffineTransform::identity(),
+        VoxelTransform::identity(),
     );
 
     let spec = ProxySpec {
@@ -128,7 +128,7 @@ fn downsample_target_larger_than_source_clamps() {
         0,
         vec![7u16; (16 * 32 * 32) as usize],
         [16, 32, 32],
-        AffineTransform::identity(),
+        VoxelTransform::identity(),
     );
 
     let spec = ProxySpec {

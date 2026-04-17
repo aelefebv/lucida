@@ -67,7 +67,7 @@ mod tests {
     use crate::image::{
         Axis, AxisKind, DataType, LevelGeometry, MultiscaleInfo,
     };
-    use crate::transform::AffineTransform;
+    use crate::transform::VoxelTransform;
 
     fn make_single_image_graph() -> ContentGraph {
         let entity_id = EntityId("img-0".to_string());
@@ -89,7 +89,7 @@ mod tests {
             vec![TransformEdge {
                 from: entity_id.clone(),
                 to: entity_id.clone(),
-                transform: AffineTransform::identity(),
+                transform: VoxelTransform::identity(),
             }],
             vec![ImageSpec {
                 image_id,

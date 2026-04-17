@@ -160,7 +160,7 @@ pub fn source_content_hash(
             .transforms()
             .iter()
             .filter(|edge| &edge.from == *cid || &edge.to == *cid)
-            .map(|edge| (edge.from.0.as_str(), edge.to.0.as_str(), edge.transform.matrix))
+            .map(|edge| (edge.from.0.as_str(), edge.to.0.as_str(), *edge.transform.matrix()))
             .collect();
             edges.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
         for (from, to, matrix) in edges {

@@ -12,7 +12,7 @@ Top-level terms. Per-crate glossaries have more detail.
 
 **LevelGeometry** -- Shape, chunk shape, grid shape, and scale for one pyramid level. Fixed 5D: `[T, C, Z, Y, X]`.
 
-**TransformEdge** -- Directed spatial relationship between entities (e.g., field-to-well translation).
+**TransformEdge** -- Directed spatial relationship between entities (e.g., field-to-well translation). Carries a `VoxelTransform` — translations and scales are always in voxel units of the source entity's full-resolution image.
 
 **LayoutSpec** -- A spatial arrangement of entities. Source layouts come from metadata; derived layouts are client-authored.
 

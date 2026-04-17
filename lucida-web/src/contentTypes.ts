@@ -18,6 +18,16 @@ export interface Entity {
 export interface TransformEdge {
   from: string;
   to: string;
+  /**
+   * Affine transform from `from` to `to`, expressed in **voxel units** of
+   * the source entity's full-resolution image. Wire format is
+   * `{ matrix: [16 floats] }` in column-major order, so the 2D translation
+   * components live at `matrix[12]` (tx) and `matrix[13]` (ty).
+   *
+   * See `lucida-content/src/transform.rs` for the authoritative
+   * `VoxelTransform` definition and the unit contract producers must
+   * uphold.
+   */
   transform: { matrix: number[] };
 }
 

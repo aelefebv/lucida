@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::entity::{Entity, EntityKind};
 use crate::id::{EntityId, LayoutId};
 use crate::layout::{EntityPlacement, LayoutSpec};
-use crate::transform::{AffineTransform, TransformEdge};
+use crate::transform::{TransformEdge, VoxelTransform};
 
 /// Gap between FOV fields within a well, as a fraction of FOV width.
 const FIELD_GAP_FRACTION: f64 = 0.08;
@@ -162,7 +162,7 @@ pub fn build_grid_field_transforms(
             transforms.push(TransformEdge {
                 from: field.id.clone(),
                 to: (*well_id).clone(),
-                transform: AffineTransform::translation_2d(tx, ty),
+                transform: VoxelTransform::from_voxel_translation_2d(tx, ty),
             });
         }
     }
@@ -196,8 +196,8 @@ pub fn plate_extent(
             max_y = max_y.max(placement.position[1] + fov_y);
         } else {
             for t in &well_field_transforms {
-                let field_tx = t.transform.matrix[12];
-                let field_ty = t.transform.matrix[13];
+                let field_tx = t.transform.matrix()[12];
+                let field_ty = t.transform.matrix()[13];
                 max_x = max_x.max(placement.position[0] + field_tx + fov_x);
                 max_y = max_y.max(placement.position[1] + field_ty + fov_y);
             }
@@ -314,8 +314,8 @@ mod tests {
         assert_eq!(transforms.len(), 6);
 
         for t in &transforms {
-            assert!((t.transform.matrix[12]).abs() < 1e-9, "tx should be 0");
-            assert!((t.transform.matrix[13]).abs() < 1e-9, "ty should be 0");
+            assert!((t.transform.matrix()[12]).abs() < 1e-9, "tx should be 0");
+            assert!((t.transform.matrix()[13]).abs() < 1e-9, "ty should be 0");
         }
     }
 
@@ -381,17 +381,17 @@ mod tests {
         assert_eq!(w00_transforms.len(), 4);
 
         // field 0 at (0, 0)
-        assert!((w00_transforms[0].transform.matrix[12]).abs() < 1e-9);
-        assert!((w00_transforms[0].transform.matrix[13]).abs() < 1e-9);
+        assert!((w00_transforms[0].transform.matrix()[12]).abs() < 1e-9);
+        assert!((w00_transforms[0].transform.matrix()[13]).abs() < 1e-9);
         // field 1 at (fov_x + gap_x, 0)
-        assert!((w00_transforms[1].transform.matrix[12] - (fov_x + gap_x)).abs() < 1e-9);
-        assert!((w00_transforms[1].transform.matrix[13]).abs() < 1e-9);
+        assert!((w00_transforms[1].transform.matrix()[12] - (fov_x + gap_x)).abs() < 1e-9);
+        assert!((w00_transforms[1].transform.matrix()[13]).abs() < 1e-9);
         // field 2 at (0, fov_y + gap_y)
-        assert!((w00_transforms[2].transform.matrix[12]).abs() < 1e-9);
-        assert!((w00_transforms[2].transform.matrix[13] - (fov_y + gap_y)).abs() < 1e-9);
+        assert!((w00_transforms[2].transform.matrix()[12]).abs() < 1e-9);
+        assert!((w00_transforms[2].transform.matrix()[13] - (fov_y + gap_y)).abs() < 1e-9);
         // field 3 at (fov_x + gap_x, fov_y + gap_y)
-        assert!((w00_transforms[3].transform.matrix[12] - (fov_x + gap_x)).abs() < 1e-9);
-        assert!((w00_transforms[3].transform.matrix[13] - (fov_y + gap_y)).abs() < 1e-9);
+        assert!((w00_transforms[3].transform.matrix()[12] - (fov_x + gap_x)).abs() < 1e-9);
+        assert!((w00_transforms[3].transform.matrix()[13] - (fov_y + gap_y)).abs() < 1e-9);
     }
 
     #[test]

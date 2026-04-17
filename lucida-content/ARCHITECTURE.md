@@ -8,7 +8,7 @@ Canonical content model. Describes datasets as scientific objects. No dependenci
 lib.rs          re-exports
 id.rs           DatasetId, EntityId, ImageId, LayoutId
 entity.rs       Entity, EntityKind (Image/Well/Field), EntityLabels
-transform.rs    TransformEdge, AffineTransform (column-major 4x4)
+transform.rs    TransformEdge, VoxelTransform (voxel-unit newtype), AffineTransform (column-major 4x4)
 image.rs        ImageSpec, MultiscaleInfo, Axis, AxisKind, LevelGeometry, DataType
 layout.rs       LayoutSpec, EntityPlacement, PositioningMode
 kind.rs         DatasetKind (Single / Plate)
@@ -31,3 +31,4 @@ normalize.rs    axis_index(), normalize_to_5d(), normalize_f64_to_5d()
 - `LevelGeometry.grid_shape` is precomputed: `ceil(shape / chunk_shape)`.
 - Plate layouts place wells, not fields. Field positions come from `TransformEdge`.
 - Placements are `[X, Y]`. Shapes are `[T, C, Z, Y, X]`.
+- All `TransformEdge.transform` values are in **voxel units** of the source entity's full-resolution image. Enforced by the `VoxelTransform` newtype.

@@ -1,7 +1,7 @@
 #[path = "common/mod.rs"]
 mod common;
 
-use lucida_content::{AffineTransform, EntityId};
+use lucida_content::{EntityId, VoxelTransform};
 use lucida_proxy::{ProxyKind, ProxySpec, generate_proxy};
 
 use crate::common::{FieldSpec, MockSource, fill_volume, level5, sample, well_graph_with_fields};
@@ -52,7 +52,7 @@ fn aggregate_2x2_grid_no_gap_no_overlap() {
             img, 0, 0, 0,
             fill_volume(dims, value),
             dims,
-            AffineTransform::identity(),
+            VoxelTransform::identity(),
         );
     }
 
@@ -124,7 +124,7 @@ fn aggregate_2x2_grid_with_gap_zero_filled() {
             img, 0, 0, 0,
             fill_volume(dims, 100),
             dims,
-            AffineTransform::identity(),
+            VoxelTransform::identity(),
         );
     }
 
@@ -170,7 +170,7 @@ fn aggregate_single_field_well_works() {
         "img-0", 0, 0, 0,
         fill_volume(dims, 77),
         dims,
-        AffineTransform::identity(),
+        VoxelTransform::identity(),
     );
 
     let spec = ProxySpec {
@@ -213,8 +213,8 @@ fn aggregate_overlapping_fields_average() {
     );
 
     let mut source = MockSource::default();
-    source.insert("img-L", 0, 0, 0, fill_volume(dims, 100), dims, AffineTransform::identity());
-    source.insert("img-R", 0, 0, 0, fill_volume(dims, 200), dims, AffineTransform::identity());
+    source.insert("img-L", 0, 0, 0, fill_volume(dims, 100), dims, VoxelTransform::identity());
+    source.insert("img-R", 0, 0, 0, fill_volume(dims, 200), dims, VoxelTransform::identity());
 
     let spec = ProxySpec {
         entity_id: EntityId("well".into()),
@@ -276,12 +276,12 @@ fn aggregate_downsampled_voxel_to_image_preserves_field_extent() {
 
     // voxel_to_image as the lucida-server fix would produce it: shape ratio
     // (32/16 = 2.0) along each spatial axis.
-    let scale_2x = AffineTransform { matrix: [
+    let scale_2x = VoxelTransform::from_voxel_matrix([
         2.0, 0.0, 0.0, 0.0,
         0.0, 2.0, 0.0, 0.0,
         0.0, 0.0, 2.0, 0.0,
         0.0, 0.0, 0.0, 1.0,
-    ]};
+    ]);
 
     // Source returns the downsampled volume at level 1 with the scale transform.
     // (Level 0 isn't inserted — pick_level should pick level 1 below.)

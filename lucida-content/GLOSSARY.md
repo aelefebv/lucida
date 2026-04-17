@@ -6,9 +6,11 @@
 
 **EntityLabels** -- Optional structured metadata on an entity (name, well_row, column_index, field_index, etc.).
 
-**TransformEdge** -- A directed spatial relationship between two entities. Typically field-to-well, encoding stage translation or grid offset.
+**TransformEdge** -- A directed spatial relationship between two entities. Typically field-to-well, encoding stage translation or grid offset. The `transform` field is a `VoxelTransform`, so units are enforced at the type level.
 
-**AffineTransform** -- Column-major 4x4 matrix. Used for 2D translations in practice.
+**VoxelTransform** -- Newtype wrapper around `AffineTransform` whose translations and scales are required to be in **voxel units** of the source entity's full-resolution image. Producers reading from physical-unit metadata (e.g., OME-Zarr microns) must convert at the call site. Constructors: `identity()`, `from_voxel_translation_2d(tx, ty)`, `from_voxel_matrix([f64; 16])`. Read access via `matrix()`. `#[serde(transparent)]` so wire format is identical to `AffineTransform`.
+
+**AffineTransform** -- Column-major 4x4 matrix. Underlying primitive used by `VoxelTransform`. Has no unit semantics on its own; do not put one inside a `TransformEdge` directly — go through `VoxelTransform`.
 
 **ImageSpec** -- Links an image-bearing entity to its multiscale geometry via `owner: EntityId`.
 

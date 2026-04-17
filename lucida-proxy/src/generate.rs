@@ -15,7 +15,7 @@
 //!   them; gaps stay zero.
 
 use lucida_content::{
-    AffineTransform, ContentGraph, Entity, EntityId, EntityKind, ImageSpec, LevelGeometry,
+    ContentGraph, Entity, EntityId, EntityKind, ImageSpec, LevelGeometry, VoxelTransform,
 };
 
 use crate::source::{ProxySourceData, SourceError};
@@ -245,7 +245,7 @@ fn aggregate_well(
         // Compose voxel→image and image→well into voxel→well so we can
         // bound and sample in well space directly.
         let voxel_to_well = compose(&field_to_well, &volume.voxel_to_image);
-        let well_to_voxel = invert(&voxel_to_well).unwrap_or_else(AffineTransform::identity);
+        let well_to_voxel = invert(&voxel_to_well).unwrap_or_else(VoxelTransform::identity);
 
         field_data.push(FieldEntry {
             image: image.clone(),
@@ -388,8 +388,8 @@ struct FieldEntry {
     #[allow(dead_code)]
     image: ImageSpec,
     volume: crate::source::FieldVolume,
-    voxel_to_well: AffineTransform,
-    well_to_voxel: AffineTransform,
+    voxel_to_well: VoxelTransform,
+    well_to_voxel: VoxelTransform,
 }
 
 /// Find an `EntityKind::Field → Well` transform. Returns identity if no
@@ -398,13 +398,13 @@ fn find_field_to_well(
     content: &ContentGraph,
     field_id: &EntityId,
     well_id: &EntityId,
-) -> AffineTransform {
+) -> VoxelTransform {
     content
         .transforms()
         .iter()
         .find(|edge| &edge.from == field_id && &edge.to == well_id)
         .map(|edge| edge.transform.clone())
-        .unwrap_or_else(AffineTransform::identity)
+        .unwrap_or_else(VoxelTransform::identity)
 }
 
 // =============================================================================
@@ -412,27 +412,29 @@ fn find_field_to_well(
 // =============================================================================
 
 /// Multiply two column-major 4x4 matrices. Returns `lhs * rhs`.
-fn compose(lhs: &AffineTransform, rhs: &AffineTransform) -> AffineTransform {
+fn compose(lhs: &VoxelTransform, rhs: &VoxelTransform) -> VoxelTransform {
     // Column-major: m[col*4 + row]
     let mut out = [0.0_f64; 16];
+    let lhs_m = lhs.matrix();
+    let rhs_m = rhs.matrix();
     for col in 0..4 {
         for row in 0..4 {
             let mut sum = 0.0;
             for k in 0..4 {
-                let a = lhs.matrix[k * 4 + row];
-                let b = rhs.matrix[col * 4 + k];
+                let a = lhs_m[k * 4 + row];
+                let b = rhs_m[col * 4 + k];
                 sum += a * b;
             }
             out[col * 4 + row] = sum;
         }
     }
-    AffineTransform { matrix: out }
+    VoxelTransform::from_voxel_matrix(out)
 }
 
 /// Apply a column-major affine to a point `[x, y, z]` (homogeneous w = 1).
-fn transform_point(m: &AffineTransform, p: [f64; 3]) -> [f64; 3] {
+fn transform_point(m: &VoxelTransform, p: [f64; 3]) -> [f64; 3] {
     // Column-major: column `c` lives at indices `[c*4 .. c*4 + 4]`.
-    let mat = &m.matrix;
+    let mat = m.matrix();
     let x = p[0];
     let y = p[1];
     let z = p[2];
@@ -444,12 +446,13 @@ fn transform_point(m: &AffineTransform, p: [f64; 3]) -> [f64; 3] {
 
 /// Invert a column-major 4×4 affine via Gauss-Jordan with partial
 /// pivoting. Returns `None` for degenerate matrices.
-fn invert(m: &AffineTransform) -> Option<AffineTransform> {
+fn invert(m: &VoxelTransform) -> Option<VoxelTransform> {
     // Convert column-major flat to a row-major [4][4] array.
+    let mat = m.matrix();
     let mut a = [[0.0f64; 4]; 4];
     for col in 0..4 {
         for row in 0..4 {
-            a[row][col] = m.matrix[col * 4 + row];
+            a[row][col] = mat[col * 4 + row];
         }
     }
 
@@ -506,5 +509,5 @@ fn invert(m: &AffineTransform) -> Option<AffineTransform> {
             out[col * 4 + row] = inv[row][col];
         }
     }
-    Some(AffineTransform { matrix: out })
+    Some(VoxelTransform::from_voxel_matrix(out))
 }

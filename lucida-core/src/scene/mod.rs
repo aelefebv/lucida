@@ -702,7 +702,7 @@ fn find_entity_position(
             // Get field->parent transform
             let transform_offset = transforms.iter()
                 .find(|t| &t.from == entity_id && &t.to == parent_id)
-                .map(|t| [t.transform.matrix[12], t.transform.matrix[13]])
+                .map(|t| [t.transform.matrix()[12], t.transform.matrix()[13]])
                 .unwrap_or([0.0, 0.0]);
 
             return [parent_pos[0] + transform_offset[0], parent_pos[1] + transform_offset[1]];

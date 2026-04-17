@@ -4,7 +4,7 @@
 //! Callers (the server, tests, future PyO3 wrapper) provide voxel data
 //! through the [`ProxySourceData`] trait.
 
-use lucida_content::{AffineTransform, ImageId};
+use lucida_content::{ImageId, VoxelTransform};
 
 /// A single field's voxel data plus the transform that places its voxel
 /// grid into image / field coordinates.
@@ -17,7 +17,7 @@ pub struct FieldVolume {
     /// Maps voxel-index space `(x, y, z)` to image / field-local space.
     /// Used by the well aggregator to find a sample location after
     /// transforming a target well coordinate back into the field.
-    pub voxel_to_image: AffineTransform,
+    pub voxel_to_image: VoxelTransform,
 }
 
 /// Source for proxy generation. Implementors return decoded `u16` volumes

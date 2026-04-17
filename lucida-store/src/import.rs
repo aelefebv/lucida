@@ -403,13 +403,13 @@ async fn import_plate(
                     transforms.push(TransformEdge {
                         from: field_entity_id.clone(),
                         to: well_entity_id.clone(),
-                        transform: AffineTransform::translation_2d(x - min_x, y - min_y),
+                        transform: VoxelTransform::from_voxel_translation_2d(x - min_x, y - min_y),
                     });
                 } else {
                     transforms.push(TransformEdge {
                         from: field_entity_id.clone(),
                         to: well_entity_id.clone(),
-                        transform: AffineTransform::translation_2d(0.0, 0.0),
+                        transform: VoxelTransform::from_voxel_translation_2d(0.0, 0.0),
                     });
                 }
             }
@@ -1086,17 +1086,17 @@ mod tests {
         // min_x=200, min_y=100 => FOV 0 at (0,0), FOV 1 at (400,200).
         let t0 = &result.content.transforms()[0];
         let t1 = &result.content.transforms()[1];
-        assert!((t0.transform.matrix[12]).abs() < 1e-9, "FOV 0 tx should be 0");
-        assert!((t0.transform.matrix[13]).abs() < 1e-9, "FOV 0 ty should be 0");
+        assert!((t0.transform.matrix()[12]).abs() < 1e-9, "FOV 0 tx should be 0");
+        assert!((t0.transform.matrix()[13]).abs() < 1e-9, "FOV 0 ty should be 0");
         assert!(
-            (t1.transform.matrix[12] - 400.0).abs() < 1e-9,
+            (t1.transform.matrix()[12] - 400.0).abs() < 1e-9,
             "FOV 1 tx should be 400, got {}",
-            t1.transform.matrix[12],
+            t1.transform.matrix()[12],
         );
         assert!(
-            (t1.transform.matrix[13] - 200.0).abs() < 1e-9,
+            (t1.transform.matrix()[13] - 200.0).abs() < 1e-9,
             "FOV 1 ty should be 200, got {}",
-            t1.transform.matrix[13],
+            t1.transform.matrix()[13],
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1303,20 +1303,20 @@ mod tests {
 
         // FOV 0 is the per-well origin.
         let t0 = find_field_transform(&result, "stage-vox", 0);
-        assert!((t0.transform.matrix[12]).abs() < 1e-9, "FOV 0 tx should be 0");
-        assert!((t0.transform.matrix[13]).abs() < 1e-9, "FOV 0 ty should be 0");
+        assert!((t0.transform.matrix()[12]).abs() < 1e-9, "FOV 0 tx should be 0");
+        assert!((t0.transform.matrix()[13]).abs() < 1e-9, "FOV 0 ty should be 0");
 
         // FOV 1: 100 µm / 0.5 = 200 voxels in X, 200 µm / 0.5 = 400 voxels in Y.
         let t1 = find_field_transform(&result, "stage-vox", 1);
         assert!(
-            (t1.transform.matrix[12] - 200.0).abs() < 1e-9,
+            (t1.transform.matrix()[12] - 200.0).abs() < 1e-9,
             "FOV 1 tx should be 200 voxels, got {}",
-            t1.transform.matrix[12],
+            t1.transform.matrix()[12],
         );
         assert!(
-            (t1.transform.matrix[13] - 400.0).abs() < 1e-9,
+            (t1.transform.matrix()[13] - 400.0).abs() < 1e-9,
             "FOV 1 ty should be 400 voxels, got {}",
-            t1.transform.matrix[13],
+            t1.transform.matrix()[13],
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1358,17 +1358,17 @@ mod tests {
         let gap_x = 0.08 * fov_x;
 
         let t0 = find_field_transform(&result, "grid-plate", 0);
-        assert!((t0.transform.matrix[12]).abs() < 1e-9, "field 0 tx");
-        assert!((t0.transform.matrix[13]).abs() < 1e-9, "field 0 ty");
+        assert!((t0.transform.matrix()[12]).abs() < 1e-9, "field 0 tx");
+        assert!((t0.transform.matrix()[13]).abs() < 1e-9, "field 0 ty");
 
         let t1 = find_field_transform(&result, "grid-plate", 1);
         assert!(
-            (t1.transform.matrix[12] - (fov_x + gap_x)).abs() < 1e-9,
+            (t1.transform.matrix()[12] - (fov_x + gap_x)).abs() < 1e-9,
             "field 1 tx should be {} voxels, got {}",
             fov_x + gap_x,
-            t1.transform.matrix[12],
+            t1.transform.matrix()[12],
         );
-        assert!((t1.transform.matrix[13]).abs() < 1e-9, "field 1 ty");
+        assert!((t1.transform.matrix()[13]).abs() < 1e-9, "field 1 ty");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1396,20 +1396,20 @@ mod tests {
 
         // FOV 0 at origin.
         let t0 = find_field_transform(&result, "missing-scale", 0);
-        assert!((t0.transform.matrix[12]).abs() < 1e-9);
-        assert!((t0.transform.matrix[13]).abs() < 1e-9);
+        assert!((t0.transform.matrix()[12]).abs() < 1e-9);
+        assert!((t0.transform.matrix()[13]).abs() < 1e-9);
 
         // FOV 1: pass-through (raw 100 -> 100 voxels in X, 200 -> 200 in Y).
         let t1 = find_field_transform(&result, "missing-scale", 1);
         assert!(
-            (t1.transform.matrix[12] - 100.0).abs() < 1e-9,
+            (t1.transform.matrix()[12] - 100.0).abs() < 1e-9,
             "FOV 1 tx should be 100 voxels (pass-through), got {}",
-            t1.transform.matrix[12],
+            t1.transform.matrix()[12],
         );
         assert!(
-            (t1.transform.matrix[13] - 200.0).abs() < 1e-9,
+            (t1.transform.matrix()[13] - 200.0).abs() < 1e-9,
             "FOV 1 ty should be 200 voxels (pass-through), got {}",
-            t1.transform.matrix[13],
+            t1.transform.matrix()[13],
         );
 
         let _ = fs::remove_dir_all(&dir);
@@ -1436,26 +1436,26 @@ mod tests {
 
         // FOV 0 at origin.
         let t0 = find_field_transform(&result, "zero-scale", 0);
-        assert!((t0.transform.matrix[12]).abs() < 1e-9);
-        assert!((t0.transform.matrix[13]).abs() < 1e-9);
+        assert!((t0.transform.matrix()[12]).abs() < 1e-9);
+        assert!((t0.transform.matrix()[13]).abs() < 1e-9);
 
         // FOV 1: X falls back to scale=1 (raw 100 -> 100). Y uses real
         // scale=0.5 (raw 200 -> 400). Verify no NaN/Inf.
         let t1 = find_field_transform(&result, "zero-scale", 1);
         assert!(
-            t1.transform.matrix[12].is_finite(),
+            t1.transform.matrix()[12].is_finite(),
             "FOV 1 tx must be finite (no division by zero), got {}",
-            t1.transform.matrix[12],
+            t1.transform.matrix()[12],
         );
         assert!(
-            (t1.transform.matrix[12] - 100.0).abs() < 1e-9,
+            (t1.transform.matrix()[12] - 100.0).abs() < 1e-9,
             "FOV 1 tx should be 100 (X scale fell back to 1.0), got {}",
-            t1.transform.matrix[12],
+            t1.transform.matrix()[12],
         );
         assert!(
-            (t1.transform.matrix[13] - 400.0).abs() < 1e-9,
+            (t1.transform.matrix()[13] - 400.0).abs() < 1e-9,
             "FOV 1 ty should be 400 (Y scale 0.5 still applied), got {}",
-            t1.transform.matrix[13],
+            t1.transform.matrix()[13],
         );
 
         let _ = fs::remove_dir_all(&dir);

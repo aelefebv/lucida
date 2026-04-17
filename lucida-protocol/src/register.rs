@@ -44,7 +44,7 @@ mod tests {
             vec![TransformEdge {
                 from: entity_id.clone(),
                 to: entity_id.clone(),
-                transform: AffineTransform::identity(),
+                transform: VoxelTransform::identity(),
             }],
             vec![ImageSpec {
                 image_id: image_id.clone(),
