@@ -209,13 +209,12 @@ export class Orchestrator {
   private _lastVisibleRegion: VisibleRegion | null = null;
   private _lastEntities: EntitySnapshot[] = [];
   private _lastCachedKeyCounts = new Map<string, number>();
-  /** Last filtered requests, re-submitted on epoch HIT to CpuCache. */
+  /** Last filtered requests, kept for the deliverToWorker resend pass on cache hits. */
   private _lastFilteredRequests: ChunkRequest[] = [];
   /**
-   * Last proxy requests produced by `plan()`, re-submitted on epoch HIT
-   * to CpuCache. S5 only cached chunk requests, which dropped any
-   * proxies whenever the orchestrator took the cache-hit short-circuit;
-   * S6 closes that gap so proxies stay live across cached planning ticks.
+   * Last proxy requests produced by `plan()`, kept for the deliverToWorker
+   * proxy resend pass on cache hits (see `:735-751`). Not re-submitted to
+   * CpuCache — fetches stay alive on their own now that submit is additive.
    */
   private _lastProxyRequests: ProxyRequest[] = [];
 
@@ -266,19 +265,6 @@ export class Orchestrator {
       currentEpochs.selection === this.lastEpochs.selection &&
       currentEpochs.asset === this.lastEpochs.asset
     ) {
-      // Re-submit detail + minimap (and any cached proxies) in one call
-      // so they don't cancel each other. Forwarding `_lastProxyRequests`
-      // here closes the S5 gap where proxies vanished on epoch HIT.
-      const minimapReqs = this.collectMinimapRequests(ctx, minimapPendingFetch);
-      const allRequests = [...this._lastFilteredRequests, ...minimapReqs];
-      if (allRequests.length > 0 || this._lastProxyRequests.length > 0) {
-        ctx.cpuCache.submit({
-          requests: allRequests,
-          activeSet: [...(this.previousActiveSet.values())].flat(),
-          proxyRequests: this._lastProxyRequests,
-          epochs: this.lastEpochs!,
-        });
-      }
       if (debugStats.enabled && debugStats.orch) {
         debugStats.orch.epochCacheHit = true;
       }
@@ -992,38 +978,6 @@ export class Orchestrator {
       proxyRequests: [proxyRequest],
       epochs,
     });
-  }
-
-  /** Collect minimap pending fetches as overview-lane ChunkRequests (no submit). */
-  private collectMinimapRequests(
-    ctx: TickContext,
-    minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
-  ): ChunkRequest[] {
-    const requests: ChunkRequest[] = [];
-    for (const [dsId, ds] of ctx.datasets) {
-      for (const img of ds.content.images) {
-        const pending = minimapPendingFetch.get(img.image_id);
-        if (pending && pending.length > 0) {
-          for (const coord of pending) {
-            requests.push({
-              entityId: img.image_id,
-              imageId: img.image_id,
-              level: coord.level,
-              t: coord.t,
-              c: coord.c,
-              z: coord.z,
-              y: coord.y,
-              x: coord.x,
-              lane: "overview",
-              priority: 2000,
-              chunkKey: coord.key,
-              datasetId: dsId,
-            });
-          }
-        }
-      }
-    }
-    return requests;
   }
 
   /** Build and send a ColdStateMessage to the GPU worker. */

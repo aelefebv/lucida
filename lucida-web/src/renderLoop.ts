@@ -155,6 +155,8 @@ export class RenderLoop {
     // member IDs may differ (e.g. "plateId:A/1/0").
     const memberIds = this.collectMemberIds(id);
 
+    this.cpuCache?.cancelDataset(id, memberIds);
+
     clearVolumeForDataset(this.volumeState, id);
     clearSliceForDataset(this.sliceState, id);
     clearVolumeForMembers(this.volumeState, memberIds);

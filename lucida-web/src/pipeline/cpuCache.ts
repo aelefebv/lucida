@@ -290,7 +290,19 @@ export class CpuCache {
   // Public API
   // =========================================================================
 
-  /** Diff against in-flight, cancel stale, update eviction tiers, start new fetches. */
+  /**
+   * Add new requests to the fetch queue. Purely additive — does NOT cancel
+   * in-flight fetches that aren't in the new plan. Use cancelDataset() for
+   * explicit removal.
+   *
+   * Plan churn from view/layout/selection changes is handled cheaply: the
+   * dedup pass skips anything already in-flight, cached, or failed, so
+   * re-submitting an unchanged plan is a no-op for the fetch queue.
+   *
+   * Active-set diffing still happens here — entities removed from the
+   * active set have their detail entries demoted from active-detail to
+   * demoted-detail tier (eviction priority signal).
+   */
   submit(plan: RequestPlan): void {
     this.currentEpochs = plan.epochs;
 
@@ -308,18 +320,6 @@ export class CpuCache {
       }
     }
     this.activeEntityIds = newActiveIds;
-
-    // Build set of requested composite keys
-    const requestedKeys = new Set(plan.requests.map(r => this.compositeKey(r)));
-
-    // Cancel in-flight fetches not in new plan
-    for (const [key, entry] of this.inFlight) {
-      if (!requestedKeys.has(key)) {
-        entry.controller.abort();
-        this.inFlightBytes -= entry.estimatedBytes;
-        this.inFlight.delete(key);
-      }
-    }
 
     // Build new pending queue: skip cached, in-flight, and failed chunks
     this.pendingQueue = [];
@@ -347,17 +347,6 @@ export class CpuCache {
     // S5: route proxy requests to fetchProxy. Mirrors the chunk path:
     // dedup against the proxy cache + in-flight map, then enqueue.
     const proxyRequests = plan.proxyRequests ?? [];
-    const requestedProxyKeys = new Set(
-      proxyRequests.map(p => this.proxyCompositeKey(p)),
-    );
-
-    for (const [key, entry] of this.inFlightProxy) {
-      if (!requestedProxyKeys.has(key)) {
-        entry.controller.abort();
-        this.inFlightProxyBytes -= entry.estimatedBytes;
-        this.inFlightProxy.delete(key);
-      }
-    }
 
     this.pendingProxyQueue = [];
     for (const req of proxyRequests) {
@@ -377,6 +366,100 @@ export class CpuCache {
     // Start new fetches
     this.startFetches();
     this.startProxyFetches();
+  }
+
+  /**
+   * Drop all state belonging to a removed dataset.
+   *
+   * Aborts in-flight chunk fetches whose entityId is in entityIds, in-flight
+   * proxy fetches under datasetId, queued entries, cached entries (detail +
+   * overview chunks for entityIds, proxies under datasetId), ready
+   * deliveries, failure-map entries for entityIds, and activeEntityIds
+   * entries.
+   *
+   * The orchestrator owns the dataset → entityIds mapping; this method
+   * does not maintain its own. Pass the full set of entity ids that
+   * belonged to the removed dataset.
+   *
+   * Called by RenderLoop.removeDataset. Not called for view/layout/
+   * selection epoch bumps — those are pure plan churn and must not
+   * abort fetches.
+   */
+  cancelDataset(datasetId: string, entityIds: string[]): void {
+    const entityIdSet = new Set(entityIds);
+
+    // 1. In-flight chunk fetches.
+    for (const [key, entry] of this.inFlight) {
+      if (entityIdSet.has(entry.request.entityId)) {
+        entry.controller.abort();
+        this.inFlightBytes -= entry.estimatedBytes;
+        this.inFlight.delete(key);
+      }
+    }
+
+    // 2. In-flight proxy fetches.
+    for (const [key, entry] of this.inFlightProxy) {
+      if (entry.request.datasetId === datasetId) {
+        entry.controller.abort();
+        this.inFlightProxyBytes -= entry.estimatedBytes;
+        this.inFlightProxy.delete(key);
+      }
+    }
+
+    // 3. Pending chunk queue.
+    this.pendingQueue = this.pendingQueue.filter(
+      r => !entityIdSet.has(r.entityId),
+    );
+
+    // 4. Pending proxy queue.
+    this.pendingProxyQueue = this.pendingProxyQueue.filter(
+      r => r.datasetId !== datasetId,
+    );
+
+    // 5. Cached chunks (detail + overview).
+    for (const entityId of entityIds) {
+      const detailMap = this.detailCache.get(entityId);
+      if (detailMap) {
+        for (const entry of detailMap.values()) {
+          this.detailBytes -= entry.sizeBytes;
+        }
+        this.detailCache.delete(entityId);
+      }
+      const overviewMap = this.overviewCache.get(entityId);
+      if (overviewMap) {
+        for (const entry of overviewMap.values()) {
+          this.overviewBytes -= entry.sizeBytes;
+        }
+        this.overviewCache.delete(entityId);
+      }
+    }
+
+    // 6. Cached proxies under this dataset.
+    const proxyMap = this.proxyCache.get(datasetId);
+    if (proxyMap) {
+      for (const entry of proxyMap.values()) {
+        this.proxyBytes -= entry.bytes;
+      }
+      this.proxyCache.delete(datasetId);
+    }
+
+    // 7. Ready deliveries.
+    this.ready = this.ready.filter(d => {
+      if (d.kind === "proxy") return d.datasetId !== datasetId;
+      return !entityIdSet.has(d.entityId);
+    });
+
+    // 8. Failure map + activeEntityIds. Failure keys are
+    // `${entityId}/${chunkKey}`; entityIds may contain slashes
+    // (plate naming, e.g. "plateId:A/1/0"), so prefix-match on
+    // `entityId + "/"` rather than splitting.
+    for (const entityId of entityIds) {
+      const prefix = `${entityId}/`;
+      for (const key of this.failures.keys()) {
+        if (key.startsWith(prefix)) this.failures.delete(key);
+      }
+      this.activeEntityIds.delete(entityId);
+    }
   }
 
   /** Pull decoded buffers up to budget. Returns new deliveries only. */

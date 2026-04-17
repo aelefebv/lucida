@@ -306,25 +306,368 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Fetch cancellation
+  // Fetch lifecycle decoupled from plan omission (PRD #420)
   // =========================================================================
 
-  describe("fetch cancellation", () => {
-    it("aborts in-flight fetches not in new plan", async () => {
+  describe("fetch lifecycle decoupled from plan omission", () => {
+    it("submit twice with overlapping requests does not cancel first batch's in-flight", async () => {
       const { cache, source } = createTestCache();
       const reqA = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
       const reqB = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
 
-      cache.submit(makePlan([reqA]));
-      expect(source.pendingFetches.size).toBe(1);
+      cache.submit(makePlan([reqA, reqB]));
+      expect(source.pendingFetches.size).toBe(2);
 
-      // Submit new plan with only reqB — reqA should be aborted
+      // Submit again with only reqB — reqA must remain in-flight.
       cache.submit(makePlan([reqB]));
 
-      // reqA's fetch should have been aborted (removed from pending)
-      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
-      // reqB should be in-flight
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
       expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/1")).toBe(true);
+      expect(cache.telemetry().inFlightCount).toBe(2);
+    });
+
+    it("submit with smaller plan keeps prior in-flight alive", async () => {
+      const { cache, source } = createTestCache();
+      const reqA = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
+      const reqB = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
+
+      cache.submit(makePlan([reqA, reqB]));
+      expect(cache.telemetry().inFlightCount).toBe(2);
+
+      // Smaller plan that omits reqA. The in-flight fetch must persist.
+      cache.submit(makePlan([reqB]));
+      expect(cache.telemetry().inFlightCount).toBe(2);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+    });
+
+    it("submit with empty plan does not cancel in-flight", async () => {
+      const { cache, source } = createTestCache();
+      const req = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
+
+      cache.submit(makePlan([req]));
+      expect(cache.telemetry().inFlightCount).toBe(1);
+
+      // Empty plan must not abort prior in-flight fetches.
+      cache.submit(makePlan([]));
+      expect(cache.telemetry().inFlightCount).toBe(1);
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(true);
+    });
+
+    it("re-submitting an unchanged plan is a no-op for the fetch queue", () => {
+      const { cache, source } = createTestCache();
+      const req = makeRequest();
+
+      cache.submit(makePlan([req]));
+      expect(source.fetchCount).toBe(1);
+
+      cache.submit(makePlan([req]));
+      cache.submit(makePlan([req]));
+      expect(source.fetchCount).toBe(1);
+    });
+
+    it("submit with empty proxy plan does not cancel in-flight proxy", () => {
+      const { cache, source } = createTestCache();
+      const proxyReq: ProxyRequest = {
+        datasetId: "ds-1",
+        entityId: "entity-1",
+        imageId: "image-1",
+        kind: "FieldProxy3D",
+        t: 0,
+        c: 0,
+        priority: 0,
+      };
+
+      // Block fetchProxy by overriding to never resolve.
+      let proxyResolve: (() => void) | null = null;
+      source.fetchProxy = (_req, signal) => {
+        source.fetchProxyCount++;
+        return new Promise((resolve, reject) => {
+          proxyResolve = () => resolve({
+            header: source.proxyHeader,
+            data: new ArrayBuffer(64),
+            wireFormat: { Raw: { data_type: "uint16" } },
+          });
+          signal.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        });
+      };
+
+      cache.submit({
+        requests: [],
+        activeSet: [],
+        proxyRequests: [proxyReq],
+        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      });
+      expect(cache.telemetry().inFlightProxyCount).toBe(1);
+
+      // Submit again with no proxies — must not abort.
+      cache.submit(makePlan([]));
+      expect(cache.telemetry().inFlightProxyCount).toBe(1);
+
+      // Cleanup so promise doesn't dangle.
+      void proxyResolve;
+    });
+  });
+
+  // =========================================================================
+  // cancelDataset (PRD #420)
+  // =========================================================================
+
+  describe("cancelDataset", () => {
+    function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
+      return {
+        datasetId: "ds-1",
+        entityId: "entity-1",
+        imageId: "image-1",
+        kind: "FieldProxy3D",
+        t: 0,
+        c: 0,
+        priority: 0,
+        ...overrides,
+      };
+    }
+
+    function makeProxyPlan(
+      proxyRequests: ProxyRequest[],
+      epochs?: Partial<PlanningEpochs>,
+    ): RequestPlan {
+      return {
+        requests: [],
+        activeSet: [],
+        proxyRequests,
+        epochs: {
+          content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1,
+          ...epochs,
+        },
+      };
+    }
+
+    it("cancels in-flight chunks matching entityIds; preserves bytes accounting", () => {
+      const { cache, source } = createTestCache();
+      const req = makeRequest({ entityId: "entity-1" });
+
+      cache.submit(makePlan([req]));
+      expect(cache.telemetry().inFlightCount).toBe(1);
+
+      cache.cancelDataset("ds-1", ["entity-1"]);
+
+      expect(cache.telemetry().inFlightCount).toBe(0);
+      expect(cache.telemetry().inFlightBytes).toBe(0);
+      // Source's pending fetch should have been removed (abort triggers reject).
+      expect(source.pendingFetches.has("entity-1/image-1/0/0/0/0/0/0")).toBe(false);
+    });
+
+    it("cancels in-flight proxies matching datasetId; preserves bytes accounting", () => {
+      const { cache, source } = createTestCache();
+      const proxyReq = makeProxyRequest();
+
+      // Block fetchProxy with a never-resolving promise so the entry stays in-flight.
+      let pendingResolve: ((v: FetchProxyResult) => void) | null = null;
+      source.fetchProxy = (_req, signal) => {
+        source.fetchProxyCount++;
+        return new Promise<FetchProxyResult>((resolve, reject) => {
+          pendingResolve = resolve;
+          signal.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        });
+      };
+      cache.submit(makeProxyPlan([proxyReq]));
+      expect(cache.telemetry().inFlightProxyCount).toBe(1);
+
+      cache.cancelDataset("ds-1", []);
+
+      expect(cache.telemetry().inFlightProxyCount).toBe(0);
+      expect(cache.telemetry().inFlightProxyBytes).toBe(0);
+      void pendingResolve;
+    });
+
+    it("clears pending queue entries (chunks + proxies)", () => {
+      const { cache } = createTestCache({
+        maxConcurrentFetches: 1,
+        maxBytesInFlight: 1, // throttle so subsequent requests sit in pending queue
+      });
+      const reqA = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
+      const reqB = makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" });
+      const proxyReq: ProxyRequest = {
+        datasetId: "ds-1",
+        entityId: "entity-1",
+        imageId: "image-1",
+        kind: "FieldProxy3D",
+        t: 0, c: 0, priority: 0,
+      };
+
+      cache.submit({
+        requests: [reqA, reqB],
+        activeSet: [],
+        proxyRequests: [proxyReq],
+        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      });
+
+      // At least one request should be queued.
+      const tel = cache.telemetry();
+      expect(tel.queueDepth + tel.inFlightCount).toBeGreaterThan(0);
+
+      cache.cancelDataset("ds-1", ["entity-1"]);
+
+      const after = cache.telemetry();
+      expect(after.queueDepth).toBe(0);
+      expect(after.proxyQueueDepth).toBe(0);
+    });
+
+    it("drops cached chunks (detail + overview); subtracts bytes", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 100;
+
+      const detailReq = makeRequest({ entityId: "entity-1", lane: "detail", chunkKey: "0/0/0/0/0/0" });
+      const overviewReq = makeRequest({ entityId: "entity-1", lane: "overview", chunkKey: "0/0/0/0/0/1" });
+
+      cache.submit(makePlan([detailReq, overviewReq]));
+      await flush();
+
+      expect(cache.telemetry().detailBytes).toBe(100);
+      expect(cache.telemetry().overviewBytes).toBe(100);
+      expect(cache.getCached("entity-1", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCached("entity-1", "0/0/0/0/0/1")).not.toBeNull();
+
+      cache.cancelDataset("ds-1", ["entity-1"]);
+
+      expect(cache.telemetry().detailBytes).toBe(0);
+      expect(cache.telemetry().overviewBytes).toBe(0);
+      expect(cache.getCached("entity-1", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCached("entity-1", "0/0/0/0/0/1")).toBeNull();
+    });
+
+    it("drops cached proxies; subtracts bytes", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveProxyBytes = 256;
+
+      cache.submit(makeProxyPlan([makeProxyRequest()]));
+      await flush();
+
+      expect(cache.telemetry().proxyBytes).toBe(256);
+      expect(cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 0, 0)).not.toBeNull();
+
+      cache.cancelDataset("ds-1", ["entity-1"]);
+
+      expect(cache.telemetry().proxyBytes).toBe(0);
+      expect(cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 0, 0)).toBeNull();
+    });
+
+    it("clears ready deliveries", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+
+      cache.submit(makePlan([
+        makeRequest({ entityId: "entity-1", chunkKey: "0/0/0/0/0/0" }),
+      ]));
+      await flush();
+      // Don't drain — leave delivery in the ready queue.
+
+      cache.submit(makeProxyPlan([makeProxyRequest()]));
+      await flush();
+
+      cache.cancelDataset("ds-1", ["entity-1"]);
+
+      expect(cache.drain(Infinity)).toHaveLength(0);
+    });
+
+    it("clears failures map entries for entityIds", async () => {
+      const { cache, source } = createTestCache();
+      const req = makeRequest({ entityId: "entity-1" });
+      cache.submit(makePlan([req]));
+
+      source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("404 not found"));
+      await flush();
+      await flush();
+
+      expect(cache.telemetry().failedChunks.permanent).toBe(1);
+
+      // After cancelDataset, re-submitting with the same content epoch should
+      // re-fetch (failure entry was cleared).
+      cache.cancelDataset("ds-1", ["entity-1"]);
+      const fetchesBefore = source.fetchCount;
+      cache.submit(makePlan([req], undefined, { content: 1 }));
+      expect(source.fetchCount).toBe(fetchesBefore + 1);
+    });
+
+    it("removes activeEntityIds entries", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+
+      // Insert + cache a detail chunk for entity-1, marked active.
+      const req = makeRequest({ entityId: "entity-1", chunkKey: "0/0/0/0/0/0" });
+      cache.submit(makePlan([req], [makeActiveEntry("entity-1")]));
+      await flush();
+
+      cache.cancelDataset("ds-1", ["entity-1"]);
+
+      // Now submit a plan with NO entity-1 in activeSet. If activeEntityIds
+      // still contained "entity-1", demoteEntity would be called — but the
+      // detail map is already empty, so this is a sanity check that no entry
+      // remains. We assert via the detailCache being empty (already covered)
+      // and that re-adding entity-1 then dropping it from the active set
+      // doesn't crash.
+      cache.submit(makePlan([], [makeActiveEntry("entity-2")]));
+
+      // No crash, snapshot should reflect entity-1 fully gone.
+      const snap = cache.snapshot();
+      expect(snap.cached.has("entity-1")).toBe(false);
+      expect(snap.inFlight.has("entity-1")).toBe(false);
+    });
+
+    it("does not touch other datasets' state", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      source.autoResolveProxyBytes = 128;
+
+      // Dataset A
+      const reqA = makeRequest({ entityId: "entity-A", imageId: "image-A", chunkKey: "0/0/0/0/0/0" });
+      const proxyA: ProxyRequest = {
+        datasetId: "ds-A", entityId: "entity-A", imageId: "image-A",
+        kind: "FieldProxy3D", t: 0, c: 0, priority: 0,
+      };
+      cache.submit({
+        requests: [reqA],
+        activeSet: [makeActiveEntry("entity-A", "image-A")],
+        proxyRequests: [proxyA],
+        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      });
+      await flush();
+
+      // Dataset B
+      const reqB = makeRequest({ entityId: "entity-B", imageId: "image-B", chunkKey: "0/0/0/0/0/0" });
+      const proxyB: ProxyRequest = {
+        datasetId: "ds-B", entityId: "entity-B", imageId: "image-B",
+        kind: "FieldProxy3D", t: 0, c: 0, priority: 0,
+      };
+      cache.submit({
+        requests: [reqB],
+        activeSet: [makeActiveEntry("entity-B", "image-B")],
+        proxyRequests: [proxyB],
+        epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      });
+      await flush();
+
+      const beforeDetailB = cache.getCached("entity-B", "0/0/0/0/0/0");
+      const beforeProxyB = cache.getCachedProxy("ds-B", "entity-B", "FieldProxy3D", 0, 0);
+      expect(beforeDetailB).not.toBeNull();
+      expect(beforeProxyB).not.toBeNull();
+      const detailBytesBoth = cache.telemetry().detailBytes;
+      const proxyBytesBoth = cache.telemetry().proxyBytes;
+
+      cache.cancelDataset("ds-A", ["entity-A"]);
+
+      // Dataset A is gone.
+      expect(cache.getCached("entity-A", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedProxy("ds-A", "entity-A", "FieldProxy3D", 0, 0)).toBeNull();
+      // Dataset B is intact.
+      expect(cache.getCached("entity-B", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCachedProxy("ds-B", "entity-B", "FieldProxy3D", 0, 0)).not.toBeNull();
+      // Bytes accounting reflects only A's data was subtracted.
+      expect(cache.telemetry().detailBytes).toBe(detailBytesBoth - 64);
+      expect(cache.telemetry().proxyBytes).toBe(proxyBytesBoth - 128);
     });
   });
 

@@ -514,7 +514,7 @@ Holds decompressed data between network and GPU. Schedules fetches. Resolves log
 
 **Boundary contract:**
 
-- **Inputs:** `RequestPlan` from Orchestrator (logical asset requests). Network responses from server.
+- **Inputs:** `RequestPlan` from Orchestrator (logical asset requests, purely additive). Explicit `cancelDataset(datasetId, entityIds)` calls from RenderLoop on dataset removal. Network responses from server.
 - **Outputs:** Ready deliveries to Orchestrator (decompressed chunk/proxy buffers for GPU upload). Cache status (hit rates, bytes).
 
 **Rules:**
@@ -523,6 +523,7 @@ Holds decompressed data between network and GPU. Schedules fetches. Resolves log
 - Overview and detail have separate eviction policies and lifetime behavior.
 - The fetch scheduler budgets by bytes-in-flight and lane priority, not a single flat count.
 - The content source abstraction hides whether bytes came from individual OME-Zarr chunks, a shard, a batched response, or a cached overview product.
+- `submit()` is purely additive — absence of a request from a plan does not cancel its in-flight fetch. Explicit `cancelDataset()` is the only abort path. View/layout/selection epoch churn is cheap; the dedup pass turns re-submitted plans into no-ops for already-known requests.
 
 ### 6.3 Worker Protocol (message boundary)
 
