@@ -135,6 +135,37 @@ function App() {
     }
   }, [render.activeLoop]);
 
+  // S5 HITL: expose the orchestrator + cpuCache on `window.__orch`
+  // (also aliased as `__lucidaOrch`) so the dev console can call
+  // `requestTestProxy(datasetId, entityId, imageId, kind, t, c)` to
+  // verify the proxy fetch wire flow without waiting for S6 to land
+  // promotion-driven proxy requests.
+  useEffect(() => {
+    const loop = render.activeLoop;
+    const cache = bridge.cpuCacheRef.current;
+    if (!loop || !cache) return;
+    const orch = loop.getOrchestrator();
+    const debug = {
+      orchestrator: orch,
+      cpuCache: cache,
+      requestTestProxy: (
+        datasetId: string,
+        entityId: string,
+        imageId: string,
+        kind: "WellProxy3D" | "FieldProxy3D",
+        t = 0,
+        c = 0,
+      ) => orch.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
+    };
+    const w = window as unknown as { __orch?: typeof debug; __lucidaOrch?: typeof debug };
+    w.__orch = debug;
+    w.__lucidaOrch = debug;
+    return () => {
+      delete w.__orch;
+      delete w.__lucidaOrch;
+    };
+  }, [render.activeLoop, bridge.cpuCacheRef]);
+
   useIntensityBatcher({
     clientReady: render.clientReady,
     clientRef: render.clientRef,

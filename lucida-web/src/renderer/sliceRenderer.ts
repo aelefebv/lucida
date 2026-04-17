@@ -3,7 +3,7 @@ import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 
-// Uniform buffer layout (352 bytes):
+// Uniform buffer layout (400 bytes):
 //   offset 0:   transform      mat4x4f   (64B) — screen UV → texture UV
 //   offset 64:  intensityRange vec4f     (16B) — x=min, y=max, z=gamma, w=opacity
 //   offset 80:  chunkDims      vec4u     (16B) — x=chunkX, y=chunkY, z=levelWidth, w=levelHeight
@@ -14,7 +14,10 @@ import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 //   offset 160: lodGridDims    vec4u[4]  (64B) — xy=gridDims, w=offset
 //   offset 224: lodChunkDims   vec4u[4]  (64B) — xy=chunkDims
 //   offset 288: lodLevelDims   vec4f[4]  (64B) — xy=levelDims
-const UNIFORM_SIZE = 352;
+//   offset 352: proxyParams    vec4u     (16B) — x=renderMode, y=fieldSlot, z=wellSlot
+//   offset 368: fieldProxyDims vec4u     (16B) — xyz=(Z,Y,X)
+//   offset 384: wellProxyDims  vec4u     (16B) — xyz=(Z,Y,X)
+const UNIFORM_SIZE = 400;
 
 export class SliceRenderer {
   private device: GPUDevice;
@@ -39,6 +42,17 @@ export class SliceRenderer {
   private atlasSlotDims = [1, 1];
   private levelDims = [1, 1];
   private lodMetas: LodIndirectionMeta[] = [];
+  // S8: proxy fallback bindings + uniform values. Slice mode reads a
+  // single Z plane within the proxy slot — see slice.wgsl notes for the
+  // current MVP semantics. Defaults match "no proxy".
+  private fieldProxyTexture: GPUTexture | null = null;
+  private wellProxyTexture: GPUTexture | null = null;
+  private dummyProxyTexture: GPUTexture | null = null;
+  private renderModeProxy = 0;
+  private fieldProxySlotIndex = 0xFFFFFFFF;
+  private wellProxySlotIndex = 0xFFFFFFFF;
+  private fieldProxyDims: [number, number, number] = [1, 1, 1]; // [Z, Y, X]
+  private wellProxyDims: [number, number, number] = [1, 1, 1];  // [Z, Y, X]
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -71,6 +85,18 @@ export class SliceRenderer {
           binding: 4,
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" },
+        },
+        // S8: proxy textures (fieldProxy + wellProxy). 3D r16uint, same as
+        // volume.wgsl — slice mode reads at the slot's Z midpoint.
+        {
+          binding: 5,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "3d" },
+        },
+        {
+          binding: 6,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "3d" },
         },
       ],
     });
@@ -169,9 +195,49 @@ export class SliceRenderer {
     this.opacity = v;
   }
 
+  /** S8: lazily allocate the 1×1×1 dummy proxy texture. */
+  private getDummyProxyTexture(): GPUTexture {
+    if (!this.dummyProxyTexture) {
+      this.dummyProxyTexture = this.device.createTexture({
+        size: [1, 1, 1],
+        format: "r16uint",
+        dimension: "3d",
+        usage: GPUTextureUsage.TEXTURE_BINDING,
+      });
+    }
+    return this.dummyProxyTexture;
+  }
+
+  /**
+   * S8: configure proxy textures + per-entity descriptor for the next
+   * draw. Must be called before `setAtlas()` (which rebuilds the bind
+   * group), or pass `null` textures to fall back to the dummy.
+   */
+  setProxyParams(
+    mode: number,
+    fieldTexture: GPUTexture | null,
+    fieldSlotIndex: number,
+    fieldDims: [number, number, number],
+    wellTexture: GPUTexture | null,
+    wellSlotIndex: number,
+    wellDims: [number, number, number],
+  ) {
+    this.renderModeProxy = mode;
+    this.fieldProxyTexture = fieldTexture;
+    this.fieldProxySlotIndex = fieldSlotIndex;
+    this.fieldProxyDims = fieldDims;
+    this.wellProxyTexture = wellTexture;
+    this.wellProxySlotIndex = wellSlotIndex;
+    this.wellProxyDims = wellDims;
+    this.rebuildBindGroup();
+  }
+
   private rebuildBindGroup() {
     const atlas = this.atlasTexture ?? this.dummyTexture;
     const indirection = this.indirectionBuffer ?? this.dummyIndirectionBuffer;
+    const dummyProxy = this.getDummyProxyTexture();
+    const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
+    const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -180,6 +246,8 @@ export class SliceRenderer {
         { binding: 2, resource: { buffer: indirection } },
         { binding: 3, resource: this.lutTexture.createView() },
         { binding: 4, resource: this.lutSampler },
+        { binding: 5, resource: fieldProxyView },
+        { binding: 6, resource: wellProxyView },
       ],
     });
   }
@@ -232,6 +300,20 @@ export class SliceRenderer {
       u32View.set([this.chunkDims[0], this.chunkDims[1], 0, 0], 56);
       uniformData.set([this.levelDims[0], this.levelDims[1], 0, 0], 72);
     }
+
+    // S8: proxy params at offset 352B (= 88 u32s).
+    u32View.set(
+      [this.renderModeProxy, this.fieldProxySlotIndex >>> 0, this.wellProxySlotIndex >>> 0, 0],
+      88,
+    );
+    u32View.set(
+      [this.fieldProxyDims[0], this.fieldProxyDims[1], this.fieldProxyDims[2], 0],
+      92,
+    );
+    u32View.set(
+      [this.wellProxyDims[0], this.wellProxyDims[1], this.wellProxyDims[2], 0],
+      96,
+    );
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }

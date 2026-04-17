@@ -771,7 +771,7 @@ pub(crate) mod test_helpers {
             }],
         });
 
-        RegisterDataset { content, fetch }
+        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
     }
 
     /// Create a RegisterDataset with specific shape and multiple levels.
@@ -852,7 +852,7 @@ pub(crate) mod test_helpers {
             }],
         });
 
-        RegisterDataset { content, fetch }
+        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
     }
 
     /// Create a RegisterDataset for a plate with multiple image members.
@@ -951,7 +951,7 @@ pub(crate) mod test_helpers {
             images: fetch_images,
         });
 
-        RegisterDataset { content, fetch }
+        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
     }
 }
 

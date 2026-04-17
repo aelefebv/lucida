@@ -106,6 +106,11 @@ export function useBridge({
                 };
                 setupFetchPipeline(content as ContentGraph, fetchDesc);
               }
+              // Mirror the snapshot's asset catalog into the JS-side
+              // AssetCatalog. `load_document` already parsed it on the
+              // WASM side; this keeps the mirror consistent.
+              const catalog = doc.asset_catalogs?.[dsId] ?? { entries: [] };
+              loopRef.current?.getAssetCatalog().applyInitial(dsId, catalog);
             }
           }
 
@@ -134,11 +139,19 @@ export function useBridge({
             if (!datasetsRef.current.has(cmd.content.dataset_id)) {
               setupFetchPipeline(cmd.content as ContentGraph, cmd.fetch as ClientFetchDescriptor);
             }
+            // Mirror the initial catalog into the JS-side AssetCatalog so
+            // Planning's snapshot view stays consistent with WASM. Empty
+            // in S3; populated by S5 once the server actually sends data.
+            const catalog = cmd.catalog ?? { entries: [] };
+            loopRef.current
+              ?.getAssetCatalog()
+              .applyInitial(cmd.content.dataset_id, catalog);
             setRemoteDatasetLoading(false);
             setWasmScene(scene);
           }
           if (cmd.type === "remove_dataset") {
             datasetCallbacksRef.current.removeDataset(cmd.id);
+            loopRef.current?.getAssetCatalog().removeDataset(cmd.id);
           }
           bumpRemoteDocumentVersion();
         } catch (e) {
@@ -148,6 +161,9 @@ export function useBridge({
       onAck: (_seq) => {},
       onChunkData: (key, data) => {
         contentSource.handleChunkData(key, data);
+      },
+      onProxyData: (key, data) => {
+        contentSource.handleProxyData(key, data);
       },
       onPeerJoined: (clientId, presence) => {
         setPeers(prev => {
@@ -267,6 +283,14 @@ export function useBridge({
       onOpenDatasetFailed: (_url, error) => {
         setRemoteDatasetLoading(false);
         setRemoteDatasetError(error);
+      },
+      onAssetCatalogUpdate: (datasetId, deltaJson) => {
+        try {
+          const delta = JSON.parse(deltaJson);
+          loopRef.current?.getAssetCatalog().applyDelta(datasetId, delta);
+        } catch (e) {
+          console.warn("[Bridge] bad asset_catalog_update:", e);
+        }
       },
       onDisconnect: () => {
         setRemoteDatasetLoading(false);

@@ -8,6 +8,7 @@ import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, cle
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { Orchestrator } from "./pipeline/orchestrator.ts";
 import type { CpuCache } from "./pipeline/cpuCache.ts";
+import { AssetCatalog } from "./pipeline/assetCatalog.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 
 // Re-export types so downstream imports stay unchanged
@@ -32,6 +33,12 @@ export class RenderLoop {
   private orchestrator = new Orchestrator();
   private cpuCache: CpuCache | null = null;
   private cpuCacheUnsub: (() => void) | null = null;
+  /**
+   * Per-loop AssetCatalog. Constructed lazily once the WasmScene is
+   * known so it can forward deltas through `apply_asset_catalog_delta`.
+   * S3: stays empty unless the bridge calls `applyInitial`/`applyDelta`.
+   */
+  private assetCatalog: AssetCatalog | null = null;
 
   private _renderScale = 1.0;
 
@@ -104,6 +111,32 @@ export class RenderLoop {
       this.dataDirty = true;
       this.scheduleIfNeeded();
     });
+  }
+
+  /**
+   * Expose the orchestrator + cpuCache for HITL debugging via
+   * `window.__lucidaOrch`. The full chain is needed because
+   * `Orchestrator.requestTestProxy(...)` submits through CpuCache and the
+   * normal subscribe → tick → `deliverToWorker` path forwards the result
+   * to the GPU worker.
+   */
+  getOrchestrator(): Orchestrator {
+    return this.orchestrator;
+  }
+  getCpuCache(): CpuCache | null {
+    return this.cpuCache;
+  }
+
+  /**
+   * Return the loop's AssetCatalog, constructing it on first use.
+   * The bridge calls this to forward `RegisterDataset.catalog` and any
+   * `AssetCatalogUpdate` server messages.
+   */
+  getAssetCatalog(): AssetCatalog {
+    if (!this.assetCatalog) {
+      this.assetCatalog = new AssetCatalog(this.scene);
+    }
+    return this.assetCatalog;
   }
 
   addDataset(id: string, content: ContentGraph): void {
@@ -249,6 +282,7 @@ export class RenderLoop {
       mode: this.mode,
       renderScale: this._renderScale,
       cpuCache: this.cpuCache!,
+      assetCatalog: this.getAssetCatalog(),
     };
   }
 

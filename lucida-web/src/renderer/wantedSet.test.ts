@@ -1,10 +1,26 @@
 import { describe, it, expect } from "vitest";
-import { computeWantedSet, type AtlasSnapshot } from "./wantedSet.ts";
+import {
+  computeWantedSet,
+  type AtlasSnapshot,
+  type ProxyAtlasSnapshot,
+} from "./wantedSet.ts";
 import type {
   ColdStateMessage,
   ColdStateActiveEntry,
+  MissingChunk,
+  MissingProxy,
 } from "./workerProtocol.ts";
 import type { PlanningEpochs, VisibleRegion } from "../pipeline/planning.ts";
+
+/** Type-narrowing helper: only chunk-kind entries from a wanted-set. */
+function chunks(missing: Array<MissingChunk | MissingProxy>): MissingChunk[] {
+  return missing.filter((m): m is MissingChunk => m.kind === "chunk");
+}
+
+/** Type-narrowing helper: only proxy-kind entries from a wanted-set. */
+function proxies(missing: Array<MissingChunk | MissingProxy>): MissingProxy[] {
+  return missing.filter((m): m is MissingProxy => m.kind === "proxy");
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -50,6 +66,12 @@ function makeActiveEntry(
         levelDims: [64, 128, 128],
       },
     ],
+    // S7 defaults — `fields-with-detail` with no proxy advertised, so
+    // existing tests keep their chunk-only expectations.
+    mode: "fields-with-detail",
+    proxyAvailable: false,
+    wellProxyAvailable: false,
+    parentWellId: null,
     ...overrides,
   };
 }
@@ -134,7 +156,7 @@ describe("computeWantedSet", () => {
 
     expect(result.missing).toHaveLength(4); // 2x2x1 = 4 chunks
     // Verify chunk keys follow the correct format
-    for (const entry of result.missing) {
+    for (const entry of chunks(result.missing)) {
       expect(entry.entityId).toBe("entity-0");
       expect(entry.chunkKey).toMatch(/^0\/0\/0\/\d+\/\d+\/\d+$/);
     }
@@ -182,7 +204,7 @@ describe("computeWantedSet", () => {
     const result = computeWantedSet(coldState, volumeAtlases, new Map(), buildMemberToPool(volumeAtlases));
 
     expect(result.missing).toHaveLength(2);
-    const keys = result.missing.map((m) => m.chunkKey).sort();
+    const keys = chunks(result.missing).map((m) => m.chunkKey).sort();
     expect(keys).toEqual(["0/0/0/0/0/1", "0/0/0/0/1/0"]);
   });
 
@@ -204,7 +226,7 @@ describe("computeWantedSet", () => {
     // Should be 2x2x1 = 4, not 4x4x2 = 32
     expect(result.missing).toHaveLength(4);
     // Verify no chunk index exceeds the visible bounds
-    for (const entry of result.missing) {
+    for (const entry of chunks(result.missing)) {
       const parts = entry.chunkKey.split("/").map(Number);
       const [, , , iz, iy, ix] = parts;
       expect(ix).toBeLessThan(2);
@@ -238,7 +260,7 @@ describe("computeWantedSet", () => {
     // 1 chunk per channel, 2 channels = 2 missing
     expect(result.missing).toHaveLength(2);
 
-    const keys = result.missing.map((m) => m.chunkKey).sort();
+    const keys = chunks(result.missing).map((m) => m.chunkKey).sort();
     // channel 0 and channel 2
     expect(keys).toEqual(["0/0/0/0/0/0", "0/0/2/0/0/0"]);
   });
@@ -266,7 +288,7 @@ describe("computeWantedSet", () => {
 
     // Only Z chunk 0 (containing slice z=10), 2x2 in XY = 4 chunks
     expect(result.missing).toHaveLength(4);
-    for (const entry of result.missing) {
+    for (const entry of chunks(result.missing)) {
       const parts = entry.chunkKey.split("/").map(Number);
       expect(parts[3]).toBe(0); // z chunk index
     }
@@ -325,7 +347,9 @@ describe("computeWantedSet", () => {
 
     // LOD 0 chunk "0/0/0/0/0/0" present, LOD 1 chunk "1/0/0/0/0/0" present, LOD 2 missing => 1 missing
     expect(result.missing).toHaveLength(1);
-    expect(result.missing[0].chunkKey).toBe("2/0/0/0/0/0");
+    const onlyChunks = chunks(result.missing);
+    expect(onlyChunks).toHaveLength(1);
+    expect(onlyChunks[0].chunkKey).toBe("2/0/0/0/0/0");
   });
 
   it("single-LOD fallback: only target LOD in wanted-set", () => {
@@ -355,7 +379,9 @@ describe("computeWantedSet", () => {
 
     // Only LOD 1 is in entityMetas, so only LOD 1 chunks appear in wanted-set
     expect(result.missing).toHaveLength(1);
-    expect(result.missing[0].chunkKey).toMatch(/^1\//);
+    const onlyChunks = chunks(result.missing);
+    expect(onlyChunks).toHaveLength(1);
+    expect(onlyChunks[0].chunkKey).toMatch(/^1\//);
   });
 
   it("coarser LODs have smaller grids: fewer chunks in wanted-set", () => {
@@ -384,10 +410,256 @@ describe("computeWantedSet", () => {
     const result = computeWantedSet(coldState, volumeAtlases, new Map(), buildMemberToPool(volumeAtlases));
 
     // LOD 0: 8x8x1 = 64 chunks, LOD 1: 4x4x1 = 16 chunks => 80 total
-    const lod0 = result.missing.filter((m) => m.chunkKey.startsWith("0/"));
-    const lod1 = result.missing.filter((m) => m.chunkKey.startsWith("1/"));
+    const allChunks = chunks(result.missing);
+    const lod0 = allChunks.filter((m) => m.chunkKey.startsWith("0/"));
+    const lod1 = allChunks.filter((m) => m.chunkKey.startsWith("1/"));
     expect(lod0).toHaveLength(64);
     expect(lod1).toHaveLength(16);
     expect(result.missing).toHaveLength(80);
+  });
+
+  // -------------------------------------------------------------------------
+  // S7: proxy wanted-set
+  // -------------------------------------------------------------------------
+
+  describe("S7 — proxy wanted-set", () => {
+    /** Helper: pool snapshot with the given resident slot keys. */
+    function makeProxyPool(
+      kind: "WellProxy3D" | "FieldProxy3D",
+      keys: string[],
+    ): ProxyAtlasSnapshot {
+      const slots = new Map<string, number>();
+      keys.forEach((k, i) => slots.set(k, i));
+      return { kind, slots };
+    }
+
+    it("well-as-proxy + no resident proxy -> emits MissingProxy { WellProxy3D }", () => {
+      const coldState = makeColdState({
+        activeSet: [
+          makeActiveEntry({
+            entityId: "well-1",
+            imageId: "",
+            mode: "well-as-proxy",
+            proxyKind: "WellProxy3D",
+            proxyAvailable: true,
+            wellProxyAvailable: true,
+          }),
+        ],
+      });
+      const result = computeWantedSet(coldState, new Map(), new Map(), new Map(), new Map());
+
+      const ps = proxies(result.missing);
+      expect(ps).toHaveLength(1);
+      expect(ps[0]).toMatchObject({
+        kind: "proxy",
+        entityId: "well-1",
+        proxyKind: "WellProxy3D",
+        t: 0,
+        c: 0,
+      });
+      // No chunks for well-as-proxy.
+      expect(chunks(result.missing)).toHaveLength(0);
+    });
+
+    it("well-as-proxy + resident proxy -> empty wanted-set", () => {
+      const coldState = makeColdState({
+        activeSet: [
+          makeActiveEntry({
+            entityId: "well-1",
+            imageId: "",
+            mode: "well-as-proxy",
+            proxyKind: "WellProxy3D",
+            proxyAvailable: true,
+            wellProxyAvailable: true,
+          }),
+        ],
+      });
+      const proxyAtlases = new Map<string, ProxyAtlasSnapshot>([
+        ["any-pool", makeProxyPool("WellProxy3D", ["well-1|0|0"])],
+      ]);
+      const result = computeWantedSet(coldState, new Map(), new Map(), new Map(), proxyAtlases);
+      expect(result.missing).toHaveLength(0);
+    });
+
+    it("fields-with-detail + present field-proxy -> no proxy ask, chunk wanted-set unchanged", () => {
+      const coldState = makeColdState({
+        visibleRegion: makeVisibleRegion({
+          xyBounds: [0, 0, 32, 32],
+          zRange: [0, 32],
+        }),
+        activeSet: [
+          makeActiveEntry({
+            entityId: "field-1",
+            imageId: "img",
+            mode: "fields-with-detail",
+            proxyKind: "FieldProxy3D",
+            proxyAvailable: true,
+            wellProxyAvailable: false,
+          }),
+        ],
+      });
+      const atlas = makeVolumePool("img", [
+        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+      ]);
+      const volumeAtlases = new Map([["ds-0", atlas]]);
+      const proxyAtlases = new Map<string, ProxyAtlasSnapshot>([
+        ["pool-A", makeProxyPool("FieldProxy3D", ["field-1|0|0"])],
+      ]);
+      const result = computeWantedSet(
+        coldState,
+        volumeAtlases,
+        new Map(),
+        buildMemberToPool(volumeAtlases),
+        proxyAtlases,
+      );
+      // 1 chunk should be missing (visible region 1x1x1), no proxy asks
+      expect(proxies(result.missing)).toHaveLength(0);
+      expect(chunks(result.missing)).toHaveLength(1);
+    });
+
+    it("fields-with-detail + missing advertised field-proxy -> emits MissingProxy { FieldProxy3D }", () => {
+      const coldState = makeColdState({
+        visibleRegion: makeVisibleRegion({
+          xyBounds: [0, 0, 32, 32],
+          zRange: [0, 32],
+        }),
+        activeSet: [
+          makeActiveEntry({
+            entityId: "field-1",
+            imageId: "img",
+            mode: "fields-with-detail",
+            proxyKind: "FieldProxy3D",
+            proxyAvailable: true,
+          }),
+        ],
+      });
+      const atlas = makeVolumePool("img", [
+        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+      ]);
+      const volumeAtlases = new Map([["ds-0", atlas]]);
+      const result = computeWantedSet(
+        coldState,
+        volumeAtlases,
+        new Map(),
+        buildMemberToPool(volumeAtlases),
+        new Map(),
+      );
+      const ps = proxies(result.missing);
+      expect(ps).toHaveLength(1);
+      expect(ps[0].entityId).toBe("field-1");
+      expect(ps[0].proxyKind).toBe("FieldProxy3D");
+    });
+
+    it("fields-with-detail + proxyAvailable=false -> no MissingProxy", () => {
+      const coldState = makeColdState({
+        visibleRegion: makeVisibleRegion({
+          xyBounds: [0, 0, 32, 32],
+          zRange: [0, 32],
+        }),
+        activeSet: [
+          makeActiveEntry({
+            entityId: "field-1",
+            imageId: "img",
+            mode: "fields-with-detail",
+            // Catalog says no proxy exists — don't ask for one.
+            proxyKind: "FieldProxy3D",
+            proxyAvailable: false,
+          }),
+        ],
+      });
+      const atlas = makeVolumePool("img", [
+        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+      ]);
+      const volumeAtlases = new Map([["ds-0", atlas]]);
+      const result = computeWantedSet(
+        coldState,
+        volumeAtlases,
+        new Map(),
+        buildMemberToPool(volumeAtlases),
+        new Map(),
+      );
+      expect(proxies(result.missing)).toHaveLength(0);
+    });
+
+    it("fields-with-proxy-fallback emits both field-proxy and parent-well-proxy (deduped per well)", () => {
+      const coldState = makeColdState({
+        visibleRegion: makeVisibleRegion({
+          xyBounds: [0, 0, 32, 32],
+          zRange: [0, 32],
+        }),
+        activeSet: [
+          makeActiveEntry({
+            entityId: "field-A",
+            imageId: "imgA",
+            mode: "fields-with-proxy-fallback",
+            proxyKind: "FieldProxy3D",
+            proxyAvailable: true,
+            wellProxyAvailable: true,
+            parentWellId: "well-1",
+          }),
+          makeActiveEntry({
+            entityId: "field-B",
+            imageId: "imgB",
+            mode: "fields-with-proxy-fallback",
+            proxyKind: "FieldProxy3D",
+            proxyAvailable: true,
+            wellProxyAvailable: true,
+            parentWellId: "well-1",
+          }),
+        ],
+      });
+      const result = computeWantedSet(coldState, new Map(), new Map(), new Map(), new Map());
+      const ps = proxies(result.missing);
+      // 2 field proxies + 1 deduped well proxy = 3
+      const fieldProxies = ps.filter((p) => p.proxyKind === "FieldProxy3D");
+      const wellProxies = ps.filter((p) => p.proxyKind === "WellProxy3D");
+      expect(fieldProxies.map((p) => p.entityId).sort()).toEqual(["field-A", "field-B"]);
+      expect(wellProxies).toHaveLength(1);
+      expect(wellProxies[0].entityId).toBe("well-1");
+    });
+
+    it("mixed modes: well-as-proxy + fields-with-detail -> both reported correctly", () => {
+      const coldState = makeColdState({
+        visibleRegion: makeVisibleRegion({
+          xyBounds: [0, 0, 32, 32],
+          zRange: [0, 32],
+        }),
+        activeSet: [
+          makeActiveEntry({
+            entityId: "well-X",
+            imageId: "",
+            mode: "well-as-proxy",
+            proxyKind: "WellProxy3D",
+            proxyAvailable: true,
+            wellProxyAvailable: true,
+          }),
+          makeActiveEntry({
+            entityId: "field-Y",
+            imageId: "imgY",
+            mode: "fields-with-detail",
+            proxyKind: "FieldProxy3D",
+            proxyAvailable: true,
+          }),
+        ],
+      });
+      const atlas = makeVolumePool("imgY", [
+        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+      ]);
+      const volumeAtlases = new Map([["ds-0", atlas]]);
+      const result = computeWantedSet(
+        coldState,
+        volumeAtlases,
+        new Map(),
+        buildMemberToPool(volumeAtlases),
+        new Map(),
+      );
+      const ps = proxies(result.missing);
+      const wellMissing = ps.filter((p) => p.proxyKind === "WellProxy3D" && p.entityId === "well-X");
+      const fieldMissing = ps.filter((p) => p.proxyKind === "FieldProxy3D" && p.entityId === "field-Y");
+      expect(wellMissing).toHaveLength(1);
+      expect(fieldMissing).toHaveLength(1);
+      // Field-Y also has chunk wanted-set entries.
+      expect(chunks(result.missing).length).toBeGreaterThan(0);
+    });
   });
 });

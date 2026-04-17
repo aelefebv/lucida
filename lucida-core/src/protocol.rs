@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
+use lucida_protocol::AssetCatalogDelta;
 
 use crate::camera::Camera;
 use crate::command::DocumentCommand;
@@ -101,6 +102,12 @@ pub enum ServerMessage {
     },
     /// Sent when OpenRemoteDataset cannot be fulfilled.
     OpenDatasetFailed { url: String, error: String },
+    /// Incremental update to a dataset's asset catalog.
+    /// Reserved for S5; S3 server never emits this.
+    AssetCatalogUpdate {
+        dataset_id: DatasetId,
+        delta: AssetCatalogDelta,
+    },
 }
 
 /// Chunk-related messages exchanged between clients and server.
@@ -397,6 +404,33 @@ mod tests {
                 assert_eq!(error, "not found");
             }
             _ => panic!("expected OpenDatasetFailed"),
+        }
+    }
+
+    #[test]
+    fn asset_catalog_update_round_trips() {
+        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
+
+        let msg = ServerMessage::AssetCatalogUpdate {
+            dataset_id: DatasetId("ds1".into()),
+            delta: AssetCatalogDelta {
+                added: vec![ProxyAvailability {
+                    entity_id: lucida_content::EntityId("e1".into()),
+                    kinds: vec![ProxyKind::WellProxy3D],
+                }],
+            },
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"asset_catalog_update\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::AssetCatalogUpdate { dataset_id, delta } => {
+                assert_eq!(dataset_id, DatasetId("ds1".into()));
+                assert_eq!(delta.added.len(), 1);
+                assert_eq!(delta.added[0].entity_id, lucida_content::EntityId("e1".into()));
+                assert_eq!(delta.added[0].kinds, vec![ProxyKind::WellProxy3D]);
+            }
+            _ => panic!("expected AssetCatalogUpdate"),
         }
     }
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, LayoutId, LayoutSpec};
-use lucida_protocol::RegisterDataset;
+use lucida_protocol::{AssetCatalogDelta, RegisterDataset};
 
 use crate::camera::Camera;
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
@@ -20,6 +20,12 @@ pub enum DocumentCommand {
     SetActiveLayout {
         dataset_id: DatasetId,
         layout_id: LayoutId,
+    },
+    /// Merge an asset catalog delta into the document. Bumps `epochs.asset`.
+    /// Idempotent on identical re-apply.
+    ApplyAssetCatalogDelta {
+        dataset_id: DatasetId,
+        delta: AssetCatalogDelta,
     },
 }
 
@@ -180,6 +186,11 @@ impl Scene {
                     }
                     DocumentCommand::SetActiveLayout { .. } => {
                         unreachable!("handled above");
+                    }
+                    DocumentCommand::ApplyAssetCatalogDelta { .. } => {
+                        // Bump the asset epoch. Document state update happens
+                        // below via self.document.apply().
+                        self.epochs.asset += 1;
                     }
                 }
                 self.document.apply(doc_cmd);
@@ -831,10 +842,160 @@ mod tests {
         assert_eq!(scene.epochs.view, 3);
     }
 
+    // --- Asset catalog tests ---
+
+    #[test]
+    fn apply_asset_catalog_delta_bumps_only_asset_epoch() {
+        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
+        let mut scene = Scene::new([800, 600]);
+        // Register a dataset first so the catalog is initialized.
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let baseline = scene.epochs.clone();
+        assert_eq!(baseline.asset, 0);
+
+        let cmd = DocumentCommand::ApplyAssetCatalogDelta {
+            dataset_id: DatasetId("ds1".into()),
+            delta: AssetCatalogDelta {
+                added: vec![ProxyAvailability {
+                    entity_id: lucida_content::EntityId("ds1-entity".into()),
+                    kinds: vec![ProxyKind::FieldProxy3D],
+                }],
+            },
+        };
+        scene.apply(cmd.into());
+
+        assert_eq!(scene.epochs.asset, 1);
+        // No other epoch should change.
+        assert_eq!(scene.epochs.content, baseline.content);
+        assert_eq!(scene.epochs.layout, baseline.layout);
+        assert_eq!(scene.epochs.view, baseline.view);
+        assert_eq!(scene.epochs.selection, baseline.selection);
+    }
+
+    #[test]
+    fn apply_asset_catalog_delta_idempotent_on_repeat() {
+        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+
+        let delta = AssetCatalogDelta {
+            added: vec![ProxyAvailability {
+                entity_id: lucida_content::EntityId("ds1-entity".into()),
+                kinds: vec![ProxyKind::FieldProxy3D],
+            }],
+        };
+        let cmd1 = DocumentCommand::ApplyAssetCatalogDelta {
+            dataset_id: DatasetId("ds1".into()),
+            delta: delta.clone(),
+        };
+        let cmd2 = DocumentCommand::ApplyAssetCatalogDelta {
+            dataset_id: DatasetId("ds1".into()),
+            delta,
+        };
+
+        scene.apply(cmd1.into());
+        let after_first = scene.document.asset_catalogs[&DatasetId("ds1".into())].clone();
+        // Asset epoch bumps each call (it's the message-arrival counter; whether
+        // catalog *contents* changed is checked separately below).
+        assert_eq!(scene.epochs.asset, 1);
+
+        scene.apply(cmd2.into());
+        let after_second = scene.document.asset_catalogs[&DatasetId("ds1".into())].clone();
+
+        // Catalog contents must be identical — the merge must dedupe.
+        assert_eq!(after_first, after_second);
+        assert_eq!(after_second.entries.len(), 1);
+        assert_eq!(after_second.entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
+    }
+
+    #[test]
+    fn apply_asset_catalog_delta_merges_kinds_for_same_entity() {
+        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+
+        scene.apply(
+            DocumentCommand::ApplyAssetCatalogDelta {
+                dataset_id: DatasetId("ds1".into()),
+                delta: AssetCatalogDelta {
+                    added: vec![ProxyAvailability {
+                        entity_id: lucida_content::EntityId("e1".into()),
+                        kinds: vec![ProxyKind::FieldProxy3D],
+                    }],
+                },
+            }
+            .into(),
+        );
+
+        scene.apply(
+            DocumentCommand::ApplyAssetCatalogDelta {
+                dataset_id: DatasetId("ds1".into()),
+                delta: AssetCatalogDelta {
+                    added: vec![ProxyAvailability {
+                        entity_id: lucida_content::EntityId("e1".into()),
+                        kinds: vec![ProxyKind::WellProxy3D],
+                    }],
+                },
+            }
+            .into(),
+        );
+
+        let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
+        assert_eq!(cat.entries.len(), 1);
+        assert!(cat.entries[0].kinds.contains(&ProxyKind::FieldProxy3D));
+        assert!(cat.entries[0].kinds.contains(&ProxyKind::WellProxy3D));
+    }
+
+    #[test]
+    fn register_dataset_seeds_catalog_from_register_command() {
+        use lucida_protocol::{AssetCatalog, ProxyAvailability, ProxyKind};
+        let mut scene = Scene::new([800, 600]);
+        let mut reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        reg.catalog = AssetCatalog {
+            entries: vec![ProxyAvailability {
+                entity_id: lucida_content::EntityId("seed".into()),
+                kinds: vec![ProxyKind::WellProxy3D],
+            }],
+        };
+        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+
+        let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
+        assert_eq!(cat.entries.len(), 1);
+        assert_eq!(cat.entries[0].entity_id, lucida_content::EntityId("seed".into()));
+    }
+
+    #[test]
+    fn apply_asset_catalog_delta_command_round_trips() {
+        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
+        let cmd = DocumentCommand::ApplyAssetCatalogDelta {
+            dataset_id: DatasetId("ds1".into()),
+            delta: AssetCatalogDelta {
+                added: vec![ProxyAvailability {
+                    entity_id: lucida_content::EntityId("e1".into()),
+                    kinds: vec![ProxyKind::FieldProxy3D],
+                }],
+            },
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("\"type\":\"apply_asset_catalog_delta\""));
+        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
+        match parsed {
+            DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
+                assert_eq!(dataset_id, DatasetId("ds1".into()));
+                assert_eq!(delta.added.len(), 1);
+                assert_eq!(delta.added[0].kinds, vec![ProxyKind::FieldProxy3D]);
+            }
+            _ => panic!("expected ApplyAssetCatalogDelta"),
+        }
+    }
+
     #[test]
     fn scene_epochs_serde_round_trip() {
         use crate::epoch::SceneEpochs;
-        let epochs = SceneEpochs { content: 1, layout: 2, view: 3, selection: 4 };
+        let epochs = SceneEpochs { content: 1, layout: 2, view: 3, selection: 4, asset: 5 };
         let json = serde_json::to_string(&epochs).unwrap();
         let parsed: SceneEpochs = serde_json::from_str(&json).unwrap();
         assert_eq!(epochs, parsed);

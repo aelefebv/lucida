@@ -16,6 +16,12 @@ export interface BridgeHandlers {
   onCommand: (seq: number, commandJson: string) => void;
   onAck: (seq: number) => void;
   onChunkData?: (key: string, data: ArrayBuffer) => void;
+  /**
+   * S5: binary frame whose key starts with `proxy/`. Routed separately
+   * from `onChunkData` so the content source's proxy promise map can be
+   * resolved without colliding with chunk pending requests.
+   */
+  onProxyData?: (key: string, data: ArrayBuffer) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
   onPeerLeft?: (clientId: ClientId) => void;
   onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: PresenceState["view"], display: PresenceState["display"]) => void;
@@ -23,6 +29,11 @@ export interface BridgeHandlers {
   onFollowChanged?: (clientId: ClientId, target: ClientId | null) => void;
   onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
   onOpenDatasetFailed?: (url: string, error: string) => void;
+  /**
+   * S5 will start emitting these. S3 server doesn't, so the handler may
+   * be called with an empty `delta.added` only as a sanity check (no-op).
+   */
+  onAssetCatalogUpdate?: (datasetId: string, deltaJson: string) => void;
   onDisconnect?: () => void;
 }
 
@@ -101,6 +112,12 @@ export class Bridge {
           case "open_dataset_failed":
             this.handlers.onOpenDatasetFailed?.(msg.url, msg.error);
             break;
+          case "asset_catalog_update":
+            this.handlers.onAssetCatalogUpdate?.(
+              msg.dataset_id,
+              JSON.stringify(msg.delta ?? { added: [] }),
+            );
+            break;
         }
       } catch (e) {
         console.warn("[Bridge] failed to parse message:", e);
@@ -128,8 +145,16 @@ export class Bridge {
     if (buffer.byteLength < 6 + keyLen) return;
     const keyBytes = new Uint8Array(buffer, 6, keyLen);
     const key = new TextDecoder().decode(keyBytes);
-    const chunkData = buffer.slice(6 + keyLen);
-    this.handlers.onChunkData?.(key, chunkData);
+    const payload = buffer.slice(6 + keyLen);
+    // S5: proxy frames use the same envelope as chunk frames but with a
+    // `proxy/...` key prefix and a different payload layout (header +
+    // u16 voxels). Route them to the proxy handler so the content
+    // source can resolve the matching pending promise.
+    if (key.startsWith("proxy/")) {
+      this.handlers.onProxyData?.(key, payload);
+    } else {
+      this.handlers.onChunkData?.(key, payload);
+    }
   }
 
   private scheduleReconnect() {

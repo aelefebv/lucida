@@ -18,7 +18,15 @@ struct Uniforms {
   lodGridDims: array<vec4u, 4>,   // offset 416 (64 bytes) — xyz=gridDims, w=indirection offset
   lodChunkDims: array<vec4u, 4>,  // offset 480 (64 bytes) — xyz=chunkDims
   lodLevelDims: array<vec4f, 4>,  // offset 544 (64 bytes) — xyz=level voxel dimensions
-  // total = 608 bytes
+  // S8: proxy fallback — see proxyAtlas.ts for slot layout (1-D-along-X).
+  // Slot dim convention matches proxyAtlas slotDims = [Z, Y, X]:
+  //   proxyDims.x = Z, proxyDims.y = Y, proxyDims.z = X
+  // proxyParams: x=renderMode (0=detailOnly, 1=proxyDirect/well-as-proxy,
+  //   2=detailWithProxyFallback), y=fieldProxySlotIndex, z=wellProxySlotIndex (0xFFFFFFFF if absent), w=reserved.
+  proxyParams: vec4u,         // offset 608 (16 bytes)
+  fieldProxyDims: vec4u,      // offset 624 (16 bytes) — xyz = (Z, Y, X), w = reserved
+  wellProxyDims: vec4u,       // offset 640 (16 bytes) — xyz = (Z, Y, X), w = reserved
+  // total = 656 bytes
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -26,6 +34,11 @@ struct Uniforms {
 @group(0) @binding(2) var<storage, read> indirection: array<u32>;
 @group(0) @binding(3) var lutTex: texture_2d<f32>;
 @group(0) @binding(4) var lutSampler: sampler;
+// S8: proxy textures. Same r16uint format as the chunk atlas. A slot
+// occupies texture region [slotIdx * dims.z, 0, 0] of size dims (X=dims.z,
+// Y=dims.y, Z=dims.x), matching `proxySlotOrigin()` in proxyAtlas.ts.
+@group(0) @binding(5) var fieldProxyTex: texture_3d<u32>;
+@group(0) @binding(6) var wellProxyTex: texture_3d<u32>;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -55,9 +68,54 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
   return vec2f(tNear, tFar);
 }
 
-// Sample from the atlas with multi-LOD fallback.
+// S8: Sample one voxel from a proxy atlas slot.
+//
+//   - `dims.x` = slot Z, `dims.y` = slot Y, `dims.z` = slot X (matches
+//     `proxyAtlas.ts` `slotDims: [Z, Y, X]`).
+//   - Slot origin in the texture is `[slotIdx * dims.z, 0, 0]` (1-D-along-X
+//     layout — see `proxySlotOrigin()`).
+//   - `frac` is in [0,1]³ over the slot's voxel cube. We Y-flip to match
+//     the chunk path's image-convention sampling.
+//
+// Returns 0xFFFFFFFFu if the slot index is the sentinel; otherwise the
+// raw u16 voxel value (zero-extended into u32).
+fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec4u, frac: vec3f) -> u32 {
+  if (slotIdx == 0xFFFFFFFFu) {
+    return 0xFFFFFFFFu;
+  }
+  let slotZ = dims.x;
+  let slotY = dims.y;
+  let slotX = dims.z;
+  let originX = slotIdx * slotX;
+  let voxX = clamp(u32(frac.x * f32(slotX)), 0u, slotX - 1u);
+  let voxY = clamp(u32((1.0 - frac.y) * f32(slotY)), 0u, slotY - 1u);
+  let voxZ = clamp(u32(frac.z * f32(slotZ)), 0u, slotZ - 1u);
+  let coord = vec3i(
+    i32(originX + voxX),
+    i32(voxY),
+    i32(voxZ),
+  );
+  return textureLoad(tex, coord, 0).r;
+}
+
+// Sample from the atlas with multi-LOD fallback, then (renderMode == 2)
+// proxy fallback chain: detail → fieldProxy → wellProxy.
+//
+// renderMode == 1 short-circuits to a direct wellProxy sample (used by
+// well-as-proxy at far zoom).
+//
 // pos is in [0,1]³ local space. Tries target LOD first, then coarser LODs.
 fn sampleWithFallback(pos: vec3f) -> u32 {
+  let renderMode = u.proxyParams.x;
+  let fieldSlot = u.proxyParams.y;
+  let wellSlot = u.proxyParams.z;
+
+  // S8: well-as-proxy short-circuit. Skip indirection; one direct sample
+  // from the well's proxy slot. This is the major FPS win at far zoom.
+  if (renderMode == 1u) {
+    return sampleProxy(wellProxyTex, wellSlot, u.wellProxyDims, pos);
+  }
+
   let numLods = u.lodParams.x;
   let targetIdx = u.lodParams.y;
 
@@ -101,6 +159,29 @@ fn sampleWithFallback(pos: vec3f) -> u32 {
         i32(slotCoord.z * chunkDims.z + localTexel.z),
       );
       return textureLoad(volumeTex, atlasCoord, 0).r;
+    }
+  }
+
+  // S8: proxy fallback (renderMode == 2). Detail missed; try field proxy
+  // first, then parent well proxy. Each `sampleProxy()` call returns
+  // 0xFFFFFFFFu if its slot is the sentinel, so we cascade naturally.
+  //
+  // Note: the well-proxy sample uses the field's local `pos` (no
+  // field-to-well transform yet — see S8 PRD #405 and follow-up).
+  // Visually this means the well-proxy fallback in field-mode entries
+  // will display proxy voxels at field-local coordinates, which is
+  // spatially incorrect but produces a non-blank result while detail
+  // chunks load. The FPS win comes from renderMode == 1 (well-as-proxy
+  // at far zoom) which doesn't need the transform — it samples the
+  // well's own proxy at well-local coords.
+  if (renderMode == 2u) {
+    if (fieldSlot != 0xFFFFFFFFu) {
+      let v = sampleProxy(fieldProxyTex, fieldSlot, u.fieldProxyDims, pos);
+      if (v != 0xFFFFFFFFu) { return v; }
+    }
+    if (wellSlot != 0xFFFFFFFFu) {
+      let v = sampleProxy(wellProxyTex, wellSlot, u.wellProxyDims, pos);
+      if (v != 0xFFFFFFFFu) { return v; }
     }
   }
 

@@ -5,20 +5,42 @@
  *   PlanningSnapshot  ->  RequestPlan
  *
  * Currently implements:
- *   - promote()  — promotion/demotion + LOD range assignment
+ *   - promote()  — three-tier per-well promotion + LOD range assignment
  *   - createSyntheticSnapshot() / createSyntheticEntity() — test helpers
  */
 
 import type { LevelGeometry } from "../contentTypes.ts";
+import type { AssetCatalogSnapshot } from "./assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Projected diagonal (px) at which an overview entity promotes to detail. */
-export const PROMOTE_THRESHOLD_PX = 80;
+/**
+ * Far threshold (px). Below this, a well promotes to `well-as-proxy`.
+ * Replaces the legacy two-tier `PROMOTE_THRESHOLD_PX = 80`; same value.
+ */
+export const FAR_THRESHOLD_PX = 80;
 
-/** Projected diagonal (px) below which a detail entity demotes to overview. */
+/** Medium/Detail threshold (px). Above this, fields use real detail chunks. */
+export const MEDIUM_THRESHOLD_PX = 150;
+
+/** Hysteresis band (px) on either side of each threshold. */
+export const HYSTERESIS_PX = 5;
+
+/**
+ * Backwards-compat alias for the legacy constant. Many tests still import
+ * `PROMOTE_THRESHOLD_PX`; map it onto the new far threshold so the value
+ * still means "below this we use the proxy/coarse representation".
+ */
+export const PROMOTE_THRESHOLD_PX = FAR_THRESHOLD_PX;
+
+/**
+ * Backwards-compat alias for the legacy demote threshold. Kept as an
+ * export but no longer participates in promotion logic — three-tier
+ * promotion uses {@link FAR_THRESHOLD_PX} / {@link MEDIUM_THRESHOLD_PX}
+ * with {@link HYSTERESIS_PX}-band hysteresis instead.
+ */
 export const DEMOTE_THRESHOLD_PX = 40;
 
 /** Priority lane offset for overview requests (lowest urgency). */
@@ -26,6 +48,9 @@ export const OVERVIEW_LANE_OFFSET = 2000;
 
 /** Priority lane offset for runway (prefetch) requests. */
 export const RUNWAY_LANE_OFFSET = 1000;
+
+/** Priority lane offset for proxy requests (between detail and overview). */
+export const PROXY_LANE_OFFSET = 500;
 
 /** Priority lane offset for detail requests (highest urgency). */
 export const DETAIL_LANE_OFFSET = 0;
@@ -42,7 +67,11 @@ export interface PlanningEpochs {
   layout: number;
   view: number;
   selection: number;
-  /** Placeholder — always 0 until Asset Catalog (step 6). */
+  /**
+   * Bumped by `apply_asset_catalog_delta` (catalog membership change).
+   * The orchestrator reads it from `wasmScene.asset_epoch()` each tick.
+   * Stays 0 until S5 starts publishing real proxy availability.
+   */
   asset: number;
   /** Bumped when Planning produces a new request plan. */
   request: number;
@@ -82,6 +111,16 @@ export interface EntitySnapshot {
   levels: LevelGeometry[];
   /** Layout placement position. */
   position: [number, number];
+  /**
+   * Parent entity id (`Field.parent === wellId`), or `null` for top-level
+   * entities (`Image`, `Well`). Used by S6 promotion to group fields by
+   * their parent well so all fields of a well agree on a single
+   * {@link WellMode}.
+   *
+   * Optional in the type for backward compat with synthetic test
+   * snapshots that don't model plates; treat `undefined` as `null`.
+   */
+  parentId?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,12 +153,13 @@ export interface WorkerWantedSetSnapshot {
 }
 
 // ---------------------------------------------------------------------------
-// AssetCatalogSnapshot (placeholder)
+// AssetCatalogSnapshot
 // ---------------------------------------------------------------------------
 
-export interface AssetCatalogSnapshot {
-  // No fields until step 6.
-}
+// Re-exported from `./assetCatalog.ts` so consumers of the planning
+// snapshot don't need a separate import. S3 wires the snapshot through
+// the orchestrator with `byEntity` empty; S6 makes Planning consume it.
+export type { AssetCatalogSnapshot, ProxyKind } from "./assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
 // PlanningSnapshot  (full input)
@@ -133,7 +173,16 @@ export interface PlanningSnapshot {
   cacheState: CacheStateSnapshot;
   workerWantedSet: WorkerWantedSetSnapshot;
   previousActiveSet: ActiveSetEntry[];
-  /** null until step 6 (Asset Catalog). */
+  /**
+   * Asset catalog snapshot for promotion. The orchestrator passes
+   * `ctx.assetCatalog.snapshot()` (always non-null since S3); Planning
+   * S6 consults it to decide whether `well-as-proxy` /
+   * `fields-with-proxy-fallback` are reachable for each well.
+   *
+   * `null` is still accepted for callers that want to opt out — e.g.
+   * tests and `createSyntheticSnapshot`. Treated as an empty catalog →
+   * no proxies available → all wells degrade to `fields-with-detail`.
+   */
   assetCatalog: AssetCatalogSnapshot | null;
 }
 
@@ -145,6 +194,12 @@ export interface RequestPlan {
   requests: ChunkRequest[];
   activeSet: ActiveSetEntry[];
   epochs: PlanningEpochs;
+  /**
+   * Proxy assets to fetch alongside chunks. Populated by S6 promotion.
+   * Always defined — empty array when no entries use a proxy mode.
+   * CpuCache routes these to `ContentSource.fetchProxy`.
+   */
+  proxyRequests: ProxyRequest[];
 }
 
 export interface ChunkRequest {
@@ -164,16 +219,90 @@ export interface ChunkRequest {
   chunkKey: string;
 }
 
-export type Representation = "overview" | "proxy" | "detail";
-
-export interface ActiveSetEntry {
+/**
+ * A request to fetch a proxy asset for an entity. Mirrors
+ * `lucida_protocol::AssetRequest` on the wire and is consumed by
+ * [`CpuCache.submit`] which routes it to
+ * [`ContentSource.fetchProxy`].
+ *
+ * S6 populates these from the three-tier promotion: `WellProxy3D` for
+ * wells in `well-as-proxy` and as a parent fallback for
+ * `fields-with-proxy-fallback`; `FieldProxy3D` for fields in
+ * `fields-with-proxy-fallback` and `fields-with-detail`.
+ */
+export interface ProxyRequest {
+  datasetId: string;
   entityId: string;
   imageId: string;
-  representation: Representation;
+  kind: "WellProxy3D" | "FieldProxy3D";
+  t: number;
+  c: number;
+  /** Lower = more urgent. Same scale as `ChunkRequest.priority`. */
+  priority: number;
+}
+
+/**
+ * Per-well promotion mode, selected by {@link chooseWellMode} from the
+ * well's projected diagonal (max of constituent fields, in pixels):
+ *
+ *   - `well-as-proxy`            (< {@link FAR_THRESHOLD_PX})  — render the
+ *     well from a single `WellProxy3D` asset; no field chunks.
+ *   - `fields-with-proxy-fallback` (mid range)  — request real field detail
+ *     chunks but also fetch `FieldProxy3D` per visible field and the
+ *     parent's `WellProxy3D` as a fast fallback while detail loads.
+ *   - `fields-with-detail`        (> {@link MEDIUM_THRESHOLD_PX})  — real
+ *     field detail chunks only; proxy is a stand-in fallback that the
+ *     worker uses when chunks are missing.
+ */
+export type WellMode =
+  | "well-as-proxy"
+  | "fields-with-proxy-fallback"
+  | "fields-with-detail";
+
+export interface ActiveSetEntry {
+  /**
+   * For `well-as-proxy`: the well's entity id.
+   * For field modes: the field's entity id.
+   */
+  entityId: string;
+  /**
+   * For `well-as-proxy`: empty string — the well has no single owning
+   * image. Downstream code that iterates chunks short-circuits for
+   * `well-as-proxy` entries before reading this field.
+   *
+   * For field modes: the field's owning image id (matches
+   * `EntitySnapshot.imageId`).
+   */
+  imageId: string;
+  /** Promotion mode. See {@link WellMode}. */
+  mode: WellMode;
   targetLod: number;
   seedDetailLod: number;
   /** [finest, coarsest] inclusive. */
   detailOwnedLodRange: [number, number];
+  /**
+   * Which proxy kind (if any) this entry would prefer. For
+   * `well-as-proxy` this is always `WellProxy3D` (the entry IS the
+   * proxy); for field modes it's `FieldProxy3D` if available; otherwise
+   * `undefined`.
+   */
+  proxyKind?: "WellProxy3D" | "FieldProxy3D";
+  /**
+   * True if the entry's preferred proxy is known to be in the catalog.
+   * Field-mode entries set this from the field's catalog entry.
+   * `well-as-proxy` entries are always `true` (we only chose the mode
+   * because the well's proxy was advertised).
+   */
+  proxyAvailable: boolean;
+  /**
+   * For field-mode entries: whether the parent well's `WellProxy3D` is
+   * advertised. Drives the secondary lower-priority well-proxy request
+   * in `fields-with-proxy-fallback` and the parent-fallback hint in
+   * `fields-with-detail`.
+   *
+   * For `well-as-proxy` entries: same as `proxyAvailable` (true).
+   */
+  wellProxyAvailable: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,74 +310,301 @@ export interface ActiveSetEntry {
 // ---------------------------------------------------------------------------
 
 /**
- * Decide each entity's representation (overview vs detail) and compute its
- * LOD range.  Uses hysteresis: entities between the promote and demote
- * thresholds keep their previous representation.
+ * Decide a {@link WellMode} for the given projected diagonal, applying
+ * symmetric ±{@link HYSTERESIS_PX} hysteresis around both the far and
+ * medium thresholds.
+ *
+ * Outside the bands the natural mode is forced. Inside a band the
+ * previous mode wins as long as it's adjacent to the natural choice.
+ */
+export function chooseWellMode(
+  prevMode: WellMode | null,
+  projectedDiagonalPx: number,
+): WellMode {
+  const farUpper = FAR_THRESHOLD_PX + HYSTERESIS_PX; // 85
+  const farLower = FAR_THRESHOLD_PX - HYSTERESIS_PX; // 75
+  const medUpper = MEDIUM_THRESHOLD_PX + HYSTERESIS_PX; // 155
+  const medLower = MEDIUM_THRESHOLD_PX - HYSTERESIS_PX; // 145
+
+  // Clearly past the thresholds: natural choice wins.
+  if (projectedDiagonalPx < farLower) return "well-as-proxy";
+  if (projectedDiagonalPx > medUpper) return "fields-with-detail";
+  if (projectedDiagonalPx >= farUpper && projectedDiagonalPx <= medLower) {
+    return "fields-with-proxy-fallback";
+  }
+
+  // In a hysteresis band — keep prev mode if it's a sensible neighbor.
+  if (prevMode === "well-as-proxy" && projectedDiagonalPx < farUpper) {
+    return "well-as-proxy";
+  }
+  if (prevMode === "fields-with-detail" && projectedDiagonalPx > medLower) {
+    return "fields-with-detail";
+  }
+  if (prevMode === "fields-with-proxy-fallback") {
+    // Already in the middle band — only flip when clearly past.
+    return "fields-with-proxy-fallback";
+  }
+  return prevMode ?? "fields-with-proxy-fallback";
+}
+
+interface WellGroup {
+  /** The well's entity id. May be derived from `parentId` of fields. */
+  wellId: string;
+  /**
+   * The visible well entity if {@link EntitySnapshot.kind} === "Well"
+   * was in `entities`, otherwise `null`.
+   */
+  wellEntity: EntitySnapshot | null;
+  /** All visible field entities whose `parentId === wellId`. */
+  fields: EntitySnapshot[];
+  /** Max projectedDiagonalPx across well + fields. */
+  projectedDiagonalPx: number;
+}
+
+/**
+ * Group visible field entities by their parent well, also surfacing
+ * standalone {@link EntitySnapshot}s with `kind === "Image"` (which are
+ * treated as their own one-entry "well" so the rest of the pipeline is
+ * uniform).
+ *
+ * `kind === "Well"` entries are grouped with their fields; if a well is
+ * visible but has no visible fields, it still appears as a group with
+ * `fields: []`.
+ */
+function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
+  const groups = new Map<string, WellGroup>();
+
+  for (const entity of entities) {
+    if (!entity.visible) continue;
+
+    if (entity.kind === "Well") {
+      const wellId = entity.entityId;
+      let group = groups.get(wellId);
+      if (!group) {
+        group = {
+          wellId,
+          wellEntity: entity,
+          fields: [],
+          projectedDiagonalPx: entity.projectedDiagonalPx,
+        };
+        groups.set(wellId, group);
+      } else {
+        group.wellEntity = entity;
+        group.projectedDiagonalPx = Math.max(
+          group.projectedDiagonalPx,
+          entity.projectedDiagonalPx,
+        );
+      }
+      continue;
+    }
+
+    if (entity.kind === "Field") {
+      const wellId = entity.parentId ?? null;
+      if (wellId === null) {
+        // Field with no parent — fall back to a singleton group keyed on
+        // the field id so it gets a sensible mode.
+        const k = `__no-parent__${entity.entityId}`;
+        groups.set(k, {
+          wellId: entity.entityId,
+          wellEntity: null,
+          fields: [entity],
+          projectedDiagonalPx: entity.projectedDiagonalPx,
+        });
+        continue;
+      }
+
+      let group = groups.get(wellId);
+      if (!group) {
+        group = {
+          wellId,
+          wellEntity: null,
+          fields: [entity],
+          projectedDiagonalPx: entity.projectedDiagonalPx,
+        };
+        groups.set(wellId, group);
+      } else {
+        group.fields.push(entity);
+        group.projectedDiagonalPx = Math.max(
+          group.projectedDiagonalPx,
+          entity.projectedDiagonalPx,
+        );
+      }
+      continue;
+    }
+
+    // kind === "Image": treat as singleton group (its own "well") so
+    // non-plate datasets keep working transparently.
+    const wellId = `__image__${entity.entityId}`;
+    groups.set(wellId, {
+      wellId,
+      wellEntity: null,
+      fields: [entity],
+      projectedDiagonalPx: entity.projectedDiagonalPx,
+    });
+  }
+
+  return [...groups.values()];
+}
+
+/**
+ * Decide each entity's promotion mode and compute its LOD range.
+ *
+ * Three-tier per-well decision (S6):
+ *   - Group fields by parent well (or treat plain Images as singletons).
+ *   - For each group, pick a {@link WellMode} from the group's projected
+ *     diagonal with hysteresis against the previous active set.
+ *   - Catalog-aware degrade: if the chosen mode requires a proxy that
+ *     isn't advertised, fall through to the next finer mode.
+ *   - Emit one `ActiveSetEntry` per well (`well-as-proxy`) or one per
+ *     visible field (field modes).
  */
 export function promote(
   entities: EntitySnapshot[],
   previousActiveSet: ActiveSetEntry[],
+  catalog: AssetCatalogSnapshot | null = null,
 ): ActiveSetEntry[] {
-  // Build O(1) lookup from previous active set.
-  const previousByEntity = new Map<string, ActiveSetEntry>();
-  for (const entry of previousActiveSet) {
-    previousByEntity.set(entry.entityId, entry);
+  // Index previous active set by well id (for `well-as-proxy`) or by
+  // parent well id (for field-mode entries) so both lookups land on the
+  // same `prevMode`.
+  const prevModeByWell = new Map<string, WellMode>();
+  // Build a map from (entityId → wellId) so we can resolve where a
+  // field-mode entry's mode "belongs". For `well-as-proxy` entries
+  // entityId IS the wellId.
+  const fieldEntityToWell = new Map<string, string>();
+  for (const entity of entities) {
+    if (entity.kind === "Field" && entity.parentId) {
+      fieldEntityToWell.set(entity.entityId, entity.parentId);
+    }
+  }
+  for (const prev of previousActiveSet) {
+    if (prev.mode === "well-as-proxy") {
+      prevModeByWell.set(prev.entityId, prev.mode);
+    } else {
+      const wellId = fieldEntityToWell.get(prev.entityId);
+      if (wellId !== undefined) {
+        // Same-well field-mode entries always agree on mode, so
+        // first-write-wins is fine.
+        if (!prevModeByWell.has(wellId)) {
+          prevModeByWell.set(wellId, prev.mode);
+        }
+      }
+    }
   }
 
-  return entities.map((entity) => {
-    // Invisible entities are always overview.
-    if (!entity.visible) {
-      return makeOverviewEntry(entity);
+  const out: ActiveSetEntry[] = [];
+
+  for (const group of groupByWell(entities)) {
+    const prev = prevModeByWell.get(group.wellId) ?? null;
+    let desired = chooseWellMode(prev, group.projectedDiagonalPx);
+
+    // Catalog-aware degrade. We always inspect the well's catalog entry
+    // and the constituent fields' entries; both are needed to know which
+    // modes are reachable.
+    const wellHasProxy =
+      catalog !== null && catalogHas(catalog, group.wellId, "WellProxy3D");
+    const anyFieldHasProxy =
+      catalog !== null &&
+      group.fields.some((f) => catalogHas(catalog, f.entityId, "FieldProxy3D"));
+
+    if (desired === "well-as-proxy" && !wellHasProxy) {
+      desired = "fields-with-proxy-fallback";
+    }
+    if (
+      desired === "fields-with-proxy-fallback" &&
+      !anyFieldHasProxy &&
+      !wellHasProxy
+    ) {
+      desired = "fields-with-detail";
     }
 
-    let representation: Representation;
-
-    if (entity.projectedDiagonalPx >= PROMOTE_THRESHOLD_PX) {
-      representation = "detail";
-    } else if (entity.projectedDiagonalPx < DEMOTE_THRESHOLD_PX) {
-      representation = "overview";
-    } else {
-      // Hysteresis band — keep previous representation (default to overview).
-      const prev = previousByEntity.get(entity.entityId);
-      representation =
-        prev !== undefined && prev.representation === "detail"
-          ? "detail"
-          : "overview";
+    if (desired === "well-as-proxy") {
+      out.push(makeWellAsProxyEntry(group));
+      continue;
     }
 
-    if (representation === "detail") {
-      return makeDetailEntry(entity);
+    // Field-mode (proxy-fallback or detail). One entry per visible
+    // field. `wellEntity` (if visible) is intentionally NOT emitted as
+    // its own entry: the well's geometry is represented by its fields.
+    for (const field of group.fields) {
+      out.push(makeFieldEntry(field, desired, wellHasProxy, catalog));
     }
-    return makeOverviewEntry(entity);
-  });
+  }
+
+  // Pass-through: invisible entities still need to appear so that
+  // downstream consumers (CpuCache eviction tier, debug panels, etc.)
+  // can see them. Mirror the legacy behaviour by emitting them in
+  // `fields-with-detail` at the coarsest level (no chunk requests will
+  // be generated because `iterateChunks` early-outs on empty visible
+  // region overlap, but they remain in the active set for symmetry).
+  for (const entity of entities) {
+    if (entity.visible) continue;
+    out.push(makeInvisibleEntry(entity));
+  }
+
+  return out;
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
+function catalogHas(
+  catalog: AssetCatalogSnapshot,
+  entityId: string,
+  kind: "WellProxy3D" | "FieldProxy3D",
+): boolean {
+  return catalog.byEntity.get(entityId)?.kinds.has(kind) ?? false;
+}
 
-function makeOverviewEntry(entity: EntitySnapshot): ActiveSetEntry {
+function makeWellAsProxyEntry(group: WellGroup): ActiveSetEntry {
+  return {
+    entityId: group.wellId,
+    imageId: "",
+    mode: "well-as-proxy",
+    // The well-proxy is a single asset; LOD bookkeeping is mostly
+    // unused for this mode but we publish defensible defaults.
+    targetLod: 0,
+    seedDetailLod: 0,
+    detailOwnedLodRange: [0, 0],
+    proxyKind: "WellProxy3D",
+    proxyAvailable: true,
+    wellProxyAvailable: true,
+  };
+}
+
+function makeFieldEntry(
+  entity: EntitySnapshot,
+  mode: WellMode,
+  wellProxyAvailable: boolean,
+  catalog: AssetCatalogSnapshot | null,
+): ActiveSetEntry {
+  // Geometric: same logic the legacy `makeDetailEntry` used.
+  const targetLod = entity.idealTargetLod;
+  const seedDetailLod = Math.min(targetLod + 2, entity.numLevels - 1);
+  const fieldProxyAvailable =
+    catalog !== null && catalogHas(catalog, entity.entityId, "FieldProxy3D");
+
+  return {
+    entityId: entity.entityId,
+    imageId: entity.imageId,
+    mode,
+    targetLod,
+    seedDetailLod,
+    detailOwnedLodRange: [targetLod, seedDetailLod],
+    proxyKind: "FieldProxy3D",
+    proxyAvailable: fieldProxyAvailable,
+    wellProxyAvailable,
+  };
+}
+
+function makeInvisibleEntry(entity: EntitySnapshot): ActiveSetEntry {
   const coarsest = Math.max(entity.numLevels - 1, 0);
   return {
     entityId: entity.entityId,
     imageId: entity.imageId,
-    representation: "overview",
+    mode: "fields-with-detail",
     targetLod: coarsest,
     seedDetailLod: coarsest,
     detailOwnedLodRange: [coarsest, coarsest],
-  };
-}
-
-function makeDetailEntry(entity: EntitySnapshot): ActiveSetEntry {
-  const targetLod = entity.idealTargetLod;
-  const seedDetailLod = Math.min(targetLod + 2, entity.numLevels - 1);
-  return {
-    entityId: entity.entityId,
-    imageId: entity.imageId,
-    representation: "detail",
-    targetLod,
-    seedDetailLod,
-    detailOwnedLodRange: [targetLod, seedDetailLod],
+    proxyKind: undefined,
+    proxyAvailable: false,
+    wellProxyAvailable: false,
   };
 }
 
@@ -273,6 +629,7 @@ export function createSyntheticEntity(
     numLevels: 5,
     levels: [],
     position: [0, 0],
+    parentId: null,
     ...overrides,
   };
 }
@@ -368,6 +725,9 @@ export function chunkOutsideFrustum(
  * region.
  *
  * Ported from Rust `visible_chunks()` in lucida-core/src/chunk.rs.
+ *
+ * For `well-as-proxy` entries this returns an empty list — the well is
+ * served by a single proxy asset, not by chunk requests.
  */
 export function iterateChunks(
   entity: EntitySnapshot,
@@ -378,6 +738,7 @@ export function iterateChunks(
 ): ChunkRequest[] {
   const requests: ChunkRequest[] = [];
 
+  if (entry.mode === "well-as-proxy") return requests;
   if (entity.levels.length === 0) {
     return requests;
   }
@@ -526,9 +887,9 @@ function iterateGridCells(
 /**
  * Compute a numeric priority for a chunk request.
  *
- * Lower values = more urgent.  The lane offset separates the three lanes
- * (detail < runway < overview), while importance and distance provide
- * intra-lane ordering.
+ * Lower values = more urgent.  The lane offset separates the lanes
+ * (detail < proxy < runway < overview), while importance and distance
+ * provide intra-lane ordering.
  */
 function computePriority(
   laneOffset: number,
@@ -549,8 +910,12 @@ function computePriority(
  * single {@link RequestPlan}.
  */
 export function plan(snapshot: PlanningSnapshot): RequestPlan {
-  // Step 1: Promote.
-  const activeSet = promote(snapshot.entities, snapshot.previousActiveSet);
+  // Step 1: Promote (three-tier, S6).
+  const activeSet = promote(
+    snapshot.entities,
+    snapshot.previousActiveSet,
+    snapshot.assetCatalog,
+  );
 
   // Step 2: Build entity lookup.
   const entityById = new Map<string, EntitySnapshot>();
@@ -559,13 +924,41 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
   }
 
   const allRequests: ChunkRequest[] = [];
+  const proxyRequests: ProxyRequest[] = [];
 
-  // Step 3: Detail lane.
+  // Track well-proxy requests we've already emitted (one per
+  // (wellId, t, c)) so multiple fields-with-proxy-fallback fields of
+  // the same well don't each push a duplicate parent-well request.
+  const wellProxyEmitted = new Set<string>();
+
+  // Default datasetId for proxy requests. The orchestrator overrides
+  // both chunk and proxy requests with the real dataset id after
+  // `plan()` returns; we leave the empty string here so synthetic test
+  // snapshots still produce well-formed values.
+  const defaultDatasetId = "";
+
+  // Step 3: Detail / proxy lane (per active entry).
   for (const entry of activeSet) {
-    if (entry.representation !== "detail") continue;
+    if (entry.mode === "well-as-proxy") {
+      // Single proxy request per visible channel; no chunks.
+      for (const c of snapshot.selection.visibleChannels) {
+        proxyRequests.push({
+          datasetId: defaultDatasetId,
+          entityId: entry.entityId,
+          imageId: entry.imageId,
+          kind: "WellProxy3D",
+          t: snapshot.selection.t,
+          c,
+          priority: PROXY_LANE_OFFSET + 0,
+        });
+      }
+      continue;
+    }
+
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
+    // Field-mode entries: emit chunk requests at detail priority.
     const chunks = iterateChunks(
       entity,
       entry,
@@ -579,13 +972,54 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
       req.priority = computePriority(DETAIL_LANE_OFFSET, entity.importance, dist);
       allRequests.push(req);
     }
+
+    // Field proxy fallback (per visible channel).
+    if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
+      for (const c of snapshot.selection.visibleChannels) {
+        proxyRequests.push({
+          datasetId: defaultDatasetId,
+          entityId: entry.entityId,
+          imageId: entry.imageId,
+          kind: "FieldProxy3D",
+          t: snapshot.selection.t,
+          c,
+          priority: PROXY_LANE_OFFSET + 1,
+        });
+      }
+    }
+
+    // Parent-well proxy (only for proxy-fallback mode, deduped per
+    // (wellId, t, c)). At `fields-with-detail` zoom the chunk path is
+    // expected to keep up — no extra parent fetch.
+    if (
+      entry.mode === "fields-with-proxy-fallback" &&
+      entry.wellProxyAvailable &&
+      entity.parentId
+    ) {
+      const wellId = entity.parentId;
+      for (const c of snapshot.selection.visibleChannels) {
+        const dedupKey = `${wellId}|${snapshot.selection.t}|${c}`;
+        if (wellProxyEmitted.has(dedupKey)) continue;
+        wellProxyEmitted.add(dedupKey);
+        proxyRequests.push({
+          datasetId: defaultDatasetId,
+          entityId: wellId,
+          imageId: "",
+          kind: "WellProxy3D",
+          t: snapshot.selection.t,
+          c,
+          priority: PROXY_LANE_OFFSET + 100,
+        });
+      }
+    }
   }
 
-  // Step 4: Runway lane.
+  // Step 4: Runway lane — for field-mode entries only.
   for (const entry of activeSet) {
-    if (entry.representation !== "detail") continue;
+    if (entry.mode === "well-as-proxy") continue;
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
+    if (entity.levels.length === 0) continue;
 
     const maxT = entity.levels[0]?.grid_shape[0] ?? 0;
     for (let dt = 1; dt <= RUNWAY_DEPTH; dt++) {
@@ -624,10 +1058,13 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
     const overviewEntry: ActiveSetEntry = {
       entityId: entity.entityId,
       imageId: entity.imageId,
-      representation: "overview",
+      mode: "fields-with-detail",
       targetLod: coarsest,
       seedDetailLod: coarsest,
       detailOwnedLodRange: [coarsest, coarsest],
+      proxyKind: undefined,
+      proxyAvailable: false,
+      wellProxyAvailable: false,
     };
 
     const chunks = iterateChunks(
@@ -647,6 +1084,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
 
   // Step 6: Merge and sort by priority (ascending — lower = more urgent).
   allRequests.sort((a, b) => a.priority - b.priority);
+  proxyRequests.sort((a, b) => a.priority - b.priority);
 
   // Step 7: Epoch propagation.
   const epochs: PlanningEpochs = {
@@ -655,7 +1093,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
   };
 
   // Step 8: Return.
-  return { requests: allRequests, activeSet, epochs };
+  return { requests: allRequests, activeSet, epochs, proxyRequests };
 }
 
 // ---------------------------------------------------------------------------

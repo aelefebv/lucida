@@ -88,10 +88,15 @@ function uploadAndRenderSlice(
         const layerColormap = chSettings?.colormap ?? "gray";
 
         for (const m of members) {
+          // S8 fix: synthesized well-as-proxy entries carry their own
+          // dataW/dataH (the well's world-space AABB footprint). Fall back
+          // to the dataset's full-res image dims for normal field entries.
+          const layerDataW = m.dataW ?? fullResWidth;
+          const layerDataH = m.dataH ?? fullResHeight;
           layers.push({
             datasetId: compositeKey(m.imageId, ch),
-            dataW: fullResWidth,
-            dataH: fullResHeight,
+            dataW: layerDataW,
+            dataH: layerDataH,
             contrastMin: layerContrastMin,
             contrastMax: layerContrastMax,
             gamma: layerGamma,
@@ -100,6 +105,8 @@ function uploadAndRenderSlice(
             colormap: layerColormap,
             offsetX: m.position[0],
             offsetY: m.position[1],
+            entityId: m.entityId,
+            mode: m.mode,
           });
         }
       }
@@ -114,10 +121,14 @@ function uploadAndRenderSlice(
       const layerColormap = chSettings?.colormap ?? "gray";
 
       for (const m of members) {
+        // S8 fix: synthesized well-as-proxy entries carry their own
+        // dataW/dataH (the well's world-space AABB footprint).
+        const layerDataW = m.dataW ?? fullResWidth;
+        const layerDataH = m.dataH ?? fullResHeight;
         layers.push({
           datasetId: m.imageId,
-          dataW: fullResWidth,
-          dataH: fullResHeight,
+          dataW: layerDataW,
+          dataH: layerDataH,
           contrastMin: layerContrastMin,
           contrastMax: layerContrastMax,
           gamma: layerGamma,
@@ -126,6 +137,8 @@ function uploadAndRenderSlice(
           colormap: layerColormap,
           offsetX: m.position[0],
           offsetY: m.position[1],
+          entityId: m.entityId,
+          mode: m.mode,
         });
       }
     }

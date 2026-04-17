@@ -7,7 +7,12 @@
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { SceneSettings } from "../tickCommon.ts";
 import type { ImageSpec, ContentGraph, LevelGeometry } from "../contentTypes.ts";
-import type { ColdStateActiveEntry, ColdStateMessage } from "../renderer/workerProtocol.ts";
+import type {
+  ColdStateActiveEntry,
+  ColdStateMessage,
+  MissingChunk as MissingChunkLite,
+  MissingProxy as MissingProxyLite,
+} from "../renderer/workerProtocol.ts";
 // Note: atlas config messages eliminated — worker manages atlases from cold state
 import {
   getSceneSettings,
@@ -24,13 +29,49 @@ import type {
   SelectionState,
   ChunkRequest,
 } from "./planning.ts";
-import type { ReadyDelivery } from "./cpuCache.ts";
+import type {
+  CpuCache,
+  ReadyChunkDelivery,
+  ReadyProxyDelivery,
+} from "./cpuCache.ts";
+import type { ProxyRequest } from "./planning.ts";
 import { debugStats, type OrchDebug, type OrchMemberDebug } from "../debug/debugStats.ts";
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
   imageId: string;
   position: [number, number];
+  /**
+   * S8: entity id from the planning active set entry that produced this
+   * roster member. Forwarded to the GPU worker per-layer so it can look
+   * up the proxy descriptor for shader binding.
+   */
+  entityId?: string;
+  /**
+   * S8: promotion mode from the planning active set entry. Drives the
+   * shader's `renderMode` branch (well-as-proxy direct sample vs
+   * detail+proxy fallback). Optional for backward compat.
+   */
+  mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
+  /**
+   * S8: optional precomputed world-space model matrix for the
+   * `[0,1]^3` unit cube that bounds this member. When present, the
+   * render path uses it instead of querying `scene.member_model_matrix`.
+   * Used by `well-as-proxy` entries because wells aren't in
+   * `derived.members` and therefore have no native model matrix.
+   * Column-major 4×4. `invModelMatrix` is the matching inverse.
+   */
+  modelMatrix?: Float32Array;
+  invModelMatrix?: Float32Array;
+  /**
+   * S8 fix: optional 2D world-space footprint of the member (in voxel
+   * units, the same coordinate frame as `position`). When present, the
+   * slice path uses these instead of the dataset's per-image dataW/dataH
+   * for layer sizing — necessary for synthesized `well-as-proxy`
+   * entries whose footprint spans multiple field images.
+   */
+  dataW?: number;
+  dataH?: number;
 }
 
 export interface OrchestratorResult {
@@ -52,6 +93,113 @@ export interface MinimapChunkCoord {
   key: string;
 }
 
+/**
+ * S8: build a synthetic roster entry for a `well-as-proxy` entry.
+ *
+ * Wells aren't in `derived.members` so `scene.member_model_matrix` would
+ * return identity for them; instead we compute the well's world-space
+ * AABB by unioning each visible field's `[0,1]^3` cube transformed by
+ * its own model matrix, then build a translate+scale matrix that maps
+ * `[0,1]^3` onto that AABB. The shader marches a ray through this
+ * synthetic cube and samples the well's proxy texture once per fragment.
+ *
+ * Returns `null` if no field model matrices were available (defensive;
+ * caller already filters out wells with zero visible fields).
+ */
+function synthesizeWellRosterEntry(
+  ctx: TickContext,
+  dsId: string,
+  wellEntityId: string,
+  childFields: EntitySnapshot[],
+): MemberRosterEntry | null {
+  // 3D AABB (in 3D world-space, post Y-flip + global correction). Drives
+  // the volume path's `modelMatrix` for ray-marching the well as one
+  // synthetic cube.
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  let validCornerCount = 0;
+  // 2D AABB (in voxel space). Drives the slice path's `position` and
+  // `dataW/dataH` for rendering the well as a flat quad. Voxel-space is
+  // a different frame from the 3D model matrix output (no Y-flip, no
+  // global scaling), so we must compute it independently.
+  let min2DX = Infinity, min2DY = Infinity;
+  let max2DX = -Infinity, max2DY = -Infinity;
+  let valid2DCount = 0;
+  for (const field of childFields) {
+    // 2D voxel-space AABB from the field's own position + level0 shape.
+    // EntitySnapshot.position is already in voxel coords (from
+    // `scene.member_positions`).
+    const fx = field.position[0];
+    const fy = field.position[1];
+    const lvl0 = field.levels[0];
+    if (lvl0) {
+      const fw = lvl0.shape[4]; // X
+      const fh = lvl0.shape[3]; // Y
+      min2DX = Math.min(min2DX, fx);
+      min2DY = Math.min(min2DY, fy);
+      max2DX = Math.max(max2DX, fx + fw);
+      max2DY = Math.max(max2DY, fy + fh);
+      valid2DCount++;
+    }
+
+    // 3D world AABB via the field's model matrix.
+    const model = ctx.scene.member_model_matrix(dsId, field.imageId);
+    if (model.length !== 16) continue;
+    for (let i = 0; i < 8; i++) {
+      const cx = i & 1;
+      const cy = (i >> 1) & 1;
+      const cz = (i >> 2) & 1;
+      const wx = model[0] * cx + model[4] * cy + model[8] * cz + model[12];
+      const wy = model[1] * cx + model[5] * cy + model[9] * cz + model[13];
+      const wz = model[2] * cx + model[6] * cy + model[10] * cz + model[14];
+      const ww = model[3] * cx + model[7] * cy + model[11] * cz + model[15];
+      if (ww === 0) continue;
+      const x = wx / ww;
+      const y = wy / ww;
+      const z = wz / ww;
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+      validCornerCount++;
+    }
+  }
+  if (validCornerCount === 0 || valid2DCount === 0) return null;
+  const sx = maxX - minX;
+  const sy = maxY - minY;
+  const sz = maxZ - minZ;
+  if (sx === 0 || sy === 0 || sz === 0) return null;
+  const sx2D = max2DX - min2DX;
+  const sy2D = max2DY - min2DY;
+  if (sx2D === 0 || sy2D === 0) return null;
+  // Column-major 3D model matrix: scale + translate so [0,1]^3 → world AABB.
+  const model = new Float32Array([
+    sx,   0,    0,    0,
+    0,    sy,   0,    0,
+    0,    0,    sz,   0,
+    minX, minY, minZ, 1,
+  ]);
+  const inv = new Float32Array([
+    1 / sx,         0,              0,              0,
+    0,              1 / sy,         0,              0,
+    0,              0,              1 / sz,         0,
+    -minX / sx,     -minY / sy,     -minZ / sz,     1,
+  ]);
+  return {
+    // imageId stays empty per planning's `well-as-proxy` convention; the
+    // worker uses entityId for descriptor lookup, not imageId.
+    imageId: wellEntityId,
+    // 2D voxel-space position + size for the slice path. Independent of
+    // the 3D model matrix above (different coordinate frame).
+    position: [min2DX, min2DY],
+    entityId: wellEntityId,
+    mode: "well-as-proxy",
+    modelMatrix: model,
+    invModelMatrix: inv,
+    dataW: sx2D,
+    dataH: sy2D,
+  };
+}
+
 export class Orchestrator {
   private previousActiveSet = new Map<string, ActiveSetEntry[]>();
   private lastEpochs: PlanningEpochs | null = null;
@@ -63,6 +211,13 @@ export class Orchestrator {
   private _lastCachedKeyCounts = new Map<string, number>();
   /** Last filtered requests, re-submitted on epoch HIT to CpuCache. */
   private _lastFilteredRequests: ChunkRequest[] = [];
+  /**
+   * Last proxy requests produced by `plan()`, re-submitted on epoch HIT
+   * to CpuCache. S5 only cached chunk requests, which dropped any
+   * proxies whenever the orchestrator took the cache-hit short-circuit;
+   * S6 closes that gap so proxies stay live across cached planning ticks.
+   */
+  private _lastProxyRequests: ProxyRequest[] = [];
 
   // Delivery state — tracks what's been sent to the GPU worker
   private deliverySentToWorker = new Map<string, Set<string>>();
@@ -81,7 +236,12 @@ export class Orchestrator {
       layout: rawEpochs.layout,
       view: rawEpochs.view,
       selection: rawEpochs.selection,
-      asset: 0,
+      // `asset_epoch()` is the authoritative source. Older WASM builds
+      // without the binding fall back to 0 (functional no-op for S3).
+      asset:
+        typeof ctx.scene.asset_epoch === "function"
+          ? ctx.scene.asset_epoch()
+          : (rawEpochs.asset ?? 0),
       request: this.requestEpoch,
     };
 
@@ -91,15 +251,19 @@ export class Orchestrator {
       currentEpochs.content === this.lastEpochs.content &&
       currentEpochs.layout === this.lastEpochs.layout &&
       currentEpochs.view === this.lastEpochs.view &&
-      currentEpochs.selection === this.lastEpochs.selection
+      currentEpochs.selection === this.lastEpochs.selection &&
+      currentEpochs.asset === this.lastEpochs.asset
     ) {
-      // Re-submit detail + minimap in one call so they don't cancel each other
+      // Re-submit detail + minimap (and any cached proxies) in one call
+      // so they don't cancel each other. Forwarding `_lastProxyRequests`
+      // here closes the S5 gap where proxies vanished on epoch HIT.
       const minimapReqs = this.collectMinimapRequests(ctx, minimapPendingFetch);
       const allRequests = [...this._lastFilteredRequests, ...minimapReqs];
-      if (allRequests.length > 0) {
+      if (allRequests.length > 0 || this._lastProxyRequests.length > 0) {
         ctx.cpuCache.submit({
           requests: allRequests,
           activeSet: [...(this.previousActiveSet.values())].flat(),
+          proxyRequests: this._lastProxyRequests,
           epochs: this.lastEpochs!,
         });
       }
@@ -135,6 +299,13 @@ export class Orchestrator {
       for (const img of ds.content.images) {
         imageSpecById.set(img.image_id, img);
       }
+      // Parent lookup from the dataset's content graph. S6 promotion
+      // groups visible fields by `parentId` (the well id) so all fields
+      // of a well agree on a single WellMode.
+      const parentByEntityId = new Map<string, string | null>();
+      for (const ent of ds.content.entities) {
+        parentByEntityId.set(ent.id, ent.parent ?? null);
+      }
 
       const entities: EntitySnapshot[] = vq.visible_entities.map((e: any) => {
         const imgSpec = imageSpecById.get(e.image_id);
@@ -154,6 +325,7 @@ export class Orchestrator {
           numLevels,
           levels,
           position,
+          parentId: parentByEntityId.get(e.entity_id) ?? null,
         } satisfies EntitySnapshot;
       });
 
@@ -215,7 +387,10 @@ export class Orchestrator {
         cacheState: { cached: new Map(), inFlight: new Map() },
         workerWantedSet: { missing: new Map() },
         previousActiveSet: this.previousActiveSet.get(dsId) ?? [],
-        assetCatalog: null,
+        // S3: real (but empty) snapshot. Planning falls through to
+        // existing two-tier promote() since `byEntity.size === 0`.
+        // S6 will start consuming this for proxy promotion.
+        assetCatalog: ctx.assetCatalog.snapshot(),
       };
 
       const result = plan(snapshot);
@@ -225,9 +400,18 @@ export class Orchestrator {
       this._lastVisibleRegion = visibleRegion;
       this._lastEntities = entities;
 
+      // Annotate proxy requests with the real dataset id (Planning emits
+      // an empty default since it has no per-dataset context).
+      for (const pr of result.proxyRequests) {
+        pr.datasetId = dsId;
+      }
+      this._lastProxyRequests = result.proxyRequests;
+
       // 3i. Filter to single level per entity for atlas config (M4 adds multi-level).
+      // Skip `well-as-proxy` entries — they don't contribute chunks.
       const targetLevelByEntity = new Map<string, number>();
       for (const entry of result.activeSet) {
+        if (entry.mode === "well-as-proxy") continue;
         targetLevelByEntity.set(entry.entityId, entry.targetLod);
       }
       const filteredRequests = result.requests.filter(r => {
@@ -248,12 +432,47 @@ export class Orchestrator {
       }
 
       // 3j. Build member roster from active set for render layer construction.
+      // S8: forward the planning entry's entityId + mode so the render
+      // path can dispatch per-mode (well-as-proxy emits one layer per
+      // well; field modes iterate fields).
+      //
+      // For `well-as-proxy` entries the well typically isn't in the
+      // visible_entities query result (which iterates `derived.members`
+      // — image-level members only). We synthesize a roster entry by
+      // computing the well's world-space AABB from its visible fields,
+      // building a precomputed model matrix that maps the unit cube
+      // [0,1]^3 onto that AABB, and stashing the well's entityId for
+      // proxy descriptor lookup in the worker.
       const entityById = new Map(entities.map(e => [e.entityId, e]));
+      const fieldsByWell = new Map<string, EntitySnapshot[]>();
+      for (const entity of entities) {
+        if (entity.kind === "Field" && entity.parentId) {
+          let arr = fieldsByWell.get(entity.parentId);
+          if (!arr) {
+            arr = [];
+            fieldsByWell.set(entity.parentId, arr);
+          }
+          arr.push(entity);
+        }
+      }
       const rosterEntries: MemberRosterEntry[] = [];
       for (const entry of result.activeSet) {
+        if (entry.mode === "well-as-proxy") {
+          // Synthetic well member. Compute AABB from constituent fields.
+          const childFields = fieldsByWell.get(entry.entityId) ?? [];
+          if (childFields.length === 0) continue; // no geometry to render
+          const synth = synthesizeWellRosterEntry(ctx, dsId, entry.entityId, childFields);
+          if (synth) rosterEntries.push(synth);
+          continue;
+        }
         const entity = entityById.get(entry.entityId);
         if (entity) {
-          rosterEntries.push({ imageId: entity.imageId, position: entity.position });
+          rosterEntries.push({
+            imageId: entity.imageId,
+            position: entity.position,
+            entityId: entry.entityId,
+            mode: entry.mode,
+          });
         }
       }
       memberRoster.set(dsId, rosterEntries);
@@ -282,10 +501,14 @@ export class Orchestrator {
         }
       }
 
-      // Submit detail + minimap requests in a single call so they don't cancel each other
+      // Submit detail + minimap (chunks) and proxy requests in a single
+      // call so they don't cancel each other. Proxies sit in their own
+      // queue inside CpuCache but share the cancellation contract: if
+      // the next plan omits a request, its in-flight fetch is aborted.
       ctx.cpuCache.submit({
         requests: [...filteredRequests, ...minimapRequests],
         activeSet: result.activeSet,
+        proxyRequests: result.proxyRequests,
         epochs: currentEpochs,
       });
 
@@ -352,7 +575,7 @@ export class Orchestrator {
         for (const entry of activeSet) {
           orchDebug.activeSet.push({
             entityId: entry.entityId,
-            representation: entry.representation,
+            mode: entry.mode,
             targetLod: entry.targetLod,
             seedDetailLod: entry.seedDetailLod,
             detailOwnedLodRange: entry.detailOwnedLodRange,
@@ -428,9 +651,24 @@ export class Orchestrator {
     const deliveries = ctx.cpuCache.drain(budget);
 
     // Send each delivery to the worker.
-    // Skip runway (pre-cached for future timepoints), overview (minimap path),
-    // and wrong-LOD chunks (stale requests from a previous plan).
     for (const delivery of deliveries) {
+      if (delivery.kind === "proxy") {
+        // S5: proxies are routed to a dedicated worker message. The
+        // worker stub just logs receipt — S7 lands the actual GPU
+        // upload.
+        const sent = this.sendProxyDeliveryToWorker(ctx, delivery, epochs);
+        if (sent > 0) {
+          remaining -= sent;
+          if (remaining <= 0) {
+            budgetExhausted = true;
+            break;
+          }
+        }
+        continue;
+      }
+      // Chunk path. Skip runway (pre-cached for future timepoints),
+      // overview (minimap path), and wrong-LOD chunks (stale requests
+      // from a previous plan).
       if (delivery.lane === "runway" || delivery.lane === "overview") continue;
       const target = targetLevelByImage.get(delivery.imageId);
       if (target === undefined || delivery.level !== target) continue;
@@ -478,16 +716,30 @@ export class Orchestrator {
     }
   }
 
-  /** Process a wanted-set delta from the GPU worker. */
-  handleWantedSetDelta(missing: Array<{ entityId: string; chunkKey: string }>): void {
+  /**
+   * Process a wanted-set delta from the GPU worker.
+   *
+   * S7: now accepts a discriminated union over chunks and proxies.
+   * Chunks land in `workerWantedSet` (existing chunk-resend logic);
+   * proxy entries are not yet tracked here — `_lastProxyRequests` is
+   * the orchestrator's source of truth and the cache-hit path keeps
+   * re-submitting them, so a proxy missing from the worker simply
+   * stays in the next plan's request set. (Direct fast-path for proxy
+   * resend can land in a future slice if the steady-state churn turns
+   * out to need it.)
+   */
+  handleWantedSetDelta(
+    missing: Array<MissingChunkLite | MissingProxyLite>,
+  ): void {
     this.workerWantedSet.clear();
-    for (const { entityId, chunkKey } of missing) {
-      let set = this.workerWantedSet.get(entityId);
+    for (const entry of missing) {
+      if (entry.kind !== "chunk") continue;
+      let set = this.workerWantedSet.get(entry.entityId);
       if (!set) {
         set = new Set();
-        this.workerWantedSet.set(entityId, set);
+        this.workerWantedSet.set(entry.entityId, set);
       }
-      set.add(chunkKey);
+      set.add(entry.chunkKey);
     }
   }
 
@@ -502,12 +754,12 @@ export class Orchestrator {
   }
 
   /**
-   * Send a single delivery to the GPU worker, emitting atlas config if the
+   * Send a single chunk delivery to the GPU worker, emitting atlas config if the
    * state key changed and the chunk data itself.  Returns bytes sent (0 if skipped).
    */
   private sendDeliveryToWorker(
     ctx: TickContext,
-    delivery: ReadyDelivery,
+    delivery: ReadyChunkDelivery,
     multiChannel: boolean,
     sliceZ: number | null,
     epochs: PlanningEpochs,
@@ -575,6 +827,74 @@ export class Orchestrator {
     return delivery.data.byteLength;
   }
 
+  /**
+   * S5: forward a proxy delivery to the GPU worker. The worker stub
+   * just logs receipt; S7 will hook this up to real GPU residency.
+   */
+  private sendProxyDeliveryToWorker(
+    ctx: TickContext,
+    delivery: ReadyProxyDelivery,
+    epochs: PlanningEpochs,
+  ): number {
+    ctx.client.proxyAssetData(
+      delivery.datasetId,
+      delivery.entityId,
+      delivery.imageId,
+      delivery.proxyKind,
+      delivery.t,
+      delivery.c,
+      delivery.header.dims,
+      delivery.data,
+      epochs,
+    );
+    return delivery.data.byteLength;
+  }
+
+  /**
+   * Debug helper for HITL: synthesize a single-proxy `RequestPlan`,
+   * submit it to CpuCache, and rely on the normal subscribe → tick →
+   * `deliverToWorker` path to forward the result to the GPU worker.
+   *
+   * Intended to be called from the dev console, e.g.
+   * `window.__lucidaOrchestrator.requestTestProxy(...)`. App.tsx exposes
+   * the orchestrator on `window` for this purpose.
+   *
+   * Returns immediately — the result lands in the worker asynchronously.
+   */
+  requestTestProxy(
+    cpuCache: CpuCache,
+    datasetId: string,
+    entityId: string,
+    imageId: string,
+    kind: "WellProxy3D" | "FieldProxy3D",
+    t: number,
+    c: number,
+  ): void {
+    const proxyRequest: ProxyRequest = {
+      datasetId,
+      entityId,
+      imageId,
+      kind,
+      t,
+      c,
+      priority: 0,
+    };
+    const epochs: PlanningEpochs = this.lastEpochs ?? {
+      content: 0,
+      layout: 0,
+      view: 0,
+      selection: 0,
+      asset: 0,
+      request: 0,
+    };
+    cpuCache.submit({
+      requests: [],
+      activeSet: [],
+      proxyRequests: [proxyRequest],
+      epochs,
+    });
+  }
+
   /** Collect minimap pending fetches as overview-lane ChunkRequests (no submit). */
   private collectMinimapRequests(
     ctx: TickContext,
@@ -636,12 +956,24 @@ export class Orchestrator {
         return { level: idx, chunkShape, gridShape, levelDims };
       });
 
+      // S7: forward Planning's promotion mode + proxy availability so
+      // the worker's wanted-set knows whether to ask for proxies.
+      // `parentWellId` lets the worker fan out a well-proxy upload to
+      // its child fields' descriptors.
+      const parentWellId =
+        entity?.kind === "Field" ? (entity.parentId ?? null) : null;
+
       return {
         entityId: entry.entityId,
         imageId: entry.imageId,
         targetLod: entry.targetLod,
         detailOwnedLodRange: entry.detailOwnedLodRange,
         levels,
+        mode: entry.mode,
+        proxyKind: entry.proxyKind,
+        proxyAvailable: entry.proxyAvailable,
+        wellProxyAvailable: entry.wellProxyAvailable,
+        parentWellId,
       };
     });
 

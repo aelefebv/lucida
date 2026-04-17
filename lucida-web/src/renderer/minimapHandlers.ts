@@ -63,6 +63,11 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
     if (!overview) continue;
 
     const idx = renderedLayers.length;
+    // S8: minimap always uses the legacy chunk-only path (renderMode=0).
+    // Reset proxy state in case a previous main-view draw left renderMode
+    // != 0 — otherwise the minimap would short-circuit to a sentinel
+    // proxy slot and render empty.
+    renderer.setProxyParams(0, null, 0xFFFFFFFF, [1, 1, 1], null, 0xFFFFFFFF, [1, 1, 1]);
     renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(1.0);

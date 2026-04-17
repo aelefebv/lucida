@@ -130,6 +130,21 @@ let depthTexture: GPUTexture | null = null;
 let depthW = 0;
 let depthH = 0;
 
+// S8: shared dummy indirection buffer, used when binding the chunk atlas
+// for `well-as-proxy` layers (which sample only the proxy texture; chunk
+// bindings still need valid GPU resources).
+let dummyIndirectionBuf: GPUBuffer | null = null;
+function getDummyIndirection(device: GPUDevice): GPUBuffer {
+  if (!dummyIndirectionBuf) {
+    dummyIndirectionBuf = device.createBuffer({
+      size: 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(dummyIndirectionBuf, 0, new Uint32Array([0xFFFFFFFF]));
+  }
+  return dummyIndirectionBuf;
+}
+
 function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture {
   if (depthTexture && depthW === w && depthH === h) return depthTexture;
   depthTexture?.destroy();
@@ -439,7 +454,7 @@ export function handleVolumeChunkData(
 export function handleVolumeRenderMultiPass(
   ctx: WorkerCtx,
   msg: VolumeRenderMultiPassMessage,
-  layerToPool: (memberId: string) => { poolKey: string } | null,
+  layerToPool: (memberId: string) => { poolKey: string | null; datasetId: string | null } | null,
 ): void {
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
@@ -457,33 +472,109 @@ export function handleVolumeRenderMultiPass(
     const memberId = layer.datasetId;
     const resolved = layerToPool(memberId);
     if (!resolved) continue;
-    const atlas = atlasPerDataset.get(resolved.poolKey);
-    if (!atlas) continue;
-    const entityLodMetas = atlas.entityMetas.get(memberId);
-    if (!entityLodMetas) continue;
 
-    rayHitPerEntity.set(memberId, layer.rayHitLocal);
+    // S8: well-as-proxy entries don't have a chunk pool — we render with
+    // a dummy chunk atlas + indirection but a real proxy texture binding.
+    const isWellAsProxy = layer.mode === "well-as-proxy";
+    const atlas = resolved.poolKey ? atlasPerDataset.get(resolved.poolKey) ?? null : null;
+    let entityLodMetas: LodIndirectionMeta[] | null = null;
+    if (atlas) {
+      entityLodMetas = atlas.entityMetas.get(memberId) ?? null;
+    }
+    if (!isWellAsProxy) {
+      // Field-mode: chunk atlas + per-entity LOD meta required.
+      if (!atlas || !entityLodMetas) continue;
+      rayHitPerEntity.set(memberId, layer.rayHitLocal);
+    }
 
     const lutTex = ctx.getOrCreateLUT(layer.colormap ?? "gray");
     renderer.setColormapTexture(lutTex);
 
-    if (atlas.indirectionDirty) {
+    if (atlas && atlas.indirectionDirty) {
       ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
       atlas.indirectionDirty = false;
     }
-    // Use target LOD's dims for the legacy single-LOD uniforms (gridX/Y/Z, levelWidth/Height/Depth).
-    // Multi-LOD fallback uses entityLodMetas which has per-LOD info.
-    const targetMeta = entityLodMetas[0]; // first is target (finest)
-    const [tGridZ, tGridY, tGridX] = targetMeta.gridDims;
-    const [tLevelD, tLevelH, tLevelW] = targetMeta.levelDims;
-    renderer.setAtlas(
-      atlas.texture, atlas.indirectionBuf,
-      [atlas.chunkX, atlas.chunkY, atlas.chunkZ],
-      [tGridX, tGridY, tGridZ],
-      [atlas.slotsX, atlas.slotsY, atlas.slotsZ],
-      [tLevelW, tLevelH, tLevelD],
-      entityLodMetas,
+
+    // S8: resolve proxy descriptor for this layer's entity. Falls back
+    // to "no proxy" (sentinel slot indices, dummy texture) when the
+    // entity has no descriptor yet.
+    const desc = layer.entityId
+      ? ctx.lookupProxyDescriptor(layer.entityId)
+      : null;
+    let renderModeProxy = 0; // 0 = legacy chunk-only
+    let fieldProxyTexture: GPUTexture | null = null;
+    let fieldProxySlotIndex = 0xFFFFFFFF;
+    let fieldProxyDims: [number, number, number] = [1, 1, 1];
+    let wellProxyTexture: GPUTexture | null = null;
+    let wellProxySlotIndex = 0xFFFFFFFF;
+    let wellProxyDims: [number, number, number] = [1, 1, 1];
+
+    if (layer.mode === "well-as-proxy") {
+      renderModeProxy = 1;
+    } else if (
+      layer.mode === "fields-with-proxy-fallback" ||
+      layer.mode === "fields-with-detail"
+    ) {
+      renderModeProxy = 2;
+    }
+
+    if (desc && resolved.datasetId) {
+      if (desc.fieldProxyHandle) {
+        const pool = ctx.lookupProxyPool(resolved.datasetId, desc.fieldProxyHandle.poolKey);
+        if (pool) {
+          fieldProxyTexture = pool.texture;
+          fieldProxySlotIndex = desc.fieldProxyHandle.slotIndex;
+          fieldProxyDims = pool.slotDims;
+        }
+      }
+      if (desc.wellProxyHandle) {
+        const pool = ctx.lookupProxyPool(resolved.datasetId, desc.wellProxyHandle.poolKey);
+        if (pool) {
+          wellProxyTexture = pool.texture;
+          wellProxySlotIndex = desc.wellProxyHandle.slotIndex;
+          wellProxyDims = pool.slotDims;
+        }
+      }
+    }
+
+    // For well-as-proxy mode, if no well proxy is resident yet, the
+    // shader returns 0xFFFFFFFFu (transparent) — skip the draw to avoid
+    // a flashing empty rect.
+    if (renderModeProxy === 1 && wellProxySlotIndex === 0xFFFFFFFF) {
+      isFirstLayer = false;
+      continue;
+    }
+
+    renderer.setProxyParams(
+      renderModeProxy,
+      fieldProxyTexture, fieldProxySlotIndex, fieldProxyDims,
+      wellProxyTexture, wellProxySlotIndex, wellProxyDims,
     );
+
+    if (atlas && entityLodMetas) {
+      // Field-mode (or fallback) path: real chunk atlas + LOD metadata.
+      const targetMeta = entityLodMetas[0]; // first is target (finest)
+      const [tGridZ, tGridY, tGridX] = targetMeta.gridDims;
+      const [tLevelD, tLevelH, tLevelW] = targetMeta.levelDims;
+      renderer.setAtlas(
+        atlas.texture, atlas.indirectionBuf,
+        [atlas.chunkX, atlas.chunkY, atlas.chunkZ],
+        [tGridX, tGridY, tGridZ],
+        [atlas.slotsX, atlas.slotsY, atlas.slotsZ],
+        [tLevelW, tLevelH, tLevelD],
+        entityLodMetas,
+      );
+    } else {
+      // S8: well-as-proxy with no chunk atlas — bind dummies. The
+      // shader's well-as-proxy short-circuit ignores chunk binding 1
+      // and indirection 2, but WebGPU still requires valid resources.
+      const dummyChunk = ctx.getDummy3DTexture();
+      renderer.setAtlas(
+        dummyChunk, getDummyIndirection(ctx.device),
+        [1, 1, 1], [1, 1, 1], [1, 1, 1], [1, 1, 1],
+        [],
+      );
+    }
 
     renderer.setDisplayParams(layer.contrastMin, layer.contrastMax, layer.gamma);
     renderer.setOpacity(layer.opacity);
@@ -535,4 +626,6 @@ export function destroyAllVolumeResources(): void {
   rayHitPerEntity.clear();
   depthTexture?.destroy();
   depthTexture = null;
+  dummyIndirectionBuf?.destroy();
+  dummyIndirectionBuf = null;
 }

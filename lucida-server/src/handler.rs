@@ -2,17 +2,22 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
-use lucida_content::{DatasetId, ImageId};
+use lucida_content::{DatasetId, EntityKind, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
-use lucida_protocol::RegisterDataset;
+use lucida_protocol::{
+    AssetCatalog, AssetMessage, ProxyAvailability, RegisterDataset,
+};
+use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use object_store::path::Path;
 use tokio::sync::{broadcast, mpsc, Mutex};
 
 use crate::binding::{ChunkResolver, ServerBinding};
+use crate::decode::decode_storage_bytes;
+use crate::proxy::{ProxyCache, ProxyGenerator};
 use crate::session::Session;
-use crate::{BroadcastItem, UnicastRoutes};
+use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
 
 pub async fn handle_client(
     id: ClientId,
@@ -20,6 +25,7 @@ pub async fn handle_client(
     session: Arc<Mutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
+    proxy_config: ProxyConfig,
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
@@ -228,10 +234,17 @@ pub async fn handle_client(
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let url_clone = url.clone();
+                            let proxy_config_clone = proxy_config.clone();
                             tokio::spawn(async move {
                                 handle_open_remote_dataset(
-                                    id, url_clone, session_clone, tx_clone, unicast_routes_clone,
-                                ).await;
+                                    id,
+                                    url_clone,
+                                    session_clone,
+                                    tx_clone,
+                                    unicast_routes_clone,
+                                    proxy_config_clone,
+                                )
+                                .await;
                             });
                         }
                         ClientMessage::DatasetPresence {
@@ -292,6 +305,46 @@ pub async fn handle_client(
                     continue;
                 }
 
+                // Try as AssetMessage (S5: proxy asset request).
+                if let Ok(asset_msg) = serde_json::from_str::<AssetMessage>(&json) {
+                    match asset_msg {
+                        AssetMessage::AssetRequest {
+                            dataset_id,
+                            entity_id,
+                            kind,
+                            t,
+                            c,
+                        } => {
+                            let generator = {
+                                let sess = session.lock().await;
+                                sess.server_bindings
+                                    .get(&dataset_id)
+                                    .map(|b| b.proxy_generator.clone())
+                            };
+                            let Some(generator) = generator else {
+                                eprintln!(
+                                    "server: no binding for dataset {dataset_id} (asset {entity_id:?}/{kind:?} dropped)"
+                                );
+                                continue;
+                            };
+                            let unicast_routes_clone = Arc::clone(&unicast_routes);
+                            tokio::spawn(async move {
+                                serve_asset_request(
+                                    id,
+                                    entity_id,
+                                    kind,
+                                    t,
+                                    c,
+                                    &generator,
+                                    &unicast_routes_clone,
+                                )
+                                .await;
+                            });
+                        }
+                    }
+                    continue;
+                }
+
                 eprintln!("client {id}: unrecognized message");
             }
             Message::Binary(data) => {
@@ -344,6 +397,41 @@ pub async fn handle_client(
     eprintln!("client {id} disconnected");
 }
 
+/// Compute the stable, content-derived DatasetId for a source URL.
+///
+/// The ID is deterministic in `url` only — independent of wall clock or
+/// server lifetime — so that:
+///   * the same URL opened multiple times within a session shares one
+///     `ServerBinding` (and therefore one cache, one import);
+///   * the proxy cache layout (S3, S4) can key on the URL hash and survive
+///     restarts.
+///
+/// Uses the first 8 bytes of a BLAKE3 hash of the URL.
+pub fn dataset_id_for_url(url: &str) -> String {
+    let digest = blake3_url(url);
+    let prefix: [u8; 8] = digest[..8].try_into().unwrap();
+    format!("ds-{:016x}", u64::from_le_bytes(prefix))
+}
+
+/// 16-byte URL hash used by the proxy cache for its per-dataset
+/// directory name. Shares the underlying BLAKE3 digest with
+/// [`dataset_id_for_url`] so the two stay in lockstep — the cache
+/// directory's first 8 bytes (in BLAKE3 order) match the bytes from
+/// which the `ds-...` ID is built.
+pub fn dataset_url_hash16(url: &str) -> [u8; 16] {
+    let digest = blake3_url(url);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+/// Internal: full 32-byte BLAKE3 digest of `url`. Held as a single
+/// helper so the ID, the 16-byte cache key, and any future longer
+/// derivation cannot drift apart.
+fn blake3_url(url: &str) -> [u8; 32] {
+    *blake3::hash(url.as_bytes()).as_bytes()
+}
+
 /// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast RegisterDataset.
 async fn handle_open_remote_dataset(
     client_id: ClientId,
@@ -351,7 +439,39 @@ async fn handle_open_remote_dataset(
     session: Arc<Mutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
+    proxy_config: ProxyConfig,
 ) {
+    // Stable, content-derived ID. Two opens of the same URL produce the
+    // same ID so the second open reuses the existing binding.
+    let dataset_id = dataset_id_for_url(&url);
+    let dataset_id_key = DatasetId(dataset_id.clone());
+
+    // If we've already imported this URL in this session, reuse the binding.
+    // Re-broadcast the existing RegisterDataset (held on the binding) so the
+    // requesting client receives the same content graph + fetch descriptor
+    // without re-importing.
+    {
+        let sess = session.lock().await;
+        if let Some(existing) = sess.server_bindings.get(&dataset_id_key) {
+            let command = DocumentCommand::RegisterDataset(existing.register_command.clone());
+            let seq = sess.seq;
+            drop(sess);
+            let broadcast_msg = ServerMessage::CommandBroadcast {
+                seq,
+                command,
+            };
+            let _ = tx.send(BroadcastItem::CommandBroadcast {
+                sender: u64::MAX,
+                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+                ack_json: String::new(),
+            });
+            eprintln!(
+                "server: reused existing binding for dataset {dataset_id} from {url}"
+            );
+            return;
+        }
+    }
+
     // Open storage backend.
     let store = match lucida_store::backend::open(&url) {
         Ok(s) => s,
@@ -367,19 +487,6 @@ async fn handle_open_remote_dataset(
         .find(|s| !s.is_empty())
         .unwrap_or("dataset")
         .to_string();
-
-    // Generate a dataset ID.
-    let dataset_id = format!("srv-{:016x}", {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        url.hash(&mut h);
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .hash(&mut h);
-        h.finish()
-    });
 
     // Import dataset via the new pipeline.
     tracing::info!(url = %url, id = %dataset_id, name = %name, "importing dataset");
@@ -407,25 +514,105 @@ async fn handle_open_remote_dataset(
 
     // Build operational binding.
     let cached = Arc::new(CachedStore::new(store.clone(), 512 * 1024 * 1024));
-    let resolver = ChunkResolver::new(&result.binding_seed);
+    let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
+
+    // S5: build the initial proxy availability catalog by enumerating
+    // entities. Wells advertise WellProxy3D, Fields advertise FieldProxy3D,
+    // and bare Images advertise FieldProxy3D (the proxy generator falls
+    // back to FieldProxy semantics for non-Well entities — see
+    // `build_server_proxy_source`). Entities without a contributing image
+    // are skipped — Planning has nothing to fetch for them.
+    let catalog_entries: Vec<ProxyAvailability> = result
+        .content
+        .entities()
+        .iter()
+        .filter_map(|entity| {
+            let kinds = match entity.kind {
+                EntityKind::Well => vec![ProxyKind::WellProxy3D],
+                EntityKind::Field | EntityKind::Image => vec![ProxyKind::FieldProxy3D],
+            };
+            // Only advertise entities that own an image (Wells aggregate
+            // their fields' images downstream, so we keep all Wells).
+            let has_image = matches!(entity.kind, EntityKind::Well)
+                || result
+                    .content
+                    .images()
+                    .iter()
+                    .any(|img| img.owner == entity.id);
+            if !has_image {
+                return None;
+            }
+            Some(ProxyAvailability {
+                entity_id: entity.id.clone(),
+                kinds,
+            })
+        })
+        .collect();
+
+    let register_command = RegisterDataset {
+        content: result.content.clone(),
+        fetch: result.fetch,
+        catalog: AssetCatalog {
+            entries: catalog_entries.clone(),
+        },
+    };
+
+    // S4: per-dataset proxy infrastructure. Cache root is keyed by the
+    // 16-byte URL hash so a single shared `cache_dir` can host many
+    // datasets without collision. The generator owns its own bounded
+    // semaphore + in-flight dedup map.
+    let url_hash16 = dataset_url_hash16(&url);
+    let proxy_cache = Arc::new(ProxyCache::new(
+        proxy_config.cache_dir.clone(),
+        url_hash16,
+    ));
+    let proxy_generator = Arc::new(ProxyGenerator::new(
+        proxy_cache.clone(),
+        cached.clone(),
+        resolver.clone(),
+        Arc::new(result.content),
+        proxy_config.concurrency,
+    ));
+
+    // Clone for the (T=0, C=0) pre-generation task spawned below.
+    let prefetch_generator = proxy_generator.clone();
+    let prefetch_entries = catalog_entries.clone();
+
     let binding = ServerBinding {
         source_url: url.clone(),
         store: store.clone(),
         resolver,
         cache: cached,
+        register_command: register_command.clone(),
+        proxy_cache,
+        proxy_generator,
     };
 
     // Build RegisterDataset command (content + fetch, no server-private state).
-    let command = DocumentCommand::RegisterDataset(RegisterDataset {
-        content: result.content,
-        fetch: result.fetch,
-    });
+    let command = DocumentCommand::RegisterDataset(register_command);
 
-    let dataset_id_key = DatasetId(dataset_id.clone());
-
-    // Apply command and register server binding.
+    // Apply command and register server binding. Re-check the binding
+    // presence under the lock in case a concurrent open raced ahead.
     let seq = {
         let mut sess = session.lock().await;
+        if let Some(existing) = sess.server_bindings.get(&dataset_id_key) {
+            // Lost the race: another open completed the import. Drop our
+            // duplicate binding/command and rebroadcast the canonical one.
+            let canonical = existing.register_command.clone();
+            let seq = sess.seq;
+            drop(sess);
+            let broadcast_msg = ServerMessage::CommandBroadcast {
+                seq,
+                command: DocumentCommand::RegisterDataset(canonical),
+            };
+            let _ = tx.send(BroadcastItem::CommandBroadcast {
+                sender: u64::MAX,
+                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
+                ack_json: String::new(),
+            });
+            eprintln!("server: lost import race for {dataset_id}, reused existing binding");
+            return;
+        }
         let seq = sess.apply(command.clone());
         sess.server_bindings.insert(dataset_id_key, binding);
         seq
@@ -447,7 +634,43 @@ async fn handle_open_remote_dataset(
     });
 
     eprintln!("server: opened remote dataset {dataset_id} from {url}");
+
+    // S5: kick off background generation for the initial (T=0, C=0) view
+    // of every advertised entity at the lowest priority. Errors are logged
+    // but do not propagate — the open succeeds either way, and downstream
+    // requests will surface the failure with their own error path.
+    if !prefetch_entries.is_empty() {
+        let dataset_id_for_log = dataset_id.clone();
+        tokio::spawn(async move {
+            for availability in prefetch_entries {
+                for kind in availability.kinds {
+                    let spec = ProxySpec {
+                        entity_id: availability.entity_id.clone(),
+                        kind,
+                        t: 0,
+                        c: 0,
+                        target_long_axis: PROXY_TARGET_LONG_AXIS,
+                    };
+                    if let Err(e) = prefetch_generator.request(spec, 0).await {
+                        tracing::warn!(
+                            dataset = %dataset_id_for_log,
+                            entity = %availability.entity_id.0,
+                            kind = ?kind,
+                            error = %e,
+                            "background proxy pre-generation failed"
+                        );
+                    }
+                }
+            }
+        });
+    }
 }
+
+/// Soft cap on the longest output dimension of a proxy. Mirrors the value
+/// used by `serve_asset_request` so the cache key (which is derived from
+/// `(entity, kind, t, c)` only, not the target) stays in lockstep with the
+/// pre-generation task.
+const PROXY_TARGET_LONG_AXIS: u32 = 128;
 
 /// Read a chunk from a CachedStore and send it to the requesting client.
 ///
@@ -484,42 +707,22 @@ async fn serve_chunk_from_store(
     };
 
     // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
-    let bytes: Vec<u8> = match storage_compression {
-        crate::binding::StorageCompression::Lz4 => {
-            match lz4_flex::decompress_size_prepended(&storage_bytes) {
-                Ok(raw) => {
-                    tracing::debug!(
-                        key = chunk_key,
-                        compressed = storage_bytes.len(),
-                        decompressed = raw.len(),
-                        "lz4 decoded"
-                    );
-                    raw
-                }
-                Err(e) => {
-                    eprintln!("server: lz4 decompress failed for {chunk_key}: {e}");
-                    return;
-                }
-            }
+    // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
+    let bytes: Vec<u8> = match decode_storage_bytes(&storage_bytes, storage_compression) {
+        Ok(raw) => {
+            tracing::debug!(
+                key = chunk_key,
+                compressed = storage_bytes.len(),
+                decompressed = raw.len(),
+                compression = ?storage_compression,
+                "chunk decoded"
+            );
+            raw
         }
-        crate::binding::StorageCompression::Zstd => {
-            match zstd::stream::decode_all(std::io::Cursor::new(&storage_bytes)) {
-                Ok(raw) => {
-                    tracing::debug!(
-                        key = chunk_key,
-                        compressed = storage_bytes.len(),
-                        decompressed = raw.len(),
-                        "zstd decoded"
-                    );
-                    raw
-                }
-                Err(e) => {
-                    eprintln!("server: zstd decompression failed for {chunk_key}: {e}");
-                    return;
-                }
-            }
+        Err(e) => {
+            eprintln!("server: decode failed for {chunk_key}: {e}");
+            return;
         }
-        crate::binding::StorageCompression::None => storage_bytes.to_vec(),
     };
 
     // Build binary response: [client_id: u32 LE][key_len: u16 LE][key][data]
@@ -540,6 +743,132 @@ async fn serve_chunk_from_store(
     }
 }
 
+/// Generate (or fetch from cache) a proxy asset and send it to the
+/// requesting client over the unicast channel.
+///
+/// Wire frame layout (binary, little-endian):
+///
+/// ```text
+/// [client_id : u32]
+/// [key_len   : u16] [key bytes]
+/// [header    : 64 bytes  (lucida_proxy::write_header layout)]
+/// [voxels    : N * u16   (Z, Y, X row-major)]
+/// ```
+///
+/// The leading `client_id`/`key_len`/`key` envelope mirrors
+/// [`serve_chunk_from_store`] so the client's bridge layer can route both
+/// chunk and proxy frames through the same binary handler.
+///
+/// `key` is `proxy/{entity_id}/{kind_str}/T{t:05}_C{c:03}` where
+/// `kind_str` is `WellProxy3D` or `FieldProxy3D` (matching the JSON
+/// variant names of [`ProxyKind`]). The `proxy/` prefix lets the client
+/// distinguish proxy frames from chunk frames, which use
+/// `{dataset_id}/{image_id}/{chunk_key}`.
+async fn serve_asset_request(
+    client_id: ClientId,
+    entity_id: lucida_content::EntityId,
+    kind: ProxyKind,
+    t: u32,
+    c: u32,
+    generator: &Arc<ProxyGenerator>,
+    unicast_routes: &UnicastRoutes,
+) {
+    let spec = ProxySpec {
+        entity_id: entity_id.clone(),
+        kind,
+        t,
+        c,
+        target_long_axis: PROXY_TARGET_LONG_AXIS,
+    };
+
+    tracing::debug!(
+        entity = %entity_id.0,
+        kind = ?kind,
+        t,
+        c,
+        "serving proxy asset"
+    );
+
+    let asset = match generator.request(spec, 1).await {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!(
+                "server: proxy generation failed for {entity_id:?}/{kind:?}/T{t}_C{c}: {e}"
+            );
+            return;
+        }
+    };
+
+    let buf = match encode_proxy_frame(client_id, &entity_id, kind, t, c, &asset) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("server: proxy frame encode failed: {e}");
+            return;
+        }
+    };
+
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Binary(buf.into()));
+    }
+}
+
+/// Build the binary proxy response frame. See [`serve_asset_request`] for
+/// the layout. Pulled out as a free function so unit tests can exercise the
+/// format without spinning up the network.
+pub(crate) fn encode_proxy_frame(
+    client_id: ClientId,
+    entity_id: &lucida_content::EntityId,
+    kind: ProxyKind,
+    t: u32,
+    c: u32,
+    asset: &ProxyAsset,
+) -> std::io::Result<Vec<u8>> {
+    let key = proxy_response_key(entity_id, kind, t, c);
+    let key_bytes = key.as_bytes();
+    let key_len: u16 = key_bytes
+        .len()
+        .try_into()
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "proxy key too long"))?;
+
+    let voxel_bytes: &[u8] = bytemuck::cast_slice(&asset.voxels);
+
+    let mut buf = Vec::with_capacity(4 + 2 + key_bytes.len() + 64 + voxel_bytes.len());
+    buf.extend_from_slice(&(client_id as u32).to_le_bytes());
+    buf.extend_from_slice(&key_len.to_le_bytes());
+    buf.extend_from_slice(key_bytes);
+    lucida_proxy::write_header(&mut buf, &asset.header)?;
+    buf.extend_from_slice(voxel_bytes);
+    Ok(buf)
+}
+
+/// Compose the proxy response key. Public so the TS client can mirror
+/// the format and the test suite can assert it.
+pub(crate) fn proxy_response_key(
+    entity_id: &lucida_content::EntityId,
+    kind: ProxyKind,
+    t: u32,
+    c: u32,
+) -> String {
+    format!(
+        "proxy/{}/{}/T{:05}_C{:03}",
+        entity_id.0,
+        proxy_kind_str(kind),
+        t,
+        c
+    )
+}
+
+/// Stable string representation of [`ProxyKind`] used in proxy response
+/// keys. We pin it explicitly rather than using `Debug` so renaming a
+/// variant won't silently break the wire format.
+pub(crate) fn proxy_kind_str(kind: ProxyKind) -> &'static str {
+    match kind {
+        ProxyKind::WellProxy3D => "WellProxy3D",
+        ProxyKind::FieldProxy3D => "FieldProxy3D",
+    }
+}
+
 /// Send an OpenDatasetFailed message to the requesting client.
 async fn send_open_failed(
     client_id: ClientId,
@@ -556,5 +885,86 @@ async fn send_open_failed(
     let senders = unicast_routes.lock().await;
     if let Some(sender) = senders.get(&client_id) {
         let _ = sender.send(Message::Text(json.into()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lucida_content::EntityId;
+    use lucida_proxy::{ProxyDtype, ProxyHeader};
+
+    fn sample_asset(zyx: [u32; 3]) -> ProxyAsset {
+        let count = zyx.iter().fold(1usize, |a, b| a * (*b as usize));
+        let voxels: Vec<u16> = (0..count).map(|i| (i as u16).wrapping_mul(7)).collect();
+        ProxyAsset {
+            header: ProxyHeader {
+                algorithm_version: lucida_proxy::ALGORITHM_VERSION,
+                source_content_hash: [0xABu8; 32],
+                dims: zyx,
+                dtype: ProxyDtype::U16,
+            },
+            voxels,
+        }
+    }
+
+    #[test]
+    fn proxy_response_key_format_matches_spec() {
+        let key = proxy_response_key(
+            &EntityId("field-A1".into()),
+            ProxyKind::FieldProxy3D,
+            0,
+            0,
+        );
+        assert_eq!(key, "proxy/field-A1/FieldProxy3D/T00000_C000");
+
+        let well = proxy_response_key(
+            &EntityId("well-B2".into()),
+            ProxyKind::WellProxy3D,
+            12,
+            3,
+        );
+        assert_eq!(well, "proxy/well-B2/WellProxy3D/T00012_C003");
+    }
+
+    #[test]
+    fn proxy_kind_str_pins_variant_names() {
+        assert_eq!(proxy_kind_str(ProxyKind::WellProxy3D), "WellProxy3D");
+        assert_eq!(proxy_kind_str(ProxyKind::FieldProxy3D), "FieldProxy3D");
+    }
+
+    #[test]
+    fn encode_proxy_frame_round_trips_header_and_voxels() {
+        let asset = sample_asset([2, 3, 4]);
+        let entity_id = EntityId("e1".into());
+        let buf = encode_proxy_frame(7, &entity_id, ProxyKind::FieldProxy3D, 5, 1, &asset)
+            .expect("encode");
+
+        // [client_id:u32 LE][key_len:u16 LE][key][header 64][voxels]
+        assert!(buf.len() >= 4 + 2 + 64);
+        let client_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        assert_eq!(client_id, 7);
+
+        let key_len = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
+        let key_start = 6;
+        let key_end = key_start + key_len;
+        let key = std::str::from_utf8(&buf[key_start..key_end]).unwrap();
+        assert_eq!(key, "proxy/e1/FieldProxy3D/T00005_C001");
+
+        // Header round-trips via lucida_proxy::read_header.
+        let mut header_cursor = std::io::Cursor::new(&buf[key_end..key_end + 64]);
+        let header = lucida_proxy::read_header(&mut header_cursor).unwrap();
+        assert_eq!(header.dims, [2, 3, 4]);
+        assert_eq!(header.algorithm_version, asset.header.algorithm_version);
+        assert_eq!(header.source_content_hash, asset.header.source_content_hash);
+
+        // Voxels follow immediately, little-endian u16.
+        let voxel_bytes = &buf[key_end + 64..];
+        assert_eq!(voxel_bytes.len(), asset.voxels.len() * 2);
+        let parsed: Vec<u16> = voxel_bytes
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .collect();
+        assert_eq!(parsed, asset.voxels);
     }
 }

@@ -75,6 +75,30 @@ export interface VolumeChunkDataMessage {
   hitLocal: [number, number, number];
 }
 
+/**
+ * S5: a generated proxy asset delivered to the worker. Carries the
+ * compact `[Z, Y, X]` u16 voxel buffer plus identifying metadata.
+ *
+ * No GPU work happens for this message in S5 — the worker just records
+ * receipt in a debug map. S7 will hook this up to a "proxy texture"
+ * residency tier.
+ */
+export interface ProxyAssetDataMessage {
+  type: "proxyAssetData";
+  epochs: PlanningEpochs;
+  datasetId: string;
+  entityId: string;
+  imageId: string;
+  kind: "WellProxy3D" | "FieldProxy3D";
+  t: number;
+  c: number;
+  /** `[Z, Y, X]` voxel counts. */
+  dims: [number, number, number];
+  dataType: "u16";
+  /** Raw u16 voxels (little-endian), `Z*Y*X*2` bytes. */
+  data: ArrayBuffer;
+}
+
 // Multi-pass render messages
 
 export interface VolumeLayerParams {
@@ -90,6 +114,23 @@ export interface VolumeLayerParams {
   renderMode: "translucent" | "max_intensity";
   colormap?: string;
   scissorRect?: [number, number, number, number];
+  /**
+   * S8: per-entity id used by the worker to look up the proxy descriptor
+   * (`proxyDescriptorsByEntity`). For field-mode entries this is the
+   * field's entity id; for `well-as-proxy` entries this is the well's
+   * entity id. Optional for backward compat — when absent, the worker
+   * treats the layer as `mode === "fields-with-detail"` with no proxy
+   * binding (legacy behaviour).
+   */
+  entityId?: string;
+  /**
+   * S8: promotion mode for this layer. Drives shader `renderMode`:
+   *   - `well-as-proxy`              → renderMode = 1 (skip indirection)
+   *   - `fields-with-proxy-fallback` / `fields-with-detail`
+   *                                  → renderMode = 2 (chunk + proxy chain)
+   *   - undefined / `detailOnly`     → renderMode = 0 (legacy chunk-only)
+   */
+  mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
 }
 
 export interface VolumeRenderMultiPassMessage {
@@ -123,6 +164,10 @@ export interface SliceLayerParams {
   offsetX?: number;
   /** Member position offset in voxels along Y (default 0). */
   offsetY?: number;
+  /** S8: see {@link VolumeLayerParams.entityId}. */
+  entityId?: string;
+  /** S8: see {@link VolumeLayerParams.mode}. */
+  mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
 }
 
 export interface SliceRenderMultiPassMessage {
@@ -216,6 +261,32 @@ export interface ColdStateActiveEntry {
     gridShape: [number, number, number];  // chunks per axis
     levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
   }>;
+  /**
+   * S7: promotion mode for this entry (set by Planning, propagated by
+   * the orchestrator). The worker uses this to decide which proxy
+   * residency rules apply when computing the wanted-set.
+   */
+  mode: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
+  /**
+   * S7: which proxy kind (if any) this entry would prefer. For
+   * `well-as-proxy` this is `WellProxy3D`; for field modes it's
+   * `FieldProxy3D` if the catalog advertises it.
+   */
+  proxyKind?: "WellProxy3D" | "FieldProxy3D";
+  /** S7: catalog says the preferred proxy is fetchable. */
+  proxyAvailable: boolean;
+  /**
+   * S7: catalog says the parent well's `WellProxy3D` is fetchable.
+   * For `well-as-proxy` entries equals `proxyAvailable`; for field
+   * entries this drives the secondary parent-well-proxy request.
+   */
+  wellProxyAvailable: boolean;
+  /**
+   * S7: parent well id for field entries (so the worker can map a
+   * field's descriptor back to its parent's wellProxyHandle). `null`
+   * for non-field entries.
+   */
+  parentWellId?: string | null;
 }
 
 export interface ColdStateMessage {
@@ -235,6 +306,7 @@ export type MainToWorkerMessage =
   | ResizeMessage
   | SliceChunkDataMessage
   | VolumeChunkDataMessage
+  | ProxyAssetDataMessage
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage
   | MinimapInitMessage
@@ -274,10 +346,32 @@ export interface ChunksEvictedMessage {
   skipped?: string[];
 }
 
+/** S7: a chunk that the worker is missing from its atlas. */
+export type MissingChunk = {
+  kind: "chunk";
+  entityId: string;
+  chunkKey: string;
+};
+
+/** S7: a proxy asset that the worker is missing from its proxy atlas. */
+export type MissingProxy = {
+  kind: "proxy";
+  entityId: string;
+  proxyKind: "WellProxy3D" | "FieldProxy3D";
+  t: number;
+  c: number;
+};
+
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
   epochs: PlanningEpochs;
-  missing: Array<{ entityId: string; chunkKey: string }>;
+  /**
+   * S7: discriminated union over chunks and proxies. Existing chunk
+   * consumers should match on `kind === "chunk"` to extract `chunkKey`;
+   * the orchestrator uses proxy entries to know which proxies to
+   * re-deliver from CpuCache.
+   */
+  missing: Array<MissingChunk | MissingProxy>;
 }
 
 export type WorkerToMainMessage =

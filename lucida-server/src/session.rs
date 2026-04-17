@@ -225,7 +225,7 @@ mod tests {
                 wire_format: WireFormat::Raw { data_type: DataType::Uint16 },
             }],
         });
-        RegisterDataset { content, fetch }
+        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
     }
 
     #[test]

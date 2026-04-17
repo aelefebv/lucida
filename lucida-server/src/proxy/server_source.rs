@@ -1,0 +1,433 @@
+//! Adapter from the server's async `CachedStore` to the synchronous
+//! [`ProxySourceData`] trait expected by `lucida-proxy`.
+//!
+//! The trick: rather than block_on inside the trait impl, we **pre-fetch
+//! all chunks** the requested proxy needs (under a tokio task) into an
+//! in-memory `ServerProxySource`, then call `generate_proxy()` against
+//! that. The trait impl just looks up the pre-loaded volume by
+//! `(image_id, t, c, level)`.
+//!
+//! For the MVP this means each `ProxyGenerator::request` does one full
+//! read of the source data per generation. That's fine: we only generate
+//! once per `(spec, source_hash)` and the result is cached on disk.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use lucida_content::{
+    AffineTransform, ContentGraph, EntityId, EntityKind, ImageId, ImageSpec,
+};
+use lucida_proxy::{FieldVolume, ProxyKind, ProxySourceData, ProxySpec, SourceError};
+use lucida_store::cache::CachedStore;
+use object_store::path::Path;
+
+use crate::binding::ChunkResolver;
+use crate::decode::{DecodeError, decode_storage_bytes};
+
+/// In-memory pre-fetched volumes for a single `ProxyGenerator::request`.
+/// Implements [`ProxySourceData`] by lookup; never performs I/O.
+pub struct ServerProxySource {
+    /// Keyed by `(image_id.0, t, c, level)`.
+    volumes: HashMap<VolumeKey, OwnedFieldVolume>,
+}
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct VolumeKey {
+    image_id: String,
+    t: u32,
+    c: u32,
+    level: usize,
+}
+
+struct OwnedFieldVolume {
+    data: Vec<u16>,
+    dims: [u32; 3],
+    voxel_to_image: AffineTransform,
+}
+
+impl ServerProxySource {
+    /// Construct an empty source. Tests use this; production callers go
+    /// through [`build_server_proxy_source`].
+    pub fn empty() -> Self {
+        Self {
+            volumes: HashMap::new(),
+        }
+    }
+
+    /// Insert a pre-decoded volume.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert(
+        &mut self,
+        image_id: &ImageId,
+        t: u32,
+        c: u32,
+        level: usize,
+        data: Vec<u16>,
+        dims: [u32; 3],
+        voxel_to_image: AffineTransform,
+    ) {
+        self.volumes.insert(
+            VolumeKey {
+                image_id: image_id.0.clone(),
+                t,
+                c,
+                level,
+            },
+            OwnedFieldVolume {
+                data,
+                dims,
+                voxel_to_image,
+            },
+        );
+    }
+}
+
+impl ProxySourceData for ServerProxySource {
+    fn read_field_volume(
+        &self,
+        image_id: &ImageId,
+        t: u32,
+        c: u32,
+        level: usize,
+    ) -> Result<FieldVolume, SourceError> {
+        let key = VolumeKey {
+            image_id: image_id.0.clone(),
+            t,
+            c,
+            level,
+        };
+        self.volumes
+            .get(&key)
+            .map(|v| FieldVolume {
+                data: v.data.clone(),
+                dims: v.dims,
+                voxel_to_image: v.voxel_to_image.clone(),
+            })
+            .ok_or(SourceError::NotFound)
+    }
+}
+
+/// Pre-fetch all chunks needed to satisfy `spec` from `store`, decode
+/// them, and assemble dense `(Z, Y, X)` u16 volumes per image.
+///
+/// For a `FieldProxy3D` this fetches one image (the entity's image). For
+/// a `WellProxy3D` it fetches one image per field child. For each image
+/// we pick the same level [`lucida_proxy`] would (`pick_level`) and read
+/// every chunk in that level's grid for `(t, c)`, decompressing per
+/// `ChunkResolver::storage_compression`.
+pub async fn build_server_proxy_source(
+    spec: &ProxySpec,
+    content: &ContentGraph,
+    store: &Arc<CachedStore>,
+    resolver: &ChunkResolver,
+) -> Result<ServerProxySource, BuildSourceError> {
+    let entity = content
+        .entities()
+        .iter()
+        .find(|e| e.id == spec.entity_id)
+        .ok_or_else(|| BuildSourceError::MissingEntity(spec.entity_id.clone()))?;
+
+    // Determine which images contribute to this proxy.
+    let image_ids: Vec<&ImageSpec> = match spec.kind {
+        ProxyKind::FieldProxy3D => {
+            // Single image owned by the entity.
+            let img = content
+                .images()
+                .iter()
+                .find(|i| i.owner == entity.id)
+                .ok_or_else(|| BuildSourceError::MissingImage(entity.id.clone()))?;
+            vec![img]
+        }
+        ProxyKind::WellProxy3D => {
+            if !matches!(entity.kind, EntityKind::Well) {
+                // Treat non-well entities the same way `aggregate_well`
+                // does: fall back to FieldProxy semantics. This keeps the
+                // pre-fetch consistent with `generate_proxy`'s dispatch.
+                let img = content
+                    .images()
+                    .iter()
+                    .find(|i| i.owner == entity.id)
+                    .ok_or_else(|| BuildSourceError::MissingImage(entity.id.clone()))?;
+                vec![img]
+            } else {
+                let mut imgs: Vec<&ImageSpec> = Vec::new();
+                for child in content.entities().iter().filter(|c| {
+                    matches!(c.kind, EntityKind::Field)
+                        && c.parent.as_ref() == Some(&entity.id)
+                }) {
+                    let img = content
+                        .images()
+                        .iter()
+                        .find(|i| i.owner == child.id)
+                        .ok_or_else(|| BuildSourceError::MissingImage(child.id.clone()))?;
+                    imgs.push(img);
+                }
+                if imgs.is_empty() {
+                    return Err(BuildSourceError::NoFields(entity.id.clone()));
+                }
+                imgs
+            }
+        }
+    };
+
+    let mut source = ServerProxySource::empty();
+    for image in image_ids {
+        let level_index = pick_level(image, spec.target_long_axis);
+        let (data, dims, voxel_to_image) = fetch_dense_volume(
+            content,
+            image,
+            spec.t,
+            spec.c,
+            level_index,
+            store,
+            resolver,
+        )
+        .await?;
+        source.insert(
+            &image.image_id,
+            spec.t,
+            spec.c,
+            level_index,
+            data,
+            dims,
+            voxel_to_image,
+        );
+    }
+
+    Ok(source)
+}
+
+/// Mirrors `lucida_proxy::generate::pick_level`. We can't reach that
+/// private fn directly; reproducing it here is short and stable (the
+/// algorithm version bumps if it ever changes).
+fn pick_level(image: &ImageSpec, target_long_axis: u32) -> usize {
+    let levels = &image.multiscale.levels;
+    if levels.is_empty() {
+        return 0;
+    }
+    let threshold = (target_long_axis as u64).saturating_mul(2);
+    let mut chosen = 0usize;
+    for (i, level) in levels.iter().enumerate() {
+        let z = level.shape[2];
+        let y = level.shape[3];
+        let x = level.shape[4];
+        let min_spatial = z.min(y).min(x);
+        if min_spatial >= threshold {
+            chosen = i;
+        }
+    }
+    if chosen == 0
+        && levels[0].shape[2..5]
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(0)
+            < threshold
+    {
+        chosen = levels.len() - 1;
+    }
+    chosen
+}
+
+/// Fetch every chunk in `image`'s `level` grid for `(t, c)`, decompress
+/// each, and assemble a dense `[Z, Y, X]` u16 buffer of the level's
+/// spatial shape. Returns `(data, dims, voxel_to_image)`.
+async fn fetch_dense_volume(
+    content: &ContentGraph,
+    image: &ImageSpec,
+    t: u32,
+    c: u32,
+    level: usize,
+    store: &Arc<CachedStore>,
+    resolver: &ChunkResolver,
+) -> Result<(Vec<u16>, [u32; 3], AffineTransform), BuildSourceError> {
+    let level_geom = image
+        .multiscale
+        .levels
+        .get(level)
+        .ok_or_else(|| BuildSourceError::BadLevel { image: image.image_id.clone(), level })?;
+
+    // shape = [T, C, Z, Y, X]
+    let level_t = level_geom.shape[0];
+    let level_c = level_geom.shape[1];
+    if (t as u64) >= level_t || (c as u64) >= level_c {
+        return Err(BuildSourceError::OutOfBounds {
+            image: image.image_id.clone(),
+            t,
+            c,
+        });
+    }
+
+    let level_z = level_geom.shape[2];
+    let level_y = level_geom.shape[3];
+    let level_x = level_geom.shape[4];
+
+    let chunk_z = level_geom.chunk_shape[2].max(1);
+    let chunk_y = level_geom.chunk_shape[3].max(1);
+    let chunk_x = level_geom.chunk_shape[4].max(1);
+
+    let grid_z = level_geom.grid_shape[2];
+    let grid_y = level_geom.grid_shape[3];
+    let grid_x = level_geom.grid_shape[4];
+
+    let total_voxels = (level_z as usize)
+        .checked_mul(level_y as usize)
+        .and_then(|v| v.checked_mul(level_x as usize))
+        .ok_or(BuildSourceError::TooLarge)?;
+    let mut out = vec![0u16; total_voxels];
+
+    let storage_compression = resolver.storage_compression(&image.image_id);
+
+    for gz in 0..grid_z {
+        for gy in 0..grid_y {
+            for gx in 0..grid_x {
+                // Canonical 5D chunk key: "{level}/{t}/{c}/{z}/{y}/{x}".
+                let key = format!("{level}/{t}/{c}/{gz}/{gy}/{gx}");
+                let object_path = resolver.resolve(&image.image_id, &key).ok_or_else(|| {
+                    BuildSourceError::UnknownImage(image.image_id.clone())
+                })?;
+                let storage_bytes = store
+                    .get_bytes(&Path::from(object_path.as_str()))
+                    .await
+                    .map_err(|e| BuildSourceError::Fetch {
+                        image: image.image_id.clone(),
+                        key: key.clone(),
+                        message: e.to_string(),
+                    })?;
+
+                let raw = decode_storage_bytes(&storage_bytes, storage_compression)
+                    .map_err(|e| BuildSourceError::Decode {
+                        image: image.image_id.clone(),
+                        key: key.clone(),
+                        source: e,
+                    })?;
+
+                // Edge truncation: the last grid cell on each axis may be
+                // partial. Compute the in-bounds extent for this chunk.
+                let z0 = gz * chunk_z;
+                let y0 = gy * chunk_y;
+                let x0 = gx * chunk_x;
+                let z_end = (z0 + chunk_z).min(level_z);
+                let y_end = (y0 + chunk_y).min(level_y);
+                let x_end = (x0 + chunk_x).min(level_x);
+
+                let dz = z_end - z0;
+                let dy = y_end - y0;
+                let dx = x_end - x0;
+
+                // Each chunk is stored densely as `[chunk_z, chunk_y, chunk_x]`
+                // in row-major order (X varies fastest), as little-endian u16
+                // bytes. We read directly from `&[u8]` into `&mut [u16]` to
+                // avoid an intermediate `Vec<u16>` per chunk.
+                let stride_z = (chunk_y * chunk_x) as usize;
+                let stride_y = chunk_x as usize;
+
+                let out_stride_y = level_x as usize;
+                let out_stride_z = (level_y as usize) * out_stride_y;
+
+                let expected_chunk_voxels =
+                    (chunk_z as usize) * (chunk_y as usize) * (chunk_x as usize);
+                if raw.len() < expected_chunk_voxels * 2 {
+                    return Err(BuildSourceError::ShortChunk {
+                        image: image.image_id.clone(),
+                        key,
+                        got: raw.len() / 2,
+                        expected: expected_chunk_voxels,
+                    });
+                }
+
+                for lz in 0..dz {
+                    for ly in 0..dy {
+                        let in_off = (lz as usize) * stride_z + (ly as usize) * stride_y;
+                        let out_off = ((z0 + lz) as usize) * out_stride_z
+                            + ((y0 + ly) as usize) * out_stride_y
+                            + (x0 as usize);
+                        let len = dx as usize;
+                        let in_byte_off = in_off * 2;
+                        let row_bytes = &raw[in_byte_off..in_byte_off + len * 2];
+                        for (i, pair) in row_bytes.chunks_exact(2).enumerate() {
+                            out[out_off + i] = u16::from_le_bytes([pair[0], pair[1]]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let dims = [
+        u32::try_from(level_z).map_err(|_| BuildSourceError::TooLarge)?,
+        u32::try_from(level_y).map_err(|_| BuildSourceError::TooLarge)?,
+        u32::try_from(level_x).map_err(|_| BuildSourceError::TooLarge)?,
+    ];
+
+    let voxel_to_image = find_voxel_to_image(content, &image.owner);
+    Ok((out, dims, voxel_to_image))
+}
+
+/// Try to find a `voxel → image-local` transform. The current import
+/// pipeline does not emit such an edge per se; we look for a `image-owner →
+/// image-owner` self-edge (used elsewhere in the graph) and fall back to
+/// identity. Identity is the right behavior for single-field datasets and
+/// matches the test fixtures.
+fn find_voxel_to_image(content: &ContentGraph, owner: &EntityId) -> AffineTransform {
+    content
+        .transforms()
+        .iter()
+        .find(|edge| &edge.from == owner && &edge.to == owner)
+        .map(|edge| edge.transform.clone())
+        .unwrap_or_else(AffineTransform::identity)
+}
+
+/// Errors from [`build_server_proxy_source`]. Mapped onto
+/// `GenerateError::Source` by the generator.
+#[derive(thiserror::Error, Debug)]
+pub enum BuildSourceError {
+    #[error("entity not found in content graph: {0}")]
+    MissingEntity(EntityId),
+    #[error("image not found for entity: {0}")]
+    MissingImage(EntityId),
+    #[error("well has no field children: {0}")]
+    NoFields(EntityId),
+    #[error("level {level} out of range for image {image}")]
+    BadLevel { image: ImageId, level: usize },
+    #[error("requested t={t} or c={c} out of bounds for image {image}")]
+    OutOfBounds { image: ImageId, t: u32, c: u32 },
+    #[error("unknown image in resolver: {0}")]
+    UnknownImage(ImageId),
+    #[error("fetch failed for image {image} chunk {key}: {message}")]
+    Fetch {
+        image: ImageId,
+        key: String,
+        message: String,
+    },
+    #[error("decode failed for image {image} chunk {key}: {source}")]
+    Decode {
+        image: ImageId,
+        key: String,
+        #[source]
+        source: DecodeError,
+    },
+    #[error("chunk {key} for {image} too short: got {got}, expected {expected}")]
+    ShortChunk {
+        image: ImageId,
+        key: String,
+        got: usize,
+        expected: usize,
+    },
+    #[error("requested level too large to fit in memory")]
+    TooLarge,
+}
+
+impl From<BuildSourceError> for SourceError {
+    fn from(e: BuildSourceError) -> Self {
+        match e {
+            BuildSourceError::MissingEntity(_)
+            | BuildSourceError::MissingImage(_)
+            | BuildSourceError::NoFields(_)
+            | BuildSourceError::OutOfBounds { .. }
+            | BuildSourceError::BadLevel { .. } => SourceError::NotFound,
+            other => SourceError::Io(other.to_string()),
+        }
+    }
+}
+

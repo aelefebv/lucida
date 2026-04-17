@@ -11,6 +11,7 @@ path = "src/main.rs"
 lucida-content = { path = "../lucida-content" }
 lucida-core = { path = "../lucida-core" }
 lucida-protocol = { path = "../lucida-protocol" }
+lucida-proxy = { path = "../lucida-proxy" }
 lucida-store = { path = "../lucida-store" }
 object_store = "0.12"
 tokio = { version = "1", features = ["full"] }
@@ -23,3 +24,17 @@ lz4_flex = "0.11"
 zstd = "0.13"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+num_cpus = "1"
+rand = "0.8"
+thiserror = "1"
+bytemuck = "1"
+
+[dev-dependencies]
+tempfile = "3"
+async-trait = "0.1"
+bytes = "1"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

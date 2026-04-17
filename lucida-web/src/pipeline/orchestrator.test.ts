@@ -3,6 +3,12 @@ import type { ContentGraph } from "../contentTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import type { CpuCache } from "./cpuCache.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
+import { AssetCatalog } from "./assetCatalog.ts";
+
+/** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
+function createMockAssetCatalog(): AssetCatalog {
+  return new AssetCatalog({ apply_asset_catalog_delta: () => {} });
+}
 
 // ---------------------------------------------------------------------------
 // Mock factories
@@ -197,6 +203,7 @@ describe("epoch caching", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache: createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -404,6 +411,7 @@ describe("multi-dataset planning", () => {
       mode: "slice",
       renderScale: 1,
       cpuCache: createMockCpuCache(),
+      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 

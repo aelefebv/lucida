@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 lucida-content = { path = "../lucida-content" }
+lucida-proxy = { path = "../lucida-proxy" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

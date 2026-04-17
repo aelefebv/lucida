@@ -24,7 +24,51 @@ import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
 
-type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch";
+/** Short label for a S6 WellMode in the active-set rendering. */
+function modeLabel(mode: string): string {
+  switch (mode) {
+    case "well-as-proxy":
+      return "WP";
+    case "fields-with-proxy-fallback":
+      return "FP";
+    case "fields-with-detail":
+      return "FD";
+    default:
+      return mode;
+  }
+}
+
+/** Color for a S6 WellMode in the active-set rendering. */
+function modeColor(mode: string): string {
+  switch (mode) {
+    case "well-as-proxy":
+      return "#88f";
+    case "fields-with-proxy-fallback":
+      return "#fb4";
+    case "fields-with-detail":
+      return "#4f4";
+    default:
+      return "#aaa";
+  }
+}
+
+type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch" | "catalog";
+
+interface CatalogSnap {
+  assetEpoch: number;
+  perDataset: Array<{
+    datasetId: string;
+    name: string;
+    wellsWithProxy: number;
+    fieldsWithProxy: number;
+    totalEntries: number;
+    sampleEntries: Array<{ entityId: string; kinds: string[] }>;
+  }>;
+  proxyBytes: number;
+  proxyBudget: number;
+  inFlightProxyCount: number;
+  proxyQueueDepth: number;
+}
 
 interface SceneQuerySnap {
   epochs: { content: number; layout: number; view: number; selection: number } | null;
@@ -93,6 +137,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
   // Cache tab state
   const [cacheTelemetry, setCacheTelemetry] = useState<CacheTelemetry | null>(null);
 
+  // Catalog tab state
+  const [catalogSnap, setCatalogSnap] = useState<CatalogSnap | null>(null);
+
   useEffect(() => {
     const id = setInterval(() => {
       setSnap({ ...debugStats, memberStats: [...debugStats.memberStats] });
@@ -100,6 +147,54 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
       // Poll cache telemetry
       const cache = cpuCacheRef?.current;
       if (cache) setCacheTelemetry(cache.telemetry());
+
+      // Poll asset catalog (per-dataset proxy availability + cache stats)
+      {
+        const ws = wasmSceneRef?.current;
+        if (ws) {
+          try {
+            const tel = cache?.telemetry();
+            const perDataset: CatalogSnap["perDataset"] = [];
+            for (const [dsId, dsEntry] of datasets.entries()) {
+              try {
+                const json = ws.get_asset_catalog(dsId);
+                const cat = json ? JSON.parse(json) : { entries: [] };
+                const entries: Array<{ entity_id: string; kinds: string[] }> =
+                  Array.isArray(cat.entries) ? cat.entries : [];
+                let wells = 0;
+                let fields = 0;
+                for (const e of entries) {
+                  if (e.kinds?.includes("WellProxy3D")) wells++;
+                  if (e.kinds?.includes("FieldProxy3D")) fields++;
+                }
+                perDataset.push({
+                  datasetId: dsId,
+                  name: dsEntry.content?.name ?? dsId,
+                  wellsWithProxy: wells,
+                  fieldsWithProxy: fields,
+                  totalEntries: entries.length,
+                  sampleEntries: entries.slice(0, 5).map(e => ({
+                    entityId: e.entity_id,
+                    kinds: e.kinds ?? [],
+                  })),
+                });
+              } catch {
+                // dataset not yet registered in scene state
+              }
+            }
+            setCatalogSnap({
+              assetEpoch: typeof ws.asset_epoch === "function" ? ws.asset_epoch() : 0,
+              perDataset,
+              proxyBytes: tel?.proxyBytes ?? 0,
+              proxyBudget: tel?.proxyBudget ?? 0,
+              inFlightProxyCount: tel?.inFlightProxyCount ?? 0,
+              proxyQueueDepth: tel?.proxyQueueDepth ?? 0,
+            });
+          } catch {
+            // ignore
+          }
+        }
+      }
 
       // Poll scene query data if available
       const ws = wasmSceneRef?.current;
@@ -147,6 +242,15 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 }
               }
 
+              // Build parent lookup so S6 promotion can group fields by
+              // their parent well.
+              const parentByEntityId = new Map<string, string | null>();
+              if (content) {
+                for (const ent of content.entities) {
+                  parentByEntityId.set(ent.id, ent.parent ?? null);
+                }
+              }
+
               // Map view query entities to EntitySnapshots
               const entities: EntitySnapshot[] = viewQuery.visible_entities.map(
                 (e: NonNullable<SceneQuerySnap["viewQuery"]>["visible_entities"][number]) => {
@@ -168,6 +272,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     numLevels,
                     levels,
                     position,
+                    parentId: parentByEntityId.get(e.entity_id) ?? null,
                   } satisfies EntitySnapshot;
                 },
               );
@@ -271,6 +376,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "planning", label: "Planning" },
     { id: "cache", label: "Cache" },
     { id: "orch", label: "Orch" },
+    { id: "catalog", label: "Catalog" },
   ];
 
   return (
@@ -653,7 +759,10 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 {snap.orch.activeSet.length > 0 && (
                   <div className="debug-section">
                     <div className="debug-title">
-                      Active Set ({snap.orch.activeSet.filter(e => e.representation === "detail").length} detail / {snap.orch.activeSet.filter(e => e.representation === "overview").length} overview)
+                      Active Set (
+                      {snap.orch.activeSet.filter(e => e.mode === "well-as-proxy").length} well-proxy /
+                      {" "}{snap.orch.activeSet.filter(e => e.mode === "fields-with-proxy-fallback").length} fields+proxy /
+                      {" "}{snap.orch.activeSet.filter(e => e.mode === "fields-with-detail").length} fields-detail)
                     </div>
                     <div className="debug-member-list">
                       {snap.orch.activeSet.slice(0, 10).map((e) => (
@@ -661,9 +770,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           <span className="debug-member-id" title={e.entityId}>
                             {e.entityId.length > 12 ? "..." + e.entityId.slice(-10) : e.entityId}
                           </span>
-                          <span style={{ color: e.representation === "detail" ? "#4f4" : "#88f" }}>
-                            {e.representation === "detail" ? "D" : "O"}
-                          </span>
+                          <span style={{ color: modeColor(e.mode) }}>{modeLabel(e.mode)}</span>
                           <span>target L{e.targetLod}</span>
                           <span>range {e.detailOwnedLodRange[0]}-{e.detailOwnedLodRange[1]}</span>
                         </div>
@@ -754,12 +861,13 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               <>
                 {/* Active Set */}
                 {(() => {
-                  const detail = planResult.activeSet.filter(e => e.representation === "detail");
-                  const overview = planResult.activeSet.filter(e => e.representation === "overview");
+                  const wellProxy = planResult.activeSet.filter(e => e.mode === "well-as-proxy");
+                  const fieldsProxy = planResult.activeSet.filter(e => e.mode === "fields-with-proxy-fallback");
+                  const fieldsDetail = planResult.activeSet.filter(e => e.mode === "fields-with-detail");
                   return (
                     <div className="debug-section">
                       <div className="debug-title">
-                        Active Set ({detail.length} detail / {overview.length} overview)
+                        Active Set ({wellProxy.length} well-proxy / {fieldsProxy.length} fields+proxy / {fieldsDetail.length} fields-detail)
                       </div>
                       <div className="debug-member-list">
                         {planResult.activeSet.slice(0, 15).map((e) => (
@@ -767,7 +875,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                             <span className="debug-member-id" title={e.entityId}>
                               {e.entityId.length > 12 ? "..." + e.entityId.slice(-10) : e.entityId}
                             </span>
-                            <span>{e.representation === "detail" ? "D" : "O"}</span>
+                            <span style={{ color: modeColor(e.mode) }}>{modeLabel(e.mode)}</span>
                             <span>L{e.targetLod}</span>
                             <span>s{e.seedDetailLod}</span>
                             <span title={`range: ${e.detailOwnedLodRange[0]}-${e.detailOwnedLodRange[1]}`}>
@@ -843,6 +951,78 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             ) : (
               <div className="debug-section">
                 <div style={{ color: "#666" }}>Waiting for data...</div>
+              </div>
+            )}
+          </>
+        )}
+        {activeTab === "catalog" && (
+          <>
+            <div className="debug-section">
+              <div className="debug-title">Asset Catalog</div>
+              {catalogSnap ? (
+                <>
+                  <div>assetEpoch: {catalogSnap.assetEpoch}</div>
+                  <div style={{ marginTop: 6 }}>
+                    Proxy cache: {fmtBytes(catalogSnap.proxyBytes)} /{" "}
+                    {fmtBytes(catalogSnap.proxyBudget)}
+                  </div>
+                  <div>
+                    In-flight: {catalogSnap.inFlightProxyCount} (queue:{" "}
+                    {catalogSnap.proxyQueueDepth})
+                  </div>
+                </>
+              ) : (
+                <div style={{ color: "#666" }}>Waiting for catalog…</div>
+              )}
+            </div>
+            {catalogSnap?.perDataset.map(ds => (
+              <div key={ds.datasetId} className="debug-section">
+                <div className="debug-title">{ds.name}</div>
+                <div style={{ color: "#888", fontSize: 11 }}>
+                  {ds.datasetId}
+                </div>
+                <div style={{ marginTop: 4 }}>
+                  WellProxy3D:{" "}
+                  <span style={{ color: ds.wellsWithProxy > 0 ? "#6f6" : "#666" }}>
+                    {ds.wellsWithProxy}
+                  </span>{" "}
+                  · FieldProxy3D:{" "}
+                  <span style={{ color: ds.fieldsWithProxy > 0 ? "#6f6" : "#666" }}>
+                    {ds.fieldsWithProxy}
+                  </span>{" "}
+                  · total entries: {ds.totalEntries}
+                </div>
+                {ds.sampleEntries.length > 0 && (
+                  <div style={{ marginTop: 6, fontSize: 11, color: "#aaa" }}>
+                    <div style={{ color: "#888" }}>sample entries:</div>
+                    {ds.sampleEntries.map((e, i) => (
+                      <div
+                        key={i}
+                        style={{
+                          fontFamily: "monospace",
+                          paddingLeft: 8,
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        }}
+                      >
+                        {e.entityId}: [{e.kinds.join(", ")}]
+                      </div>
+                    ))}
+                    {ds.totalEntries > ds.sampleEntries.length && (
+                      <div style={{ color: "#666", paddingLeft: 8 }}>
+                        … {ds.totalEntries - ds.sampleEntries.length} more
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+            {catalogSnap && catalogSnap.perDataset.length === 0 && (
+              <div className="debug-section">
+                <div style={{ color: "#666" }}>
+                  No datasets registered yet.
+                </div>
               </div>
             )}
           </>

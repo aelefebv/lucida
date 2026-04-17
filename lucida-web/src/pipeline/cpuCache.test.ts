@@ -1,8 +1,21 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { CpuCache, type ReadyDelivery, type CpuCacheConfig } from "./cpuCache.ts";
-import type { ContentSource, FetchRequest, FetchResult } from "./contentSource.ts";
+import { CpuCache, type CpuCacheConfig } from "./cpuCache.ts";
+import type {
+  ContentSource,
+  FetchRequest,
+  FetchResult,
+  FetchProxyRequest,
+  FetchProxyResult,
+  ProxyHeaderJs,
+} from "./contentSource.ts";
 import type { DecodePool } from "./decodePool.ts";
-import type { ChunkRequest, ActiveSetEntry, PlanningEpochs, RequestPlan } from "./planning.ts";
+import type {
+  ChunkRequest,
+  ActiveSetEntry,
+  PlanningEpochs,
+  ProxyRequest,
+  RequestPlan,
+} from "./planning.ts";
 
 // ---------------------------------------------------------------------------
 // Test Factories
@@ -16,6 +29,14 @@ interface MockContentSource extends ContentSource {
   reject(compositeKey: string, error: Error): void;
   /** Auto-resolve mode: immediately resolves fetches with a buffer of the given size. */
   autoResolveBytes: number | null;
+
+  // Proxy fetch state — mirrors the chunk side.
+  fetchProxyCount: number;
+  fetchProxyCalls: FetchProxyRequest[];
+  /** Default header used when auto-resolving proxies. */
+  proxyHeader: ProxyHeaderJs;
+  /** Auto-resolve proxies with this many voxel bytes. */
+  autoResolveProxyBytes: number | null;
 }
 
 function createMockContentSource(): MockContentSource {
@@ -29,6 +50,16 @@ function createMockContentSource(): MockContentSource {
     fetchCount: 0,
     lastSignal: null,
     autoResolveBytes: null,
+
+    fetchProxyCount: 0,
+    fetchProxyCalls: [],
+    proxyHeader: {
+      algorithmVersion: 1,
+      sourceContentHash: new Uint8Array(32),
+      dims: [4, 4, 4],
+      dtype: "u16",
+    },
+    autoResolveProxyBytes: 4 * 4 * 4 * 2,
 
     fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult> {
       fetchCount++;
@@ -53,6 +84,17 @@ function createMockContentSource(): MockContentSource {
           pendingFetches.delete(key);
           reject(new DOMException("Aborted", "AbortError"));
         });
+      });
+    },
+
+    fetchProxy(request: FetchProxyRequest, _signal: AbortSignal): Promise<FetchProxyResult> {
+      source.fetchProxyCount++;
+      source.fetchProxyCalls.push(request);
+      const bytes = source.autoResolveProxyBytes ?? 64;
+      return Promise.resolve({
+        header: source.proxyHeader,
+        data: new ArrayBuffer(bytes),
+        wireFormat: { Raw: { data_type: "uint16" } },
       });
     },
 
@@ -117,11 +159,15 @@ function makePlan(
     activeSet: activeSet ?? [{
       entityId: "entity-1",
       imageId: "image-1",
-      representation: "detail",
+      mode: "fields-with-detail",
       targetLod: 0,
       seedDetailLod: 2,
       detailOwnedLodRange: [0, 2],
+      proxyKind: undefined,
+      proxyAvailable: false,
+      wellProxyAvailable: false,
     }],
+    proxyRequests: [],
     epochs: {
       content: 1,
       layout: 1,
@@ -138,10 +184,13 @@ function makeActiveEntry(entityId: string, imageId?: string): ActiveSetEntry {
   return {
     entityId,
     imageId: imageId ?? entityId.replace("entity", "image"),
-    representation: "detail",
+    mode: "fields-with-detail",
     targetLod: 0,
     seedDetailLod: 2,
     detailOwnedLodRange: [0, 2],
+    proxyKind: undefined,
+    proxyAvailable: false,
+    wellProxyAvailable: false,
   };
 }
 
@@ -699,6 +748,178 @@ describe("CpuCache", () => {
       const tel = cache.telemetry();
       expect(tel.detailBytes).toBe(0);
       expect(tel.overviewBytes).toBe(0);
+      expect(tel.proxyBytes).toBe(0);
+    });
+  });
+
+  // =========================================================================
+  // Proxy tier (S5)
+  // =========================================================================
+
+  describe("proxy tier", () => {
+    function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
+      return {
+        datasetId: "ds-1",
+        entityId: "entity-1",
+        imageId: "image-1",
+        kind: "FieldProxy3D",
+        t: 0,
+        c: 0,
+        priority: 0,
+        ...overrides,
+      };
+    }
+
+    function makeProxyPlan(
+      proxyRequests: ProxyRequest[],
+      epochs?: Partial<PlanningEpochs>,
+    ): RequestPlan {
+      return {
+        requests: [],
+        activeSet: [],
+        proxyRequests,
+        epochs: {
+          content: 1,
+          layout: 1,
+          view: 1,
+          selection: 1,
+          asset: 0,
+          request: 1,
+          ...epochs,
+        },
+      };
+    }
+
+    it("submit with proxy request → fetchProxy called once", async () => {
+      const { cache, source } = createTestCache();
+      cache.submit(makeProxyPlan([makeProxyRequest()]));
+      await flush();
+
+      expect(source.fetchProxyCount).toBe(1);
+      expect(source.fetchProxyCalls[0]).toMatchObject({
+        datasetId: "ds-1",
+        entityId: "entity-1",
+        kind: "FieldProxy3D",
+        t: 0,
+        c: 0,
+      });
+    });
+
+    it("drain returns a proxy delivery with kind: proxy and header", async () => {
+      const { cache, source } = createTestCache();
+      cache.submit(makeProxyPlan([makeProxyRequest()]));
+      await flush();
+
+      const deliveries = cache.drain(Infinity);
+      expect(deliveries).toHaveLength(1);
+      const d = deliveries[0];
+      expect(d.kind).toBe("proxy");
+      if (d.kind !== "proxy") throw new Error("expected proxy delivery");
+      expect(d.datasetId).toBe("ds-1");
+      expect(d.entityId).toBe("entity-1");
+      expect(d.proxyKind).toBe("FieldProxy3D");
+      expect(d.t).toBe(0);
+      expect(d.c).toBe(0);
+      expect(d.header).toEqual(source.proxyHeader);
+      expect(d.data.byteLength).toBe(source.autoResolveProxyBytes);
+    });
+
+    it("does not re-fetch a cached proxy on second submit (cache hit)", async () => {
+      const { cache, source } = createTestCache();
+      const req = makeProxyRequest();
+      cache.submit(makeProxyPlan([req]));
+      await flush();
+      // Drain the first delivery so the next submit doesn't re-emit it.
+      cache.drain(Infinity);
+
+      const fetchesBefore = source.fetchProxyCount;
+      cache.submit(makeProxyPlan([req]));
+      await flush();
+
+      // No new network fetch.
+      expect(source.fetchProxyCount).toBe(fetchesBefore);
+
+      // But the cache entry should be re-emitted as a delivery so the
+      // worker can pick it up after reconnect/eviction.
+      const replays = cache.drain(Infinity);
+      expect(replays).toHaveLength(1);
+      expect(replays[0].kind).toBe("proxy");
+    });
+
+    it("getCachedProxy returns null for misses and the entry for hits", async () => {
+      const { cache } = createTestCache();
+      expect(
+        cache.getCachedProxy("ds-1", "entity-x", "FieldProxy3D", 0, 0),
+      ).toBeNull();
+
+      cache.submit(makeProxyPlan([makeProxyRequest()]));
+      await flush();
+
+      const hit = cache.getCachedProxy(
+        "ds-1",
+        "entity-1",
+        "FieldProxy3D",
+        0,
+        0,
+      );
+      expect(hit).not.toBeNull();
+      expect(hit!.kind).toBe("proxy");
+      expect(hit!.entityId).toBe("entity-1");
+    });
+
+    it("telemetry reports proxy bytes, budget, and queue depth", async () => {
+      const { cache, source } = createTestCache({ proxyBudgetBytes: 1024 });
+      source.autoResolveProxyBytes = 256;
+
+      cache.submit(makeProxyPlan([makeProxyRequest({ t: 0 })]));
+      await flush();
+      cache.submit(makeProxyPlan([makeProxyRequest({ t: 1 })]));
+      await flush();
+
+      const tel = cache.telemetry();
+      expect(tel.proxyBudget).toBe(1024);
+      expect(tel.proxyBytes).toBe(512);
+    });
+
+    it("evicts oldest proxies when over budget", async () => {
+      const budget = 256;
+      const { cache, source } = createTestCache({ proxyBudgetBytes: budget });
+      source.autoResolveProxyBytes = 100;
+
+      cache.submit(makeProxyPlan([makeProxyRequest({ t: 0 })]));
+      await flush();
+      cache.submit(makeProxyPlan([makeProxyRequest({ t: 1 })]));
+      await flush();
+      // Both fit (200 <= 256).
+      expect(cache.telemetry().proxyBytes).toBe(200);
+
+      cache.submit(makeProxyPlan([makeProxyRequest({ t: 2 })]));
+      await flush();
+      // 300 > 256 → oldest (t=0) was evicted.
+      expect(cache.telemetry().proxyBytes).toBeLessThanOrEqual(budget);
+      expect(
+        cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 0, 0),
+      ).toBeNull();
+      expect(
+        cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 2, 0),
+      ).not.toBeNull();
+    });
+
+    it("reset clears proxy cache state", async () => {
+      const { cache, source } = createTestCache();
+      cache.submit(makeProxyPlan([makeProxyRequest()]));
+      await flush();
+      expect(cache.telemetry().proxyBytes).toBeGreaterThan(0);
+
+      cache.reset();
+      expect(cache.telemetry().proxyBytes).toBe(0);
+      expect(
+        cache.getCachedProxy("ds-1", "entity-1", "FieldProxy3D", 0, 0),
+      ).toBeNull();
+      // Counter sanity check — fetchProxy not called again on reset.
+      const before = source.fetchProxyCount;
+      cache.drain(Infinity);
+      expect(source.fetchProxyCount).toBe(before);
     });
   });
 });

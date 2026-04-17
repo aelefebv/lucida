@@ -4,7 +4,7 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
 import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 
-// Uniform buffer layout (608 bytes):
+// Uniform buffer layout (656 bytes):
 //   offset 0:   invViewProj     mat4x4f   (64B)
 //   offset 64:  modelMatrix     mat4x4f   (64B)
 //   offset 128: invModelMatrix  mat4x4f   (64B)
@@ -22,7 +22,10 @@ import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 //   offset 416: lodGridDims     vec4u[4]  (64B) — xyz=gridDims, w=offset
 //   offset 480: lodChunkDims    vec4u[4]  (64B) — xyz=chunkDims
 //   offset 544: lodLevelDims    vec4f[4]  (64B) — xyz=levelDims
-const UNIFORM_SIZE = 608;
+//   offset 608: proxyParams     vec4u     (16B) — x=renderMode, y=fieldSlot, z=wellSlot
+//   offset 624: fieldProxyDims  vec4u     (16B) — xyz=(Z,Y,X)
+//   offset 640: wellProxyDims   vec4u     (16B) — xyz=(Z,Y,X)
+const UNIFORM_SIZE = 656;
 
 export class VolumeRenderer {
   private device: GPUDevice;
@@ -51,6 +54,17 @@ export class VolumeRenderer {
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
+  // S8: proxy fallback bindings + uniform values. Default to "no proxy"
+  // (renderMode=0, sentinel slot indices) so legacy callers see unchanged
+  // behaviour. The dummy 1×1×1 texture binds when no real proxy is set.
+  private fieldProxyTexture: GPUTexture | null = null;
+  private wellProxyTexture: GPUTexture | null = null;
+  private dummyProxyTexture: GPUTexture | null = null;
+  private renderModeProxy = 0; // 0=detailOnly, 1=well-as-proxy, 2=detailWithProxyFallback
+  private fieldProxySlotIndex = 0xFFFFFFFF;
+  private wellProxySlotIndex = 0xFFFFFFFF;
+  private fieldProxyDims: [number, number, number] = [1, 1, 1]; // [Z, Y, X]
+  private wellProxyDims: [number, number, number] = [1, 1, 1];  // [Z, Y, X]
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -83,6 +97,17 @@ export class VolumeRenderer {
           binding: 4,
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" },
+        },
+        // S8: proxy textures (fieldProxy + wellProxy)
+        {
+          binding: 5,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "3d" },
+        },
+        {
+          binding: 6,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "3d" },
         },
       ],
     });
@@ -139,6 +164,49 @@ export class VolumeRenderer {
     // Bind group will be rebuilt on the next setAtlas call
   }
 
+  /** S8: lazily allocate the 1×1×1 dummy proxy texture used when no real
+   *  proxy is bound. Same r16uint format as the real proxy atlases so the
+   *  bind-group layout is satisfied. */
+  private getDummyProxyTexture(): GPUTexture {
+    if (!this.dummyProxyTexture) {
+      this.dummyProxyTexture = this.device.createTexture({
+        size: [1, 1, 1],
+        format: "r16uint",
+        dimension: "3d",
+        usage: GPUTextureUsage.TEXTURE_BINDING,
+      });
+    }
+    return this.dummyProxyTexture;
+  }
+
+  /**
+   * S8: configure proxy textures + per-entity descriptor for the next
+   * draw. Call before `setAtlas()` (which rebuilds the bind group), or
+   * pass `null` textures to fall back to the dummy.
+   *
+   * - `mode = 0` keeps legacy chunk-only behaviour.
+   * - `mode = 1` (well-as-proxy) uses `wellTexture` + `wellSlotIndex`.
+   * - `mode = 2` (detail with proxy fallback) uses both as the shader
+   *   sees fit; sentinel slot indices skip individual fallbacks.
+   */
+  setProxyParams(
+    mode: number,
+    fieldTexture: GPUTexture | null,
+    fieldSlotIndex: number,
+    fieldDims: [number, number, number],
+    wellTexture: GPUTexture | null,
+    wellSlotIndex: number,
+    wellDims: [number, number, number],
+  ) {
+    this.renderModeProxy = mode;
+    this.fieldProxyTexture = fieldTexture;
+    this.fieldProxySlotIndex = fieldSlotIndex;
+    this.fieldProxyDims = fieldDims;
+    this.wellProxyTexture = wellTexture;
+    this.wellProxySlotIndex = wellSlotIndex;
+    this.wellProxyDims = wellDims;
+  }
+
   setAtlas(
     texture: GPUTexture,
     indirectionBuf: GPUBuffer,
@@ -153,6 +221,9 @@ export class VolumeRenderer {
     this.gridDims = gridDims;
     this.atlasSlotDims = atlasSlotDims;
     this.lodMetas = lodMetas ?? [];
+    const dummyProxy = this.getDummyProxyTexture();
+    const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
+    const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
@@ -161,6 +232,8 @@ export class VolumeRenderer {
         { binding: 2, resource: { buffer: indirectionBuf } },
         { binding: 3, resource: this.lutTexture.createView() },
         { binding: 4, resource: this.lutSampler },
+        { binding: 5, resource: fieldProxyView },
+        { binding: 6, resource: wellProxyView },
       ],
     });
   }
@@ -289,6 +362,22 @@ export class VolumeRenderer {
       u32View.set([this.chunkDims[0], this.chunkDims[1], this.chunkDims[2], 0], 120);
       uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 136);
     }
+
+    // S8: proxy params at offset 608B (= 152 u32s).
+    //   proxyParams: x=renderMode, y=fieldSlot, z=wellSlot, w=reserved.
+    //   fieldProxyDims / wellProxyDims: xyz=(Z, Y, X), w=reserved.
+    u32View.set(
+      [this.renderModeProxy, this.fieldProxySlotIndex >>> 0, this.wellProxySlotIndex >>> 0, 0],
+      152,
+    );
+    u32View.set(
+      [this.fieldProxyDims[0], this.fieldProxyDims[1], this.fieldProxyDims[2], 0],
+      156,
+    );
+    u32View.set(
+      [this.wellProxyDims[0], this.wellProxyDims[1], this.wellProxyDims[2], 0],
+      160,
+    );
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

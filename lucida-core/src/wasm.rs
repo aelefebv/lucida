@@ -814,6 +814,47 @@ impl WasmScene {
         serde_json::to_string(&self.inner.epochs).unwrap_or_default()
     }
 
+    /// Return the current `epochs.asset` value. Convenience accessor for
+    /// the orchestrator so it doesn't have to JSON-decode `epochs()` just
+    /// to read one number.
+    pub fn asset_epoch(&self) -> u64 {
+        self.inner.epochs.asset
+    }
+
+    /// Apply an asset catalog delta. The JSON shape mirrors the
+    /// `ApplyAssetCatalogDelta` document command body (snake_case):
+    /// `{"dataset_id": "...", "delta": {"added": [...]}}`.
+    ///
+    /// Bumps `epochs.asset` exactly once per call. Idempotent on repeat
+    /// applies of the same delta.
+    pub fn apply_asset_catalog_delta(&mut self, json: &str) -> Result<(), JsError> {
+        #[derive(serde::Deserialize)]
+        struct Body {
+            dataset_id: String,
+            delta: lucida_protocol::AssetCatalogDelta,
+        }
+        let body: Body =
+            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        let cmd = Command::Document(crate::command::DocumentCommand::ApplyAssetCatalogDelta {
+            dataset_id: DatasetId(body.dataset_id),
+            delta: body.delta,
+        });
+        self.inner.apply(cmd);
+        Ok(())
+    }
+
+    /// Return the asset catalog for `dataset_id` as JSON. If the dataset
+    /// has no catalog (e.g. not yet registered), returns the JSON for an
+    /// empty catalog.
+    pub fn get_asset_catalog(&self, dataset_id: &str) -> String {
+        let id = DatasetId(dataset_id.to_string());
+        match self.inner.document.asset_catalogs.get(&id) {
+            Some(cat) => serde_json::to_string(cat).unwrap_or_else(|_| "{}".to_string()),
+            None => serde_json::to_string(&lucida_protocol::AssetCatalog::empty())
+                .unwrap_or_else(|_| "{}".to_string()),
+        }
+    }
+
     pub fn dataset_ids(&self) -> String {
         let ids: Vec<&str> = self.inner.document.content_graphs.keys().map(|id| id.0.as_str()).collect();
         serde_json::to_string(&ids).unwrap()

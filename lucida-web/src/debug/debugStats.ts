@@ -33,7 +33,8 @@ export interface OrchDebug {
   /** Active set entries from plan() */
   activeSet: Array<{
     entityId: string;
-    representation: string;
+    /** S6 promotion mode — see {@link import("../pipeline/planning.ts").WellMode}. */
+    mode: string;
     targetLod: number;
     seedDetailLod: number;
     detailOwnedLodRange: [number, number];

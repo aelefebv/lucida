@@ -141,8 +141,14 @@ function uploadAndRenderVolume(
 
         for (const m of members) {
           const compKey = compositeKey(m.imageId, ch);
-          const model = new Float32Array(scene.member_model_matrix(dsId, m.imageId));
-          const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, m.imageId));
+          // S8: well-as-proxy entries pass the well's entity id with a
+          // precomputed model matrix (the orchestrator synthesised it
+          // from constituent fields' AABBs). Field-mode entries pass the
+          // field's entity id and look up its model matrix from WASM.
+          const model = m.modelMatrix
+            ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
+          const invModel = m.invModelMatrix
+            ?? new Float32Array(scene.inv_member_model_matrix(dsId, m.imageId));
 
           const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
           if (!scissorRect) continue; // well fully off-screen
@@ -160,6 +166,8 @@ function uploadAndRenderVolume(
             renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
             colormap: layerColormap,
             scissorRect,
+            entityId: m.entityId,
+            mode: m.mode,
           });
         }
       }
@@ -174,8 +182,10 @@ function uploadAndRenderVolume(
       const layerColormap = chSettings?.colormap ?? "gray";
 
       for (const m of members) {
-        const model = new Float32Array(scene.member_model_matrix(dsId, m.imageId));
-        const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, m.imageId));
+        const model = m.modelMatrix
+          ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
+        const invModel = m.invModelMatrix
+          ?? new Float32Array(scene.inv_member_model_matrix(dsId, m.imageId));
 
         const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
         if (!scissorRect) continue; // well fully off-screen
@@ -193,6 +203,8 @@ function uploadAndRenderVolume(
           renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
           colormap: layerColormap,
           scissorRect,
+          entityId: m.entityId,
+          mode: m.mode,
         });
       }
     }

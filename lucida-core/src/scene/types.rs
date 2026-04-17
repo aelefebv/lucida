@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 use lucida_content::{DatasetId, LayoutId, LayoutSpec};
+use lucida_protocol::AssetCatalog;
 
 use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
@@ -166,6 +167,11 @@ pub struct DocumentState {
     pub registered_layouts: HashMap<DatasetId, Vec<LayoutSpec>>,
     #[serde(default)]
     pub active_layout_ids: HashMap<DatasetId, LayoutId>,
+    /// Per-dataset asset catalog (proxy availability). Populated via
+    /// `RegisterDataset.catalog` on register and incrementally via
+    /// `DocumentCommand::ApplyAssetCatalogDelta`. Empty in S3.
+    #[serde(default)]
+    pub asset_catalogs: IndexMap<DatasetId, AssetCatalog>,
 }
 
 impl DocumentState {
@@ -177,6 +183,36 @@ impl DocumentState {
     /// Remove a dataset by id.
     pub fn remove_dataset(&mut self, id: &DatasetId) {
         self.content_graphs.shift_remove(id);
+        self.asset_catalogs.shift_remove(id);
+    }
+
+    /// Merge an [`AssetCatalogDelta`] into the catalog for `dataset_id`.
+    ///
+    /// Idempotent: re-applying the same delta is a no-op. Existing
+    /// `ProxyAvailability` entries for an entity are merged by union of
+    /// their `kinds` lists (preserving original order; new kinds appended
+    /// at the end).
+    pub fn apply_asset_catalog_delta(
+        &mut self,
+        dataset_id: DatasetId,
+        delta: lucida_protocol::AssetCatalogDelta,
+    ) {
+        let catalog = self.asset_catalogs.entry(dataset_id).or_default();
+        for incoming in delta.added {
+            if let Some(existing) = catalog
+                .entries
+                .iter_mut()
+                .find(|e| e.entity_id == incoming.entity_id)
+            {
+                for kind in incoming.kinds {
+                    if !existing.kinds.contains(&kind) {
+                        existing.kinds.push(kind);
+                    }
+                }
+            } else {
+                catalog.entries.push(incoming);
+            }
+        }
     }
 
     /// Apply a document command directly. Used by the server to avoid
@@ -184,7 +220,10 @@ impl DocumentState {
     pub fn apply(&mut self, cmd: DocumentCommand) {
         match cmd {
             DocumentCommand::RegisterDataset(reg) => {
+                let dataset_id = reg.content.dataset_id.clone();
                 self.register_dataset(reg.content);
+                // Seed the catalog from the register command. Empty in S3.
+                self.asset_catalogs.insert(dataset_id, reg.catalog);
             }
             DocumentCommand::RemoveDataset { id } => {
                 self.remove_dataset(&id);
@@ -197,6 +236,9 @@ impl DocumentState {
             }
             DocumentCommand::SetActiveLayout { dataset_id, layout_id } => {
                 self.active_layout_ids.insert(dataset_id, layout_id);
+            }
+            DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
+                self.apply_asset_catalog_delta(dataset_id, delta);
             }
         }
     }

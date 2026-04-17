@@ -7,6 +7,8 @@ import type {
   MinimapLayerParams,
   WorkerToMainMessage,
   ColdStateMessage,
+  MissingChunk,
+  MissingProxy,
 } from "./workerProtocol.ts";
 import type { PlanningEpochs } from "../pipeline/planning.ts";
 
@@ -16,7 +18,11 @@ export class RenderClient {
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ((datasetId: string, evicted: string[], skipped: string[]) => void) | null = null;
-  onWantedSetDelta: ((epochs: PlanningEpochs, missing: Array<{ entityId: string; chunkKey: string }>) => void) | null = null;
+  /**
+   * S7: missing entries are now a discriminated union over chunks and
+   * proxies. Existing consumers should match on `kind === "chunk"`.
+   */
+  onWantedSetDelta: ((epochs: PlanningEpochs, missing: Array<MissingChunk | MissingProxy>) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -138,6 +144,42 @@ export class RenderClient {
 
   coldState(msg: ColdStateMessage) {
     this.worker.postMessage(msg);
+  }
+
+  /**
+   * S5: forward a proxy asset to the worker. Transfers the underlying
+   * ArrayBuffer for zero-copy. The worker logs receipt for now; S7 will
+   * upload the proxy as a 3D texture.
+   */
+  proxyAssetData(
+    datasetId: string,
+    entityId: string,
+    imageId: string,
+    kind: "WellProxy3D" | "FieldProxy3D",
+    t: number,
+    c: number,
+    dims: [number, number, number],
+    data: ArrayBuffer,
+    epochs: PlanningEpochs,
+  ) {
+    // Take ownership of the buffer for transfer.
+    const buf = data.slice(0);
+    this.worker.postMessage(
+      {
+        type: "proxyAssetData",
+        epochs,
+        datasetId,
+        entityId,
+        imageId,
+        kind,
+        t,
+        c,
+        dims,
+        dataType: "u16",
+        data: buf,
+      },
+      [buf],
+    );
   }
 
   volumeRenderMultiPass(

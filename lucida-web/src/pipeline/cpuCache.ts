@@ -7,9 +7,21 @@
  * See docs/cpu-cache-spec.md for the full specification.
  */
 
-import type { ContentSource, FetchResult } from "./contentSource.ts";
+import type {
+  ContentSource,
+  FetchResult,
+  FetchProxyResult,
+  ProxyHeaderJs,
+} from "./contentSource.ts";
 import type { DecodePool } from "./decodePool.ts";
-import type { RequestPlan, ChunkRequest, ActiveSetEntry, PlanningEpochs, CacheStateSnapshot } from "./planning.ts";
+import type {
+  RequestPlan,
+  ChunkRequest,
+  ActiveSetEntry,
+  PlanningEpochs,
+  CacheStateSnapshot,
+  ProxyRequest,
+} from "./planning.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -17,6 +29,7 @@ import type { RequestPlan, ChunkRequest, ActiveSetEntry, PlanningEpochs, CacheSt
 
 export const DEFAULT_DETAIL_BUDGET = 512 * 1024 * 1024;
 export const DEFAULT_OVERVIEW_BUDGET = 64 * 1024 * 1024;
+export const DEFAULT_PROXY_BUDGET = 256 * 1024 * 1024;
 export const DEFAULT_MAX_BYTES_IN_FLIGHT = 32 * 1024 * 1024;
 export const FETCH_CONCURRENCY_MULTIPLIER = 3;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
@@ -30,6 +43,12 @@ export const EPOCH_VELOCITY_WINDOW = 10;
 export interface CpuCacheConfig {
   detailBudgetBytes: number;
   overviewBudgetBytes: number;
+  /**
+   * Budget for the proxy tier in bytes. Proxies are a small middle layer
+   * (between detail and overview) — see [`DEFAULT_PROXY_BUDGET`]. Eviction
+   * tier order: detail > proxy > overview.
+   */
+  proxyBudgetBytes: number;
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
 }
@@ -42,7 +61,21 @@ type Lane = "detail" | "runway" | "overview";
 type InteractionMode = "panning" | "scrubbing" | "idle";
 type EvictionTier = "runway" | "demoted-detail" | "active-detail";
 
-export interface ReadyDelivery {
+/**
+ * A delivery from the CPU cache that the orchestrator routes to the GPU
+ * worker. The discriminated union covers both regular chunks
+ * (`kind: "chunk"`, the default for backward compat) and S5 proxy
+ * deliveries (`kind: "proxy"`).
+ *
+ * Existing call sites that work with chunks should not need changes:
+ * the `kind` field is optional on the chunk variant for source-level
+ * compat, and the orchestrator narrows by inspecting the field.
+ */
+export type ReadyDelivery = ReadyChunkDelivery | ReadyProxyDelivery;
+
+export interface ReadyChunkDelivery {
+  /** Discriminant. Optional for backward compat — defaults to `"chunk"`. */
+  kind?: "chunk";
   entityId: string;
   imageId: string;
   level: number;
@@ -58,16 +91,41 @@ export interface ReadyDelivery {
   lane: Lane;
 }
 
+/**
+ * A delivered proxy asset. Carries the parsed header + raw u16 voxel
+ * bytes. The orchestrator forwards this to the worker via
+ * `client.proxyAssetData(...)`.
+ */
+export interface ReadyProxyDelivery {
+  kind: "proxy";
+  datasetId: string;
+  entityId: string;
+  imageId: string;
+  proxyKind: "WellProxy3D" | "FieldProxy3D";
+  t: number;
+  c: number;
+  header: ProxyHeaderJs;
+  data: ArrayBuffer;
+  epochs: PlanningEpochs;
+}
+
 export interface CacheTelemetry {
   detailBytes: number;
   detailBudget: number;
   overviewBytes: number;
   overviewBudget: number;
+  /** S5: proxy tier bytes / budget. */
+  proxyBytes: number;
+  proxyBudget: number;
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   inFlightCount: number;
   inFlightBytes: number;
+  /** S5: in-flight proxy fetches (count, estimated bytes). */
+  inFlightProxyCount: number;
+  inFlightProxyBytes: number;
   queueDepth: number;
+  proxyQueueDepth: number;
   hitRate: number;
   evictionsPerSec: number;
   interactionMode: InteractionMode;
@@ -109,6 +167,35 @@ interface FailedEntry {
   isPermanent: boolean;
 }
 
+/** Per-entry record for the proxy cache. */
+interface ProxyCacheEntry {
+  header: ProxyHeaderJs;
+  data: ArrayBuffer;
+  bytes: number;
+  datasetId: string;
+  entityId: string;
+  imageId: string;
+  proxyKind: "WellProxy3D" | "FieldProxy3D";
+  t: number;
+  c: number;
+  insertedAt: number;
+  epochs: PlanningEpochs;
+}
+
+interface InFlightProxyEntry {
+  request: ProxyRequest;
+  controller: AbortController;
+  estimatedBytes: number;
+}
+
+/**
+ * Compose the inner proxy cache key. Entries are partitioned per-dataset
+ * (outer Map) so dataset removal can drop the whole subtree at once.
+ */
+function proxyInnerKey(req: { entityId: string; kind: string; t: number; c: number }): string {
+  return `${req.entityId}|${req.kind}|${req.t}|${req.c}`;
+}
+
 // ---------------------------------------------------------------------------
 // CpuCache
 // ---------------------------------------------------------------------------
@@ -126,10 +213,26 @@ export class CpuCache {
   private overviewCache = new Map<string, Map<string, CacheEntry>>();
   private overviewBytes = 0;
 
+  /**
+   * Proxy cache (S5): datasetId → innerKey → ProxyCacheEntry where
+   * innerKey is `${entityId}|${kind}|${t}|${c}`.
+   *
+   * Eviction tier order is detail > proxy > overview, so under memory
+   * pressure proxies stick around longer than overview chunks but are
+   * dropped before in-use detail chunks.
+   */
+  private proxyCache = new Map<string, Map<string, ProxyCacheEntry>>();
+  private proxyBytes = 0;
+
   // Fetch scheduler state
   private pendingQueue: ChunkRequest[] = [];
   private inFlight = new Map<string, InFlightEntry>(); // compositeKey → entry
   private inFlightBytes = 0;
+
+  // Proxy fetch state
+  private pendingProxyQueue: ProxyRequest[] = [];
+  private inFlightProxy = new Map<string, InFlightProxyEntry>(); // datasetId|innerKey → entry
+  private inFlightProxyBytes = 0;
 
   // Ready deliveries (not yet drained)
   private ready: ReadyDelivery[] = [];
@@ -177,6 +280,7 @@ export class CpuCache {
     this.config = {
       detailBudgetBytes: config?.detailBudgetBytes ?? DEFAULT_DETAIL_BUDGET,
       overviewBudgetBytes: config?.overviewBudgetBytes ?? DEFAULT_OVERVIEW_BUDGET,
+      proxyBudgetBytes: config?.proxyBudgetBytes ?? DEFAULT_PROXY_BUDGET,
       maxConcurrentFetches: config?.maxConcurrentFetches ?? (decode.size * FETCH_CONCURRENCY_MULTIPLIER),
       maxBytesInFlight: config?.maxBytesInFlight ?? DEFAULT_MAX_BYTES_IN_FLIGHT,
     };
@@ -240,8 +344,53 @@ export class CpuCache {
       this.pendingQueue.push(req);
     }
 
+    // S5: route proxy requests to fetchProxy. Mirrors the chunk path:
+    // dedup against the proxy cache + in-flight map, then enqueue.
+    const proxyRequests = plan.proxyRequests ?? [];
+    const requestedProxyKeys = new Set(
+      proxyRequests.map(p => this.proxyCompositeKey(p)),
+    );
+
+    for (const [key, entry] of this.inFlightProxy) {
+      if (!requestedProxyKeys.has(key)) {
+        entry.controller.abort();
+        this.inFlightProxyBytes -= entry.estimatedBytes;
+        this.inFlightProxy.delete(key);
+      }
+    }
+
+    this.pendingProxyQueue = [];
+    let reEmittedAny = false;
+    for (const req of proxyRequests) {
+      const key = this.proxyCompositeKey(req);
+
+      // Already cached?
+      if (this.isProxyCached(req)) {
+        // Re-emit a delivery so the orchestrator can route the cached
+        // proxy to the worker without paying a fetch — mirrors how
+        // `getCached` works for chunks but pushes through `ready`.
+        const entry = this.proxyCache.get(req.datasetId)?.get(proxyInnerKey(req));
+        if (entry) {
+          this.ready.push(this.proxyEntryToDelivery(entry));
+          reEmittedAny = true;
+        }
+        continue;
+      }
+
+      // Already in-flight?
+      if (this.inFlightProxy.has(key)) continue;
+
+      this.pendingProxyQueue.push(req);
+    }
+
     // Start new fetches
     this.startFetches();
+    this.startProxyFetches();
+
+    // If we re-emitted any cached proxy deliveries, notify subscribers.
+    if (reEmittedAny) {
+      this.notifyListeners();
+    }
   }
 
   /** Pull decoded buffers up to budget. Returns new deliveries only. */
@@ -305,11 +454,16 @@ export class CpuCache {
       detailBudget: this.config.detailBudgetBytes,
       overviewBytes: this.overviewBytes,
       overviewBudget: this.config.overviewBudgetBytes,
+      proxyBytes: this.proxyBytes,
+      proxyBudget: this.config.proxyBudgetBytes,
       maxConcurrentFetches: this.config.maxConcurrentFetches,
       maxBytesInFlight: this.config.maxBytesInFlight,
       inFlightCount: this.inFlight.size,
       inFlightBytes: this.inFlightBytes,
+      inFlightProxyCount: this.inFlightProxy.size,
+      inFlightProxyBytes: this.inFlightProxyBytes,
       queueDepth: this.pendingQueue.length,
+      proxyQueueDepth: this.pendingProxyQueue.length,
       hitRate: this.totalRequests > 0 ? this.totalHits / this.totalRequests : 0,
       evictionsPerSec,
       interactionMode: mode,
@@ -331,16 +485,19 @@ export class CpuCache {
 
   /**
    * Look up a cached chunk by entity and chunk key.
-   * Returns a ReadyDelivery if the chunk is in the detail or overview cache, null otherwise.
-   * Used by the Orchestrator for re-sending chunks evicted from the worker.
+   * Returns a ReadyChunkDelivery if the chunk is in the detail or
+   * overview cache, null otherwise. Used by the Orchestrator for
+   * re-sending chunks evicted from the worker. Proxies are not
+   * re-sendable through this path — see [`getCachedProxy`].
    */
-  getCached(entityId: string, chunkKey: string): ReadyDelivery | null {
+  getCached(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
     const entry =
       this.detailCache.get(entityId)?.get(chunkKey) ??
       this.overviewCache.get(entityId)?.get(chunkKey) ??
       null;
     if (!entry) return null;
     return {
+      kind: "chunk",
       entityId: entry.entityId,
       imageId: entry.imageId,
       level: entry.level,
@@ -355,6 +512,22 @@ export class CpuCache {
       epochs: entry.epochs,
       lane: entry.lane,
     };
+  }
+
+  /**
+   * Look up a cached proxy. Returns a ReadyProxyDelivery if the proxy
+   * is in the proxy cache, null otherwise.
+   */
+  getCachedProxy(
+    datasetId: string,
+    entityId: string,
+    kind: "WellProxy3D" | "FieldProxy3D",
+    t: number,
+    c: number,
+  ): ReadyProxyDelivery | null {
+    const entry = this.proxyCache.get(datasetId)?.get(proxyInnerKey({ entityId, kind, t, c }));
+    if (!entry) return null;
+    return this.proxyEntryToDelivery(entry);
   }
 
   /** Register a listener called when new chunks become ready. Returns unsubscribe function. */
@@ -379,14 +552,23 @@ export class CpuCache {
     this.inFlight.clear();
     this.inFlightBytes = 0;
 
+    for (const [, entry] of this.inFlightProxy) {
+      entry.controller.abort();
+    }
+    this.inFlightProxy.clear();
+    this.inFlightProxyBytes = 0;
+
     // Clear caches
     this.detailCache.clear();
     this.detailBytes = 0;
     this.overviewCache.clear();
     this.overviewBytes = 0;
+    this.proxyCache.clear();
+    this.proxyBytes = 0;
 
     // Clear state
     this.pendingQueue = [];
+    this.pendingProxyQueue = [];
     this.ready = [];
     this.activeEntityIds.clear();
     this.epochHistory = [];
@@ -555,6 +737,7 @@ export class CpuCache {
 
     // Mark as ready for drain
     this.ready.push({
+      kind: "chunk",
       entityId: req.entityId,
       imageId: req.imageId,
       level: req.level,
@@ -575,6 +758,164 @@ export class CpuCache {
 
     // Start next pending fetch
     this.startFetches();
+  }
+
+  // =========================================================================
+  // Proxy Fetch Scheduler (S5)
+  // =========================================================================
+
+  private startProxyFetches(): void {
+    while (
+      this.pendingProxyQueue.length > 0 &&
+      // Share the chunk concurrency caps for now; proxies are a small minority.
+      this.inFlight.size + this.inFlightProxy.size < this.config.maxConcurrentFetches &&
+      this.inFlightBytes + this.inFlightProxyBytes < this.config.maxBytesInFlight
+    ) {
+      const req = this.pendingProxyQueue.shift()!;
+      this.startSingleProxyFetch(req);
+    }
+  }
+
+  private startSingleProxyFetch(req: ProxyRequest): void {
+    const key = this.proxyCompositeKey(req);
+    const controller = new AbortController();
+    // We don't have a running average for proxy sizes yet; reuse the chunk
+    // average as a rough estimate. Corrected to actual size once the
+    // response arrives.
+    const estimate = this.avgDecodedBytes;
+    const entry: InFlightProxyEntry = { request: req, controller, estimatedBytes: estimate };
+    this.inFlightProxyBytes += estimate;
+    this.inFlightProxy.set(key, entry);
+
+    this.fetchProxyAsset(req, controller, key).catch(() => {
+      // Errors handled inside fetchProxyAsset
+    });
+  }
+
+  private async fetchProxyAsset(
+    req: ProxyRequest,
+    controller: AbortController,
+    key: string,
+  ): Promise<void> {
+    let result: FetchProxyResult;
+    try {
+      result = await this.source.fetchProxy(
+        {
+          datasetId: req.datasetId,
+          entityId: req.entityId,
+          kind: req.kind,
+          t: req.t,
+          c: req.c,
+        },
+        controller.signal,
+      );
+    } catch (err: unknown) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        this.inFlightProxy.delete(key);
+        return;
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      this.lastError = message;
+      const failed = this.inFlightProxy.get(key);
+      if (failed) this.inFlightProxyBytes -= failed.estimatedBytes;
+      this.inFlightProxy.delete(key);
+      // No retry / failure tracking in S5 — orchestrator can resubmit on
+      // the next plan if it still wants this proxy.
+      return;
+    }
+
+    // Correct in-flight bytes accounting
+    const responseBytes = result.data.byteLength;
+    const inFlightEntry = this.inFlightProxy.get(key);
+    if (inFlightEntry) {
+      this.inFlightProxyBytes += responseBytes - inFlightEntry.estimatedBytes;
+      inFlightEntry.estimatedBytes = responseBytes;
+    }
+
+    // Insert into proxy cache
+    const cacheEntry: ProxyCacheEntry = {
+      header: result.header,
+      data: result.data,
+      bytes: responseBytes,
+      datasetId: req.datasetId,
+      entityId: req.entityId,
+      imageId: req.imageId,
+      proxyKind: req.kind,
+      t: req.t,
+      c: req.c,
+      insertedAt: this.insertCounter++,
+      epochs: { ...this.currentEpochs },
+    };
+
+    this.evictProxyIfNeeded(responseBytes);
+
+    let datasetMap = this.proxyCache.get(req.datasetId);
+    if (!datasetMap) {
+      datasetMap = new Map();
+      this.proxyCache.set(req.datasetId, datasetMap);
+    }
+    datasetMap.set(proxyInnerKey(req), cacheEntry);
+    this.proxyBytes += responseBytes;
+
+    if (this.inFlightProxy.has(key)) {
+      this.inFlightProxyBytes -= responseBytes;
+      this.inFlightProxy.delete(key);
+    }
+
+    // Mark as ready for drain
+    this.ready.push(this.proxyEntryToDelivery(cacheEntry));
+    this.notifyListeners();
+
+    // Drain queue
+    this.startProxyFetches();
+  }
+
+  private evictProxyIfNeeded(incomingBytes: number): void {
+    if (this.proxyBytes + incomingBytes <= this.config.proxyBudgetBytes) return;
+    const needed = this.proxyBytes + incomingBytes - this.config.proxyBudgetBytes;
+    let freed = 0;
+
+    // Flatten + sort by insertion order (LRU oldest first).
+    const entries: { datasetId: string; key: string; entry: ProxyCacheEntry }[] = [];
+    for (const [datasetId, inner] of this.proxyCache) {
+      for (const [k, e] of inner) entries.push({ datasetId, key: k, entry: e });
+    }
+    entries.sort((a, b) => a.entry.insertedAt - b.entry.insertedAt);
+
+    for (const { datasetId, key, entry } of entries) {
+      if (freed >= needed) break;
+      const inner = this.proxyCache.get(datasetId);
+      if (inner) {
+        inner.delete(key);
+        if (inner.size === 0) this.proxyCache.delete(datasetId);
+      }
+      this.proxyBytes -= entry.bytes;
+      freed += entry.bytes;
+      this.evictionsSinceSnapshot++;
+    }
+  }
+
+  private isProxyCached(req: ProxyRequest): boolean {
+    return this.proxyCache.get(req.datasetId)?.has(proxyInnerKey(req)) === true;
+  }
+
+  private proxyCompositeKey(req: ProxyRequest): string {
+    return `${req.datasetId}|${proxyInnerKey(req)}`;
+  }
+
+  private proxyEntryToDelivery(entry: ProxyCacheEntry): ReadyProxyDelivery {
+    return {
+      kind: "proxy",
+      datasetId: entry.datasetId,
+      entityId: entry.entityId,
+      imageId: entry.imageId,
+      proxyKind: entry.proxyKind,
+      t: entry.t,
+      c: entry.c,
+      header: entry.header,
+      data: entry.data,
+      epochs: entry.epochs,
+    };
   }
 
   // =========================================================================

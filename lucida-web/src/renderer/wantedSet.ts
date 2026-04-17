@@ -1,9 +1,17 @@
 /**
  * Wanted-set computation — pure function that diffs expected chunks against
  * actual atlas contents to determine what the GPU worker is missing.
+ *
+ * S7: extended to also report missing proxy assets, alongside missing
+ * chunks. Output is a discriminated union (`MissingChunk | MissingProxy`).
  */
 
-import type { ColdStateMessage } from "./workerProtocol.ts";
+import type {
+  ColdStateMessage,
+  MissingChunk,
+  MissingProxy,
+} from "./workerProtocol.ts";
+import type { ProxyKind } from "../pipeline/assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,8 +36,23 @@ export interface AtlasSnapshot {
   lodMetas?: AtlasLodMeta[];
 }
 
+/**
+ * Minimal per-pool view of proxy residency for wanted-set queries.
+ * Independent from `ProxyAtlasState` so this module stays GPU-free.
+ *
+ * The map key is the composite slot key `${entityId}|${t}|${c}` —
+ * matches `proxySlotKey()` in `./proxyAtlas.ts`. `kind` is carried so
+ * residency checks distinguish `WellProxy3D` vs `FieldProxy3D` pools
+ * for entities that could appear as either (a defensive safeguard;
+ * pool keying already separates them in practice).
+ */
+export interface ProxyAtlasSnapshot {
+  kind: ProxyKind;
+  slots: Map<string, number>;
+}
+
 export interface WantedSetResult {
-  missing: Array<{ entityId: string; chunkKey: string }>;
+  missing: Array<MissingChunk | MissingProxy>;
 }
 
 // ---------------------------------------------------------------------------
@@ -37,18 +60,39 @@ export interface WantedSetResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute which chunks the GPU worker is missing by diffing expected chunks
- * (derived from cold state + visible region) against actual atlas contents.
+ * Compute which chunks AND proxies the GPU worker is missing.
  *
  * Pure function — no side effects, no GPU dependencies.
+ *
+ * Chunk wanted-set rules (unchanged): for each detail-owned LOD on
+ * each visible channel, enumerate the visible-region grid cells and
+ * report any whose composite slot key is missing.
+ *
+ * Proxy wanted-set rules (S7): for each cold-state active entry, walk
+ * its `mode`:
+ *
+ *   - `well-as-proxy` (entry.entityId IS the wellId)
+ *       → emit a `MissingProxy { kind: WellProxy3D }` per visible
+ *         channel if the well's slot isn't resident.
+ *   - `fields-with-proxy-fallback` (entry.entityId is the fieldId)
+ *       → emit a `MissingProxy { kind: FieldProxy3D }` for the field
+ *         per channel (if `proxyAvailable`), and a single
+ *         `MissingProxy { kind: WellProxy3D }` for the parent well per
+ *         channel (if `wellProxyAvailable` and `parentWellId` is set).
+ *         Parent-well requests are deduped per (parentWellId, t, c).
+ *   - `fields-with-detail`
+ *       → existing chunk wanted-set + a per-channel field-proxy
+ *         request when the catalog advertises one but it isn't yet
+ *         resident.
  */
 export function computeWantedSet(
   coldState: ColdStateMessage,
   volumeAtlases: Map<string, AtlasSnapshot>,
   sliceAtlases: Map<string, AtlasSnapshot>,
   memberToPool?: Map<string, string>,
+  proxyAtlases?: Map<string, ProxyAtlasSnapshot>,
 ): WantedSetResult {
-  const missing: Array<{ entityId: string; chunkKey: string }> = [];
+  const missing: Array<MissingChunk | MissingProxy> = [];
 
   if (coldState.activeSet.length === 0) {
     return { missing };
@@ -56,7 +100,86 @@ export function computeWantedSet(
 
   const isMultiChannel = coldState.visibleChannels.length > 1;
 
+  // Dedup per (wellId, t, c) so multiple field entries of the same
+  // parent only emit one parent-well-proxy request.
+  const wellProxyEmitted = new Set<string>();
+
   for (const entry of coldState.activeSet) {
+    // ---- S7: proxy wanted-set ----
+    if (entry.mode === "well-as-proxy") {
+      // Single proxy per visible channel; no chunks.
+      for (const c of coldState.visibleChannels) {
+        if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "WellProxy3D")) {
+          missing.push({
+            kind: "proxy",
+            entityId: entry.entityId,
+            proxyKind: "WellProxy3D",
+            t: coldState.currentT,
+            c,
+          });
+        }
+      }
+      // well-as-proxy contributes no chunk requests.
+      continue;
+    }
+
+    // Field-mode entries can need both proxies and chunks.
+    if (entry.mode === "fields-with-proxy-fallback") {
+      // Field proxy per visible channel.
+      if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
+        for (const c of coldState.visibleChannels) {
+          if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")) {
+            missing.push({
+              kind: "proxy",
+              entityId: entry.entityId,
+              proxyKind: "FieldProxy3D",
+              t: coldState.currentT,
+              c,
+            });
+          }
+        }
+      }
+      // Parent-well proxy per visible channel (deduped).
+      const wellId = entry.parentWellId ?? null;
+      if (entry.wellProxyAvailable && wellId) {
+        for (const c of coldState.visibleChannels) {
+          const dk = `${wellId}|${coldState.currentT}|${c}`;
+          if (wellProxyEmitted.has(dk)) continue;
+          if (!isProxyResident(proxyAtlases, wellId, coldState.currentT, c, "WellProxy3D")) {
+            wellProxyEmitted.add(dk);
+            missing.push({
+              kind: "proxy",
+              entityId: wellId,
+              proxyKind: "WellProxy3D",
+              t: coldState.currentT,
+              c,
+            });
+          } else {
+            // Already resident — still mark dedup so we don't requery.
+            wellProxyEmitted.add(dk);
+          }
+        }
+      }
+    } else if (entry.mode === "fields-with-detail") {
+      // Field proxy fallback (per channel) for the worker to use while
+      // detail chunks are still loading. Only request if catalog says
+      // the proxy exists.
+      if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
+        for (const c of coldState.visibleChannels) {
+          if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")) {
+            missing.push({
+              kind: "proxy",
+              entityId: entry.entityId,
+              proxyKind: "FieldProxy3D",
+              t: coldState.currentT,
+              c,
+            });
+          }
+        }
+      }
+    }
+
+    // ---- existing chunk wanted-set (unchanged) ----
     // Build the list of (workerMemberId, channel) pairs for this entry.
     const members: Array<{ memberId: string; channel: number }> = [];
     if (isMultiChannel) {
@@ -136,7 +259,11 @@ export function computeWantedSet(
               const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
               const slotKey = useCompositeKey ? `${memberId}|${chunkKey}` : chunkKey;
               if (!atlas.slots.has(slotKey)) {
-                missing.push({ entityId: entry.entityId, chunkKey });
+                missing.push({
+                  kind: "chunk",
+                  entityId: entry.entityId,
+                  chunkKey,
+                });
               }
             }
           }
@@ -146,4 +273,34 @@ export function computeWantedSet(
   }
 
   return { missing };
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Check whether a proxy is resident across any pool with matching
+ * `(entityId, t, c)`. We don't know the pool key from cold state alone
+ * (it depends on slot dims and channel); instead we scan all pools
+ * indexed by the channel + composite key.
+ *
+ * In practice the orchestrator provides `proxyAtlases` indexed by
+ * `proxyPoolKey()` strings; the slot composite key is unique per
+ * `(entityId, t, c)`, so a single hit anywhere counts.
+ */
+function isProxyResident(
+  proxyAtlases: Map<string, ProxyAtlasSnapshot> | undefined,
+  entityId: string,
+  t: number,
+  c: number,
+  proxyKind: ProxyKind,
+): boolean {
+  if (!proxyAtlases || proxyAtlases.size === 0) return false;
+  const slotKey = `${entityId}|${t}|${c}`;
+  for (const atlas of proxyAtlases.values()) {
+    if (atlas.kind !== proxyKind) continue;
+    if (atlas.slots.has(slotKey)) return true;
+  }
+  return false;
 }

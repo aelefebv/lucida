@@ -3,6 +3,7 @@ import type { WasmScene } from "lucida-core";
 import type { ContentGraph } from "./contentTypes.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 import type { CpuCache } from "./pipeline/cpuCache.ts";
+import type { AssetCatalog } from "./pipeline/assetCatalog.ts";
 
 export interface DatasetEntry {
   content: ContentGraph;
@@ -51,4 +52,11 @@ export interface TickContext {
   mode: "slice" | "volume";
   renderScale: number;
   cpuCache: CpuCache;
+  /**
+   * Local mirror of per-entity proxy availability. Populated by
+   * `bridge` from `RegisterDataset.catalog` and any subsequent
+   * `AssetCatalogUpdate` server messages. Empty in S3 — Planning
+   * doesn't consume it until S6.
+   */
+  assetCatalog: AssetCatalog;
 }
