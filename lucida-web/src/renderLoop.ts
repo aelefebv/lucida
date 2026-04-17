@@ -8,14 +8,14 @@ import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, cle
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { Orchestrator } from "./pipeline/orchestrator.ts";
 import type { CpuCache } from "./pipeline/cpuCache.ts";
-import { AssetCatalog } from "./pipeline/assetCatalog.ts";
+import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 
 // Re-export types so downstream imports stay unchanged
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 
 export class RenderLoop {
-  private scene: RenderLoopOptions["scene"];
+  private session: Session;
   private datasets: Map<string, { content: ContentGraph }>;
   private client: RenderLoopOptions["client"];
   private canvas: HTMLCanvasElement;
@@ -31,15 +31,7 @@ export class RenderLoop {
   private volumeState: VolumeState = createVolumeState();
   private minimapState: MinimapState = createMinimapState();
   private orchestrator = new Orchestrator();
-  private cpuCache: CpuCache | null = null;
-  private cpuCacheUnsub: (() => void) | null = null;
-  /**
-   * Set by App.tsx via setAssetCatalog when the active loop changes;
-   * lifetime-coupled to the per-bridge AssetCatalog instance so mode
-   * switches (which recreate the RenderLoop) don't lose proxy
-   * availability data populated by the bridge.
-   */
-  private assetCatalog: AssetCatalog | null = null;
+  private cpuCacheUnsub: () => void;
 
   private _renderScale = 1.0;
 
@@ -52,7 +44,7 @@ export class RenderLoop {
   private sliceC = 0;
 
   constructor(opts: RenderLoopOptions) {
-    this.scene = opts.scene;
+    this.session = opts.session;
     this.datasets = new Map();
     for (const [id, entry] of opts.datasets) {
       this.datasets.set(id, { content: entry.content });
@@ -60,6 +52,10 @@ export class RenderLoop {
     this.client = opts.client;
     this.canvas = opts.canvas;
     this.mode = opts.mode;
+    this.cpuCacheUnsub = this.session.cpuCache.subscribe(() => {
+      this.dataDirty = true;
+      this.scheduleIfNeeded();
+    });
   }
 
   start(): void {
@@ -94,32 +90,11 @@ export class RenderLoop {
     }
     this.client.onChunksEvicted = null;
     this.client.onWantedSetDelta = null;
-    this.cpuCacheUnsub?.();
-    this.cpuCacheUnsub = null;
-    this.cpuCache = null;
+    this.cpuCacheUnsub();
     for (const unsub of this.unsubs.values()) {
       unsub();
     }
     this.unsubs.clear();
-  }
-
-  setCpuCache(cache: CpuCache): void {
-    if (this.cpuCache === cache) return;
-    // Unsubscribe from previous cache
-    this.cpuCacheUnsub?.();
-    this.cpuCache = cache;
-    this.cpuCacheUnsub = cache.subscribe(() => {
-      this.dataDirty = true;
-      this.scheduleIfNeeded();
-    });
-  }
-
-  setAssetCatalog(cat: AssetCatalog): void {
-    if (this.assetCatalog === cat) return;
-    this.assetCatalog = cat;
-    // No subscribe surface on AssetCatalog — just reschedule so a tick
-    // that previously bailed on a null catalog can run.
-    this.scheduleIfNeeded();
   }
 
   /**
@@ -132,8 +107,8 @@ export class RenderLoop {
   getOrchestrator(): Orchestrator {
     return this.orchestrator;
   }
-  getCpuCache(): CpuCache | null {
-    return this.cpuCache;
+  getCpuCache(): CpuCache {
+    return this.session.cpuCache;
   }
 
   addDataset(id: string, content: ContentGraph): void {
@@ -155,7 +130,7 @@ export class RenderLoop {
     // member IDs may differ (e.g. "plateId:A/1/0").
     const memberIds = this.collectMemberIds(id);
 
-    this.cpuCache?.cancelDataset(id, memberIds);
+    this.session.cpuCache.cancelDataset(id, memberIds);
 
     clearVolumeForDataset(this.volumeState, id);
     clearSliceForDataset(this.sliceState, id);
@@ -196,7 +171,7 @@ export class RenderLoop {
    * old naming convention so they don't leak on the worker.
    */
   private handleMultiChannelTransition(): void {
-    const mc = this.scene.multi_channel();
+    const mc = this.session.scene!.multi_channel();
     if (mc === this.prevMultiChannel) return;
     this.prevMultiChannel = mc;
 
@@ -274,14 +249,14 @@ export class RenderLoop {
 
   private buildContext(): TickContext {
     return {
-      scene: this.scene,
+      scene: this.session.scene!,
       datasets: this.datasets,
       client: this.client,
       canvas: this.canvas,
       mode: this.mode,
       renderScale: this._renderScale,
-      cpuCache: this.cpuCache!,
-      assetCatalog: this.assetCatalog!,
+      cpuCache: this.session.cpuCache,
+      assetCatalog: this.session.assetCatalog!,
     };
   }
 
@@ -290,16 +265,10 @@ export class RenderLoop {
 
     if (!this.viewDirty && !this.dataDirty) return;
 
-    // CpuCache not yet wired (brief window between RenderLoop start and setCpuCache).
-    // Reschedule — setCpuCache will mark dirty and trigger another tick.
-    if (!this.cpuCache) {
-      this.scheduleIfNeeded();
-      return;
-    }
-
-    // AssetCatalog not yet wired (brief window between RenderLoop start and setAssetCatalog).
-    // Reschedule — setAssetCatalog will trigger another tick.
-    if (!this.assetCatalog) {
+    // AssetCatalog not yet wired (brief window before the first server
+    // snapshot lazily constructs it on Session). Reschedule — once the
+    // catalog appears, the next markViewDirty/markDataDirty triggers a tick.
+    if (!this.session.assetCatalog) {
       this.scheduleIfNeeded();
       return;
     }

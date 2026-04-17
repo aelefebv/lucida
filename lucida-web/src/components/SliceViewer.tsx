@@ -3,12 +3,14 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from "react"
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
+import type { Session } from "../session.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 
 interface Props {
   z: number;
   t: number;
   c: number;
+  session: Session;
   scene: WasmScene;
   datasets: Map<string, DatasetEntry>;
   client: RenderClient;
@@ -21,14 +23,14 @@ interface Props {
   onLoopChange: (loop: RenderLoop | null) => void;
 }
 
-export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange }: Props) {
+export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
 
   // Create/start render loop
   useEffect(() => {
-    const loop = new RenderLoop({ scene, datasets, client, canvas, mode: "slice" });
+    const loop = new RenderLoop({ session, datasets, client, canvas, mode: "slice" });
     loopRef.current = loop;
     parentLoopRef.current = loop;
     loop.start();
@@ -38,7 +40,7 @@ export function SliceViewer({ z, t, c, scene, datasets, client, canvas, remoteDo
       parentLoopRef.current = null;
       onLoopChange(null);
     };
-  }, [scene, client, canvas]);
+  }, [session, client, canvas]);
 
   // Update slice params on prop changes and when loop is recreated
   useEffect(() => {

@@ -96,6 +96,12 @@ Top-level terms. Per-crate glossaries have more detail.
 
 **WantedSetDeltaMessage** -- Worker→main message carrying the wanted-set: an array of `{ entityId, chunkKey }` entries for chunks the worker needs but doesn't have. Sent after cold state arrival and after eviction.
 
+## Web Client State Containers
+
+**Session** -- Per-bridge state container in lucida-web (`lucida-web/src/session.ts`). Lifetime-coupled to the WebSocket connection, NOT to a particular render mode. Holds `Bridge`, `ProxiedContentSource`, `CpuCache`, `DecodePool`, `WasmScene`, `AssetCatalog`. RenderLoop reads from Session in its constructor so 2D↔3D mode switches (which recreate RenderLoop) cannot lose this state. New persistent state belongs here if it should survive a mode toggle; otherwise on RenderLoop.
+
+**RenderLoop** -- Per-render-mode state container in lucida-web. Recreated on 2D↔3D toggle. Owns the GPU `RenderClient`, mode-specific render state (slice/volume/minimap), and `Orchestrator` (whose worker-tracking state legitimately resets when the worker is recreated). Takes `Session` as a constructor argument.
+
 ## Per-Crate Glossaries
 
 - [lucida-content/GLOSSARY.md](lucida-content/GLOSSARY.md)

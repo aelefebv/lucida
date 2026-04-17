@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } fro
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
+import type { Session } from "../session.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { useKeyState } from "../hooks/useKeyState.ts";
 import { getBoundKeys, isActionPressed } from "../config/keyBindings.ts";
@@ -10,6 +11,7 @@ import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
 import { FlyCameraHint } from "./FlyCameraHint.tsx";
 
 interface Props {
+  session: Session;
   scene: WasmScene;
   datasets: Map<string, DatasetEntry>;
   client: RenderClient;
@@ -30,7 +32,7 @@ const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
 const SCALE_RESTORE_DELAY_MS = 50;
 
-export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange }: Props) {
+export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
   const [showHint, setShowHint] = useState(false);
@@ -78,7 +80,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
 
   // Create/start render loop
   useEffect(() => {
-    const loop = new RenderLoop({ scene, datasets, client, canvas, mode: "volume" });
+    const loop = new RenderLoop({ session, datasets, client, canvas, mode: "volume" });
     loopRef.current = loop;
     parentLoopRef.current = loop;
     loop.start();
@@ -88,7 +90,7 @@ export function VolumeViewer({ scene, datasets, client, canvas, remoteDocumentVe
       parentLoopRef.current = null;
       onLoopChange(null);
     };
-  }, [scene, client, canvas]);
+  }, [session, client, canvas]);
 
   // Mark dirty on remote document updates
   useEffect(() => {

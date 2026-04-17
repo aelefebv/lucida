@@ -121,29 +121,12 @@ function App() {
         return prev;
       });
       setVolumeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
-      bridge.contentSourceRef.current?.rejectDataset(id);
+      bridge.sessionRef.current?.contentSource.rejectDataset(id);
       bumpDatasetsVersion();
     },
   };
 
   // --- Side-effect hooks ---
-
-  // Wire up CpuCache whenever the RenderLoop is recreated (e.g. mode switch)
-  useEffect(() => {
-    if (render.activeLoop && bridge.cpuCacheRef.current) {
-      render.activeLoop.setCpuCache(bridge.cpuCacheRef.current);
-    }
-  }, [render.activeLoop]);
-
-  // Wire up AssetCatalog whenever the RenderLoop is recreated (mirrors
-  // the CpuCache wiring above). The per-bridge catalog instance carries
-  // proxy availability across mode switches so 2D↔3D doesn't silently
-  // disable proxies.
-  useEffect(() => {
-    if (render.activeLoop && bridge.assetCatalogRef.current) {
-      render.activeLoop.setAssetCatalog(bridge.assetCatalogRef.current);
-    }
-  }, [render.activeLoop]);
 
   // S5 HITL: expose the orchestrator + cpuCache on `window.__orch`
   // (also aliased as `__lucidaOrch`) so the dev console can call
@@ -152,7 +135,7 @@ function App() {
   // promotion-driven proxy requests.
   useEffect(() => {
     const loop = render.activeLoop;
-    const cache = bridge.cpuCacheRef.current;
+    const cache = bridge.sessionRef.current?.cpuCache;
     if (!loop || !cache) return;
     const orch = loop.getOrchestrator();
     const debug = {
@@ -174,7 +157,7 @@ function App() {
       delete w.__orch;
       delete w.__lucidaOrch;
     };
-  }, [render.activeLoop, bridge.cpuCacheRef]);
+  }, [render.activeLoop, bridge.sessionRef]);
 
   useIntensityBatcher({
     clientReady: render.clientReady,
@@ -182,7 +165,7 @@ function App() {
     autoContrastMapRef: layers.autoContrastMapRef,
     wasmSceneRef: scene.wasmSceneRef,
     loopRef: render.loopRef,
-    bridgeRef: bridge.bridgeRef,
+    sessionRef: bridge.sessionRef,
     datasetsRef,
     setDataRangeMap: layers.setDataRangeMap,
   });
@@ -381,11 +364,12 @@ function App() {
                 display: "block",
               }}
             />
-            {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && (
+            {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
               <SliceViewer
                 z={dims.z}
                 t={dims.t}
                 c={dims.c}
+                session={bridge.sessionRef.current}
                 scene={scene.wasmScene}
                 datasets={datasetsRef.current}
                 client={render.client}
@@ -418,8 +402,9 @@ function App() {
                 />
               );
             })()}
-            {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && (
+            {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
               <VolumeViewer
+                session={bridge.sessionRef.current}
                 scene={scene.wasmScene}
                 datasets={datasetsRef.current}
                 client={render.client}
@@ -461,7 +446,7 @@ function App() {
               datasetId={selectedDatasetId}
               lastClickScreen={lastClickScreen}
               datasets={datasetsRef.current}
-              cpuCacheRef={bridge.cpuCacheRef}
+              sessionRef={bridge.sessionRef}
               style={{ height: layout.canvasHeight }}
             />
           )}

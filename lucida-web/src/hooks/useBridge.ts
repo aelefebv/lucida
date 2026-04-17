@@ -6,10 +6,8 @@ import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
 import { ProxiedContentSource } from "../pipeline/contentSource.ts";
 import { CpuCache } from "../pipeline/cpuCache.ts";
-import { AssetCatalog } from "../pipeline/assetCatalog.ts";
+import { Session } from "../session.ts";
 import type { RenderLoop } from "../renderLoop.ts";
-
-const decodePool = new DecodePool();
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { VolumeData } from "../types.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
@@ -56,10 +54,7 @@ export function useBridge({
   bumpDatasetsVersion,
   bumpRemoteDocumentVersion,
 }: Params) {
-  const bridgeRef = useRef<Bridge | null>(null);
-  const contentSourceRef = useRef<ProxiedContentSource | null>(null);
-  const cpuCacheRef = useRef<CpuCache | null>(null);
-  const assetCatalogRef = useRef<AssetCatalog | null>(null);
+  const sessionRef = useRef<Session | null>(null);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
@@ -69,34 +64,13 @@ export function useBridge({
   const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!wasmReady || bridgeRef.current) return;
+    if (!wasmReady || sessionRef.current) return;
 
+    const decodePool = new DecodePool();
     const contentSource = new ProxiedContentSource(
-      (json) => bridgeRef.current?.send(json),
+      (json) => sessionRef.current?.bridge.send(json),
     );
-    contentSourceRef.current = contentSource;
-    cpuCacheRef.current = new CpuCache(contentSource, decodePool);
-
-    /**
-     * Lazily construct the per-bridge AssetCatalog. Deferred because
-     * `AssetCatalog`'s constructor requires `WasmScene`, which only
-     * becomes available after `ensureScene()` runs (inside the snapshot
-     * or `register_dataset` command handler). All call sites in this
-     * file run after that point, so this helper is safe.
-     *
-     * On first construction, also push the new catalog into the active
-     * RenderLoop. The App.tsx `setAssetCatalog` useEffect handles
-     * subsequent mode switches (which recreate the loop after the
-     * catalog already exists).
-     */
-    const ensureAssetCatalog = (): AssetCatalog | null => {
-      if (assetCatalogRef.current) return assetCatalogRef.current;
-      const scene = wasmSceneRef.current;
-      if (!scene) return null;
-      assetCatalogRef.current = new AssetCatalog(scene);
-      loopRef.current?.setAssetCatalog(assetCatalogRef.current);
-      return assetCatalogRef.current;
-    };
+    const cpuCache = new CpuCache(contentSource, decodePool);
 
     const handlers: BridgeHandlers = {
       onSnapshot: (_seq, documentJson, snapshotPeers, yourId) => {
@@ -112,6 +86,8 @@ export function useBridge({
             }
           }
           setPeers(peerMap);
+
+          sessionRef.current?.setScene(scene);
 
           const doc = JSON.parse(documentJson);
           if (doc.content_graphs) {
@@ -133,7 +109,7 @@ export function useBridge({
               // AssetCatalog. `load_document` already parsed it on the
               // WASM side; this keeps the mirror consistent.
               const catalog = doc.asset_catalogs?.[dsId] ?? { entries: [] };
-              ensureAssetCatalog()?.applyInitial(dsId, catalog);
+              sessionRef.current?.ensureAssetCatalog()?.applyInitial(dsId, catalog);
             }
           }
 
@@ -159,6 +135,7 @@ export function useBridge({
           bumpSettingsGeneration();
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "register_dataset") {
+            sessionRef.current?.setScene(scene);
             if (!datasetsRef.current.has(cmd.content.dataset_id)) {
               setupFetchPipeline(cmd.content as ContentGraph, cmd.fetch as ClientFetchDescriptor);
             }
@@ -166,13 +143,13 @@ export function useBridge({
             // Planning's snapshot view stays consistent with WASM. Empty
             // in S3; populated by S5 once the server actually sends data.
             const catalog = cmd.catalog ?? { entries: [] };
-            ensureAssetCatalog()?.applyInitial(cmd.content.dataset_id, catalog);
+            sessionRef.current?.ensureAssetCatalog()?.applyInitial(cmd.content.dataset_id, catalog);
             setRemoteDatasetLoading(false);
             setWasmScene(scene);
           }
           if (cmd.type === "remove_dataset") {
             datasetCallbacksRef.current.removeDataset(cmd.id);
-            ensureAssetCatalog()?.removeDataset(cmd.id);
+            sessionRef.current?.ensureAssetCatalog()?.removeDataset(cmd.id);
           }
           bumpRemoteDocumentVersion();
         } catch (e) {
@@ -223,7 +200,7 @@ export function useBridge({
               setC(scene.c());
               setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
               loopRef.current?.markViewDirty();
-              bridgeRef.current?.sendPresence(scene.export_presence());
+              sessionRef.current?.bridge.sendPresence(scene.export_presence());
             } catch (e) {
               console.warn("[Bridge] failed to import presence:", e);
             }
@@ -264,7 +241,7 @@ export function useBridge({
                   setC(scene.c());
                   setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
                   loopRef.current?.markViewDirty();
-                  bridgeRef.current?.sendPresence(scene.export_presence());
+                  sessionRef.current?.bridge.sendPresence(scene.export_presence());
                 } catch (e) {
                   console.warn("[Bridge] failed to import presence on steer:", e);
                 }
@@ -308,7 +285,7 @@ export function useBridge({
       onAssetCatalogUpdate: (datasetId, deltaJson) => {
         try {
           const delta = JSON.parse(deltaJson);
-          ensureAssetCatalog()?.applyDelta(datasetId, delta);
+          sessionRef.current?.ensureAssetCatalog()?.applyDelta(datasetId, delta);
         } catch (e) {
           console.warn("[Bridge] bad asset_catalog_update:", e);
         }
@@ -318,7 +295,8 @@ export function useBridge({
         contentSource.rejectAll();
       },
     };
-    bridgeRef.current = new Bridge(handlers);
+    const bridge = new Bridge(handlers);
+    sessionRef.current = new Session({ bridge, contentSource, cpuCache, decodePool });
   }, [wasmReady]);
 
   function setupFetchPipeline(content: ContentGraph, fetchDesc: ClientFetchDescriptor) {
@@ -326,7 +304,7 @@ export function useBridge({
 
     if ("Proxied" in fetchDesc) {
       for (const spec of fetchDesc.Proxied.images) {
-        contentSourceRef.current!.registerImage(spec.image_id, spec.wire_format);
+        sessionRef.current!.contentSource.registerImage(spec.image_id, spec.wire_format);
       }
     }
 
@@ -359,9 +337,6 @@ export function useBridge({
     }
 
     loopRef.current?.addDataset(datasetId, content);
-    if (cpuCacheRef.current && loopRef.current) {
-      loopRef.current.setCpuCache(cpuCacheRef.current);
-    }
 
     const coarsestLevel = firstImage?.multiscale.levels[firstImage.multiscale.levels.length - 1];
     if (coarsestLevel) {
@@ -381,42 +356,42 @@ export function useBridge({
   }
 
   const sendCommand = useCallback((json: string) => {
-    bridgeRef.current?.sendCommand(json);
+    sessionRef.current?.bridge.sendCommand(json);
   }, []);
 
   const emitPresence = useCallback(() => {
     const scene = wasmSceneRef.current;
     if (!scene) return;
-    bridgeRef.current?.sendPresence(scene.export_presence());
+    sessionRef.current?.bridge.sendPresence(scene.export_presence());
   }, [wasmSceneRef]);
 
   const emitDatasetPresence = useCallback(() => {
     const scene = wasmSceneRef.current;
     if (!scene) return;
-    bridgeRef.current?.sendDatasetPresence(scene.export_dataset_presence());
+    sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
   }, [wasmSceneRef]);
 
   const sendCursor = useCallback((position: [number, number] | null) => {
-    bridgeRef.current?.sendCursor(position);
+    sessionRef.current?.bridge.sendCursor(position);
   }, []);
 
   const sendOpenRemoteDataset = useCallback((url: string) => {
     setRemoteDatasetLoading(true);
     setRemoteDatasetError(null);
-    bridgeRef.current?.sendOpenRemoteDataset(url);
+    sessionRef.current?.bridge.sendOpenRemoteDataset(url);
   }, []);
 
   const breakFollow = useCallback(() => {
     if (followTargetRef.current !== null) {
       setFollowTarget(null);
-      bridgeRef.current?.sendFollow(null);
+      sessionRef.current?.bridge.sendFollow(null);
     }
   }, []);
 
   const handleFollow = useCallback((targetId: ClientId | null) => {
     if (targetId === myId) return;
     setFollowTarget(targetId);
-    bridgeRef.current?.sendFollow(targetId);
+    sessionRef.current?.bridge.sendFollow(targetId);
     if (targetId !== null) {
       const peer = peers.get(targetId);
       if (peer) {
@@ -459,10 +434,7 @@ export function useBridge({
     .filter(([, p]) => p.following === null || p.following === undefined);
 
   return {
-    bridgeRef,
-    contentSourceRef,
-    cpuCacheRef,
-    assetCatalogRef,
+    sessionRef,
     peers,
     myId,
     followTarget,

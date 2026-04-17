@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { WasmScene } from "lucida-core";
-import type { Bridge } from "../bridge.ts";
+import type { Session } from "../session.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -12,7 +12,7 @@ interface Params {
   autoContrastMapRef: React.RefObject<Map<string, boolean>>;
   wasmSceneRef: React.RefObject<WasmScene | null>;
   loopRef: React.RefObject<RenderLoop | null>;
-  bridgeRef: React.RefObject<Bridge | null>;
+  sessionRef: React.RefObject<Session | null>;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   setDataRangeMap: React.Dispatch<React.SetStateAction<Map<string, { min: number; max: number }>>>;
 }
@@ -23,7 +23,7 @@ export function useIntensityBatcher({
   autoContrastMapRef,
   wasmSceneRef,
   loopRef,
-  bridgeRef,
+  sessionRef,
   datasetsRef,
   setDataRangeMap,
 }: Params) {
@@ -66,7 +66,7 @@ export function useIntensityBatcher({
           }));
           bumpSettingsGeneration();
           loopRef.current?.markDataDirty();
-          bridgeRef.current?.sendDatasetPresence(scene.export_dataset_presence());
+          sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
         }
       }
 
@@ -102,5 +102,5 @@ export function useIntensityBatcher({
         intensityRafRef.current = 0;
       }
     };
-  }, [clientReady, clientRef, autoContrastMapRef, wasmSceneRef, loopRef, bridgeRef, datasetsRef, setDataRangeMap]);
+  }, [clientReady, clientRef, autoContrastMapRef, wasmSceneRef, loopRef, sessionRef, datasetsRef, setDataRangeMap]);
 }

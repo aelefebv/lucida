@@ -19,7 +19,8 @@ import type {
   RequestPlan,
   PlanningEpochs,
 } from "../pipeline/planning.ts";
-import type { CpuCache, CacheTelemetry } from "../pipeline/cpuCache.ts";
+import type { CacheTelemetry } from "../pipeline/cpuCache.ts";
+import type { Session } from "../session.ts";
 import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
@@ -99,7 +100,7 @@ interface DebugPanelProps {
   datasetId?: string | null;
   lastClickScreen?: [number, number] | null;
   datasets: Map<string, { sharedQueue: any; content: ContentGraph }>;
-  cpuCacheRef?: React.RefObject<CpuCache | null>;
+  sessionRef?: React.RefObject<Session | null>;
   style?: React.CSSProperties;
 }
 
@@ -113,7 +114,7 @@ function fmtBytes(bytes: number): string {
   return `${bytes}B`;
 }
 
-export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets, cpuCacheRef, style }: DebugPanelProps) {
+export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets, sessionRef, style }: DebugPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("render");
   const [snap, setSnap] = useState<DebugStats>({ ...debugStats });
 
@@ -145,7 +146,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
       setSnap({ ...debugStats, memberStats: [...debugStats.memberStats] });
 
       // Poll cache telemetry
-      const cache = cpuCacheRef?.current;
+      const cache = sessionRef?.current?.cpuCache ?? null;
       if (cache) setCacheTelemetry(cache.telemetry());
 
       // Poll asset catalog (per-dataset proxy availability + cache stats)
@@ -349,7 +350,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [wasmSceneRef, datasetId, datasets, cpuCacheRef]);
+  }, [wasmSceneRef, datasetId, datasets, sessionRef]);
 
   // Ray pick on click
   useEffect(() => {
@@ -611,7 +612,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       value={Math.round(cacheTelemetry.detailBudget / (1024 * 1024))}
                       onChange={e => {
                         const mb = Number(e.target.value);
-                        if (mb > 0) cpuCacheRef?.current?.updateConfig({ detailBudgetBytes: mb * 1024 * 1024 });
+                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ detailBudgetBytes: mb * 1024 * 1024 });
                       }}
                     />
                   </div>
@@ -623,7 +624,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       value={Math.round(cacheTelemetry.overviewBudget / (1024 * 1024))}
                       onChange={e => {
                         const mb = Number(e.target.value);
-                        if (mb > 0) cpuCacheRef?.current?.updateConfig({ overviewBudgetBytes: mb * 1024 * 1024 });
+                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ overviewBudgetBytes: mb * 1024 * 1024 });
                       }}
                     />
                   </div>
@@ -635,7 +636,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       value={cacheTelemetry.maxConcurrentFetches}
                       onChange={e => {
                         const v = Number(e.target.value);
-                        if (v > 0) cpuCacheRef?.current?.updateConfig({ maxConcurrentFetches: v });
+                        if (v > 0) sessionRef?.current?.cpuCache.updateConfig({ maxConcurrentFetches: v });
                       }}
                     />
                   </div>
@@ -647,7 +648,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       value={Math.round(cacheTelemetry.maxBytesInFlight / (1024 * 1024))}
                       onChange={e => {
                         const mb = Number(e.target.value);
-                        if (mb > 0) cpuCacheRef?.current?.updateConfig({ maxBytesInFlight: mb * 1024 * 1024 });
+                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ maxBytesInFlight: mb * 1024 * 1024 });
                       }}
                     />
                   </div>

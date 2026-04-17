@@ -4,13 +4,14 @@ import type { ContentGraph } from "./contentTypes.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 import type { CpuCache } from "./pipeline/cpuCache.ts";
 import type { AssetCatalog } from "./pipeline/assetCatalog.ts";
+import type { Session } from "./session.ts";
 
 export interface DatasetEntry {
   content: ContentGraph;
 }
 
 export interface RenderLoopOptions {
-  scene: WasmScene;
+  session: Session;
   datasets: Map<string, DatasetEntry>;
   client: RenderClient;
   canvas: HTMLCanvasElement;
