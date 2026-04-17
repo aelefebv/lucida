@@ -6,6 +6,7 @@ import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
 import { ProxiedContentSource } from "../pipeline/contentSource.ts";
 import { CpuCache } from "../pipeline/cpuCache.ts";
+import { AssetCatalog } from "../pipeline/assetCatalog.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 
 const decodePool = new DecodePool();
@@ -58,6 +59,7 @@ export function useBridge({
   const bridgeRef = useRef<Bridge | null>(null);
   const contentSourceRef = useRef<ProxiedContentSource | null>(null);
   const cpuCacheRef = useRef<CpuCache | null>(null);
+  const assetCatalogRef = useRef<AssetCatalog | null>(null);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
@@ -74,6 +76,27 @@ export function useBridge({
     );
     contentSourceRef.current = contentSource;
     cpuCacheRef.current = new CpuCache(contentSource, decodePool);
+
+    /**
+     * Lazily construct the per-bridge AssetCatalog. Deferred because
+     * `AssetCatalog`'s constructor requires `WasmScene`, which only
+     * becomes available after `ensureScene()` runs (inside the snapshot
+     * or `register_dataset` command handler). All call sites in this
+     * file run after that point, so this helper is safe.
+     *
+     * On first construction, also push the new catalog into the active
+     * RenderLoop. The App.tsx `setAssetCatalog` useEffect handles
+     * subsequent mode switches (which recreate the loop after the
+     * catalog already exists).
+     */
+    const ensureAssetCatalog = (): AssetCatalog | null => {
+      if (assetCatalogRef.current) return assetCatalogRef.current;
+      const scene = wasmSceneRef.current;
+      if (!scene) return null;
+      assetCatalogRef.current = new AssetCatalog(scene);
+      loopRef.current?.setAssetCatalog(assetCatalogRef.current);
+      return assetCatalogRef.current;
+    };
 
     const handlers: BridgeHandlers = {
       onSnapshot: (_seq, documentJson, snapshotPeers, yourId) => {
@@ -110,7 +133,7 @@ export function useBridge({
               // AssetCatalog. `load_document` already parsed it on the
               // WASM side; this keeps the mirror consistent.
               const catalog = doc.asset_catalogs?.[dsId] ?? { entries: [] };
-              loopRef.current?.getAssetCatalog().applyInitial(dsId, catalog);
+              ensureAssetCatalog()?.applyInitial(dsId, catalog);
             }
           }
 
@@ -143,15 +166,13 @@ export function useBridge({
             // Planning's snapshot view stays consistent with WASM. Empty
             // in S3; populated by S5 once the server actually sends data.
             const catalog = cmd.catalog ?? { entries: [] };
-            loopRef.current
-              ?.getAssetCatalog()
-              .applyInitial(cmd.content.dataset_id, catalog);
+            ensureAssetCatalog()?.applyInitial(cmd.content.dataset_id, catalog);
             setRemoteDatasetLoading(false);
             setWasmScene(scene);
           }
           if (cmd.type === "remove_dataset") {
             datasetCallbacksRef.current.removeDataset(cmd.id);
-            loopRef.current?.getAssetCatalog().removeDataset(cmd.id);
+            ensureAssetCatalog()?.removeDataset(cmd.id);
           }
           bumpRemoteDocumentVersion();
         } catch (e) {
@@ -287,7 +308,7 @@ export function useBridge({
       onAssetCatalogUpdate: (datasetId, deltaJson) => {
         try {
           const delta = JSON.parse(deltaJson);
-          loopRef.current?.getAssetCatalog().applyDelta(datasetId, delta);
+          ensureAssetCatalog()?.applyDelta(datasetId, delta);
         } catch (e) {
           console.warn("[Bridge] bad asset_catalog_update:", e);
         }
@@ -441,6 +462,7 @@ export function useBridge({
     bridgeRef,
     contentSourceRef,
     cpuCacheRef,
+    assetCatalogRef,
     peers,
     myId,
     followTarget,

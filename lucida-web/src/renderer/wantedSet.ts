@@ -112,6 +112,7 @@ export function computeWantedSet(
         if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "WellProxy3D")) {
           missing.push({
             kind: "proxy",
+            datasetId: coldState.datasetId,
             entityId: entry.entityId,
             proxyKind: "WellProxy3D",
             t: coldState.currentT,
@@ -131,6 +132,7 @@ export function computeWantedSet(
           if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")) {
             missing.push({
               kind: "proxy",
+              datasetId: coldState.datasetId,
               entityId: entry.entityId,
               proxyKind: "FieldProxy3D",
               t: coldState.currentT,
@@ -149,6 +151,7 @@ export function computeWantedSet(
             wellProxyEmitted.add(dk);
             missing.push({
               kind: "proxy",
+              datasetId: coldState.datasetId,
               entityId: wellId,
               proxyKind: "WellProxy3D",
               t: coldState.currentT,
@@ -169,6 +172,7 @@ export function computeWantedSet(
           if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")) {
             missing.push({
               kind: "proxy",
+              datasetId: coldState.datasetId,
               entityId: entry.entityId,
               proxyKind: "FieldProxy3D",
               t: coldState.currentT,

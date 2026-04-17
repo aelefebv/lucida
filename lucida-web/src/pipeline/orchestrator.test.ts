@@ -1,9 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { ContentGraph } from "../contentTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
-import type { CpuCache } from "./cpuCache.ts";
+import type {
+  CpuCache,
+  ReadyProxyDelivery,
+  ReadyDelivery,
+} from "./cpuCache.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
+import type { PlanningEpochs, ProxyRequest } from "./planning.ts";
+import type { MissingProxy } from "../renderer/workerProtocol.ts";
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
 function createMockAssetCatalog(): AssetCatalog {
@@ -486,5 +492,220 @@ describe("multi-dataset planning", () => {
     expect(call2Snapshot.previousActiveSet).toBeDefined();
     expect(Array.isArray(call1Snapshot.previousActiveSet)).toBe(true);
     expect(Array.isArray(call2Snapshot.previousActiveSet)).toBe(true);
+  });
+});
+
+// ===========================================================================
+// 3. Proxy delivery tracking (PRD #409 / S2)
+// ===========================================================================
+
+describe("proxy delivery tracking", () => {
+  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    const orchestratorModule = await import("./orchestrator.ts");
+    Orchestrator = orchestratorModule.Orchestrator;
+  });
+
+  function makeProxyRequest(
+    overrides?: Partial<ProxyRequest>,
+  ): ProxyRequest {
+    return {
+      datasetId: "ds1",
+      entityId: "field-0",
+      imageId: "img-0",
+      kind: "FieldProxy3D",
+      t: 0,
+      c: 0,
+      priority: 0,
+      ...overrides,
+    };
+  }
+
+  function makeProxyDelivery(
+    overrides?: Partial<ReadyProxyDelivery>,
+  ): ReadyProxyDelivery {
+    return {
+      kind: "proxy",
+      datasetId: "ds1",
+      entityId: "field-0",
+      imageId: "img-0",
+      proxyKind: "FieldProxy3D",
+      t: 0,
+      c: 0,
+      header: {
+        algorithmVersion: 1,
+        sourceContentHash: new Uint8Array(32),
+        dims: [4, 4, 4],
+        dtype: "u16",
+      },
+      data: new ArrayBuffer(128),
+      epochs: {
+        content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1,
+      },
+      ...overrides,
+    };
+  }
+
+  function makeMockCpuCache(opts?: {
+    drainResult?: ReadyDelivery[];
+    cachedProxies?: Map<string, ReadyProxyDelivery>;
+  }): CpuCache {
+    const drained = opts?.drainResult ?? [];
+    const cached = opts?.cachedProxies ?? new Map();
+    return {
+      submit: vi.fn(),
+      // drain() consumed once per call
+      drain: vi.fn(() => {
+        const out = drained.slice();
+        drained.length = 0;
+        return out;
+      }),
+      snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
+      getCached: vi.fn(() => null),
+      getCachedProxy: vi.fn(
+        (datasetId: string, entityId: string, kind: string, t: number, c: number) => {
+          return cached.get(`${datasetId}|${entityId}|${kind}|${t}|${c}`) ?? null;
+        },
+      ),
+      telemetry: vi.fn(),
+      updateConfig: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
+      reset: vi.fn(),
+    } as unknown as CpuCache;
+  }
+
+  function makeCtx(opts: {
+    cpuCache: CpuCache;
+    proxyAssetDataMock?: ReturnType<typeof vi.fn>;
+  }): TickContext {
+    return {
+      scene: {
+        multi_channel: () => false,
+      } as unknown,
+      datasets: new Map(),
+      client: {
+        coldState: vi.fn(),
+        proxyAssetData: opts.proxyAssetDataMock ?? vi.fn(),
+      } as unknown,
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: opts.cpuCache,
+      assetCatalog: new AssetCatalog({ apply_asset_catalog_delta: () => {} }),
+    } as unknown as TickContext;
+  }
+
+  function proxyKey(req: ProxyRequest | ReadyProxyDelivery): string {
+    if ("kind" in req && req.kind === "proxy") {
+      return `${req.datasetId}|${req.entityId}|${req.proxyKind}|${req.t}|${req.c}`;
+    }
+    const r = req as ProxyRequest;
+    return `${r.datasetId}|${r.entityId}|${r.kind}|${r.t}|${r.c}`;
+  }
+
+  it("proxy delivery tracked after first send", () => {
+    const orch = new Orchestrator();
+    const delivery = makeProxyDelivery();
+    const cpuCache = makeMockCpuCache({ drainResult: [delivery] });
+    const proxyAssetData = vi.fn();
+    const ctx = makeCtx({ cpuCache, proxyAssetDataMock: proxyAssetData });
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
+
+    expect(proxyAssetData).toHaveBeenCalledTimes(1);
+    expect(orch.getProxyDeliveredKeys().has(proxyKey(delivery))).toBe(true);
+  });
+
+  it("proxy resend uses getCachedProxy when key missing from delivered set", () => {
+    const orch = new Orchestrator();
+    const delivery = makeProxyDelivery();
+    const req = makeProxyRequest();
+
+    // Pre-populate _lastProxyRequests so the resend pass has work to do.
+    (orch as unknown as { _lastProxyRequests: ProxyRequest[] })._lastProxyRequests = [req];
+
+    // Cache returns the proxy on getCachedProxy lookup.
+    const cached = new Map<string, ReadyProxyDelivery>();
+    cached.set(proxyKey(req), delivery);
+    const cpuCache = makeMockCpuCache({ cachedProxies: cached });
+    const proxyAssetData = vi.fn();
+    const ctx = makeCtx({ cpuCache, proxyAssetDataMock: proxyAssetData });
+
+    // First call: drain returns nothing (we left it empty), but the
+    // resend pass should still pick up the cached proxy because the
+    // key is missing from delivered tracking.
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
+    expect(proxyAssetData).toHaveBeenCalledTimes(1);
+    expect(orch.getProxyDeliveredKeys().has(proxyKey(req))).toBe(true);
+
+    // Second call: key is now in delivered set → no resend.
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
+    expect(proxyAssetData).toHaveBeenCalledTimes(1);
+
+    // After explicit clear, resend kicks in again.
+    orch.getProxyDeliveredKeys().delete(proxyKey(req));
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
+    expect(proxyAssetData).toHaveBeenCalledTimes(2);
+  });
+
+  it("proxyDeliveredToWorker cleared on full plan", async () => {
+    // Use full planAndFetch path: bump epoch to force a non-cache-hit
+    // tick so `proxyDeliveredToWorker.clear()` runs at the start of
+    // the per-dataset loop.
+    const planningModule = await import("./planning.ts");
+    const planSpy = vi.fn(planningModule.plan);
+    vi.doMock("./planning.ts", async () => {
+      const actual = await import("./planning.ts");
+      return { ...actual, plan: planSpy };
+    });
+    const { Orchestrator: OrchClass } = await import("./orchestrator.ts");
+    const orch = new OrchClass();
+
+    const scene = createMockScene({
+      epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+    });
+    const datasets = new Map<string, DatasetEntry>([
+      ["ds1", { content: createMockContent() }],
+    ]);
+    const cpuCache = makeMockCpuCache();
+    const ctx = {
+      scene,
+      datasets,
+      client: { coldState: vi.fn() } as unknown,
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache,
+      assetCatalog: new AssetCatalog({ apply_asset_catalog_delta: () => {} }),
+    } as unknown as TickContext;
+
+    // Pre-populate the delivered set as if a previous tick had sent.
+    orch.getProxyDeliveredKeys().add("ds1|x|FieldProxy3D|0|0");
+    expect(orch.getProxyDeliveredKeys().size).toBe(1);
+
+    // Drive a full plan tick; the per-dataset loop clears the set.
+    orch.planAndFetch(ctx, new Map());
+    expect(orch.getProxyDeliveredKeys().size).toBe(0);
+  });
+
+  it("handleWantedSetDelta with proxy entries clears delivered tracking", () => {
+    const orch = new Orchestrator();
+    const key = "ds1|field-0|FieldProxy3D|0|0";
+    orch.getProxyDeliveredKeys().add(key);
+    expect(orch.getProxyDeliveredKeys().has(key)).toBe(true);
+
+    const missing: MissingProxy = {
+      kind: "proxy",
+      datasetId: "ds1",
+      entityId: "field-0",
+      proxyKind: "FieldProxy3D",
+      t: 0,
+      c: 0,
+    };
+    orch.handleWantedSetDelta([missing]);
+
+    expect(orch.getProxyDeliveredKeys().has(key)).toBe(false);
   });
 });

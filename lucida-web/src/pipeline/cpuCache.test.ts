@@ -829,7 +829,7 @@ describe("CpuCache", () => {
       const req = makeProxyRequest();
       cache.submit(makeProxyPlan([req]));
       await flush();
-      // Drain the first delivery so the next submit doesn't re-emit it.
+      // Drain the first delivery.
       cache.drain(Infinity);
 
       const fetchesBefore = source.fetchProxyCount;
@@ -839,11 +839,47 @@ describe("CpuCache", () => {
       // No new network fetch.
       expect(source.fetchProxyCount).toBe(fetchesBefore);
 
-      // But the cache entry should be re-emitted as a delivery so the
-      // worker can pick it up after reconnect/eviction.
+      // PRD #409 / S2: cache-hit submit() is a no-op for proxies (mirrors
+      // the chunk path). The orchestrator now resends evicted proxies via
+      // `getCachedProxy`, so `submit()` no longer needs to push to ready.
       const replays = cache.drain(Infinity);
-      expect(replays).toHaveLength(1);
-      expect(replays[0].kind).toBe("proxy");
+      expect(replays).toHaveLength(0);
+    });
+
+    it("submit() with already-cached proxy does not push to ready", async () => {
+      const { cache } = createTestCache();
+      const req = makeProxyRequest();
+      cache.submit(makeProxyPlan([req]));
+      await flush();
+      // Drain the initial decode delivery.
+      const initial = cache.drain(Infinity);
+      expect(initial).toHaveLength(1);
+
+      // Second submit of the same plan: nothing should land in `ready`.
+      cache.submit(makeProxyPlan([req]));
+      await flush();
+      expect(cache.drain(Infinity)).toHaveLength(0);
+    });
+
+    it("notifyListeners is not called on re-submit-cached-proxy", async () => {
+      const { cache } = createTestCache();
+      const req = makeProxyRequest();
+
+      let notifyCount = 0;
+      cache.subscribe(() => {
+        notifyCount++;
+      });
+
+      cache.submit(makeProxyPlan([req]));
+      await flush();
+      // First decode notifies (from fetchProxyAsset).
+      const afterFirst = notifyCount;
+      expect(afterFirst).toBeGreaterThanOrEqual(1);
+
+      // Second submit hits the cache → no new ready, no new notify.
+      cache.submit(makeProxyPlan([req]));
+      await flush();
+      expect(notifyCount).toBe(afterFirst);
     });
 
     it("getCachedProxy returns null for misses and the entry for hits", async () => {

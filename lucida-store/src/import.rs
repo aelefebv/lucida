@@ -280,6 +280,27 @@ async fn import_plate(
         PositioningMode::Grid
     };
 
+    // For stage-positioned plates, OME-Zarr translations are in physical units
+    // (e.g., microns), but the rest of lucida composes them with voxel-unit
+    // well placements. Convert translations to voxel units here using the
+    // level-0 scale. Defensive: a missing or invalid scale falls back to 1.0
+    // (pass-through) and emits a single warning per dataset.
+    let (scale_x, scale_y) = {
+        let raw_x = levels[0].scale[4];
+        let raw_y = levels[0].scale[3];
+        let valid = |s: f64| s.is_finite() && s != 0.0;
+        let sx = if valid(raw_x) { raw_x } else { 1.0 };
+        let sy = if valid(raw_y) { raw_y } else { 1.0 };
+        if has_stage_positions && (!valid(raw_x) || !valid(raw_y)) {
+            eprintln!(
+                "[lucida-store] dataset {id:?} has missing or invalid voxel \
+                 scale (scale_x={raw_x}, scale_y={raw_y}); stage translations \
+                 are passed through unchanged",
+            );
+        }
+        (sx, sy)
+    };
+
     // Determine row/column labels for each well from row_index/column_index.
     let find_row_label = |ri: u32| -> String {
         rows.get(ri as usize)
@@ -321,6 +342,9 @@ async fn import_plate(
         });
 
         // Collect stage translations for this well's FOVs to normalize them.
+        // Translations are stored in OME-Zarr in physical units (e.g. microns);
+        // convert to voxel units here so downstream consumers see consistent
+        // units across grid- and stage-positioned plates.
         let stage_positions: Vec<Option<[f64; 2]>> = if has_stage_positions {
             well.fovs
                 .iter()
@@ -329,7 +353,7 @@ async fn import_plate(
                         let len = t.len();
                         if len >= 2 {
                             // Last value is X, second-to-last is Y
-                            [t[len - 1], t[len - 2]]
+                            [t[len - 1] / scale_x, t[len - 2] / scale_y]
                         } else {
                             [0.0, 0.0]
                         }
@@ -1072,6 +1096,365 @@ mod tests {
         assert!(
             (t1.transform.matrix[13] - 200.0).abs() < 1e-9,
             "FOV 1 ty should be 200, got {}",
+            t1.transform.matrix[13],
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Build a single-well stage-positioned plate fixture.
+    ///
+    /// `translations[i]` is written verbatim as the FOV's
+    /// `coordinateTransformations.translation` (5-element TCZYX). Pass `None`
+    /// to omit the entry, producing a grid-positioned well.
+    /// `scale` is the level-0 [T, C, Z, Y, X] scale; pass `None` to omit the
+    /// `scale` coordinate transform entirely (so default scale of 1.0 applies).
+    fn create_stage_plate_fixture(
+        dir: &std::path::Path,
+        translations: &[Option<[f64; 5]>],
+        scale: Option<[f64; 5]>,
+    ) {
+        fs::create_dir_all(dir).unwrap();
+
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "plate": {
+                        "version": "0.5",
+                        "name": "test_plate",
+                        "rows": [{"name": "A"}],
+                        "columns": [{"name": "1"}],
+                        "wells": [{"path": "A/1", "rowIndex": 0, "columnIndex": 0}]
+                    }
+                }
+            }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        let well_dir = dir.join("A").join("1");
+        fs::create_dir_all(&well_dir).unwrap();
+
+        let row_dir = dir.join("A");
+        let row_meta = serde_json::json!({"zarr_format": 3, "node_type": "group"});
+        fs::write(
+            row_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&row_meta).unwrap(),
+        )
+        .unwrap();
+
+        let images: Vec<serde_json::Value> = translations
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let mut entry = serde_json::json!({"path": i.to_string()});
+                if let Some(translation) = t {
+                    entry["coordinateTransformations"] = serde_json::json!([{
+                        "type": "translation",
+                        "translation": translation,
+                    }]);
+                }
+                entry
+            })
+            .collect();
+
+        let well_meta = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "well": { "images": images }
+                }
+            }
+        });
+        fs::write(
+            well_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&well_meta).unwrap(),
+        )
+        .unwrap();
+
+        for i in 0..translations.len() {
+            let fov_dir = well_dir.join(i.to_string());
+            fs::create_dir_all(&fov_dir).unwrap();
+
+            // Optionally include the scale coordinate transform.
+            let mut dataset = serde_json::json!({"path": "0"});
+            if let Some(s) = scale {
+                dataset["coordinateTransformations"] = serde_json::json!([{
+                    "type": "scale",
+                    "scale": s,
+                }]);
+            }
+
+            let fov_root = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {
+                    "ome": {
+                        "version": "0.5",
+                        "multiscales": [{
+                            "version": "0.5",
+                            "name": "image",
+                            "axes": [
+                                {"name": "t", "type": "time"},
+                                {"name": "c", "type": "channel"},
+                                {"name": "z", "type": "space"},
+                                {"name": "y", "type": "space"},
+                                {"name": "x", "type": "space"}
+                            ],
+                            "datasets": [dataset]
+                        }]
+                    }
+                }
+            });
+            fs::write(
+                fov_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&fov_root).unwrap(),
+            )
+            .unwrap();
+
+            let level_dir = fov_dir.join("0");
+            fs::create_dir_all(&level_dir).unwrap();
+            let arr = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": [1, 1, 1, 128, 128],
+                "data_type": "uint16",
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": { "chunk_shape": [1, 1, 1, 64, 64] }
+                },
+                "codecs": [{"name": "bytes", "configuration": {"endian": "little"}}],
+                "fill_value": 0
+            });
+            fs::write(
+                level_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&arr).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// Find the field->well TransformEdge for a given field index. Field IDs
+    /// follow the pattern `{dataset}:field:A/1/{i}` per the import code.
+    fn find_field_transform<'a>(
+        result: &'a ImportResult,
+        dataset_id: &str,
+        fov_index: usize,
+    ) -> &'a TransformEdge {
+        let target = format!("{dataset_id}:field:A/1/{fov_index}");
+        result
+            .content
+            .transforms()
+            .iter()
+            .find(|t| t.from.0 == target)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no transform from {target}; available: {:?}",
+                    result
+                        .content
+                        .transforms()
+                        .iter()
+                        .map(|t| t.from.0.clone())
+                        .collect::<Vec<_>>(),
+                )
+            })
+    }
+
+    /// Bug C / S3: stage translations stored in microns must be converted to
+    /// voxel units before forming the field->well transform.
+    /// FOV 0 at (0, 0); FOV 1 at (100 µm, 200 µm). With Y/X scale of
+    /// 0.5 µm/voxel the second FOV ends up at (200, 400) voxels.
+    #[tokio::test]
+    async fn stage_translations_normalized_to_voxel_units() {
+        let dir = temp_dir("stage_translations_voxel_units");
+        // Translations are TCZYX. The test puts X=100 µm, Y=200 µm on FOV 1.
+        let translations = vec![
+            Some([0.0, 0.0, 0.0, 0.0, 0.0]),
+            Some([0.0, 0.0, 0.0, 200.0, 100.0]),
+        ];
+        let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
+        create_stage_plate_fixture(&dir, &translations, scale);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "stage-vox", "Stage Voxel")
+            .await
+            .unwrap();
+
+        // Sanity: should be Stage-positioned.
+        if let DatasetKind::Plate {
+            positioning_mode,
+            has_stage_positions,
+            ..
+        } = &result.content.kind
+        {
+            assert_eq!(*positioning_mode, PositioningMode::Stage);
+            assert!(*has_stage_positions);
+        } else {
+            panic!("expected Plate kind");
+        }
+
+        // FOV 0 is the per-well origin.
+        let t0 = find_field_transform(&result, "stage-vox", 0);
+        assert!((t0.transform.matrix[12]).abs() < 1e-9, "FOV 0 tx should be 0");
+        assert!((t0.transform.matrix[13]).abs() < 1e-9, "FOV 0 ty should be 0");
+
+        // FOV 1: 100 µm / 0.5 = 200 voxels in X, 200 µm / 0.5 = 400 voxels in Y.
+        let t1 = find_field_transform(&result, "stage-vox", 1);
+        assert!(
+            (t1.transform.matrix[12] - 200.0).abs() < 1e-9,
+            "FOV 1 tx should be 200 voxels, got {}",
+            t1.transform.matrix[12],
+        );
+        assert!(
+            (t1.transform.matrix[13] - 400.0).abs() < 1e-9,
+            "FOV 1 ty should be 400 voxels, got {}",
+            t1.transform.matrix[13],
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Grid-positioned plates (no translations) must be unaffected by the
+    /// scale-conversion code path.
+    #[tokio::test]
+    async fn grid_plates_unaffected() {
+        let dir = temp_dir("grid_plates_unaffected");
+        // Two FOVs, neither with a translation -> grid-positioned plate.
+        let translations = vec![None, None];
+        // Choose a non-trivial scale so the wrong code path would be visible.
+        let scale = Some([1.0, 1.0, 1.0, 0.5, 0.5]);
+        create_stage_plate_fixture(&dir, &translations, scale);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "grid-plate", "Grid Plate")
+            .await
+            .unwrap();
+
+        // Sanity: should be Grid-positioned.
+        if let DatasetKind::Plate {
+            positioning_mode,
+            has_stage_positions,
+            ..
+        } = &result.content.kind
+        {
+            assert_eq!(*positioning_mode, PositioningMode::Grid);
+            assert!(!*has_stage_positions);
+        } else {
+            panic!("expected Plate kind");
+        }
+
+        // The grid formula: for n=2 fields, cols = ceil(sqrt(2)) = 2,
+        // gap = 0.08 * 128 = 10.24, so field 0 at (0, 0), field 1 at
+        // (128 + 10.24, 0). FOV size is 128x128 (level 0 shape).
+        let fov_x = 128.0_f64;
+        let gap_x = 0.08 * fov_x;
+
+        let t0 = find_field_transform(&result, "grid-plate", 0);
+        assert!((t0.transform.matrix[12]).abs() < 1e-9, "field 0 tx");
+        assert!((t0.transform.matrix[13]).abs() < 1e-9, "field 0 ty");
+
+        let t1 = find_field_transform(&result, "grid-plate", 1);
+        assert!(
+            (t1.transform.matrix[12] - (fov_x + gap_x)).abs() < 1e-9,
+            "field 1 tx should be {} voxels, got {}",
+            fov_x + gap_x,
+            t1.transform.matrix[12],
+        );
+        assert!((t1.transform.matrix[13]).abs() < 1e-9, "field 1 ty");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// When the multiscales `scale` coordinate transform is omitted, the
+    /// default scale is 1.0 (per parse.rs), so stage translations should pass
+    /// through to voxel units unchanged.
+    #[tokio::test]
+    async fn missing_voxel_scale_falls_back_to_unit_scale() {
+        let dir = temp_dir("missing_voxel_scale");
+        // FOV 1 at translation (100 µm, 200 µm) — but with scale=1.0 (the
+        // default), the conversion is a no-op and the voxel translation
+        // matches the raw value.
+        let translations = vec![
+            Some([0.0, 0.0, 0.0, 0.0, 0.0]),
+            Some([0.0, 0.0, 0.0, 200.0, 100.0]),
+        ];
+        // No explicit scale entry -> default of 1.0 in parse.rs.
+        create_stage_plate_fixture(&dir, &translations, None);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "missing-scale", "Missing Scale")
+            .await
+            .unwrap();
+
+        // FOV 0 at origin.
+        let t0 = find_field_transform(&result, "missing-scale", 0);
+        assert!((t0.transform.matrix[12]).abs() < 1e-9);
+        assert!((t0.transform.matrix[13]).abs() < 1e-9);
+
+        // FOV 1: pass-through (raw 100 -> 100 voxels in X, 200 -> 200 in Y).
+        let t1 = find_field_transform(&result, "missing-scale", 1);
+        assert!(
+            (t1.transform.matrix[12] - 100.0).abs() < 1e-9,
+            "FOV 1 tx should be 100 voxels (pass-through), got {}",
+            t1.transform.matrix[12],
+        );
+        assert!(
+            (t1.transform.matrix[13] - 200.0).abs() < 1e-9,
+            "FOV 1 ty should be 200 voxels (pass-through), got {}",
+            t1.transform.matrix[13],
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A zero (or non-finite) voxel scale is malformed metadata. We must not
+    /// panic or divide by zero — the import falls back to a unit scale and
+    /// translations are passed through unchanged.
+    #[tokio::test]
+    async fn zero_voxel_scale_falls_back_with_warning() {
+        let dir = temp_dir("zero_voxel_scale");
+        let translations = vec![
+            Some([0.0, 0.0, 0.0, 0.0, 0.0]),
+            Some([0.0, 0.0, 0.0, 200.0, 100.0]),
+        ];
+        // X scale (last value) is zero — invalid. Y scale is fine.
+        let scale = Some([1.0, 1.0, 1.0, 0.5, 0.0]);
+        create_stage_plate_fixture(&dir, &translations, scale);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "zero-scale", "Zero Scale")
+            .await
+            .unwrap();
+
+        // FOV 0 at origin.
+        let t0 = find_field_transform(&result, "zero-scale", 0);
+        assert!((t0.transform.matrix[12]).abs() < 1e-9);
+        assert!((t0.transform.matrix[13]).abs() < 1e-9);
+
+        // FOV 1: X falls back to scale=1 (raw 100 -> 100). Y uses real
+        // scale=0.5 (raw 200 -> 400). Verify no NaN/Inf.
+        let t1 = find_field_transform(&result, "zero-scale", 1);
+        assert!(
+            t1.transform.matrix[12].is_finite(),
+            "FOV 1 tx must be finite (no division by zero), got {}",
+            t1.transform.matrix[12],
+        );
+        assert!(
+            (t1.transform.matrix[12] - 100.0).abs() < 1e-9,
+            "FOV 1 tx should be 100 (X scale fell back to 1.0), got {}",
+            t1.transform.matrix[12],
+        );
+        assert!(
+            (t1.transform.matrix[13] - 400.0).abs() < 1e-9,
+            "FOV 1 ty should be 400 (Y scale 0.5 still applied), got {}",
             t1.transform.matrix[13],
         );
 

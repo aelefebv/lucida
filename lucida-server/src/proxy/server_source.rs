@@ -360,8 +360,62 @@ async fn fetch_dense_volume(
         u32::try_from(level_x).map_err(|_| BuildSourceError::TooLarge)?,
     ];
 
-    let voxel_to_image = find_voxel_to_image(content, &image.owner);
+    // voxel_to_image: maps level-`level` voxel coords to full-res image-space
+    // (= level-0 voxel space). The aggregator composes this with field_to_well
+    // (in full-res voxel units) to compute the well's AABB. Without this scale,
+    // a level-k voxel is treated as 1 full-res voxel and fields shrink to
+    // `full_res / 2^k` in the proxy — see #417.
+    //
+    // Shape ratio is more robust than OME-Zarr per-level `scale` metadata
+    // (which may be missing or incorrect) and gives the downsampling factor
+    // the aggregator actually needs.
+    let level0 = &image.multiscale.levels[0];
+    let scale_axis = |full: u64, lvl: u64| -> f64 {
+        if lvl == 0 { 1.0 } else { full as f64 / lvl as f64 }
+    };
+    let sx = scale_axis(level0.shape[4], level_x);
+    let sy = scale_axis(level0.shape[3], level_y);
+    let sz = scale_axis(level0.shape[2], level_z);
+    let level_voxel_to_image = AffineTransform {
+        matrix: [
+            sx,  0.0, 0.0, 0.0,
+            0.0, sy,  0.0, 0.0,
+            0.0, 0.0, sz,  0.0,
+            0.0, 0.0, 0.0, 1.0,
+        ],
+    };
+
+    // Compose with any explicit owner→owner self-edge if present (none today,
+    // but preserves forward-compatibility with future content-graph emitters).
+    let owner_self = find_voxel_to_image(content, &image.owner);
+    let voxel_to_image = compose_self_edge(&owner_self, &level_voxel_to_image);
+
     Ok((out, dims, voxel_to_image))
+}
+
+/// Compose `owner_self ∘ level_scale` (apply level scale first, then any
+/// self-edge transform). Returns just `level_scale` if `owner_self` is identity.
+fn compose_self_edge(owner_self: &AffineTransform, level_scale: &AffineTransform) -> AffineTransform {
+    if is_identity(owner_self) {
+        return level_scale.clone();
+    }
+    // 4x4 column-major: result[col][row] = sum_k owner_self[k][row] * level_scale[col][k]
+    let mut out = [0.0f64; 16];
+    for col in 0..4 {
+        for row in 0..4 {
+            let mut acc = 0.0;
+            for k in 0..4 {
+                acc += owner_self.matrix[k * 4 + row] * level_scale.matrix[col * 4 + k];
+            }
+            out[col * 4 + row] = acc;
+        }
+    }
+    AffineTransform { matrix: out }
+}
+
+fn is_identity(t: &AffineTransform) -> bool {
+    let id = AffineTransform::identity();
+    t.matrix == id.matrix
 }
 
 /// Try to find a `voxel → image-local` transform. The current import

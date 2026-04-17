@@ -222,6 +222,18 @@ export class Orchestrator {
   // Delivery state — tracks what's been sent to the GPU worker
   private deliverySentToWorker = new Map<string, Set<string>>();
 
+  /**
+   * Tracks proxies already uploaded to the GPU worker. Composite key:
+   * `${datasetId}|${entityId}|${proxyKind}|${t}|${c}`. Mirrors
+   * `deliverySentToWorker` for chunks: cleared on full-plan ticks,
+   * cleared per-entry by `handleWantedSetDelta` when the worker reports
+   * a `MissingProxy`, and consulted by `deliverToWorker`'s proxy resend
+   * pass. Without it the cache-hit short-circuit (which re-submits
+   * `_lastProxyRequests` every tick) would re-emit and re-upload every
+   * cached proxy on every animation frame.
+   */
+  private proxyDeliveredToWorker = new Set<string>();
+
   /** Wanted-set from the GPU worker — entityId → Set<chunkKey> of missing chunks. */
   private workerWantedSet = new Map<string, Set<string>>();
 
@@ -423,8 +435,9 @@ export class Orchestrator {
 
       // Send cold state to the worker — drives atlas creation/remap + wanted-set
       this.sendColdState(dsId, result.activeSet, entities, selection, visibleRegion, currentEpochs, ctx);
-      // Clear delivery tracking so chunks are re-sent for the new state
+      // Clear delivery tracking so chunks + proxies are re-sent for the new state
       this.deliverySentToWorker.clear();
+      this.proxyDeliveredToWorker.clear();
 
       // Annotate requests with the real dataset ID (entityId may differ for plates)
       for (const req of filteredRequests) {
@@ -704,6 +717,31 @@ export class Orchestrator {
       }
     }
 
+    // Re-send proxies the worker has evicted (or never received because
+    // the previous tick cleared `proxyDeliveredToWorker`). Mirrors the
+    // chunk resend pass: iterate the last-known proxy request set, skip
+    // anything already tracked as delivered, and look up the cached
+    // entry via `getCachedProxy`. New deliveries (above) populate
+    // `proxyDeliveredToWorker` themselves; this pass closes the gap
+    // for cache hits where `submit()` is now a no-op.
+    if (!budgetExhausted && this._lastProxyRequests.length > 0) {
+      for (const req of this._lastProxyRequests) {
+        if (budgetExhausted) break;
+        if (this.proxyDeliveredToWorker.has(this.proxyKeyFromRequest(req))) continue;
+
+        const cached = ctx.cpuCache.getCachedProxy(
+          req.datasetId, req.entityId, req.kind, req.t, req.c,
+        );
+        if (!cached) continue;
+
+        const sent = this.sendProxyDeliveryToWorker(ctx, cached, epochs);
+        if (sent > 0) {
+          remaining -= sent;
+          if (remaining <= 0) budgetExhausted = true;
+        }
+      }
+    }
+
     return deliveries.length > 0 || budgetExhausted;
   }
 
@@ -719,27 +757,35 @@ export class Orchestrator {
   /**
    * Process a wanted-set delta from the GPU worker.
    *
-   * S7: now accepts a discriminated union over chunks and proxies.
-   * Chunks land in `workerWantedSet` (existing chunk-resend logic);
-   * proxy entries are not yet tracked here — `_lastProxyRequests` is
-   * the orchestrator's source of truth and the cache-hit path keeps
-   * re-submitting them, so a proxy missing from the worker simply
-   * stays in the next plan's request set. (Direct fast-path for proxy
-   * resend can land in a future slice if the steady-state churn turns
-   * out to need it.)
+   * S7: accepts a discriminated union over chunks and proxies.
+   *  - chunk: land in `workerWantedSet` (existing chunk-resend logic).
+   *  - proxy: clear the entry from `proxyDeliveredToWorker` so the
+   *    next tick's resend pass picks it up via `getCachedProxy`.
+   *
+   * (S7's earlier note about not tracking proxy resends is now
+   * obsolete — see PRD #409 / S2: the cache-hit short-circuit means
+   * we can't rely on `submit()` re-emission.)
    */
   handleWantedSetDelta(
     missing: Array<MissingChunkLite | MissingProxyLite>,
   ): void {
     this.workerWantedSet.clear();
     for (const entry of missing) {
-      if (entry.kind !== "chunk") continue;
-      let set = this.workerWantedSet.get(entry.entityId);
-      if (!set) {
-        set = new Set();
-        this.workerWantedSet.set(entry.entityId, set);
+      switch (entry.kind) {
+        case "chunk": {
+          let set = this.workerWantedSet.get(entry.entityId);
+          if (!set) {
+            set = new Set();
+            this.workerWantedSet.set(entry.entityId, set);
+          }
+          set.add(entry.chunkKey);
+          break;
+        }
+        case "proxy": {
+          this.proxyDeliveredToWorker.delete(this.proxyKeyFromMissing(entry));
+          break;
+        }
       }
-      set.add(entry.chunkKey);
     }
   }
 
@@ -830,6 +876,10 @@ export class Orchestrator {
   /**
    * S5: forward a proxy delivery to the GPU worker. The worker stub
    * just logs receipt; S7 will hook this up to real GPU residency.
+   *
+   * Records the composite key in `proxyDeliveredToWorker` so subsequent
+   * cache-hit ticks (which re-submit `_lastProxyRequests`) can short-
+   * circuit without re-uploading.
    */
   private sendProxyDeliveryToWorker(
     ctx: TickContext,
@@ -847,7 +897,38 @@ export class Orchestrator {
       delivery.data,
       epochs,
     );
+    this.proxyDeliveredToWorker.add(this.proxyKeyFromDelivery(delivery));
     return delivery.data.byteLength;
+  }
+
+  /**
+   * Composite key used by `proxyDeliveredToWorker`. Two small helpers —
+   * one for `ReadyProxyDelivery` (uses `proxyKind`) and one for
+   * `ProxyRequest` / `MissingProxy` (uses `kind` / `proxyKind`) — keep
+   * each call site honest about which shape it has without runtime
+   * branching.
+   */
+  private proxyKeyFromDelivery(delivery: ReadyProxyDelivery): string {
+    return `${delivery.datasetId}|${delivery.entityId}|${delivery.proxyKind}|${delivery.t}|${delivery.c}`;
+  }
+
+  private proxyKeyFromRequest(req: ProxyRequest): string {
+    return `${req.datasetId}|${req.entityId}|${req.kind}|${req.t}|${req.c}`;
+  }
+
+  private proxyKeyFromMissing(missing: MissingProxyLite): string {
+    return `${missing.datasetId}|${missing.entityId}|${missing.proxyKind}|${missing.t}|${missing.c}`;
+  }
+
+  /**
+   * Test-only accessor for the proxy-delivered tracking set. Marked
+   * `// @internal` — used by `orchestrator.test.ts` to assert the
+   * cache-hit short-circuit no longer re-uploads cached proxies.
+   *
+   * @internal
+   */
+  getProxyDeliveredKeys(): Set<string> {
+    return this.proxyDeliveredToWorker;
   }
 
   /**

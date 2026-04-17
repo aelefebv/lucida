@@ -135,6 +135,16 @@ function App() {
     }
   }, [render.activeLoop]);
 
+  // Wire up AssetCatalog whenever the RenderLoop is recreated (mirrors
+  // the CpuCache wiring above). The per-bridge catalog instance carries
+  // proxy availability across mode switches so 2D↔3D doesn't silently
+  // disable proxies.
+  useEffect(() => {
+    if (render.activeLoop && bridge.assetCatalogRef.current) {
+      render.activeLoop.setAssetCatalog(bridge.assetCatalogRef.current);
+    }
+  }, [render.activeLoop]);
+
   // S5 HITL: expose the orchestrator + cpuCache on `window.__orch`
   // (also aliased as `__lucidaOrch`) so the dev console can call
   // `requestTestProxy(datasetId, entityId, imageId, kind, t, c)` to

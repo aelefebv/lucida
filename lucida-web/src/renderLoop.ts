@@ -34,9 +34,10 @@ export class RenderLoop {
   private cpuCache: CpuCache | null = null;
   private cpuCacheUnsub: (() => void) | null = null;
   /**
-   * Per-loop AssetCatalog. Constructed lazily once the WasmScene is
-   * known so it can forward deltas through `apply_asset_catalog_delta`.
-   * S3: stays empty unless the bridge calls `applyInitial`/`applyDelta`.
+   * Set by App.tsx via setAssetCatalog when the active loop changes;
+   * lifetime-coupled to the per-bridge AssetCatalog instance so mode
+   * switches (which recreate the RenderLoop) don't lose proxy
+   * availability data populated by the bridge.
    */
   private assetCatalog: AssetCatalog | null = null;
 
@@ -113,6 +114,14 @@ export class RenderLoop {
     });
   }
 
+  setAssetCatalog(cat: AssetCatalog): void {
+    if (this.assetCatalog === cat) return;
+    this.assetCatalog = cat;
+    // No subscribe surface on AssetCatalog — just reschedule so a tick
+    // that previously bailed on a null catalog can run.
+    this.scheduleIfNeeded();
+  }
+
   /**
    * Expose the orchestrator + cpuCache for HITL debugging via
    * `window.__lucidaOrch`. The full chain is needed because
@@ -125,18 +134,6 @@ export class RenderLoop {
   }
   getCpuCache(): CpuCache | null {
     return this.cpuCache;
-  }
-
-  /**
-   * Return the loop's AssetCatalog, constructing it on first use.
-   * The bridge calls this to forward `RegisterDataset.catalog` and any
-   * `AssetCatalogUpdate` server messages.
-   */
-  getAssetCatalog(): AssetCatalog {
-    if (!this.assetCatalog) {
-      this.assetCatalog = new AssetCatalog(this.scene);
-    }
-    return this.assetCatalog;
   }
 
   addDataset(id: string, content: ContentGraph): void {
@@ -282,7 +279,7 @@ export class RenderLoop {
       mode: this.mode,
       renderScale: this._renderScale,
       cpuCache: this.cpuCache!,
-      assetCatalog: this.getAssetCatalog(),
+      assetCatalog: this.assetCatalog!,
     };
   }
 
@@ -294,6 +291,13 @@ export class RenderLoop {
     // CpuCache not yet wired (brief window between RenderLoop start and setCpuCache).
     // Reschedule — setCpuCache will mark dirty and trigger another tick.
     if (!this.cpuCache) {
+      this.scheduleIfNeeded();
+      return;
+    }
+
+    // AssetCatalog not yet wired (brief window between RenderLoop start and setAssetCatalog).
+    // Reschedule — setAssetCatalog will trigger another tick.
+    if (!this.assetCatalog) {
       this.scheduleIfNeeded();
       return;
     }

@@ -360,22 +360,13 @@ export class CpuCache {
     }
 
     this.pendingProxyQueue = [];
-    let reEmittedAny = false;
     for (const req of proxyRequests) {
       const key = this.proxyCompositeKey(req);
 
-      // Already cached?
-      if (this.isProxyCached(req)) {
-        // Re-emit a delivery so the orchestrator can route the cached
-        // proxy to the worker without paying a fetch — mirrors how
-        // `getCached` works for chunks but pushes through `ready`.
-        const entry = this.proxyCache.get(req.datasetId)?.get(proxyInnerKey(req));
-        if (entry) {
-          this.ready.push(this.proxyEntryToDelivery(entry));
-          reEmittedAny = true;
-        }
-        continue;
-      }
+      // Already cached? Skip silently — mirrors the chunk path. The
+      // orchestrator tracks delivered proxies separately and re-sends
+      // via `getCachedProxy` when the worker reports an eviction.
+      if (this.isProxyCached(req)) continue;
 
       // Already in-flight?
       if (this.inFlightProxy.has(key)) continue;
@@ -386,11 +377,6 @@ export class CpuCache {
     // Start new fetches
     this.startFetches();
     this.startProxyFetches();
-
-    // If we re-emitted any cached proxy deliveries, notify subscribers.
-    if (reEmittedAny) {
-      this.notifyListeners();
-    }
   }
 
   /** Pull decoded buffers up to budget. Returns new deliveries only. */

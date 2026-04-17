@@ -353,9 +353,17 @@ export type MissingChunk = {
   chunkKey: string;
 };
 
-/** S7: a proxy asset that the worker is missing from its proxy atlas. */
+/**
+ * S7: a proxy asset that the worker is missing from its proxy atlas.
+ *
+ * `datasetId` is included so the orchestrator can clear its
+ * `proxyDeliveredToWorker` tracking by composite key without scanning
+ * `_lastProxyRequests`. Populated from `coldState.datasetId` in
+ * `wantedSet.computeWantedSet`.
+ */
 export type MissingProxy = {
   kind: "proxy";
+  datasetId: string;
   entityId: string;
   proxyKind: "WellProxy3D" | "FieldProxy3D";
   t: number;
