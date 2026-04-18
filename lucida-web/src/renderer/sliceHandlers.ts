@@ -431,19 +431,19 @@ export function handleSliceRenderMultiPass(
     if (!descIndex) continue;
     const entityIndex = layer.entityIndex;
 
-    const isWellAsProxy = layer.mode === "well-as-proxy";
+    // Detect "no detail" via descriptor-derived state: the canonical
+    // signal that this entity has no chunks in the pool. Drives the
+    // dummy chunk atlas binding + skip-render guard below.
     const atlas = resolved.poolKey ? atlasPerDataset.get(resolved.poolKey) ?? null : null;
     let entityLodMetas: LodIndirectionMeta[] | null = null;
     if (atlas) {
       entityLodMetas = atlas.entityMetas.get(memberId) ?? null;
     }
-    if (!isWellAsProxy) {
-      if (!atlas || !entityLodMetas) continue;
-    }
+    const hasDetail = entityLodMetas != null && entityLodMetas.length > 0;
 
     const ox = layer.offsetX ?? 0;
     const oy = layer.offsetY ?? 0;
-    if (!isWellAsProxy) {
+    if (hasDetail) {
       cameraUVPerEntity.set(memberId, [
         (msg.cx - ox) / layer.dataW,
         (msg.cy - oy) / layer.dataH,
@@ -462,19 +462,9 @@ export function handleSliceRenderMultiPass(
     const desc = layer.entityId
       ? ctx.lookupProxyDescriptor(layer.entityId)
       : null;
-    let renderModeProxy = 0;
     let fieldProxyTexture: GPUTexture | null = null;
     let wellProxyTexture: GPUTexture | null = null;
     let wellProxySlotResident = false;
-
-    if (layer.mode === "well-as-proxy") {
-      renderModeProxy = 1;
-    } else if (
-      layer.mode === "fields-with-proxy-fallback" ||
-      layer.mode === "fields-with-detail"
-    ) {
-      renderModeProxy = 2;
-    }
 
     if (desc) {
       if (desc.fieldProxyHandle) {
@@ -492,20 +482,22 @@ export function handleSliceRenderMultiPass(
       }
     }
 
-    // Skip well-as-proxy layers when their proxy isn't resident yet.
-    if (renderModeProxy === 1 && !wellProxySlotResident) continue;
+    // Skip when the layer has nothing renderable: no detail chunks AND
+    // no resident well proxy. Entities with detail OR a resident proxy
+    // continue rendering — the unified fallback chain handles the rest.
+    if (!hasDetail && !wellProxySlotResident) continue;
 
-    renderer.setProxyParams(renderModeProxy, fieldProxyTexture, wellProxyTexture);
+    renderer.setProxyTextures(fieldProxyTexture, wellProxyTexture);
 
-    if (atlas && entityLodMetas) {
+    if (hasDetail && atlas) {
       renderer.setAtlas(
         atlas.texture, atlas.indirectionBuf,
         [atlas.slotsX, atlas.slotsY],
       );
     } else {
-      // S8: well-as-proxy without a chunk atlas — bind the slice
-      // renderer's own dummy chunk + indirection so the bind group is
-      // valid. The shader's renderMode == 1 branch ignores them.
+      // No detail — bind the slice renderer's own dummy chunk +
+      // indirection so the bind group is valid. The unified shader chain
+      // falls through to the proxy via the descriptor.
       renderer.setAtlas(
         ctx.getDummyTexture(), getDummySliceIndirection(ctx.device),
         [1, 1],

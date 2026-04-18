@@ -155,7 +155,6 @@ function uploadAndRenderVolume(
             renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
             scissorRect,
             entityId: m.entityId,
-            mode: m.mode,
             entityIndex,
           });
         }
@@ -180,7 +179,6 @@ function uploadAndRenderVolume(
           renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
           scissorRect,
           entityId: m.entityId,
-          mode: m.mode,
           entityIndex,
         });
       }

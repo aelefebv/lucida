@@ -499,18 +499,15 @@ export function handleVolumeRenderMultiPass(
     if (!descIndex) continue;
     const entityIndex = layer.entityIndex;
 
-    // S8: well-as-proxy entries don't have a chunk pool — we render with
-    // a dummy chunk atlas + indirection but a real proxy texture binding.
-    const isWellAsProxy = layer.mode === "well-as-proxy";
+    // Detect "no detail" via descriptor-derived state: the canonical
+    // signal that this entity has no chunks in the pool. Drives the
+    // dummy chunk atlas binding + skip-render guard below.
     const atlas = resolved.poolKey ? atlasPerDataset.get(resolved.poolKey) ?? null : null;
     let entityLodMetas: LodIndirectionMeta[] | null = null;
     if (atlas) {
       entityLodMetas = atlas.entityMetas.get(memberId) ?? null;
     }
-    if (!isWellAsProxy) {
-      // Field-mode: chunk atlas + per-entity LOD meta required.
-      if (!atlas || !entityLodMetas) continue;
-    }
+    const hasDetail = entityLodMetas != null && entityLodMetas.length > 0;
 
     // M2: colormap name lives in the descriptor's CPU mirror (set by
     // cold state). Resolve it per draw to bind the right LUT texture.
@@ -530,20 +527,10 @@ export function handleVolumeRenderMultiPass(
     const desc = layer.entityId
       ? ctx.lookupProxyDescriptor(layer.entityId)
       : null;
-    let renderModeProxy = 0; // 0 = legacy chunk-only
     let fieldProxyTexture: GPUTexture | null = null;
     let wellProxyTexture: GPUTexture | null = null;
     let wellProxySlotResident = false;
     let wellSlotDimsForVolumeFallback: [number, number, number] = [1, 1, 1];
-
-    if (layer.mode === "well-as-proxy") {
-      renderModeProxy = 1;
-    } else if (
-      layer.mode === "fields-with-proxy-fallback" ||
-      layer.mode === "fields-with-detail"
-    ) {
-      renderModeProxy = 2;
-    }
 
     if (desc) {
       if (desc.fieldProxyHandle) {
@@ -563,18 +550,18 @@ export function handleVolumeRenderMultiPass(
       }
     }
 
-    // For well-as-proxy mode, if no well proxy is resident yet, the
-    // shader returns 0xFFFFFFFFu (transparent) — skip the draw to avoid
-    // a flashing empty rect.
-    if (renderModeProxy === 1 && !wellProxySlotResident) {
+    // Skip when the layer has nothing renderable: no detail chunks AND
+    // no resident well proxy. Entities with detail OR a resident proxy
+    // continue rendering — the unified fallback chain handles the rest.
+    if (!hasDetail && !wellProxySlotResident) {
       isFirstLayer = false;
       continue;
     }
 
-    renderer.setProxyParams(renderModeProxy, fieldProxyTexture, wellProxyTexture);
+    renderer.setProxyTextures(fieldProxyTexture, wellProxyTexture);
 
-    if (atlas && entityLodMetas) {
-      // Field-mode (or fallback) path: real chunk atlas + LOD metadata.
+    if (hasDetail && atlas && entityLodMetas) {
+      // Detail path: real chunk atlas + LOD metadata.
       const targetMeta = entityLodMetas[0]; // first is target (finest)
       const [tLevelD, tLevelH, tLevelW] = targetMeta.levelDims;
       renderer.setAtlas(
@@ -584,8 +571,8 @@ export function handleVolumeRenderMultiPass(
         entityLodMetas,
       );
     } else {
-      // S8: well-as-proxy with no chunk atlas — bind dummies for the
-      // shader's chunk path (short-circuited by renderMode==1).
+      // No detail — bind dummies for the chunk path (the unified shader
+      // chain falls through to the well proxy via the descriptor).
       // volumeDims must reflect the proxy's voxel resolution: the volume
       // renderer derives ray-march stepSize from it, and [1,1,1] yields
       // ~3 samples/ray → alpha barely accumulates in translucent

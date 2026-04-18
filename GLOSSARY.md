@@ -104,6 +104,8 @@ Top-level terms. Per-crate glossaries have more detail.
 
 **ViewHotStateMessage** -- Main→worker message carrying per-entity ray-pick coords (`rayHitsByEntity`) for chunk eviction prioritization. Emitted when `epochs.view` advances. Replaces the per-frame `rayHitLocal`/`hitLocal` fields previously embedded in render and chunk-data messages.
 
+**Semantic fallback chain** -- The shader's per-fragment sampling chain for promoted detail entities: `target detail LOD → coarser detail LODs in the detail-owned range → field proxy → well proxy → empty`. Implemented identically in `volume.wgsl:sampleWithFallback` and `slice.wgsl:fs`, modulo 2D vs 3D sampling. Driven entirely by descriptor sentinels — `lodCount == 0` skips the detail loop; `*ProxySlotIndex == 0xFFFFFFFFu` skips a proxy step. No per-draw mode flag.
+
 **Wanted-set** -- The set of chunks the GPU worker reports as missing — the diff between what it should have (derived from cold state + visible region) and what it actually has in its atlas. Computed by `computeWantedSet()`.
 
 **WantedSetDeltaMessage** -- Worker→main message carrying the wanted-set: an array of `{ entityId, chunkKey }` entries for chunks the worker needs but doesn't have. Sent after cold state arrival and after eviction.

@@ -107,21 +107,12 @@ export interface VolumeLayerParams {
   scissorRect?: [number, number, number, number];
   /**
    * S8: per-entity id used by the worker to look up the proxy descriptor
-   * (`proxyDescriptorsByEntity`). For field-mode entries this is the
-   * field's entity id; for `well-as-proxy` entries this is the well's
-   * entity id. Optional for backward compat — when absent, the worker
-   * treats the layer as `mode === "fields-with-detail"` with no proxy
-   * binding (legacy behaviour).
+   * (`proxyDescriptorsByEntity`). For field entries this is the field's
+   * entity id; for `well-as-proxy` entries this is the well's entity id.
+   * Optional for backward compat — when absent, the worker has no proxy
+   * binding for this layer.
    */
   entityId?: string;
-  /**
-   * S8: promotion mode for this layer. Drives shader `renderMode`:
-   *   - `well-as-proxy`              → renderMode = 1 (skip indirection)
-   *   - `fields-with-proxy-fallback` / `fields-with-detail`
-   *                                  → renderMode = 2 (chunk + proxy chain)
-   *   - undefined / `detailOnly`     → renderMode = 0 (legacy chunk-only)
-   */
-  mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
   /**
    * M1 (DOMAINS step 8a): index into the per-dataset entity descriptor
    * buffer. Required for the worker to resolve descriptor + display state.
@@ -157,8 +148,6 @@ export interface SliceLayerParams {
   offsetY?: number;
   /** S8: see {@link VolumeLayerParams.entityId}. */
   entityId?: string;
-  /** S8: see {@link VolumeLayerParams.mode}. */
-  mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
   /** M1: see {@link VolumeLayerParams.entityIndex}. */
   entityIndex: number;
 }

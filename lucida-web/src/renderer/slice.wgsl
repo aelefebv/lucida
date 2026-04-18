@@ -4,14 +4,8 @@ struct Uniforms {
   transform: mat4x4f,       // offset 0   (64 bytes) — inverse pan/zoom (screen UV → texture UV)
   atlasSlotDims: vec4u,      // offset 64  (16 bytes) — xy=slots per axis = 128 total
   memberScreenSize: vec4f,   // offset 80  (16 bytes) — xy=member pixel size on screen
-  // M1: lodParams.x = targetLodIdx; lodCount comes from descriptor.
   lodParams: vec4u,          // offset 96  (16 bytes) — x=targetLodIdx
-  // S8 / M1: proxy fallback. Slice samples a fixed Z plane within each
-  // proxy slot; we use the slot's Z midpoint for the MVP. proxyParams.x
-  // drives the renderMode branch; slot indices and dims are now in the
-  // descriptor.
-  proxyParams: vec4u,         // offset 112 (16 bytes) — x=renderMode
-  // total = 128 bytes
+  // total = 112 bytes
 };
 
 // M1: per-draw uniform with the entity index into entityDescriptors.
@@ -136,10 +130,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     return vec4f(0.3, 0.3, 0.3, 1.0);
   }
 
-  let renderMode = u.proxyParams.x;
   let entity = entityDescriptors[currentEntity.index.x];
-  let fieldSlot = entity.fieldProxySlotIndex;
-  let wellSlot = entity.wellProxySlotIndex;
 
   // M2: per-entity display state from the descriptor buffer.
   let intensityMin = entity.contrastMin;
@@ -148,68 +139,66 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   let gamma = entity.gamma;
   let layerOpacity = entity.opacity;
 
+  // Unified semantic fallback chain (DOMAINS §6.5):
+  //   target detail LOD → coarser detail LODs → field proxy → well proxy → empty
+  // Sentinels make unavailable steps no-ops: when `lodCount == 0` the
+  // detail loop is a no-op; when a proxy slot is `0xFFFFFFFFu` the proxy
+  // step is a no-op. Same field-to-well caveat as volume.wgsl: the
+  // well-proxy sample uses field-local UV, which is spatially incorrect
+  // for field entries but visually non-blank.
   var chunkVal = 0xFFFFFFFFu;
+  let numLods = entity.lodCount;
+  let targetIdx = u.lodParams.x;
 
-  // S8: well-as-proxy short-circuit. Sample the well's proxy directly
-  // at the slot's Z midpoint; skip indirection.
-  if (renderMode == 1u) {
-    chunkVal = sampleProxy2D(wellProxyTex, wellSlot, entity.wellProxyDims, texUV);
-  } else {
-    // Multi-LOD atlas lookup with fallback
-    let numLods = entity.lodCount;
-    let targetIdx = u.lodParams.x;
+  for (var i = targetIdx; i < numLods; i++) {
+    let lod = entity.lods[i];
+    let levelDims = vec2u(lod.levelDims.x, lod.levelDims.y);
+    let chunkDims = vec2u(lod.chunkDims.x, lod.chunkDims.y);
+    let gridDims = vec2u(lod.gridDims.x, lod.gridDims.y);
+    let offset = lod.indirectionOffset;
 
-    for (var i = targetIdx; i < numLods; i++) {
-      let lod = entity.lods[i];
-      let levelDims = vec2u(lod.levelDims.x, lod.levelDims.y);
-      let chunkDims = vec2u(lod.chunkDims.x, lod.chunkDims.y);
-      let gridDims = vec2u(lod.gridDims.x, lod.gridDims.y);
-      let offset = lod.indirectionOffset;
+    let texCoord = vec2i(
+      clamp(i32(texUV.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
+      clamp(i32(texUV.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
+    );
 
-      let texCoord = vec2i(
-        clamp(i32(texUV.x * f32(levelDims.x)), 0, i32(levelDims.x) - 1),
-        clamp(i32(texUV.y * f32(levelDims.y)), 0, i32(levelDims.y) - 1),
+    let chunkCoord = vec2u(
+      u32(texCoord.x) / chunkDims.x,
+      u32(texCoord.y) / chunkDims.y,
+    );
+    let gridIdx = offset + chunkCoord.y * gridDims.x + chunkCoord.x;
+    let slot = indirection[gridIdx];
+
+    if (slot != 0xFFFFFFFFu) {
+      let slotCoord = vec2u(
+        slot % u.atlasSlotDims.x,
+        slot / u.atlasSlotDims.x,
       );
-
-      let chunkCoord = vec2u(
-        u32(texCoord.x) / chunkDims.x,
-        u32(texCoord.y) / chunkDims.y,
+      let localTexel = vec2u(
+        u32(texCoord.x) % chunkDims.x,
+        u32(texCoord.y) % chunkDims.y,
       );
-      let gridIdx = offset + chunkCoord.y * gridDims.x + chunkCoord.x;
-      let slot = indirection[gridIdx];
-
-      if (slot != 0xFFFFFFFFu) {
-        let slotCoord = vec2u(
-          slot % u.atlasSlotDims.x,
-          slot / u.atlasSlotDims.x,
-        );
-        let localTexel = vec2u(
-          u32(texCoord.x) % chunkDims.x,
-          u32(texCoord.y) % chunkDims.y,
-        );
-        let atlasCoord = vec2i(
-          i32(slotCoord.x * chunkDims.x + localTexel.x),
-          i32(slotCoord.y * chunkDims.y + localTexel.y),
-        );
-        chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
-        break;
-      }
+      let atlasCoord = vec2i(
+        i32(slotCoord.x * chunkDims.x + localTexel.x),
+        i32(slotCoord.y * chunkDims.y + localTexel.y),
+      );
+      chunkVal = textureLoad(chunkTex, atlasCoord, 0).r;
+      break;
     }
+  }
 
-    // S8: proxy fallback (renderMode == 2). Detail missed; try field
-    // proxy then parent well proxy at the slot's Z midpoint. Same
-    // field-to-well caveat as volume.wgsl: well-proxy sample uses the
-    // field's local UV, which is spatially incorrect but visually
-    // non-blank. The intended visual win is renderMode == 1 above.
-    if (chunkVal == 0xFFFFFFFFu && renderMode == 2u) {
-      if (fieldSlot != 0xFFFFFFFFu) {
-        let v = sampleProxy2D(fieldProxyTex, fieldSlot, entity.fieldProxyDims, texUV);
-        if (v != 0xFFFFFFFFu) { chunkVal = v; }
-      }
-      if (chunkVal == 0xFFFFFFFFu && wellSlot != 0xFFFFFFFFu) {
-        let v = sampleProxy2D(wellProxyTex, wellSlot, entity.wellProxyDims, texUV);
-        if (v != 0xFFFFFFFFu) { chunkVal = v; }
-      }
+  if (chunkVal == 0xFFFFFFFFu) {
+    let fieldSlot = entity.fieldProxySlotIndex;
+    if (fieldSlot != 0xFFFFFFFFu) {
+      let v = sampleProxy2D(fieldProxyTex, fieldSlot, entity.fieldProxyDims, texUV);
+      if (v != 0xFFFFFFFFu) { chunkVal = v; }
+    }
+  }
+  if (chunkVal == 0xFFFFFFFFu) {
+    let wellSlot = entity.wellProxySlotIndex;
+    if (wellSlot != 0xFFFFFFFFu) {
+      let v = sampleProxy2D(wellProxyTex, wellSlot, entity.wellProxyDims, texUV);
+      if (v != 0xFFFFFFFFu) { chunkVal = v; }
     }
   }
 

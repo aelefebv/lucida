@@ -101,7 +101,6 @@ function uploadAndRenderSlice(
             offsetX: m.position[0],
             offsetY: m.position[1],
             entityId: m.entityId,
-            mode: m.mode,
             entityIndex,
           });
         }
@@ -125,7 +124,6 @@ function uploadAndRenderSlice(
           offsetX: m.position[0],
           offsetY: m.position[1],
           entityId: m.entityId,
-          mode: m.mode,
           entityIndex,
         });
       }

@@ -63,11 +63,13 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // S8: minimap always uses the legacy chunk-only path (renderMode=0).
-    // Reset proxy state in case a previous main-view draw left renderMode
-    // != 0 — otherwise the minimap would short-circuit to a sentinel
-    // proxy slot and render empty.
-    renderer.setProxyParams(0, null, null);
+    // Minimap renders the overview as a single-LOD volume — the
+    // transient descriptor sets proxy slot indices to the sentinel, so
+    // the unified chain naturally falls through to the chunk path.
+    // Reset textures in case a previous main-view draw bound real proxy
+    // textures — leaving stale handles bound is harmless but signals
+    // intent more clearly.
+    renderer.setProxyTextures(null, null);
     renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
     renderer.setMatrices(msg.invViewProj, msg.eye);
     // M1+M2: bind a transient single-entity descriptor so the shader's

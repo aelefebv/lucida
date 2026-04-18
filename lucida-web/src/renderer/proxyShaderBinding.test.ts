@@ -6,11 +6,11 @@
  *   1. The shader's `slotOrigin = slotIdx * dims.z` math agrees with the
  *      TS-side `proxySlotOrigin()` (which is what gpu.worker.ts uses to
  *      decide where to write proxy uploads).
- *   2. The renderers pack `proxyParams` / `fieldProxyDims` /
- *      `wellProxyDims` at the documented uniform-buffer offsets, so the
- *      shader struct stays in sync. We replay the offset arithmetic
- *      here against constants so a future tweak that desyncs
- *      `UNIFORM_SIZE` or per-field offsets fails loudly.
+ *   2. The renderers' per-frame uniform layouts stay in sync with the
+ *      shader's `Uniforms` struct. Step 9 unified the proxy/detail
+ *      fallback chain and dropped `proxyParams.x = renderMode` from
+ *      both volume and slice — these constants encode the post-step-9
+ *      sizes so a future regression fails loudly.
  */
 
 import { describe, it, expect } from "vitest";
@@ -105,43 +105,30 @@ describe("proxy slot origin math (shader ↔ proxyAtlas.ts)", () => {
 // Uniform buffer packing offsets (volume + slice)
 // ---------------------------------------------------------------------------
 
-describe("renderer uniform layouts (M2: per-frame proxyParams)", () => {
-  // M1 (DOMAINS step 8a): proxy slot indices and dims moved into the
-  // per-entity descriptor buffer. The per-frame uniform carries
-  // proxyParams.x = renderMode.
-  // M2: per-entity contrast/gamma/opacity also moved into the descriptor
-  // buffer, shrinking the uniform layout by one vec4 (16B) on volume and
-  // by one vec4 on slice. These constants mirror volumeRenderer.ts and
+describe("renderer uniform layouts (post-step-9 unified fallback chain)", () => {
+  // Step 9 (DOMAINS §6.5): the unified semantic fallback chain is driven
+  // by descriptor sentinels — `proxyParams.x = renderMode` is gone from
+  // both volume (256→240B) and slice (128→112B) uniforms. The last vec4
+  // is now `lodParams`. These constants mirror volumeRenderer.ts and
   // sliceRenderer.ts.
-  const VOLUME_UNIFORM_SIZE = 256;
-  const VOLUME_PROXY_PARAMS_OFFSET_BYTES = 240;
+  const VOLUME_UNIFORM_SIZE = 240;
+  const VOLUME_LOD_PARAMS_OFFSET_BYTES = 224;
 
-  const SLICE_UNIFORM_SIZE = 128;
-  const SLICE_PROXY_PARAMS_OFFSET_BYTES = 112;
+  const SLICE_UNIFORM_SIZE = 112;
+  const SLICE_LOD_PARAMS_OFFSET_BYTES = 96;
 
-  it("volume proxyParams is 16-byte aligned and tail of UNIFORM_SIZE", () => {
-    expect(VOLUME_PROXY_PARAMS_OFFSET_BYTES % 16).toBe(0);
-    expect(VOLUME_PROXY_PARAMS_OFFSET_BYTES + 16).toBe(VOLUME_UNIFORM_SIZE);
+  it("volume lodParams is 16-byte aligned and tail of UNIFORM_SIZE", () => {
+    expect(VOLUME_LOD_PARAMS_OFFSET_BYTES % 16).toBe(0);
+    expect(VOLUME_LOD_PARAMS_OFFSET_BYTES + 16).toBe(VOLUME_UNIFORM_SIZE);
   });
 
-  it("slice proxyParams is 16-byte aligned and tail of UNIFORM_SIZE", () => {
-    expect(SLICE_PROXY_PARAMS_OFFSET_BYTES % 16).toBe(0);
-    expect(SLICE_PROXY_PARAMS_OFFSET_BYTES + 16).toBe(SLICE_UNIFORM_SIZE);
+  it("slice lodParams is 16-byte aligned and tail of UNIFORM_SIZE", () => {
+    expect(SLICE_LOD_PARAMS_OFFSET_BYTES % 16).toBe(0);
+    expect(SLICE_LOD_PARAMS_OFFSET_BYTES + 16).toBe(SLICE_UNIFORM_SIZE);
   });
 
   it("u32-view indices match byte offsets / 4", () => {
-    expect(VOLUME_PROXY_PARAMS_OFFSET_BYTES / 4).toBe(60);
-    expect(SLICE_PROXY_PARAMS_OFFSET_BYTES / 4).toBe(28);
-  });
-
-  it("renderMode survives round-trip through proxyParams.x", () => {
-    const buf = new ArrayBuffer(VOLUME_UNIFORM_SIZE);
-    const u32 = new Uint32Array(buf);
-    const renderMode = 2;
-    u32.set([renderMode, 0, 0, 0], 60);
-    expect(u32[60]).toBe(renderMode);
-    expect(u32[61]).toBe(0);
-    expect(u32[62]).toBe(0);
-    expect(u32[63]).toBe(0);
+    expect(VOLUME_LOD_PARAMS_OFFSET_BYTES / 4).toBe(56);
+    expect(SLICE_LOD_PARAMS_OFFSET_BYTES / 4).toBe(24);
   });
 });

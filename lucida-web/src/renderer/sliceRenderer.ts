@@ -2,14 +2,12 @@
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 
-// Uniform buffer layout (128 bytes — M2 strips per-entity contrast/gamma/
-// opacity that moved into the descriptor buffer):
+// Uniform buffer layout (112 bytes):
 //   offset 0:   transform        mat4x4f   (64B)
 //   offset 64:  atlasSlotDims    vec4u     (16B)
 //   offset 80:  memberScreenSize vec4f     (16B)
 //   offset 96:  lodParams        vec4u     (16B) — x=targetLodIdx
-//   offset 112: proxyParams      vec4u     (16B) — x=renderMode
-const UNIFORM_SIZE = 128;
+const UNIFORM_SIZE = 112;
 const ENTITY_REF_SIZE = 16;
 
 export class SliceRenderer {
@@ -36,7 +34,6 @@ export class SliceRenderer {
   private fieldProxyTexture: GPUTexture | null = null;
   private wellProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
-  private renderModeProxy = 0;
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -194,16 +191,14 @@ export class SliceRenderer {
   }
 
   /**
-   * M1: configure proxy textures + renderMode for the next draw. Slot
-   * indices and dims live in the per-entity descriptor; the texture
-   * binding stays CPU-side.
+   * Configure proxy textures for the next draw. Slot indices and dims
+   * live in the per-entity descriptor; the shader's unified fallback
+   * chain decides per-fragment whether to consult them.
    */
-  setProxyParams(
-    mode: number,
+  setProxyTextures(
     fieldTexture: GPUTexture | null,
     wellTexture: GPUTexture | null,
   ) {
-    this.renderModeProxy = mode;
     this.fieldProxyTexture = fieldTexture;
     this.wellProxyTexture = wellTexture;
     this.rebuildBindGroup();
@@ -278,9 +273,6 @@ export class SliceRenderer {
     // M1: lodParams.x = targetLodIdx (always 0 — descriptor lods start
     // at finest LOD).
     u32View.set([0, 0, 0, 0], 24); // lodParams at 96B = 24 u32s
-
-    // M1: proxyParams.x = renderMode; rest reserved.
-    u32View.set([this.renderModeProxy, 0, 0, 0], 28); // proxyParams at 112B = 28 u32s
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }

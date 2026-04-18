@@ -10,8 +10,7 @@ import {
 
 import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 
-// Uniform buffer layout (256 bytes — M2 strips per-entity contrast/gamma/
-// opacity that moved into the descriptor buffer):
+// Uniform buffer layout (240 bytes):
 //   offset 0:   invViewProj     mat4x4f   (64B)
 //   offset 64:  cameraPos       vec4f     (16B)
 //   offset 80:  volumeDims      vec4f     (16B)
@@ -21,8 +20,7 @@ import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 //   offset 192: camForward      vec4f     (16B)
 //   offset 208: clipParams      vec4f     (16B)
 //   offset 224: lodParams       vec4u     (16B) — x=targetLodIdx
-//   offset 240: proxyParams     vec4u     (16B) — x=renderMode
-const UNIFORM_SIZE = 256;
+const UNIFORM_SIZE = 240;
 
 /** M1: 16-byte uniform with the entity index for the current draw. */
 const ENTITY_REF_SIZE = 16;
@@ -53,13 +51,13 @@ export class VolumeRenderer {
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
-  // S8: proxy textures for binding. M1 keeps texture binding CPU-side
-  // (descriptor only carries pool/slot indices, not the GPU texture
-  // handle); slot indices and dims live in the descriptor.
+  // S8: proxy textures for binding. The descriptor carries pool/slot
+  // indices + dims; the texture handle stays CPU-side because WebGPU
+  // bind groups can't index into a texture array without a texture-array
+  // binding (future optimization).
   private fieldProxyTexture: GPUTexture | null = null;
   private wellProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
-  private renderModeProxy = 0; // 0=detailOnly, 1=well-as-proxy, 2=detailWithProxyFallback
 
   constructor(device: GPUDevice) {
     this.device = device;
@@ -192,18 +190,14 @@ export class VolumeRenderer {
   }
 
   /**
-   * S8: configure proxy textures + renderMode for the next draw. Slot
-   * indices and dims live in the per-entity descriptor (M1) — the
-   * texture binding still needs to be set CPU-side because WebGPU bind
-   * groups can't carry an index-into-texture-array directly without a
-   * texture-array binding (future optimization).
+   * Configure proxy textures for the next draw. Slot indices and dims
+   * live in the per-entity descriptor; the shader's unified fallback
+   * chain decides per-fragment whether to consult them.
    */
-  setProxyParams(
-    mode: number,
+  setProxyTextures(
     fieldTexture: GPUTexture | null,
     wellTexture: GPUTexture | null,
   ) {
-    this.renderModeProxy = mode;
     this.fieldProxyTexture = fieldTexture;
     this.wellProxyTexture = wellTexture;
   }
@@ -408,9 +402,6 @@ export class VolumeRenderer {
     // already trimmed to start at finest LOD). lodCount comes from
     // descriptor.
     u32View.set([0, 0, 0, 0], 56); // lodParams at 224B = 56 u32s
-
-    // M1: proxyParams.x = renderMode; rest reserved.
-    u32View.set([this.renderModeProxy, 0, 0, 0], 60); // proxyParams at 240B = 60 u32s
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
 

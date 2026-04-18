@@ -4,22 +4,16 @@ struct Uniforms {
   invViewProj: mat4x4f,      // offset 0   (64 bytes)
   cameraPos: vec4f,           // offset 64  (16 bytes)
   volumeDims: vec4f,          // offset 80  (16 bytes)
-  // M2: stepInfo.x=opacityScale (translucent compositing constant),
+  // stepInfo.x=opacityScale (translucent compositing constant),
   // stepInfo.y=stepSize, stepInfo.z=renderMode (0=translucent,1=MIP),
-  // stepInfo.w=reserved. Per-entity contrast/gamma/opacity moved into
-  // the descriptor buffer.
+  // stepInfo.w=reserved.
   stepInfo: vec4f,            // offset 96  (16 bytes)
   atlasSlotDims: vec4u,       // offset 112 (16 bytes) — xyz=slots per axis
   viewProj: mat4x4f,          // offset 128 (64 bytes)
   camForward: vec4f,          // offset 192 (16 bytes) — xyz=camera forward dir
   clipParams: vec4f,          // offset 208 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
-  // M1: lodParams.x = targetLodIdx; lodCount comes from the descriptor
-  // buffer. renderMode (proxyParams.x in legacy layout) stays per-draw.
-  // proxyParams: x=renderMode (0=detailOnly, 1=well-as-proxy,
-  //   2=detailWithProxyFallback), yzw=reserved.
   lodParams: vec4u,           // offset 224 (16 bytes) — x=targetLodIdx
-  proxyParams: vec4u,         // offset 240 (16 bytes)
-  // total = 256 bytes
+  // total = 240 bytes
 };
 
 // M1: per-draw uniform with the entity index into entityDescriptors.
@@ -148,27 +142,23 @@ fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f)
   return textureLoad(tex, coord, 0).r;
 }
 
-// Sample from the atlas with multi-LOD fallback, then (renderMode == 2)
-// proxy fallback chain: detail → fieldProxy → wellProxy.
+// Unified semantic fallback chain (DOMAINS §6.5):
+//   target detail LOD → coarser detail LODs → field proxy → well proxy → empty
 //
-// renderMode == 1 short-circuits to a direct wellProxy sample (used by
-// well-as-proxy at far zoom).
+// pos is in [0,1]³ local space. Sentinels make unavailable steps no-ops:
+// when `lodCount == 0` the detail loop is a no-op; when a proxy slot is
+// `0xFFFFFFFFu` the proxy step returns the sentinel and we move on.
 //
-// pos is in [0,1]³ local space. Tries target LOD first, then coarser LODs.
-//
-// M1: lod array, proxy slot indices and proxy dims all come from the
-// per-entity descriptor; renderMode and targetLodIdx remain per-draw.
+// Note: the well-proxy sample uses the field's local `pos` (no
+// field-to-well transform yet — see S8 PRD #405 and follow-up). Visually
+// this means the well-proxy fallback in field entries displays proxy
+// voxels at field-local coordinates, which is spatially incorrect but
+// produces a non-blank result while detail chunks load. Well-as-proxy
+// entries don't need the transform — `lodCount == 0` makes the detail
+// loop a no-op, the field proxy step is also a no-op (no field handle),
+// and the well-proxy step samples the well's own proxy at well-local
+// coords.
 fn sampleWithFallback(pos: vec3f) -> u32 {
-  let renderMode = u.proxyParams.x;
-  let fieldSlot = activeEntity.fieldProxySlotIndex;
-  let wellSlot = activeEntity.wellProxySlotIndex;
-
-  // S8: well-as-proxy short-circuit. Skip indirection; one direct sample
-  // from the well's proxy slot. This is the major FPS win at far zoom.
-  if (renderMode == 1u) {
-    return sampleProxy(wellProxyTex, wellSlot, activeEntity.wellProxyDims, pos);
-  }
-
   let numLods = activeEntity.lodCount;
   let targetIdx = u.lodParams.x;
 
@@ -216,27 +206,15 @@ fn sampleWithFallback(pos: vec3f) -> u32 {
     }
   }
 
-  // S8: proxy fallback (renderMode == 2). Detail missed; try field proxy
-  // first, then parent well proxy. Each `sampleProxy()` call returns
-  // 0xFFFFFFFFu if its slot is the sentinel, so we cascade naturally.
-  //
-  // Note: the well-proxy sample uses the field's local `pos` (no
-  // field-to-well transform yet — see S8 PRD #405 and follow-up).
-  // Visually this means the well-proxy fallback in field-mode entries
-  // will display proxy voxels at field-local coordinates, which is
-  // spatially incorrect but produces a non-blank result while detail
-  // chunks load. The FPS win comes from renderMode == 1 (well-as-proxy
-  // at far zoom) which doesn't need the transform — it samples the
-  // well's own proxy at well-local coords.
-  if (renderMode == 2u) {
-    if (fieldSlot != 0xFFFFFFFFu) {
-      let v = sampleProxy(fieldProxyTex, fieldSlot, activeEntity.fieldProxyDims, pos);
-      if (v != 0xFFFFFFFFu) { return v; }
-    }
-    if (wellSlot != 0xFFFFFFFFu) {
-      let v = sampleProxy(wellProxyTex, wellSlot, activeEntity.wellProxyDims, pos);
-      if (v != 0xFFFFFFFFu) { return v; }
-    }
+  let fieldSlot = activeEntity.fieldProxySlotIndex;
+  if (fieldSlot != 0xFFFFFFFFu) {
+    let v = sampleProxy(fieldProxyTex, fieldSlot, activeEntity.fieldProxyDims, pos);
+    if (v != 0xFFFFFFFFu) { return v; }
+  }
+  let wellSlot = activeEntity.wellProxySlotIndex;
+  if (wellSlot != 0xFFFFFFFFu) {
+    let v = sampleProxy(wellProxyTex, wellSlot, activeEntity.wellProxyDims, pos);
+    if (v != 0xFFFFFFFFu) { return v; }
   }
 
   return 0xFFFFFFFFu;
