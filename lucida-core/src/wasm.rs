@@ -355,17 +355,6 @@ impl WasmScene {
         serde_json::to_string(&map).unwrap()
     }
 
-    pub fn chunk_plan(&self) -> String {
-        let plan = self.inner.chunk_plan();
-        serde_json::to_string(&plan).unwrap()
-    }
-
-    pub fn chunk_plan_for(&self, dataset_id: &str) -> String {
-        let ds_id = DatasetId(dataset_id.to_string());
-        let plans = self.inner.chunk_plan_for(&ds_id).unwrap_or_default();
-        serde_json::to_string(&plans).unwrap()
-    }
-
     /// Returns the full volume shape [Z, Y, X] for a dataset.
     pub fn dataset_volume_shape(&self, dataset_id: &str) -> Vec<u32> {
         let ds_id = DatasetId(dataset_id.to_string());
