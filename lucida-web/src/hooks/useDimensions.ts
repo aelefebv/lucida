@@ -35,7 +35,7 @@ export function useDimensions({
   let dimZ = 1, dimC = 1, dimT = 1;
   void datasetsVersion;
   for (const ds of datasetsRef.current.values()) {
-    const shape = ds.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
+    const shape = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
     dimZ = Math.max(dimZ, shape[2]);
     dimC = Math.max(dimC, shape[1]);
     dimT = Math.max(dimT, shape[0]);
@@ -75,10 +75,10 @@ export function useDimensions({
     if (wasmScene) {
       applyViewportCommand(wasmScene, { type: next === "3d" ? "set_mode_arcball" : "set_mode_slice" });
       if (next === "2d" && selectedDatasetId) {
-        const dsContent = datasetsRef.current.get(selectedDatasetId)?.content;
-        if (dsContent) {
-          const shapeX = dsContent.images[0].multiscale.levels[0].shape[4];
-          const shapeY = dsContent.images[0].multiscale.levels[0].shape[3];
+        const dsManifest = datasetsRef.current.get(selectedDatasetId)?.manifest;
+        if (dsManifest) {
+          const shapeX = dsManifest.images[0].multiscale.levels[0].shape[4];
+          const shapeY = dsManifest.images[0].multiscale.levels[0].shape[3];
           applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
         }
       }

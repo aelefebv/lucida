@@ -1,13 +1,13 @@
 /** Shared types and constants for the render loop modules. */
 import type { WasmScene } from "lucida-core";
-import type { ContentGraph } from "./contentTypes.ts";
+import type { DatasetManifest } from "./manifestTypes.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
 import type { CpuCache } from "./pipeline/cpuCache.ts";
 import type { AssetCatalog } from "./pipeline/assetCatalog.ts";
 import type { Session } from "./session.ts";
 
 export interface DatasetEntry {
-  content: ContentGraph;
+  manifest: DatasetManifest;
 }
 
 export interface RenderLoopOptions {
@@ -55,7 +55,7 @@ export interface TickContext {
   cpuCache: CpuCache;
   /**
    * Local mirror of per-entity proxy availability. Populated by
-   * `bridge` from `RegisterDataset.catalog` and any subsequent
+   * `bridge` from `DatasetOpened.catalog` and any subsequent
    * `AssetCatalogUpdate` server messages. Empty in S3 — Planning
    * doesn't consume it until S6.
    */

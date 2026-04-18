@@ -15,7 +15,7 @@
 use std::io::{self, Read, Write};
 
 use blake3::Hasher;
-use lucida_content::{ContentGraph, EntityId, EntityKind, ImageSpec};
+use lucida_content::{DatasetManifest, EntityId, EntityKind, ImageSpec};
 
 use crate::spec::{ALGORITHM_VERSION, ProxyDtype, ProxyHeader};
 
@@ -110,7 +110,7 @@ pub fn read_header<R: Read>(r: &mut R) -> io::Result<ProxyHeader> {
 /// content yields the same hash. Modifying any contributing transform or
 /// level metadata changes the hash.
 pub fn source_content_hash(
-    content: &ContentGraph,
+    content: &DatasetManifest,
     entity_id: &EntityId,
     t: u32,
     c: u32,

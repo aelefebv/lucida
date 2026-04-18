@@ -4,7 +4,7 @@ import {
   buildDenseSquareLayout,
   derivedBuildersFor,
 } from "./layoutBuilders.ts";
-import type { ContentGraph, ImageSpec, LayoutSpec } from "../contentTypes.ts";
+import type { DatasetManifest, ImageSpec, LayoutSpec } from "../manifestTypes.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -37,7 +37,7 @@ function makeImage(image_id: string, owner: string, fovY = 256, fovX = 256): Ima
 }
 
 /** Single-image dataset with no source layouts. */
-function singleImageGraph(): ContentGraph {
+function singleImageGraph(): DatasetManifest {
   return {
     dataset_id: "ds-single",
     name: "single",
@@ -51,7 +51,7 @@ function singleImageGraph(): ContentGraph {
 }
 
 /** 2x2 plate, all 4 wells populated (each entity gets its own corner). */
-function plate2x2Graph(): ContentGraph {
+function plate2x2Graph(): DatasetManifest {
   const W = 256;
   const H = 256;
   const placements: LayoutSpec["placements"] = [
@@ -73,7 +73,7 @@ function plate2x2Graph(): ContentGraph {
 }
 
 /** Sparse plate: 3 entities placed (one well empty). */
-function plateSparseGraph(): ContentGraph {
+function plateSparseGraph(): DatasetManifest {
   const W = 256;
   const H = 256;
   const placements: LayoutSpec["placements"] = [
@@ -148,7 +148,7 @@ describe("buildDenseSquareLayout", () => {
   });
 
   it("returns null when source default has only 1 entity", () => {
-    const g: ContentGraph = {
+    const g: DatasetManifest = {
       ...singleImageGraph(),
       source_layouts: [{ id: "default", name: "Default", placements: [{ entity_id: "e0", position: [0, 0] }] }],
       default_layout_id: "default",
@@ -160,7 +160,7 @@ describe("buildDenseSquareLayout", () => {
 /** Plate with 2 wells, each containing a 2x2 grid of 256x256 fields.
  *  Source layout places wells at (0,0) and (1000,0). Field offsets within
  *  each well are (0,0), (256,0), (0,256), (256,256) → well bbox is 512x512. */
-function plateWithFieldsGraph(): ContentGraph {
+function plateWithFieldsGraph(): DatasetManifest {
   const wells = ["W1", "W2"];
   const wellPositions: Record<string, [number, number]> = {
     W1: [0, 0],
@@ -173,8 +173,8 @@ function plateWithFieldsGraph(): ContentGraph {
     [256, 256],
   ];
 
-  const entities: ContentGraph["entities"] = [];
-  const transforms: ContentGraph["transforms"] = [];
+  const entities: DatasetManifest["entities"] = [];
+  const transforms: DatasetManifest["transforms"] = [];
   const images: ImageSpec[] = [];
 
   for (const well of wells) {
@@ -234,7 +234,7 @@ describe("derivedBuildersFor", () => {
   });
 
   it("returns only plate-grid when dense is filtered out (1-entity dataset with source layout)", () => {
-    const g: ContentGraph = {
+    const g: DatasetManifest = {
       ...singleImageGraph(),
       source_layouts: [{ id: "default", name: "Default", placements: [{ entity_id: "e0", position: [0, 0] }] }],
       default_layout_id: "default",

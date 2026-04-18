@@ -30,7 +30,7 @@ import type {
   AssetCatalogSnapshot,
   ProxyKind,
 } from "./planning.ts";
-import type { LevelGeometry } from "../contentTypes.ts";
+import type { LevelGeometry } from "../manifestTypes.ts";
 
 // ---------------------------------------------------------------------------
 // Catalog helper

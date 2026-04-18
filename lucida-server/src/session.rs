@@ -180,10 +180,10 @@ mod tests {
     use lucida_content::*;
     use lucida_protocol::*;
 
-    fn make_register(id: &str, name: &str) -> RegisterDataset {
+    fn make_register(id: &str, name: &str) -> DatasetOpened {
         let entity_id = EntityId(format!("{id}-entity"));
         let image_id = ImageId(format!("{id}-image"));
-        let content = ContentGraph::new(
+        let manifest = DatasetManifest::new(
             DatasetId(id.to_string()),
             name.to_string(),
             DatasetKind::Single,
@@ -219,13 +219,13 @@ mod tests {
             vec![],
             None,
         );
-        let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id,
                 wire_format: WireFormat::Raw { data_type: DataType::Uint16 },
             }],
         });
-        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
     }
 
     #[test]
@@ -238,7 +238,7 @@ mod tests {
     fn apply_increments_seq() {
         let mut session = Session::new();
         let reg = make_register("ds1", "test");
-        let seq = session.apply(DocumentCommand::RegisterDataset(reg));
+        let seq = session.apply(DocumentCommand::DatasetOpened(reg));
         assert_eq!(seq, 1);
     }
 
@@ -246,16 +246,16 @@ mod tests {
     fn apply_mutates_document() {
         let mut session = Session::new();
         let reg = make_register("ds1", "test");
-        session.apply(DocumentCommand::RegisterDataset(reg));
-        assert_eq!(session.document.content_graphs.len(), 1);
-        assert!(session.document.content_graphs.contains_key(&DatasetId("ds1".into())));
+        session.apply(DocumentCommand::DatasetOpened(reg));
+        assert_eq!(session.document.manifests.len(), 1);
+        assert!(session.document.manifests.contains_key(&DatasetId("ds1".into())));
     }
 
     #[test]
     fn snapshot_contains_current_state() {
         let mut session = Session::new();
         let reg = make_register("ds1", "test");
-        session.apply(DocumentCommand::RegisterDataset(reg));
+        session.apply(DocumentCommand::DatasetOpened(reg));
         let msg = session.snapshot(42);
         match msg {
             ServerMessage::Snapshot {
@@ -266,7 +266,7 @@ mod tests {
             } => {
                 assert_eq!(seq, 1);
                 assert_eq!(your_id, 42);
-                assert_eq!(document.content_graphs.len(), 1);
+                assert_eq!(document.manifests.len(), 1);
             }
             _ => panic!("expected Snapshot"),
         }
@@ -277,7 +277,7 @@ mod tests {
         let mut session = Session::new();
         for i in 0..300 {
             let reg = make_register(&format!("ds-{i}"), "test");
-            session.apply(DocumentCommand::RegisterDataset(reg));
+            session.apply(DocumentCommand::DatasetOpened(reg));
         }
         assert_eq!(session.history.len(), HISTORY_CAPACITY);
     }

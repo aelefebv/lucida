@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { debugStats, type DebugStats } from "./debugStats.ts";
 import type { WasmScene } from "lucida-core";
-import type { ContentGraph, ImageSpec } from "../contentTypes.ts";
+import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 import { plan } from "../pipeline/planning.ts";
 import type {
   PlanningSnapshot,
@@ -99,7 +99,7 @@ interface DebugPanelProps {
   wasmSceneRef?: React.RefObject<WasmScene | null>;
   datasetId?: string | null;
   lastClickScreen?: [number, number] | null;
-  datasets: Map<string, { sharedQueue: any; content: ContentGraph }>;
+  datasets: Map<string, { sharedQueue: any; manifest: DatasetManifest }>;
   sessionRef?: React.RefObject<Session | null>;
   style?: React.CSSProperties;
 }
@@ -170,7 +170,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 }
                 perDataset.push({
                   datasetId: dsId,
-                  name: dsEntry.content?.name ?? dsId,
+                  name: dsEntry.manifest?.name ?? dsId,
                   wellsWithProxy: wells,
                   fieldsWithProxy: fields,
                   totalEntries: entries.length,
@@ -218,9 +218,9 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 request: prevRequestEpochRef.current,
               };
 
-              // Find dataset content graph
+              // Find dataset manifest
               const dsEntry = datasets.get(datasetId);
-              const content = dsEntry?.content;
+              const manifest = dsEntry?.manifest;
 
               // Build position lookup from WASM member positions
               // (composed layout placement + transform edge offsets)
@@ -237,8 +237,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
 
               // Build image spec lookup
               const imageSpecById = new Map<string, ImageSpec>();
-              if (content) {
-                for (const img of content.images) {
+              if (manifest) {
+                for (const img of manifest.images) {
                   imageSpecById.set(img.image_id, img);
                 }
               }
@@ -246,8 +246,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               // Build parent lookup so S6 promotion can group fields by
               // their parent well.
               const parentByEntityId = new Map<string, string | null>();
-              if (content) {
-                for (const ent of content.entities) {
+              if (manifest) {
+                for (const ent of manifest.entities) {
                   parentByEntityId.set(ent.id, ent.parent ?? null);
                 }
               }

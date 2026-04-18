@@ -400,12 +400,12 @@ function App() {
               if (!ds) return null;
               // Resolve the active layout's placements: derived layouts
               // come from the registry, source layouts from the content graph.
-              const activeId = layoutRegistry?.activeId(ds.id) ?? ds.content.default_layout_id;
+              const activeId = layoutRegistry?.activeId(ds.id) ?? ds.manifest.default_layout_id;
               const activePlacements =
                 (activeId ? layoutRegistry?.getSpec(ds.id, activeId)?.placements : null)
-                ?? (activeId ? ds.content.source_layouts.find((l) => l.id === activeId)?.placements : null)
+                ?? (activeId ? ds.manifest.source_layouts.find((l) => l.id === activeId)?.placements : null)
                 ?? null;
-              const plateData = extractPlateData(ds.content, activePlacements);
+              const plateData = extractPlateData(ds.manifest, activePlacements);
               if (!plateData) return null;
               return (
                 <PlateSelector

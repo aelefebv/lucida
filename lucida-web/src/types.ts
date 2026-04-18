@@ -1,4 +1,4 @@
-import type { ContentGraph, ClientFetchDescriptor } from "./contentTypes.ts";
+import type { DatasetManifest, FetchSource } from "./manifestTypes.ts";
 
 export type ViewMode = "2d" | "3d";
 
@@ -13,8 +13,8 @@ export interface VolumeData {
 export interface DatasetState {
   id: string;
   name: string;
-  content: ContentGraph;
-  fetch: ClientFetchDescriptor;
+  manifest: DatasetManifest;
+  fetch: FetchSource;
 }
 
 

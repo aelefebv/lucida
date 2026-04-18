@@ -49,20 +49,20 @@ async fn main() {
     match lucida_store::import::import_dataset(&store, &id, &name).await {
         Ok(result) => {
             // Summary to stderr
-            let n_entities = result.content.entities().len();
-            let n_images = result.content.images().len();
-            let n_transforms = result.content.transforms().len();
-            let n_layouts = result.content.source_layouts().len();
+            let n_entities = result.manifest.entities().len();
+            let n_images = result.manifest.images().len();
+            let n_transforms = result.manifest.transforms().len();
+            let n_layouts = result.manifest.source_layouts().len();
             eprintln!("");
             eprintln!("=== Import Summary ===");
-            eprintln!("  Dataset:    {} ({})", result.content.name, result.content.dataset_id.0);
-            eprintln!("  Kind:       {:?}", result.content.kind);
+            eprintln!("  Dataset:    {} ({})", result.manifest.name, result.manifest.dataset_id.0);
+            eprintln!("  Kind:       {:?}", result.manifest.kind);
             eprintln!("  Entities:   {n_entities}");
             eprintln!("  Images:     {n_images}");
             eprintln!("  Transforms: {n_transforms}");
             eprintln!("  Layouts:    {n_layouts}");
 
-            if let Some(img) = result.content.images().first() {
+            if let Some(img) = result.manifest.images().first() {
                 let ms = &img.multiscale;
                 eprintln!("  Levels:     {}", ms.levels.len());
                 eprintln!("  Data type:  {:?}", ms.data_type);
@@ -74,11 +74,11 @@ async fn main() {
             }
 
             eprintln!("  Fetch mode: {}", match &result.fetch {
-                lucida_protocol::ClientFetchDescriptor::Proxied(p) =>
+                lucida_protocol::FetchSource::Proxied(p) =>
                     format!("Proxied ({} images)", p.images.len()),
-                lucida_protocol::ClientFetchDescriptor::Direct(d) =>
+                lucida_protocol::FetchSource::Direct(d) =>
                     format!("Direct ({} images)", d.images.len()),
-                lucida_protocol::ClientFetchDescriptor::Local(l) =>
+                lucida_protocol::FetchSource::Local(l) =>
                     format!("Local ({} images)", l.images.len()),
             });
             eprintln!("  Binding:    {} image seeds", result.binding_seed.images.len());

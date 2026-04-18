@@ -121,7 +121,7 @@ function uploadAndRenderVolume(
     const dsSettings = allSettings[dsId];
     if (!dsSettings || !dsSettings.visible) continue;
 
-    const dsShapeV = dsVol.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
+    const dsShapeV = dsVol.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
 
     const members = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];

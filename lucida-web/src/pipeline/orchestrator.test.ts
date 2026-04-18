@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import type { ContentGraph } from "../contentTypes.ts";
+import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import type {
   CpuCache,
@@ -142,7 +142,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
   } as unknown;
 }
 
-function createMockContent(): ContentGraph {
+function createMockContent(): DatasetManifest {
   return {
     dataset_id: "ds1",
     name: "test",
@@ -177,7 +177,7 @@ function createMockContent(): ContentGraph {
     ],
     source_layouts: [],
     default_layout_id: null,
-  } as unknown as ContentGraph;
+  } as unknown as DatasetManifest;
 }
 
 // ===========================================================================
@@ -228,12 +228,12 @@ describe("epoch caching", () => {
     const scene = createMockScene({
       epochs: { content: 1, layout: 1, view: 1, selection: 1, ...epochOverrides },
     });
-    const content = createMockContent();
+    const manifest = createMockContent();
     const datasets = new Map<string, DatasetEntry>([
-      ["ds1", { content }],
+      ["ds1", { manifest }],
     ]);
 
-    return { scene, datasets, content };
+    return { scene, datasets, manifest };
   }
 
   const emptyMinimap = new Map<string, never[]>();
@@ -386,7 +386,7 @@ describe("multi-dataset planning", () => {
 
   function makeTwoDatasetEntries() {
     const content1 = createMockContent();
-    const content2: ContentGraph = {
+    const content2: DatasetManifest = {
       ...createMockContent(),
       dataset_id: "ds2",
       images: [
@@ -408,11 +408,11 @@ describe("multi-dataset planning", () => {
           },
         },
       ],
-    } as unknown as ContentGraph;
+    } as unknown as DatasetManifest;
 
     return new Map<string, DatasetEntry>([
-      ["ds1", { content: content1 }],
-      ["ds2", { content: content2 }],
+      ["ds1", { manifest: content1 }],
+      ["ds2", { manifest: content2 }],
     ]);
   }
 
@@ -674,7 +674,7 @@ describe("proxy delivery tracking", () => {
       epochs: { content: 1, layout: 1, view: 1, selection: 1 },
     });
     const datasets = new Map<string, DatasetEntry>([
-      ["ds1", { content: createMockContent() }],
+      ["ds1", { manifest: createMockContent() }],
     ]);
     const cpuCache = makeMockCpuCache();
     const ctx = {
@@ -765,7 +765,7 @@ describe("cold-state display state (M2)", () => {
         },
       },
     });
-    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const coldStateSpy = vi.fn();
     orch.planAndFetch(makeCtxWithSpy(scene, datasets, coldStateSpy), new Map());
 
@@ -789,7 +789,7 @@ describe("cold-state display state (M2)", () => {
     // call observes the new contrast value.
     const { bumpSettingsGeneration } = await import("../tickCommon.ts");
     const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const sceneA = createMockScene({
       epochs: { content: 1, layout: 1, view: 1, selection: 1 },
       allSettings: {
@@ -837,7 +837,7 @@ describe("cold-state display state (M2)", () => {
 
   it("multi-channel emits per-channel display state for every visible channel", () => {
     const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const scene = createMockScene({
       multiChannel: true,
       allSettings: {
@@ -901,7 +901,7 @@ describe("viewHotState emission (M3)", () => {
   it("emits one viewHotState message per dataset on initial plan", () => {
     const orch = new Orchestrator();
     const scene = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
-    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const viewHotSpy = vi.fn();
     orch.planAndFetch(makeCtxWithViewHotSpy(scene, datasets, viewHotSpy), new Map());
     expect(viewHotSpy).toHaveBeenCalledTimes(1);
@@ -917,7 +917,7 @@ describe("viewHotState emission (M3)", () => {
     const customScene = createMockScene();
     (customScene as unknown as { ray_hit_local_image: () => Float32Array }).ray_hit_local_image =
       () => new Float32Array([0.25, 0.5, 0.75]);
-    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const viewHotSpy = vi.fn();
     orch.planAndFetch(makeCtxWithViewHotSpy(customScene, datasets, viewHotSpy), new Map());
     const msg = viewHotSpy.mock.calls[0][0];
@@ -926,7 +926,7 @@ describe("viewHotState emission (M3)", () => {
 
   it("does not re-emit viewHotState when viewEpoch is unchanged across ticks", async () => {
     const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const sceneA = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     const viewHotA = vi.fn();
     orch.planAndFetch(makeCtxWithViewHotSpy(sceneA, datasets, viewHotA), new Map());
@@ -945,7 +945,7 @@ describe("viewHotState emission (M3)", () => {
 
   it("re-emits viewHotState when viewEpoch advances", () => {
     const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const sceneA = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     const viewHotA = vi.fn();
     orch.planAndFetch(makeCtxWithViewHotSpy(sceneA, datasets, viewHotA), new Map());
@@ -960,7 +960,7 @@ describe("viewHotState emission (M3)", () => {
 
   it("multi-channel emits one rayHit entry per (member, channel) composite", () => {
     const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { content: createMockContent() }]]);
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
     const scene = createMockScene({
       multiChannel: true,
       allSettings: {

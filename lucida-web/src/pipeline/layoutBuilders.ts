@@ -1,6 +1,6 @@
 /**
  * Layout builders — pure functions that derive `LayoutSpec` values from a
- * `ContentGraph`. Used by the bridge to auto-register browser-authored
+ * `DatasetManifest`. Used by the bridge to auto-register browser-authored
  * derived layouts when a dataset is opened.
  *
  * Today's two builders:
@@ -15,13 +15,13 @@
  * filters those out so callers can iterate without null checks.
  */
 
-import type { ContentGraph, LayoutSpec } from "../contentTypes.ts";
+import type { DatasetManifest, LayoutSpec } from "../manifestTypes.ts";
 
 /** Find the placements from the source default layout, if any. */
-function sourceDefaultPlacements(content: ContentGraph): LayoutSpec["placements"] | null {
+function sourceDefaultPlacements(manifest: DatasetManifest): LayoutSpec["placements"] | null {
   const def =
-    content.source_layouts.find((l) => l.id === content.default_layout_id) ??
-    content.source_layouts[0];
+    manifest.source_layouts.find((l) => l.id === manifest.default_layout_id) ??
+    manifest.source_layouts[0];
   return def?.placements ?? null;
 }
 
@@ -38,15 +38,15 @@ function sourceDefaultPlacements(content: ContentGraph): LayoutSpec["placements"
  * dense packing we therefore need the WELL's footprint (which scales with
  * fields-per-well), not just one field's FOV.
  */
-function entityFootprintYX(content: ContentGraph, entityId: string): [number, number] {
-  const directImg = content.images.find((i) => i.owner === entityId);
+function entityFootprintYX(manifest: DatasetManifest, entityId: string): [number, number] {
+  const directImg = manifest.images.find((i) => i.owner === entityId);
   if (directImg) {
     const lvl0 = directImg.multiscale.levels[0];
     if (!lvl0) return [1, 1];
     return [lvl0.shape[3] ?? 1, lvl0.shape[4] ?? 1];
   }
 
-  const children = content.entities.filter((e) => e.parent === entityId);
+  const children = manifest.entities.filter((e) => e.parent === entityId);
   if (children.length === 0) return [1, 1];
 
   let minX = Infinity;
@@ -54,13 +54,13 @@ function entityFootprintYX(content: ContentGraph, entityId: string): [number, nu
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (const child of children) {
-    const childImg = content.images.find((i) => i.owner === child.id);
+    const childImg = manifest.images.find((i) => i.owner === child.id);
     if (!childImg) continue;
     const lvl0 = childImg.multiscale.levels[0];
     if (!lvl0) continue;
     const fovY = lvl0.shape[3] ?? 1;
     const fovX = lvl0.shape[4] ?? 1;
-    const t = content.transforms.find((t) => t.from === child.id && t.to === entityId);
+    const t = manifest.transforms.find((t) => t.from === child.id && t.to === entityId);
     const tx = t?.transform.matrix[12] ?? 0;
     const ty = t?.transform.matrix[13] ?? 0;
     if (tx < minX) minX = tx;
@@ -77,13 +77,13 @@ function entityFootprintYX(content: ContentGraph, entityId: string): [number, nu
  *  the per-cell base stride for dense packing — guarantees no two placed
  *  entities overlap regardless of whether placements are at the well or
  *  image level. */
-function maxPlacementFootprintYX(content: ContentGraph): [number, number] {
-  const placements = sourceDefaultPlacements(content);
+function maxPlacementFootprintYX(manifest: DatasetManifest): [number, number] {
+  const placements = sourceDefaultPlacements(manifest);
   if (!placements) return [1, 1];
   let maxY = 0;
   let maxX = 0;
   for (const p of placements) {
-    const [y, x] = entityFootprintYX(content, p.entity_id);
+    const [y, x] = entityFootprintYX(manifest, p.entity_id);
     if (y > maxY) maxY = y;
     if (x > maxX) maxX = x;
   }
@@ -95,10 +95,10 @@ function maxPlacementFootprintYX(content: ContentGraph): [number, number] {
 /** Largest `[Y, X]` image FOV at level 0 across all images. Used as the
  *  inter-well gap so adjacent wells are visibly separated by at least one
  *  field-width — distinct from any intra-well field spacing. */
-function maxImageFovYX(content: ContentGraph): [number, number] {
+function maxImageFovYX(manifest: DatasetManifest): [number, number] {
   let maxY = 0;
   let maxX = 0;
-  for (const img of content.images) {
+  for (const img of manifest.images) {
     const lvl0 = img.multiscale.levels[0];
     if (!lvl0) continue;
     const y = lvl0.shape[3] ?? 0;
@@ -115,8 +115,8 @@ function maxImageFovYX(content: ContentGraph): [number, number] {
  * Mirror the source default layout's placements verbatim under id
  * `"derived:plate-grid"`. Returns null if no source default exists.
  */
-export function buildPlateGridLayout(content: ContentGraph): LayoutSpec | null {
-  const placements = sourceDefaultPlacements(content);
+export function buildPlateGridLayout(manifest: DatasetManifest): LayoutSpec | null {
+  const placements = sourceDefaultPlacements(manifest);
   if (!placements) return null;
   return {
     id: "derived:plate-grid",
@@ -136,12 +136,12 @@ export function buildPlateGridLayout(content: ContentGraph): LayoutSpec | null {
  * larger than any intra-well field spacing. Returns null if fewer than 2
  * entities.
  */
-export function buildDenseSquareLayout(content: ContentGraph): LayoutSpec | null {
-  const placements = sourceDefaultPlacements(content);
+export function buildDenseSquareLayout(manifest: DatasetManifest): LayoutSpec | null {
+  const placements = sourceDefaultPlacements(manifest);
   if (!placements || placements.length < 2) return null;
 
-  const [footprintY, footprintX] = maxPlacementFootprintYX(content);
-  const [gapY, gapX] = maxImageFovYX(content);
+  const [footprintY, footprintX] = maxPlacementFootprintYX(manifest);
+  const [gapY, gapX] = maxImageFovYX(manifest);
   const strideY = footprintY + gapY;
   const strideX = footprintX + gapX;
   const cols = Math.ceil(Math.sqrt(placements.length));
@@ -162,15 +162,15 @@ export function buildDenseSquareLayout(content: ContentGraph): LayoutSpec | null
 }
 
 /**
- * Convenience: returns the array of derived layouts for `content`,
+ * Convenience: returns the array of derived layouts for `manifest`,
  * filtering out nulls. Callers iterate this and feed each spec to
  * `LayoutRegistry.register`.
  */
-export function derivedBuildersFor(content: ContentGraph): LayoutSpec[] {
+export function derivedBuildersFor(manifest: DatasetManifest): LayoutSpec[] {
   const out: LayoutSpec[] = [];
-  const grid = buildPlateGridLayout(content);
+  const grid = buildPlateGridLayout(manifest);
   if (grid) out.push(grid);
-  const dense = buildDenseSquareLayout(content);
+  const dense = buildDenseSquareLayout(manifest);
   if (dense) out.push(dense);
   return out;
 }

@@ -6,7 +6,7 @@ use lucida_content::{DatasetId, EntityKind, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
 use lucida_protocol::{
-    AssetCatalog, AssetMessage, ProxyAvailability, RegisterDataset,
+    AssetCatalog, AssetMessage, ProxyAvailability, DatasetOpened,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
@@ -432,7 +432,7 @@ fn blake3_url(url: &str) -> [u8; 32] {
     *blake3::hash(url.as_bytes()).as_bytes()
 }
 
-/// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast RegisterDataset.
+/// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast DatasetOpened.
 async fn handle_open_remote_dataset(
     client_id: ClientId,
     url: String,
@@ -447,13 +447,13 @@ async fn handle_open_remote_dataset(
     let dataset_id_key = DatasetId(dataset_id.clone());
 
     // If we've already imported this URL in this session, reuse the binding.
-    // Re-broadcast the existing RegisterDataset (held on the binding) so the
+    // Re-broadcast the existing DatasetOpened (held on the binding) so the
     // requesting client receives the same content graph + fetch descriptor
     // without re-importing.
     {
         let sess = session.lock().await;
         if let Some(existing) = sess.server_bindings.get(&dataset_id_key) {
-            let command = DocumentCommand::RegisterDataset(existing.register_command.clone());
+            let command = DocumentCommand::DatasetOpened(existing.dataset_opened.clone());
             let seq = sess.seq;
             drop(sess);
             let broadcast_msg = ServerMessage::CommandBroadcast {
@@ -499,12 +499,12 @@ async fn handle_open_remote_dataset(
     };
 
     // Log import result summary.
-    let n_entities = result.content.entities().len();
-    let n_images = result.content.images().len();
-    let n_levels = result.content.images().first().map(|i| i.multiscale.levels.len()).unwrap_or(0);
+    let n_entities = result.manifest.entities().len();
+    let n_images = result.manifest.images().len();
+    let n_levels = result.manifest.images().first().map(|i| i.multiscale.levels.len()).unwrap_or(0);
     tracing::info!(
         id = %dataset_id,
-        kind = ?result.content.kind,
+        kind = ?result.manifest.kind,
         entities = n_entities,
         images = n_images,
         levels = n_levels,
@@ -523,7 +523,7 @@ async fn handle_open_remote_dataset(
     // `build_server_proxy_source`). Entities without a contributing image
     // are skipped — Planning has nothing to fetch for them.
     let catalog_entries: Vec<ProxyAvailability> = result
-        .content
+        .manifest
         .entities()
         .iter()
         .filter_map(|entity| {
@@ -535,7 +535,7 @@ async fn handle_open_remote_dataset(
             // their fields' images downstream, so we keep all Wells).
             let has_image = matches!(entity.kind, EntityKind::Well)
                 || result
-                    .content
+                    .manifest
                     .images()
                     .iter()
                     .any(|img| img.owner == entity.id);
@@ -549,8 +549,8 @@ async fn handle_open_remote_dataset(
         })
         .collect();
 
-    let register_command = RegisterDataset {
-        content: result.content.clone(),
+    let dataset_opened = DatasetOpened {
+        manifest: result.manifest.clone(),
         fetch: result.fetch,
         catalog: AssetCatalog {
             entries: catalog_entries.clone(),
@@ -570,7 +570,7 @@ async fn handle_open_remote_dataset(
         proxy_cache.clone(),
         cached.clone(),
         resolver.clone(),
-        Arc::new(result.content),
+        Arc::new(result.manifest),
         proxy_config.concurrency,
     ));
 
@@ -583,13 +583,13 @@ async fn handle_open_remote_dataset(
         store: store.clone(),
         resolver,
         cache: cached,
-        register_command: register_command.clone(),
+        dataset_opened: dataset_opened.clone(),
         proxy_cache,
         proxy_generator,
     };
 
-    // Build RegisterDataset command (content + fetch, no server-private state).
-    let command = DocumentCommand::RegisterDataset(register_command);
+    // Build DatasetOpened command (manifest + fetch, no server-private state).
+    let command = DocumentCommand::DatasetOpened(dataset_opened);
 
     // Apply command and register server binding. Re-check the binding
     // presence under the lock in case a concurrent open raced ahead.
@@ -598,12 +598,12 @@ async fn handle_open_remote_dataset(
         if let Some(existing) = sess.server_bindings.get(&dataset_id_key) {
             // Lost the race: another open completed the import. Drop our
             // duplicate binding/command and rebroadcast the canonical one.
-            let canonical = existing.register_command.clone();
+            let canonical = existing.dataset_opened.clone();
             let seq = sess.seq;
             drop(sess);
             let broadcast_msg = ServerMessage::CommandBroadcast {
                 seq,
-                command: DocumentCommand::RegisterDataset(canonical),
+                command: DocumentCommand::DatasetOpened(canonical),
             };
             let _ = tx.send(BroadcastItem::CommandBroadcast {
                 sender: u64::MAX,
@@ -621,7 +621,7 @@ async fn handle_open_remote_dataset(
     // Broadcast to ALL clients including the requester.
     // Use u64::MAX as sender so no client matches — everyone gets the
     // CommandBroadcast (not an Ack), since the requester hasn't applied
-    // the RegisterDataset locally.
+    // the DatasetOpened locally.
     let broadcast_msg = ServerMessage::CommandBroadcast {
         seq,
         command,

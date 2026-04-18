@@ -439,13 +439,13 @@ mod tests {
     }
 
     fn register_shape(scene: &mut Scene, shape: [u32; 3]) {
-        let reg = crate::scene::test_helpers::make_register_dataset_with_shape(
+        let reg = crate::scene::test_helpers::make_dataset_opened_with_shape(
             "default", "default", 1,
             [1, 1, shape[0] as u64, shape[1] as u64, shape[2] as u64],
             [1, 1, 1, 128, 128],
             1,
         );
-        scene.apply(crate::command::DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(crate::command::DocumentCommand::DatasetOpened(reg).into());
     }
 
     fn scene_2d_with_shape(viewport: [u32; 2], shape: [u32; 3]) -> Scene {

@@ -6,7 +6,7 @@
 
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { SceneSettings } from "../tickCommon.ts";
-import type { ImageSpec, ContentGraph, LevelGeometry } from "../contentTypes.ts";
+import type { ImageSpec, DatasetManifest, LevelGeometry } from "../manifestTypes.ts";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
@@ -313,14 +313,14 @@ export class Orchestrator {
 
       // 3d. Build EntitySnapshot[]
       const imageSpecById = new Map<string, ImageSpec>();
-      for (const img of ds.content.images) {
+      for (const img of ds.manifest.images) {
         imageSpecById.set(img.image_id, img);
       }
-      // Parent lookup from the dataset's content graph. S6 promotion
+      // Parent lookup from the dataset's manifest. S6 promotion
       // groups visible fields by `parentId` (the well id) so all fields
       // of a well agree on a single WellMode.
       const parentByEntityId = new Map<string, string | null>();
-      for (const ent of ds.content.entities) {
+      for (const ent of ds.manifest.entities) {
         parentByEntityId.set(ent.id, ent.parent ?? null);
       }
 
@@ -877,16 +877,16 @@ export class Orchestrator {
     const workerMemberId = multiChannel ? `${delivery.imageId}:ch${delivery.c}` : delivery.imageId;
 
     // Find dataset for this delivery
-    let dsContent: ContentGraph | null = null;
+    let dsManifest: DatasetManifest | null = null;
     for (const [, ds] of ctx.datasets) {
-      if (ds.content.images.some(img => img.image_id === delivery.imageId)) {
-        dsContent = ds.content;
+      if (ds.manifest.images.some(img => img.image_id === delivery.imageId)) {
+        dsManifest = ds.manifest;
         break;
       }
     }
-    if (!dsContent) return 0;
+    if (!dsManifest) return 0;
 
-    const imageSpec = dsContent.images.find(img => img.image_id === delivery.imageId);
+    const imageSpec = dsManifest.images.find(img => img.image_id === delivery.imageId);
     if (!imageSpec) return 0;
     const levelMeta = imageSpec.multiscale.levels[delivery.level];
     if (!levelMeta) return 0;

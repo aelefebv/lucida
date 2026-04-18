@@ -55,10 +55,10 @@ export class AssetCatalog {
 
   /**
    * Apply an initial catalog snapshot for a dataset (the `catalog` field
-   * of `RegisterDataset`). Implemented as a delta apply so that the WASM
+   * of `DatasetOpened`). Implemented as a delta apply so that the WASM
    * side bumps `epochs.asset` and the local mirror grows monotonically.
    *
-   * Note: when invoked after `WasmScene.apply_command(register_dataset)`,
+   * Note: when invoked after `WasmScene.apply_command(dataset_opened)`,
    * Rust already seeded `asset_catalogs` from the same entries — the
    * delta merge here is a no-op on Rust state thanks to dedupe, but it
    * keeps `epochs.asset` consistent and populates the JS mirror.

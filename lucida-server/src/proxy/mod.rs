@@ -2,7 +2,7 @@
 //! generator.
 //!
 //! `lucida-proxy` is the pure-compute algorithm crate: given an in-memory
-//! `ProxySourceData` and a `ContentGraph`, it produces a `ProxyAsset`.
+//! `ProxySourceData` and a `DatasetManifest`, it produces a `ProxyAsset`.
 //! This module wraps that with the production server's I/O concerns:
 //!
 //! - [`ProxyCache`] persists generated proxies under a per-dataset directory

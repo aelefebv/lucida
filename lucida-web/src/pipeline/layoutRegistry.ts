@@ -18,7 +18,7 @@
  *   4. Notifies subscribers on every change for `useSyncExternalStore`.
  */
 
-import type { LayoutSpec } from "../contentTypes.ts";
+import type { LayoutSpec } from "../manifestTypes.ts";
 
 export interface LayoutInfo {
   id: string;
@@ -37,7 +37,7 @@ export class LayoutRegistry {
   /** datasetId → active layout id (mirror; updated locally on register/setActive/setActiveLocal). */
   private readonly activeByDataset = new Map<string, string>();
   /** datasetId → layoutId → LayoutSpec for derived layouts we registered.
-   *  Source layouts are NOT mirrored here; consumers fall back to `content.source_layouts`. */
+   *  Source layouts are NOT mirrored here; consumers fall back to `manifest.source_layouts`. */
   private readonly specsByDataset = new Map<string, Map<string, LayoutSpec>>();
   private readonly listeners = new Set<() => void>();
   /** Monotonic counter bumped on every notify(); useful for `useSyncExternalStore`
@@ -123,7 +123,7 @@ export class LayoutRegistry {
   /**
    * Returns the registered `LayoutSpec` for `(datasetId, layoutId)`, or null
    * if it isn't a derived layout we registered (e.g., source layouts —
-   * callers should fall back to `content.source_layouts`).
+   * callers should fall back to `manifest.source_layouts`).
    */
   getSpec(datasetId: string, layoutId: string): LayoutSpec | null {
     return this.specsByDataset.get(datasetId)?.get(layoutId) ?? null;

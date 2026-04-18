@@ -169,12 +169,12 @@ impl PyScene {
     }
 
     fn dataset_ids(&self) -> String {
-        let ids: Vec<&str> = self.inner.document.content_graphs.keys().map(|id| id.0.as_str()).collect();
+        let ids: Vec<&str> = self.inner.document.manifests.keys().map(|id| id.0.as_str()).collect();
         serde_json::to_string(&ids).unwrap()
     }
 
     fn dataset_name(&self, id: &str) -> String {
-        self.inner.document.content_graphs.get(&DatasetId(id.to_string()))
+        self.inner.document.manifests.get(&DatasetId(id.to_string()))
             .map(|cg| cg.name.clone())
             .unwrap_or_default()
     }

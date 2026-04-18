@@ -5,7 +5,7 @@
  * Returns GPU-ready Uint16Array buffers.
  */
 
-import type { WireFormat } from "../contentTypes.ts";
+import type { WireFormat } from "../manifestTypes.ts";
 
 // ---------------------------------------------------------------------------
 // Constants (exported for CpuCacheConfig)

@@ -12,8 +12,8 @@ pub mod transform;
 pub mod view;
 
 pub use epoch::SceneEpochs;
-pub use lucida_content::{ContentGraph, DatasetId, EntityId, ImageId};
-pub use lucida_protocol::RegisterDataset;
+pub use lucida_content::{DatasetId, DatasetManifest, EntityId, ImageId};
+pub use lucida_protocol::DatasetOpened;
 pub use query::{EntityQueryResult, ViewQueryResult};
 pub use ray::{Ray, RayHit};
 

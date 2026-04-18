@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import type { ContentGraph, DatasetKind, Entity, LayoutSpec } from "../contentTypes.ts";
+import type { DatasetManifest, DatasetKind, Entity, LayoutSpec } from "../manifestTypes.ts";
 
 /** Plate metadata extracted from DatasetKind::Plate. */
 export interface PlateKind {
@@ -26,7 +26,7 @@ interface PlateSelectorProps {
 }
 
 /**
- * Extract PlateKind and positioned members from a ContentGraph.
+ * Extract PlateKind and positioned members from a DatasetManifest.
  *
  * `activeLayoutPlacements`, when provided and non-empty, takes precedence
  * over the source default layout. Use this to make click-to-pan reflect
@@ -36,13 +36,13 @@ interface PlateSelectorProps {
  * Returns null if the dataset is not a plate.
  */
 export function extractPlateData(
-  content: ContentGraph,
+  manifest: DatasetManifest,
   activeLayoutPlacements?: { entity_id: string; position: [number, number] }[] | null,
 ): { plateKind: PlateKind; members: PlacedMember[] } | null {
-  if (content.kind === "Single") return null;
-  if (typeof content.kind !== "object" || !("Plate" in content.kind)) return null;
+  if (manifest.kind === "Single") return null;
+  if (typeof manifest.kind !== "object" || !("Plate" in manifest.kind)) return null;
 
-  const plate = (content.kind as Exclude<DatasetKind, "Single">).Plate;
+  const plate = (manifest.kind as Exclude<DatasetKind, "Single">).Plate;
   const plateKind: PlateKind = {
     rows: plate.rows,
     columns: plate.columns,
@@ -57,13 +57,13 @@ export function extractPlateData(
     activeLayoutPlacements && activeLayoutPlacements.length > 0
       ? activeLayoutPlacements
       : (
-          content.source_layouts.find((l: LayoutSpec) => l.id === content.default_layout_id)
-          ?? content.source_layouts[0]
+          manifest.source_layouts.find((l: LayoutSpec) => l.id === manifest.default_layout_id)
+          ?? manifest.source_layouts[0]
         )?.placements;
 
   if (placements) {
     for (const placement of placements) {
-      const entity = content.entities.find((e: Entity) => e.id === placement.entity_id);
+      const entity = manifest.entities.find((e: Entity) => e.id === placement.entity_id);
       if (entity) {
         const labels = entity.labels as Record<string, unknown>;
         members.push({
@@ -76,7 +76,7 @@ export function extractPlateData(
     }
   } else {
     // Fallback: use image IDs with zero position
-    for (const img of content.images) {
+    for (const img of manifest.images) {
       members.push({ id: img.image_id, position: [0, 0] });
     }
   }

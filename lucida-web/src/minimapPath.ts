@@ -45,7 +45,7 @@ export function markMinimapOverviewSeeded(
 ): void {
   const ds = ctx.datasets.get(datasetId);
   if (!ds) return;
-  const multiscale = ds.content.images[0].multiscale;
+  const multiscale = ds.manifest.images[0].multiscale;
   const coarsestIdx = multiscale.levels.length - 1;
   const key = `${datasetId}/${coarsestIdx}/${t}/${c}`;
   state.overviewKey.set(datasetId, key);
@@ -82,7 +82,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
 
   for (const [dsId, ds] of datasets) {
-    const multiscale = ds.content.images[0].multiscale;
+    const multiscale = ds.manifest.images[0].multiscale;
     const coarsestIdx = multiscale.levels.length - 1;
     const levelMeta = multiscale.levels[coarsestIdx];
     const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
@@ -93,7 +93,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
     const totalChunks = nz * ny * nx;
 
     // Iterate per-member so each FOV gets its own minimap overview texture.
-    for (const img of ds.content.images) {
+    for (const img of ds.manifest.images) {
       const memberId = img.image_id;
       const overviewKey = `${memberId}/${coarsestIdx}/${t}/${c}`;
 
@@ -217,7 +217,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
     const settings = allSettings[dsId];
     if (!settings || !settings.visible) continue;
 
-    for (const img of ds.content.images) {
+    for (const img of ds.manifest.images) {
       const memberId = img.image_id;
       const model = new Float32Array(scene.member_model_matrix(dsId, memberId));
       const invModel = new Float32Array(scene.inv_member_model_matrix(dsId, memberId));
@@ -259,8 +259,8 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       // Find the parent dataset for this member
       let shape: number[] | undefined;
       for (const [, ds] of datasets) {
-        if (ds.content.images.some(img => img.image_id === layer.datasetId)) {
-          shape = ds.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
+        if (ds.manifest.images.some(img => img.image_id === layer.datasetId)) {
+          shape = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
           break;
         }
       }

@@ -6,7 +6,7 @@
  *   2. Normalize: interpret as dataType, produce GPU-ready Uint16Array buffer
  */
 
-import type { WireFormat } from "../contentTypes.ts";
+import type { WireFormat } from "../manifestTypes.ts";
 
 interface DecodeRequest {
   id: number;

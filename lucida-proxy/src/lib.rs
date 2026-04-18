@@ -7,10 +7,10 @@
 //! stream in.
 //!
 //! This crate is intentionally I/O-free and async-free: it consumes a
-//! [`ContentGraph`] plus a caller-supplied [`ProxySourceData`] and emits
+//! [`DatasetManifest`] plus a caller-supplied [`ProxySourceData`] and emits
 //! [`ProxyAsset`]s. Storage, fetching, and serving live elsewhere.
 //!
-//! [`ContentGraph`]: lucida_content::ContentGraph
+//! [`DatasetManifest`]: lucida_content::DatasetManifest
 
 pub use generate::{GenerateError, generate_proxy};
 pub use header::{read_header, source_content_hash, write_header};

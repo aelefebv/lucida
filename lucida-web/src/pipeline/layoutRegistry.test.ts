@@ -4,7 +4,7 @@ import {
   type LayoutInfo,
   type LayoutRegistryWasm,
 } from "./layoutRegistry.ts";
-import type { LayoutSpec } from "../contentTypes.ts";
+import type { LayoutSpec } from "../manifestTypes.ts";
 
 // ---------------------------------------------------------------------------
 // Test harness

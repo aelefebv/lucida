@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lucida_content::{
-    ContentGraph, EntityId, EntityKind, ImageId, ImageSpec, VoxelTransform,
+    DatasetManifest, EntityId, EntityKind, ImageId, ImageSpec, VoxelTransform,
 };
 use lucida_proxy::{FieldVolume, ProxyKind, ProxySourceData, ProxySpec, SourceError};
 use lucida_store::cache::CachedStore;
@@ -117,7 +117,7 @@ impl ProxySourceData for ServerProxySource {
 /// `ChunkResolver::storage_compression`.
 pub async fn build_server_proxy_source(
     spec: &ProxySpec,
-    content: &ContentGraph,
+    content: &DatasetManifest,
     store: &Arc<CachedStore>,
     resolver: &ChunkResolver,
 ) -> Result<ServerProxySource, BuildSourceError> {
@@ -233,7 +233,7 @@ fn pick_level(image: &ImageSpec, target_long_axis: u32) -> usize {
 /// each, and assemble a dense `[Z, Y, X]` u16 buffer of the level's
 /// spatial shape. Returns `(data, dims, voxel_to_image)`.
 async fn fetch_dense_volume(
-    content: &ContentGraph,
+    content: &DatasetManifest,
     image: &ImageSpec,
     t: u32,
     c: u32,
@@ -422,7 +422,7 @@ fn is_identity(t: &VoxelTransform) -> bool {
 /// image-owner` self-edge (used elsewhere in the graph) and fall back to
 /// identity. Identity is the right behavior for single-field datasets and
 /// matches the test fixtures.
-fn find_voxel_to_image(content: &ContentGraph, owner: &EntityId) -> VoxelTransform {
+fn find_voxel_to_image(content: &DatasetManifest, owner: &EntityId) -> VoxelTransform {
     content
         .transforms()
         .iter()

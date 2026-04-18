@@ -8,7 +8,7 @@ use crate::layout::LayoutSpec;
 use crate::transform::TransformEdge;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentGraph {
+pub struct DatasetManifest {
     pub dataset_id: DatasetId,
     pub name: String,
     pub kind: DatasetKind,
@@ -19,7 +19,7 @@ pub struct ContentGraph {
     pub default_layout_id: Option<LayoutId>,
 }
 
-impl ContentGraph {
+impl DatasetManifest {
     pub fn new(
         dataset_id: DatasetId,
         name: String,
@@ -69,11 +69,11 @@ mod tests {
     };
     use crate::transform::VoxelTransform;
 
-    fn make_single_image_graph() -> ContentGraph {
+    fn make_single_image_graph() -> DatasetManifest {
         let entity_id = EntityId("img-0".to_string());
         let image_id = ImageId("multiscale-0".to_string());
 
-        ContentGraph::new(
+        DatasetManifest::new(
             DatasetId("ds-test".to_string()),
             "test dataset".to_string(),
             DatasetKind::Single,
@@ -121,7 +121,7 @@ mod tests {
     fn serde_round_trip() {
         let graph = make_single_image_graph();
         let json = serde_json::to_string_pretty(&graph).unwrap();
-        let back: ContentGraph = serde_json::from_str(&json).unwrap();
+        let back: DatasetManifest = serde_json::from_str(&json).unwrap();
 
         assert_eq!(graph.dataset_id, back.dataset_id);
         assert_eq!(graph.name, back.name);

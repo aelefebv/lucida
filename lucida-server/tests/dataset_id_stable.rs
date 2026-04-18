@@ -16,7 +16,7 @@
 //!      lookup at `dataset_id_for_url("X")` finds it (i.e. the second
 //!      open would short-circuit and reuse the cached state, rather than
 //!      re-importing). We assert on observable binding state
-//!      (`source_url`, `register_command`, and the `Arc<CachedStore>`
+//!      (`source_url`, `dataset_opened`, and the `Arc<CachedStore>`
 //!      pointer identity) to confirm the same binding is reused.
 //!
 //! Running an actual end-to-end `handle_open_remote_dataset` requires a
@@ -27,11 +27,11 @@
 use std::sync::Arc;
 
 use lucida_content::{
-    Axis, AxisKind, ContentGraph, DataType, DatasetId, DatasetKind, Entity, EntityId,
+    Axis, AxisKind, DatasetManifest, DataType, DatasetId, DatasetKind, Entity, EntityId,
     EntityKind, EntityLabels, ImageSpec, LevelGeometry, MultiscaleInfo,
 };
 use lucida_protocol::{
-    ClientFetchDescriptor, ProxiedFetchDescriptor, ProxiedImageSpec, RegisterDataset, WireFormat,
+    FetchSource, ProxiedFetchDescriptor, ProxiedImageSpec, DatasetOpened, WireFormat,
 };
 use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::handler::dataset_id_for_url;
@@ -116,7 +116,7 @@ fn second_open_reuses_existing_binding() {
     // Second open: recompute the ID and look it up. The lookup must
     // succeed (so the handler short-circuits and skips re-import) and
     // the recovered binding must be the same one we installed —
-    // observable via `source_url`, the preserved `register_command`,
+    // observable via `source_url`, the preserved `dataset_opened`,
     // and Arc-identity on the CachedStore (which would be a fresh
     // allocation if a re-import occurred).
     let recomputed = DatasetId(dataset_id_for_url(URL_X));
@@ -129,9 +129,9 @@ fn second_open_reuses_existing_binding() {
 
     assert_eq!(recovered.source_url, URL_X);
     assert_eq!(
-        recovered.register_command.content.dataset_id,
-        original_register.content.dataset_id,
-        "register_command (replayed to the second-opening client) must be preserved"
+        recovered.dataset_opened.manifest.dataset_id,
+        original_register.manifest.dataset_id,
+        "dataset_opened (replayed to the second-opening client) must be preserved"
     );
     assert!(
         Arc::ptr_eq(&recovered.cache, &original_cache),
@@ -176,7 +176,7 @@ fn in_memory_store() -> Arc<dyn ObjectStore> {
 /// since these tests never invoke it.
 fn make_binding(
     url: &str,
-    register: &RegisterDataset,
+    register: &DatasetOpened,
     store: Arc<dyn ObjectStore>,
     cache: Arc<CachedStore>,
 ) -> ServerBinding {
@@ -191,7 +191,7 @@ fn make_binding(
         proxy_cache.clone(),
         cache.clone(),
         resolver.clone(),
-        Arc::new(register.content.clone()),
+        Arc::new(register.manifest.clone()),
         1,
     ));
     ServerBinding {
@@ -199,16 +199,16 @@ fn make_binding(
         store,
         resolver,
         cache,
-        register_command: register.clone(),
+        dataset_opened: register.clone(),
         proxy_cache,
         proxy_generator,
     }
 }
 
-fn sample_register(dataset_id: &DatasetId) -> RegisterDataset {
+fn sample_register(dataset_id: &DatasetId) -> DatasetOpened {
     let entity_id = EntityId(format!("{}-entity", dataset_id.0));
     let image_id = lucida_content::ImageId(format!("{}-image", dataset_id.0));
-    let content = ContentGraph::new(
+    let manifest = DatasetManifest::new(
         dataset_id.clone(),
         format!("test:{}", dataset_id.0),
         DatasetKind::Single,
@@ -244,7 +244,7 @@ fn sample_register(dataset_id: &DatasetId) -> RegisterDataset {
         vec![],
         None,
     );
-    let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+    let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
         images: vec![ProxiedImageSpec {
             image_id,
             wire_format: WireFormat::Raw {
@@ -252,8 +252,8 @@ fn sample_register(dataset_id: &DatasetId) -> RegisterDataset {
             },
         }],
     });
-    RegisterDataset {
-        content,
+    DatasetOpened {
+        manifest,
         fetch,
         catalog: lucida_protocol::AssetCatalog::default(),
     }

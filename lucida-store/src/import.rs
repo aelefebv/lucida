@@ -1,7 +1,7 @@
 //! Dataset import pipeline.
 //!
 //! Reads OME-Zarr metadata and produces a three-part [`ImportResult`] containing
-//! a [`ContentGraph`], [`ClientFetchDescriptor`], and [`ServerBindingSeed`].
+//! a [`DatasetManifest`], [`FetchSource`], and [`ServerBindingSeed`].
 
 use std::sync::Arc;
 
@@ -87,7 +87,7 @@ async fn import_single_image(
         }],
     };
 
-    let content = ContentGraph::new(
+    let manifest = DatasetManifest::new(
         DatasetId(id.to_string()),
         name.to_string(),
         DatasetKind::Single,
@@ -98,7 +98,7 @@ async fn import_single_image(
         Some(default_layout_id),
     );
 
-    let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+    let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
         images: vec![ProxiedImageSpec {
             image_id: image_id.clone(),
             wire_format: WireFormat::Raw { data_type },
@@ -122,7 +122,7 @@ async fn import_single_image(
     };
 
     Ok(ImportResult {
-        content,
+        manifest,
         fetch,
         binding_seed,
     })
@@ -474,7 +474,7 @@ async fn import_plate(
 
     let default_layout_id = source_layout.id.clone();
 
-    let content = ContentGraph::new(
+    let manifest = DatasetManifest::new(
         DatasetId(id.to_string()),
         name.to_string(),
         DatasetKind::Plate {
@@ -490,7 +490,7 @@ async fn import_plate(
         Some(default_layout_id),
     );
 
-    let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+    let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
         images: fetch_images,
     });
 
@@ -499,7 +499,7 @@ async fn import_plate(
     };
 
     Ok(ImportResult {
-        content,
+        manifest,
         fetch,
         binding_seed,
     })
@@ -789,16 +789,16 @@ mod tests {
             .unwrap();
 
         // Verify content graph.
-        assert_eq!(result.content.dataset_id, DatasetId("test-id".into()));
-        assert_eq!(result.content.name, "Test Dataset");
-        assert!(matches!(result.content.kind, DatasetKind::Single));
-        assert_eq!(result.content.entities().len(), 1);
-        assert_eq!(result.content.entities()[0].kind, EntityKind::Image);
-        assert_eq!(result.content.images().len(), 1);
-        assert_eq!(result.content.source_layouts().len(), 1);
+        assert_eq!(result.manifest.dataset_id, DatasetId("test-id".into()));
+        assert_eq!(result.manifest.name, "Test Dataset");
+        assert!(matches!(result.manifest.kind, DatasetKind::Single));
+        assert_eq!(result.manifest.entities().len(), 1);
+        assert_eq!(result.manifest.entities()[0].kind, EntityKind::Image);
+        assert_eq!(result.manifest.images().len(), 1);
+        assert_eq!(result.manifest.source_layouts().len(), 1);
 
         // Verify multiscale.
-        let image = &result.content.images()[0];
+        let image = &result.manifest.images()[0];
         assert!(
             image.multiscale.levels.len() >= 2,
             "expected at least 2 levels, got {}",
@@ -816,7 +816,7 @@ mod tests {
         }
 
         // Verify fetch is Proxied.
-        assert!(matches!(result.fetch, ClientFetchDescriptor::Proxied(_)));
+        assert!(matches!(result.fetch, FetchSource::Proxied(_)));
 
         // Verify binding seed.
         assert_eq!(result.binding_seed.images.len(), 1);
@@ -846,17 +846,17 @@ mod tests {
             .unwrap();
 
         // Verify content graph.
-        assert!(matches!(result.content.kind, DatasetKind::Plate { .. }));
+        assert!(matches!(result.manifest.kind, DatasetKind::Plate { .. }));
 
         // Should have well entities and field entities.
         let wells: Vec<_> = result
-            .content
+            .manifest
             .entities()
             .iter()
             .filter(|e| e.kind == EntityKind::Well)
             .collect();
         let fields: Vec<_> = result
-            .content
+            .manifest
             .entities()
             .iter()
             .filter(|e| e.kind == EntityKind::Field)
@@ -876,13 +876,13 @@ mod tests {
         }
 
         // Should have transforms (field->well).
-        assert!(!result.content.transforms().is_empty());
+        assert!(!result.manifest.transforms().is_empty());
 
         // Should have one image per field.
-        assert_eq!(result.content.images().len(), fields.len());
+        assert_eq!(result.manifest.images().len(), fields.len());
 
         // Fetch should be Proxied with one spec per image.
-        if let ClientFetchDescriptor::Proxied(ref proxied) = result.fetch {
+        if let FetchSource::Proxied(ref proxied) = result.fetch {
             assert_eq!(proxied.images.len(), fields.len());
         } else {
             panic!("Expected Proxied fetch descriptor");
@@ -895,7 +895,7 @@ mod tests {
         }
 
         // Verify source layout places wells, not fields.
-        let layout = &result.content.source_layouts()[0];
+        let layout = &result.manifest.source_layouts()[0];
         for placement in &layout.placements {
             assert!(
                 wells.iter().any(|w| w.id == placement.entity_id),
@@ -904,7 +904,7 @@ mod tests {
         }
 
         // Verify multiscale levels on images.
-        for image in result.content.images() {
+        for image in result.manifest.images() {
             assert_eq!(image.multiscale.levels.len(), 2, "expected 2 levels");
             let l0 = &image.multiscale.levels[0];
             assert_eq!(l0.shape, [1, 1, 10, 256, 256]);
@@ -918,7 +918,7 @@ mod tests {
         }
 
         // DatasetKind::Plate should carry correct metadata.
-        match &result.content.kind {
+        match &result.manifest.kind {
             DatasetKind::Plate {
                 rows,
                 columns,
@@ -1071,7 +1071,7 @@ mod tests {
             positioning_mode,
             has_stage_positions,
             ..
-        } = &result.content.kind
+        } = &result.manifest.kind
         {
             assert_eq!(*positioning_mode, PositioningMode::Stage);
             assert!(*has_stage_positions);
@@ -1080,12 +1080,12 @@ mod tests {
         }
 
         // Transforms should reflect normalized stage positions.
-        assert_eq!(result.content.transforms().len(), 2);
+        assert_eq!(result.manifest.transforms().len(), 2);
         // FOV 0 translation [y=100, x=200] => position [x=200, y=100], normalized min.
         // FOV 1 translation [y=300, x=600] => position [x=600, y=300].
         // min_x=200, min_y=100 => FOV 0 at (0,0), FOV 1 at (400,200).
-        let t0 = &result.content.transforms()[0];
-        let t1 = &result.content.transforms()[1];
+        let t0 = &result.manifest.transforms()[0];
+        let t1 = &result.manifest.transforms()[1];
         assert!((t0.transform.matrix()[12]).abs() < 1e-9, "FOV 0 tx should be 0");
         assert!((t0.transform.matrix()[13]).abs() < 1e-9, "FOV 0 ty should be 0");
         assert!(
@@ -1251,7 +1251,7 @@ mod tests {
     ) -> &'a TransformEdge {
         let target = format!("{dataset_id}:field:A/1/{fov_index}");
         result
-            .content
+            .manifest
             .transforms()
             .iter()
             .find(|t| t.from.0 == target)
@@ -1259,7 +1259,7 @@ mod tests {
                 panic!(
                     "no transform from {target}; available: {:?}",
                     result
-                        .content
+                        .manifest
                         .transforms()
                         .iter()
                         .map(|t| t.from.0.clone())
@@ -1293,7 +1293,7 @@ mod tests {
             positioning_mode,
             has_stage_positions,
             ..
-        } = &result.content.kind
+        } = &result.manifest.kind
         {
             assert_eq!(*positioning_mode, PositioningMode::Stage);
             assert!(*has_stage_positions);
@@ -1343,7 +1343,7 @@ mod tests {
             positioning_mode,
             has_stage_positions,
             ..
-        } = &result.content.kind
+        } = &result.manifest.kind
         {
             assert_eq!(*positioning_mode, PositioningMode::Grid);
             assert!(!*has_stage_positions);

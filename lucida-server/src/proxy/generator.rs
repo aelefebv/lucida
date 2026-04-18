@@ -3,7 +3,7 @@
 //! `request(spec, priority)` flow:
 //!
 //! 1. Compute the expected `source_content_hash` for `spec` from the
-//!    [`ContentGraph`].
+//!    [`DatasetManifest`].
 //! 2. Cache check via [`ProxyCache::get`]. Hit → return `Arc<ProxyAsset>`.
 //! 3. In-flight check: if another caller is already generating `spec`,
 //!    subscribe to its broadcast channel and await the result.
@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lucida_content::ContentGraph;
+use lucida_content::DatasetManifest;
 use lucida_proxy::{
     GenerateError, ProxyAsset, ProxySpec, generate_proxy, source_content_hash,
 };
@@ -76,7 +76,7 @@ pub struct ProxyGenerator {
     cache: Arc<ProxyCache>,
     store: Arc<CachedStore>,
     resolver: Arc<ChunkResolver>,
-    content: Arc<ContentGraph>,
+    content: Arc<DatasetManifest>,
     semaphore: Arc<Semaphore>,
     in_flight: Arc<Mutex<HashMap<ProxySpec, broadcast::Sender<BroadcastPayload>>>>,
 }
@@ -91,7 +91,7 @@ impl ProxyGenerator {
         cache: Arc<ProxyCache>,
         store: Arc<CachedStore>,
         resolver: Arc<ChunkResolver>,
-        content: Arc<ContentGraph>,
+        content: Arc<DatasetManifest>,
         concurrency: usize,
     ) -> Self {
         let concurrency = concurrency.max(1);

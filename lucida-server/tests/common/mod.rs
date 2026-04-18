@@ -4,7 +4,7 @@
 //! - [`InstrumentedStore`]: an `ObjectStore` wrapper that counts `get`
 //!   calls and can introduce per-call delays to make timing-sensitive
 //!   tests deterministic.
-//! - [`build_single_field_dataset`]: builds a `ContentGraph`, a
+//! - [`build_single_field_dataset`]: builds a `DatasetManifest`, a
 //!   `ChunkResolver`, and a populated `CachedStore` for a single
 //!   FieldProxy3D-shaped image with a configurable level grid.
 
@@ -17,7 +17,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use lucida_content::{
-    Axis, AxisKind, ContentGraph, DataType, DatasetId, DatasetKind, Entity, EntityId, EntityKind,
+    Axis, AxisKind, DatasetManifest, DataType, DatasetId, DatasetKind, Entity, EntityId, EntityKind,
     EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo,
 };
 use lucida_server::binding::ChunkResolver;
@@ -139,7 +139,7 @@ impl ObjectStore for InstrumentedStore {
 /// `(z * 100 + y * 10 + x) % u16::MAX`. The exact contents don't matter
 /// for the generator tests — only that decode/assembly succeed.
 pub struct SyntheticDataset {
-    pub content: Arc<ContentGraph>,
+    pub manifest: Arc<DatasetManifest>,
     pub resolver: Arc<ChunkResolver>,
     pub instrumented: Arc<InstrumentedStore>,
     pub cache: Arc<CachedStore>,
@@ -166,7 +166,7 @@ pub async fn build_single_field_dataset(
         ceil_div(level_shape[4], chunk_shape[4].max(1)),
     ];
 
-    let content = ContentGraph::new(
+    let manifest = DatasetManifest::new(
         DatasetId("ds-test".into()),
         "test".into(),
         DatasetKind::Single,
@@ -254,7 +254,7 @@ pub async fn build_single_field_dataset(
     ));
 
     SyntheticDataset {
-        content: Arc::new(content),
+        manifest: Arc::new(manifest),
         resolver,
         instrumented,
         cache,

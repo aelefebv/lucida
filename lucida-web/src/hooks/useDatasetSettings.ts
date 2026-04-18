@@ -263,7 +263,7 @@ export function useDatasetSettings({
         const c = scene.c();
         if (!wasFull) {
           const ds = datasetsRef.current.get(id);
-          const frMax = ds ? dtypeMax(ds.content.images[0].multiscale.data_type) : 65535;
+          const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
           applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: 0, max: frMax });
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
         } else {
@@ -334,7 +334,7 @@ export function useDatasetSettings({
       const settings = allSettings[id];
       const ds = datasetsRef.current.get(id);
       const dr = dataRangeMap.get(id) ?? null;
-      const frMax = ds ? dtypeMax(ds.content.images[0].multiscale.data_type) : 65535;
+      const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
 
       // Use per-channel settings if available
       const chSettings = settings?.channel_settings?.[currentC];

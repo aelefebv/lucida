@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { extractPlateData } from "./PlateSelector.tsx";
-import type { ContentGraph, ImageSpec } from "../contentTypes.ts";
+import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 
 function makeImage(image_id: string, owner: string): ImageSpec {
   return {
@@ -28,7 +28,7 @@ function makeImage(image_id: string, owner: string): ImageSpec {
   };
 }
 
-function plate2x2(): ContentGraph {
+function plate2x2(): DatasetManifest {
   return {
     dataset_id: "plate-2x2",
     name: "plate",
@@ -59,7 +59,7 @@ function plate2x2(): ContentGraph {
 
 describe("extractPlateData", () => {
   it("returns null for Single dataset kind", () => {
-    const g: ContentGraph = {
+    const g: DatasetManifest = {
       dataset_id: "ds",
       name: "ds",
       kind: "Single",

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use lucida_content::{
-    Axis, AxisKind, ContentGraph, DataType, DatasetId, DatasetKind, Entity, EntityId, EntityKind,
+    Axis, AxisKind, DatasetManifest, DataType, DatasetId, DatasetKind, Entity, EntityId, EntityKind,
     EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo, TransformEdge, VoxelTransform,
 };
 use lucida_proxy::{FieldVolume, ProxySourceData, SourceError};
@@ -98,9 +98,9 @@ pub fn single_image_graph(
     entity_id: &str,
     image_id: &str,
     levels: Vec<LevelGeometry>,
-) -> ContentGraph {
+) -> DatasetManifest {
     let eid = EntityId(entity_id.into());
-    ContentGraph::new(
+    DatasetManifest::new(
         DatasetId("ds-test".into()),
         "test".into(),
         DatasetKind::Single,
@@ -131,7 +131,7 @@ pub fn well_graph_with_fields(
     well_id: &str,
     fields: &[FieldSpec],
     levels: Vec<LevelGeometry>,
-) -> ContentGraph {
+) -> DatasetManifest {
     let well_eid = EntityId(well_id.into());
 
     let mut entities = vec![Entity {
@@ -181,7 +181,7 @@ pub fn well_graph_with_fields(
         });
     }
 
-    ContentGraph::new(
+    DatasetManifest::new(
         DatasetId("ds-test".into()),
         "test plate".into(),
         DatasetKind::Single,

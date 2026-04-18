@@ -6,7 +6,7 @@
 //! simply tells Planning which proxy kinds it can request.
 //!
 //! S3 scaffold: types defined and round-trip serializable. Server sends
-//! empty catalogs in `RegisterDataset` and emits no deltas yet. S5 fills
+//! empty catalogs in `DatasetOpened` and emits no deltas yet. S5 fills
 //! in real availability data; S6 makes Planning consume it.
 
 use lucida_content::EntityId;

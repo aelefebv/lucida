@@ -9,7 +9,7 @@
  *   - createSyntheticSnapshot() / createSyntheticEntity() — test helpers
  */
 
-import type { LevelGeometry } from "../contentTypes.ts";
+import type { LevelGeometry } from "../manifestTypes.ts";
 import type { AssetCatalogSnapshot } from "./assetCatalog.ts";
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@ use lucida_proxy::source_content_hash;
 
 use crate::common::{FieldSpec, level5, well_graph_with_fields};
 
-fn build_two_field_graph() -> lucida_content::ContentGraph {
+fn build_two_field_graph() -> lucida_content::DatasetManifest {
     well_graph_with_fields(
         "well-A",
         &[

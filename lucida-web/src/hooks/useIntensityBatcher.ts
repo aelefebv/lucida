@@ -40,7 +40,7 @@ export function useIntensityBatcher({
       const datasets = datasetsRef.current;
       if (!datasets.has(rawId)) {
         for (const [dsId, ds] of datasets) {
-          if (ds.content.images.some(img => img.image_id === rawId)) {
+          if (ds.manifest.images.some(img => img.image_id === rawId)) {
             datasetId = dsId;
             break;
           }

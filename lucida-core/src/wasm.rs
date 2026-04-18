@@ -44,7 +44,7 @@ impl WasmScene {
         // Rebuild derived state for all content graphs.
         self.inner.rebuild_derived();
         // Ensure dataset_order and dataset_settings are consistent.
-        for id in self.inner.document.content_graphs.keys() {
+        for id in self.inner.document.manifests.keys() {
             if !self.inner.dataset_order.contains(id) {
                 self.inner.dataset_order.push(id.clone());
             }
@@ -57,7 +57,7 @@ impl WasmScene {
         let dataset_ids: std::collections::HashSet<&DatasetId> = self
             .inner
             .document
-            .content_graphs
+            .manifests
             .keys()
             .collect();
         self.inner
@@ -845,13 +845,13 @@ impl WasmScene {
     }
 
     pub fn dataset_ids(&self) -> String {
-        let ids: Vec<&str> = self.inner.document.content_graphs.keys().map(|id| id.0.as_str()).collect();
+        let ids: Vec<&str> = self.inner.document.manifests.keys().map(|id| id.0.as_str()).collect();
         serde_json::to_string(&ids).unwrap()
     }
 
     pub fn dataset_name(&self, id: &str) -> String {
         let ds_id = DatasetId(id.to_string());
-        self.inner.document.content_graphs.get(&ds_id)
+        self.inner.document.manifests.get(&ds_id)
             .map(|g| g.name.clone())
             .unwrap_or_else(|| id.to_string())
     }
@@ -893,7 +893,7 @@ impl WasmScene {
         let mut layouts = Vec::new();
 
         // Source layouts from the content graph
-        if let Some(content) = self.inner.document.content_graphs.get(&ds_id) {
+        if let Some(content) = self.inner.document.manifests.get(&ds_id) {
             for l in content.source_layouts() {
                 layouts.push(LayoutInfo {
                     id: l.id.0.clone(),

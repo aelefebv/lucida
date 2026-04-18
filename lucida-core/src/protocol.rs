@@ -52,7 +52,7 @@ pub enum ClientMessage {
     /// Remote-control another client by making them follow the sender.
     Steer { client: ClientId },
     /// Request the server open a Dataset from a URL.
-    /// The server reads metadata via a StorageBackend and broadcasts RegisterDataset.
+    /// The server reads metadata via a StorageBackend and broadcasts DatasetOpened.
     OpenRemoteDataset { url: String },
 }
 
@@ -229,9 +229,9 @@ mod tests {
 
     #[test]
     fn client_message_command_round_trips() {
-        let reg = crate::scene::test_helpers::make_register_dataset("ds1", "test", 1);
+        let reg = crate::scene::test_helpers::make_dataset_opened("ds1", "test", 1);
         let msg = ClientMessage::Command {
-            command: DocumentCommand::RegisterDataset(reg),
+            command: DocumentCommand::DatasetOpened(reg),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"command\""));

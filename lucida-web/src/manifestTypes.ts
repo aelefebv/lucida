@@ -1,7 +1,7 @@
-/** Content graph and fetch descriptor types — mirrors lucida-content/lucida-protocol serde output. */
+/** Dataset manifest and fetch source types — mirrors lucida-content/lucida-protocol serde output. */
 
 // ---------------------------------------------------------------------------
-// ContentGraph (from lucida-content)
+// DatasetManifest (from lucida-content)
 // ---------------------------------------------------------------------------
 
 export type DatasetKind =
@@ -57,7 +57,7 @@ export interface LayoutSpec {
   placements: { entity_id: string; position: [number, number] }[];
 }
 
-export interface ContentGraph {
+export interface DatasetManifest {
   dataset_id: string;
   name: string;
   kind: DatasetKind;
@@ -69,11 +69,11 @@ export interface ContentGraph {
 }
 
 // ---------------------------------------------------------------------------
-// ClientFetchDescriptor (from lucida-protocol)
+// FetchSource (from lucida-protocol)
 // ---------------------------------------------------------------------------
 
 /** Externally tagged enum: { "Proxied": { images: [...] } } */
-export type ClientFetchDescriptor =
+export type FetchSource =
   | { Proxied: ProxiedFetchDescriptor }
   | { Direct: DirectFetchDescriptor }
   | { Local: LocalFetchDescriptor };

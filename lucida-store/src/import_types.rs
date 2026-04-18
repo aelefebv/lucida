@@ -1,12 +1,12 @@
-use lucida_content::{ContentGraph, ImageId};
-use lucida_protocol::ClientFetchDescriptor;
+use lucida_content::{DatasetManifest, ImageId};
+use lucida_protocol::FetchSource;
 use serde::{Deserialize, Serialize};
 
 /// The structured result of importing a dataset from storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportResult {
-    pub content: ContentGraph,
-    pub fetch: ClientFetchDescriptor,
+    pub manifest: DatasetManifest,
+    pub fetch: FetchSource,
     pub binding_seed: ServerBindingSeed,
 }
 

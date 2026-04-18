@@ -36,8 +36,8 @@ mod tests {
     #[test]
     fn single_image_view_query() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let result = scene.view_query(&DatasetId::from("ds1")).unwrap();
         assert_eq!(result.visible_entities.len(), 1);
         assert!(result.visible_entities[0].visible);
@@ -54,8 +54,8 @@ mod tests {
     #[test]
     fn view_query_carries_epochs() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let result = scene.view_query(&DatasetId::from("ds1")).unwrap();
         assert_eq!(result.epochs, scene.epochs);
     }
@@ -63,8 +63,8 @@ mod tests {
     #[test]
     fn view_query_serde_round_trip() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let result = scene.view_query(&DatasetId::from("ds1")).unwrap();
         let json = serde_json::to_string(&result).unwrap();
         let parsed: ViewQueryResult = serde_json::from_str(&json).unwrap();

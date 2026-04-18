@@ -1,5 +1,5 @@
 /** Pull-based render loop: coalesces chunk arrivals into a single RAF tick. */
-import type { ContentGraph } from "./contentTypes.ts";
+import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
@@ -16,7 +16,7 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 
 export class RenderLoop {
   private session: Session;
-  private datasets: Map<string, { content: ContentGraph }>;
+  private datasets: Map<string, { manifest: DatasetManifest }>;
   private client: RenderLoopOptions["client"];
   private canvas: HTMLCanvasElement;
   private mode: "slice" | "volume";
@@ -47,7 +47,7 @@ export class RenderLoop {
     this.session = opts.session;
     this.datasets = new Map();
     for (const [id, entry] of opts.datasets) {
-      this.datasets.set(id, { content: entry.content });
+      this.datasets.set(id, { manifest: entry.manifest });
     }
     this.client = opts.client;
     this.canvas = opts.canvas;
@@ -111,8 +111,8 @@ export class RenderLoop {
     return this.session.cpuCache;
   }
 
-  addDataset(id: string, content: ContentGraph): void {
-    this.datasets.set(id, { content });
+  addDataset(id: string, manifest: DatasetManifest): void {
+    this.datasets.set(id, { manifest });
     this.viewDirty = true;
     this.scheduleIfNeeded();
   }

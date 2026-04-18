@@ -38,7 +38,7 @@ async fn cache_hit_short_circuits_generation() {
         cache.clone(),
         ds.cache.clone(),
         ds.resolver.clone(),
-        ds.content.clone(),
+        ds.manifest.clone(),
         2,
     );
 
@@ -63,7 +63,7 @@ async fn cache_hit_short_circuits_generation() {
     // Sanity: header source_content_hash matches what generator
     // computes for the spec, so a fresh generator on the same disk
     // would also hit.
-    let expected_hash = source_content_hash(&ds.content, &spec.entity_id, spec.t, spec.c);
+    let expected_hash = source_content_hash(&ds.manifest, &spec.entity_id, spec.t, spec.c);
     let cached = cache.get(&spec, &expected_hash).unwrap();
     assert!(cached.is_some(), "cache should have a fresh entry");
 }
@@ -80,7 +80,7 @@ async fn in_flight_dedup_runs_one_generation_for_concurrent_requests() {
         cache,
         ds.cache.clone(),
         ds.resolver.clone(),
-        ds.content.clone(),
+        ds.manifest.clone(),
         4,
     ));
 
@@ -146,7 +146,7 @@ async fn bounded_concurrency_respects_limit() {
         cache,
         ds.cache.clone(),
         ds.resolver.clone(),
-        ds.content.clone(),
+        ds.manifest.clone(),
         limit,
     ));
 
@@ -198,7 +198,7 @@ async fn second_call_after_completion_uses_cache() {
         cache.clone(),
         ds.cache.clone(),
         ds.resolver.clone(),
-        ds.content.clone(),
+        ds.manifest.clone(),
         2,
     );
     let spec = proxy_spec_for(&ds);

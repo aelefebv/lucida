@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
-import type { ContentGraph, ClientFetchDescriptor } from "../contentTypes.ts";
+import type { DatasetManifest, FetchSource } from "../manifestTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
 import { ProxiedContentSource } from "../pipeline/contentSource.ts";
 import { CpuCache } from "../pipeline/cpuCache.ts";
@@ -91,20 +91,20 @@ export function useBridge({
           sessionRef.current?.setScene(scene);
 
           const doc = JSON.parse(documentJson);
-          if (doc.content_graphs) {
-            for (const [dsId, content] of Object.entries(doc.content_graphs as Record<string, ContentGraph>)) {
+          if (doc.manifests) {
+            for (const [dsId, manifest] of Object.entries(doc.manifests as Record<string, DatasetManifest>)) {
               if (!datasetsRef.current.has(dsId)) {
-                // For snapshots, we don't have the fetch descriptor.
-                // Build a proxied descriptor from the content graph's images.
-                const fetchDesc: ClientFetchDescriptor = {
+                // For snapshots, we don't have the fetch source.
+                // Build a proxied source from the manifest's images.
+                const fetchDesc: FetchSource = {
                   Proxied: {
-                    images: (content as ContentGraph).images.map(img => ({
+                    images: (manifest as DatasetManifest).images.map(img => ({
                       image_id: img.image_id,
                       wire_format: { Raw: { data_type: img.multiscale.data_type } },
                     })),
                   },
                 };
-                setupFetchPipeline(content as ContentGraph, fetchDesc);
+                setupFetchPipeline(manifest as DatasetManifest, fetchDesc);
               }
               // Mirror the snapshot's asset catalog into the JS-side
               // AssetCatalog. `load_document` already parsed it on the
@@ -119,13 +119,13 @@ export function useBridge({
               const registry = sessionRef.current?.ensureLayoutRegistry();
               if (registry) {
                 const sendCmd = (json: string) => sessionRef.current?.bridge.sendCommand(json);
-                for (const spec of derivedBuildersFor(content as ContentGraph)) {
+                for (const spec of derivedBuildersFor(manifest as DatasetManifest)) {
                   registry.register(dsId, spec, sendCmd);
                 }
                 registry.refresh(dsId);
                 const snapActive =
                   (doc.active_layout_ids as Record<string, string> | undefined)?.[dsId];
-                const fallback = (content as ContentGraph).default_layout_id;
+                const fallback = (manifest as DatasetManifest).default_layout_id;
                 const activeId = snapActive ?? fallback;
                 if (activeId) registry.setActiveLocal(dsId, activeId);
               }
@@ -144,7 +144,7 @@ export function useBridge({
           let scene = wasmSceneRef.current;
           if (!scene) {
             const cmd = JSON.parse(commandJson);
-            if (cmd.type === "register_dataset") {
+            if (cmd.type === "dataset_opened") {
               scene = ensureScene();
             } else {
               return;
@@ -153,16 +153,16 @@ export function useBridge({
           scene.apply_command(commandJson);
           bumpSettingsGeneration();
           const cmd = JSON.parse(commandJson);
-          if (cmd.type === "register_dataset") {
+          if (cmd.type === "dataset_opened") {
             sessionRef.current?.setScene(scene);
-            if (!datasetsRef.current.has(cmd.content.dataset_id)) {
-              setupFetchPipeline(cmd.content as ContentGraph, cmd.fetch as ClientFetchDescriptor);
+            if (!datasetsRef.current.has(cmd.manifest.dataset_id)) {
+              setupFetchPipeline(cmd.manifest as DatasetManifest, cmd.fetch as FetchSource);
             }
             // Mirror the initial catalog into the JS-side AssetCatalog so
             // Planning's snapshot view stays consistent with WASM. Empty
             // in S3; populated by S5 once the server actually sends data.
             const catalog = cmd.catalog ?? { entries: [] };
-            sessionRef.current?.ensureAssetCatalog()?.applyInitial(cmd.content.dataset_id, catalog);
+            sessionRef.current?.ensureAssetCatalog()?.applyInitial(cmd.manifest.dataset_id, catalog);
 
             // Auto-register browser-authored derived layouts. RegisterLayout
             // is idempotent in lucida-core (issue #425), so peers that
@@ -170,14 +170,14 @@ export function useBridge({
             const registry = sessionRef.current?.ensureLayoutRegistry();
             if (registry) {
               const sendCmd = (json: string) => sessionRef.current?.bridge.sendCommand(json);
-              const content = cmd.content as ContentGraph;
-              for (const spec of derivedBuildersFor(content)) {
-                registry.register(content.dataset_id, spec, sendCmd);
+              const manifest = cmd.manifest as DatasetManifest;
+              for (const spec of derivedBuildersFor(manifest)) {
+                registry.register(manifest.dataset_id, spec, sendCmd);
               }
               const activeId =
-                content.default_layout_id ?? content.source_layouts[0]?.id;
+                manifest.default_layout_id ?? manifest.source_layouts[0]?.id;
               if (activeId) {
-                registry.setActive(content.dataset_id, activeId, sendCmd);
+                registry.setActive(manifest.dataset_id, activeId, sendCmd);
               }
             }
 
@@ -352,8 +352,8 @@ export function useBridge({
     sessionRef.current = new Session({ bridge, contentSource, cpuCache, decodePool });
   }, [wasmReady]);
 
-  function setupFetchPipeline(content: ContentGraph, fetchDesc: ClientFetchDescriptor) {
-    const datasetId = content.dataset_id;
+  function setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource) {
+    const datasetId = manifest.dataset_id;
 
     if ("Proxied" in fetchDesc) {
       for (const spec of fetchDesc.Proxied.images) {
@@ -363,17 +363,17 @@ export function useBridge({
 
     datasetsRef.current.set(datasetId, {
       id: datasetId,
-      name: content.name,
-      content,
+      name: manifest.name,
+      manifest,
       fetch: fetchDesc,
     });
 
     initLayerMaps(datasetId);
 
     // Ensure per-channel settings exist for all channels.
-    // RegisterDataset may only create 1 channel setting (layers.len() = 1),
+    // DatasetOpened may only create 1 channel setting (layers.len() = 1),
     // but the real channel count is in the data shape.
-    const firstImage = content.images[0];
+    const firstImage = manifest.images[0];
     const channelCount = firstImage?.multiscale.levels[0]?.shape[1] ?? 1; // [T, C, Z, Y, X]
     if (channelCount > 1) {
       const scene = wasmSceneRef.current;
@@ -389,7 +389,7 @@ export function useBridge({
       }
     }
 
-    loopRef.current?.addDataset(datasetId, content);
+    loopRef.current?.addDataset(datasetId, manifest);
 
     const coarsestLevel = firstImage?.multiscale.levels[firstImage.multiscale.levels.length - 1];
     if (coarsestLevel) {

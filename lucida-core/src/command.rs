@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, LayoutId, LayoutSpec};
-use lucida_protocol::{AssetCatalogDelta, RegisterDataset};
+use lucida_protocol::{AssetCatalogDelta, DatasetOpened};
 
 use crate::camera::Camera;
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
@@ -11,7 +11,7 @@ use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DocumentCommand {
-    RegisterDataset(RegisterDataset),
+    DatasetOpened(DatasetOpened),
     RemoveDataset { id: DatasetId },
     RegisterLayout {
         dataset_id: DatasetId,
@@ -121,7 +121,7 @@ impl Scene {
                 if let DocumentCommand::SetActiveLayout { dataset_id, .. } = &doc_cmd {
                     let dataset_id = dataset_id.clone();
                     self.document.apply(doc_cmd);
-                    if let Some(content) = self.document.content_graphs.get(&dataset_id) {
+                    if let Some(content) = self.document.manifests.get(&dataset_id) {
                         let layout = crate::scene::resolve_layout(
                             content,
                             self.document.registered_layouts.get(&dataset_id),
@@ -134,8 +134,8 @@ impl Scene {
                     return;
                 }
                 match &doc_cmd {
-                    DocumentCommand::RegisterDataset(reg) => {
-                        let dataset_id = reg.content.dataset_id.clone();
+                    DocumentCommand::DatasetOpened(event) => {
+                        let dataset_id = event.manifest.dataset_id.clone();
 
                         // Dataset ordering
                         if !self.dataset_order.contains(&dataset_id) {
@@ -143,7 +143,7 @@ impl Scene {
                         }
 
                         // Channel count from first image's C dimension
-                        let channel_count = reg.content.images().first()
+                        let channel_count = event.manifest.images().first()
                             .and_then(|img| img.multiscale.levels.first())
                             .map(|l| l.shape[1] as usize)
                             .unwrap_or(1);
@@ -163,11 +163,11 @@ impl Scene {
 
                         // Build derived state
                         let layout = crate::scene::resolve_layout(
-                            &reg.content,
+                            &event.manifest,
                             self.document.registered_layouts.get(&dataset_id),
                             self.document.active_layout_ids.get(&dataset_id),
                         );
-                        let derived = crate::scene::build_derived_state(&reg.content, &layout);
+                        let derived = crate::scene::build_derived_state(&event.manifest, &layout);
                         self.derived.insert(dataset_id, derived);
 
                         self.epochs.content += 1;
@@ -406,12 +406,12 @@ mod tests {
 
     #[test]
     fn command_wrapper_round_trips_document() {
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        let cmd = Command::Document(DocumentCommand::RegisterDataset(reg));
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        let cmd = Command::Document(DocumentCommand::DatasetOpened(reg));
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"register_dataset\""));
+        assert!(json.contains("\"type\":\"dataset_opened\""));
         let parsed: Command = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, Command::Document(DocumentCommand::RegisterDataset(_))));
+        assert!(matches!(parsed, Command::Document(DocumentCommand::DatasetOpened(_))));
     }
 
     #[test]
@@ -440,18 +440,18 @@ mod tests {
     }
 
     #[test]
-    fn register_dataset_command_round_trips() {
-        let reg = test_helpers::make_register_dataset("ds1", "test dataset", 1);
-        let cmd = DocumentCommand::RegisterDataset(reg);
+    fn dataset_opened_command_round_trips() {
+        let reg = test_helpers::make_dataset_opened("ds1", "test dataset", 1);
+        let cmd = DocumentCommand::DatasetOpened(reg);
         let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"register_dataset\""));
+        assert!(json.contains("\"type\":\"dataset_opened\""));
         let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            DocumentCommand::RegisterDataset(r) => {
-                assert_eq!(r.content.dataset_id, DatasetId("ds1".into()));
-                assert_eq!(r.content.name, "test dataset");
+            DocumentCommand::DatasetOpened(r) => {
+                assert_eq!(r.manifest.dataset_id, DatasetId("ds1".into()));
+                assert_eq!(r.manifest.name, "test dataset");
             }
-            _ => panic!("expected RegisterDataset"),
+            _ => panic!("expected DatasetOpened"),
         }
     }
 
@@ -464,12 +464,12 @@ mod tests {
     }
 
     #[test]
-    fn apply_register_dataset_populates_scene() {
+    fn apply_dataset_opened_populates_scene() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
-        assert_eq!(scene.document.content_graphs.len(), 1);
-        assert!(scene.document.content_graphs.contains_key(&DatasetId("ds1".into())));
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(scene.document.manifests.len(), 1);
+        assert!(scene.document.manifests.contains_key(&DatasetId("ds1".into())));
         assert!(scene.derived.contains_key(&DatasetId("ds1".into())));
     }
 
@@ -530,8 +530,8 @@ mod tests {
     #[test]
     fn apply_set_dataset_visible_updates_settings() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         assert!(scene.dataset_settings[&DatasetId("ds1".into())].visible);
         scene.apply(ViewportCommand::SetDatasetVisible { dataset_id: "ds1".into(), visible: false }.into());
         assert!(!scene.dataset_settings[&DatasetId("ds1".into())].visible);
@@ -540,8 +540,8 @@ mod tests {
     #[test]
     fn apply_set_dataset_opacity_updates_settings() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         assert_eq!(scene.dataset_settings[&DatasetId("ds1".into())].opacity, 1.0);
         scene.apply(ViewportCommand::SetDatasetOpacity { dataset_id: "ds1".into(), opacity: 0.5 }.into());
         assert_eq!(scene.dataset_settings[&DatasetId("ds1".into())].opacity, 0.5);
@@ -550,30 +550,30 @@ mod tests {
     #[test]
     fn apply_remove_dataset_removes_from_scene() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
-        assert_eq!(scene.document.content_graphs.len(), 1);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(scene.document.manifests.len(), 1);
         scene.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) }.into());
-        assert!(scene.document.content_graphs.is_empty());
+        assert!(scene.document.manifests.is_empty());
     }
 
     #[test]
-    fn document_state_apply_register_dataset() {
+    fn document_state_apply_dataset_opened() {
         let mut doc = crate::scene::DocumentState::default();
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        doc.apply(DocumentCommand::RegisterDataset(reg));
-        assert_eq!(doc.content_graphs.len(), 1);
-        assert!(doc.content_graphs.contains_key(&DatasetId("ds1".into())));
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        doc.apply(DocumentCommand::DatasetOpened(reg));
+        assert_eq!(doc.manifests.len(), 1);
+        assert!(doc.manifests.contains_key(&DatasetId("ds1".into())));
     }
 
     #[test]
     fn document_state_apply_remove_dataset() {
         let mut doc = crate::scene::DocumentState::default();
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        doc.apply(DocumentCommand::RegisterDataset(reg));
-        assert_eq!(doc.content_graphs.len(), 1);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        doc.apply(DocumentCommand::DatasetOpened(reg));
+        assert_eq!(doc.manifests.len(), 1);
         doc.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) });
-        assert!(doc.content_graphs.is_empty());
+        assert!(doc.manifests.is_empty());
     }
 
     #[test]
@@ -754,8 +754,8 @@ mod tests {
         use crate::scene::Colormap;
         let mut scene = Scene::new([800, 600]);
         // Register a dataset with 2 channels
-        let reg = test_helpers::make_register_dataset("ds1", "test", 2);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 2);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         // Verify default colormap assignments
         let ds_id = DatasetId("ds1".into());
         assert_eq!(scene.dataset_settings[&ds_id].channel_settings[0].colormap, Colormap::Magenta);
@@ -770,12 +770,12 @@ mod tests {
     }
 
     #[test]
-    fn register_dataset_initializes_channel_settings() {
+    fn dataset_opened_initializes_channel_settings() {
         use crate::scene::Colormap;
         let mut scene = Scene::new([800, 600]);
         // Register with 4 channels
-        let reg = test_helpers::make_register_dataset("ds1", "test", 4);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 4);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
         let ch = &scene.dataset_settings[&ds_id].channel_settings;
         assert_eq!(ch.len(), 4);
@@ -796,12 +796,12 @@ mod tests {
     // --- Epoch tests ---
 
     #[test]
-    fn register_dataset_bumps_content_and_layout_epochs() {
+    fn dataset_opened_bumps_content_and_layout_epochs() {
         let mut scene = Scene::new([800, 600]);
         assert_eq!(scene.epochs.content, 0);
         assert_eq!(scene.epochs.layout, 0);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         assert_eq!(scene.epochs.content, 1);
         assert_eq!(scene.epochs.layout, 1);
         assert_eq!(scene.epochs.view, 0);
@@ -811,8 +811,8 @@ mod tests {
     #[test]
     fn remove_dataset_bumps_content_and_layout_epochs() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         scene.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) }.into());
         assert_eq!(scene.epochs.content, 2);
         assert_eq!(scene.epochs.layout, 2);
@@ -854,8 +854,8 @@ mod tests {
         use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
         let mut scene = Scene::new([800, 600]);
         // Register a dataset first so the catalog is initialized.
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let baseline = scene.epochs.clone();
         assert_eq!(baseline.asset, 0);
 
@@ -882,8 +882,8 @@ mod tests {
     fn apply_asset_catalog_delta_idempotent_on_repeat() {
         use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let delta = AssetCatalogDelta {
             added: vec![ProxyAvailability {
@@ -919,8 +919,8 @@ mod tests {
     fn apply_asset_catalog_delta_merges_kinds_for_same_entity() {
         use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         scene.apply(
             DocumentCommand::ApplyAssetCatalogDelta {
@@ -955,17 +955,17 @@ mod tests {
     }
 
     #[test]
-    fn register_dataset_seeds_catalog_from_register_command() {
+    fn dataset_opened_seeds_catalog_from_event() {
         use lucida_protocol::{AssetCatalog, ProxyAvailability, ProxyKind};
         let mut scene = Scene::new([800, 600]);
-        let mut reg = test_helpers::make_register_dataset("ds1", "test", 1);
+        let mut reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         reg.catalog = AssetCatalog {
             entries: vec![ProxyAvailability {
                 entity_id: lucida_content::EntityId("seed".into()),
                 kinds: vec![ProxyKind::WellProxy3D],
             }],
         };
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
         assert_eq!(cat.entries.len(), 1);
@@ -1075,8 +1075,8 @@ mod tests {
     fn register_layout_makes_it_available() {
         use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let layout = LayoutSpec {
             id: LayoutId("new-layout".into()),
@@ -1103,8 +1103,8 @@ mod tests {
     fn register_layout_dedupes_by_id() {
         use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
 
         let spec = LayoutSpec {
@@ -1136,7 +1136,7 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
 
         // Register a plate dataset with two members
-        let reg = test_helpers::make_plate_register_dataset(
+        let reg = test_helpers::make_plate_dataset_opened(
             "plate", "plate",
             vec![
                 ("m1", [0.0, 0.0]),
@@ -1145,7 +1145,7 @@ mod tests {
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let ds_id = DatasetId("plate".into());
         // Verify initial positions
@@ -1184,8 +1184,8 @@ mod tests {
     fn set_active_layout_updates_active_layout_ids() {
         use lucida_content::LayoutId;
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let ds_id = DatasetId("ds1".into());
         assert!(!scene.document.active_layout_ids.contains_key(&ds_id));
@@ -1207,7 +1207,7 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
 
         // Register a plate dataset with a known default layout
-        let reg = test_helpers::make_plate_register_dataset(
+        let reg = test_helpers::make_plate_dataset_opened(
             "plate", "plate",
             vec![
                 ("m1", [0.0, 0.0]),
@@ -1216,7 +1216,7 @@ mod tests {
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let ds_id = DatasetId("plate".into());
         let positions_before: Vec<[f64; 2]> = scene.derived[&ds_id]

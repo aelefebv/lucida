@@ -1,16 +1,17 @@
-use lucida_content::ContentGraph;
+use lucida_content::DatasetManifest;
 use crate::asset::AssetCatalog;
-use crate::fetch::ClientFetchDescriptor;
+use crate::fetch::FetchSource;
 use serde::{Deserialize, Serialize};
 
-/// Application-level message: a dataset has been imported and should be registered.
-/// Carries canonical content, client-visible fetch metadata, and the
-/// initial asset catalog snapshot for proxy availability.
-/// Does NOT carry server-private binding state.
+/// Application-level event: a dataset has been opened on the server and
+/// should be registered by all clients. Carries the canonical dataset
+/// manifest, the client-visible fetch source, and the initial asset
+/// catalog snapshot for proxy availability. Does NOT carry server-private
+/// binding state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegisterDataset {
-    pub content: ContentGraph,
-    pub fetch: ClientFetchDescriptor,
+pub struct DatasetOpened {
+    pub manifest: DatasetManifest,
+    pub fetch: FetchSource,
     /// Initial asset catalog. Empty in S3 — populated by S5.
     /// `#[serde(default)]` keeps backward compat with messages that omit
     /// the field (older clients/snapshots).
@@ -24,11 +25,11 @@ mod tests {
     use crate::fetch::{ProxiedFetchDescriptor, ProxiedImageSpec, WireFormat};
     use lucida_content::*;
 
-    fn make_register_dataset() -> RegisterDataset {
+    fn make_dataset_opened() -> DatasetOpened {
         let entity_id = EntityId("img-0".to_string());
         let image_id = ImageId("multiscale-0".to_string());
 
-        let content = ContentGraph::new(
+        let manifest = DatasetManifest::new(
             DatasetId("ds-test".to_string()),
             "test dataset".to_string(),
             DatasetKind::Single,
@@ -69,7 +70,7 @@ mod tests {
             None,
         );
 
-        let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id,
                 wire_format: WireFormat::Raw {
@@ -78,26 +79,26 @@ mod tests {
             }],
         });
 
-        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
     }
 
     #[test]
-    fn register_dataset_round_trip() {
-        let reg = make_register_dataset();
-        let json = serde_json::to_string_pretty(&reg).unwrap();
-        let back: RegisterDataset = serde_json::from_str(&json).unwrap();
+    fn dataset_opened_round_trip() {
+        let event = make_dataset_opened();
+        let json = serde_json::to_string_pretty(&event).unwrap();
+        let back: DatasetOpened = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(reg.content.dataset_id, back.content.dataset_id);
-        assert_eq!(reg.content.name, back.content.name);
-        assert_eq!(reg.content.entities().len(), back.content.entities().len());
-        assert_eq!(reg.content.images().len(), back.content.images().len());
+        assert_eq!(event.manifest.dataset_id, back.manifest.dataset_id);
+        assert_eq!(event.manifest.name, back.manifest.name);
+        assert_eq!(event.manifest.entities().len(), back.manifest.entities().len());
+        assert_eq!(event.manifest.images().len(), back.manifest.images().len());
         assert_eq!(
-            reg.content.images()[0].image_id,
-            back.content.images()[0].image_id
+            event.manifest.images()[0].image_id,
+            back.manifest.images()[0].image_id
         );
 
         match &back.fetch {
-            ClientFetchDescriptor::Proxied(p) => {
+            FetchSource::Proxied(p) => {
                 assert_eq!(p.images.len(), 1);
                 assert_eq!(
                     p.images[0].image_id,
@@ -110,43 +111,43 @@ mod tests {
 
     #[test]
     fn json_top_level_keys() {
-        let reg = make_register_dataset();
-        let json = serde_json::to_string(&reg).unwrap();
+        let event = make_dataset_opened();
+        let json = serde_json::to_string(&event).unwrap();
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert!(value.is_object());
-        assert!(value.get("content").is_some(), "missing 'content' key");
+        assert!(value.get("manifest").is_some(), "missing 'manifest' key");
         assert!(value.get("fetch").is_some(), "missing 'fetch' key");
         assert!(value.get("catalog").is_some(), "missing 'catalog' key");
     }
 
     #[test]
-    fn register_dataset_catalog_round_trip() {
+    fn dataset_opened_catalog_round_trip() {
         use crate::asset::ProxyAvailability;
         use lucida_proxy::ProxyKind;
 
-        let mut reg = make_register_dataset();
-        reg.catalog = AssetCatalog {
+        let mut event = make_dataset_opened();
+        event.catalog = AssetCatalog {
             entries: vec![ProxyAvailability {
                 entity_id: EntityId("img-0".into()),
                 kinds: vec![ProxyKind::FieldProxy3D],
             }],
         };
-        let json = serde_json::to_string(&reg).unwrap();
-        let back: RegisterDataset = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&event).unwrap();
+        let back: DatasetOpened = serde_json::from_str(&json).unwrap();
         assert_eq!(back.catalog.entries.len(), 1);
         assert_eq!(back.catalog.entries[0].entity_id, EntityId("img-0".into()));
         assert_eq!(back.catalog.entries[0].kinds, vec![ProxyKind::FieldProxy3D]);
     }
 
     #[test]
-    fn register_dataset_backward_compat_without_catalog() {
+    fn dataset_opened_backward_compat_without_catalog() {
         // Older messages omit 'catalog' — should deserialize with empty default.
-        let reg = make_register_dataset();
-        let json = serde_json::to_string(&reg).unwrap();
+        let event = make_dataset_opened();
+        let json = serde_json::to_string(&event).unwrap();
         let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
         val.as_object_mut().unwrap().remove("catalog");
-        let back: RegisterDataset = serde_json::from_value(val).unwrap();
+        let back: DatasetOpened = serde_json::from_value(val).unwrap();
         assert!(back.catalog.entries.is_empty());
     }
 }

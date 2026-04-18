@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// How a client turns logical chunk addresses into bytes for a dataset.
 /// Enum by mode because the modes need different fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ClientFetchDescriptor {
+pub enum FetchSource {
     Proxied(ProxiedFetchDescriptor),
     Direct(DirectFetchDescriptor),
     Local(LocalFetchDescriptor),
@@ -66,7 +66,7 @@ mod tests {
 
     #[test]
     fn proxied_round_trip() {
-        let desc = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        let desc = FetchSource::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id: ImageId("img1".into()),
                 wire_format: WireFormat::Raw {
@@ -75,9 +75,9 @@ mod tests {
             }],
         });
         let json = serde_json::to_string(&desc).unwrap();
-        let back: ClientFetchDescriptor = serde_json::from_str(&json).unwrap();
+        let back: FetchSource = serde_json::from_str(&json).unwrap();
         match &back {
-            ClientFetchDescriptor::Proxied(p) => {
+            FetchSource::Proxied(p) => {
                 assert_eq!(p.images.len(), 1);
                 assert_eq!(p.images[0].image_id, ImageId("img1".into()));
                 assert_eq!(
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn direct_round_trip() {
-        let desc = ClientFetchDescriptor::Direct(DirectFetchDescriptor {
+        let desc = FetchSource::Direct(DirectFetchDescriptor {
             images: vec![DirectImageSpec {
                 image_id: ImageId("img2".into()),
                 wire_format: WireFormat::Lz4 {
@@ -113,9 +113,9 @@ mod tests {
             }],
         });
         let json = serde_json::to_string(&desc).unwrap();
-        let back: ClientFetchDescriptor = serde_json::from_str(&json).unwrap();
+        let back: FetchSource = serde_json::from_str(&json).unwrap();
         match &back {
-            ClientFetchDescriptor::Direct(d) => {
+            FetchSource::Direct(d) => {
                 assert_eq!(d.images.len(), 1);
                 assert_eq!(d.images[0].image_id, ImageId("img2".into()));
                 assert_eq!(d.images[0].levels.len(), 2);
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn local_round_trip() {
-        let desc = ClientFetchDescriptor::Local(LocalFetchDescriptor {
+        let desc = FetchSource::Local(LocalFetchDescriptor {
             images: vec![DirectImageSpec {
                 image_id: ImageId("local-img".into()),
                 wire_format: WireFormat::Raw {
@@ -146,9 +146,9 @@ mod tests {
             }],
         });
         let json = serde_json::to_string(&desc).unwrap();
-        let back: ClientFetchDescriptor = serde_json::from_str(&json).unwrap();
+        let back: FetchSource = serde_json::from_str(&json).unwrap();
         match &back {
-            ClientFetchDescriptor::Local(l) => {
+            FetchSource::Local(l) => {
                 assert_eq!(l.images.len(), 1);
                 assert_eq!(l.images[0].image_id, ImageId("local-img".into()));
                 assert!(l.images[0].store_prefix.is_none());
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn json_shape_externally_tagged() {
-        let desc = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        let desc = FetchSource::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id: ImageId("img1".into()),
                 wire_format: WireFormat::Raw {

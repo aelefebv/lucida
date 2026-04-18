@@ -61,8 +61,8 @@ export function usePreUpload({
         const ds = datasetsRef.current.get(id);
         const scene = wasmSceneRef.current;
         if (ds && scene) {
-          const fullResWidth = ds.content.images[0].multiscale.levels[0].shape[4];
-          const fullResHeight = ds.content.images[0].multiscale.levels[0].shape[3];
+          const fullResWidth = ds.manifest.images[0].multiscale.levels[0].shape[4];
+          const fullResHeight = ds.manifest.images[0].multiscale.levels[0].shape[3];
           applyViewportCommand(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 });
           applyViewportCommand(scene, { type: "set_zoom", value: 1.0 });
           emitPresence();

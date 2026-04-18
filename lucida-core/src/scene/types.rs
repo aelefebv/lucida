@@ -159,30 +159,30 @@ impl Default for DisplayState {
     }
 }
 
-/// Shared document state — content graphs synced across all clients.
+/// Shared document state — dataset manifests synced across all clients.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DocumentState {
-    pub content_graphs: IndexMap<DatasetId, lucida_content::ContentGraph>,
+    pub manifests: IndexMap<DatasetId, lucida_content::DatasetManifest>,
     #[serde(default)]
     pub registered_layouts: HashMap<DatasetId, Vec<LayoutSpec>>,
     #[serde(default)]
     pub active_layout_ids: HashMap<DatasetId, LayoutId>,
     /// Per-dataset asset catalog (proxy availability). Populated via
-    /// `RegisterDataset.catalog` on register and incrementally via
+    /// `DatasetOpened.catalog` on open and incrementally via
     /// `DocumentCommand::ApplyAssetCatalogDelta`. Empty in S3.
     #[serde(default)]
     pub asset_catalogs: IndexMap<DatasetId, AssetCatalog>,
 }
 
 impl DocumentState {
-    /// Register (or replace) a content graph by dataset id.
-    pub fn register_dataset(&mut self, content: lucida_content::ContentGraph) {
-        self.content_graphs.insert(content.dataset_id.clone(), content);
+    /// Register (or replace) a dataset manifest by dataset id.
+    pub fn register_dataset(&mut self, manifest: lucida_content::DatasetManifest) {
+        self.manifests.insert(manifest.dataset_id.clone(), manifest);
     }
 
     /// Remove a dataset by id.
     pub fn remove_dataset(&mut self, id: &DatasetId) {
-        self.content_graphs.shift_remove(id);
+        self.manifests.shift_remove(id);
         self.asset_catalogs.shift_remove(id);
     }
 
@@ -219,11 +219,11 @@ impl DocumentState {
     /// constructing a full Scene for document mutations.
     pub fn apply(&mut self, cmd: DocumentCommand) {
         match cmd {
-            DocumentCommand::RegisterDataset(reg) => {
-                let dataset_id = reg.content.dataset_id.clone();
-                self.register_dataset(reg.content);
-                // Seed the catalog from the register command. Empty in S3.
-                self.asset_catalogs.insert(dataset_id, reg.catalog);
+            DocumentCommand::DatasetOpened(event) => {
+                let dataset_id = event.manifest.dataset_id.clone();
+                self.register_dataset(event.manifest);
+                // Seed the catalog from the open event. Empty in S3.
+                self.asset_catalogs.insert(dataset_id, event.catalog);
             }
             DocumentCommand::RemoveDataset { id } => {
                 self.remove_dataset(&id);

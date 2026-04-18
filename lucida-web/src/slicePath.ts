@@ -68,7 +68,7 @@ function uploadAndRenderSlice(
     const dsSettings = allSettings[dsId];
     if (!dsSettings || !dsSettings.visible) continue;
 
-    const dsShapeL = ds.content.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
+    const dsShapeL = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
     const fullResWidth = dsShapeL[4];
     const fullResHeight = dsShapeL[3];
 

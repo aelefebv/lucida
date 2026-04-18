@@ -15,7 +15,7 @@
 //!   them; gaps stay zero.
 
 use lucida_content::{
-    ContentGraph, Entity, EntityId, EntityKind, ImageSpec, LevelGeometry, VoxelTransform,
+    DatasetManifest, Entity, EntityId, EntityKind, ImageSpec, LevelGeometry, VoxelTransform,
 };
 
 use crate::source::{ProxySourceData, SourceError};
@@ -45,7 +45,7 @@ pub enum GenerateError {
 /// [`ProxyAsset`] (in-memory header + voxels).
 pub fn generate_proxy(
     spec: &ProxySpec,
-    content: &ContentGraph,
+    content: &DatasetManifest,
     source: &dyn ProxySourceData,
 ) -> Result<ProxyAsset, GenerateError> {
     if spec.target_long_axis == 0 {
@@ -70,7 +70,7 @@ pub fn generate_proxy(
 
 fn downsample_field(
     spec: &ProxySpec,
-    content: &ContentGraph,
+    content: &DatasetManifest,
     entity: &Entity,
     source: &dyn ProxySourceData,
 ) -> Result<ProxyAsset, GenerateError> {
@@ -206,7 +206,7 @@ fn box_bounds(oi: u32, out_size: u32, in_size: u32) -> (u32, u32) {
 
 fn aggregate_well(
     spec: &ProxySpec,
-    content: &ContentGraph,
+    content: &DatasetManifest,
     well_entity: &Entity,
     source: &dyn ProxySourceData,
 ) -> Result<ProxyAsset, GenerateError> {
@@ -395,7 +395,7 @@ struct FieldEntry {
 /// Find an `EntityKind::Field → Well` transform. Returns identity if no
 /// edge exists (a well with a single field at origin behaves correctly).
 fn find_field_to_well(
-    content: &ContentGraph,
+    content: &DatasetManifest,
     field_id: &EntityId,
     well_id: &EntityId,
 ) -> VoxelTransform {

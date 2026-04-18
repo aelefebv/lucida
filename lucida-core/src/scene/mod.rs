@@ -43,7 +43,7 @@ pub struct MemberState {
 pub struct Scene {
     pub camera: Camera,
     pub view: ViewState,
-    /// Shared document state (content graphs).
+    /// Shared document state (dataset manifests).
     #[serde(flatten)]
     pub document: DocumentState,
     /// Display settings (contrast window + gamma). Per-client, not part of shared document.
@@ -175,7 +175,7 @@ impl Scene {
     /// Compute the chunk request plan for all visible layers across all datasets.
     /// Returns a flat `ChunkRequestPlan` (union of all members of the first dataset).
     pub fn chunk_plan(&self) -> ChunkRequestPlan {
-        let ds_id = match self.document.content_graphs.keys().next() {
+        let ds_id = match self.document.manifests.keys().next() {
             Some(id) => id.clone(),
             None => return ChunkRequestPlan { needed: Vec::new(), prefetch: Vec::new() },
         };
@@ -421,17 +421,17 @@ impl Scene {
         closest
     }
 
-    /// Rebuild derived state from the document's content graphs.
+    /// Rebuild derived state from the document's dataset manifests.
     /// Call this after deserializing a Scene (since derived is not serialized).
     pub fn rebuild_derived(&mut self) {
         self.derived.clear();
-        for (id, content) in &self.document.content_graphs {
+        for (id, manifest) in &self.document.manifests {
             let layout = resolve_layout(
-                content,
+                manifest,
                 self.document.registered_layouts.get(id),
                 self.document.active_layout_ids.get(id),
             );
-            self.derived.insert(id.clone(), build_derived_state(content, &layout));
+            self.derived.insert(id.clone(), build_derived_state(manifest, &layout));
         }
     }
 
@@ -439,7 +439,7 @@ impl Scene {
     /// from the current camera viewpoint.
     pub fn view_query(&self, dataset_id: &DatasetId) -> Option<ViewQueryResult> {
         let derived = self.derived.get(dataset_id)?;
-        let content = self.document.content_graphs.get(dataset_id)?;
+        let manifest = self.document.manifests.get(dataset_id)?;
         let vp = self.camera.viewport();
         let eye = self.camera.eye_position();
 
@@ -545,7 +545,7 @@ impl Scene {
             };
 
             // Determine entity kind
-            let kind = content
+            let kind = manifest
                 .entities()
                 .iter()
                 .find(|e| e.id == member.entity_id)
@@ -583,17 +583,17 @@ impl Scene {
 ///
 /// Search order:
 /// 1. If `active_id` is Some, search source_layouts then registered for matching ID
-/// 2. Otherwise use `content.default_layout_id` to search source_layouts
+/// 2. Otherwise use `manifest.default_layout_id` to search source_layouts
 /// 3. Fallback to first source layout
 /// 4. Fallback to empty LayoutSpec
 pub fn resolve_layout(
-    content: &ContentGraph,
+    manifest: &DatasetManifest,
     registered: Option<&Vec<LayoutSpec>>,
     active_id: Option<&LayoutId>,
 ) -> LayoutSpec {
     if let Some(id) = active_id {
         // Search source layouts first
-        if let Some(layout) = content.source_layouts().iter().find(|l| &l.id == id) {
+        if let Some(layout) = manifest.source_layouts().iter().find(|l| &l.id == id) {
             return layout.clone();
         }
         // Then registered layouts
@@ -604,10 +604,10 @@ pub fn resolve_layout(
         }
     }
 
-    // Fallback: use default_layout_id from content
-    content.default_layout_id.as_ref()
-        .and_then(|id| content.source_layouts().iter().find(|l| &l.id == id))
-        .or_else(|| content.source_layouts().first())
+    // Fallback: use default_layout_id from the manifest
+    manifest.default_layout_id.as_ref()
+        .and_then(|id| manifest.source_layouts().iter().find(|l| &l.id == id))
+        .or_else(|| manifest.source_layouts().first())
         .cloned()
         .unwrap_or_else(|| LayoutSpec {
             id: LayoutId("default".into()),
@@ -616,21 +616,21 @@ pub fn resolve_layout(
         })
 }
 
-/// Build derived state from a content graph and a resolved layout.
-pub fn build_derived_state(content: &ContentGraph, layout: &LayoutSpec) -> DatasetDerivedState {
+/// Build derived state from a dataset manifest and a resolved layout.
+pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> DatasetDerivedState {
     let active_layout = layout.clone();
 
     // Build per-image member state
     let mut members = Vec::new();
     let mut volume_transforms = HashMap::new();
 
-    for image in content.images() {
+    for image in manifest.images() {
         // Find position from layout placements
         let position = find_entity_position(
             &image.owner,
             &active_layout,
-            content.entities(),
-            content.transforms(),
+            manifest.entities(),
+            manifest.transforms(),
         );
 
         // Compute volume transform from level 0 geometry
@@ -712,18 +712,18 @@ fn find_entity_position(
     [0.0, 0.0]
 }
 
-/// Test helpers for constructing content graphs and register commands.
+/// Test helpers for constructing dataset manifests and DatasetOpened events.
 #[cfg(test)]
 pub(crate) mod test_helpers {
     use lucida_content::*;
     use lucida_protocol::*;
 
-    /// Create a RegisterDataset with a simple single-image content graph.
-    pub fn make_register_dataset(id: &str, name: &str, channels: u64) -> RegisterDataset {
+    /// Create a DatasetOpened with a simple single-image manifest.
+    pub fn make_dataset_opened(id: &str, name: &str, channels: u64) -> DatasetOpened {
         let entity_id = EntityId(format!("{id}-entity"));
         let image_id = ImageId(format!("{id}-image"));
 
-        let content = ContentGraph::new(
+        let manifest = DatasetManifest::new(
             DatasetId(id.to_string()),
             name.to_string(),
             DatasetKind::Single,
@@ -762,7 +762,7 @@ pub(crate) mod test_helpers {
             None,
         );
 
-        let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id,
                 wire_format: WireFormat::Raw {
@@ -771,18 +771,18 @@ pub(crate) mod test_helpers {
             }],
         });
 
-        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
     }
 
-    /// Create a RegisterDataset with specific shape and multiple levels.
-    pub fn make_register_dataset_with_shape(
+    /// Create a DatasetOpened with specific shape and multiple levels.
+    pub fn make_dataset_opened_with_shape(
         id: &str,
         name: &str,
         _channels: u64,
         shape: [u64; 5],
         chunk_shape: [u64; 5],
         num_levels: u32,
-    ) -> RegisterDataset {
+    ) -> DatasetOpened {
         let entity_id = EntityId(format!("{id}-entity"));
         let image_id = ImageId(format!("{id}-image"));
 
@@ -810,7 +810,7 @@ pub(crate) mod test_helpers {
             });
         }
 
-        let content = ContentGraph::new(
+        let manifest = DatasetManifest::new(
             DatasetId(id.to_string()),
             name.to_string(),
             DatasetKind::Single,
@@ -843,7 +843,7 @@ pub(crate) mod test_helpers {
             None,
         );
 
-        let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id,
                 wire_format: WireFormat::Raw {
@@ -852,17 +852,17 @@ pub(crate) mod test_helpers {
             }],
         });
 
-        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
     }
 
-    /// Create a RegisterDataset for a plate with multiple image members.
-    pub fn make_plate_register_dataset(
+    /// Create a DatasetOpened for a plate with multiple image members.
+    pub fn make_plate_dataset_opened(
         id: &str,
         name: &str,
         members: Vec<(&str, [f64; 2])>,
         image_shape: [u64; 5],
         chunk_shape: [u64; 5],
-    ) -> RegisterDataset {
+    ) -> DatasetOpened {
         use lucida_content::layout::EntityPlacement;
 
         let mut entities = Vec::new();
@@ -931,7 +931,7 @@ pub(crate) mod test_helpers {
             placements,
         };
 
-        let content = ContentGraph::new(
+        let manifest = DatasetManifest::new(
             DatasetId(id.to_string()),
             name.to_string(),
             DatasetKind::Plate {
@@ -947,11 +947,11 @@ pub(crate) mod test_helpers {
             Some(LayoutId("default".into())),
         );
 
-        let fetch = ClientFetchDescriptor::Proxied(ProxiedFetchDescriptor {
+        let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
             images: fetch_images,
         });
 
-        RegisterDataset { content, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
     }
 }
 
@@ -970,13 +970,13 @@ mod tests {
     #[test]
     fn registered_dataset_produces_chunks() {
         let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_register_dataset_with_shape(
+        let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1", "test", 1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let plan = scene.chunk_plan();
         assert!(!plan.needed.is_empty());
     }
@@ -984,13 +984,13 @@ mod tests {
     #[test]
     fn changing_slice_updates_chunk_coords() {
         let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_register_dataset_with_shape(
+        let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1", "test", 1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let plan_z0 = scene.chunk_plan();
         scene.view.set_slice("z", 100).unwrap();
@@ -1003,13 +1003,13 @@ mod tests {
     #[test]
     fn z_slab_produces_chunks_across_z() {
         let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_register_dataset_with_shape(
+        let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1", "test", 1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         scene.view.set_z_range(0..128);
         let plan = scene.chunk_plan();
         let z_values: Vec<u32> = plan.needed.iter().map(|c| c.z).collect();
@@ -1038,8 +1038,8 @@ mod tests {
         scene.view.t = 2;
         scene.view.c = 1;
 
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
         let json = serde_json::to_string(&scene).unwrap();
         let mut parsed: Scene = serde_json::from_str(&json).unwrap();
@@ -1049,8 +1049,8 @@ mod tests {
         assert_eq!(parsed.view.z_range, 5..6);
         assert_eq!(parsed.view.t, 2);
         assert_eq!(parsed.view.c, 1);
-        assert_eq!(parsed.document.content_graphs.len(), 1);
-        assert!(parsed.document.content_graphs.contains_key(&DatasetId("ds1".into())));
+        assert_eq!(parsed.document.manifests.len(), 1);
+        assert!(parsed.document.manifests.contains_key(&DatasetId("ds1".into())));
         if let Camera::Slice(v) = &parsed.camera {
             assert_eq!(v.viewport, [800, 600]);
         } else {
@@ -1059,10 +1059,10 @@ mod tests {
     }
 
     #[test]
-    fn register_dataset_populates_dataset_order_and_settings() {
+    fn dataset_opened_populates_dataset_order_and_settings() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "first", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "first", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
         assert_eq!(scene.dataset_order, vec![ds_id.clone()]);
         assert!(scene.dataset_settings.contains_key(&ds_id));
@@ -1074,10 +1074,10 @@ mod tests {
     #[test]
     fn remove_dataset_cleans_up_state() {
         let mut scene = Scene::new([800, 600]);
-        let reg1 = test_helpers::make_register_dataset("ds1", "first", 1);
-        let reg2 = test_helpers::make_register_dataset("ds2", "second", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg1).into());
-        scene.apply(DocumentCommand::RegisterDataset(reg2).into());
+        let reg1 = test_helpers::make_dataset_opened("ds1", "first", 1);
+        let reg2 = test_helpers::make_dataset_opened("ds2", "second", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg1).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg2).into());
         let ds1_id = DatasetId("ds1".into());
         let ds2_id = DatasetId("ds2".into());
         scene.remove_dataset(&ds1_id);
@@ -1091,8 +1091,8 @@ mod tests {
     fn scene_backward_compat_deserialization_without_settings() {
         // JSON without dataset_order/dataset_settings should deserialize with defaults
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         // Serialize, then strip optional fields
         let json = serde_json::to_string(&scene).unwrap();
         let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1104,40 +1104,40 @@ mod tests {
     }
 
     #[test]
-    fn register_dataset_deduplicates_by_id() {
+    fn dataset_opened_deduplicates_by_id() {
         let mut scene = Scene::new([800, 600]);
-        let reg1 = test_helpers::make_register_dataset("ds1", "first", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg1).into());
-        assert_eq!(scene.document.content_graphs.len(), 1);
-        let reg2 = test_helpers::make_register_dataset("ds1", "updated", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg2).into());
-        assert_eq!(scene.document.content_graphs.len(), 1);
-        assert_eq!(scene.document.content_graphs[&DatasetId("ds1".into())].name, "updated");
+        let reg1 = test_helpers::make_dataset_opened("ds1", "first", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg1).into());
+        assert_eq!(scene.document.manifests.len(), 1);
+        let reg2 = test_helpers::make_dataset_opened("ds1", "updated", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg2).into());
+        assert_eq!(scene.document.manifests.len(), 1);
+        assert_eq!(scene.document.manifests[&DatasetId("ds1".into())].name, "updated");
     }
 
     #[test]
     fn remove_dataset_by_id() {
         let mut scene = Scene::new([800, 600]);
-        let reg1 = test_helpers::make_register_dataset("ds1", "first", 1);
-        let reg2 = test_helpers::make_register_dataset("ds2", "second", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg1).into());
-        scene.apply(DocumentCommand::RegisterDataset(reg2).into());
-        assert_eq!(scene.document.content_graphs.len(), 2);
+        let reg1 = test_helpers::make_dataset_opened("ds1", "first", 1);
+        let reg2 = test_helpers::make_dataset_opened("ds2", "second", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg1).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg2).into());
+        assert_eq!(scene.document.manifests.len(), 2);
         scene.remove_dataset(&DatasetId("ds1".into()));
-        assert_eq!(scene.document.content_graphs.len(), 1);
-        assert!(scene.document.content_graphs.contains_key(&DatasetId("ds2".into())));
+        assert_eq!(scene.document.manifests.len(), 1);
+        assert!(scene.document.manifests.contains_key(&DatasetId("ds2".into())));
     }
 
     #[test]
     fn chunk_plan_for_returns_member_plans() {
         let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_register_dataset_with_shape(
+        let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1", "test", 1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
         let plans = scene.chunk_plan_for(&ds_id).unwrap();
         assert_eq!(plans.len(), 1);
@@ -1148,13 +1148,13 @@ mod tests {
     #[test]
     fn chunk_plan_for_single_member_matches_flat_plan() {
         let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_register_dataset_with_shape(
+        let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1", "test", 1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let flat = scene.chunk_plan();
         let ds_id = DatasetId("ds1".into());
         let member_plans = scene.chunk_plan_for(&ds_id).unwrap();
@@ -1178,7 +1178,7 @@ mod tests {
         // Two members side-by-side, each 256x256 in XY. Camera at origin
         // should see member at [0,0] but not the one at [10000, 0].
         let mut scene = Scene::new([512, 512]);
-        let reg = test_helpers::make_plate_register_dataset(
+        let reg = test_helpers::make_plate_dataset_opened(
             "plate", "plate",
             vec![
                 ("m1", [0.0, 0.0]),
@@ -1187,7 +1187,7 @@ mod tests {
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("plate".into());
         let plans = scene.chunk_plan_for(&ds_id).unwrap();
         // Only the member at origin should be visible
@@ -1199,8 +1199,8 @@ mod tests {
     #[test]
     fn ray_pick_single_image_center() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         // Ray through viewport center should hit the single image
         let hit = scene.ray_pick(&DatasetId::from("ds1"), 400.0, 300.0);
         assert!(hit.is_some());
@@ -1211,8 +1211,8 @@ mod tests {
     #[test]
     fn ray_pick_miss() {
         let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_register_dataset("ds1", "test", 1);
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         // Ray way off screen should miss
         let hit = scene.ray_pick(&DatasetId::from("ds1"), -10000.0, -10000.0);
         assert!(hit.is_none());
@@ -1232,7 +1232,7 @@ mod tests {
         if let Camera::Slice(ref mut v) = scene.camera {
             v.center = [256.0, 128.0];
         }
-        let reg = test_helpers::make_plate_register_dataset(
+        let reg = test_helpers::make_plate_dataset_opened(
             "plate", "plate",
             vec![
                 ("m1", [0.0, 0.0]),
@@ -1241,7 +1241,7 @@ mod tests {
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
-        scene.apply(DocumentCommand::RegisterDataset(reg).into());
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("plate".into());
         let plans = scene.chunk_plan_for(&ds_id).unwrap();
         let ids: Vec<&ImageId> = plans.iter().map(|p| &p.image_id).collect();

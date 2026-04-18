@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lucida_content::ImageId;
-use lucida_protocol::RegisterDataset;
+use lucida_protocol::DatasetOpened;
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::ServerBindingSeed;
 use object_store::ObjectStore;
@@ -12,9 +12,9 @@ use crate::proxy::{ProxyCache, ProxyGenerator};
 /// Operational storage binding. Owns live resources.
 /// Built from ServerBindingSeed + source URL + store + cache.
 ///
-/// `register_command` is retained so that subsequent opens of the same URL
+/// `dataset_opened` is retained so that subsequent opens of the same URL
 /// (which now resolve to the same DatasetId) can reuse the import work and
-/// rebroadcast the canonical RegisterDataset to the requesting client.
+/// rebroadcast the canonical DatasetOpened to the requesting client.
 ///
 /// `proxy_cache` and `proxy_generator` were added by S4 (PRD #397):
 /// each binding has its own per-dataset cache directory keyed by the URL
@@ -26,7 +26,7 @@ pub struct ServerBinding {
     pub store: Arc<dyn ObjectStore>,
     pub resolver: Arc<ChunkResolver>,
     pub cache: Arc<CachedStore>,
-    pub register_command: RegisterDataset,
+    pub dataset_opened: DatasetOpened,
     pub proxy_cache: Arc<ProxyCache>,
     pub proxy_generator: Arc<ProxyGenerator>,
 }
