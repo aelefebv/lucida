@@ -16,6 +16,15 @@ Both single Zarr and plate enter the same way:
 2. `useDatasets.handleUrlSubmit` calls `Bridge.sendOpenRemoteDataset(url)` → `lucida-web/src/bridge.ts:208-211` sends `{type:"open_remote_dataset", url}` over the WebSocket.
 3. The **server** is what determines whether this resolves to a `Single` or `Plate`. It probes the store (Zarr root vs HCS plate metadata), builds a `DatasetManifest`, picks a `FetchSource`, and broadcasts a `dataset_opened` event back to all clients.
 
+Wire shape of the broadcast (matches Rust `DocumentCommand::DatasetOpened(DatasetOpened)`, snake-cased by serde):
+
+```json
+{ "type": "dataset_opened",
+  "manifest": <DatasetManifest>,   // structural blueprint: entities, transforms, images, layouts
+  "fetch":    <FetchSource>,        // how to get bytes: { Proxied | Direct | Local }
+  "catalog":  <AssetCatalog> }      // proxy-availability seed (empty in S3, populated S5+)
+```
+
 The web client doesn't know in advance — it learns by inspecting `manifest.kind` on the returned event (`lucida-web/src/manifestTypes.ts`).
 
 ### 1b. Receiving `dataset_opened`
@@ -331,8 +340,8 @@ MAIN_VIEW_UPLOAD_BUDGET      = 16 MB / frame
 | Dataset opening (UI)     | `lucida-web/src/App.tsx`                   | `:497-510`                                               |
 | Bridge / WebSocket       | `lucida-web/src/bridge.ts`                 | `:208-211` open, `:140-158` binary routing               |
 | Pipeline setup           | `lucida-web/src/hooks/useBridge.ts`        | `:142-186` cmd handler, `:355-409` setupFetchPipeline    |
-| Manifest types           | `lucida-web/src/manifestTypes.ts`           | type definitions                                         |
-| Fetch source             | `lucida-web/src/pipeline/contentSource.ts` | per-image fetch promise tables                           |
+| Manifest types           | `lucida-web/src/manifestTypes.ts`          | TS mirrors of `DatasetManifest` / `FetchSource`          |
+| Content source (JS class)| `lucida-web/src/pipeline/contentSource.ts` | `ContentSource` class — per-image fetch promise tables; consumes a `FetchSource` |
 | Planning                 | `lucida-web/src/pipeline/planning.ts`      | `:461-615` promote, `:732-900` chunk enum, `:912-1100` plan |
 | Orchestrator             | `lucida-web/src/pipeline/orchestrator.ts`  | `:257-689` planAndFetch, `:869-934` upload, `:1041-1148` cold state |
 | CPU cache                | `lucida-web/src/pipeline/cpuCache.ts`      | `:306-369` submit, `:617-750` scheduler, `:759-850` eviction |
