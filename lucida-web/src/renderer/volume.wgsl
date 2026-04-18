@@ -80,6 +80,13 @@ struct EntityDescriptor {
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
 
+// Active entity descriptor for the current fragment, populated once at
+// the top of fs() and read by sampleWithFallback per ray sample. Reading
+// from <private> (register-promoted in practice) instead of the storage
+// buffer per sample recovers 3D FPS lost when descriptor data moved out
+// of the per-frame uniform.
+var<private> activeEntity: EntityDescriptor;
+
 struct VSOut {
   @builtin(position) pos: vec4f,
   @location(0) ndc: vec2f,
@@ -153,21 +160,20 @@ fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f)
 // per-entity descriptor; renderMode and targetLodIdx remain per-draw.
 fn sampleWithFallback(pos: vec3f) -> u32 {
   let renderMode = u.proxyParams.x;
-  let entity = entityDescriptors[currentEntity.index.x];
-  let fieldSlot = entity.fieldProxySlotIndex;
-  let wellSlot = entity.wellProxySlotIndex;
+  let fieldSlot = activeEntity.fieldProxySlotIndex;
+  let wellSlot = activeEntity.wellProxySlotIndex;
 
   // S8: well-as-proxy short-circuit. Skip indirection; one direct sample
   // from the well's proxy slot. This is the major FPS win at far zoom.
   if (renderMode == 1u) {
-    return sampleProxy(wellProxyTex, wellSlot, entity.wellProxyDims, pos);
+    return sampleProxy(wellProxyTex, wellSlot, activeEntity.wellProxyDims, pos);
   }
 
-  let numLods = entity.lodCount;
+  let numLods = activeEntity.lodCount;
   let targetIdx = u.lodParams.x;
 
   for (var i = targetIdx; i < numLods; i++) {
-    let lod = entity.lods[i];
+    let lod = activeEntity.lods[i];
     let levelDims = vec3f(f32(lod.levelDims.x), f32(lod.levelDims.y), f32(lod.levelDims.z));
     let chunkDims = lod.chunkDims;
     let gridDims = lod.gridDims;
@@ -224,11 +230,11 @@ fn sampleWithFallback(pos: vec3f) -> u32 {
   // well's own proxy at well-local coords.
   if (renderMode == 2u) {
     if (fieldSlot != 0xFFFFFFFFu) {
-      let v = sampleProxy(fieldProxyTex, fieldSlot, entity.fieldProxyDims, pos);
+      let v = sampleProxy(fieldProxyTex, fieldSlot, activeEntity.fieldProxyDims, pos);
       if (v != 0xFFFFFFFFu) { return v; }
     }
     if (wellSlot != 0xFFFFFFFFu) {
-      let v = sampleProxy(wellProxyTex, wellSlot, entity.wellProxyDims, pos);
+      let v = sampleProxy(wellProxyTex, wellSlot, activeEntity.wellProxyDims, pos);
       if (v != 0xFFFFFFFFu) { return v; }
     }
   }
@@ -243,7 +249,8 @@ struct FsOut {
 
 @fragment
 fn fs(input: VSOut) -> FsOut {
-  let entity = entityDescriptors[currentEntity.index.x];
+  activeEntity = entityDescriptors[currentEntity.index.x];
+  let entity = activeEntity;
 
   // Reconstruct ray in world space from NDC
   let clipNear = vec4f(input.ndc, -1.0, 1.0);
