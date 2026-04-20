@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-20
 ---
 
 # ContentSource (JS) vs FetchSource (wire)
@@ -11,7 +11,7 @@ modified: 2026-04-18
 
 Two distinct types share related-sounding names by design:
 
-- **`FetchSource`** (Rust, in [[lucida-protocol]]) — wire envelope describing how to fetch bytes. Currently `Proxied(ProxiedFetchDescriptor)`; reserved variants `Direct` and `Local`.
+- **`FetchSource`** (Rust, in [[lucida-protocol]]) — wire envelope describing how to fetch bytes. Currently `Proxied(ProxiedFetchDescriptor)`; reserved variants `Direct` and `Local`. The reserved `Local` variant is also why the open command is named `OpenRemoteDataset` (server-mediated) — it leaves room for a future `OpenLocalDataset` sibling for browser-side paths. See [[flows/dataset-opening]].
 - **`ContentSource`** (TypeScript, in `lucida-web/src/pipeline/contentSource.ts`) — in-browser fetch orchestrator. Wraps a `FetchSource` and exposes `registerImage(id, wireFormat)` and `fetch(req)` returning a binary frame promise.
 
 The split was clarified in commit `1718e9a`. The names hint at the relationship; the prefixes (`Content` vs `Fetch`) hint at the layer.

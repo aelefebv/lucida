@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-20
 ---
 
 # Flow: Dataset Opening
@@ -52,6 +52,12 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
 ## Idempotency
 
 A second `open_remote_dataset` for the same URL is **fast** — the server's URL-hash check finds the existing `ServerBinding` and rebroadcasts the canonical `DatasetOpened` without re-importing. The client may see a duplicate `command_broadcast`; `Scene::apply` for `DatasetOpened` re-applies but `dataset_settings.entry(...).or_insert_with(...)` preserves user-set channel settings.
+
+## Why "remote"?
+
+The wire command is named `open_remote_dataset` even though the URL can already point to a local-to-the-server path (`lucida-store/src/backend.rs::open` routes `/path/...` and `file://` to `LocalFileSystem`). "Remote" here means *remote-from-the-browser* — the browser cannot read bytes itself, so it always asks the server.
+
+The name is forward-looking: [[decisions/content-source-vs-fetch-source|FetchSource]] reserves a `Local` variant for a future browser-side path (OPFS, File System Access API, drag-drop) where bytes never traverse the server. If that lands, the sibling command would be `OpenLocalDataset`. Until then, every dataset goes through this flow regardless of where the bytes live.
 
 ## Related
 
