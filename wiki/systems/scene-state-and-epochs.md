@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-19
 ---
 
 # Scene State and Epochs
@@ -50,7 +50,7 @@ Three layers of "what is the scene right now":
 ## Invariants
 
 - **Epochs only increase.** Fresh `Scene` starts at zero; `Scene::apply` is the only writer.
-- **`Scene::apply` is the only mutation path.** Bypassing it (e.g. by mutating fields directly via field-public access) skips epoch bumps and derived-state rebuilds — invisible until the renderer goes stale.
+- **`Scene::apply` is the conventional mutation path.** Helpers like `Scene::register_dataset`, `remove_dataset`, and `ensure_channel` are also `pub fn (&mut self)` and can be called directly from anywhere in the workspace — but doing so bypasses `apply`'s epoch bumps and derived-state rebuilds, which is invisible until the renderer goes stale. The discipline is enforced by code review, not the type system.
 - **Derived state is a function of document state + active layout.** Always reconstructable; never serialized. The CLI takes a snapshot and calls `Scene::rebuild_derived` to recompute it locally.
 - **The same command applied twice produces the same Scene** when the command is idempotent. `ApplyAssetCatalogDelta` is the explicit case — repeated application of the same delta merges idempotently. `DatasetOpened` is not idempotent (it would bump epochs twice), and the server's reuse path catches the duplicate before re-applying.
 

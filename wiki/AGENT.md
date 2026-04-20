@@ -1,13 +1,13 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-19
 ---
 
 # AGENT.md — Lucida Repo Wiki
 
 This is a **code-repo wiki** capturing the *why and how it hangs together* layer of the Lucida codebase. The code itself is ground truth for *what* the system does — read it directly when you need exact behavior. This wiki earns its keep by capturing **intent, connective tissue, gotchas, invariants, and in-flight state** that aren't visible from the source alone.
 
-This wiki supersedes the repo's `ARCHITECTURE.md`, `GLOSSARY.md`, `DOMAINS.md`, and `CHUNK_PIPELINE.md` for navigational purposes. Those files remain in the repo root as authoritative narrative documents, but new connective tissue should land here.
+This wiki supersedes the repo's earlier root-level docs for navigational purposes. Of the originals, only `CHUNK_PIPELINE.md` still lives at the repo root as an authoritative narrative document; `ARCHITECTURE.md`, `GLOSSARY.md`, and `DOMAINS.md` no longer exist (referenced by `CLAUDE.md` but missing — see [[queue]]). New connective tissue should land in this wiki.
 
 ## Navigation order
 

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-19
 ---
 
 # Presence and Follow Mode
@@ -52,7 +52,7 @@ When a client disconnects, anyone following them is reset to `following: None` a
 
 ## Gotchas
 
-- **`is_document_command()` decides what's broadcast and persisted.** Misclassifying a viewport command as a document command floods peers with sequenced shared-state updates. See [[gotchas/document-vs-viewport-classification]].
+- **What's broadcast and persisted is decided at the JS call site** — `applyDocumentCommand` (sends + awaits Ack) vs `applyViewportCommand` (local + presence emit). There's no runtime predicate; the Rust enums (`DocumentCommand` vs `ViewportCommand`) gate it at compile time. Misclassifying a viewport command as a document command floods peers with sequenced shared-state updates. See [[gotchas/document-vs-viewport-classification]].
 - **Throttle defaults are tuned, not arbitrary.** Presence at ~50 ms keeps mouse-driven panning smooth. Dataset presence at ~200 ms accommodates UI sliders without flooding. Halving them hits the server's broadcast queue hard with many clients.
 - **Steer can only target a non-following client.** If the target is already following someone (even themselves indirectly), steer is rejected silently. The CLI's `--steer` flag inherits this constraint.
 - **Local follow state is broken by any viewport command** the user issues — the assumption being that explicitly moving is a clear "I want to drive again" signal. If a client wants to merge follow with manual nudges, that's not currently expressible.

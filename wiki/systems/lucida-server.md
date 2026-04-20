@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-19
 ---
 
 # lucida-server
@@ -12,7 +12,7 @@ Tokio + Axum WebSocket relay. Brokers multi-client sessions, sequences shared do
 Lucida is collaborative: many viewers can see the same dataset and follow each other. The server exists for two reasons:
 
 1. **Document-state arbitration.** Each `DocumentCommand` (e.g. `DatasetOpened`) gets a monotonically increasing `seq` and an `Ack` to the sender. New clients receive a `Snapshot` of the full document state on connect. This makes "what datasets are loaded" a single authoritative fact.
-2. **Storage proxy and chunk router.** Browsers can't realistically open arbitrary `gs://` / `s3://` Zarr stores directly with credentials. The server probes the store, builds a [[systems/dataset-manifest|DatasetManifest]], and on demand fetches/decodes chunks and forwards them as binary frames to the requesting client. The bytes the client sees are pre-decompressed (Lz4/Zstd → raw), keyed by `(dataset_id, image_id, chunk_key)`.
+2. **Storage proxy and chunk router.** Browsers can't realistically open arbitrary `gs://` / `s3://` Zarr stores directly with credentials. The server probes the store, builds a [[lucida-content|DatasetManifest]], and on demand fetches/decodes chunks and forwards them as binary frames to the requesting client. The bytes the client sees are pre-decompressed (Lz4/Zstd → raw), keyed by `(dataset_id, image_id, chunk_key)`.
 
 Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast through the same WebSocket but never sequenced or persisted. See [[decisions/document-vs-viewport-split]].
 

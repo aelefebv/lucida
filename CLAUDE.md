@@ -1,3 +1,3 @@
-Check the GLOSSARY.md for terminology help.
-Check the ARCHITECTURE.md for hints on what you may need to touch for edits.
-Also check DOMAINS.md
+Start with the repo wiki at `wiki/index.md` (or `wiki/AGENT.md` for navigation conventions). The wiki captures intent, invariants, and gotchas across the codebase.
+
+For the chunk pipeline deep-dive, see `CHUNK_PIPELINE.md`.

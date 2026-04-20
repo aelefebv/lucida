@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-19
 ---
 
 # Document vs Viewport Command Split
@@ -27,7 +27,7 @@ Three concrete consequences shape the design:
 ## Alternatives considered (inferred)
 
 - **One unified `Command` enum with a per-variant flag** for shared-vs-local. Rejected (probably) because the type system can't enforce the distinction — every server-side handler would need a runtime guard. The current split makes "is this shared?" a compile-time question.
-- **Server-side classification via a `is_document_command()` predicate**. Still exists for the wire path but is now just a sanity check — `ClientMessage::Command` carries `DocumentCommand` directly, not the unified enum, so the wire shape is unambiguous.
+- **Server-side classification via a runtime predicate** (an earlier design had an `is_document_command()` check). Removed: `ClientMessage::Command` carries `DocumentCommand` directly, not the unified enum, so the wire shape is unambiguous and no runtime guard is needed.
 
 ## How this decision shows up in code
 
