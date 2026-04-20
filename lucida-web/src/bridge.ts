@@ -1,4 +1,17 @@
+import { isDebugEnabled } from "./debug/logging.ts";
+
 export type ClientId = number;
+
+/**
+ * Gated debug logger for bridge events. Toggle via the DebugPanel "Logging"
+ * tab or `localStorage.setItem("debug", "bridge")`. See
+ * `wiki/decisions/logging-conventions.md`.
+ */
+export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsReadyState?: number) {
+  if (!isDebugEnabled("bridge")) return;
+  // eslint-disable-next-line no-console
+  console.log(`[bridge] ${event}`, { wsReadyState, ...data });
+}
 
 export interface PresenceState {
   client_id: ClientId;
@@ -207,6 +220,7 @@ export class Bridge {
 
   /** Send a request to open a remote dataset by URL. */
   sendOpenRemoteDataset(url: string) {
+    bridgeLog("open_remote_dataset.send", { url }, this.ws?.readyState);
     this.send(JSON.stringify({ type: "open_remote_dataset", url }));
   }
 

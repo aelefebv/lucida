@@ -229,7 +229,11 @@ pub async fn handle_client(
                             }
                         }
                         ClientMessage::OpenRemoteDataset { url } => {
-                            eprintln!("client {id}: opening remote dataset from {url}");
+                            tracing::info!(
+                                client_id = %id,
+                                url = %url,
+                                "open_remote_dataset.received"
+                            );
                             let session_clone = Arc::clone(&session);
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
@@ -433,6 +437,11 @@ fn blake3_url(url: &str) -> [u8; 32] {
 }
 
 /// Handle OpenRemoteDataset: open a StorageBackend, import dataset, broadcast DatasetOpened.
+#[tracing::instrument(
+    name = "dataset_open",
+    skip(session, tx, unicast_routes, proxy_config),
+    fields(url = %url, client_id = %client_id)
+)]
 async fn handle_open_remote_dataset(
     client_id: ClientId,
     url: String,
@@ -465,8 +474,9 @@ async fn handle_open_remote_dataset(
                 broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
                 ack_json: String::new(),
             });
-            eprintln!(
-                "server: reused existing binding for dataset {dataset_id} from {url}"
+            tracing::info!(
+                dataset_id = %dataset_id,
+                "open_remote_dataset.dedup_reuse"
             );
             return;
         }
@@ -476,6 +486,7 @@ async fn handle_open_remote_dataset(
     let store = match lucida_store::backend::open(&url) {
         Ok(s) => s,
         Err(e) => {
+            tracing::warn!(error = %e, "open_remote_dataset.backend_open_failed");
             send_open_failed(client_id, &url, &e.to_string(), &unicast_routes).await;
             return;
         }
@@ -493,6 +504,7 @@ async fn handle_open_remote_dataset(
     let result = match lucida_store::import::import_dataset(&store, &dataset_id, &name).await {
         Ok(r) => r,
         Err(e) => {
+            tracing::warn!(error = %e, "open_remote_dataset.import_failed");
             send_open_failed(client_id, &url, &e.to_string(), &unicast_routes).await;
             return;
         }
@@ -610,7 +622,10 @@ async fn handle_open_remote_dataset(
                 broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
                 ack_json: String::new(),
             });
-            eprintln!("server: lost import race for {dataset_id}, reused existing binding");
+            tracing::info!(
+                dataset_id = %dataset_id,
+                "open_remote_dataset.lost_race"
+            );
             return;
         }
         let seq = sess.apply(command.clone());
@@ -633,7 +648,11 @@ async fn handle_open_remote_dataset(
         ack_json: String::new(), // unused — no client will match
     });
 
-    eprintln!("server: opened remote dataset {dataset_id} from {url}");
+    tracing::info!(
+        dataset_id = %dataset_id,
+        seq,
+        "open_remote_dataset.broadcast_sent"
+    );
 
     // S5: kick off background generation for the initial (T=0, C=0) view
     // of every advertised entity at the lowest priority. Errors are logged
@@ -876,7 +895,12 @@ async fn send_open_failed(
     error: &str,
     unicast_routes: &UnicastRoutes,
 ) {
-    eprintln!("server: failed to open {url}: {error}");
+    tracing::warn!(
+        client_id = %client_id,
+        url = %url,
+        error = %error,
+        "open_remote_dataset.failed"
+    );
     let msg = ServerMessage::OpenDatasetFailed {
         url: url.to_string(),
         error: error.to_string(),

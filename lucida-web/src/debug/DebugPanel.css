@@ -17,10 +17,20 @@
   flex-direction: row;
   border-bottom: 1px solid #333;
   flex-shrink: 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.debug-tab-bar::-webkit-scrollbar {
+  height: 4px;
+}
+
+.debug-tab-bar::-webkit-scrollbar-thumb {
+  background: #444;
 }
 
 .debug-tab {
-  flex: 1;
+  flex: 0 0 auto;
   padding: 6px 8px;
   background: transparent;
   color: #888;
@@ -31,6 +41,7 @@
   text-transform: uppercase;
   letter-spacing: 0.5px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .debug-tab:hover {

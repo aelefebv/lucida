@@ -7,6 +7,7 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { debugStats, type DebugStats } from "./debugStats.ts";
+import { DEBUG_CATEGORIES, isDebugEnabled, setDebugEnabled, type DebugCategory } from "./logging.ts";
 import type { WasmScene } from "lucida-core";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
 import { plan } from "../pipeline/planning.ts";
@@ -53,7 +54,11 @@ function modeColor(mode: string): string {
   }
 }
 
-type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch" | "catalog";
+type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch" | "catalog" | "logging";
+
+const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
+  bridge: "WebSocket send/receive and dataset-open lifecycle",
+};
 
 interface CatalogSnap {
   assetEpoch: number;
@@ -378,7 +383,14 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "cache", label: "Cache" },
     { id: "orch", label: "Orch" },
     { id: "catalog", label: "Catalog" },
+    { id: "logging", label: "Logging" },
   ];
+
+  const [loggingTick, setLoggingTick] = useState(0);
+  const toggleCategory = (cat: DebugCategory) => {
+    setDebugEnabled(cat, !isDebugEnabled(cat));
+    setLoggingTick(t => t + 1);
+  };
 
   return (
     <div className="debug-panel" style={style}>
@@ -1026,6 +1038,46 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 </div>
               </div>
             )}
+          </>
+        )}
+
+        {activeTab === "logging" && (
+          <>
+            <div className="debug-section" key={loggingTick}>
+              <div className="debug-title">Categories</div>
+              <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
+                Toggles persist in localStorage.debug. Most events fire after the
+                page boots; for startup events, enable then reload.
+              </div>
+              {DEBUG_CATEGORIES.map(cat => {
+                const on = isDebugEnabled(cat);
+                return (
+                  <label
+                    key={cat}
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      padding: "4px 0",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => toggleCategory(cat)}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div>
+                      <div style={{ fontFamily: "monospace" }}>{cat}</div>
+                      <div style={{ color: "#888", fontSize: "0.75rem" }}>
+                        {LOGGING_CATEGORY_DESCRIPTIONS[cat]}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
           </>
         )}
       </div>

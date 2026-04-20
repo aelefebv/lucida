@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
-import { Bridge, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
+import { Bridge, bridgeLog, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import type { DatasetManifest, FetchSource } from "../manifestTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
@@ -154,6 +154,18 @@ export function useBridge({
           bumpSettingsGeneration();
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "dataset_opened") {
+            const fetchVariant = typeof cmd.fetch === "string"
+              ? cmd.fetch
+              : Object.keys(cmd.fetch ?? {})[0] ?? "unknown";
+            const kind = typeof cmd.manifest?.kind === "string"
+              ? cmd.manifest.kind
+              : Object.keys(cmd.manifest?.kind ?? {})[0] ?? "unknown";
+            bridgeLog("open_remote_dataset.received", {
+              datasetId: cmd.manifest?.dataset_id,
+              kind,
+              fetchVariant,
+              nImages: cmd.manifest?.images?.length ?? 0,
+            });
             sessionRef.current?.setScene(scene);
             if (!datasetsRef.current.has(cmd.manifest.dataset_id)) {
               setupFetchPipeline(cmd.manifest as DatasetManifest, cmd.fetch as FetchSource);
@@ -182,6 +194,10 @@ export function useBridge({
             }
 
             setRemoteDatasetLoading(false);
+            bridgeLog("open_remote_dataset.loading_clear", {
+              datasetId: cmd.manifest?.dataset_id,
+              reason: "success",
+            });
             setWasmScene(scene);
           }
           if (cmd.type === "remove_dataset") {
@@ -331,7 +347,8 @@ export function useBridge({
           }
         }
       },
-      onOpenDatasetFailed: (_url, error) => {
+      onOpenDatasetFailed: (url, error) => {
+        bridgeLog("open_remote_dataset.failed", { url, error });
         setRemoteDatasetLoading(false);
         setRemoteDatasetError(error);
       },
@@ -429,6 +446,7 @@ export function useBridge({
   }, []);
 
   const sendOpenRemoteDataset = useCallback((url: string) => {
+    bridgeLog("open_remote_dataset.loading_start", { url });
     setRemoteDatasetLoading(true);
     setRemoteDatasetError(null);
     sessionRef.current?.bridge.sendOpenRemoteDataset(url);
