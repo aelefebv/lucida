@@ -7,7 +7,16 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { debugStats, type DebugStats } from "./debugStats.ts";
-import { DEBUG_CATEGORIES, isDebugEnabled, setDebugEnabled, type DebugCategory } from "./logging.ts";
+import {
+  DEBUG_CATEGORIES,
+  isDebugEnabled,
+  setDebugEnabled,
+  type DebugCategory,
+  DEBUG_OVERLAYS,
+  isOverlayEnabled,
+  setOverlayEnabled,
+  type DebugOverlay,
+} from "./logging.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import type { DatasetState } from "../types.ts";
@@ -51,6 +60,11 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   bridge: "WebSocket send/receive and dataset-open lifecycle",
   wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
   render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
+};
+
+const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
+  wellModes: "Per-well badge over the canvas: promotion mode (WP/FP/FD) + target LOD. Slice mode only.",
+  chunkGrid: "LOD chunk grid for the focal entity, color-coded by status (cached / in-flight / planned). Slice mode only.",
 };
 
 interface CatalogSnap {
@@ -497,6 +511,10 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
   const [loggingTick, setLoggingTick] = useState(0);
   const toggleCategory = (cat: DebugCategory) => {
     setDebugEnabled(cat, !isDebugEnabled(cat));
+    setLoggingTick(t => t + 1);
+  };
+  const toggleOverlay = (name: DebugOverlay) => {
+    setOverlayEnabled(name, !isOverlayEnabled(name));
     setLoggingTick(t => t + 1);
   };
 
@@ -1141,7 +1159,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
 
         {activeTab === "logging" && (
           <>
-            <div className="debug-section" key={loggingTick}>
+            <div className="debug-section" key={`cats-${loggingTick}`}>
               <div className="debug-title">Categories</div>
               <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
                 Toggles persist in localStorage.debug. Most events fire after the
@@ -1170,6 +1188,40 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       <div style={{ fontFamily: "monospace" }}>{cat}</div>
                       <div style={{ color: "#888", fontSize: "0.75rem" }}>
                         {LOGGING_CATEGORY_DESCRIPTIONS[cat]}
+                      </div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+            <div className="debug-section" key={`ovs-${loggingTick}`}>
+              <div className="debug-title">Overlays</div>
+              <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
+                Visual layers drawn over the canvas. Slice mode only.
+              </div>
+              {DEBUG_OVERLAYS.map(name => {
+                const on = isOverlayEnabled(name);
+                return (
+                  <label
+                    key={name}
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      padding: "4px 0",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      onChange={() => toggleOverlay(name)}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div>
+                      <div style={{ fontFamily: "monospace" }}>{name}</div>
+                      <div style={{ color: "#888", fontSize: "0.75rem" }}>
+                        {OVERLAY_DESCRIPTIONS[name]}
                       </div>
                     </div>
                   </label>

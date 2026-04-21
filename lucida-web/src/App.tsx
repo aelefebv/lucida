@@ -10,6 +10,7 @@ import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
+import { DebugOverlays } from "./debug/DebugOverlays.tsx";
 import { debugStats } from "./debug/debugStats.ts";
 import type { VolumeData } from "./types.ts";
 import type { DatasetState } from "./types.ts";
@@ -457,6 +458,14 @@ function App() {
             {render.clientReady && render.clientRef.current && (
               <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
             )}
+            <DebugOverlays
+              wasmSceneRef={scene.wasmSceneRef}
+              canvasRef={render.canvasRef}
+              datasets={datasetsRef.current}
+              renderLoopRef={render.loopRef}
+              cpuCache={bridge.sessionRef.current?.cpuCache ?? null}
+              viewMode={dims.viewMode}
+            />
             <FpsCounter />
             <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
           </div>

@@ -67,3 +67,51 @@ export function debugLog(category: DebugCategory, event: string, data: Record<st
   // eslint-disable-next-line no-console
   console.log(`[${category}] ${event}`, data);
 }
+
+// ---------------------------------------------------------------------------
+// Overlay toggles (separate registry from log categories)
+// ---------------------------------------------------------------------------
+//
+// Overlays are visual debug layers drawn over the canvas, not log channels.
+// Kept parallel to the category system on purpose: same shape (toggle +
+// listener), different semantics (no console output, no WASM push-down,
+// no `*` shorthand).
+
+export const DEBUG_OVERLAYS = ["wellModes", "chunkGrid"] as const;
+export type DebugOverlay = (typeof DEBUG_OVERLAYS)[number];
+
+const OVERLAY_LS_KEY = "debug.overlays";
+
+function readOverlays(): Set<string> {
+  if (typeof localStorage === "undefined") return new Set();
+  const raw = localStorage.getItem(OVERLAY_LS_KEY);
+  if (!raw) return new Set();
+  return new Set(raw.split(",").map(s => s.trim()).filter(Boolean));
+}
+
+export function isOverlayEnabled(name: DebugOverlay): boolean {
+  return readOverlays().has(name);
+}
+
+export function setOverlayEnabled(name: DebugOverlay, enabled: boolean): void {
+  if (typeof localStorage === "undefined") return;
+  const current = readOverlays();
+  if (enabled) current.add(name);
+  else current.delete(name);
+  if (current.size === 0) {
+    localStorage.removeItem(OVERLAY_LS_KEY);
+  } else {
+    localStorage.setItem(OVERLAY_LS_KEY, Array.from(current).join(","));
+  }
+  for (const fn of overlayListeners) fn();
+}
+
+const overlayListeners = new Set<() => void>();
+
+/** Subscribe to overlay-toggle changes. Returns an unsubscribe function. */
+export function onOverlaysChanged(fn: () => void): () => void {
+  overlayListeners.add(fn);
+  return () => {
+    overlayListeners.delete(fn);
+  };
+}
