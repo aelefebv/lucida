@@ -450,7 +450,11 @@ export function useBridge({
     }
     const t4 = performance.now();
 
-    loopRef.current?.addDataset(datasetId, manifest);
+    if (loopRef.current) {
+      loopRef.current.addDataset(datasetId, manifest);
+    } else {
+      bridgeLog("setup_fetch_pipeline.loop_not_ready", { datasetId });
+    }
     const t5 = performance.now();
 
     const coarsestLevel = firstImage?.multiscale.levels[firstImage.multiscale.levels.length - 1];
