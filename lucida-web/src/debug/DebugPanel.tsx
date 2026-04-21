@@ -58,6 +58,7 @@ type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch" | "cata
 
 const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   bridge: "WebSocket send/receive and dataset-open lifecycle",
+  wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
 };
 
 interface CatalogSnap {

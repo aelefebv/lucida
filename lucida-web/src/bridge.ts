@@ -9,8 +9,9 @@ export type ClientId = number;
  */
 export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsReadyState?: number) {
   if (!isDebugEnabled("bridge")) return;
+  const payload = wsReadyState !== undefined ? { wsReadyState, ...data } : data;
   // eslint-disable-next-line no-console
-  console.log(`[bridge] ${event}`, { wsReadyState, ...data });
+  console.log(`[bridge] ${event}`, payload);
 }
 
 export interface PresenceState {
@@ -76,7 +77,7 @@ export class Bridge {
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
-      console.log("[Bridge] connected");
+      bridgeLog("ws.connected", { url: this.url }, ws.readyState);
     };
 
     ws.onmessage = (event) => {
@@ -133,7 +134,9 @@ export class Bridge {
             break;
         }
       } catch (e) {
-        console.warn("[Bridge] failed to parse message:", e);
+        bridgeLog("ws.bad_message", {
+          error: e instanceof Error ? e.message : String(e),
+        }, ws.readyState);
       }
     };
 

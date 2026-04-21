@@ -168,10 +168,22 @@ impl Scene {
                             self.document.active_layout_ids.get(&dataset_id),
                         );
                         let derived = crate::scene::build_derived_state(&event.manifest, &layout);
-                        self.derived.insert(dataset_id, derived);
+                        self.derived.insert(dataset_id.clone(), derived);
 
                         self.epochs.content += 1;
                         self.epochs.layout += 1;
+
+                        crate::wasm_log!("scene.dataset_opened.applied", {
+                            "dataset_id": dataset_id.0,
+                            "n_entities": event.manifest.entities().len(),
+                            "n_images": event.manifest.images().len(),
+                            "channel_count": channel_count,
+                            "kind": format!("{:?}", event.manifest.kind),
+                            "epochs": {
+                                "content": self.epochs.content,
+                                "layout": self.epochs.layout,
+                            },
+                        });
                     }
                     DocumentCommand::RemoveDataset { id } => {
                         self.dataset_order.retain(|s| s != id);

@@ -102,6 +102,10 @@ async fn main() -> std::io::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "lucida_server=info".parse().unwrap()),
         )
+        // Emit a span-close event with elapsed time for every
+        // #[tracing::instrument]-wrapped function. See
+        // wiki/decisions/logging-conventions.md.
+        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
         .init();
 
     let cli = Cli::parse();

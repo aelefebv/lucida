@@ -4,7 +4,7 @@
  * all). See `wiki/decisions/logging-conventions.md`.
  */
 
-export const DEBUG_CATEGORIES = ["bridge"] as const;
+export const DEBUG_CATEGORIES = ["bridge", "wasm"] as const;
 export type DebugCategory = (typeof DEBUG_CATEGORIES)[number];
 
 function readEnabled(): Set<string> {
@@ -29,9 +29,30 @@ export function setDebugEnabled(category: DebugCategory, enabled: boolean): void
   } else {
     localStorage.setItem("debug", Array.from(current).join(","));
   }
+  notifyListeners();
 }
 
 export function getEnabledCategories(): DebugCategory[] {
   const enabled = readEnabled();
   return DEBUG_CATEGORIES.filter(c => enabled.has(c));
+}
+
+type ChangeListener = (enabled: DebugCategory[]) => void;
+const listeners = new Set<ChangeListener>();
+
+/**
+ * Subscribe to category-change events. Used by consumers (like the WASM
+ * module) that hold their own copy of the enabled set and need to be
+ * pushed to when JS toggles a category.
+ */
+export function onDebugCategoriesChanged(fn: ChangeListener): () => void {
+  listeners.add(fn);
+  return () => {
+    listeners.delete(fn);
+  };
+}
+
+function notifyListeners(): void {
+  const enabled = getEnabledCategories();
+  for (const fn of listeners) fn(enabled);
 }

@@ -12,6 +12,15 @@ pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
     crate::chunk::chunk_key(level, t, c, z, y, x)
 }
 
+/// Push the JS-side enabled-category set into the WASM logger. Pass a
+/// comma-separated list (matches `localStorage.debug` format). Empty
+/// string disables all WASM logging.
+#[wasm_bindgen]
+pub fn set_debug_categories(csv: &str) {
+    let cats: Vec<&str> = csv.split(',').filter(|s| !s.is_empty()).collect();
+    crate::wasm_log::set_categories(&cats);
+}
+
 #[wasm_bindgen]
 pub struct WasmScene {
     inner: Scene,

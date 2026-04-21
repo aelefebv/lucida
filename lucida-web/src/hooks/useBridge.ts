@@ -63,6 +63,10 @@ export function useBridge({
   followTargetRef.current = followTarget;
   const [remoteDatasetLoading, setRemoteDatasetLoading] = useState(false);
   const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
+  // Last open_remote_dataset.send timestamp (performance.now() ms). Used
+  // to derive a round-trip on receipt. Approximate when concurrent opens
+  // are in flight — overwritten by each send.
+  const lastOpenSendTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!wasmReady || sessionRef.current) return;
@@ -160,15 +164,24 @@ export function useBridge({
             const kind = typeof cmd.manifest?.kind === "string"
               ? cmd.manifest.kind
               : Object.keys(cmd.manifest?.kind ?? {})[0] ?? "unknown";
+            const sendTime = lastOpenSendTimeRef.current;
+            const roundTripMs = sendTime !== null
+              ? +(performance.now() - sendTime).toFixed(1)
+              : null;
+            lastOpenSendTimeRef.current = null;
             bridgeLog("open_remote_dataset.received", {
               datasetId: cmd.manifest?.dataset_id,
               kind,
               fetchVariant,
               nImages: cmd.manifest?.images?.length ?? 0,
+              roundTripMs,
             });
             sessionRef.current?.setScene(scene);
-            if (!datasetsRef.current.has(cmd.manifest.dataset_id)) {
+            const datasetId = cmd.manifest.dataset_id;
+            if (!datasetsRef.current.has(datasetId)) {
               setupFetchPipeline(cmd.manifest as DatasetManifest, cmd.fetch as FetchSource);
+            } else {
+              bridgeLog("setup_fetch_pipeline.skipped_existing", { datasetId });
             }
             // Mirror the initial catalog into the JS-side AssetCatalog so
             // Planning's snapshot view stays consistent with WASM. Empty
@@ -222,7 +235,16 @@ export function useBridge({
           }
           bumpRemoteDocumentVersion();
         } catch (e) {
-          console.warn("[Bridge] bad command:", e);
+          let cmdType: string | undefined;
+          try {
+            cmdType = JSON.parse(commandJson)?.type;
+          } catch {
+            // commandJson itself wasn't valid JSON — fall through with undefined
+          }
+          bridgeLog("apply_command.failed", {
+            commandType: cmdType,
+            error: e instanceof Error ? e.message : String(e),
+          });
         }
       },
       onAck: (_seq) => {},
@@ -371,12 +393,33 @@ export function useBridge({
 
   function setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource) {
     const datasetId = manifest.dataset_id;
+    const firstImage = manifest.images[0];
+    const channelCount = firstImage?.multiscale.levels[0]?.shape[1] ?? 1; // [T, C, Z, Y, X]
+    const fetchVariant = Object.keys(fetchDesc as object)[0] ?? "unknown";
 
+    bridgeLog("setup_fetch_pipeline.start", {
+      datasetId,
+      kind: typeof manifest.kind === "string" ? manifest.kind : Object.keys(manifest.kind ?? {})[0] ?? "unknown",
+      fetchVariant,
+      nImages: manifest.images.length,
+      channelCount,
+    });
+
+    const t0 = performance.now();
+
+    let registeredImages = 0;
     if ("Proxied" in fetchDesc) {
       for (const spec of fetchDesc.Proxied.images) {
         sessionRef.current!.contentSource.registerImage(spec.image_id, spec.wire_format);
+        registeredImages++;
       }
+    } else {
+      bridgeLog("setup_fetch_pipeline.fetch_variant_unsupported", {
+        datasetId,
+        fetchVariant,
+      });
     }
+    const t1 = performance.now();
 
     datasetsRef.current.set(datasetId, {
       id: datasetId,
@@ -384,14 +427,14 @@ export function useBridge({
       manifest,
       fetch: fetchDesc,
     });
+    const t2 = performance.now();
 
     initLayerMaps(datasetId);
+    const t3 = performance.now();
 
     // Ensure per-channel settings exist for all channels.
     // DatasetOpened may only create 1 channel setting (layers.len() = 1),
     // but the real channel count is in the data shape.
-    const firstImage = manifest.images[0];
-    const channelCount = firstImage?.multiscale.levels[0]?.shape[1] ?? 1; // [T, C, Z, Y, X]
     if (channelCount > 1) {
       const scene = wasmSceneRef.current;
       if (scene) {
@@ -405,10 +448,13 @@ export function useBridge({
         bumpSettingsGeneration();
       }
     }
+    const t4 = performance.now();
 
     loopRef.current?.addDataset(datasetId, manifest);
+    const t5 = performance.now();
 
     const coarsestLevel = firstImage?.multiscale.levels[firstImage.multiscale.levels.length - 1];
+    let hasCoarsestBuffer = false;
     if (coarsestLevel) {
       const [, , depth, height, width] = coarsestLevel.shape;
       setVolumeMap(prev => {
@@ -416,13 +462,31 @@ export function useBridge({
         next.set(datasetId, { data: new Uint16Array(width * height * depth), width, height, depth });
         return next;
       });
+      hasCoarsestBuffer = true;
     }
+    const t6 = performance.now();
 
     if (datasetsRef.current.size === 1) {
       setSelectedDatasetId(datasetId);
     }
 
     bumpDatasetsVersion();
+
+    bridgeLog("setup_fetch_pipeline.complete", {
+      datasetId,
+      registeredImages,
+      channelCount,
+      hasCoarsestBuffer,
+      totalMs: +(t6 - t0).toFixed(1),
+      stepsMs: {
+        registerImages: +(t1 - t0).toFixed(2),
+        datasetsRefSet: +(t2 - t1).toFixed(2),
+        initLayerMaps: +(t3 - t2).toFixed(2),
+        setChannelVisible: +(t4 - t3).toFixed(2),
+        addDataset: +(t5 - t4).toFixed(2),
+        preallocBuffer: +(t6 - t5).toFixed(2),
+      },
+    });
   }
 
   const sendCommand = useCallback((json: string) => {
@@ -446,6 +510,7 @@ export function useBridge({
   }, []);
 
   const sendOpenRemoteDataset = useCallback((url: string) => {
+    lastOpenSendTimeRef.current = performance.now();
     bridgeLog("open_remote_dataset.loading_start", { url });
     setRemoteDatasetLoading(true);
     setRemoteDatasetError(null);

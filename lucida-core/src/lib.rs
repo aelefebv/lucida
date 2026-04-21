@@ -10,6 +10,7 @@ pub mod ray;
 pub mod scene;
 pub mod transform;
 pub mod view;
+pub mod wasm_log;
 
 pub use epoch::SceneEpochs;
 pub use lucida_content::{DatasetId, DatasetManifest, EntityId, ImageId};
