@@ -72,13 +72,36 @@ interface ChunkRect {
   w: number;
   h: number;
   status: "cached" | "in-flight" | "planned";
+  /**
+   * For `status === "planned"`: zero-based rank in the pending fetch
+   * queue (0 = next to fetch). `undefined` means "in plan but not in
+   * the pending queue we sampled" — the chunk was deduped, dropped, or
+   * sampled between dequeue and fetch start. Useful debug signal: a
+   * gray cell where you'd expect a hot-orange one says "planning
+   * thinks this should fetch, scheduler doesn't have it queued."
+   */
+  priorityRank?: number;
 }
 
-const STATUS_COLOR: Record<ChunkRect["status"], string> = {
+const STATUS_COLOR: Record<"cached" | "in-flight", string> = {
   cached: "rgba(80, 220, 120, 0.30)",
   "in-flight": "rgba(240, 200, 70, 0.35)",
-  planned: "rgba(240, 90, 90, 0.30)",
 };
+
+/**
+ * Color for a planned chunk based on its position in the pending fetch
+ * queue. Rank 0 = next-to-fetch (bright orange); higher = colder.
+ * Discrete bands (rather than smooth interpolation) keep the visual
+ * easy to read at a glance: orange = imminent, red = soon, dim red =
+ * way back.
+ */
+function plannedColor(rank: number | undefined): string {
+  if (rank === undefined) return "rgba(140, 140, 140, 0.20)";
+  if (rank < 5) return "rgba(255, 180, 60, 0.50)";
+  if (rank < 20) return "rgba(245, 110, 70, 0.40)";
+  if (rank < 60) return "rgba(220, 70, 70, 0.32)";
+  return "rgba(160, 40, 40, 0.24)";
+}
 
 /**
  * Per-field projection frame. `model === null` means 2D (slice mode):
@@ -349,6 +372,22 @@ export function DebugOverlays({
         const t = ws.t();
         const c = ws.c();
         const snap = cpuCache.snapshot();
+        // Rank lookup for "planned" color gradient. Built once per
+        // tick: pending queue is in priority order, so array index ==
+        // rank. Key matches CpuCache's inFlightKey: `${entityId}/${chunkKey}`.
+        const pending = cpuCache.getPendingSnapshot();
+        const rankByKey = new Map<string, number>();
+        for (let i = 0; i < pending.length; i++) {
+          const r = pending[i];
+          rankByKey.set(`${r.entityId}/${r.chunkKey}`, i);
+        }
+        // Same idea for proxies, used by the WP-well rendering path.
+        const pendingProxies = cpuCache.getPendingProxySnapshot();
+        const proxyRankByKey = new Map<string, number>();
+        for (let i = 0; i < pendingProxies.length; i++) {
+          const r = pendingProxies[i];
+          proxyRankByKey.set(`${r.datasetId}|${r.entityId}|${r.kind}|${r.t}|${r.c}`, i);
+        }
 
         outer: for (const [dsId, plan] of plans) {
           if (out.length >= MAX_CHUNK_RECTS) break;
@@ -395,8 +434,14 @@ export function DebugOverlays({
               const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "WellProxy3D", t, c);
               const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "WellProxy3D", t, c);
               let status: ChunkRect["status"] = "planned";
-              if (cached) status = "cached";
-              else if (inFlight) status = "in-flight";
+              let priorityRank: number | undefined;
+              if (cached) {
+                status = "cached";
+              } else if (inFlight) {
+                status = "in-flight";
+              } else {
+                priorityRank = proxyRankByKey.get(`${dsId}|${entry.entityId}|WellProxy3D|${t}|${c}`);
+              }
 
               // Union of constituent fields' world AABBs gives the
               // well's world AABB in either mode (in 3D each field has
@@ -450,6 +495,7 @@ export function DebugOverlays({
                 w: sxMax - sxMin,
                 h: syMax - syMin,
                 status,
+                priorityRank,
               });
               continue;
             }
@@ -526,8 +572,14 @@ export function DebugOverlays({
                     continue;
                   }
                   let status: ChunkRect["status"] = "planned";
-                  if (cachedSet?.has(key)) status = "cached";
-                  else if (inFlightSet?.has(key)) status = "in-flight";
+                  let priorityRank: number | undefined;
+                  if (cachedSet?.has(key)) {
+                    status = "cached";
+                  } else if (inFlightSet?.has(key)) {
+                    status = "in-flight";
+                  } else {
+                    priorityRank = rankByKey.get(`${entry.entityId}/${key}`);
+                  }
                   out.push({
                     key: `${dsId}/${entry.entityId}/${key}`,
                     x: rect.x,
@@ -535,6 +587,7 @@ export function DebugOverlays({
                     w: rect.w,
                     h: rect.h,
                     status,
+                    priorityRank,
                   });
                 }
               }
@@ -576,10 +629,17 @@ export function DebugOverlays({
             top: c.y,
             width: c.w,
             height: c.h,
-            background: STATUS_COLOR[c.status],
+            background: c.status === "planned"
+              ? plannedColor(c.priorityRank)
+              : STATUS_COLOR[c.status],
             border: "1px solid rgba(255, 255, 255, 0.22)",
             boxSizing: "border-box",
           }}
+          title={c.status === "planned" && c.priorityRank !== undefined
+            ? `planned · queue rank ${c.priorityRank}`
+            : c.status === "planned"
+              ? "planned · not in pending queue"
+              : c.status}
         />
       ))}
       {enabled.wellModes && badges.map(b => (

@@ -60,6 +60,7 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   bridge: "WebSocket send/receive and dataset-open lifecycle",
   wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
   render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
+  cache: "CPU cache backpressure, failure bursts, eviction bursts",
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
@@ -133,6 +134,61 @@ function fmtBytes(bytes: number): string {
 function shortId(id: string, max = 16): string {
   if (id.length <= max) return id;
   return "..." + id.slice(-(max - 3));
+}
+
+/** Dump CPU cache contents to the console, grouped by entity → cache → tier. */
+function dumpCache(cache: import("../pipeline/cpuCache.ts").CpuCache | undefined | null): void {
+  if (!cache) {
+    console.warn("[DebugPanel] cpuCache not available");
+    return;
+  }
+  const entries = cache.getCacheDump();
+  const proxies = cache.getProxyCacheDump();
+  console.group(`[DebugPanel] cpuCache contents (${entries.length} chunks, ${proxies.length} proxies)`);
+  // Group chunks by entity, then dump as a single table per entity for
+  // easy scanning. console.table at the entity level keeps output dense.
+  const byEntity = new Map<string, typeof entries>();
+  for (const e of entries) {
+    let arr = byEntity.get(e.entityId);
+    if (!arr) { arr = []; byEntity.set(e.entityId, arr); }
+    arr.push(e);
+  }
+  for (const [entityId, arr] of byEntity) {
+    arr.sort((a, b) => a.level - b.level || a.chunkKey.localeCompare(b.chunkKey));
+    console.groupCollapsed(`${entityId}: ${arr.length} chunks`);
+    console.table(arr.map(e => ({
+      chunkKey: e.chunkKey,
+      cache: e.cache,
+      level: e.level,
+      tier: e.tier,
+      bytes: e.bytes,
+    })));
+    console.groupEnd();
+  }
+  if (proxies.length > 0) {
+    console.groupCollapsed(`proxies: ${proxies.length}`);
+    console.table(proxies);
+    console.groupEnd();
+  }
+  console.groupEnd();
+}
+
+/** Dump pending CPU-cache requests to the console, sorted by priority. */
+function dumpPending(cache: import("../pipeline/cpuCache.ts").CpuCache | undefined | null): void {
+  if (!cache) {
+    console.warn("[DebugPanel] cpuCache not available");
+    return;
+  }
+  const pending = cache.getPendingDump();
+  console.group(`[DebugPanel] pending cpuCache queue (${pending.length} entries)`);
+  console.table(pending.map(p => ({
+    chunkKey: p.chunkKey,
+    entityId: p.entityId,
+    lane: p.lane,
+    priority: p.priority,
+    ageMs: Math.round(p.ageMs),
+  })));
+  console.groupEnd();
 }
 
 /** Body of the Planning tab — split out so the inline JSX stays readable. */
@@ -769,11 +825,64 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   })()}
                 </div>
 
+                {/* Dump buttons */}
+                <div className="debug-section">
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button onClick={() => dumpCache(sessionRef?.current?.cpuCache)}>
+                      Dump cache → console
+                    </button>
+                    <button onClick={() => dumpPending(sessionRef?.current?.cpuCache)}>
+                      Dump pending → console
+                    </button>
+                  </div>
+                </div>
+
+                {/* Tier residency */}
+                <div className="debug-section">
+                  <div className="debug-title">Residency by tier</div>
+                  <div className="debug-member-list">
+                    {(["activeDetail", "demotedDetail", "prefetch", "overview", "proxy"] as const).map(t => {
+                      const r = cacheTelemetry.tierResidency[t];
+                      const evicted = cacheTelemetry.evictionsByTier[t];
+                      return (
+                        <div key={t} className="debug-member-row">
+                          <span className="debug-member-id">{t}</span>
+                          <span>{r.count}</span>
+                          <span>{fmtBytes(r.bytes)}</span>
+                          {evicted > 0 && (
+                            <span style={{ color: "#fb4" }} title="evicted in last window">
+                              -{evicted}
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
                 {/* Fetch */}
                 <div className="debug-section">
                   <div className="debug-title">Fetch</div>
                   <div>In-flight: {cacheTelemetry.inFlightCount} reqs, {fmtBytes(cacheTelemetry.inFlightBytes)}</div>
-                  <div>Queue: {cacheTelemetry.pendingCount}</div>
+                  <div>
+                    Queue: {cacheTelemetry.pendingCount}
+                    {cacheTelemetry.pendingOldestAgeMs > 0 && (
+                      <span style={{
+                        color: cacheTelemetry.pendingOldestAgeMs > 5000 ? "#fb4" : "#888",
+                        marginLeft: 6,
+                      }}>
+                        (oldest {fmt(cacheTelemetry.pendingOldestAgeMs / 1000, 1)}s)
+                      </span>
+                    )}
+                  </div>
+                  <div>
+                    Ready: {cacheTelemetry.readyCount}
+                    {cacheTelemetry.readyCount > 32 && (
+                      <span style={{ color: "#fb4", marginLeft: 6 }}>
+                        (drain backlog)
+                      </span>
+                    )}
+                  </div>
                 </div>
 
                 {/* Hit Rate */}
@@ -819,7 +928,13 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 <div className="debug-section">
                   <div className="debug-title">Decode</div>
                   <div>{fmt(cacheTelemetry.decodesPerSec, 1)} chunks/s ({cacheTelemetry.decodeWorkersTotal} workers)</div>
-                  <div>Avg: {fmt(cacheTelemetry.avgDecodeMs, 2)}ms</div>
+                  <div>
+                    p50: {fmt(cacheTelemetry.decodeP50Ms, 2)}ms
+                    {" · "}
+                    p95: {fmt(cacheTelemetry.decodeP95Ms, 2)}ms
+                    {" · "}
+                    avg: {fmt(cacheTelemetry.avgDecodeMs, 2)}ms
+                  </div>
                 </div>
 
                 {/* Config */}

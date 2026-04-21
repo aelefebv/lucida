@@ -21,6 +21,7 @@ import type {
   CacheStateSnapshot,
   ProxyRequest,
 } from "./planning.ts";
+import { debugLog } from "../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -125,8 +126,14 @@ export interface CacheTelemetry {
   inFlightProxyBytes: number;
   pendingCount: number;
   pendingProxyCount: number;
+  /** Age (ms) of the longest-waiting entry in pendingRequests; 0 if empty. */
+  pendingOldestAgeMs: number;
+  /** Decoded chunks waiting for the orchestrator's drain pass. */
+  readyCount: number;
   hitRate: number;
   evictionsPerSec: number;
+  /** Eviction count per tier in the last telemetry window. Resets on each call. */
+  evictionsByTier: TierCounters;
   interactionMode: InteractionMode;
   evictionTierOrder: string[];
   failedChunks: { transient: number; permanent: number };
@@ -134,6 +141,30 @@ export interface CacheTelemetry {
   decodesPerSec: number;
   decodeWorkersTotal: number;
   avgDecodeMs: number;
+  /** 50th and 95th percentile decode latency from a rolling 100-sample window. */
+  decodeP50Ms: number;
+  decodeP95Ms: number;
+  /** Cached chunks broken down by eviction tier (count + bytes per tier). */
+  tierResidency: {
+    activeDetail: TierResidencyEntry;
+    demotedDetail: TierResidencyEntry;
+    prefetch: TierResidencyEntry;
+    overview: TierResidencyEntry;
+    proxy: TierResidencyEntry;
+  };
+}
+
+export interface TierResidencyEntry {
+  count: number;
+  bytes: number;
+}
+
+export interface TierCounters {
+  activeDetail: number;
+  demotedDetail: number;
+  prefetch: number;
+  overview: number;
+  proxy: number;
 }
 
 interface CacheEntry {
@@ -193,6 +224,17 @@ interface InFlightProxyEntry {
  */
 function proxyInnerKey(req: { entityId: string; kind: string; t: number; c: number }): string {
   return `${req.entityId}|${req.kind}|${req.t}|${req.c}`;
+}
+
+function freshTierCounters(): TierCounters {
+  return { activeDetail: 0, demotedDetail: 0, prefetch: 0, overview: 0, proxy: 0 };
+}
+
+/** Pick a percentile from a numeric array. Sorts in place; copy first if needed. */
+function percentile(sorted: readonly number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor(p * sorted.length)));
+  return sorted[idx];
 }
 
 // ---------------------------------------------------------------------------
@@ -255,11 +297,25 @@ export class CpuCache {
   private totalHits = 0;
   private totalRequests = 0;
   private evictionsSinceSnapshot = 0;
+  /**
+   * Per-tier eviction counts since the last `telemetry()` call. Reset on
+   * each call so consumers see "evictions in the last window" rather
+   * than cumulative since boot.
+   */
+  private evictionsByTierSinceSnapshot: TierCounters = freshTierCounters();
   private lastTelemetryTime = performance.now();
   private lastError: string | null = null;
   private decodeTimes: number[] = [];
   private transientFailures = 0;
   private permanentFailures = 0;
+
+  /**
+   * Enqueue timestamps for entries currently in `pendingRequests`.
+   * Keyed by `inFlightKey(req)`. Used to surface starvation: the
+   * oldest age tells you "longest a request has waited unfulfilled."
+   * Cleared when an entry transitions to in-flight or is dropped.
+   */
+  private pendingEnqueuedAt = new Map<string, number>();
 
   // Running average of decoded chunk sizes for in-flight byte estimation
   private avgDecodedBytes = 0;
@@ -267,6 +323,16 @@ export class CpuCache {
 
   // Decode throughput tracking
   private decodesSinceSnapshot = 0;
+
+  // Rate-limited log state. One slot per event kind; we skip emission
+  // if we logged within the last second, but track aggregate counts so
+  // a burst still surfaces at most one summary per second.
+  private cacheLogState = {
+    backpressureLastAt: 0,
+    backpressureSkipped: 0,
+    failureLastAt: 0,
+    failureBurstCount: 0,
+  };
 
   // Current epochs (for failure clearing)
   private currentEpochs: PlanningEpochs = {
@@ -320,8 +386,12 @@ export class CpuCache {
     }
     this.activeEntityIds = newActiveIds;
 
-    // Build new pending queue: skip cached, in-flight, and failed chunks
+    // Build new pending queue: skip cached, in-flight, and failed
+    // chunks. Re-build the enqueue-time map so dropped requests don't
+    // leak entries (the dropped key won't be re-added below).
     this.pendingRequests = [];
+    const nextEnqueuedAt = new Map<string, number>();
+    const enqueueNow = performance.now();
     for (const req of plan.requests) {
       const key = this.inFlightKey(req);
 
@@ -341,7 +411,12 @@ export class CpuCache {
       if (failure && this.currentEpochs.content < failure.failedUntilContentEpoch) continue;
 
       this.pendingRequests.push(req);
+      // Preserve original enqueue time across re-submits so age reflects
+      // "how long since the request first appeared," not "how long since
+      // the most recent plan tick."
+      nextEnqueuedAt.set(key, this.pendingEnqueuedAt.get(key) ?? enqueueNow);
     }
+    this.pendingEnqueuedAt = nextEnqueuedAt;
 
     // S5: route proxy requests to fetchProxy. Mirrors the chunk path:
     // dedup against the proxy cache + in-flight map, then enqueue.
@@ -406,6 +481,11 @@ export class CpuCache {
     }
 
     // 3. Pending chunk queue.
+    for (const r of this.pendingRequests) {
+      if (entityIdSet.has(r.entityId)) {
+        this.pendingEnqueuedAt.delete(this.inFlightKey(r));
+      }
+    }
     this.pendingRequests = this.pendingRequests.filter(
       r => !entityIdSet.has(r.entityId),
     );
@@ -511,11 +591,69 @@ export class CpuCache {
     const elapsed = (now - this.lastTelemetryTime) / 1000 || 1;
     const evictionsPerSec = this.evictionsSinceSnapshot / elapsed;
     const decodesPerSec = this.decodesSinceSnapshot / elapsed;
+    const evictionsByTier = this.evictionsByTierSinceSnapshot;
     this.evictionsSinceSnapshot = 0;
+    this.evictionsByTierSinceSnapshot = freshTierCounters();
     this.decodesSinceSnapshot = 0;
     this.lastTelemetryTime = now;
 
     const mode = this.detectInteractionMode();
+
+    // Per-tier residency: walk every cached entry once and bin.
+    const tierResidency = {
+      activeDetail: { count: 0, bytes: 0 },
+      demotedDetail: { count: 0, bytes: 0 },
+      prefetch: { count: 0, bytes: 0 },
+      overview: { count: 0, bytes: 0 },
+      proxy: { count: 0, bytes: 0 },
+    };
+    for (const entityMap of this.mainCache.values()) {
+      for (const e of entityMap.values()) {
+        if (e.tier === "active-detail") {
+          tierResidency.activeDetail.count++;
+          tierResidency.activeDetail.bytes += e.sizeBytes;
+        } else if (e.tier === "demoted-detail") {
+          tierResidency.demotedDetail.count++;
+          tierResidency.demotedDetail.bytes += e.sizeBytes;
+        } else {
+          tierResidency.prefetch.count++;
+          tierResidency.prefetch.bytes += e.sizeBytes;
+        }
+      }
+    }
+    for (const entityMap of this.overviewCache.values()) {
+      for (const e of entityMap.values()) {
+        tierResidency.overview.count++;
+        tierResidency.overview.bytes += e.sizeBytes;
+      }
+    }
+    for (const datasetMap of this.proxyCache.values()) {
+      for (const e of datasetMap.values()) {
+        tierResidency.proxy.count++;
+        tierResidency.proxy.bytes += e.bytes;
+      }
+    }
+
+    // Pending-queue starvation signal: oldest enqueue timestamp wins.
+    let pendingOldestAgeMs = 0;
+    if (this.pendingEnqueuedAt.size > 0) {
+      let oldest = now;
+      for (const t of this.pendingEnqueuedAt.values()) {
+        if (t < oldest) oldest = t;
+      }
+      pendingOldestAgeMs = now - oldest;
+    }
+
+    // Decode percentiles from the rolling window.
+    let decodeP50Ms = 0;
+    let decodeP95Ms = 0;
+    let avgDecodeMs = 0;
+    if (this.decodeTimes.length > 0) {
+      avgDecodeMs = this.decodeTimes.reduce((a, b) => a + b, 0) / this.decodeTimes.length;
+      const sorted = [...this.decodeTimes].sort((a, b) => a - b);
+      decodeP50Ms = percentile(sorted, 0.5);
+      decodeP95Ms = percentile(sorted, 0.95);
+    }
 
     return {
       mainBytes: this.mainBytes,
@@ -532,17 +670,21 @@ export class CpuCache {
       inFlightProxyBytes: this.inFlightProxyBytes,
       pendingCount: this.pendingRequests.length,
       pendingProxyCount: this.pendingProxyRequests.length,
+      pendingOldestAgeMs,
+      readyCount: this.ready.length,
       hitRate: this.totalRequests > 0 ? this.totalHits / this.totalRequests : 0,
       evictionsPerSec,
+      evictionsByTier,
       interactionMode: mode,
       evictionTierOrder: this.getTierOrder(mode),
       failedChunks: { transient: this.transientFailures, permanent: this.permanentFailures },
       lastError: this.lastError,
       decodesPerSec,
       decodeWorkersTotal: this.decode.size,
-      avgDecodeMs: this.decodeTimes.length > 0
-        ? this.decodeTimes.reduce((a, b) => a + b, 0) / this.decodeTimes.length
-        : 0,
+      avgDecodeMs,
+      decodeP50Ms,
+      decodeP95Ms,
+      tierResidency,
     };
   }
 
@@ -613,6 +755,103 @@ export class CpuCache {
     return this.inFlightProxy.has(`${datasetId}|${proxyInnerKey({ entityId, kind, t, c })}`);
   }
 
+  /**
+   * Snapshot of the current `pendingRequests` (sorted by priority — the
+   * order they will be dequeued). Used by the chunk-grid overlay to
+   * color planned chunks by their queue rank, so "expected fetch order"
+   * is visible alongside "actual cached state."
+   */
+  getPendingSnapshot(): readonly ChunkRequest[] {
+    return [...this.pendingRequests];
+  }
+
+  /** Snapshot of pending proxy requests, sorted by priority. */
+  getPendingProxySnapshot(): readonly ProxyRequest[] {
+    return [...this.pendingProxyRequests];
+  }
+
+  /**
+   * Per-entity dump of cached chunks, grouped by LOD and tier. Used by
+   * the DebugPanel "Dump cache contents" button. Pure read; no mutation.
+   */
+  getCacheDump(): Array<{
+    entityId: string;
+    cache: "main" | "overview";
+    level: number;
+    tier: EvictionTier;
+    bytes: number;
+    chunkKey: string;
+    insertedAt: number;
+  }> {
+    const out: ReturnType<CpuCache["getCacheDump"]> = [];
+    for (const entityMap of this.mainCache.values()) {
+      for (const e of entityMap.values()) {
+        out.push({
+          entityId: e.entityId, cache: "main", level: e.level, tier: e.tier,
+          bytes: e.sizeBytes, chunkKey: e.chunkKey, insertedAt: e.insertedAt,
+        });
+      }
+    }
+    for (const entityMap of this.overviewCache.values()) {
+      for (const e of entityMap.values()) {
+        out.push({
+          entityId: e.entityId, cache: "overview", level: e.level, tier: e.tier,
+          bytes: e.sizeBytes, chunkKey: e.chunkKey, insertedAt: e.insertedAt,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Per-dataset dump of cached proxies. Mirrors `getCacheDump` for the
+   * proxy tier; separate because proxies live in their own typed map.
+   */
+  getProxyCacheDump(): Array<{
+    datasetId: string;
+    entityId: string;
+    proxyKind: "WellProxy3D" | "FieldProxy3D";
+    t: number;
+    c: number;
+    bytes: number;
+    insertedAt: number;
+  }> {
+    const out: ReturnType<CpuCache["getProxyCacheDump"]> = [];
+    for (const [datasetId, inner] of this.proxyCache) {
+      for (const e of inner.values()) {
+        out.push({
+          datasetId, entityId: e.entityId, proxyKind: e.proxyKind,
+          t: e.t, c: e.c, bytes: e.bytes, insertedAt: e.insertedAt,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Pending-queue dump with per-entry age (ms since enqueue). The
+   * panel "Dump pending queue" button uses this to surface starvation.
+   */
+  getPendingDump(): Array<{
+    chunkKey: string;
+    entityId: string;
+    lane: Lane;
+    priority: number;
+    ageMs: number;
+  }> {
+    const now = performance.now();
+    return this.pendingRequests.map(r => {
+      const enq = this.pendingEnqueuedAt.get(this.inFlightKey(r));
+      return {
+        chunkKey: r.chunkKey,
+        entityId: r.entityId,
+        lane: r.lane,
+        priority: r.priority,
+        ageMs: enq !== undefined ? now - enq : 0,
+      };
+    });
+  }
+
   /** Register a listener called when new chunks become ready. Returns unsubscribe function. */
   subscribe(listener: () => void): () => void {
     this.listeners.push(listener);
@@ -652,6 +891,7 @@ export class CpuCache {
     // Clear state
     this.pendingRequests = [];
     this.pendingProxyRequests = [];
+    this.pendingEnqueuedAt.clear();
     this.ready = [];
     this.activeEntityIds.clear();
     this.epochHistory = [];
@@ -665,6 +905,7 @@ export class CpuCache {
     this.totalHits = 0;
     this.totalRequests = 0;
     this.evictionsSinceSnapshot = 0;
+    this.evictionsByTierSinceSnapshot = freshTierCounters();
     this.decodesSinceSnapshot = 0;
     this.lastTelemetryTime = performance.now();
     this.lastError = null;
@@ -686,7 +927,31 @@ export class CpuCache {
       this.inFlightBytes < this.config.maxBytesInFlight
     ) {
       const req = this.pendingRequests.shift()!;
+      this.pendingEnqueuedAt.delete(this.inFlightKey(req));
       this.startSingleFetch(req);
+    }
+    // If pending remain *because* we hit a limit, surface backpressure.
+    // Rate-limit to ≤1/sec; aggregate skipped count so a sustained
+    // queue still emits a periodic summary.
+    if (
+      this.pendingRequests.length > 0 &&
+      (this.inFlight.size >= this.config.maxConcurrentFetches ||
+        this.inFlightBytes >= this.config.maxBytesInFlight)
+    ) {
+      this.cacheLogState.backpressureSkipped += this.pendingRequests.length;
+      const now = performance.now();
+      if (now - this.cacheLogState.backpressureLastAt >= 1000) {
+        debugLog("cache", "cache.backpressure", {
+          pending: this.pendingRequests.length,
+          inFlight: this.inFlight.size,
+          maxConcurrent: this.config.maxConcurrentFetches,
+          inFlightBytes: this.inFlightBytes,
+          maxBytes: this.config.maxBytesInFlight,
+          skippedSinceLastLog: this.cacheLogState.backpressureSkipped,
+        });
+        this.cacheLogState.backpressureLastAt = now;
+        this.cacheLogState.backpressureSkipped = 0;
+      }
     }
   }
 
@@ -741,6 +1006,7 @@ export class CpuCache {
       if (isPermanent) this.permanentFailures++;
       else this.transientFailures++;
       this.lastError = message;
+      this.recordFailureForBurstDetection(isPermanent, message);
       const failedEntry = this.inFlight.get(key);
       if (failedEntry) this.inFlightBytes -= failedEntry.estimatedBytes;
       this.inFlight.delete(key);
@@ -975,6 +1241,7 @@ export class CpuCache {
       this.proxyBytes -= entry.bytes;
       freed += entry.bytes;
       this.evictionsSinceSnapshot++;
+      this.evictionsByTierSinceSnapshot.proxy++;
     }
   }
 
@@ -984,6 +1251,31 @@ export class CpuCache {
 
   private inFlightProxyKey(req: ProxyRequest): string {
     return `${req.datasetId}|${proxyInnerKey(req)}`;
+  }
+
+  /**
+   * Failure-burst detector. Aggregates failures within a 1-second
+   * window; emits a single log entry per window if the burst exceeds
+   * the threshold. Avoids one-line-per-failure spam while still
+   * surfacing real outages (e.g., the WS bridge dropping mid-fetch).
+   */
+  private recordFailureForBurstDetection(isPermanent: boolean, message: string): void {
+    const now = performance.now();
+    if (now - this.cacheLogState.failureLastAt >= 1000) {
+      // Window rolled — start a new one.
+      this.cacheLogState.failureLastAt = now;
+      this.cacheLogState.failureBurstCount = 1;
+      return;
+    }
+    this.cacheLogState.failureBurstCount++;
+    if (this.cacheLogState.failureBurstCount === 4) {
+      // First time we cross the burst threshold within the window.
+      debugLog("cache", "cache.failure_burst", {
+        failuresInLastSec: this.cacheLogState.failureBurstCount,
+        lastFailurePermanent: isPermanent,
+        lastError: message,
+      });
+    }
   }
 
   private proxyEntryToDelivery(entry: ProxyCacheEntry): ReadyProxyDelivery {
@@ -1080,6 +1372,7 @@ export class CpuCache {
     const mode = this.detectInteractionMode();
     const tierOrder = this.getTierOrder(mode);
     let freed = 0;
+    let removed = 0;
 
     for (const tier of tierOrder) {
       if (freed >= bytesNeeded) break;
@@ -1090,7 +1383,17 @@ export class CpuCache {
         if (freed >= bytesNeeded) break;
         this.removeEntry(cache, entry, "main");
         freed += entry.sizeBytes;
+        removed++;
       }
+    }
+    if (removed >= 16) {
+      debugLog("cache", "cache.eviction_burst", {
+        cache: "main",
+        removed,
+        bytesFreed: freed,
+        bytesNeeded,
+        mode,
+      });
     }
   }
 
@@ -1107,6 +1410,15 @@ export class CpuCache {
     if (cacheType === "main") this.mainBytes -= entry.sizeBytes;
     else this.overviewBytes -= entry.sizeBytes;
     this.evictionsSinceSnapshot++;
+    if (cacheType === "overview") {
+      this.evictionsByTierSinceSnapshot.overview++;
+    } else if (entry.tier === "active-detail") {
+      this.evictionsByTierSinceSnapshot.activeDetail++;
+    } else if (entry.tier === "demoted-detail") {
+      this.evictionsByTierSinceSnapshot.demotedDetail++;
+    } else {
+      this.evictionsByTierSinceSnapshot.prefetch++;
+    }
   }
 
   private collectEntries(cache: Map<string, Map<string, CacheEntry>>): CacheEntry[] {

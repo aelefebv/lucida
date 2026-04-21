@@ -4,7 +4,7 @@
  * all). See `wiki/decisions/logging-conventions.md`.
  */
 
-export const DEBUG_CATEGORIES = ["bridge", "wasm", "render"] as const;
+export const DEBUG_CATEGORIES = ["bridge", "wasm", "render", "cache"] as const;
 export type DebugCategory = (typeof DEBUG_CATEGORIES)[number];
 
 function readEnabled(): Set<string> {
