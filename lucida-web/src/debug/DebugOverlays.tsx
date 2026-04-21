@@ -6,7 +6,9 @@
  *
  * Two overlays, each gated by its own toggle in the Logging tab:
  *  - wellModes: per-well badge with promotion mode + LOD
- *  - chunkGrid: LOD chunk grid for the focal entity, colored by status
+ *  - chunkGrid: LOD chunk grid for every visible field, colored by
+ *    status. Capped at MAX_CHUNK_RECTS per tick as a backstop for
+ *    pathological cases.
  *
  * Both modes (slice + volume) share the same projection pipeline:
  *
@@ -339,11 +341,16 @@ export function DebugOverlays({
         setBadges([]);
       }
 
-      // ---- Chunk grid for focal entity ----
+      // ---- Chunk grid for every visible field-mode entry ----
+      // (well-as-proxy entries don't iterate chunks — they're served by
+      // a single proxy asset.)
       if (enabled.chunkGrid && plans && cpuCache) {
         const out: ChunkRect[] = [];
-        const cssCenter = { x: canvasWCss / 2, y: canvasHCss / 2 };
-        for (const [dsId, plan] of plans) {
+        const t = ws.t();
+        const c = ws.c();
+        const snap = cpuCache.snapshot();
+
+        outer: for (const [dsId, plan] of plans) {
           if (out.length >= MAX_CHUNK_RECTS) break;
           const ds = datasets.get(dsId);
           if (!ds) continue;
@@ -355,135 +362,115 @@ export function DebugOverlays({
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
 
-          // Focal entity = visible field-mode entry whose projected
-          // world centroid is nearest the canvas center. Skip entities
-          // that fail to project (behind camera in 3D).
-          let focal: typeof plan.activeSet[number] | null = null;
-          let focalDist = Infinity;
-          let focalFrame: FieldFrame | null = null;
-          for (const entry of plan.activeSet) {
-            if (entry.mode === "well-as-proxy") continue;
-            const pos = positions[entry.entityId];
-            const img = imgById.get(entry.imageId);
-            const lvl0 = img?.multiscale.levels[0];
-            if (!pos || !lvl0) continue;
-            const frame = getFrame(dsId, entry.imageId, lvl0.shape);
-            frame.pos = pos;
-            const wc = fieldWorldCenter(frame);
-            const sp = projectWorld(ws, wc[0], wc[1], wc[2], dpr);
-            if (!sp) continue;
-            const d = (sp.x - cssCenter.x) ** 2 + (sp.y - cssCenter.y) ** 2;
-            if (d < focalDist) {
-              focalDist = d;
-              focal = entry;
-              focalFrame = frame;
-            }
-          }
-          if (!focal || !focalFrame) continue;
-
-          const img = imgById.get(focal.imageId);
-          if (!img) continue;
-          const lvl0 = img.multiscale.levels[0];
-          const lvl = img.multiscale.levels[focal.targetLod];
-          if (!lvl0 || !lvl) continue;
-
-          const fullX = lvl0.shape[4];
-          const fullY = lvl0.shape[3];
-          const fullZ = lvl0.shape[2];
-          const lvlX = lvl.shape[4];
-          const lvlY = lvl.shape[3];
-          const lvlZ = lvl.shape[2];
-          const chunkPxX = lvl.chunk_shape[4];
-          const chunkPxY = lvl.chunk_shape[3];
-          const chunkPxZ = lvl.chunk_shape[2];
-          const scaleX = fullX / lvlX;
-          const scaleY = fullY / lvlY;
-          const scaleZ = fullZ / lvlZ;
-          const chunkWorldX = chunkPxX * scaleX;
-          const chunkWorldY = chunkPxY * scaleY;
-          const chunkWorldZ = chunkPxZ * scaleZ;
-          const maxCol = Math.ceil(lvlX / chunkPxX);
-          const maxRow = Math.ceil(lvlY / chunkPxY);
-          const maxZ = Math.ceil(lvlZ / chunkPxZ);
-
-          // Restrict iteration via the visible region from WASM. In 2D
-          // this is voxel coords (matches focalFrame.pos); in 3D it's
-          // voxel coords too — visible_region is derived in voxel space
-          // for both modes, just with different culling logic upstream.
+          // Per-dataset visible region — drives clipping for every
+          // field. visible_region is in dataset (plate) voxel coords;
+          // we subtract each field's pos to get field-local bounds.
           let vrJson: string | null = null;
           try {
             vrJson = ws.visible_region(dsId);
           } catch {
             vrJson = null;
           }
-          let xyBounds: [number, number, number, number] = [
-            focalFrame.pos[0],
-            focalFrame.pos[1],
-            focalFrame.pos[0] + fullX,
-            focalFrame.pos[1] + fullY,
-          ];
-          let zRange: [number, number] = [0, fullZ];
+          let xyBounds: [number, number, number, number] | null = null;
+          let zRange: [number, number] | null = null;
           if (vrJson && vrJson !== "null") {
             try {
               const vr = JSON.parse(vrJson);
               xyBounds = vr.xy_bounds;
               zRange = vr.z_range;
             } catch {
-              // keep defaults
+              xyBounds = null;
+              zRange = null;
             }
           }
-          const localMinX = xyBounds[0] - focalFrame.pos[0];
-          const localMaxX = xyBounds[2] - focalFrame.pos[0];
-          const localMinY = xyBounds[1] - focalFrame.pos[1];
-          const localMaxY = xyBounds[3] - focalFrame.pos[1];
-          if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) continue;
 
-          const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
-          const colEnd = Math.min(maxCol, Math.max(0, Math.ceil(localMaxX / chunkWorldX)));
-          const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
-          const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
-          const zStart = Math.max(0, Math.floor(zRange[0] / chunkWorldZ));
-          const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(zRange[1] / chunkWorldZ)));
+          for (const entry of plan.activeSet) {
+            if (out.length >= MAX_CHUNK_RECTS) break outer;
+            if (entry.mode === "well-as-proxy") continue;
+            const pos = positions[entry.entityId];
+            const img = imgById.get(entry.imageId);
+            if (!pos || !img) continue;
+            const lvl0 = img.multiscale.levels[0];
+            const lvl = img.multiscale.levels[entry.targetLod];
+            if (!lvl0 || !lvl) continue;
 
-          const snap = cpuCache.snapshot();
-          const cachedSet = snap.cached.get(focal.entityId);
-          const inFlightSet = snap.inFlight.get(focal.entityId);
-          const t = ws.t();
-          const c = ws.c();
+            const frame = getFrame(dsId, entry.imageId, lvl0.shape);
+            frame.pos = pos;
 
-          for (let iz = zStart; iz < zEnd; iz++) {
-            if (out.length >= MAX_CHUNK_RECTS) break;
-            for (let row = rowStart; row < rowEnd; row++) {
+            const fullX = lvl0.shape[4];
+            const fullY = lvl0.shape[3];
+            const fullZ = lvl0.shape[2];
+            const lvlX = lvl.shape[4];
+            const lvlY = lvl.shape[3];
+            const lvlZ = lvl.shape[2];
+            const chunkPxX = lvl.chunk_shape[4];
+            const chunkPxY = lvl.chunk_shape[3];
+            const chunkPxZ = lvl.chunk_shape[2];
+            const scaleX = fullX / lvlX;
+            const scaleY = fullY / lvlY;
+            const scaleZ = fullZ / lvlZ;
+            const chunkWorldX = chunkPxX * scaleX;
+            const chunkWorldY = chunkPxY * scaleY;
+            const chunkWorldZ = chunkPxZ * scaleZ;
+            const maxCol = Math.ceil(lvlX / chunkPxX);
+            const maxRow = Math.ceil(lvlY / chunkPxY);
+            const maxZ = Math.ceil(lvlZ / chunkPxZ);
+
+            // Default: this field's full extent.
+            const fieldXyBounds: [number, number, number, number] =
+              xyBounds ?? [pos[0], pos[1], pos[0] + fullX, pos[1] + fullY];
+            const fieldZRange: [number, number] = zRange ?? [0, fullZ];
+
+            const localMinX = fieldXyBounds[0] - pos[0];
+            const localMaxX = fieldXyBounds[2] - pos[0];
+            const localMinY = fieldXyBounds[1] - pos[1];
+            const localMaxY = fieldXyBounds[3] - pos[1];
+            if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) continue;
+
+            const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
+            const colEnd = Math.min(maxCol, Math.max(0, Math.ceil(localMaxX / chunkWorldX)));
+            const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
+            const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
+            const zStart = Math.max(0, Math.floor(fieldZRange[0] / chunkWorldZ));
+            const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(fieldZRange[1] / chunkWorldZ)));
+
+            const cachedSet = snap.cached.get(entry.entityId);
+            const inFlightSet = snap.inFlight.get(entry.entityId);
+
+            for (let iz = zStart; iz < zEnd; iz++) {
               if (out.length >= MAX_CHUNK_RECTS) break;
-              for (let col = colStart; col < colEnd; col++) {
+              for (let row = rowStart; row < rowEnd; row++) {
                 if (out.length >= MAX_CHUNK_RECTS) break;
-                const key = `${focal.targetLod}/${t}/${c}/${iz}/${row}/${col}`;
-                const vMin: [number, number, number] = [
-                  col * chunkWorldX,
-                  row * chunkWorldY,
-                  iz * chunkWorldZ,
-                ];
-                const vMax: [number, number, number] = [
-                  (col + 1) * chunkWorldX,
-                  (row + 1) * chunkWorldY,
-                  (iz + 1) * chunkWorldZ,
-                ];
-                const rect = projectVoxelAabb(ws, focalFrame, vMin, vMax, dpr);
-                if (!rect) continue;
-                if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
-                  continue;
+                for (let col = colStart; col < colEnd; col++) {
+                  if (out.length >= MAX_CHUNK_RECTS) break;
+                  const key = `${entry.targetLod}/${t}/${c}/${iz}/${row}/${col}`;
+                  const vMin: [number, number, number] = [
+                    col * chunkWorldX,
+                    row * chunkWorldY,
+                    iz * chunkWorldZ,
+                  ];
+                  const vMax: [number, number, number] = [
+                    (col + 1) * chunkWorldX,
+                    (row + 1) * chunkWorldY,
+                    (iz + 1) * chunkWorldZ,
+                  ];
+                  const rect = projectVoxelAabb(ws, frame, vMin, vMax, dpr);
+                  if (!rect) continue;
+                  if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
+                    continue;
+                  }
+                  let status: ChunkRect["status"] = "planned";
+                  if (cachedSet?.has(key)) status = "cached";
+                  else if (inFlightSet?.has(key)) status = "in-flight";
+                  out.push({
+                    key: `${dsId}/${entry.entityId}/${key}`,
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                    status,
+                  });
                 }
-                let status: ChunkRect["status"] = "planned";
-                if (cachedSet?.has(key)) status = "cached";
-                else if (inFlightSet?.has(key)) status = "in-flight";
-                out.push({
-                  key: `${dsId}/${focal.entityId}/${key}`,
-                  x: rect.x,
-                  y: rect.y,
-                  w: rect.w,
-                  h: rect.h,
-                  status,
-                });
               }
             }
           }

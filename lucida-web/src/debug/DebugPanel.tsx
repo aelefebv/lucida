@@ -64,7 +64,7 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
   wellModes: "Per-well badge over the canvas: promotion mode (WP/FP/FD) + target LOD.",
-  chunkGrid: "LOD chunk grid for the focal entity, color-coded by status (cached / in-flight / planned). Capped at ~600 cells.",
+  chunkGrid: "LOD chunk grid for every visible field, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
 };
 
 interface CatalogSnap {
