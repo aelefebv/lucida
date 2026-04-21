@@ -512,13 +512,13 @@ describe("CpuCache", () => {
 
       // At least one request should be queued.
       const tel = cache.telemetry();
-      expect(tel.queueDepth + tel.inFlightCount).toBeGreaterThan(0);
+      expect(tel.pendingCount + tel.inFlightCount).toBeGreaterThan(0);
 
       cache.cancelDataset("ds-1", ["entity-1"]);
 
       const after = cache.telemetry();
-      expect(after.queueDepth).toBe(0);
-      expect(after.proxyQueueDepth).toBe(0);
+      expect(after.pendingCount).toBe(0);
+      expect(after.pendingProxyCount).toBe(0);
     });
 
     it("drops cached chunks (detail + overview); subtracts bytes", async () => {
@@ -531,17 +531,17 @@ describe("CpuCache", () => {
       cache.submit(makePlan([detailReq, overviewReq]));
       await flush();
 
-      expect(cache.telemetry().detailBytes).toBe(100);
+      expect(cache.telemetry().mainBytes).toBe(100);
       expect(cache.telemetry().overviewBytes).toBe(100);
-      expect(cache.getCached("entity-1", "0/0/0/0/0/0")).not.toBeNull();
-      expect(cache.getCached("entity-1", "0/0/0/0/0/1")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).not.toBeNull();
 
       cache.cancelDataset("ds-1", ["entity-1"]);
 
-      expect(cache.telemetry().detailBytes).toBe(0);
+      expect(cache.telemetry().mainBytes).toBe(0);
       expect(cache.telemetry().overviewBytes).toBe(0);
-      expect(cache.getCached("entity-1", "0/0/0/0/0/0")).toBeNull();
-      expect(cache.getCached("entity-1", "0/0/0/0/0/1")).toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).toBeNull();
     });
 
     it("drops cached proxies; subtracts bytes", async () => {
@@ -611,7 +611,7 @@ describe("CpuCache", () => {
       // Now submit a plan with NO entity-1 in activeSet. If activeEntityIds
       // still contained "entity-1", demoteEntity would be called — but the
       // detail map is already empty, so this is a sanity check that no entry
-      // remains. We assert via the detailCache being empty (already covered)
+      // remains. We assert via the mainCache being empty (already covered)
       // and that re-adding entity-1 then dropping it from the active set
       // doesn't crash.
       cache.submit(makePlan([], [makeActiveEntry("entity-2")]));
@@ -657,23 +657,23 @@ describe("CpuCache", () => {
       });
       await flush();
 
-      const beforeDetailB = cache.getCached("entity-B", "0/0/0/0/0/0");
+      const beforeDetailB = cache.getCachedChunk("entity-B", "0/0/0/0/0/0");
       const beforeProxyB = cache.getCachedProxy("ds-B", "entity-B", "FieldProxy3D", 0, 0);
       expect(beforeDetailB).not.toBeNull();
       expect(beforeProxyB).not.toBeNull();
-      const detailBytesBoth = cache.telemetry().detailBytes;
+      const mainBytesBoth = cache.telemetry().mainBytes;
       const proxyBytesBoth = cache.telemetry().proxyBytes;
 
       cache.cancelDataset("ds-A", ["entity-A"]);
 
       // Dataset A is gone.
-      expect(cache.getCached("entity-A", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedChunk("entity-A", "0/0/0/0/0/0")).toBeNull();
       expect(cache.getCachedProxy("ds-A", "entity-A", "FieldProxy3D", 0, 0)).toBeNull();
       // Dataset B is intact.
-      expect(cache.getCached("entity-B", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-B", "0/0/0/0/0/0")).not.toBeNull();
       expect(cache.getCachedProxy("ds-B", "entity-B", "FieldProxy3D", 0, 0)).not.toBeNull();
       // Bytes accounting reflects only A's data was subtracted.
-      expect(cache.telemetry().detailBytes).toBe(detailBytesBoth - 64);
+      expect(cache.telemetry().mainBytes).toBe(mainBytesBoth - 64);
       expect(cache.telemetry().proxyBytes).toBe(proxyBytesBoth - 128);
     });
   });
@@ -752,7 +752,7 @@ describe("CpuCache", () => {
   describe("eviction tiers", () => {
     it("evicts prefetch before active-detail under budget pressure", async () => {
       const budget = 256;
-      const { cache, source } = createTestCache({ detailBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
       source.autoResolveBytes = 100;
 
       // Insert a detail chunk and a prefetch chunk
@@ -780,7 +780,7 @@ describe("CpuCache", () => {
 
     it("evicts demoted before active-detail", async () => {
       const budget = 256;
-      const { cache, source } = createTestCache({ detailBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
       source.autoResolveBytes = 100;
 
       // Insert chunk for entity-1
@@ -853,7 +853,7 @@ describe("CpuCache", () => {
 
     it("scrubbing mode protects prefetch over demoted", async () => {
       const budget = 256;
-      const { cache, source } = createTestCache({ detailBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
       source.autoResolveBytes = 100;
 
       // Force scrubbing mode via selectionEpoch velocity
@@ -956,7 +956,7 @@ describe("CpuCache", () => {
   describe("budget enforcement", () => {
     it("evicts when exceeding detail budget", async () => {
       const budget = 200;
-      const { cache, source } = createTestCache({ detailBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
       source.autoResolveBytes = 100;
 
       // Insert 3 chunks (300 bytes > 200 budget)
@@ -970,12 +970,12 @@ describe("CpuCache", () => {
 
       // Should have evicted to stay under budget
       const tel = cache.telemetry();
-      expect(tel.detailBytes).toBeLessThanOrEqual(budget);
+      expect(tel.mainBytes).toBeLessThanOrEqual(budget);
     });
 
     it("overview and detail budgets are independent", async () => {
       const { cache, source } = createTestCache({
-        detailBudgetBytes: 200,
+        mainBudgetBytes: 200,
         overviewBudgetBytes: 200,
       });
       source.autoResolveBytes = 100;
@@ -997,7 +997,7 @@ describe("CpuCache", () => {
       await flush();
 
       const tel = cache.telemetry();
-      expect(tel.detailBytes).toBe(200);
+      expect(tel.mainBytes).toBe(200);
       expect(tel.overviewBytes).toBe(200);
     });
   });
@@ -1015,7 +1015,7 @@ describe("CpuCache", () => {
       source.resolve("entity-1/image-1/0/0/0/0/0/0", new ArrayBuffer(64), "uint16");
       await flush();
 
-      const result = cache.getCached("entity-1", "0/0/0/0/0/0");
+      const result = cache.getCachedChunk("entity-1", "0/0/0/0/0/0");
       expect(result).not.toBeNull();
       expect(result!.entityId).toBe("entity-1");
       expect(result!.imageId).toBe("image-1");
@@ -1027,7 +1027,7 @@ describe("CpuCache", () => {
 
     it("returns null for missing chunk", () => {
       const { cache } = createTestCache();
-      expect(cache.getCached("no-such-entity", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedChunk("no-such-entity", "0/0/0/0/0/0")).toBeNull();
     });
 
     it("returns entry after drain", async () => {
@@ -1040,7 +1040,7 @@ describe("CpuCache", () => {
       // Drain removes from ready queue but NOT from cache
       cache.drain(Infinity);
 
-      const result = cache.getCached("entity-1", "0/0/0/0/0/0");
+      const result = cache.getCachedChunk("entity-1", "0/0/0/0/0/0");
       expect(result).not.toBeNull();
       expect(result!.entityId).toBe("entity-1");
       expect(result!.chunkKey).toBe("0/0/0/0/0/0");
@@ -1048,7 +1048,7 @@ describe("CpuCache", () => {
 
     it("returns null after eviction", async () => {
       const budget = 200;
-      const { cache, source } = createTestCache({ detailBudgetBytes: budget });
+      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
       source.autoResolveBytes = 100;
 
       // Insert 2 chunks (200 bytes = budget, oldest first)
@@ -1061,8 +1061,8 @@ describe("CpuCache", () => {
       await flush();
 
       // Both cached at this point
-      expect(cache.getCached("entity-1", "0/0/0/0/0/0")).not.toBeNull();
-      expect(cache.getCached("entity-1", "0/0/0/0/0/1")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/0")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).not.toBeNull();
 
       // Insert a third chunk to trigger eviction (300 > 200)
       const third = makeRequest({ x: 2, chunkKey: "0/0/0/0/0/2" });
@@ -1070,10 +1070,10 @@ describe("CpuCache", () => {
       await flush();
 
       // Oldest chunk should have been evicted
-      expect(cache.getCached("entity-1", "0/0/0/0/0/0")).toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/0")).toBeNull();
       // Newer chunks should still be cached
-      expect(cache.getCached("entity-1", "0/0/0/0/0/1")).not.toBeNull();
-      expect(cache.getCached("entity-1", "0/0/0/0/0/2")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).not.toBeNull();
+      expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/2")).not.toBeNull();
     });
   });
 
@@ -1096,7 +1096,7 @@ describe("CpuCache", () => {
       expect(cache.drain(Infinity)).toHaveLength(0);
 
       const tel = cache.telemetry();
-      expect(tel.detailBytes).toBe(0);
+      expect(tel.mainBytes).toBe(0);
       expect(tel.overviewBytes).toBe(0);
       expect(tel.proxyBytes).toBe(0);
     });
@@ -1223,7 +1223,7 @@ describe("CpuCache", () => {
 
       cache.submit(makeProxyPlan([req]));
       await flush();
-      // First decode notifies (from fetchProxyAsset).
+      // First decode notifies (from fetchProxy).
       const afterFirst = notifyCount;
       expect(afterFirst).toBeGreaterThanOrEqual(1);
 

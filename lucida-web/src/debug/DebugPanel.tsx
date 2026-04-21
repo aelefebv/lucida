@@ -80,7 +80,7 @@ interface CatalogSnap {
   proxyBytes: number;
   proxyBudget: number;
   inFlightProxyCount: number;
-  proxyQueueDepth: number;
+  pendingProxyCount: number;
 }
 
 interface SceneQuerySnap {
@@ -454,7 +454,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               proxyBytes: tel?.proxyBytes ?? 0,
               proxyBudget: tel?.proxyBudget ?? 0,
               inFlightProxyCount: tel?.inFlightProxyCount ?? 0,
-              proxyQueueDepth: tel?.proxyQueueDepth ?? 0,
+              pendingProxyCount: tel?.pendingProxyCount ?? 0,
             });
           } catch {
             // ignore
@@ -748,17 +748,17 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 <div className="debug-section">
                   <div className="debug-title">Budget</div>
                   {(() => {
-                    const detailPct = cacheTelemetry.detailBudget > 0
-                      ? Math.min(100, Math.round((cacheTelemetry.detailBytes / cacheTelemetry.detailBudget) * 100))
+                    const mainPct = cacheTelemetry.mainBudget > 0
+                      ? Math.min(100, Math.round((cacheTelemetry.mainBytes / cacheTelemetry.mainBudget) * 100))
                       : 0;
                     const overviewPct = cacheTelemetry.overviewBudget > 0
                       ? Math.min(100, Math.round((cacheTelemetry.overviewBytes / cacheTelemetry.overviewBudget) * 100))
                       : 0;
                     return (
                       <>
-                        <div>Detail: {fmtBytes(cacheTelemetry.detailBytes)} / {fmtBytes(cacheTelemetry.detailBudget)} ({detailPct}%)</div>
+                        <div>Main: {fmtBytes(cacheTelemetry.mainBytes)} / {fmtBytes(cacheTelemetry.mainBudget)} ({mainPct}%)</div>
                         <div className="debug-bar-track">
-                          <div className="debug-bar-fill" style={{ width: `${detailPct}%`, background: "#4f4" }} />
+                          <div className="debug-bar-fill" style={{ width: `${mainPct}%`, background: "#4f4" }} />
                         </div>
                         <div>Overview: {fmtBytes(cacheTelemetry.overviewBytes)} / {fmtBytes(cacheTelemetry.overviewBudget)} ({overviewPct}%)</div>
                         <div className="debug-bar-track">
@@ -773,7 +773,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 <div className="debug-section">
                   <div className="debug-title">Fetch</div>
                   <div>In-flight: {cacheTelemetry.inFlightCount} reqs, {fmtBytes(cacheTelemetry.inFlightBytes)}</div>
-                  <div>Queue: {cacheTelemetry.queueDepth}</div>
+                  <div>Queue: {cacheTelemetry.pendingCount}</div>
                 </div>
 
                 {/* Hit Rate */}
@@ -826,14 +826,14 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 <div className="debug-section">
                   <div className="debug-title">Config</div>
                   <div className="debug-config-row">
-                    <span>Detail budget (MB)</span>
+                    <span>Main budget (MB)</span>
                     <input
                       className="debug-config-input"
                       type="number"
-                      value={Math.round(cacheTelemetry.detailBudget / (1024 * 1024))}
+                      value={Math.round(cacheTelemetry.mainBudget / (1024 * 1024))}
                       onChange={e => {
                         const mb = Number(e.target.value);
-                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ detailBudgetBytes: mb * 1024 * 1024 });
+                        if (mb > 0) sessionRef?.current?.cpuCache.updateConfig({ mainBudgetBytes: mb * 1024 * 1024 });
                       }}
                     />
                   </div>
@@ -1097,7 +1097,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   </div>
                   <div>
                     In-flight: {catalogSnap.inFlightProxyCount} (queue:{" "}
-                    {catalogSnap.proxyQueueDepth})
+                    {catalogSnap.pendingProxyCount})
                   </div>
                 </>
               ) : (

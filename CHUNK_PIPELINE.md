@@ -152,8 +152,8 @@ Each tick, orchestrator calls `cpuCache.submit(plan)`. Cache:
 
 1. **Demotes entities** that left the active set: their cached chunks move from `active-detail` → `demoted-detail` tier (still in cache, but first to evict).
 2. **Dedups** each request: skip if cached, in-flight, or recently-failed.
-3. Pushes survivors onto `pendingQueue`.
-4. Calls `startFetches()`.
+3. Pushes survivors onto `pendingRequests`.
+4. Calls `startChunkFetches()`.
 
 ### 4b. Fetch scheduler (`cpuCache.ts:617-750`)
 
@@ -162,7 +162,7 @@ maxConcurrentFetches = decodePoolSize × 3   (≈9 in-flight)
 maxBytesInFlight     = 32 MB
 ```
 
-Sort `pendingQueue` ascending by priority, then launch fetches until either limit is hit. Each fetch:
+Sort `pendingRequests` ascending by priority, then launch fetches until either limit is hit. Each fetch:
 
 1. `contentSource.fetch(req)` → binary frame from the WS proxy (matched by `level/t/c/z/y/x` key in `bridge.ts:140-158`).
 2. Hand the encoded buffer to `decodePool.decode(...)` — 3 web workers running `decode.worker.ts`, picking codec by wire format (Raw/Lz4/Zstd).
@@ -323,7 +323,7 @@ HYSTERESIS_PX                = 5
 PREFETCH_DEPTH               = 2          # prefetch 2 future timepoints
 
 # CPU Cache budgets
-DEFAULT_DETAIL_BUDGET        = 512 MB
+DEFAULT_MAIN_BUDGET          = 512 MB
 DEFAULT_OVERVIEW_BUDGET      = 64 MB
 DEFAULT_PROXY_BUDGET         = 256 MB
 DEFAULT_MAX_BYTES_IN_FLIGHT  = 32 MB

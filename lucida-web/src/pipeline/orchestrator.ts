@@ -973,7 +973,7 @@ export class Orchestrator {
         const ss = this.deliverySentToWorker.get(wid);
         if (ss?.has(req.chunkKey)) continue;
 
-        const cached = ctx.cpuCache.getCached(req.entityId, req.chunkKey);
+        const cached = ctx.cpuCache.getCachedChunk(req.entityId, req.chunkKey);
         if (!cached) continue;
 
         const sent = this.sendDeliveryToWorker(ctx, cached, multiChannel, sliceZ, epochs);

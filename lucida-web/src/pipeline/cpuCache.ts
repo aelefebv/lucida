@@ -26,21 +26,21 @@ import type {
 // Constants
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_DETAIL_BUDGET = 512 * 1024 * 1024;
+export const DEFAULT_MAIN_BUDGET = 512 * 1024 * 1024;
 export const DEFAULT_OVERVIEW_BUDGET = 64 * 1024 * 1024;
 export const DEFAULT_PROXY_BUDGET = 256 * 1024 * 1024;
 export const DEFAULT_MAX_BYTES_IN_FLIGHT = 32 * 1024 * 1024;
 export const FETCH_CONCURRENCY_MULTIPLIER = 3;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
-export const EPOCH_VELOCITY_WINDOW = 10;
+export const INTERACTION_MODE_WINDOW = 10;
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
 export interface CpuCacheConfig {
-  detailBudgetBytes: number;
+  mainBudgetBytes: number;
   overviewBudgetBytes: number;
   /**
    * Budget for the proxy tier in bytes. Proxies are a small middle layer
@@ -109,8 +109,8 @@ export interface ReadyProxyDelivery {
 }
 
 export interface CacheTelemetry {
-  detailBytes: number;
-  detailBudget: number;
+  mainBytes: number;
+  mainBudget: number;
   overviewBytes: number;
   overviewBudget: number;
   /** S5: proxy tier bytes / budget. */
@@ -123,8 +123,8 @@ export interface CacheTelemetry {
   /** S5: in-flight proxy fetches (count, estimated bytes). */
   inFlightProxyCount: number;
   inFlightProxyBytes: number;
-  queueDepth: number;
-  proxyQueueDepth: number;
+  pendingCount: number;
+  pendingProxyCount: number;
   hitRate: number;
   evictionsPerSec: number;
   interactionMode: InteractionMode;
@@ -205,8 +205,8 @@ export class CpuCache {
   private config: CpuCacheConfig;
 
   // Detail cache: entityId → chunkKey → CacheEntry
-  private detailCache = new Map<string, Map<string, CacheEntry>>();
-  private detailBytes = 0;
+  private mainCache = new Map<string, Map<string, CacheEntry>>();
+  private mainBytes = 0;
 
   // Overview cache: entityId → chunkKey → CacheEntry
   private overviewCache = new Map<string, Map<string, CacheEntry>>();
@@ -224,12 +224,12 @@ export class CpuCache {
   private proxyBytes = 0;
 
   // Fetch scheduler state
-  private pendingQueue: ChunkRequest[] = [];
-  private inFlight = new Map<string, InFlightEntry>(); // compositeKey → entry
+  private pendingRequests: ChunkRequest[] = [];
+  private inFlight = new Map<string, InFlightEntry>(); // inFlightKey → entry
   private inFlightBytes = 0;
 
   // Proxy fetch state
-  private pendingProxyQueue: ProxyRequest[] = [];
+  private pendingProxyRequests: ProxyRequest[] = [];
   private inFlightProxy = new Map<string, InFlightProxyEntry>(); // datasetId|innerKey → entry
   private inFlightProxyBytes = 0;
 
@@ -243,10 +243,10 @@ export class CpuCache {
   private epochHistory: PlanningEpochs[] = [];
 
   // Failure tracking
-  private failures = new Map<string, FailedEntry>(); // compositeKey → failure
+  private failures = new Map<string, FailedEntry>(); // inFlightKey → failure
 
   // Monotonic counter for LRU ordering
-  private insertCounter = 0;
+  private lruCounter = 0;
 
   // Listeners notified when new chunks become ready
   private listeners: (() => void)[] = [];
@@ -277,7 +277,7 @@ export class CpuCache {
     this.source = source;
     this.decode = decode;
     this.config = {
-      detailBudgetBytes: config?.detailBudgetBytes ?? DEFAULT_DETAIL_BUDGET,
+      mainBudgetBytes: config?.mainBudgetBytes ?? DEFAULT_MAIN_BUDGET,
       overviewBudgetBytes: config?.overviewBudgetBytes ?? DEFAULT_OVERVIEW_BUDGET,
       proxyBudgetBytes: config?.proxyBudgetBytes ?? DEFAULT_PROXY_BUDGET,
       maxConcurrentFetches: config?.maxConcurrentFetches ?? (decode.size * FETCH_CONCURRENCY_MULTIPLIER),
@@ -307,7 +307,7 @@ export class CpuCache {
 
     // Track epoch velocity
     this.epochHistory.push({ ...plan.epochs });
-    if (this.epochHistory.length > EPOCH_VELOCITY_WINDOW) {
+    if (this.epochHistory.length > INTERACTION_MODE_WINDOW) {
       this.epochHistory.shift();
     }
 
@@ -321,14 +321,14 @@ export class CpuCache {
     this.activeEntityIds = newActiveIds;
 
     // Build new pending queue: skip cached, in-flight, and failed chunks
-    this.pendingQueue = [];
+    this.pendingRequests = [];
     for (const req of plan.requests) {
-      const key = this.compositeKey(req);
+      const key = this.inFlightKey(req);
 
       this.totalRequests++;
 
       // Already cached?
-      if (this.isCached(req)) {
+      if (this.isChunkCached(req)) {
         this.totalHits++;
         continue;
       }
@@ -340,16 +340,16 @@ export class CpuCache {
       const failure = this.failures.get(key);
       if (failure && this.currentEpochs.content < failure.failedUntilContentEpoch) continue;
 
-      this.pendingQueue.push(req);
+      this.pendingRequests.push(req);
     }
 
     // S5: route proxy requests to fetchProxy. Mirrors the chunk path:
     // dedup against the proxy cache + in-flight map, then enqueue.
     const proxyRequests = plan.proxyRequests ?? [];
 
-    this.pendingProxyQueue = [];
+    this.pendingProxyRequests = [];
     for (const req of proxyRequests) {
-      const key = this.proxyCompositeKey(req);
+      const key = this.inFlightProxyKey(req);
 
       // Already cached? Skip silently — mirrors the chunk path. The
       // orchestrator tracks delivered proxies separately and re-sends
@@ -359,11 +359,11 @@ export class CpuCache {
       // Already in-flight?
       if (this.inFlightProxy.has(key)) continue;
 
-      this.pendingProxyQueue.push(req);
+      this.pendingProxyRequests.push(req);
     }
 
     // Start new fetches
-    this.startFetches();
+    this.startChunkFetches();
     this.startProxyFetches();
   }
 
@@ -406,23 +406,23 @@ export class CpuCache {
     }
 
     // 3. Pending chunk queue.
-    this.pendingQueue = this.pendingQueue.filter(
+    this.pendingRequests = this.pendingRequests.filter(
       r => !entityIdSet.has(r.entityId),
     );
 
     // 4. Pending proxy queue.
-    this.pendingProxyQueue = this.pendingProxyQueue.filter(
+    this.pendingProxyRequests = this.pendingProxyRequests.filter(
       r => r.datasetId !== datasetId,
     );
 
     // 5. Cached chunks (detail + overview).
     for (const entityId of entityIds) {
-      const detailMap = this.detailCache.get(entityId);
+      const detailMap = this.mainCache.get(entityId);
       if (detailMap) {
         for (const entry of detailMap.values()) {
-          this.detailBytes -= entry.sizeBytes;
+          this.mainBytes -= entry.sizeBytes;
         }
-        this.detailCache.delete(entityId);
+        this.mainCache.delete(entityId);
       }
       const overviewMap = this.overviewCache.get(entityId);
       if (overviewMap) {
@@ -485,7 +485,7 @@ export class CpuCache {
   /** Immutable snapshot of cached + in-flight keys for PlanningSnapshot. */
   snapshot(): CacheStateSnapshot {
     const cached = new Map<string, Set<string>>();
-    for (const [entityId, chunks] of this.detailCache) {
+    for (const [entityId, chunks] of this.mainCache) {
       cached.set(entityId, new Set(chunks.keys()));
     }
     for (const [entityId, chunks] of this.overviewCache) {
@@ -518,8 +518,8 @@ export class CpuCache {
     const mode = this.detectInteractionMode();
 
     return {
-      detailBytes: this.detailBytes,
-      detailBudget: this.config.detailBudgetBytes,
+      mainBytes: this.mainBytes,
+      mainBudget: this.config.mainBudgetBytes,
       overviewBytes: this.overviewBytes,
       overviewBudget: this.config.overviewBudgetBytes,
       proxyBytes: this.proxyBytes,
@@ -530,8 +530,8 @@ export class CpuCache {
       inFlightBytes: this.inFlightBytes,
       inFlightProxyCount: this.inFlightProxy.size,
       inFlightProxyBytes: this.inFlightProxyBytes,
-      queueDepth: this.pendingQueue.length,
-      proxyQueueDepth: this.pendingProxyQueue.length,
+      pendingCount: this.pendingRequests.length,
+      pendingProxyCount: this.pendingProxyRequests.length,
       hitRate: this.totalRequests > 0 ? this.totalHits / this.totalRequests : 0,
       evictionsPerSec,
       interactionMode: mode,
@@ -558,9 +558,9 @@ export class CpuCache {
    * re-sending chunks evicted from the worker. Proxies are not
    * re-sendable through this path — see [`getCachedProxy`].
    */
-  getCached(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
+  getCachedChunk(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
     const entry =
-      this.detailCache.get(entityId)?.get(chunkKey) ??
+      this.mainCache.get(entityId)?.get(chunkKey) ??
       this.overviewCache.get(entityId)?.get(chunkKey) ??
       null;
     if (!entry) return null;
@@ -642,21 +642,21 @@ export class CpuCache {
     this.inFlightProxyBytes = 0;
 
     // Clear caches
-    this.detailCache.clear();
-    this.detailBytes = 0;
+    this.mainCache.clear();
+    this.mainBytes = 0;
     this.overviewCache.clear();
     this.overviewBytes = 0;
     this.proxyCache.clear();
     this.proxyBytes = 0;
 
     // Clear state
-    this.pendingQueue = [];
-    this.pendingProxyQueue = [];
+    this.pendingRequests = [];
+    this.pendingProxyRequests = [];
     this.ready = [];
     this.activeEntityIds.clear();
     this.epochHistory = [];
     this.failures.clear();
-    this.insertCounter = 0;
+    this.lruCounter = 0;
 
     // Clear listeners
     this.listeners = [];
@@ -679,19 +679,19 @@ export class CpuCache {
   // Fetch Scheduler
   // =========================================================================
 
-  private startFetches(): void {
+  private startChunkFetches(): void {
     while (
-      this.pendingQueue.length > 0 &&
+      this.pendingRequests.length > 0 &&
       this.inFlight.size < this.config.maxConcurrentFetches &&
       this.inFlightBytes < this.config.maxBytesInFlight
     ) {
-      const req = this.pendingQueue.shift()!;
+      const req = this.pendingRequests.shift()!;
       this.startSingleFetch(req);
     }
   }
 
   private startSingleFetch(req: ChunkRequest): void {
-    const key = this.compositeKey(req);
+    const key = this.inFlightKey(req);
     const controller = new AbortController();
     const estimate = this.avgDecodedBytes;
     const entry: InFlightEntry = { request: req, controller, estimatedBytes: estimate };
@@ -803,7 +803,7 @@ export class CpuCache {
       y: req.y,
       x: req.x,
       chunkKey: req.chunkKey,
-      insertedAt: this.insertCounter++,
+      insertedAt: this.lruCounter++,
       epochs: { ...this.currentEpochs },
       dataType: result.dataType,
     };
@@ -813,9 +813,9 @@ export class CpuCache {
       this.insertEntry(this.overviewCache, cacheEntry);
       this.overviewBytes += decoded.byteLength;
     } else {
-      this.evictIfNeeded(this.detailCache, this.config.detailBudgetBytes, decoded.byteLength, "detail");
-      this.insertEntry(this.detailCache, cacheEntry);
-      this.detailBytes += decoded.byteLength;
+      this.evictIfNeeded(this.mainCache, this.config.mainBudgetBytes, decoded.byteLength, "main");
+      this.insertEntry(this.mainCache, cacheEntry);
+      this.mainBytes += decoded.byteLength;
     }
 
     // Mark as ready for drain
@@ -840,7 +840,7 @@ export class CpuCache {
     this.notifyListeners();
 
     // Start next pending fetch
-    this.startFetches();
+    this.startChunkFetches();
   }
 
   // =========================================================================
@@ -849,18 +849,18 @@ export class CpuCache {
 
   private startProxyFetches(): void {
     while (
-      this.pendingProxyQueue.length > 0 &&
+      this.pendingProxyRequests.length > 0 &&
       // Share the chunk concurrency caps for now; proxies are a small minority.
       this.inFlight.size + this.inFlightProxy.size < this.config.maxConcurrentFetches &&
       this.inFlightBytes + this.inFlightProxyBytes < this.config.maxBytesInFlight
     ) {
-      const req = this.pendingProxyQueue.shift()!;
+      const req = this.pendingProxyRequests.shift()!;
       this.startSingleProxyFetch(req);
     }
   }
 
   private startSingleProxyFetch(req: ProxyRequest): void {
-    const key = this.proxyCompositeKey(req);
+    const key = this.inFlightProxyKey(req);
     const controller = new AbortController();
     // We don't have a running average for proxy sizes yet; reuse the chunk
     // average as a rough estimate. Corrected to actual size once the
@@ -870,12 +870,12 @@ export class CpuCache {
     this.inFlightProxyBytes += estimate;
     this.inFlightProxy.set(key, entry);
 
-    this.fetchProxyAsset(req, controller, key).catch(() => {
-      // Errors handled inside fetchProxyAsset
+    this.fetchProxy(req, controller, key).catch(() => {
+      // Errors handled inside fetchProxy
     });
   }
 
-  private async fetchProxyAsset(
+  private async fetchProxy(
     req: ProxyRequest,
     controller: AbortController,
     key: string,
@@ -926,7 +926,7 @@ export class CpuCache {
       proxyKind: req.kind,
       t: req.t,
       c: req.c,
-      insertedAt: this.insertCounter++,
+      insertedAt: this.lruCounter++,
       epochs: { ...this.currentEpochs },
     };
 
@@ -982,7 +982,7 @@ export class CpuCache {
     return this.proxyCache.get(req.datasetId)?.has(proxyInnerKey(req)) === true;
   }
 
-  private proxyCompositeKey(req: ProxyRequest): string {
+  private inFlightProxyKey(req: ProxyRequest): string {
     return `${req.datasetId}|${proxyInnerKey(req)}`;
   }
 
@@ -1014,13 +1014,13 @@ export class CpuCache {
     entityMap.set(entry.chunkKey, entry);
   }
 
-  private isCached(req: ChunkRequest): boolean {
-    const cache = req.lane === "overview" ? this.overviewCache : this.detailCache;
+  private isChunkCached(req: ChunkRequest): boolean {
+    const cache = req.lane === "overview" ? this.overviewCache : this.mainCache;
     return cache.get(req.entityId)?.has(req.chunkKey) === true;
   }
 
   private demoteEntity(entityId: string): void {
-    const entityMap = this.detailCache.get(entityId);
+    const entityMap = this.mainCache.get(entityId);
     if (!entityMap) return;
     for (const entry of entityMap.values()) {
       if (entry.tier === "active-detail") {
@@ -1043,9 +1043,9 @@ export class CpuCache {
     cache: Map<string, Map<string, CacheEntry>>,
     budget: number,
     incomingBytes: number,
-    cacheType: "detail" | "overview",
+    cacheType: "main" | "overview",
   ): void {
-    const currentBytes = cacheType === "detail" ? this.detailBytes : this.overviewBytes;
+    const currentBytes = cacheType === "main" ? this.mainBytes : this.overviewBytes;
     if (currentBytes + incomingBytes <= budget) return;
 
     if (cacheType === "overview") {
@@ -1059,7 +1059,7 @@ export class CpuCache {
   private evictLRU(
     cache: Map<string, Map<string, CacheEntry>>,
     bytesNeeded: number,
-    cacheType: "detail" | "overview",
+    cacheType: "main" | "overview",
   ): void {
     let freed = 0;
     const allEntries = this.collectEntries(cache);
@@ -1088,7 +1088,7 @@ export class CpuCache {
 
       for (const entry of entries) {
         if (freed >= bytesNeeded) break;
-        this.removeEntry(cache, entry, "detail");
+        this.removeEntry(cache, entry, "main");
         freed += entry.sizeBytes;
       }
     }
@@ -1097,14 +1097,14 @@ export class CpuCache {
   private removeEntry(
     cache: Map<string, Map<string, CacheEntry>>,
     entry: CacheEntry,
-    cacheType: "detail" | "overview",
+    cacheType: "main" | "overview",
   ): void {
     const entityMap = cache.get(entry.entityId);
     if (entityMap) {
       entityMap.delete(entry.chunkKey);
       if (entityMap.size === 0) cache.delete(entry.entityId);
     }
-    if (cacheType === "detail") this.detailBytes -= entry.sizeBytes;
+    if (cacheType === "main") this.mainBytes -= entry.sizeBytes;
     else this.overviewBytes -= entry.sizeBytes;
     this.evictionsSinceSnapshot++;
   }
@@ -1167,7 +1167,7 @@ export class CpuCache {
   // Helpers
   // =========================================================================
 
-  private compositeKey(req: ChunkRequest): string {
+  private inFlightKey(req: ChunkRequest): string {
     return `${req.entityId}/${req.chunkKey}`;
   }
 }

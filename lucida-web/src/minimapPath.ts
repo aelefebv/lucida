@@ -115,7 +115,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
             const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
             if (uploaded.has(chunkKey)) continue;
 
-            const cached = ctx.cpuCache.getCached(memberId, chunkKey);
+            const cached = ctx.cpuCache.getCachedChunk(memberId, chunkKey);
             if (cached && cached.data.byteLength > 0) {
               // GPU expects uint16 — expand uint8 if needed
               let u16: Uint16Array;

@@ -17,7 +17,7 @@ The repo's top-level **`CHUNK_PIPELINE.md`** is the long-form trace, complete wi
 
 ### 2. CPU cache submits + schedules
 
-[[cpu-cache]] — `cpuCache.ts:306-369` (submit), `:617-750` (scheduler). Demote stale entities, dedup, push to `pendingQueue`. Sort by priority, launch up to ≈9 concurrent fetches bounded by 32 MB in-flight.
+[[cpu-cache]] — `cpuCache.ts:306-369` (submit), `:617-750` (scheduler). Demote stale entities, dedup, push to `pendingRequests`. Sort by priority, launch up to ≈9 concurrent fetches bounded by 32 MB in-flight.
 
 ### 3. Network fetch
 

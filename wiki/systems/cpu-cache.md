@@ -21,8 +21,8 @@ Three problems all want to be solved in one place:
 
 Each tick:
 
-1. **Submit** — orchestrator calls `cpuCache.submit(plan)`. The cache demotes entities that left the active set (their chunks move to the `demoted-detail` tier), dedups requests, pushes survivors onto `pendingQueue`.
-2. **Schedule** — `startFetches` sorts pending by priority and launches up to `maxConcurrentFetches` (≈9) bounded by `maxBytesInFlight` (32 MB).
+1. **Submit** — orchestrator calls `cpuCache.submit(plan)`. The cache demotes entities that left the active set (their chunks move to the `demoted-detail` tier), dedups requests, pushes survivors onto `pendingRequests`.
+2. **Schedule** — `startChunkFetches` sorts pending by priority and launches up to `maxConcurrentFetches` (≈9) bounded by `maxBytesInFlight` (32 MB).
 3. **Fetch** — `contentSource.fetch(req)` returns binary bytes via the WebSocket bridge; routed by `(level, t, c, z, y, x)` key.
 4. **Decode** — `decodePool.decode(...)` picks a worker from a 3-worker pool, selects codec by wire format (Raw/Lz4/Zstd), returns a typed array.
 5. **Insert + signal** — decoded chunk lands in the cache and on the `ready[]` queue. The orchestrator drains this each tick within the upload budget.
@@ -37,7 +37,7 @@ Highest-numbered tier evicts first. LRU within each tier (by `insertedAt`).
 4. **proxy** — fallback resource (well/field proxy)
 5. **overview** (minimap) — most expensive; covers whole dataset
 
-Budgets: detail 512 MB, overview 64 MB, proxy 256 MB.
+Budgets: main 512 MB, overview 64 MB, proxy 256 MB.
 
 ## Interactions
 
