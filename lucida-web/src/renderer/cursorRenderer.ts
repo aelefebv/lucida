@@ -92,9 +92,11 @@ export class CursorRenderer {
   updateCursors(data: Float32Array, count: number): void {
     this.cursorCount = Math.min(count, MAX_CURSORS);
     if (this.cursorCount > 0) {
+      // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
+      // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
       this.device.queue.writeBuffer(
         this.cursorBuffer, 0,
-        data, 0, this.cursorCount * FLOATS_PER_CURSOR,
+        data as Float32Array<ArrayBuffer>, 0, this.cursorCount * FLOATS_PER_CURSOR,
       );
     }
   }

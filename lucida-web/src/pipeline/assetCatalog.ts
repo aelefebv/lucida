@@ -50,8 +50,11 @@ export interface AssetCatalogWasm {
 export class AssetCatalog {
   /** datasetId → entityId → set of available proxy kinds. */
   private readonly byDataset = new Map<string, Map<string, Set<ProxyKind>>>();
+  private readonly wasmScene: AssetCatalogWasm;
 
-  constructor(private readonly wasmScene: AssetCatalogWasm) {}
+  constructor(wasmScene: AssetCatalogWasm) {
+    this.wasmScene = wasmScene;
+  }
 
   /**
    * Apply an initial catalog snapshot for a dataset (the `catalog` field

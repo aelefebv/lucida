@@ -8,7 +8,6 @@ import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx, EntityProxyDescriptor } from "./workerContext.ts";
 import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases, getOrCreateSlicePool, resizeSliceIndirection, remapSliceIndirection } from "./sliceHandlers.ts";
 import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, getOrCreateVolumePool, resizeIndirection, remapIndirection, applyViewHotState, type LodIndirectionMeta } from "./volumeHandlers.ts";
-import type { ColdStateActiveEntry } from "./workerProtocol.ts";
 import { computeWantedSet, type ProxyAtlasSnapshot } from "./wantedSet.ts";
 import {
   createProxyAtlas,
@@ -123,7 +122,9 @@ function getOrCreateLUT(name: string): GPUTexture {
     format: "rgba8unorm",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
-  device.queue.writeTexture({ texture: tex }, data, { bytesPerRow: 256 * 4 }, [256, 1]);
+  // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
+  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+  device.queue.writeTexture({ texture: tex }, data as Uint8Array<ArrayBuffer>, { bytesPerRow: 256 * 4 }, [256, 1]);
   lutCache.set(name, tex);
   return tex;
 }

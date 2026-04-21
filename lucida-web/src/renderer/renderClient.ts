@@ -262,9 +262,11 @@ export class RenderClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: VolumeChunk[] = chunks.map(chunk => {
-      const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength);
+      // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
+      // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+      const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength) as ArrayBuffer;
       transferList.push(buf);
-      return { data: buf, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
+      return { data: buf, dataType: "uint16", x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
     });
     this.worker.postMessage(
       {

@@ -42,7 +42,6 @@ interface MockContentSource extends ContentSource {
 function createMockContentSource(): MockContentSource {
   const pendingFetches = new Map<string, { resolve: (r: FetchResult) => void; reject: (e: Error) => void }>();
   let fetchCount = 0;
-  let lastSignal: AbortSignal | null = null;
   let autoResolveBytes: number | null = null;
 
   const source: MockContentSource = {
@@ -64,7 +63,6 @@ function createMockContentSource(): MockContentSource {
     fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult> {
       fetchCount++;
       source.fetchCount = fetchCount;
-      lastSignal = signal;
       source.lastSignal = signal;
 
       const key = `${request.datasetId}/${request.imageId}/${request.chunkKey}`;
@@ -237,8 +235,10 @@ describe("CpuCache", () => {
       const deliveries = cache.drain(Infinity);
       expect(deliveries).toHaveLength(1);
       expect(deliveries[0].entityId).toBe("entity-1");
-      expect(deliveries[0].chunkKey).toBe("0/0/0/0/0/0");
-      expect(deliveries[0].lane).toBe("detail");
+      const delivery = deliveries[0];
+      if (delivery.kind === "proxy") throw new Error("expected chunk delivery");
+      expect(delivery.chunkKey).toBe("0/0/0/0/0/0");
+      expect(delivery.lane).toBe("detail");
     });
 
     it("drain returns empty when nothing ready", () => {

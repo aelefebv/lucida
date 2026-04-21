@@ -6,7 +6,6 @@ import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
 import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
-import { debugStats } from "./debug/debugStats.ts";
 
 /** SliceState — empty after S5.3 migration to Orchestrator delivery. */
 export type SliceState = Record<string, never>;

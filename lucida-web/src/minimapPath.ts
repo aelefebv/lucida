@@ -81,7 +81,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState): bool
 
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
 
-  for (const [dsId, ds] of datasets) {
+  for (const [, ds] of datasets) {
     const multiscale = ds.manifest.images[0].multiscale;
     const coarsestIdx = multiscale.levels.length - 1;
     const levelMeta = multiscale.levels[coarsestIdx];

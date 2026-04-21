@@ -86,7 +86,9 @@ async function decompressZstd(src: ArrayBuffer): Promise<ArrayBuffer> {
   if (!fzstdModule) {
     fzstdModule = await import("fzstd");
   }
-  return fzstdModule.decompress(new Uint8Array(src)).buffer;
+  // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
+  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+  return fzstdModule.decompress(new Uint8Array(src)).buffer as ArrayBuffer;
 }
 
 function decompress(bytes: ArrayBuffer, wireFormat: WireFormat): ArrayBuffer | Promise<ArrayBuffer> {

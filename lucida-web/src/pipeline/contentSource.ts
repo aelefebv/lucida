@@ -157,11 +157,19 @@ export class ProxiedContentSource implements ContentSource {
   private pendingProxy = new Map<string, PendingProxyRequest>();
   private imageWireFormats = new Map<string, WireFormat>();
 
+  private sendMessage: (json: string) => void;
+  private timeoutMs: number;
+  private proxyTimeoutMs: number;
+
   constructor(
-    private sendMessage: (json: string) => void,
-    private timeoutMs = DEFAULT_TIMEOUT_MS,
-    private proxyTimeoutMs = DEFAULT_PROXY_TIMEOUT_MS,
-  ) {}
+    sendMessage: (json: string) => void,
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    proxyTimeoutMs = DEFAULT_PROXY_TIMEOUT_MS,
+  ) {
+    this.sendMessage = sendMessage;
+    this.timeoutMs = timeoutMs;
+    this.proxyTimeoutMs = proxyTimeoutMs;
+  }
 
   /** Register an image's wire format. Called during dataset setup. */
   registerImage(imageId: string, wireFormat: WireFormat): void {

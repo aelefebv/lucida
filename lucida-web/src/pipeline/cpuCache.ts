@@ -17,7 +17,6 @@ import type { DecodePool } from "./decodePool.ts";
 import type {
   RequestPlan,
   ChunkRequest,
-  ActiveSetEntry,
   PlanningEpochs,
   CacheStateSnapshot,
   ProxyRequest,

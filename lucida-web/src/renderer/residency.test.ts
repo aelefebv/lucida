@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseChunkKey, remapIndirection, applyViewHotState, getRayHitForMember, type AtlasState, type LodIndirectionMeta } from "./volumeHandlers.ts";
-import { remapSliceIndirection, type SliceAtlasState, type SliceEntityZInfo } from "./sliceHandlers.ts";
+import { remapSliceIndirection, type SliceAtlasState } from "./sliceHandlers.ts";
 import type { ViewHotStateMessage } from "./workerProtocol.ts";
 
 // ---------------------------------------------------------------------------

@@ -9,7 +9,8 @@ import { useEffect, useRef, useState } from "react";
 import { debugStats, type DebugStats } from "./debugStats.ts";
 import { DEBUG_CATEGORIES, isDebugEnabled, setDebugEnabled, type DebugCategory } from "./logging.ts";
 import type { WasmScene } from "lucida-core";
-import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
+import type { ImageSpec } from "../manifestTypes.ts";
+import type { DatasetState } from "../types.ts";
 import { plan } from "../pipeline/planning.ts";
 import type {
   PlanningSnapshot,
@@ -105,7 +106,7 @@ interface DebugPanelProps {
   wasmSceneRef?: React.RefObject<WasmScene | null>;
   datasetId?: string | null;
   lastClickScreen?: [number, number] | null;
-  datasets: Map<string, { sharedQueue: any; manifest: DatasetManifest }>;
+  datasets: Map<string, DatasetState>;
   sessionRef?: React.RefObject<Session | null>;
   style?: React.CSSProperties;
 }
@@ -190,7 +191,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
               }
             }
             setCatalogSnap({
-              assetEpoch: typeof ws.asset_epoch === "function" ? ws.asset_epoch() : 0,
+              assetEpoch: typeof ws.asset_epoch === "function" ? Number(ws.asset_epoch()) : 0,
               perDataset,
               proxyBytes: tel?.proxyBytes ?? 0,
               proxyBudget: tel?.proxyBudget ?? 0,

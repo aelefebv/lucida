@@ -53,6 +53,10 @@ function makeVisibleRegion(
 function makeActiveEntry(
   overrides?: Partial<ColdStateActiveEntry>,
 ): ColdStateActiveEntry {
+  // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
+  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+  const identity = new Float32Array(16) as Float32Array<ArrayBuffer>;
+  identity[0] = identity[5] = identity[10] = identity[15] = 1;
   return {
     entityId: "entity-0",
     imageId: "img",
@@ -72,6 +76,18 @@ function makeActiveEntry(
     proxyAvailable: false,
     wellProxyAvailable: false,
     parentWellId: null,
+    modelMatrix: identity,
+    invModelMatrix: identity,
+    displayStateByChannel: {
+      0: {
+        contrastMin: 0,
+        contrastMax: 1,
+        gamma: 1,
+        opacity: 1,
+        colormapName: "gray",
+        channelMask: 1,
+      },
+    },
     ...overrides,
   };
 }
@@ -102,17 +118,6 @@ function makeVolumePool(
   return {
     slots: slots ?? new Map(),
     entityMetas: new Map([[memberId, lodMetas!]]),
-  };
-}
-
-/** Slice atlas (still per-member, single-entity). */
-function makeAtlas(overrides?: Partial<AtlasSnapshot>): AtlasSnapshot {
-  return {
-    slots: new Map(),
-    lodMetas: [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ],
-    ...overrides,
   };
 }
 

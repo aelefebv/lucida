@@ -43,8 +43,11 @@ export class LayoutRegistry {
   /** Monotonic counter bumped on every notify(); useful for `useSyncExternalStore`
    *  consumers that need a stable primitive snapshot. */
   private versionCounter = 0;
+  private readonly wasmScene: LayoutRegistryWasm;
 
-  constructor(private readonly wasmScene: LayoutRegistryWasm) {}
+  constructor(wasmScene: LayoutRegistryWasm) {
+    this.wasmScene = wasmScene;
+  }
 
   /**
    * Register a derived layout with WASM and broadcast it. Idempotent on

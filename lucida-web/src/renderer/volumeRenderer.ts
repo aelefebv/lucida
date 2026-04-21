@@ -43,7 +43,6 @@ export class VolumeRenderer {
   private invViewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private eyePos: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private atlasSlotDims = [1, 1, 1];
-  private lodMetas: LodIndirectionMeta[] = [];
   private viewProj: Float32Array<ArrayBufferLike> = new Float32Array(16);
   private camForward: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private clipDistance = 0;
@@ -207,11 +206,10 @@ export class VolumeRenderer {
     indirectionBuf: GPUBuffer,
     atlasSlotDims: [number, number, number],
     volumeDims: [number, number, number],
-    lodMetas?: LodIndirectionMeta[],
+    _lodMetas?: LodIndirectionMeta[],
   ) {
     this.volumeDims = volumeDims;
     this.atlasSlotDims = atlasSlotDims;
-    this.lodMetas = lodMetas ?? [];
     const dummyProxy = this.getDummyProxyTexture();
     const fieldProxyView = (this.fieldProxyTexture ?? dummyProxy).createView();
     const wellProxyView = (this.wellProxyTexture ?? dummyProxy).createView();

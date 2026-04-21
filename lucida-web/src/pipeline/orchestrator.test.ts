@@ -8,7 +8,7 @@ import type {
 } from "./cpuCache.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
-import type { PlanningEpochs, ProxyRequest } from "./planning.ts";
+import type { ProxyRequest } from "./planning.ts";
 import type { ColdStateMessage, MissingProxy } from "../renderer/workerProtocol.ts";
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */

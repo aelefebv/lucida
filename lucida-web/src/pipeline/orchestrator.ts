@@ -39,7 +39,7 @@ import type {
   ReadyProxyDelivery,
 } from "./cpuCache.ts";
 import type { ProxyRequest } from "./planning.ts";
-import { debugStats, type OrchDebug, type OrchMemberDebug } from "../debug/debugStats.ts";
+import { debugStats, type OrchDebug } from "../debug/debugStats.ts";
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -613,6 +613,8 @@ export class Orchestrator {
         members: [],
         hasMixedLevels: false,
         epochCacheHit: false,
+        visibleRegion: null,
+        entityDiag: [],
       };
 
       // Aggregate from member roster

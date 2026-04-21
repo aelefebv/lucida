@@ -77,7 +77,9 @@ function makeMockDevice(): { device: GPUDevice; lastWrite: () => ArrayBuffer | n
           (data as ArrayBufferView).byteOffset,
           (data as ArrayBufferView).byteOffset + (data as ArrayBufferView).byteLength,
         );
-    lastWriteCopy = ab.slice(0);
+    // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
+    // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+    lastWriteCopy = ab.slice(0) as ArrayBuffer;
     (buffer as unknown as MockBuffer).contents = lastWriteCopy;
   });
   const device = {
