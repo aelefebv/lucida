@@ -49,7 +49,7 @@ Same code path, different `DatasetManifest`:
 | `manifest.kind`       | `"Single"`                                                            | `{Plate: {rows, columns, positioning_mode, has_stage_positions}}`           |
 | Entities              | one `Image`                                                           | many `Well` (parents) + `Field` (children); images attach to fields         |
 | Layouts               | one placement at `[0, 0]` for the image entity                        | `source_layouts[].placements` position **wells** in plate-space; field-within-well offsets come from `TransformEdge`s (`build_grid_field_transforms` for grid plates; OME translation for stage-positioned) |
-| Planning treats it as | a singleton "well group" with one field (`planning.ts:437-443`)       | grouped by `parentId` (`planning.ts:374-447`)                               |
+| Planning treats it as | a singleton "well group" with one field (`planning.ts:472-481`)       | grouped by `parentId` (`planning.ts:411-483`)                               |
 
 So **plate complexity lives entirely in planning** (where it groups, promotes, and synthesizes well proxies). The fetch/cache/render layers below see the same chunk requests either way, just more of them and with extra `WellProxy3D`/`FieldProxy3D` request kinds.
 
@@ -85,7 +85,7 @@ This lives in `lucida-web/src/pipeline/planning.ts` and runs every tick from the
 
 The view query is **the** source of truth for "what's visible and at what apparent size."
 
-### 3b. Promotion: per-well LOD/proxy decision (`planning.ts:461-615`)
+### 3b. Promotion: per-well LOD/proxy decision (`planning.ts:498-635`)
 
 For each well group, choose one of three modes based on the well's projected diagonal (in screen pixels):
 
@@ -97,9 +97,9 @@ For each well group, choose one of three modes based on the well's projected dia
 
 Constants in `planning.ts:23-36`. **Hysteresis bands** of ±5px around each threshold prevent flapping when the user dwells near a boundary — once you're in a mode, you stay until you cross the far edge.
 
-**Catalog-aware degradation** (`planning.ts:546-615`): if the chosen mode wants a proxy that the server's asset catalog doesn't advertise, degrade one tier finer (e.g., wanted well-as-proxy but no `WellProxy3D` exists → drop to fields-with-proxy-fallback).
+**Catalog-aware degradation** (`planning.ts:537-558`): if the chosen mode wants a proxy that the server's asset catalog doesn't advertise, degrade one tier finer (e.g., wanted well-as-proxy but no `WellProxy3D` exists → drop to fields-with-proxy-fallback). Each degrade increments `PlanStats.catalogDegradations`.
 
-**LOD range** (`planning.ts:575-614`):
+**LOD range** (`planning.ts:611-632`, `makeFieldEntry`):
 
 ```
 targetLod        = entity.idealTargetLod    (from WASM, log2 of pixels-per-chunk)
@@ -109,7 +109,7 @@ detailOwnedRange = [targetLod, seedDetailLod]
 
 Two-LOD buffer absorbs zoom transitions smoothly.
 
-### 3c. Chunk enumeration & priority (`planning.ts:732-900`)
+### 3c. Chunk enumeration & priority (`planning.ts:772-957`)
 
 For each entity in the active set, iterate grid cells inside `xyBounds` ∩ `zRange` ∩ frustum planes. Each candidate becomes a `ChunkRequest` with a priority:
 
@@ -127,6 +127,18 @@ priority = laneOffset + (1 - importance) * 500 + distance * 10
 | OVERVIEW | 2000   | Minimap                       |
 
 So a centered, important detail chunk wins (~0); a faraway runway chunk loses (~1500+).
+
+### 3d. Inspecting what planning did
+
+`plan()` returns `RequestPlan.stats: PlanStats` alongside the requests — `catalogDegradations` and culling counters (`considered → afterXyBounds → afterZRange → afterFrustum`) accumulated across all `iterateChunks` calls in the run. The orchestrator combines this with the plan itself + a `cpuCache.snapshot()` cross-reference to publish per-dataset planning telemetry to `debugStats.planning.byDataset[dsId]`:
+
+- chunk lanes, total chunks, proxy count
+- per-LOD breakdown (planned / cached / in-flight)
+- wells-by-mode (deduped by parent well)
+- catalog degradations
+- focal entity (visible entity nearest viewport center) with its mode + reason ("123px ∈ [85, 145] → clearly fallback")
+
+The DebugPanel **Planning** tab renders this per dataset; two console-dump buttons there print the raw plan and active set categorized by lane. Two **overlays** (gated in the Logging tab) draw on top of the canvas: per-well promotion-mode badges and a chunk-grid visualization (status: cached / in-flight / planned). Both work in slice and volume modes via `WasmScene.project_to_screen`. See `lucida-web/src/debug/DebugOverlays.tsx`.
 
 ---
 
@@ -342,7 +354,7 @@ MAIN_VIEW_UPLOAD_BUDGET      = 16 MB / frame
 | Pipeline setup           | `lucida-web/src/hooks/useBridge.ts`        | `:142-186` cmd handler, `:355-409` setupFetchPipeline    |
 | Manifest types           | `lucida-web/src/manifestTypes.ts`          | TS mirrors of `DatasetManifest` / `FetchSource`          |
 | Content source (JS class)| `lucida-web/src/pipeline/contentSource.ts` | `ContentSource` class — per-image fetch promise tables; consumes a `FetchSource` |
-| Planning                 | `lucida-web/src/pipeline/planning.ts`      | `:461-615` promote, `:732-900` chunk enum, `:912-1100` plan |
+| Planning                 | `lucida-web/src/pipeline/planning.ts`      | `:498-635` promote, `:772-957` chunk enum + culling counters, `:969+` plan, `:218` PlanStats |
 | Orchestrator             | `lucida-web/src/pipeline/orchestrator.ts`  | `:257-689` planAndFetch, `:869-934` upload, `:1041-1148` cold state |
 | CPU cache                | `lucida-web/src/pipeline/cpuCache.ts`      | `:306-369` submit, `:617-750` scheduler, `:759-850` eviction |
 | Decode pool              | `lucida-web/src/pipeline/decodePool.ts`    | 3 workers; codec selection                               |
@@ -354,3 +366,6 @@ MAIN_VIEW_UPLOAD_BUDGET      = 16 MB / frame
 | Proxy atlas              | `lucida-web/src/renderer/proxyAtlas.ts`    | per-(dataset,kind,dims,channel) pools                    |
 | Wanted-set computation   | `lucida-web/src/renderer/wantedSet.ts`     | missing chunks/proxies                                   |
 | Shaders                  | `lucida-web/src/renderer/{slice,volume,compositor}.wgsl` | indirection, fallback chain, LUT                |
+| Debug telemetry          | `lucida-web/src/debug/debugStats.ts`       | `planning.byDataset` shape — populated by orchestrator   |
+| Debug panel              | `lucida-web/src/debug/DebugPanel.tsx`      | Planning tab + dump buttons                              |
+| Debug overlays           | `lucida-web/src/debug/DebugOverlays.tsx`   | well-mode badges + chunk-grid; uses `WasmScene.project_to_screen` |
