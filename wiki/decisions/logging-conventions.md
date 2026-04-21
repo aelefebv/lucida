@@ -78,6 +78,16 @@ When in doubt: **the prefix should be the most useful word to grep for.** If you
 - **Client-side multi-step time**: capture `performance.now()` between steps, fold into the `*.complete` event as a `stepsMs` map plus `totalMs`. Example: `setup_fetch_pipeline.complete` reports per-step time for all six 1b setup steps.
 - **Client-side round-trip**: store the start timestamp in a ref on send, compute delta on receipt, include as `roundTripMs` in the receive event. Approximate when concurrent requests are in flight (later sends overwrite the ref) — fine for the typical interactive case of one in-flight open at a time.
 
+### Anomaly checks
+
+When a happy-path log has predictable shape (counts, IDs, structural facts), pair it with a separate `<scope>.shape_anomaly`-style event that fires **only** if something is off. The pattern:
+
+1. Compute structural facts in a single pass (orphan counts, missing references, empty containers).
+2. Emit them as fields on the existing happy-path event so they're visible at a glance.
+3. Run a cheap predicate suite on the same facts. If anything fails, emit a separate anomaly event with an `issues: [...]` array describing each problem.
+
+Example: `scene.dataset_opened.applied` carries `n_wells`, `n_fields`, `n_orphans`, etc.; `manifest.shape_anomaly` fires only if a Plate has zero fields, a Field references a non-existent parent, or `default_layout_id` doesn't resolve. Healthy datasets emit one log; broken ones emit two — and the second one names the problem.
+
 ## Tradeoffs
 
 - **Inconsistency persists in untouched flows.** Old `eprintln!`s in chunk-serve, proxy-generate, etc. aren't actively wrong — they just don't benefit from spans/levels. Replacing them all in one go is a refactor with no functional payoff; the convention propagates as each flow gets touched.

@@ -397,12 +397,32 @@ export function useBridge({
     const channelCount = firstImage?.multiscale.levels[0]?.shape[1] ?? 1; // [T, C, Z, Y, X]
     const fetchVariant = Object.keys(fetchDesc as object)[0] ?? "unknown";
 
+    // Shape summary — mirrors the WASM-side `analyze_manifest_shape`
+    // counts so a JS-only debugger can spot Plate vs. Single anomalies
+    // without enabling the wasm category.
+    const entityIds = new Set(manifest.entities.map(e => e.id));
+    let nWells = 0;
+    let nFields = 0;
+    let nOrphans = 0;
+    for (const e of manifest.entities) {
+      if (e.kind === "Well") nWells++;
+      else if (e.kind === "Field") {
+        nFields++;
+        if (e.parent !== null && !entityIds.has(e.parent)) nOrphans++;
+      }
+    }
+
     bridgeLog("setup_fetch_pipeline.start", {
       datasetId,
       kind: typeof manifest.kind === "string" ? manifest.kind : Object.keys(manifest.kind ?? {})[0] ?? "unknown",
       fetchVariant,
       nImages: manifest.images.length,
       channelCount,
+      nWells,
+      nFields,
+      nOrphans,
+      nLayouts: manifest.source_layouts.length,
+      defaultLayoutId: manifest.default_layout_id,
     });
 
     const t0 = performance.now();

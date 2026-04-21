@@ -1,6 +1,8 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
-use lucida_content::{DatasetId, LayoutId, LayoutSpec};
+use lucida_content::{DatasetId, DatasetKind, DatasetManifest, EntityId, EntityKind, LayoutId, LayoutSpec};
 use lucida_protocol::{AssetCatalogDelta, DatasetOpened};
 
 use crate::camera::Camera;
@@ -173,17 +175,35 @@ impl Scene {
                         self.epochs.content += 1;
                         self.epochs.layout += 1;
 
+                        let shape = analyze_manifest_shape(&event.manifest);
                         crate::wasm_log!("scene.dataset_opened.applied", {
                             "dataset_id": dataset_id.0,
                             "n_entities": event.manifest.entities().len(),
                             "n_images": event.manifest.images().len(),
+                            "n_wells": shape.n_wells,
+                            "n_fields": shape.n_fields,
+                            "n_orphans": shape.n_orphans,
+                            "n_layouts": shape.n_layouts,
                             "channel_count": channel_count,
-                            "kind": format!("{:?}", event.manifest.kind),
+                            "kind": kind_label(&event.manifest.kind),
+                            "plate_rows": shape.plate_rows,
+                            "plate_columns": shape.plate_columns,
+                            "has_stage_positions": shape.has_stage_positions,
+                            "default_layout_id": event.manifest.default_layout_id.as_ref().map(|id| id.0.clone()),
                             "epochs": {
                                 "content": self.epochs.content,
                                 "layout": self.epochs.layout,
                             },
                         });
+
+                        let issues = manifest_anomalies(&event.manifest, &shape);
+                        if !issues.is_empty() {
+                            crate::wasm_log!("manifest.shape_anomaly", {
+                                "dataset_id": dataset_id.0,
+                                "kind": kind_label(&event.manifest.kind),
+                                "issues": issues,
+                            });
+                        }
                     }
                     DocumentCommand::RemoveDataset { id } => {
                         self.dataset_order.retain(|s| s != id);
@@ -391,6 +411,118 @@ impl Scene {
                 self.epochs.selection += 1;
             }
         }
+    }
+}
+
+/// Aggregated counts and plate metadata used by both the
+/// `scene.dataset_opened.applied` log enrichment and the
+/// `manifest.shape_anomaly` check. Single pass over `entities()` so the
+/// extra accounting is cheap even for plates with many fields.
+struct ManifestShape {
+    n_wells: usize,
+    n_fields: usize,
+    n_orphans: usize,
+    n_layouts: usize,
+    n_fields_without_image: usize,
+    plate_rows: Option<usize>,
+    plate_columns: Option<usize>,
+    has_stage_positions: Option<bool>,
+}
+
+fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
+    let entities = manifest.entities();
+    let entity_ids: HashSet<&EntityId> = entities.iter().map(|e| &e.id).collect();
+    let image_owners: HashSet<&EntityId> = manifest.images().iter().map(|i| &i.owner).collect();
+
+    let (plate_rows, plate_columns, has_stage_positions) = match &manifest.kind {
+        DatasetKind::Plate { rows, columns, has_stage_positions, .. } => (
+            Some(rows.len()),
+            Some(columns.len()),
+            Some(*has_stage_positions),
+        ),
+        DatasetKind::Single => (None, None, None),
+    };
+
+    let mut shape = ManifestShape {
+        n_wells: 0,
+        n_fields: 0,
+        n_orphans: 0,
+        n_layouts: manifest.source_layouts().len(),
+        n_fields_without_image: 0,
+        plate_rows,
+        plate_columns,
+        has_stage_positions,
+    };
+
+    for entity in entities {
+        match entity.kind {
+            EntityKind::Well => shape.n_wells += 1,
+            EntityKind::Field => {
+                shape.n_fields += 1;
+                if let Some(parent) = &entity.parent {
+                    if !entity_ids.contains(parent) {
+                        shape.n_orphans += 1;
+                    }
+                }
+                if !image_owners.contains(&entity.id) {
+                    shape.n_fields_without_image += 1;
+                }
+            }
+            EntityKind::Image => {}
+        }
+    }
+
+    shape
+}
+
+fn manifest_anomalies(manifest: &DatasetManifest, shape: &ManifestShape) -> Vec<String> {
+    let mut issues = Vec::new();
+
+    if matches!(manifest.kind, DatasetKind::Plate { .. }) {
+        if shape.plate_rows == Some(0) {
+            issues.push("plate has zero rows".into());
+        }
+        if shape.plate_columns == Some(0) {
+            issues.push("plate has zero columns".into());
+        }
+        if shape.n_fields == 0 {
+            issues.push("plate has wells but no fields".into());
+        }
+    }
+
+    if shape.n_orphans > 0 {
+        issues.push(format!(
+            "{} field(s) reference a parent entity that doesn't exist",
+            shape.n_orphans
+        ));
+    }
+    if shape.n_fields_without_image > 0 {
+        issues.push(format!(
+            "{} field(s) have no associated image",
+            shape.n_fields_without_image
+        ));
+    }
+
+    if let Some(default_id) = &manifest.default_layout_id {
+        let layout_ids: HashSet<&LayoutId> =
+            manifest.source_layouts().iter().map(|l| &l.id).collect();
+        if !layout_ids.contains(default_id) {
+            issues.push(format!(
+                "default_layout_id '{}' is not in source_layouts",
+                default_id.0
+            ));
+        }
+    }
+
+    issues
+}
+
+/// Short, stable label for the dataset kind (e.g. `"Single"`, `"Plate"`).
+/// Avoids leaking the full Debug output (which includes row/column lists).
+fn kind_label(kind: &DatasetKind) -> &'static str {
+    match kind {
+        DatasetKind::Single => "Single",
+        DatasetKind::Plate { .. } => "Plate",
     }
 }
 
