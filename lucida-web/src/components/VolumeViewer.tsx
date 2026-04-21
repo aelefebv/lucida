@@ -52,20 +52,21 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const sceneRef = useRef<WasmScene>(scene);
   sceneRef.current = scene;
 
-  const markInteractiveDirty = useCallback(() => {
-    loopRef.current?.markInteractiveDirty();
-  }, []);
-
   const isFlyMode = cameraMode === "fly";
 
   // Fly camera input hook
+  // Inline the markInteractiveDirty wrapper here (instead of reusing the
+  // shared `markInteractiveDirty` above) so the dirty_set log carries a
+  // fly-specific source. Fly-camera ticks every animation frame, so this
+  // is the one external caller where attribution is genuinely useful;
+  // the rate-limiter collapses 60+/sec into one log line per second.
   const fly = useFlyCameraInput(
     sceneRef,
     applyViewportCommand,
     { current: pressedKeys },
     isFlyMode,
     emitPresence,
-    markInteractiveDirty,
+    useCallback(() => loopRef.current?.markInteractiveDirty("fly_camera_input"), []),
     useCallback(() => {
       clearTimeout(scaleTimerRef.current);
       loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);

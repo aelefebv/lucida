@@ -88,6 +88,15 @@ When a happy-path log has predictable shape (counts, IDs, structural facts), pai
 
 Example: `scene.dataset_opened.applied` carries `n_wells`, `n_fields`, `n_orphans`, etc.; `manifest.shape_anomaly` fires only if a Plate has zero fields, a Field references a non-existent parent, or `default_layout_id` doesn't resolve. Healthy datasets emit one log; broken ones emit two — and the second one names the problem.
 
+### Hot-path instrumentation
+
+The render loop runs at ~60Hz, so per-tick logging would flood the console. Two patterns make the `render` category readable while still useful:
+
+- **Source attribution with per-(kind,source) rate limiting.** `markInteractiveDirty(source)` and `markResidencyDirty(source)` flow into a private `setDirty(kind, source)` helper that emits `render_loop.dirty_set` at most once per second per `(kind, source)` key. Bursts collapse into a single log + a `suppressedSince` count. Lets a debugger answer "what woke up the loop?" without 60 logs/sec. Existing external callers default to `source = "external"`; label individually as needed when you're chasing a specific wakeup.
+- **Aggregated burst events.** `render_loop.residency_throttled` fires only when the 33ms gate suppresses a render. Rate-limited to once per second, with a `skipCount` showing how many renders were dropped in the window. Quiet on the happy path; noisy only when chunks are arriving faster than the throttle allows.
+
+In general: **anything that fires faster than once per second should aggregate or rate-limit before logging.** The DebugPanel "Render" tab is the right place for live per-frame state; logs are for discrete events and historical audit.
+
 ## Tradeoffs
 
 - **Inconsistency persists in untouched flows.** Old `eprintln!`s in chunk-serve, proxy-generate, etc. aren't actively wrong — they just don't benefit from spans/levels. Replacing them all in one go is a refactor with no functional payoff; the convention propagates as each flow gets touched.
@@ -96,10 +105,12 @@ Example: `scene.dataset_opened.applied` carries `n_wells`, `n_fields`, `n_orphan
 - **DebugPanel toggle has a bootstrap gap.** Events that fire before the panel mounts (initial WS connect, first frame) aren't captured by a freshly-flicked toggle. Workaround: enable, reload, then capture the next session.
 - **WASM logger holds its own copy of the enabled set.** WASM can't read `localStorage` directly. JS pushes via `set_debug_categories(csv)` on init (in `useWasmScene`) and on every panel toggle (via `onDebugCategoriesChanged`). Out-of-band changes to `localStorage` (e.g., DevTools console without reload) only update the JS-side gate; WASM stays stale until JS calls the setter.
 - **Round-trip timing is approximate under concurrent sends.** A second `sendOpenRemoteDataset` before the first's response overwrites the start timestamp; the first's response then reports the *second* send's roundtrip. Acceptable for the interactive 1-at-a-time case; revisit when batch opens become common.
+- **Render-loop source attribution is opt-in for external callers.** The renderLoop's internal sites (cache subscribe, eviction, tick continuation, lifecycle) are labeled, but external callers of `markInteractiveDirty()` / `markResidencyDirty()` default to `source: "external"` to avoid touching ~30 callsites in App.tsx and the hooks. Label individually when chasing a specific wakeup; the convention's value is local to the file you're debugging.
 
 ## How this decision shows up in code
 
-- `lucida-web/src/debug/logging.ts` — category registry, `isDebugEnabled` / `setDebugEnabled`, `onDebugCategoriesChanged` listener.
+- `lucida-web/src/debug/logging.ts` — category registry, `isDebugEnabled` / `setDebugEnabled`, `onDebugCategoriesChanged` listener, generic `debugLog(category, event, data)`.
+- `lucida-web/src/renderLoop.ts` — `setDirty(kind, source)` private helper + `markInteractiveDirty(source)` / `markResidencyDirty(source)` public methods; throttle skip aggregation in `tick()`.
 - `lucida-web/src/bridge.ts` — `bridgeLog` helper (the existing `[Bridge]` `console.log`/`console.warn` lines predate this convention and remain until next touch).
 - `lucida-web/src/hooks/useWasmScene.ts` — pushes initial categories into WASM after `init()` and subscribes to JS-side changes.
 - `lucida-web/src/debug/DebugPanel.tsx` — "Logging" tab UI over `localStorage.debug`.

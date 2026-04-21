@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from "react";
 import { debugStats, type DebugStats } from "./debugStats.ts";
 import { DEBUG_CATEGORIES, isDebugEnabled, setDebugEnabled, type DebugCategory } from "./logging.ts";
+import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import type { ImageSpec } from "../manifestTypes.ts";
 import type { DatasetState } from "../types.ts";
@@ -60,6 +61,7 @@ type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch" | "cata
 const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   bridge: "WebSocket send/receive and dataset-open lifecycle",
   wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
+  render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
 };
 
 interface CatalogSnap {
@@ -108,8 +110,11 @@ interface DebugPanelProps {
   lastClickScreen?: [number, number] | null;
   datasets: Map<string, DatasetState>;
   sessionRef?: React.RefObject<Session | null>;
+  renderLoopRef?: React.RefObject<RenderLoop | null>;
   style?: React.CSSProperties;
 }
+
+type RenderLoopSnap = ReturnType<RenderLoop["getDebugSnapshot"]>;
 
 function fmt(n: number, decimals = 1): string {
   return n.toFixed(decimals);
@@ -121,7 +126,7 @@ function fmtBytes(bytes: number): string {
   return `${bytes}B`;
 }
 
-export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets, sessionRef, style }: DebugPanelProps) {
+export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets, sessionRef, renderLoopRef, style }: DebugPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("render");
   const [snap, setSnap] = useState<DebugStats>({ ...debugStats });
 
@@ -148,9 +153,16 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
   // Catalog tab state
   const [catalogSnap, setCatalogSnap] = useState<CatalogSnap | null>(null);
 
+  // Render loop snapshot (FPS, dirty flags, throttle, sticky max times)
+  const [loopSnap, setLoopSnap] = useState<RenderLoopSnap | null>(null);
+
   useEffect(() => {
     const id = setInterval(() => {
       setSnap({ ...debugStats, memberStats: [...debugStats.memberStats] });
+
+      // Poll render loop snapshot (FPS, dirty flags, throttle state, max times)
+      const loop = renderLoopRef?.current ?? null;
+      setLoopSnap(loop ? loop.getDebugSnapshot() : null);
 
       // Poll cache telemetry
       const cache = sessionRef?.current?.cpuCache ?? null;
@@ -357,7 +369,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
       }
     }, POLL_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [wasmSceneRef, datasetId, datasets, sessionRef]);
+  }, [wasmSceneRef, datasetId, datasets, sessionRef, renderLoopRef]);
 
   // Ray pick on click
   useEffect(() => {
@@ -413,17 +425,92 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             <div className="debug-section">
               <div className="debug-title">Render</div>
               <div>Mode: {snap.mode || "\u2014"}</div>
-              <div>Frame: {fmt(snap.frameTimeMs, 1)}ms</div>
-              <div>Plan: {fmt(snap.planTimeMs, 1)}ms</div>
-              <div>Upload: {fmt(snap.uploadTimeMs, 1)}ms</div>
-              <div>Passes: {snap.renderPassCount}</div>
+              <div>
+                FPS: {loopSnap?.fps ?? "—"}
+                {loopSnap?.msSinceLastRender !== null && loopSnap?.msSinceLastRender !== undefined && (
+                  <span style={{ color: "#888" }}> (last render {loopSnap.msSinceLastRender}ms ago)</span>
+                )}
+              </div>
+              <div>
+                Frame: {fmt(snap.frameTimeMs, 1)}ms
+                {loopSnap && <span style={{ color: "#888" }}> (max {fmt(loopSnap.maxFrameMs, 1)})</span>}
+              </div>
+              <div>
+                Plan: {fmt(snap.planTimeMs, 1)}ms
+                {loopSnap && <span style={{ color: "#888" }}> (max {fmt(loopSnap.maxPlanMs, 1)})</span>}
+              </div>
+              <div>
+                Upload: {fmt(snap.uploadTimeMs, 1)}ms
+                {loopSnap && <span style={{ color: "#888" }}> (max {fmt(loopSnap.maxUploadMs, 1)})</span>}
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <span>Dirty:</span>
+                {(() => {
+                  // Three-state indicator: bright when currently set, dim
+                  // afterglow within 500ms of being set, gray otherwise.
+                  // Afterglow lets the panel surface fast set→clear flips
+                  // (e.g. an interactive flip that resolves within one RAF)
+                  // that would otherwise be invisible at 200ms polling.
+                  const AFTERGLOW_MS = 500;
+                  const interactiveRecent = loopSnap?.msSinceInteractiveDirty !== null
+                    && loopSnap?.msSinceInteractiveDirty !== undefined
+                    && loopSnap.msSinceInteractiveDirty < AFTERGLOW_MS;
+                  const residencyRecent = loopSnap?.msSinceResidencyDirty !== null
+                    && loopSnap?.msSinceResidencyDirty !== undefined
+                    && loopSnap.msSinceResidencyDirty < AFTERGLOW_MS;
+                  const interactiveColor = loopSnap?.interactiveDirty
+                    ? "#4f4"
+                    : interactiveRecent ? "#283" : "#444";
+                  const residencyColor = loopSnap?.residencyDirty
+                    ? "#fb4"
+                    : residencyRecent ? "#963" : "#444";
+                  return (
+                    <>
+                      <span style={{ color: interactiveColor }}>
+                        {loopSnap?.interactiveDirty ? "● " : interactiveRecent ? "◐ " : "○ "}interactive
+                      </span>
+                      <span style={{ color: residencyColor }}>
+                        {loopSnap?.residencyDirty ? "● " : residencyRecent ? "◐ " : "○ "}residency
+                      </span>
+                    </>
+                  );
+                })()}
+              </div>
+              {loopSnap && loopSnap.residencyDirty && loopSnap.throttleSkipsPending > 0 && (
+                <div style={{ color: "#fb4" }}>
+                  Throttled: {loopSnap.throttleSkipsPending} skip{loopSnap.throttleSkipsPending === 1 ? "" : "s"} pending
+                </div>
+              )}
+            </div>
+
+            <div className="debug-section">
+              <div className="debug-title">Passes</div>
+              <div>
+                Total: {snap.renderPasses.total}
+                {loopSnap && loopSnap.maxPasses > snap.renderPasses.total && (
+                  <span style={{ color: "#888" }}> (max {loopSnap.maxPasses})</span>
+                )}
+              </div>
+              {Object.entries(snap.renderPasses.byDataset).length > 0 && (
+                <div className="debug-member-list">
+                  {Object.entries(snap.renderPasses.byDataset)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([dsId, count]) => (
+                      <div key={dsId} className="debug-member-row">
+                        <span className="debug-member-id" title={dsId}>
+                          {dsId.length > 16 ? "..." + dsId.slice(-14) : dsId}
+                        </span>
+                        <span>{count}</span>
+                      </div>
+                    ))}
+                </div>
+              )}
             </div>
 
             <div className="debug-section">
               <div className="debug-title">LOD</div>
               <div>Level: {snap.selectedLevel} / {snap.numLevels - 1}</div>
               <div>eff_zoom: {fmt(snap.effectiveZoom, 2)}</div>
-              <div>zoom/vox: {fmt(snap.zoomPerVoxel, 4)}</div>
             </div>
 
             <div className="debug-section">
@@ -443,14 +530,22 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             </div>
 
             {snap.memberStats.length > 0 && (() => {
-              const active = snap.memberStats.filter(m => m.chunksNeeded > 0);
+              const active = snap.memberStats
+                .filter(m => m.chunksNeeded > 0)
+                .map(m => ({ ...m, gap: m.chunksNeeded - m.chunksSent }))
+                .sort((a, b) => b.gap - a.gap);
               if (active.length === 0) return null;
+              const worstGap = active[0].gap;
               return (
                 <div className="debug-section">
-                  <div className="debug-title">Per-Member ({active.length} active)</div>
+                  <div className="debug-title">Per-Member ({active.length} active, sorted by gap)</div>
                   <div className="debug-member-list">
-                    {active.slice(0, 12).map((m) => (
-                      <div key={m.id} className="debug-member-row">
+                    {active.slice(0, 12).map((m, i) => (
+                      <div
+                        key={m.id}
+                        className="debug-member-row"
+                        style={i === 0 && worstGap > 0 ? { color: "#fb4" } : undefined}
+                      >
                         <span className="debug-member-id" title={m.id}>
                           {m.id.length > 16 ? "..." + m.id.slice(-14) : m.id}
                         </span>

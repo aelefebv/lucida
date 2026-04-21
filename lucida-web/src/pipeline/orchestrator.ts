@@ -216,6 +216,20 @@ export class Orchestrator {
   private previousActiveSet = new Map<string, ActiveSetEntry[]>();
   private lastEpochs: PlanningEpochs | null = null;
   private cachedResult: OrchestratorResult | null = null;
+  /**
+   * Snapshot of debug member stats produced during the most recent
+   * non-cache-hit planning run. Replayed onto `debugStats` when an
+   * epoch cache hit returns early; otherwise the panel would show
+   * `Visible: 0 / 0` for every idle tick even though the same N
+   * members are still being rendered. See DebugPanel "Render" tab.
+   */
+  private cachedDebugMemberSnapshot: {
+    visibleMembers: number;
+    totalMembers: number;
+    memberStats: typeof debugStats.memberStats;
+    selectedLevel: number;
+    numLevels: number;
+  } | null = null;
   private requestEpoch = 0;
   /**
    * M3 (DOMAINS step 8a): per-dataset last-emitted viewEpoch. Tracked so
@@ -285,6 +299,16 @@ export class Orchestrator {
     ) {
       if (debugStats.enabled && debugStats.orch) {
         debugStats.orch.epochCacheHit = true;
+      }
+      // Replay member stats from the last full planning run so the panel
+      // doesn't blink to "Visible: 0 / 0" between non-planning ticks.
+      if (debugStats.enabled && this.cachedDebugMemberSnapshot) {
+        const s = this.cachedDebugMemberSnapshot;
+        debugStats.visibleMembers = s.visibleMembers;
+        debugStats.totalMembers = s.totalMembers;
+        debugStats.memberStats = [...s.memberStats];
+        debugStats.selectedLevel = s.selectedLevel;
+        debugStats.numLevels = s.numLevels;
       }
       return this.cachedResult;
     }
@@ -687,6 +711,15 @@ export class Orchestrator {
     // Step 5 — Cache and return
     this.lastEpochs = currentEpochs;
     this.cachedResult = { memberRoster, settings, multiChannel, epochs: currentEpochs, entityIndexByDataset };
+    if (debugStats.enabled) {
+      this.cachedDebugMemberSnapshot = {
+        visibleMembers: debugStats.visibleMembers,
+        totalMembers: debugStats.totalMembers,
+        memberStats: [...debugStats.memberStats],
+        selectedLevel: debugStats.selectedLevel,
+        numLevels: debugStats.numLevels,
+      };
+    }
     return this.cachedResult;
   }
 

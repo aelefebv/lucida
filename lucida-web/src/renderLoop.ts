@@ -4,6 +4,7 @@ import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./rende
 import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
 import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
+import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { Orchestrator } from "./pipeline/orchestrator.ts";
@@ -26,6 +27,28 @@ export class RenderLoop {
   private lastResidencyRenderTime = 0;
   private rafId: number | null = null;
   private unsubs = new Map<string, () => void>();
+
+  // --- debug instrumentation (gated on the "render" category) ---
+  // Per-(kind,source) emit throttling for `render_loop.dirty_set`. A
+  // burst of identical calls within DIRTY_EMIT_INTERVAL_MS collapses to
+  // one log + a `suppressedSince` count.
+  private dirtyEmitState = new Map<string, { lastEmit: number; pending: number }>();
+  private static readonly DIRTY_EMIT_INTERVAL_MS = 1000;
+  // `render_loop.residency_throttled` aggregation. Counts how many
+  // residency renders the throttle gate suppressed since the last emit.
+  private throttleSkipPending = 0;
+  private lastThrottleEmit = Number.NEGATIVE_INFINITY;
+  private static readonly THROTTLE_EMIT_INTERVAL_MS = 1000;
+  // Ring buffer of recent ticks. Powers FPS, sticky-max times, and the
+  // "ms since last render" indicator on the DebugPanel. Bounded to
+  // SAMPLE_BUFFER_LIMIT entries; oldest evicted on push.
+  private frameSamples: Array<{ t: number; frame: number; plan: number; upload: number; passes: number; rendered: boolean }> = [];
+  private static readonly SAMPLE_BUFFER_LIMIT = 120;
+  // Last-set timestamps for each dirty flag. Lets the panel show a brief
+  // "afterglow" so transient flips (e.g. an interactive flag that gets
+  // cleared within one RAF) are visible at the 200ms polling rate.
+  private lastInteractiveDirtyAt: number | null = null;
+  private lastResidencyDirtyAt: number | null = null;
 
   private sliceState: SliceState = createSliceState();
   private volumeState: VolumeState = createVolumeState();
@@ -53,8 +76,7 @@ export class RenderLoop {
     this.canvas = opts.canvas;
     this.mode = opts.mode;
     this.cpuCacheUnsub = this.session.cpuCache.subscribe(() => {
-      this.residencyDirty = true;
-      this.scheduleIfNeeded();
+      this.setDirty("residency", "cache_subscribe");
     });
   }
 
@@ -64,8 +86,7 @@ export class RenderLoop {
     this.client.onChunksEvicted = (datasetId: string, evicted: string[], skipped: string[]) => {
       this.orchestrator.handleChunksEvicted(datasetId, evicted, skipped);
       if (evicted.length > 0) {
-        this.residencyDirty = true;
-        this.scheduleIfNeeded();
+        this.setDirty("residency", "chunks_evicted");
       }
     };
 
@@ -74,13 +95,11 @@ export class RenderLoop {
     this.client.onWantedSetDelta = (_epochs, missing) => {
       this.orchestrator.handleWantedSetDelta(missing);
       if (missing.length > 0) {
-        this.residencyDirty = true;
-        this.scheduleIfNeeded();
+        this.setDirty("residency", "wanted_set_delta");
       }
     };
 
-    this.interactiveDirty = true;
-    this.scheduleIfNeeded();
+    this.setDirty("interactive", "loop_start");
   }
 
   stop(): void {
@@ -113,8 +132,7 @@ export class RenderLoop {
 
   addDataset(id: string, manifest: DatasetManifest): void {
     this.datasets.set(id, { manifest });
-    this.interactiveDirty = true;
-    this.scheduleIfNeeded();
+    this.setDirty("interactive", "dataset_added");
   }
 
   removeDataset(id: string): void {
@@ -161,8 +179,7 @@ export class RenderLoop {
       }
     }
 
-    this.interactiveDirty = true;
-    this.scheduleIfNeeded();
+    this.setDirty("interactive", "dataset_removed");
   }
 
   /**
@@ -196,14 +213,12 @@ export class RenderLoop {
     return [...ids];
   }
 
-  markInteractiveDirty(): void {
-    this.interactiveDirty = true;
-    this.scheduleIfNeeded();
+  markInteractiveDirty(source: string = "external"): void {
+    this.setDirty("interactive", source);
   }
 
-  markResidencyDirty(): void {
-    this.residencyDirty = true;
-    this.scheduleIfNeeded();
+  markResidencyDirty(source: string = "external"): void {
+    this.setDirty("residency", source);
   }
 
   resetVolumeCache(): void {
@@ -215,15 +230,13 @@ export class RenderLoop {
       this.sliceZ = z;
       this.sliceT = t;
       this.sliceC = c;
-      this.interactiveDirty = true;
-      this.scheduleIfNeeded();
+      this.setDirty("interactive", "slice_params");
     }
   }
 
   setRenderScale(s: number): void {
     this._renderScale = s;
-    this.interactiveDirty = true;
-    this.scheduleIfNeeded();
+    this.setDirty("interactive", "render_scale");
   }
 
   setMinimap(enabled: boolean, size?: number, overlayCallback?: ((data: MinimapOverlayData) => void) | null): void {
@@ -231,8 +244,7 @@ export class RenderLoop {
     if (size !== undefined) this.minimapState.size = size;
     this.minimapState.overlayCallback = overlayCallback ?? null;
     if (enabled) {
-      this.interactiveDirty = true;
-      this.scheduleIfNeeded();
+      this.setDirty("interactive", "minimap_enabled");
     }
   }
 
@@ -244,6 +256,135 @@ export class RenderLoop {
   private scheduleIfNeeded(): void {
     if ((this.interactiveDirty || this.residencyDirty) && this.rafId === null) {
       this.rafId = requestAnimationFrame(this.tick);
+    }
+  }
+
+  private recordFrameSample(t: number, frame: number, plan: number, upload: number, passes: number, rendered: boolean): void {
+    this.frameSamples.push({ t, frame, plan, upload, passes, rendered });
+    if (this.frameSamples.length > RenderLoop.SAMPLE_BUFFER_LIMIT) {
+      this.frameSamples.shift();
+    }
+  }
+
+  /**
+   * Snapshot of render-loop internals for the DebugPanel "Render" tab.
+   * Computed on demand from the ring buffer; cheap (O(SAMPLE_BUFFER_LIMIT)).
+   */
+  getDebugSnapshot(): {
+    interactiveDirty: boolean;
+    residencyDirty: boolean;
+    msSinceInteractiveDirty: number | null;
+    msSinceResidencyDirty: number | null;
+    throttleSkipsPending: number;
+    msSinceLastThrottleEmit: number | null;
+    msSinceLastRender: number | null;
+    fps: number | null;
+    sampleWindowMs: number | null;
+    maxFrameMs: number;
+    maxPlanMs: number;
+    maxUploadMs: number;
+    maxPasses: number;
+  } {
+    const now = performance.now();
+    const samples = this.frameSamples;
+    // Window FPS / max stats to the last ~2 seconds. Otherwise FPS keeps
+    // reporting "60" long after the loop has gone idle, because the ring
+    // buffer still holds samples from earlier active bursts.
+    const FPS_WINDOW_MS = 2000;
+    const windowCutoff = now - FPS_WINDOW_MS;
+    const recent = samples.filter(s => s.t >= windowCutoff);
+    const rendered = recent.filter(s => s.rendered);
+
+    let fps: number | null = null;
+    let sampleWindowMs: number | null = null;
+    if (rendered.length >= 2) {
+      const first = rendered[0].t;
+      const last = rendered[rendered.length - 1].t;
+      const span = last - first;
+      if (span > 0) {
+        fps = +((rendered.length - 1) / (span / 1000)).toFixed(1);
+        sampleWindowMs = Math.round(span);
+      }
+    }
+
+    // For "last render age" use the full buffer (not windowed) so a 5s
+    // idle period still tells you how long it's been.
+    const lastRenderedFull = samples.filter(s => s.rendered).pop();
+    const msSinceLastRender = lastRenderedFull ? Math.round(now - lastRenderedFull.t) : null;
+
+    // If we couldn't compute fps from the window AND it's been >1s since
+    // the last render, the loop is genuinely idle — report 0 instead of
+    // null so the panel shows "FPS: 0" instead of "—".
+    if (fps === null && (msSinceLastRender === null || msSinceLastRender > 1000)) {
+      fps = 0;
+    }
+
+    let maxFrameMs = 0, maxPlanMs = 0, maxUploadMs = 0, maxPasses = 0;
+    for (const s of recent) {
+      if (s.frame > maxFrameMs) maxFrameMs = s.frame;
+      if (s.plan > maxPlanMs) maxPlanMs = s.plan;
+      if (s.upload > maxUploadMs) maxUploadMs = s.upload;
+      if (s.passes > maxPasses) maxPasses = s.passes;
+    }
+
+    return {
+      interactiveDirty: this.interactiveDirty,
+      residencyDirty: this.residencyDirty,
+      msSinceInteractiveDirty: this.lastInteractiveDirtyAt === null
+        ? null
+        : Math.round(now - this.lastInteractiveDirtyAt),
+      msSinceResidencyDirty: this.lastResidencyDirtyAt === null
+        ? null
+        : Math.round(now - this.lastResidencyDirtyAt),
+      throttleSkipsPending: this.throttleSkipPending,
+      msSinceLastThrottleEmit: this.lastThrottleEmit === Number.NEGATIVE_INFINITY
+        ? null
+        : Math.round(now - this.lastThrottleEmit),
+      msSinceLastRender,
+      fps,
+      sampleWindowMs,
+      maxFrameMs: +maxFrameMs.toFixed(1),
+      maxPlanMs: +maxPlanMs.toFixed(1),
+      maxUploadMs: +maxUploadMs.toFixed(1),
+      maxPasses,
+    };
+  }
+
+  /**
+   * Set a dirty flag with attribution. The `source` string flows into
+   * the gated `render_loop.dirty_set` event so a debugger can answer
+   * "what woke up the loop just now?". Identical (kind, source) calls
+   * within DIRTY_EMIT_INTERVAL_MS collapse into one log + a count.
+   */
+  private setDirty(kind: "interactive" | "residency", source: string): void {
+    const tNow = performance.now();
+    if (kind === "interactive") {
+      this.interactiveDirty = true;
+      this.lastInteractiveDirtyAt = tNow;
+    } else {
+      this.residencyDirty = true;
+      this.lastResidencyDirtyAt = tNow;
+    }
+    this.scheduleIfNeeded();
+
+    const key = `${kind}:${source}`;
+    const now = performance.now();
+    const entry = this.dirtyEmitState.get(key);
+    if (!entry) {
+      debugLog("render", "dirty_set", { kind, source });
+      this.dirtyEmitState.set(key, { lastEmit: now, pending: 0 });
+      return;
+    }
+    if (now - entry.lastEmit > RenderLoop.DIRTY_EMIT_INTERVAL_MS) {
+      debugLog("render", "dirty_set", {
+        kind,
+        source,
+        suppressedSince: entry.pending,
+      });
+      entry.lastEmit = now;
+      entry.pending = 0;
+    } else {
+      entry.pending++;
     }
   }
 
@@ -292,8 +433,27 @@ export class RenderLoop {
         this.residencyDirty = false;
         this.lastResidencyRenderTime = now;
         shouldRender = true;
+      } else {
+        // Residency dirty but debounce not elapsed — tick still runs for
+        // uploads; only the render is suppressed. Aggregate skip counts
+        // and emit one log per second so chunk-burst loading doesn't
+        // flood the console.
+        this.throttleSkipPending++;
+        if (now - this.lastThrottleEmit > RenderLoop.THROTTLE_EMIT_INTERVAL_MS) {
+          debugLog("render", "residency_throttled", {
+            skipCount: this.throttleSkipPending,
+            windowMs: this.lastThrottleEmit === Number.NEGATIVE_INFINITY
+              ? null
+              : Math.round(now - this.lastThrottleEmit),
+            nextRenderInMs: Math.max(
+              0,
+              Math.round(RESIDENCY_RENDER_INTERVAL_MS - (now - this.lastResidencyRenderTime)),
+            ),
+          });
+          this.throttleSkipPending = 0;
+          this.lastThrottleEmit = now;
+        }
       }
-      // else: residency dirty but debounce not elapsed — still run tick for uploads, skip render
     }
 
     const ctx = this.buildContext();
@@ -304,19 +464,20 @@ export class RenderLoop {
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
       if (tickSlice(ctx, this.orchestrator, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
-        this.residencyDirty = true;
+        this.setDirty("residency", "tick_slice_continuation");
       }
     } else {
       if (tickVolume(ctx, this.orchestrator, this.minimapState.pendingFetch, shouldRender)) {
-        this.residencyDirty = true;
+        this.setDirty("residency", "tick_volume_continuation");
       }
     }
 
     if (debugStats.enabled) {
       debugStats.frameTimeMs = performance.now() - now;
+      this.recordFrameSample(now, debugStats.frameTimeMs, debugStats.planTimeMs, debugStats.uploadTimeMs, debugStats.renderPasses.total, shouldRender);
     }
 
-    if (tickMinimapOverview(ctx, this.minimapState)) this.residencyDirty = true;
+    if (tickMinimapOverview(ctx, this.minimapState)) this.setDirty("residency", "minimap_overview_continuation");
     if (shouldRender) tickMinimap(ctx, this.minimapState, this.sliceZ);
 
     // If work remains (budget exhausted or chunks pending), schedule another frame

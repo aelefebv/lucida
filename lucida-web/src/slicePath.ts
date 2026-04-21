@@ -6,6 +6,7 @@ import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
 import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
+import { debugStats } from "./debug/debugStats.ts";
 
 /** SliceState — empty after S5.3 migration to Orchestrator delivery. */
 export type SliceState = Record<string, never>;
@@ -61,7 +62,9 @@ function uploadAndRenderSlice(
   const cy = centerArr[1];
 
   const layers: SliceLayerParams[] = [];
+  const passesByDataset: Record<string, number> = {};
   for (const dsId of layerOrder) {
+    const layersBefore = layers.length;
     const ds = datasets.get(dsId);
     if (!ds) continue;
     const dsSettings = allSettings[dsId];
@@ -127,6 +130,12 @@ function uploadAndRenderSlice(
         });
       }
     }
+    const added = layers.length - layersBefore;
+    if (added > 0) passesByDataset[dsId] = added;
+  }
+
+  if (debugStats.enabled) {
+    debugStats.renderPasses = { total: layers.length, byDataset: passesByDataset };
   }
 
   client.resize(canvasW, canvasH);
@@ -159,7 +168,9 @@ export function tickSlice(
   const canvasH = Math.round(canvas.clientHeight * dpr);
   scene.set_viewport(canvasW, canvasH);
 
+  const t0 = debugStats.enabled ? performance.now() : 0;
   const orchResult = orchestrator.planAndFetch(ctx, minimapPendingFetch);
+  if (debugStats.enabled) debugStats.planTimeMs = performance.now() - t0;
   if (!orchResult) return false;
 
   const vpCenter = scene.center();

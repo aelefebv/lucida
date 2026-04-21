@@ -4,7 +4,7 @@
  * all). See `wiki/decisions/logging-conventions.md`.
  */
 
-export const DEBUG_CATEGORIES = ["bridge", "wasm"] as const;
+export const DEBUG_CATEGORIES = ["bridge", "wasm", "render"] as const;
 export type DebugCategory = (typeof DEBUG_CATEGORIES)[number];
 
 function readEnabled(): Set<string> {
@@ -55,4 +55,15 @@ export function onDebugCategoriesChanged(fn: ChangeListener): () => void {
 function notifyListeners(): void {
   const enabled = getEnabledCategories();
   for (const fn of listeners) fn(enabled);
+}
+
+/**
+ * Generic gated logger. Use category-specialized helpers (`bridgeLog`)
+ * when one exists; reach for this when no helper applies (e.g. render
+ * loop events that don't ride on the bridge).
+ */
+export function debugLog(category: DebugCategory, event: string, data: Record<string, unknown> = {}): void {
+  if (!isDebugEnabled(category)) return;
+  // eslint-disable-next-line no-console
+  console.log(`[${category}] ${event}`, data);
 }

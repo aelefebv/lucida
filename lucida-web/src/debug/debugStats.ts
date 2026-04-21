@@ -89,7 +89,15 @@ export interface DebugStats {
   budgetExhausted: boolean;
 
   // Render passes
-  renderPassCount: number;
+  renderPasses: {
+    total: number;
+    /**
+     * Per-dataset breakdown using the original `dsId` from the layer-build
+     * loop, not the layer's `datasetId` (which may be a composite key
+     * `imageId:chN` in multi-channel mode).
+     */
+    byDataset: Record<string, number>;
+  };
   visibleMembers: number;
   totalMembers: number;
 
@@ -134,7 +142,7 @@ export const debugStats: DebugStats = {
   uploadBytesUsed: 0,
   uploadBudgetTotal: 8 * 1024 * 1024,
   budgetExhausted: false,
-  renderPassCount: 0,
+  renderPasses: { total: 0, byDataset: {} },
   visibleMembers: 0,
   totalMembers: 0,
   activeChannels: 1,
@@ -153,7 +161,7 @@ export function resetFrameStats(): void {
   debugStats.memberStats = [];
   debugStats.visibleMembers = 0;
   debugStats.totalMembers = 0;
-  debugStats.renderPassCount = 0;
+  debugStats.renderPasses = { total: 0, byDataset: {} };
   debugStats.uploadBytesUsed = 0;
   debugStats.budgetExhausted = false;
 }

@@ -467,6 +467,7 @@ function App() {
               lastClickScreen={lastClickScreen}
               datasets={datasetsRef.current}
               sessionRef={bridge.sessionRef}
+              renderLoopRef={render.loopRef}
               style={{ height: layout.canvasHeight }}
             />
           )}

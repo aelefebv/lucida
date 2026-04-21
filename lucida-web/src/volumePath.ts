@@ -115,7 +115,9 @@ function uploadAndRenderVolume(
   const clipMode = clipModeStr === "sphere" ? 1 : 0;
 
   const layers: VolumeLayerParams[] = [];
+  const passesByDataset: Record<string, number> = {};
   for (const dsId of layerOrder) {
+    const layersBefore = layers.length;
     const dsVol = datasets.get(dsId);
     if (!dsVol) continue;
     const dsSettings = allSettings[dsId];
@@ -183,10 +185,12 @@ function uploadAndRenderVolume(
         });
       }
     }
+    const added = layers.length - layersBefore;
+    if (added > 0) passesByDataset[dsId] = added;
   }
 
   if (debugStats.enabled) {
-    debugStats.renderPassCount = layers.length;
+    debugStats.renderPasses = { total: layers.length, byDataset: passesByDataset };
   }
 
   client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode);
