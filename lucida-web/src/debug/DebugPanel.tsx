@@ -26,7 +26,7 @@ import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
 
-/** Short label for a S6 WellMode in the active-set rendering. */
+/** Short label for a S6 EntityMode in the active-set rendering. */
 function modeLabel(mode: string): string {
   switch (mode) {
     case "well-as-proxy":
@@ -40,7 +40,7 @@ function modeLabel(mode: string): string {
   }
 }
 
-/** Color for a S6 WellMode in the active-set rendering. */
+/** Color for a S6 EntityMode in the active-set rendering. */
 function modeColor(mode: string): string {
   switch (mode) {
     case "well-as-proxy":
@@ -63,7 +63,7 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
-  wellModes: "Per-well badge over the canvas: promotion mode (WP/FP/FD) + target LOD.",
+  wellModes: "Per-well badge over the canvas: tier mode (WP/FP/FD) + target LOD.",
   chunkGrid: "LOD chunk grid for every visible field, color-coded by status (cached / in-flight / planned). Capped at ~600 cells per tick.",
 };
 
@@ -167,14 +167,14 @@ function PlanningTabBody({
     for (const [dsId, plan] of plans) {
       const lanes: Record<string, typeof plan.requests> = {
         detail: [],
-        runway: [],
+        prefetch: [],
         overview: [],
       };
       for (const r of plan.requests) lanes[r.lane].push(r);
       console.group(
-        `${dsId}: ${plan.requests.length} chunks (${lanes.detail.length} D / ${lanes.runway.length} R / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
+        `${dsId}: ${plan.requests.length} chunks (${lanes.detail.length} D / ${lanes.prefetch.length} P / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
       );
-      for (const lane of ["detail", "runway", "overview"] as const) {
+      for (const lane of ["detail", "prefetch", "overview"] as const) {
         if (lanes[lane].length === 0) continue;
         console.groupCollapsed(`${lane}: ${lanes[lane].length}`);
         console.table(
@@ -272,7 +272,7 @@ function PlanningDatasetSection({
         </div>
         <div>
           <span style={{ color: "#4f4" }}>D:{p.lanes.detail}</span>{" "}
-          <span style={{ color: "#ff4" }}>R:{p.lanes.runway}</span>{" "}
+          <span style={{ color: "#ff4" }}>P:{p.lanes.prefetch}</span>{" "}
           <span style={{ color: "#88f" }}>O:{p.lanes.overview}</span>{" "}
           <span style={{ color: "#aaa" }}>· proxies:{p.proxyCount}</span>{" "}
           <span style={{ color: "#aaa" }}>· total chunks:{p.totalChunks}</span>
@@ -1007,13 +1007,13 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   <div>
                     <span style={{ color: "#4f4" }}>detail: {snap.orch.laneCount.detail}</span>
                     {" "}
-                    <span style={{ color: "#ff4" }}>runway: {snap.orch.laneCount.runway}</span>
+                    <span style={{ color: "#ff4" }}>prefetch: {snap.orch.laneCount.prefetch}</span>
                     {" "}
                     <span style={{ color: "#88f" }}>overview: {snap.orch.laneCount.overview}</span>
                   </div>
                   <div style={{ marginTop: 4 }}>
                     <span style={{ color: "#aaa" }}>By level: </span>
-                    {Object.entries(snap.orch.levelCount)
+                    {Object.entries(snap.orch.chunksByLevel)
                       .sort(([a], [b]) => Number(a) - Number(b))
                       .map(([lvl, count]) => (
                         <span key={lvl} style={{ marginRight: 8 }}>L{lvl}:{count}</span>
@@ -1035,8 +1035,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                           </span>
                           <span>uploadL{m.uploadLevel ?? "?"}</span>
                           <span>n:{m.neededCount} p:{m.prefetchCount}</span>
-                          <span title={`Levels: ${JSON.stringify(m.levelCounts)}`}>
-                            {Object.entries(m.levelCounts).map(([l, c]) => `L${l}:${c}`).join(" ")}
+                          <span title={`Levels: ${JSON.stringify(m.chunksByLevel)}`}>
+                            {Object.entries(m.chunksByLevel).map(([l, c]) => `L${l}:${c}`).join(" ")}
                           </span>
                           {m.mixedLevels && <span style={{ color: "#f44" }}>MIX</span>}
                         </div>
@@ -1053,10 +1053,10 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       {snap.orch.topRequests.map((r, i) => (
                         <div key={`${r.chunkKey}-${i}`} className="debug-member-row">
                           <span style={{
-                            color: r.lane === "detail" ? "#4f4" : r.lane === "runway" ? "#ff4" : "#88f",
+                            color: r.lane === "detail" ? "#4f4" : r.lane === "prefetch" ? "#ff4" : "#88f",
                             width: 14,
                           }}>
-                            {r.lane === "detail" ? "D" : r.lane === "runway" ? "R" : "O"}
+                            {r.lane === "detail" ? "D" : r.lane === "prefetch" ? "P" : "O"}
                           </span>
                           <span>L{r.level}</span>
                           <span className="debug-member-id" title={r.chunkKey}>

@@ -31,8 +31,8 @@ Hysteresis bands of ±5 px around each threshold prevent flapping. Thresholds an
 
 ```
 targetLod         = entity.idealTargetLod                 # from WASM view_query
-seedDetailLod     = min(targetLod + 2, maxLevel)
-detailOwnedRange  = [targetLod, seedDetailLod]
+coarsestDetailLod     = min(targetLod + 2, maxLevel)
+detailOwnedRange  = [targetLod, coarsestDetailLod]
 ```
 
 The two-LOD buffer absorbs zoom transitions smoothly — by the time the user zooms in past the next threshold, the finer LOD's detail chunks are already CPU-resident.
@@ -51,10 +51,10 @@ Lane offsets:
 |---|---|---|
 | DETAIL | 0 | Visible chunks |
 | PROXY | 500 | Well/field proxy fallbacks |
-| RUNWAY | 1000 | Next-timepoint prefetch |
+| PREFETCH | 1000 | Next-timepoint prefetch |
 | OVERVIEW | 2000 | Minimap |
 
-Centered, important detail wins (~0); a far runway chunk loses (~1500+). The constants are tuned, not arbitrary — changing them noticeably affects perceived snappiness on plates.
+Centered, important detail wins (~0); a far prefetch chunk loses (~1500+). The constants are tuned, not arbitrary — changing them noticeably affects perceived snappiness on plates.
 
 ## Interactions
 

@@ -15,7 +15,7 @@ Three problems all want to be solved in one place:
 
 1. **Decoding is parallel** but bounded by the decode worker pool size (3). If the network out-paces decode, requests pile up; if decode out-paces upload, decoded bytes sit waiting. A central cache lets fetch and decode and upload each go at their own rate without coupling.
 2. **Re-fetch on GPU eviction is wasteful** if the bytes are still in CPU memory. The worker can evict an atlas slot under memory pressure; the CPU cache holds the decoded bytes long enough to re-upload without going back to the network.
-3. **Tier-aware eviction lets the cheap stuff (runway, demoted) go first.** Without tiers, LRU evicts whatever's oldest, which often happens to be the most expensive thing to re-fetch (overview/minimap data covers the whole dataset).
+3. **Tier-aware eviction lets the cheap stuff (prefetch, demoted) go first.** Without tiers, LRU evicts whatever's oldest, which often happens to be the most expensive thing to re-fetch (overview/minimap data covers the whole dataset).
 
 ## Submit → schedule → decode → drain
 
@@ -31,7 +31,7 @@ Each tick:
 
 Highest-numbered tier evicts first. LRU within each tier (by `insertedAt`).
 
-1. **runway** (prefetch) — cheapest to lose
+1. **prefetch** — cheapest to lose
 2. **demoted-detail** — entity navigated away from
 3. **active-detail** — currently visible
 4. **proxy** — fallback resource (well/field proxy)

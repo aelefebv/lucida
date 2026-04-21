@@ -1,23 +1,23 @@
 import { describe, it, expect } from "vitest";
 
 import {
-  promote,
+  assignModes,
   createSyntheticEntity,
   createSyntheticSnapshot,
   PROMOTE_THRESHOLD_PX,
   DEMOTE_THRESHOLD_PX,
   FAR_THRESHOLD_PX,
-  MEDIUM_THRESHOLD_PX,
+  DETAIL_THRESHOLD_PX,
   HYSTERESIS_PX,
   PROXY_LANE_OFFSET,
   DETAIL_LANE_OFFSET,
   OVERVIEW_LANE_OFFSET,
-  chooseWellMode,
+  chooseEntityMode,
   chunkKey,
   chunkOutsideFrustum,
   iterateChunks,
   plan,
-  RUNWAY_DEPTH,
+  PREFETCH_DEPTH,
 } from "./planning.ts";
 import type {
   ActiveSetEntry,
@@ -26,7 +26,7 @@ import type {
   SelectionState,
   CacheStateSnapshot,
   PlanningSnapshot,
-  WellMode,
+  EntityMode,
   AssetCatalogSnapshot,
   ProxyKind,
 } from "./planning.ts";
@@ -60,15 +60,15 @@ function makeFieldDetailEntry(
   entityId: string,
   imageId: string,
   targetLod: number,
-  seedDetailLod: number,
+  coarsestDetailLod: number,
 ): ActiveSetEntry {
   return {
     entityId,
     imageId,
     mode: "fields-with-detail",
     targetLod,
-    seedDetailLod,
-    detailOwnedLodRange: [targetLod, seedDetailLod],
+    coarsestDetailLod,
+    detailOwnedLodRange: [targetLod, coarsestDetailLod],
     proxyKind: undefined,
     proxyAvailable: false,
     wellProxyAvailable: false,
@@ -85,20 +85,20 @@ function makeFieldDetailEntry(
 // well-as-proxy desired-mode region from fields-with-detail; `<` flips
 // to fields-with-detail post-degrade. We test the mode after degrade.
 
-describe("promote — three-tier (no catalog)", () => {
+describe("assignModes — three-tier (no catalog)", () => {
   it("entity above MEDIUM threshold uses fields-with-detail", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
     });
-    expect(entity.projectedDiagonalPx).toBeGreaterThan(MEDIUM_THRESHOLD_PX);
+    expect(entity.projectedDiagonalPx).toBeGreaterThan(DETAIL_THRESHOLD_PX);
 
-    const [result] = promote([entity], []);
+    const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
   });
 
   it("entity below FAR threshold degrades to fields-with-detail when no catalog", () => {
-    // Below FAR_THRESHOLD_PX, chooseWellMode picks well-as-proxy, but
+    // Below FAR_THRESHOLD_PX, chooseEntityMode picks well-as-proxy, but
     // catalog-aware degrade pushes it all the way down to fields-with-detail.
     const entity = createSyntheticEntity({
       kind: "Image",
@@ -106,7 +106,7 @@ describe("promote — three-tier (no catalog)", () => {
     });
     expect(entity.projectedDiagonalPx).toBeLessThan(FAR_THRESHOLD_PX);
 
-    const [result] = promote([entity], []);
+    const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
   });
 
@@ -115,7 +115,7 @@ describe("promote — three-tier (no catalog)", () => {
       kind: "Image",
       projectedDiagonalPx: 100,
     });
-    const [result] = promote([entity], []);
+    const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
   });
 
@@ -126,7 +126,7 @@ describe("promote — three-tier (no catalog)", () => {
       numLevels: 5,
     });
 
-    const [result] = promote([entity], []);
+    const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
     expect(result.targetLod).toBe(4);
     expect(result.detailOwnedLodRange).toEqual([4, 4]);
@@ -138,7 +138,7 @@ describe("promote — three-tier (no catalog)", () => {
 // ---------------------------------------------------------------------------
 
 describe("LOD range", () => {
-  it("sets seedDetailLod = targetLod + 2 for a field-mode entity", () => {
+  it("sets coarsestDetailLod = targetLod + 2 for a field-mode entity", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
@@ -146,14 +146,14 @@ describe("LOD range", () => {
       numLevels: 5,
     });
 
-    const [result] = promote([entity], []);
+    const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
     expect(result.targetLod).toBe(0);
-    expect(result.seedDetailLod).toBe(2);
+    expect(result.coarsestDetailLod).toBe(2);
     expect(result.detailOwnedLodRange).toEqual([0, 2]);
   });
 
-  it("clamps seedDetailLod to numLevels - 1", () => {
+  it("clamps coarsestDetailLod to numLevels - 1", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
@@ -161,10 +161,10 @@ describe("LOD range", () => {
       numLevels: 4,
     });
 
-    const [result] = promote([entity], []);
+    const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
     expect(result.targetLod).toBe(3);
-    expect(result.seedDetailLod).toBe(3); // clamped: min(3+2, 3) = 3
+    expect(result.coarsestDetailLod).toBe(3); // clamped: min(3+2, 3) = 3
     expect(result.detailOwnedLodRange).toEqual([3, 3]);
   });
 
@@ -176,10 +176,10 @@ describe("LOD range", () => {
       numLevels: 1,
     });
 
-    const [result] = promote([entity], []);
+    const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
     expect(result.targetLod).toBe(0);
-    expect(result.seedDetailLod).toBe(0);
+    expect(result.coarsestDetailLod).toBe(0);
     expect(result.detailOwnedLodRange).toEqual([0, 0]);
   });
 
@@ -191,83 +191,83 @@ describe("LOD range", () => {
       numLevels: 5,
     });
 
-    const [result] = promote([entity], []);
+    const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
     expect(result.targetLod).toBe(4);
-    expect(result.seedDetailLod).toBe(4);
+    expect(result.coarsestDetailLod).toBe(4);
     expect(result.detailOwnedLodRange).toEqual([4, 4]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// chooseWellMode — pure hysteresis tests
+// chooseEntityMode — pure hysteresis tests
 // ---------------------------------------------------------------------------
 
-describe("chooseWellMode", () => {
+describe("chooseEntityMode", () => {
   it("clearly far → well-as-proxy", () => {
-    expect(chooseWellMode(null, 50)).toBe("well-as-proxy");
+    expect(chooseEntityMode(null, 50)).toBe("well-as-proxy");
   });
   it("clearly mid → fields-with-proxy-fallback", () => {
-    expect(chooseWellMode(null, 100)).toBe("fields-with-proxy-fallback");
+    expect(chooseEntityMode(null, 100)).toBe("fields-with-proxy-fallback");
   });
   it("clearly near → fields-with-detail", () => {
-    expect(chooseWellMode(null, 200)).toBe("fields-with-detail");
+    expect(chooseEntityMode(null, 200)).toBe("fields-with-detail");
   });
 
   it("hysteresis at FAR threshold: keeps well-as-proxy across 75–84", () => {
-    let prev: WellMode | null = "well-as-proxy";
+    let prev: EntityMode | null = "well-as-proxy";
     for (const px of [80, 78, 82, 84, 75, 79]) {
-      const next = chooseWellMode(prev, px);
+      const next = chooseEntityMode(prev, px);
       expect(next).toBe("well-as-proxy");
       prev = next;
     }
     // Past upper bound (>= 85) → flip
-    expect(chooseWellMode("well-as-proxy", 85)).toBe(
+    expect(chooseEntityMode("well-as-proxy", 85)).toBe(
       "fields-with-proxy-fallback",
     );
   });
 
   it("hysteresis at FAR threshold: keeps proxy-fallback across 76–85", () => {
-    let prev: WellMode | null = "fields-with-proxy-fallback";
+    let prev: EntityMode | null = "fields-with-proxy-fallback";
     for (const px of [80, 81, 82, 84, 85]) {
-      const next = chooseWellMode(prev, px);
+      const next = chooseEntityMode(prev, px);
       expect(next).toBe("fields-with-proxy-fallback");
       prev = next;
     }
     // Below lower bound → flip down to well-as-proxy
-    expect(chooseWellMode("fields-with-proxy-fallback", 74)).toBe(
+    expect(chooseEntityMode("fields-with-proxy-fallback", 74)).toBe(
       "well-as-proxy",
     );
   });
 
   it("hysteresis at MEDIUM threshold: keeps fields-with-detail across 146-155", () => {
-    let prev: WellMode | null = "fields-with-detail";
+    let prev: EntityMode | null = "fields-with-detail";
     for (const px of [150, 148, 152, 155, 146]) {
-      const next = chooseWellMode(prev, px);
+      const next = chooseEntityMode(prev, px);
       expect(next).toBe("fields-with-detail");
       prev = next;
     }
     // Below lower bound (<= 145) → flip
-    expect(chooseWellMode("fields-with-detail", 145)).toBe(
+    expect(chooseEntityMode("fields-with-detail", 145)).toBe(
       "fields-with-proxy-fallback",
     );
   });
 
   it("hysteresis at MEDIUM threshold: keeps proxy-fallback across 145-154", () => {
-    let prev: WellMode | null = "fields-with-proxy-fallback";
+    let prev: EntityMode | null = "fields-with-proxy-fallback";
     for (const px of [150, 151, 154, 145, 148]) {
-      const next = chooseWellMode(prev, px);
+      const next = chooseEntityMode(prev, px);
       expect(next).toBe("fields-with-proxy-fallback");
       prev = next;
     }
-    expect(chooseWellMode("fields-with-proxy-fallback", 156)).toBe(
+    expect(chooseEntityMode("fields-with-proxy-fallback", 156)).toBe(
       "fields-with-detail",
     );
   });
 });
 
 // ---------------------------------------------------------------------------
-// promote() with a populated catalog (three-tier behaviour)
+// assignModes() with a populated catalog (three-tier behaviour)
 // ---------------------------------------------------------------------------
 
 /** Build a 1-well-3-fields plate group at the given diagonal. */
@@ -303,7 +303,7 @@ function makePlateEntities(
   return out;
 }
 
-describe("promote — three-tier with catalog", () => {
+describe("assignModes — three-tier with catalog", () => {
   it("far well (50px) with full catalog → single well-as-proxy entry", () => {
     const entities = makePlateEntities("wellA", [
       { id: "fA1", image: "imgA1", px: 40 },
@@ -315,7 +315,7 @@ describe("promote — three-tier with catalog", () => {
       ["fA2", ["FieldProxy3D"]],
     ]);
 
-    const result = promote(entities, [], catalog);
+    const result = assignModes(entities, [], catalog);
 
     expect(result).toHaveLength(1);
     expect(result[0].mode).toBe("well-as-proxy");
@@ -336,7 +336,7 @@ describe("promote — three-tier with catalog", () => {
       ["fB2", ["FieldProxy3D"]],
     ]);
 
-    const result = promote(entities, [], catalog);
+    const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(2);
     for (const entry of result) {
       expect(entry.mode).toBe("fields-with-proxy-fallback");
@@ -357,7 +357,7 @@ describe("promote — three-tier with catalog", () => {
       ["fC2", ["FieldProxy3D"]],
     ]);
 
-    const result = promote(entities, [], catalog);
+    const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(2);
     for (const entry of result) {
       expect(entry.mode).toBe("fields-with-detail");
@@ -379,7 +379,7 @@ describe("promote — three-tier with catalog", () => {
       ["fB1", ["FieldProxy3D"]],
     ]);
 
-    const result = promote(entities, [], catalog);
+    const result = assignModes(entities, [], catalog);
     const wellAEntries = result.filter(
       (e) => e.entityId === "wellA" || e.entityId === "fA1",
     );
@@ -401,7 +401,7 @@ describe("promote — three-tier with catalog", () => {
       ["fD1", ["FieldProxy3D"]],
     ]);
 
-    const result = promote(entities, [], catalog);
+    const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(1);
     expect(result[0].mode).toBe("fields-with-proxy-fallback");
     expect(result[0].proxyAvailable).toBe(true);
@@ -414,7 +414,7 @@ describe("promote — three-tier with catalog", () => {
     ]);
     const catalog = makeCatalog([]); // empty catalog
 
-    const result = promote(entities, [], catalog);
+    const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(1);
     expect(result[0].mode).toBe("fields-with-detail");
     expect(result[0].proxyAvailable).toBe(false);
@@ -427,7 +427,7 @@ describe("promote — three-tier with catalog", () => {
     ]);
     const catalog = makeCatalog([["wellF", ["WellProxy3D"]]]);
 
-    const result = promote(entities, [], catalog);
+    const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(1);
     // Stays in proxy-fallback because well-proxy can stand in.
     expect(result[0].mode).toBe("fields-with-proxy-fallback");
@@ -449,7 +449,7 @@ describe("promote — three-tier with catalog", () => {
         imageId: "",
         mode: "well-as-proxy",
         targetLod: 0,
-        seedDetailLod: 0,
+        coarsestDetailLod: 0,
         detailOwnedLodRange: [0, 0],
         proxyKind: "WellProxy3D",
         proxyAvailable: true,
@@ -457,7 +457,7 @@ describe("promote — three-tier with catalog", () => {
       },
     ];
 
-    const result = promote(entities, prev, catalog);
+    const result = assignModes(entities, prev, catalog);
     expect(result).toHaveLength(1);
     expect(result[0].mode).toBe("well-as-proxy");
   });
@@ -469,15 +469,15 @@ describe("promote — three-tier with catalog", () => {
       ["fH1", ["FieldProxy3D"]],
     ]);
 
-    const r1 = promote(makePlateEntities("wellH", fields), [], catalog);
+    const r1 = assignModes(makePlateEntities("wellH", fields), [], catalog);
     expect(r1[0].mode).toBe("well-as-proxy");
 
     fields[0].px = 100;
-    const r2 = promote(makePlateEntities("wellH", fields), r1, catalog);
+    const r2 = assignModes(makePlateEntities("wellH", fields), r1, catalog);
     expect(r2[0].mode).toBe("fields-with-proxy-fallback");
 
     fields[0].px = 50;
-    const r3 = promote(makePlateEntities("wellH", fields), r2, catalog);
+    const r3 = assignModes(makePlateEntities("wellH", fields), r2, catalog);
     expect(r3[0].mode).toBe("well-as-proxy");
   });
 });
@@ -615,7 +615,7 @@ describe("iterateChunks", () => {
       imageId: "",
       mode: "well-as-proxy",
       targetLod: 0,
-      seedDetailLod: 0,
+      coarsestDetailLod: 0,
       detailOwnedLodRange: [0, 0],
       proxyKind: "WellProxy3D",
       proxyAvailable: true,
@@ -845,36 +845,36 @@ describe("request scheduling", () => {
     });
   }
 
-  it("detail requests have lower priority than runway", () => {
+  it("detail requests have lower priority than prefetch", () => {
     const snapshot = makeSchedulingSnapshot();
     const result = plan(snapshot);
 
     const detailReqs = result.requests.filter((r) => r.lane === "detail");
-    const runwayReqs = result.requests.filter((r) => r.lane === "runway");
+    const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
 
     expect(detailReqs.length).toBeGreaterThan(0);
-    expect(runwayReqs.length).toBeGreaterThan(0);
+    expect(prefetchReqs.length).toBeGreaterThan(0);
 
     const maxDetailPriority = Math.max(...detailReqs.map((r) => r.priority));
-    const minRunwayPriority = Math.min(...runwayReqs.map((r) => r.priority));
-    expect(maxDetailPriority).toBeLessThan(minRunwayPriority);
+    const minPrefetchPriority = Math.min(...prefetchReqs.map((r) => r.priority));
+    expect(maxDetailPriority).toBeLessThan(minPrefetchPriority);
   });
 
-  it("runway requests have lower priority than overview", () => {
+  it("prefetch requests have lower priority than overview", () => {
     const snapshot = makeSchedulingSnapshot();
     const result = plan(snapshot);
 
-    const runwayReqs = result.requests.filter((r) => r.lane === "runway");
+    const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
     const overviewReqs = result.requests.filter((r) => r.lane === "overview");
 
-    expect(runwayReqs.length).toBeGreaterThan(0);
+    expect(prefetchReqs.length).toBeGreaterThan(0);
     expect(overviewReqs.length).toBeGreaterThan(0);
 
-    const maxRunwayPriority = Math.max(...runwayReqs.map((r) => r.priority));
+    const maxPrefetchPriority = Math.max(...prefetchReqs.map((r) => r.priority));
     const minOverviewPriority = Math.min(
       ...overviewReqs.map((r) => r.priority),
     );
-    expect(maxRunwayPriority).toBeLessThan(minOverviewPriority);
+    expect(maxPrefetchPriority).toBeLessThan(minOverviewPriority);
   });
 
   it("higher importance yields lower priority within a lane", () => {
@@ -940,25 +940,25 @@ describe("request scheduling", () => {
     expect(maxHighPriority).toBeLessThan(minLowPriority);
   });
 
-  it("temporal runway generates T+1 and T+2", () => {
+  it("temporal prefetch generates T+1 and T+2", () => {
     const snapshot = makeSchedulingSnapshot();
     const result = plan(snapshot);
 
-    const runwayReqs = result.requests.filter((r) => r.lane === "runway");
-    expect(runwayReqs.length).toBeGreaterThan(0);
+    const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
+    expect(prefetchReqs.length).toBeGreaterThan(0);
 
-    const tValues = new Set(runwayReqs.map((r) => r.t));
+    const tValues = new Set(prefetchReqs.map((r) => r.t));
     expect(tValues.has(11)).toBe(true);
     expect(tValues.has(12)).toBe(true);
   });
 
-  it("runway T+1 before T+2", () => {
+  it("prefetch T+1 before T+2", () => {
     const snapshot = makeSchedulingSnapshot();
     const result = plan(snapshot);
 
-    const runwayReqs = result.requests.filter((r) => r.lane === "runway");
-    const t11Reqs = runwayReqs.filter((r) => r.t === 11);
-    const t12Reqs = runwayReqs.filter((r) => r.t === 12);
+    const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
+    const t11Reqs = prefetchReqs.filter((r) => r.t === 11);
+    const t12Reqs = prefetchReqs.filter((r) => r.t === 12);
 
     expect(t11Reqs.length).toBeGreaterThan(0);
     expect(t12Reqs.length).toBeGreaterThan(0);
@@ -1160,12 +1160,12 @@ describe("plan()", () => {
     const detailReqs = result.requests.filter((r) => r.lane === "detail");
     expect(detailReqs).toHaveLength(8);
 
-    // Runway lane: both entities each contribute 4 chunks * 2 timepoints.
-    const runwayReqs = result.requests.filter((r) => r.lane === "runway");
-    expect(runwayReqs).toHaveLength(2 * 4 * RUNWAY_DEPTH);
-    const runwayTs = new Set(runwayReqs.map((r) => r.t));
-    expect(runwayTs.has(6)).toBe(true);
-    expect(runwayTs.has(7)).toBe(true);
+    // Prefetch lane: both entities each contribute 4 chunks * 2 timepoints.
+    const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
+    expect(prefetchReqs).toHaveLength(2 * 4 * PREFETCH_DEPTH);
+    const prefetchTs = new Set(prefetchReqs.map((r) => r.t));
+    expect(prefetchTs.has(6)).toBe(true);
+    expect(prefetchTs.has(7)).toBe(true);
 
     // Overview lane: both entities contribute coarsest-level chunks.
     // Each entity has a 2x2 grid at level 0 (only level), so 4+4 = 8.
@@ -1175,7 +1175,7 @@ describe("plan()", () => {
     expect(overviewEntities.has("detail-entity")).toBe(true);
     expect(overviewEntities.has("overview-entity")).toBe(true);
 
-    // Total: 8 detail + 16 runway + 8 overview = 32
+    // Total: 8 detail + 16 prefetch + 8 overview = 32
     expect(result.requests).toHaveLength(32);
 
     // Requests are sorted by ascending priority.
@@ -1474,7 +1474,7 @@ describe("plan() — proxy request emission", () => {
 
   it("constants check: thresholds 80/150 with hysteresis 5", () => {
     expect(FAR_THRESHOLD_PX).toBe(80);
-    expect(MEDIUM_THRESHOLD_PX).toBe(150);
+    expect(DETAIL_THRESHOLD_PX).toBe(150);
     expect(HYSTERESIS_PX).toBe(5);
     // Backwards-compat: PROMOTE_THRESHOLD_PX maps onto FAR_THRESHOLD_PX.
     expect(PROMOTE_THRESHOLD_PX).toBe(FAR_THRESHOLD_PX);

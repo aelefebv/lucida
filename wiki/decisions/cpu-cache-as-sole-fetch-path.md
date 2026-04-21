@@ -19,7 +19,7 @@ The two fetch paths fought each other:
 - **Two LRU disciplines, one memory budget.** Each path tracked its own residents; their combined memory pressure exceeded any sane budget, and eviction in one didn't inform the other.
 - **Two failure-handling regimes.** A failed fetch in the queue was independent of a failed fetch in the cache, so a chunk could fail twice for the same key.
 
-Merging into one path resolved all three. The cache's **tiered LRU** (`runway → demoted-detail → active-detail → proxy → overview`) absorbs everything the queue used to do (eager prefetching = runway; demoted entities = demoted-detail).
+Merging into one path resolved all three. The cache's **tiered LRU** (`prefetch → demoted-detail → active-detail → proxy → overview`) absorbs everything the queue used to do (eager prefetching = prefetch lane; demoted entities = demoted-detail).
 
 ## Tradeoffs
 

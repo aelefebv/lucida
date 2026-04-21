@@ -56,9 +56,9 @@ export interface CpuCacheConfig {
 // Types
 // ---------------------------------------------------------------------------
 
-type Lane = "detail" | "runway" | "overview";
+type Lane = "detail" | "prefetch" | "overview";
 type InteractionMode = "panning" | "scrubbing" | "idle";
-type EvictionTier = "runway" | "demoted-detail" | "active-detail";
+type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
 /**
  * A delivery from the CPU cache that the orchestrator routes to the GPU
@@ -1030,8 +1030,8 @@ export class CpuCache {
   }
 
   private laneToTier(lane: Lane): EvictionTier {
-    if (lane === "runway") return "runway";
-    if (lane === "overview") return "runway"; // overview has simple LRU, tier doesn't matter
+    if (lane === "prefetch") return "prefetch";
+    if (lane === "overview") return "prefetch"; // overview has simple LRU, tier doesn't matter
     return "active-detail";
   }
 
@@ -1154,12 +1154,12 @@ export class CpuCache {
   private getTierOrder(mode: InteractionMode): string[] {
     switch (mode) {
       case "panning":
-        return ["runway", "demoted-detail", "active-detail"];
+        return ["prefetch", "demoted-detail", "active-detail"];
       case "scrubbing":
-        return ["demoted-detail", "active-detail", "runway"];
+        return ["demoted-detail", "active-detail", "prefetch"];
       case "idle":
       default:
-        return ["runway", "demoted-detail", "active-detail"];
+        return ["prefetch", "demoted-detail", "active-detail"];
     }
   }
 

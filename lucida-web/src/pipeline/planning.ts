@@ -5,7 +5,7 @@
  *   PlanningSnapshot  ->  RequestPlan
  *
  * Currently implements:
- *   - promote()  — three-tier per-well promotion + LOD range assignment
+ *   - assignModes()  — three-tier per-well mode assignment + LOD range
  *   - createSyntheticSnapshot() / createSyntheticEntity() — test helpers
  */
 
@@ -23,7 +23,7 @@ import type { AssetCatalogSnapshot } from "./assetCatalog.ts";
 export const FAR_THRESHOLD_PX = 80;
 
 /** Medium/Detail threshold (px). Above this, fields use real detail chunks. */
-export const MEDIUM_THRESHOLD_PX = 150;
+export const DETAIL_THRESHOLD_PX = 150;
 
 /** Hysteresis band (px) on either side of each threshold. */
 export const HYSTERESIS_PX = 5;
@@ -38,7 +38,7 @@ export const PROMOTE_THRESHOLD_PX = FAR_THRESHOLD_PX;
 /**
  * Backwards-compat alias for the legacy demote threshold. Kept as an
  * export but no longer participates in promotion logic — three-tier
- * promotion uses {@link FAR_THRESHOLD_PX} / {@link MEDIUM_THRESHOLD_PX}
+ * promotion uses {@link FAR_THRESHOLD_PX} / {@link DETAIL_THRESHOLD_PX}
  * with {@link HYSTERESIS_PX}-band hysteresis instead.
  */
 export const DEMOTE_THRESHOLD_PX = 40;
@@ -46,8 +46,8 @@ export const DEMOTE_THRESHOLD_PX = 40;
 /** Priority lane offset for overview requests (lowest urgency). */
 export const OVERVIEW_LANE_OFFSET = 2000;
 
-/** Priority lane offset for runway (prefetch) requests. */
-export const RUNWAY_LANE_OFFSET = 1000;
+/** Priority lane offset for prefetch (next-timepoint) requests. */
+export const PREFETCH_LANE_OFFSET = 1000;
 
 /** Priority lane offset for proxy requests (between detail and overview). */
 export const PROXY_LANE_OFFSET = 500;
@@ -55,8 +55,8 @@ export const PROXY_LANE_OFFSET = 500;
 /** Priority lane offset for detail requests (highest urgency). */
 export const DETAIL_LANE_OFFSET = 0;
 
-/** Number of future timepoints to prefetch in the runway lane. */
-export const RUNWAY_DEPTH = 2;
+/** Number of future timepoints to prefetch (length of the prefetch lane). */
+export const PREFETCH_DEPTH = 2;
 
 // ---------------------------------------------------------------------------
 // Epochs
@@ -115,7 +115,7 @@ export interface EntitySnapshot {
    * Parent entity id (`Field.parent === wellId`), or `null` for top-level
    * entities (`Image`, `Well`). Used by S6 promotion to group fields by
    * their parent well so all fields of a well agree on a single
-   * {@link WellMode}.
+   * {@link EntityMode}.
    *
    * Optional in the type for backward compat with synthetic test
    * snapshots that don't model plates; treat `undefined` as `null`.
@@ -211,7 +211,7 @@ export interface RequestPlan {
 
 /**
  * Per-plan accumulator. Counters are summed across all `iterateChunks`
- * calls (detail + runway + overview lanes) and across all entities.
+ * calls (detail + prefetch + overview lanes) and across all entities.
  */
 export interface PlanStats {
   /** How many times catalog-aware promotion downgraded a well's mode. */
@@ -250,7 +250,7 @@ export interface ChunkRequest {
   z: number;
   y: number;
   x: number;
-  lane: "overview" | "detail" | "runway";
+  lane: "overview" | "detail" | "prefetch";
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;
@@ -279,7 +279,7 @@ export interface ProxyRequest {
 }
 
 /**
- * Per-well promotion mode, selected by {@link chooseWellMode} from the
+ * Per-well promotion mode, selected by {@link chooseEntityMode} from the
  * well's projected diagonal (max of constituent fields, in pixels):
  *
  *   - `well-as-proxy`            (< {@link FAR_THRESHOLD_PX})  — render the
@@ -287,11 +287,11 @@ export interface ProxyRequest {
  *   - `fields-with-proxy-fallback` (mid range)  — request real field detail
  *     chunks but also fetch `FieldProxy3D` per visible field and the
  *     parent's `WellProxy3D` as a fast fallback while detail loads.
- *   - `fields-with-detail`        (> {@link MEDIUM_THRESHOLD_PX})  — real
+ *   - `fields-with-detail`        (> {@link DETAIL_THRESHOLD_PX})  — real
  *     field detail chunks only; proxy is a stand-in fallback that the
  *     worker uses when chunks are missing.
  */
-export type WellMode =
+export type EntityMode =
   | "well-as-proxy"
   | "fields-with-proxy-fallback"
   | "fields-with-detail";
@@ -311,10 +311,10 @@ export interface ActiveSetEntry {
    * `EntitySnapshot.imageId`).
    */
   imageId: string;
-  /** Promotion mode. See {@link WellMode}. */
-  mode: WellMode;
+  /** Promotion mode. See {@link EntityMode}. */
+  mode: EntityMode;
   targetLod: number;
-  seedDetailLod: number;
+  coarsestDetailLod: number;
   /** [finest, coarsest] inclusive. */
   detailOwnedLodRange: [number, number];
   /**
@@ -343,25 +343,25 @@ export interface ActiveSetEntry {
 }
 
 // ---------------------------------------------------------------------------
-// promote()
+// assignModes()
 // ---------------------------------------------------------------------------
 
 /**
- * Decide a {@link WellMode} for the given projected diagonal, applying
+ * Decide a {@link EntityMode} for the given projected diagonal, applying
  * symmetric ±{@link HYSTERESIS_PX} hysteresis around both the far and
  * medium thresholds.
  *
  * Outside the bands the natural mode is forced. Inside a band the
  * previous mode wins as long as it's adjacent to the natural choice.
  */
-export function chooseWellMode(
-  prevMode: WellMode | null,
+export function chooseEntityMode(
+  prevMode: EntityMode | null,
   projectedDiagonalPx: number,
-): WellMode {
+): EntityMode {
   const farUpper = FAR_THRESHOLD_PX + HYSTERESIS_PX; // 85
   const farLower = FAR_THRESHOLD_PX - HYSTERESIS_PX; // 75
-  const medUpper = MEDIUM_THRESHOLD_PX + HYSTERESIS_PX; // 155
-  const medLower = MEDIUM_THRESHOLD_PX - HYSTERESIS_PX; // 145
+  const medUpper = DETAIL_THRESHOLD_PX + HYSTERESIS_PX; // 155
+  const medLower = DETAIL_THRESHOLD_PX - HYSTERESIS_PX; // 145
 
   // Clearly past the thresholds: natural choice wins.
   if (projectedDiagonalPx < farLower) return "well-as-proxy";
@@ -488,14 +488,14 @@ function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
  *
  * Three-tier per-well decision (S6):
  *   - Group fields by parent well (or treat plain Images as singletons).
- *   - For each group, pick a {@link WellMode} from the group's projected
+ *   - For each group, pick a {@link EntityMode} from the group's projected
  *     diagonal with hysteresis against the previous active set.
  *   - Catalog-aware degrade: if the chosen mode requires a proxy that
  *     isn't advertised, fall through to the next finer mode.
  *   - Emit one `ActiveSetEntry` per well (`well-as-proxy`) or one per
  *     visible field (field modes).
  */
-export function promote(
+export function assignModes(
   entities: EntitySnapshot[],
   previousActiveSet: ActiveSetEntry[],
   catalog: AssetCatalogSnapshot | null = null,
@@ -504,7 +504,7 @@ export function promote(
   // Index previous active set by well id (for `well-as-proxy`) or by
   // parent well id (for field-mode entries) so both lookups land on the
   // same `prevMode`.
-  const prevModeByWell = new Map<string, WellMode>();
+  const prevModeByWell = new Map<string, EntityMode>();
   // Build a map from (entityId → wellId) so we can resolve where a
   // field-mode entry's mode "belongs". For `well-as-proxy` entries
   // entityId IS the wellId.
@@ -533,7 +533,7 @@ export function promote(
 
   for (const group of groupByWell(entities)) {
     const prev = prevModeByWell.get(group.wellId) ?? null;
-    let desired = chooseWellMode(prev, group.projectedDiagonalPx);
+    let desired = chooseEntityMode(prev, group.projectedDiagonalPx);
 
     // Catalog-aware degrade. We always inspect the well's catalog entry
     // and the constituent fields' entries; both are needed to know which
@@ -600,7 +600,7 @@ function makeWellAsProxyEntry(group: WellGroup): ActiveSetEntry {
     // The well-proxy is a single asset; LOD bookkeeping is mostly
     // unused for this mode but we publish defensible defaults.
     targetLod: 0,
-    seedDetailLod: 0,
+    coarsestDetailLod: 0,
     detailOwnedLodRange: [0, 0],
     proxyKind: "WellProxy3D",
     proxyAvailable: true,
@@ -610,13 +610,13 @@ function makeWellAsProxyEntry(group: WellGroup): ActiveSetEntry {
 
 function makeFieldEntry(
   entity: EntitySnapshot,
-  mode: WellMode,
+  mode: EntityMode,
   wellProxyAvailable: boolean,
   catalog: AssetCatalogSnapshot | null,
 ): ActiveSetEntry {
   // Geometric: same logic the legacy `makeDetailEntry` used.
   const targetLod = entity.idealTargetLod;
-  const seedDetailLod = Math.min(targetLod + 2, entity.numLevels - 1);
+  const coarsestDetailLod = Math.min(targetLod + 2, entity.numLevels - 1);
   const fieldProxyAvailable =
     catalog !== null && catalogHas(catalog, entity.entityId, "FieldProxy3D");
 
@@ -625,8 +625,8 @@ function makeFieldEntry(
     imageId: entity.imageId,
     mode,
     targetLod,
-    seedDetailLod,
-    detailOwnedLodRange: [targetLod, seedDetailLod],
+    coarsestDetailLod,
+    detailOwnedLodRange: [targetLod, coarsestDetailLod],
     proxyKind: "FieldProxy3D",
     proxyAvailable: fieldProxyAvailable,
     wellProxyAvailable,
@@ -640,7 +640,7 @@ function makeInvisibleEntry(entity: EntitySnapshot): ActiveSetEntry {
     imageId: entity.imageId,
     mode: "fields-with-detail",
     targetLod: coarsest,
-    seedDetailLod: coarsest,
+    coarsestDetailLod: coarsest,
     detailOwnedLodRange: [coarsest, coarsest],
     proxyKind: undefined,
     proxyAvailable: false,
@@ -945,7 +945,7 @@ function iterateGridCells(
  * Compute a numeric priority for a chunk request.
  *
  * Lower values = more urgent.  The lane offset separates the lanes
- * (detail < proxy < runway < overview), while importance and distance
+ * (detail < proxy < prefetch < overview), while importance and distance
  * provide intra-lane ordering.
  */
 function computePriority(
@@ -970,7 +970,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
   const stats = emptyPlanStats();
 
   // Step 1: Promote (three-tier, S6).
-  const activeSet = promote(
+  const activeSet = assignModes(
     snapshot.entities,
     snapshot.previousActiveSet,
     snapshot.assetCatalog,
@@ -1075,7 +1075,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
     }
   }
 
-  // Step 4: Runway lane — for field-mode entries only.
+  // Step 4: Prefetch lane — for field-mode entries only.
   for (const entry of activeSet) {
     if (entry.mode === "well-as-proxy") continue;
     const entity = entityById.get(entry.entityId);
@@ -1083,10 +1083,10 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
     if (entity.levels.length === 0) continue;
 
     const maxT = entity.levels[0]?.grid_shape[0] ?? 0;
-    for (let dt = 1; dt <= RUNWAY_DEPTH; dt++) {
+    for (let dt = 1; dt <= PREFETCH_DEPTH; dt++) {
       const nextT = snapshot.selection.t + dt;
       if (nextT >= maxT) break;
-      const runwaySelection: SelectionState = {
+      const prefetchSelection: SelectionState = {
         ...snapshot.selection,
         t: nextT,
       };
@@ -1095,15 +1095,15 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
         entity,
         entry,
         snapshot.visibleRegion,
-        runwaySelection,
+        prefetchSelection,
         snapshot.cacheState,
         stats,
       );
       for (const req of chunks) {
         const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
-        req.lane = "runway";
+        req.lane = "prefetch";
         req.priority = computePriority(
-          RUNWAY_LANE_OFFSET + dt * 100,
+          PREFETCH_LANE_OFFSET + dt * 100,
           entity.importance,
           dist,
         );
@@ -1122,7 +1122,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
       imageId: entity.imageId,
       mode: "fields-with-detail",
       targetLod: coarsest,
-      seedDetailLod: coarsest,
+      coarsestDetailLod: coarsest,
       detailOwnedLodRange: [coarsest, coarsest],
       proxyKind: undefined,
       proxyAvailable: false,

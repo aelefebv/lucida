@@ -219,7 +219,7 @@ function synthesizeWellRosterEntry(
 
 /**
  * Translate a focal entity's projected diagonal into a human-readable
- * mode-band classification. Mirrors the logic in `chooseWellMode`
+ * mode-band classification. Mirrors the logic in `chooseEntityMode`
  * (planning.ts) so the panel can explain *why* the focal entity is in
  * its current mode without us threading that reason through the active
  * set entry shape.
@@ -250,11 +250,11 @@ function buildPlanningDatasetDebug(
   visibleRegion: VisibleRegion,
   cpuCache: CpuCache,
 ): PlanningDatasetDebug {
-  const lanes = { detail: 0, runway: 0, overview: 0 };
-  const byLevel: Record<number, number> = {};
+  const lanes = { detail: 0, prefetch: 0, overview: 0 };
+  const chunksByLevel: Record<number, number> = {};
   for (const r of result.requests) {
     lanes[r.lane]++;
-    byLevel[r.level] = (byLevel[r.level] ?? 0) + 1;
+    chunksByLevel[r.level] = (chunksByLevel[r.level] ?? 0) + 1;
   }
 
   // Per-LOD breakdown: planned (from plan), cached + in-flight (from cache).
@@ -279,7 +279,7 @@ function buildPlanningDatasetDebug(
     }
   }
   const allLevels = new Set<number>([
-    ...Object.keys(byLevel).map(Number),
+    ...Object.keys(chunksByLevel).map(Number),
     ...Object.keys(cached).map(Number),
     ...Object.keys(inFlight).map(Number),
   ]);
@@ -287,7 +287,7 @@ function buildPlanningDatasetDebug(
     .sort((a, b) => a - b)
     .map(level => ({
       level,
-      planned: byLevel[level] ?? 0,
+      planned: chunksByLevel[level] ?? 0,
       cached: cached[level] ?? 0,
       inFlight: inFlight[level] ?? 0,
     }));
@@ -365,7 +365,7 @@ function buildPlanningDatasetDebug(
     lanes,
     proxyCount: result.proxyRequests.length,
     totalChunks: result.requests.length,
-    byLevel,
+    chunksByLevel,
     lodBreakdown,
     culling: result.stats.culling,
     catalogDegradations: result.stats.catalogDegradations,
@@ -511,7 +511,7 @@ export class Orchestrator {
       }
       // Parent lookup from the dataset's manifest. S6 promotion
       // groups visible fields by `parentId` (the well id) so all fields
-      // of a well agree on a single WellMode.
+      // of a well agree on a single EntityMode.
       const parentByEntityId = new Map<string, string | null>();
       for (const ent of ds.manifest.entities) {
         parentByEntityId.set(ent.id, ent.parent ?? null);
@@ -598,7 +598,7 @@ export class Orchestrator {
         workerWantedSet: { missing: new Map() },
         previousActiveSet: this.previousActiveSet.get(dsId) ?? [],
         // S3: real (but empty) snapshot. Planning falls through to
-        // existing two-tier promote() since `byEntity.size === 0`.
+        // existing two-tier assignModes() since `byEntity.size === 0`.
         // S6 will start consuming this for proxy promotion.
         assetCatalog: ctx.assetCatalog.snapshot(),
       };
@@ -798,7 +798,7 @@ export class Orchestrator {
             level: tl,
             numLevels: entity.numLevels,
             chunksNeeded: result.requests.filter(
-              (r) => r.entityId === entity.entityId && r.lane !== "runway",
+              (r) => r.entityId === entity.entityId && r.lane !== "prefetch",
             ).length,
             chunksSent: 0,
           });
@@ -815,8 +815,8 @@ export class Orchestrator {
       // Collect from all datasets' plans (last dataset wins for activeSet — fine for single-dataset debug)
       const orchDebug: OrchDebug = {
         activeSet: [],
-        laneCount: { detail: 0, runway: 0, overview: 0 },
-        levelCount: {},
+        laneCount: { detail: 0, prefetch: 0, overview: 0 },
+        chunksByLevel: {},
         topRequests: [],
         members: [],
         hasMixedLevels: false,
@@ -834,7 +834,7 @@ export class Orchestrator {
             neededCount: 0,
             prefetchCount: 0,
             uploadLevel: undefined,
-            levelCounts: {},
+            chunksByLevel: {},
             mixedLevels: false,
           });
         }
@@ -848,7 +848,7 @@ export class Orchestrator {
             entityId: entry.entityId,
             mode: entry.mode,
             targetLod: entry.targetLod,
-            seedDetailLod: entry.seedDetailLod,
+            coarsestDetailLod: entry.coarsestDetailLod,
             detailOwnedLodRange: entry.detailOwnedLodRange,
           });
         }
@@ -858,9 +858,9 @@ export class Orchestrator {
       if (this._lastRequests) {
         for (const r of this._lastRequests) {
           if (r.lane === "detail") orchDebug.laneCount.detail++;
-          else if (r.lane === "runway") orchDebug.laneCount.runway++;
+          else if (r.lane === "prefetch") orchDebug.laneCount.prefetch++;
           else orchDebug.laneCount.overview++;
-          orchDebug.levelCount[r.level] = (orchDebug.levelCount[r.level] ?? 0) + 1;
+          orchDebug.chunksByLevel[r.level] = (orchDebug.chunksByLevel[r.level] ?? 0) + 1;
         }
         orchDebug.topRequests = this._lastRequests.slice(0, 20).map(r => ({
           entityId: r.entityId,
@@ -946,10 +946,10 @@ export class Orchestrator {
         }
         continue;
       }
-      // Chunk path. Skip runway (pre-cached for future timepoints),
+      // Chunk path. Skip prefetch (pre-cached for future timepoints),
       // overview (minimap path), and wrong-LOD chunks (stale requests
       // from a previous plan).
-      if (delivery.lane === "runway" || delivery.lane === "overview") continue;
+      if (delivery.lane === "prefetch" || delivery.lane === "overview") continue;
       const target = targetLevelByImage.get(delivery.imageId);
       if (target === undefined || delivery.level !== target) continue;
       const sent = this.sendDeliveryToWorker(ctx, delivery, multiChannel, sliceZ, epochs);
@@ -968,7 +968,7 @@ export class Orchestrator {
     if (!budgetExhausted && this._lastFilteredRequests.length > 0) {
       for (const req of this._lastFilteredRequests) {
         if (budgetExhausted) break;
-        if (req.lane === "runway") continue;
+        if (req.lane === "prefetch") continue;
         const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
         const ss = this.deliverySentToWorker.get(wid);
         if (ss?.has(req.chunkKey)) continue;

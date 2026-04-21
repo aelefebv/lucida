@@ -23,7 +23,7 @@ export interface OrchMemberDebug {
   /** Level selected by upload path: needed[0]?.level */
   uploadLevel: number | undefined;
   /** Breakdown: how many needed chunks at each level */
-  levelCounts: Record<number, number>;
+  chunksByLevel: Record<number, number>;
   /** True if needed[] contains chunks at more than one level */
   mixedLevels: boolean;
 }
@@ -41,13 +41,13 @@ export interface OrchMemberDebug {
 export interface PlanningDatasetDebug {
   datasetId: string;
   /** Total chunk requests in the plan, broken down by lane. */
-  lanes: { detail: number; runway: number; overview: number };
+  lanes: { detail: number; prefetch: number; overview: number };
   /** Proxy requests in the plan (separate from chunk lanes). */
   proxyCount: number;
   /** Total chunk requests in the plan (sum of `lanes`). */
   totalChunks: number;
   /** Chunk requests grouped by LOD level — independent of lane. */
-  byLevel: Record<number, number>;
+  chunksByLevel: Record<number, number>;
   /**
    * Per-LOD breakdown for the focused dataset. One entry per LOD that
    * appears in the plan, with cross-references against the CPU cache.
@@ -65,9 +65,9 @@ export interface PlanningDatasetDebug {
     afterZRange: number;
     afterFrustum: number;
   };
-  /** Number of times catalog-aware promotion downgraded a well's mode. */
+  /** Number of times catalog-aware mode assignment downgraded a well's mode. */
   catalogDegradations: number;
-  /** Active-set entries grouped by S6 promotion mode. */
+  /** Active-set entries grouped by tier mode. */
   wellsByMode: {
     wellAsProxy: number;
     fieldsWithProxyFallback: number;
@@ -101,16 +101,16 @@ export interface OrchDebug {
   /** Active set entries from plan() */
   activeSet: Array<{
     entityId: string;
-    /** S6 promotion mode — see {@link import("../pipeline/planning.ts").WellMode}. */
+    /** Tier mode — see {@link import("../pipeline/planning.ts").EntityMode}. */
     mode: string;
     targetLod: number;
-    seedDetailLod: number;
+    coarsestDetailLod: number;
     detailOwnedLodRange: [number, number];
   }>;
   /** Request counts by lane */
-  laneCount: { detail: number; runway: number; overview: number };
+  laneCount: { detail: number; prefetch: number; overview: number };
   /** Request counts by level */
-  levelCount: Record<number, number>;
+  chunksByLevel: Record<number, number>;
   /** First N requests for inspection */
   topRequests: Array<{
     entityId: string;

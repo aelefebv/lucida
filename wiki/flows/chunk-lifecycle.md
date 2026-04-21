@@ -31,7 +31,7 @@ Frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `b
 
 ### 5. Cache insertion
 
-Decoded chunk inserted into the appropriate tier of [[cpu-cache]] (active-detail / demoted-detail / runway / proxy / overview); appended to `ready[]`.
+Decoded chunk inserted into the appropriate tier of [[cpu-cache]] (active-detail / demoted-detail / prefetch / proxy / overview); appended to `ready[]`.
 
 ### 6. Orchestrator drain
 

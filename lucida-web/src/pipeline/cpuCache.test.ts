@@ -160,7 +160,7 @@ function makePlan(
       imageId: "image-1",
       mode: "fields-with-detail",
       targetLod: 0,
-      seedDetailLod: 2,
+      coarsestDetailLod: 2,
       detailOwnedLodRange: [0, 2],
       proxyKind: undefined,
       proxyAvailable: false,
@@ -186,7 +186,7 @@ function makeActiveEntry(entityId: string, imageId?: string): ActiveSetEntry {
     imageId: imageId ?? entityId.replace("entity", "image"),
     mode: "fields-with-detail",
     targetLod: 0,
-    seedDetailLod: 2,
+    coarsestDetailLod: 2,
     detailOwnedLodRange: [0, 2],
     proxyKind: undefined,
     proxyAvailable: false,
@@ -750,15 +750,15 @@ describe("CpuCache", () => {
   // =========================================================================
 
   describe("eviction tiers", () => {
-    it("evicts runway before active-detail under budget pressure", async () => {
+    it("evicts prefetch before active-detail under budget pressure", async () => {
       const budget = 256;
       const { cache, source } = createTestCache({ detailBudgetBytes: budget });
       source.autoResolveBytes = 100;
 
-      // Insert a detail chunk and a runway chunk
+      // Insert a detail chunk and a prefetch chunk
       const detail = makeRequest({ x: 0, lane: "detail", chunkKey: "0/0/0/0/0/0" });
-      const runway = makeRequest({ x: 1, lane: "runway", chunkKey: "0/0/0/0/0/1" });
-      cache.submit(makePlan([detail, runway]));
+      const prefetch = makeRequest({ x: 1, lane: "prefetch", chunkKey: "0/0/0/0/0/1" });
+      cache.submit(makePlan([detail, prefetch]));
       await flush();
 
       // Both should be cached (200 bytes < 256 budget)
@@ -767,13 +767,13 @@ describe("CpuCache", () => {
 
       // Insert another chunk that forces eviction (300 > 256)
       const extra = makeRequest({ x: 2, lane: "detail", chunkKey: "0/0/0/0/0/2" });
-      cache.submit(makePlan([detail, runway, extra]));
+      cache.submit(makePlan([detail, prefetch, extra]));
       await flush();
 
-      // Runway should be evicted first
+      // Prefetch should be evicted first
       snap = cache.snapshot();
       const keys = snap.cached.get("entity-1")!;
-      expect(keys.has("0/0/0/0/0/1")).toBe(false); // runway evicted
+      expect(keys.has("0/0/0/0/0/1")).toBe(false); // prefetch evicted
       expect(keys.has("0/0/0/0/0/0")).toBe(true);  // detail kept
       expect(keys.has("0/0/0/0/0/2")).toBe(true);  // new detail kept
     });
@@ -851,7 +851,7 @@ describe("CpuCache", () => {
       expect(tel.interactionMode).toBe("idle");
     });
 
-    it("scrubbing mode protects runway over demoted", async () => {
+    it("scrubbing mode protects prefetch over demoted", async () => {
       const budget = 256;
       const { cache, source } = createTestCache({ detailBudgetBytes: budget });
       source.autoResolveBytes = 100;
@@ -866,20 +866,20 @@ describe("CpuCache", () => {
       cache.submit(makePlan([e1detail], [makeActiveEntry("entity-1")], { view: 1, selection: 6 }));
       await flush();
 
-      // Demote entity-1 by switching active set to entity-2, and add a runway chunk
-      const runway = makeRequest({ entityId: "entity-2", imageId: "image-2", lane: "runway", chunkKey: "0/0/0/0/0/1" });
-      cache.submit(makePlan([e1detail, runway], [makeActiveEntry("entity-2")], { view: 1, selection: 7 }));
+      // Demote entity-1 by switching active set to entity-2, and add a prefetch chunk
+      const prefetch = makeRequest({ entityId: "entity-2", imageId: "image-2", lane: "prefetch", chunkKey: "0/0/0/0/0/1" });
+      cache.submit(makePlan([e1detail, prefetch], [makeActiveEntry("entity-2")], { view: 1, selection: 7 }));
       await flush();
 
       // Add one more active-detail to force eviction (300 > 256)
       const e2detail = makeRequest({ entityId: "entity-2", imageId: "image-2", lane: "detail", chunkKey: "0/0/0/0/0/2" });
-      cache.submit(makePlan([e1detail, runway, e2detail], [makeActiveEntry("entity-2")], { view: 1, selection: 8 }));
+      cache.submit(makePlan([e1detail, prefetch, e2detail], [makeActiveEntry("entity-2")], { view: 1, selection: 8 }));
       await flush();
 
-      // In scrubbing mode: demoted evicts first, runway protected
+      // In scrubbing mode: demoted evicts first, prefetch protected
       const snap = cache.snapshot();
       expect(snap.cached.has("entity-1")).toBe(false); // demoted-detail, evicted first
-      expect(snap.cached.get("entity-2")?.has("0/0/0/0/0/1")).toBe(true); // runway, protected
+      expect(snap.cached.get("entity-2")?.has("0/0/0/0/0/1")).toBe(true); // prefetch, protected
     });
   });
 

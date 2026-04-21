@@ -103,8 +103,8 @@ Constants in `planning.ts:23-36`. **Hysteresis bands** of ±5px around each thre
 
 ```
 targetLod        = entity.idealTargetLod    (from WASM, log2 of pixels-per-chunk)
-seedDetailLod    = min(targetLod + 2, maxLevel)
-detailOwnedRange = [targetLod, seedDetailLod]
+coarsestDetailLod    = min(targetLod + 2, maxLevel)
+detailOwnedRange = [targetLod, coarsestDetailLod]
 ```
 
 Two-LOD buffer absorbs zoom transitions smoothly.
@@ -123,10 +123,10 @@ priority = laneOffset + (1 - importance) * 500 + distance * 10
 | -------- | ------ | ----------------------------- |
 | DETAIL   | 0      | Visible chunks                |
 | PROXY    | 500    | Well/field proxy fallbacks    |
-| RUNWAY   | 1000   | Next-timepoint prefetch       |
+| PREFETCH | 1000   | Next-timepoint prefetch       |
 | OVERVIEW | 2000   | Minimap                       |
 
-So a centered, important detail chunk wins (~0); a faraway runway chunk loses (~1500+).
+So a centered, important detail chunk wins (~0); a faraway prefetch chunk loses (~1500+).
 
 ### 3d. Inspecting what planning did
 
@@ -172,7 +172,7 @@ Sort `pendingQueue` ascending by priority, then launch fetches until either limi
 
 Evict from highest-numbered tier first:
 
-1. `runway` (prefetch) — cheapest to lose
+1. `prefetch` — cheapest to lose
 2. `demoted-detail` — entities the user navigated away from
 3. `active-detail` — currently visible
 4. `proxy` — fallback resource
@@ -298,7 +298,7 @@ Composites multi-layer outputs (per-channel composites for multichannel mode, pe
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | **What gets fetched first?**                   | Lowest priority number wins. Detail-lane chunks at high importance and near viewport center fetch first (≈0). Runway/overview lanes wait. |
 | **What gets uploaded to GPU first?**           | Whatever drained from `cpuCache.ready[]` this tick that's also in `workerWantedSet`. Drain order matches the order chunks finished decoding (FIFO within priority). |
-| **What gets evicted from CPU cache first?**    | Tier order: runway → demoted-detail → active-detail → proxy → overview. LRU within tier.                                              |
+| **What gets evicted from CPU cache first?**    | Tier order: prefetch → demoted-detail → active-detail → proxy → overview. LRU within tier.                                              |
 | **What gets evicted from GPU atlas first?**    | Pure LRU on slot `touchOrder` (per pool). The orchestrator drives "what should be there"; the worker just reports what it lost.       |
 | **What LOD is chosen?**                        | `idealTargetLod` from WASM view query (computed from projected diagonal vs. ideal pixels-per-chunk), with a +2 LOD buffer (`detailOwnedLodRange`). |
 | **Plate-specific: when do well proxies show up?** | When the well's projected diagonal is below 80px (well-as-proxy mode) or in the 80–150px band (proxy-fallback). One pool per `(dataset, kind, slotDims, channel)` to keep pools cohesive. |
@@ -316,11 +316,11 @@ User opens a URL → web sends `open_remote_dataset` → server probes the store
 ```
 # Planning thresholds (pixels of projected diagonal)
 FAR_THRESHOLD_PX             = 80
-MEDIUM_THRESHOLD_PX          = 150
+DETAIL_THRESHOLD_PX          = 150
 HYSTERESIS_PX                = 5
 
 # Buffers
-RUNWAY_DEPTH                 = 2          # prefetch 2 future timepoints
+PREFETCH_DEPTH               = 2          # prefetch 2 future timepoints
 
 # CPU Cache budgets
 DEFAULT_DETAIL_BUDGET        = 512 MB

@@ -5,7 +5,7 @@
  * production-side state added for it to work.
  *
  * Two overlays, each gated by its own toggle in the Logging tab:
- *  - wellModes: per-well badge with promotion mode + LOD
+ *  - wellModes: per-well badge with tier mode + LOD
  *  - chunkGrid: LOD chunk grid for every visible field, colored by
  *    status. Capped at MAX_CHUNK_RECTS per tick as a backstop for
  *    pathological cases.
