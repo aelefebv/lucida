@@ -178,7 +178,7 @@ Evict from highest-numbered tier first:
 4. `proxy` — fallback resource
 5. `overview` (minimap) — most expensive to lose; whole-dataset coverage
 
-LRU within each tier (by `insertedAt`). Budgets: detail 512 MB, overview 64 MB, proxy 256 MB.
+LRU within each tier (by `insertedAt`), **except** active-detail, which sorts by `lastSeenTick` ascending → `priority` descending → `insertedAt` ascending. This prevents the "evict the focal point first" pathology that pure insertion-LRU produces (focal chunks fetch first, so they're oldest, so they'd evict first as new outer chunks arrive). Both `lastSeenTick` and `priority` are refreshed on every `submit()` for any cached chunk in the new plan; planning therefore emits cached chunks (no cache filtering at the plan level). Budgets: detail 512 MB, overview 64 MB, proxy 256 MB.
 
 ### 4d. Drain to GPU (`cpuCache.ts:466-484`)
 
@@ -298,7 +298,7 @@ Composites multi-layer outputs (per-channel composites for multichannel mode, pe
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | **What gets fetched first?**                   | Lowest priority number wins. Detail-lane chunks at high importance and near viewport center fetch first (≈0). Runway/overview lanes wait. |
 | **What gets uploaded to GPU first?**           | Whatever drained from `cpuCache.ready[]` this tick that's also in `workerWantedSet`. Drain order matches the order chunks finished decoding (FIFO within priority). |
-| **What gets evicted from CPU cache first?**    | Tier order: prefetch → demoted-detail → active-detail → proxy → overview. LRU within tier.                                              |
+| **What gets evicted from CPU cache first?**    | Tier order: prefetch → demoted-detail → active-detail → proxy → overview. LRU within tier, **except active-detail**: least-recently-seen-in-plan first, then highest priority number (= farthest from focal) first. |
 | **What gets evicted from GPU atlas first?**    | Pure LRU on slot `touchOrder` (per pool). The orchestrator drives "what should be there"; the worker just reports what it lost.       |
 | **What LOD is chosen?**                        | `idealTargetLod` from WASM view query (computed from projected diagonal vs. ideal pixels-per-chunk), with a +2 LOD buffer (`detailOwnedLodRange`). |
 | **Plate-specific: when do well proxies show up?** | When the well's projected diagonal is below 80px (well-as-proxy mode) or in the 80–150px band (proxy-fallback). One pool per `(dataset, kind, slotDims, channel)` to keep pools cohesive. |

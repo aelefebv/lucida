@@ -29,7 +29,7 @@ Each tick:
 
 ## Eviction tiers
 
-Highest-numbered tier evicts first. LRU within each tier (by `insertedAt`).
+Highest-numbered tier evicts first. LRU within each tier (by `insertedAt`), except for **active-detail** — see below.
 
 1. **prefetch** — cheapest to lose
 2. **demoted-detail** — entity navigated away from
@@ -38,6 +38,18 @@ Highest-numbered tier evicts first. LRU within each tier (by `insertedAt`).
 5. **overview** (minimap) — most expensive; covers whole dataset
 
 Budgets: main 512 MB, overview 64 MB, proxy 256 MB.
+
+### Active-detail uses least-recently-wanted, lowest-importance first
+
+Pure insertion-order LRU is exactly wrong here: focal-point chunks fetch first (smallest priority number), so they're the *oldest* in cache, so they'd evict first under pressure — producing a center-outward eviction wave (visible in the chunkGrid debug overlay as green→red ripples).
+
+Instead, active-detail evicts in this order (each key is a tiebreaker for the prior):
+
+1. **`lastSeenTick` ascending** — chunks not present in the most recent plan go first. Handles frustum-culled, out-of-LOD-range, and off-screen chunks for still-active entities.
+2. **`priority` descending** — among entries seen this tick, the highest priority *number* (= farthest from focal, lowest importance) goes first.
+3. **`insertedAt` ascending** — deterministic tiebreaker.
+
+Both `lastSeenTick` and `priority` are refreshed on every `submit()` for any cached chunk that appears in the plan. This requires Planning to emit cached chunks (it doesn't filter by cache state — `submit()` is the sole dedup point).
 
 ## Interactions
 

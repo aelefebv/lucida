@@ -578,11 +578,10 @@ export class Orchestrator {
         interactionState: "idle",
       };
 
-      // 3g. Cache state — pass empty maps so Planning emits ALL needed chunks.
-      // The re-send loop (deliverToWorker) iterates _lastFilteredRequests to
-      // re-send worker-evicted chunks from CpuCache. If Planning filtered cached
-      // chunks, _lastFilteredRequests would miss them and re-send would break.
-      // CpuCache.submit() deduplicates internally, so no double-fetching occurs.
+      // 3g. Track per-entity cache occupancy for telemetry. Planning no
+      // longer filters cached chunks (CpuCache.submit() refreshes them
+      // and dedups internally), so _lastFilteredRequests sees every
+      // requested chunk and the re-send loop can find any of them.
       for (const entity of entities) {
         const cachedKeys = ctx.cpuCache.snapshot().cached.get(entity.entityId);
         this._lastCachedKeyCounts.set(entity.entityId, cachedKeys?.size ?? 0);
@@ -594,7 +593,6 @@ export class Orchestrator {
         entities,
         visibleRegion,
         selection,
-        cacheState: { cached: new Map(), inFlight: new Map() },
         workerWantedSet: { missing: new Map() },
         previousActiveSet: this.previousActiveSet.get(dsId) ?? [],
         // S3: real (but empty) snapshot. Planning falls through to

@@ -170,7 +170,6 @@ export interface PlanningSnapshot {
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
   selection: SelectionState;
-  cacheState: CacheStateSnapshot;
   workerWantedSet: WorkerWantedSetSnapshot;
   previousActiveSet: ActiveSetEntry[];
   /**
@@ -703,7 +702,6 @@ export function createSyntheticSnapshot(
       renderMode: "slice",
       interactionState: "idle",
     },
-    cacheState: { cached: new Map(), inFlight: new Map() },
     workerWantedSet: { missing: new Map() },
     previousActiveSet: [],
     assetCatalog: null,
@@ -774,7 +772,6 @@ export function iterateChunks(
   entry: ActiveSetEntry,
   visibleRegion: VisibleRegion,
   selection: SelectionState,
-  cacheState: CacheStateSnapshot,
   stats: PlanStats | null = null,
 ): ChunkRequest[] {
   const requests: ChunkRequest[] = [];
@@ -785,7 +782,6 @@ export function iterateChunks(
   }
 
   const [finest, coarsest] = entry.detailOwnedLodRange;
-  const cachedSet = cacheState.cached.get(entity.entityId);
 
   // Iterate from coarsest (seed) down to finest (target).
   for (let level = coarsest; level >= finest; level--) {
@@ -804,7 +800,6 @@ export function iterateChunks(
         level0,
         level,
         c,
-        cachedSet,
         requests,
         stats,
       );
@@ -826,7 +821,6 @@ function iterateGridCells(
   level0: LevelGeometry,
   level: number,
   c: number,
-  cachedSet: Set<string> | undefined,
   out: ChunkRequest[],
   stats: PlanStats | null = null,
 ): void {
@@ -914,11 +908,11 @@ function iterateGridCells(
 
         const key = chunkKey(level, selection.t, c, iz, row, col);
 
-        // Skip already-cached chunks.
-        if (cachedSet !== undefined && cachedSet.has(key)) {
-          continue;
-        }
-
+        // NOTE: cached chunks are NOT filtered here. They flow through
+        // `submit()` so the cache can refresh their priority and
+        // lastSeenTick — eviction relies on those signals to spare
+        // still-wanted chunks. Dedup against the cache happens in
+        // `CpuCache.submit`.
         out.push({
           entityId: entity.entityId,
           imageId: entity.imageId,
@@ -1024,7 +1018,6 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
       entry,
       snapshot.visibleRegion,
       snapshot.selection,
-      snapshot.cacheState,
       stats,
     );
     for (const req of chunks) {
@@ -1096,7 +1089,6 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
         entry,
         snapshot.visibleRegion,
         prefetchSelection,
-        snapshot.cacheState,
         stats,
       );
       for (const req of chunks) {
@@ -1134,7 +1126,6 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
       overviewEntry,
       snapshot.visibleRegion,
       snapshot.selection,
-      snapshot.cacheState,
       stats,
     );
     for (const req of chunks) {

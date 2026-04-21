@@ -161,8 +161,12 @@ function voxelToWorld(
   vz: number,
 ): [number, number, number] {
   if (frame.model) {
+    // Volume path: unit-space Y is flipped vs image-convention voxel Y
+    // (the shader does `(1 - pos.y) * levelDims.y` to sample voxels).
+    // Mirror that flip here so projected chunk rects line up with what
+    // the renderer actually displays.
     const ux = vx / frame.fullVoxel[0];
-    const uy = vy / frame.fullVoxel[1];
+    const uy = 1 - vy / frame.fullVoxel[1];
     const uz = vz / frame.fullVoxel[2];
     const m = frame.model;
     return [

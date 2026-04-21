@@ -184,6 +184,21 @@ interface CacheEntry {
   insertedAt: number;
   epochs: PlanningEpochs;
   dataType: string;
+  /**
+   * Priority recorded the last time this chunk appeared in a plan
+   * (lower = more urgent; mirrors `ChunkRequest.priority`). Used as the
+   * secondary sort key for active-detail eviction so distant chunks go
+   * before focal ones. Refreshed on every `submit()` that includes the
+   * chunk; can be stale for chunks not currently planned (frustum-culled,
+   * out-of-LOD-range), but `lastSeenTick` handles that case.
+   */
+  priority: number;
+  /**
+   * Submit-tick counter from the last `submit()` that planned this
+   * chunk. Primary sort key for active-detail eviction: chunks not
+   * present in the current plan get evicted before chunks that are.
+   */
+  lastSeenTick: number;
 }
 
 interface InFlightEntry {
@@ -290,6 +305,14 @@ export class CpuCache {
   // Monotonic counter for LRU ordering
   private lruCounter = 0;
 
+  /**
+   * Bumped at the start of every `submit()`. Stamped onto cached
+   * entries when their request appears in the new plan. Eviction reads
+   * this to identify "not currently wanted" chunks (oldest tick =
+   * least recently planned).
+   */
+  private submitTick = 0;
+
   // Listeners notified when new chunks become ready
   private listeners: (() => void)[] = [];
 
@@ -370,6 +393,7 @@ export class CpuCache {
    */
   submit(plan: RequestPlan): void {
     this.currentEpochs = plan.epochs;
+    this.submitTick++;
 
     // Track epoch velocity
     this.epochHistory.push({ ...plan.epochs });
@@ -386,9 +410,9 @@ export class CpuCache {
     }
     this.activeEntityIds = newActiveIds;
 
-    // Build new pending queue: skip cached, in-flight, and failed
-    // chunks. Re-build the enqueue-time map so dropped requests don't
-    // leak entries (the dropped key won't be re-added below).
+    // Build new pending queue: skip in-flight and failed; refresh cached.
+    // Re-build the enqueue-time map so dropped requests don't leak
+    // entries (the dropped key won't be re-added below).
     this.pendingRequests = [];
     const nextEnqueuedAt = new Map<string, number>();
     const enqueueNow = performance.now();
@@ -397,9 +421,15 @@ export class CpuCache {
 
       this.totalRequests++;
 
-      // Already cached?
-      if (this.isChunkCached(req)) {
+      // Already cached? Refresh priority + lastSeenTick on the entry so
+      // eviction can see the chunk is still wanted and at what urgency.
+      // Planning emits cached chunks (it no longer filters them) so the
+      // refresh signal reaches every still-wanted entry.
+      const cachedEntry = this.lookupCachedEntry(req);
+      if (cachedEntry) {
         this.totalHits++;
+        cachedEntry.priority = req.priority;
+        cachedEntry.lastSeenTick = this.submitTick;
         continue;
       }
 
@@ -562,7 +592,12 @@ export class CpuCache {
     return result;
   }
 
-  /** Immutable snapshot of cached + in-flight keys for PlanningSnapshot. */
+  /**
+   * Immutable snapshot of cached + in-flight keys. Used by the
+   * orchestrator and DebugOverlays for telemetry — Planning no longer
+   * consumes this (it emits all visible chunks; the cache dedups in
+   * `submit()`).
+   */
   snapshot(): CacheStateSnapshot {
     const cached = new Map<string, Set<string>>();
     for (const [entityId, chunks] of this.mainCache) {
@@ -912,6 +947,7 @@ export class CpuCache {
     this.epochHistory = [];
     this.failures.clear();
     this.lruCounter = 0;
+    this.submitTick = 0;
 
     // Clear listeners
     this.listeners = [];
@@ -1087,6 +1123,8 @@ export class CpuCache {
       insertedAt: this.lruCounter++,
       epochs: { ...this.currentEpochs },
       dataType: result.dataType,
+      priority: req.priority,
+      lastSeenTick: this.submitTick,
     };
 
     if (lane === "overview") {
@@ -1321,9 +1359,9 @@ export class CpuCache {
     entityMap.set(entry.chunkKey, entry);
   }
 
-  private isChunkCached(req: ChunkRequest): boolean {
+  private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
     const cache = req.lane === "overview" ? this.overviewCache : this.mainCache;
-    return cache.get(req.entityId)?.has(req.chunkKey) === true;
+    return cache.get(req.entityId)?.get(req.chunkKey);
   }
 
   private demoteEntity(entityId: string): void {
@@ -1392,7 +1430,20 @@ export class CpuCache {
     for (const tier of tierOrder) {
       if (freed >= bytesNeeded) break;
       const entries = this.collectEntriesByTier(cache, tier as EvictionTier);
-      entries.sort((a, b) => a.insertedAt - b.insertedAt); // oldest first within tier
+      // Active-detail uses a "least-recently-wanted, lowest-importance
+      // first" sort to avoid evicting focal-point chunks (which are
+      // fetched first and would otherwise be the oldest in pure LRU,
+      // producing a center-outward eviction wave). Other tiers stay on
+      // pure insertion-order LRU — they're sacrificial by design.
+      if (tier === "active-detail") {
+        entries.sort((a, b) =>
+          a.lastSeenTick - b.lastSeenTick      // oldest plan tick first
+          || b.priority - a.priority           // then highest priority number (= farthest from focal) first
+          || a.insertedAt - b.insertedAt,      // then oldest insertion as deterministic tiebreaker
+        );
+      } else {
+        entries.sort((a, b) => a.insertedAt - b.insertedAt);
+      }
 
       for (const entry of entries) {
         if (freed >= bytesNeeded) break;

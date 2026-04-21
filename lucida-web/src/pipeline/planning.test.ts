@@ -13,7 +13,6 @@ import {
   DETAIL_LANE_OFFSET,
   OVERVIEW_LANE_OFFSET,
   chooseEntityMode,
-  chunkKey,
   chunkOutsideFrustum,
   iterateChunks,
   plan,
@@ -24,7 +23,6 @@ import type {
   EntitySnapshot,
   VisibleRegion,
   SelectionState,
-  CacheStateSnapshot,
   PlanningSnapshot,
   EntityMode,
   AssetCatalogSnapshot,
@@ -533,13 +531,6 @@ function makeSelection(overrides?: Partial<SelectionState>): SelectionState {
   };
 }
 
-/** Default empty cache state. */
-function makeCacheState(
-  entries?: [string, Set<string>][],
-): CacheStateSnapshot {
-  return { cached: new Map(entries ?? []), inFlight: new Map() };
-}
-
 // ---------------------------------------------------------------------------
 // chunkOutsideFrustum
 // ---------------------------------------------------------------------------
@@ -587,9 +578,8 @@ describe("iterateChunks", () => {
     // Visible region covers only top-left quarter: [0,0]-[512,512]
     const region = makeVisibleRegion({ xyBounds: [0, 0, 512, 512] });
     const selection = makeSelection();
-    const cache = makeCacheState();
 
-    const result = iterateChunks(entity, entry, region, selection, cache);
+    const result = iterateChunks(entity, entry, region, selection);
 
     // Expect 2x2 = 4 chunks (cols 0-1, rows 0-1)
     expect(result).toHaveLength(4);
@@ -622,7 +612,7 @@ describe("iterateChunks", () => {
       wellProxyAvailable: true,
     };
 
-    const result = iterateChunks(entity, entry, makeVisibleRegion(), makeSelection(), makeCacheState());
+    const result = iterateChunks(entity, entry, makeVisibleRegion(), makeSelection());
     expect(result).toHaveLength(0);
   });
 
@@ -648,16 +638,14 @@ describe("iterateChunks", () => {
       frustumPlanes: [[-1, 0, 0, 256]],
     });
     const selection = makeSelection();
-    const cache = makeCacheState();
 
     const all = iterateChunks(
       entity,
       entry,
       makeVisibleRegion({ xyBounds: [0, 0, 1024, 1024], zRange: [0, 4] }),
       selection,
-      cache,
     );
-    const culled = iterateChunks(entity, entry, region, selection, cache);
+    const culled = iterateChunks(entity, entry, region, selection);
 
     // Without frustum: 4*4*4 = 64 chunks
     expect(all).toHaveLength(64);
@@ -668,7 +656,11 @@ describe("iterateChunks", () => {
     }
   });
 
-  it("cached chunks are excluded", () => {
+  it("emits all visible chunks regardless of cache state", () => {
+    // Planning no longer filters cached chunks — CpuCache.submit()
+    // refreshes cached entries' priority/lastSeenTick from the request,
+    // so eviction can spare them. iterateChunks must therefore emit
+    // every visible chunk, cached or not.
     const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
       entityId: "e0",
@@ -681,16 +673,10 @@ describe("iterateChunks", () => {
     const region = makeVisibleRegion({ xyBounds: [0, 0, 512, 512] });
     const selection = makeSelection();
 
-    // Cache two of the four chunks.
-    const cachedKeys = new Set([chunkKey(0, 0, 0, 0, 0, 0), chunkKey(0, 0, 0, 0, 1, 1)]);
-    const cache = makeCacheState([["e0", cachedKeys]]);
+    const result = iterateChunks(entity, entry, region, selection);
 
-    const result = iterateChunks(entity, entry, region, selection, cache);
-
-    expect(result).toHaveLength(2);
-    for (const req of result) {
-      expect(cachedKeys.has(req.chunkKey)).toBe(false);
-    }
+    // 2x2 grid → 4 chunks, regardless of what's cached.
+    expect(result).toHaveLength(4);
   });
 
   it("multi-channel produces one request per channel per spatial cell", () => {
@@ -705,9 +691,8 @@ describe("iterateChunks", () => {
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
     const region = makeVisibleRegion({ xyBounds: [0, 0, 256, 256] });
     const selection = makeSelection({ visibleChannels: [0, 2, 3] });
-    const cache = makeCacheState();
 
-    const result = iterateChunks(entity, entry, region, selection, cache);
+    const result = iterateChunks(entity, entry, region, selection);
 
     // 1 spatial cell * 3 channels = 3 requests
     expect(result).toHaveLength(3);
@@ -732,9 +717,8 @@ describe("iterateChunks", () => {
       sortCenter: [960, 128, 0],
     });
     const selection = makeSelection();
-    const cache = makeCacheState();
 
-    const result = iterateChunks(entity, entry, region, selection, cache);
+    const result = iterateChunks(entity, entry, region, selection);
 
     // All 4 columns should be present.
     expect(result).toHaveLength(4);
@@ -757,9 +741,8 @@ describe("iterateChunks", () => {
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
     const region = makeVisibleRegion({ xyBounds: [400, 400, 600, 600] });
     const selection = makeSelection();
-    const cache = makeCacheState();
 
-    const result = iterateChunks(entity, entry, region, selection, cache);
+    const result = iterateChunks(entity, entry, region, selection);
 
     // Local range: x=[-100,100], y=[-100,100].
     // Clamped to [0,100] x [0,100] → col 0, row 0 only.
@@ -788,9 +771,8 @@ describe("iterateChunks", () => {
     const entry = makeFieldDetailEntry("e0", "img0", 0, 2);
     const region = makeVisibleRegion({ xyBounds: [0, 0, 1024, 1024] });
     const selection = makeSelection();
-    const cache = makeCacheState();
 
-    const result = iterateChunks(entity, entry, region, selection, cache);
+    const result = iterateChunks(entity, entry, region, selection);
 
     // Level 0: 4x4 = 16, Level 1: 2x2 = 4, Level 2: 1x1 = 1 → total 21
     expect(result).toHaveLength(21);
@@ -841,7 +823,6 @@ describe("request scheduling", () => {
         renderMode: "slice",
         interactionState: "idle",
       },
-      cacheState: { cached: new Map(), inFlight: new Map() },
     });
   }
 
@@ -918,7 +899,6 @@ describe("request scheduling", () => {
         renderMode: "slice",
         interactionState: "idle",
       },
-      cacheState: { cached: new Map(), inFlight: new Map() },
     });
 
     const result = plan(snapshot);
@@ -1145,7 +1125,6 @@ describe("plan()", () => {
         renderMode: "slice",
         interactionState: "idle",
       },
-      cacheState: { cached: new Map(), inFlight: new Map() },
     });
 
     const result = plan(snapshot);
