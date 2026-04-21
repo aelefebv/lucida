@@ -81,12 +81,19 @@ interface ChunkRect {
    * thinks this should fetch, scheduler doesn't have it queued."
    */
   priorityRank?: number;
+  /**
+   * For `status === "cached"`: which eviction tier the chunk is in.
+   * Surfaces eviction churn — `active-detail` won't evict under
+   * normal pressure, `demoted-detail` is next-to-go, `prefetch` is
+   * cheapest. `null` for cached chunks where the lookup failed
+   * (rare; treat as fallback green).
+   */
+  tier?: import("../pipeline/cpuCache.ts").EvictionTier | null;
 }
 
-const STATUS_COLOR: Record<"cached" | "in-flight", string> = {
-  cached: "rgba(80, 220, 120, 0.30)",
-  "in-flight": "rgba(240, 200, 70, 0.35)",
-};
+const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
+const SOLID_IN_FLIGHT = "rgba(240, 200, 70, 0.35)";
+const SOLID_PLANNED = "rgba(240, 90, 90, 0.30)";
 
 /**
  * Color for a planned chunk based on its position in the pending fetch
@@ -101,6 +108,25 @@ function plannedColor(rank: number | undefined): string {
   if (rank < 20) return "rgba(245, 110, 70, 0.40)";
   if (rank < 60) return "rgba(220, 70, 70, 0.32)";
   return "rgba(160, 40, 40, 0.24)";
+}
+
+/**
+ * Color for a cached chunk based on eviction tier. Stays in the green
+ * family so "cached = green" reads at a glance, with hue shifts that
+ * convey "how at-risk":
+ *   active-detail  → bright green (safest)
+ *   demoted-detail → pale sage    (will evict on memory pressure)
+ *   prefetch       → teal         (cheapest to lose)
+ */
+function cachedColor(
+  tier: import("../pipeline/cpuCache.ts").EvictionTier | null | undefined,
+): string {
+  switch (tier) {
+    case "active-detail":  return "rgba(80, 220, 120, 0.36)";
+    case "demoted-detail": return "rgba(150, 200, 140, 0.30)";
+    case "prefetch":       return "rgba(70, 200, 200, 0.32)";
+    default:               return SOLID_CACHED;
+  }
 }
 
 /**
@@ -199,16 +225,15 @@ export function DebugOverlays({
   cpuCache,
   viewMode,
 }: Props) {
-  const [enabled, setEnabled] = useState<Record<DebugOverlay, boolean>>(() => ({
-    wellModes: isOverlayEnabled("wellModes"),
-    chunkGrid: isOverlayEnabled("chunkGrid"),
-  }));
+  const readEnabled = (): Record<DebugOverlay, boolean> => {
+    const out = {} as Record<DebugOverlay, boolean>;
+    for (const name of DEBUG_OVERLAYS) out[name] = isOverlayEnabled(name);
+    return out;
+  };
+  const [enabled, setEnabled] = useState<Record<DebugOverlay, boolean>>(readEnabled);
   useEffect(() => {
-    const sync = () => setEnabled({
-      wellModes: isOverlayEnabled("wellModes"),
-      chunkGrid: isOverlayEnabled("chunkGrid"),
-    });
-    return onOverlaysChanged(sync);
+    return onOverlaysChanged(() => setEnabled(readEnabled()));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const anyEnabled = DEBUG_OVERLAYS.some(o => enabled[o]);
@@ -439,7 +464,7 @@ export function DebugOverlays({
                 status = "cached";
               } else if (inFlight) {
                 status = "in-flight";
-              } else {
+              } else if (enabled.plannedRank) {
                 priorityRank = proxyRankByKey.get(`${dsId}|${entry.entityId}|WellProxy3D|${t}|${c}`);
               }
 
@@ -573,11 +598,15 @@ export function DebugOverlays({
                   }
                   let status: ChunkRect["status"] = "planned";
                   let priorityRank: number | undefined;
+                  let tier: import("../pipeline/cpuCache.ts").EvictionTier | null | undefined;
                   if (cachedSet?.has(key)) {
                     status = "cached";
+                    if (enabled.cachedTier) {
+                      tier = cpuCache.getCachedChunkTier(entry.entityId, key);
+                    }
                   } else if (inFlightSet?.has(key)) {
                     status = "in-flight";
-                  } else {
+                  } else if (enabled.plannedRank) {
                     priorityRank = rankByKey.get(`${entry.entityId}/${key}`);
                   }
                   out.push({
@@ -588,6 +617,7 @@ export function DebugOverlays({
                     h: rect.h,
                     status,
                     priorityRank,
+                    tier,
                   });
                 }
               }
@@ -620,28 +650,44 @@ export function DebugOverlays({
         overflow: "hidden",
       }}
     >
-      {enabled.chunkGrid && chunks.map(c => (
-        <div
-          key={c.key}
-          style={{
-            position: "absolute",
-            left: c.x,
-            top: c.y,
-            width: c.w,
-            height: c.h,
-            background: c.status === "planned"
-              ? plannedColor(c.priorityRank)
-              : STATUS_COLOR[c.status],
-            border: "1px solid rgba(255, 255, 255, 0.22)",
-            boxSizing: "border-box",
-          }}
-          title={c.status === "planned" && c.priorityRank !== undefined
-            ? `planned · queue rank ${c.priorityRank}`
-            : c.status === "planned"
-              ? "planned · not in pending queue"
-              : c.status}
-        />
-      ))}
+      {enabled.chunkGrid && chunks.map(c => {
+        // Each color band gates on its own toggle so the simple
+        // 3-color view (cached/in-flight/planned) is recoverable by
+        // turning off both sub-toggles.
+        const bg =
+          c.status === "cached"
+            ? enabled.cachedTier ? cachedColor(c.tier) : SOLID_CACHED
+            : c.status === "in-flight"
+              ? SOLID_IN_FLIGHT
+              : enabled.plannedRank ? plannedColor(c.priorityRank) : SOLID_PLANNED;
+        const tooltip = c.status === "cached"
+          ? enabled.cachedTier && c.tier
+            ? `cached · tier ${c.tier}`
+            : "cached"
+          : c.status === "in-flight"
+            ? "in-flight"
+            : enabled.plannedRank && c.priorityRank !== undefined
+              ? `planned · queue rank ${c.priorityRank}`
+              : enabled.plannedRank
+                ? "planned · not in pending queue"
+                : "planned";
+        return (
+          <div
+            key={c.key}
+            style={{
+              position: "absolute",
+              left: c.x,
+              top: c.y,
+              width: c.w,
+              height: c.h,
+              background: bg,
+              border: "1px solid rgba(255, 255, 255, 0.22)",
+              boxSizing: "border-box",
+            }}
+            title={tooltip}
+          />
+        );
+      })}
       {enabled.wellModes && badges.map(b => (
         <div
           key={b.key}

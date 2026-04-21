@@ -59,7 +59,7 @@ export interface CpuCacheConfig {
 
 type Lane = "detail" | "prefetch" | "overview";
 type InteractionMode = "panning" | "scrubbing" | "idle";
-type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
+export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
 /**
  * A delivery from the CPU cache that the orchestrator routes to the GPU
@@ -753,6 +753,21 @@ export class CpuCache {
     c: number,
   ): boolean {
     return this.inFlightProxy.has(`${datasetId}|${proxyInnerKey({ entityId, kind, t, c })}`);
+  }
+
+  /**
+   * Eviction tier of a cached chunk, or null if it's not cached. Used
+   * by the chunk-grid overlay to color cached cells by their eviction
+   * tier so churn ("active fades to demoted to prefetch then evicts")
+   * is visible. Lookup hits both main + overview caches so overview
+   * chunks (which carry tier `prefetch` cosmetically — they're LRU-
+   * managed, not tiered) still resolve.
+   */
+  getCachedChunkTier(entityId: string, chunkKey: string): EvictionTier | null {
+    const entry =
+      this.mainCache.get(entityId)?.get(chunkKey) ??
+      this.overviewCache.get(entityId)?.get(chunkKey);
+    return entry?.tier ?? null;
   }
 
   /**
