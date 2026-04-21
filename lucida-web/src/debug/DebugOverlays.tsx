@@ -386,7 +386,73 @@ export function DebugOverlays({
 
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
-            if (entry.mode === "well-as-proxy") continue;
+
+            // Well-as-proxy: there's no chunk grid because the well is
+            // served by a single proxy asset. Render one rect per well
+            // colored by proxy status, so plates at WP zoom still
+            // surface load progress.
+            if (entry.mode === "well-as-proxy") {
+              const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "WellProxy3D", t, c);
+              const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "WellProxy3D", t, c);
+              let status: ChunkRect["status"] = "planned";
+              if (cached) status = "cached";
+              else if (inFlight) status = "in-flight";
+
+              // Union of constituent fields' world AABBs gives the
+              // well's world AABB in either mode (in 3D each field has
+              // its own model matrix, so we union after voxelToWorld).
+              let minX = Infinity, minY = Infinity, minZ = Infinity;
+              let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+              let any = false;
+              for (const ent of ds.manifest.entities) {
+                if (ent.parent !== entry.entityId || ent.kind !== "Field") continue;
+                const fieldImg = ds.manifest.images.find(i => i.image_id === ent.id)
+                  ?? ds.manifest.images[0];
+                if (!fieldImg) continue;
+                const fpos = positions[ent.id];
+                if (!fpos) continue;
+                const flvl0 = fieldImg.multiscale.levels[0];
+                if (!flvl0) continue;
+                const fframe = getFrame(dsId, ent.id, flvl0.shape);
+                fframe.pos = fpos;
+                for (let i = 0; i < 8; i++) {
+                  const vx = i & 1 ? fframe.fullVoxel[0] : 0;
+                  const vy = (i >> 1) & 1 ? fframe.fullVoxel[1] : 0;
+                  const vz = (i >> 2) & 1 ? fframe.fullVoxel[2] : 0;
+                  const [wx, wy, wz] = voxelToWorld(fframe, vx, vy, vz);
+                  if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
+                  if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
+                  if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz;
+                  any = true;
+                }
+              }
+              if (!any) continue;
+              let sxMin = Infinity, syMin = Infinity, sxMax = -Infinity, syMax = -Infinity;
+              let projected = false;
+              for (let i = 0; i < 8; i++) {
+                const wx = i & 1 ? maxX : minX;
+                const wy = (i >> 1) & 1 ? maxY : minY;
+                const wz = (i >> 2) & 1 ? maxZ : minZ;
+                const p = projectWorld(ws, wx, wy, wz, dpr);
+                if (!p) continue;
+                projected = true;
+                if (p.x < sxMin) sxMin = p.x;
+                if (p.y < syMin) syMin = p.y;
+                if (p.x > sxMax) sxMax = p.x;
+                if (p.y > syMax) syMax = p.y;
+              }
+              if (!projected) continue;
+              if (sxMax < xMin || syMax < yMin || sxMin > xMax || syMin > yMax) continue;
+              out.push({
+                key: `${dsId}/${entry.entityId}/well-proxy`,
+                x: sxMin,
+                y: syMin,
+                w: sxMax - sxMin,
+                h: syMax - syMin,
+                status,
+              });
+              continue;
+            }
             const pos = positions[entry.entityId];
             const img = imgById.get(entry.imageId);
             if (!pos || !img) continue;

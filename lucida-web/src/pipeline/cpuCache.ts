@@ -598,6 +598,21 @@ export class CpuCache {
     return this.proxyEntryToDelivery(entry);
   }
 
+  /**
+   * Whether a proxy fetch is currently in-flight. Used by debug overlays
+   * to render an "in-flight" status without exposing the internal
+   * inFlightProxy map.
+   */
+  isProxyInFlight(
+    datasetId: string,
+    entityId: string,
+    kind: "WellProxy3D" | "FieldProxy3D",
+    t: number,
+    c: number,
+  ): boolean {
+    return this.inFlightProxy.has(`${datasetId}|${proxyInnerKey({ entityId, kind, t, c })}`);
+  }
+
   /** Register a listener called when new chunks become ready. Returns unsubscribe function. */
   subscribe(listener: () => void): () => void {
     this.listeners.push(listener);
