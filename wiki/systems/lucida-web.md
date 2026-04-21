@@ -73,7 +73,7 @@ Subdirectories:
 ## Invariants
 
 - **All GPU work is on the worker.** The main thread never touches WebGPU directly; the canvas is transferred via `OffscreenCanvas`. See [[decisions/gpu-on-dedicated-worker]].
-- **`viewDirty` and `dataDirty` are throttled differently.** `viewDirty` renders immediately; `dataDirty` waits ~33ms. The reason and consequence are in [[chunk-pipeline]].
+- **`interactiveDirty` and `residencyDirty` are throttled differently.** `interactiveDirty` renders immediately; `residencyDirty` waits ~33ms. The reason and consequence are in [[chunk-pipeline]].
 - **The classification gate is call-site discipline, not a runtime predicate.** `applyDocumentCommand` (sends to server, awaits Ack/CommandBroadcast) vs `applyViewportCommand` (applies locally + emits presence) is the choice point; the Rust side enforces it at compile time via the disjoint `DocumentCommand` / `ViewportCommand` enums. Misclassifying a viewport command as a document command floods peers; misclassifying a document command as viewport silently drops shared state. See [[gotchas/document-vs-viewport-classification]].
 - **`Scene::apply_command` is called for every incoming command broadcast** so all clients converge on the same document state. Local viewport commands take a separate path (`applyViewportCommand`).
 

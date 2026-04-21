@@ -35,8 +35,8 @@ export interface MinimapOverlayData {
   mainInvViewProj: Float32Array | null;
 }
 
-/** Minimum interval between data-triggered renders (ms). View-triggered renders are immediate. */
-export const DATA_RENDER_INTERVAL_MS = 100;
+/** Minimum interval between residency-triggered renders (ms). Interactive renders are immediate. */
+export const RESIDENCY_RENDER_INTERVAL_MS = 33;
 
 /** Separate budget for minimap overview uploads (independent from main view). */
 export const MINIMAP_UPLOAD_BUDGET_BYTES = 2 * 1024 * 1024; // 2 MB per frame

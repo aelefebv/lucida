@@ -37,7 +37,7 @@ The web client doesn't know in advance — it learns by inspecting `manifest.kin
   2. `datasetsRef.set(datasetId, {manifest, fetch})` — the JS dataset registry.
   3. `initLayerMaps(datasetId)` — per-channel display state (contrast/gamma/colormap).
   4. Apply `set_channel_visible` per channel so WASM knows the channel count (extracted from image `shape[1]` since axes are TCZYX).
-  5. `loopRef.current.addDataset(datasetId, manifest)` — `RenderLoop` learns about the new dataset and flips `viewDirty=true`.
+  5. `loopRef.current.addDataset(datasetId, manifest)` — `RenderLoop` learns about the new dataset and flips `interactiveDirty=true`.
   6. Pre-allocate a `Uint16Array` for the coarsest level (used by the volume/intensity sampler).
 
 ### 1c. The single vs. plate divergence is in **manifest shape**, not flow
@@ -59,13 +59,13 @@ So **plate complexity lives entirely in planning** (where it groups, promotes, a
 
 `lucida-web/src/renderLoop.ts:17-325` is a **pull-based RAF loop with typed dirty flags**:
 
-- `viewDirty` — camera move, layout change, dataset add/remove, multichannel toggle, click in canvas.
-- `dataDirty` — new chunk decoded (CPU cache subscribe), worker reports eviction, worker reports wanted-set delta.
+- `interactiveDirty` — camera move, layout change, dataset add/remove, multichannel toggle, click in canvas.
+- `residencyDirty` — new chunk decoded (CPU cache subscribe), worker reports eviction, worker reports wanted-set delta.
 
 Throttling (`renderLoop.ts:289-296`):
 
-- `viewDirty` → render **immediately** (camera move can't wait).
-- `dataDirty` → wait until `now - lastDataRenderTime >= 33ms` (≈30 fps cap on chunk-arrival redraws). The **tick still runs** in the gap to keep uploading; only the *render* is throttled.
+- `interactiveDirty` → render **immediately** (camera move can't wait).
+- `residencyDirty` → wait until `now - lastResidencyRenderTime >= 33ms` (≈30 fps cap on chunk-arrival redraws). The **tick still runs** in the gap to keep uploading; only the *render* is throttled.
 
 Every tick runs four phases in order: **plan → upload → render (maybe) → minimap**. Reschedule via RAF if work remains.
 
@@ -208,7 +208,7 @@ On receipt, the worker:
 4. Computes the **wanted-set** (`renderer/wantedSet.ts`): walking the active set + LOD range against current GPU residency, produces `MissingChunk[]` and `MissingProxy[]`.
 5. Posts a `wantedSetDelta` back to main thread.
 
-On the main thread, `orchestrator.handleWantedSetDelta` clears `proxyDeliveredToWorker` for the missing keys (so the next drain re-sends them) and bumps `dataDirty`.
+On the main thread, `orchestrator.handleWantedSetDelta` clears `proxyDeliveredToWorker` for the missing keys (so the next drain re-sends them) and bumps `residencyDirty`.
 
 ### 5c. Upload to GPU (`orchestrator.ts:869-934`)
 
@@ -329,7 +329,7 @@ VOLUME_ATLAS_BUDGET          = 512 MB
 PROXY_POOL_CAPACITY          = 64         # slots per pool
 
 # Render throttling
-DATA_RENDER_INTERVAL_MS      = 33 ms      # batch chunk arrivals, ≈30 fps cap
+RESIDENCY_RENDER_INTERVAL_MS      = 33 ms      # batch chunk arrivals, ≈30 fps cap
 MAIN_VIEW_UPLOAD_BUDGET      = 16 MB / frame
 ```
 

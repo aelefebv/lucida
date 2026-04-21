@@ -19,7 +19,7 @@ Articles below are **derived from code analysis** unless explicitly marked other
 - [[content-source-vs-fetch-source]] — JS-side `ContentSource` wraps wire-side `FetchSource`
 - [[wasm-scene-as-source-of-truth]] — Scene state lives in WASM; JS is a thin orchestration layer
 - [[cpu-cache-as-sole-fetch-path]] — `SharedChunkQueue` deleted in S5; `CpuCache` is the only path
-- [[pull-based-raf-with-typed-dirty]] — RAF loop with `viewDirty` (immediate) and `dataDirty` (33ms throttle)
+- [[pull-based-raf-with-typed-dirty]] — RAF loop with `interactiveDirty` (immediate) and `residencyDirty` (33ms throttle)
 - [[temporal-runway-not-implemented]] — GPU-side runway not pursued; CPU-side runway + scrubbing eviction is sufficient (2026-04-17)
 - [[dual-handoff-on-dataset-opened]] — `DatasetOpened` event splits into WASM `apply_command` and JS `setupFetchPipeline`
 - [[logging-conventions]] — `tracing` spans on the server, `bridgeLog` helper on the client, `dot.scope` event names (2026-04-20)

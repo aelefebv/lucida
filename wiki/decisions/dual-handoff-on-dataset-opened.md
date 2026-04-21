@@ -17,7 +17,7 @@ When the web client receives a `dataset_opened` broadcast, it splits the work in
   2. `datasetsRef.set(datasetId, {manifest, fetch})`
   3. `initLayerMaps(datasetId)` for per-channel display state
   4. `set_channel_visible` per channel (channel count from `image.shape[1]`)
-  5. `loopRef.current.addDataset(datasetId, manifest)` and flip `viewDirty=true`
+  5. `loopRef.current.addDataset(datasetId, manifest)` and flip `interactiveDirty=true`
   6. Pre-allocate `Uint16Array` for the coarsest level (used by the volume sampler)
 
 Both sides observe the same `DatasetOpened` event but consume different parts of it.
@@ -38,7 +38,7 @@ Within JS-side, the order is intentional:
 - `contentSource.registerImage` first, so when the planner runs and the cache calls `contentSource.fetch(req)`, the image is registered.
 - `datasetsRef.set` before `initLayerMaps` so layer-map setup can read the manifest.
 - `set_channel_visible` per channel **after** the dataset is registered with WASM — the call goes through `wasmScene.apply_command` and would fail otherwise.
-- `loopRef.current.addDataset(...)` last on the JS side because flipping `viewDirty` triggers the next tick, and the tick must see the fully set-up state.
+- `loopRef.current.addDataset(...)` last on the JS side because flipping `interactiveDirty` triggers the next tick, and the tick must see the fully set-up state.
 
 Reordering breaks subtly — see [[gotchas/app-tsx-hook-order]] for the related hook-order rule.
 

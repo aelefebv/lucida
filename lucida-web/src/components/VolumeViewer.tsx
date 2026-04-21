@@ -52,8 +52,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const sceneRef = useRef<WasmScene>(scene);
   sceneRef.current = scene;
 
-  const markViewDirty = useCallback(() => {
-    loopRef.current?.markViewDirty();
+  const markInteractiveDirty = useCallback(() => {
+    loopRef.current?.markInteractiveDirty();
   }, []);
 
   const isFlyMode = cameraMode === "fly";
@@ -65,7 +65,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     { current: pressedKeys },
     isFlyMode,
     emitPresence,
-    markViewDirty,
+    markInteractiveDirty,
     useCallback(() => {
       clearTimeout(scaleTimerRef.current);
       loopRef.current?.setRenderScale(INTERACTION_RENDER_SCALE);
@@ -94,12 +94,12 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
 
   // Mark dirty on remote document updates
   useEffect(() => {
-    loopRef.current?.markViewDirty();
+    loopRef.current?.markInteractiveDirty();
   }, [remoteDocumentVersion]);
 
   // Mark dirty on T/C changes so the render loop re-evaluates chunks
   useEffect(() => {
-    loopRef.current?.markViewDirty();
+    loopRef.current?.markInteractiveDirty();
   }, [t, c]);
 
   // Clip distance adjustment + fly mode toggle via RAF loop
@@ -119,7 +119,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         const delta = (inc ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
         scene.adjust_clip_distance(delta);
         emitPresence();
-        loopRef.current?.markViewDirty();
+        loopRef.current?.markInteractiveDirty();
       }
 
       // Toggle fly mode on F key press (edge detect)
@@ -142,7 +142,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         if (newMode === "fly") setShowHint(true);
         breakFollow();
         emitPresence();
-        loopRef.current?.markViewDirty();
+        loopRef.current?.markInteractiveDirty();
         canvas.focus();
       }
       fWasPressed = fPressed;
@@ -208,7 +208,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
         applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
       }
       emitPresence();
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
     },
     [dragging, scene, canvas, emitPresence, breakFollow, sendCursor],
   );
@@ -264,7 +264,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       breakFollow();
       applyViewportCommand(scene, { type: "arcball_zoom", delta });
       emitPresence();
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       setLowRes();
       scheduleFullRes();
     },

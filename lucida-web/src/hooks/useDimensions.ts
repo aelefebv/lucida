@@ -124,7 +124,7 @@ export function useDimensions({
     if (scene) {
       applyViewportCommand(scene, { type: "set_multi_channel", enabled: next });
       bumpSettingsGeneration();
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitPresence();
     }
   }, [multiChannel, wasmSceneRef, bridgeCallbacksRef, loopRef]);

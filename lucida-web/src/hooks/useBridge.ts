@@ -222,7 +222,7 @@ export function useBridge({
             // Inbound layout broadcast: refresh the mirror so peers' changes
             // appear locally. setActiveLocal updates the active id without
             // re-broadcasting (the WASM side already applied via apply_command
-            // above). markViewDirty so the GPU canvas re-renders without
+            // above). markInteractiveDirty so the GPU canvas re-renders without
             // requiring local user interaction.
             const registry = sessionRef.current?.ensureLayoutRegistry();
             if (registry && cmd.dataset_id) {
@@ -230,7 +230,7 @@ export function useBridge({
               if (cmd.type === "set_active_layout" && cmd.layout_id) {
                 registry.setActiveLocal(cmd.dataset_id, cmd.layout_id);
               }
-              loopRef.current?.markViewDirty();
+              loopRef.current?.markInteractiveDirty();
             }
           }
           bumpRemoteDocumentVersion();
@@ -290,7 +290,7 @@ export function useBridge({
               setT(scene.t());
               setC(scene.c());
               setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
-              loopRef.current?.markViewDirty();
+              loopRef.current?.markInteractiveDirty();
               sessionRef.current?.bridge.sendPresence(scene.export_presence());
             } catch (e) {
               console.warn("[Bridge] failed to import presence:", e);
@@ -331,7 +331,7 @@ export function useBridge({
                   setT(scene.t());
                   setC(scene.c());
                   setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
-                  loopRef.current?.markViewDirty();
+                  loopRef.current?.markInteractiveDirty();
                   sessionRef.current?.bridge.sendPresence(scene.export_presence());
                 } catch (e) {
                   console.warn("[Bridge] failed to import presence on steer:", e);
@@ -362,7 +362,7 @@ export function useBridge({
               scene.import_dataset_presence(json);
               bumpSettingsGeneration();
               bumpLayerSettingsVersion();
-              loopRef.current?.markViewDirty();
+              loopRef.current?.markInteractiveDirty();
             } catch (e) {
               console.warn("[Bridge] failed to import dataset presence:", e);
             }
@@ -561,7 +561,7 @@ export function useBridge({
             setT(scene.t());
             setC(scene.c());
             setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
-            loopRef.current?.markViewDirty();
+            loopRef.current?.markInteractiveDirty();
           } catch (e) {
             console.warn("Failed to import peer presence:", e);
           }

@@ -19,7 +19,7 @@ Every RAF tick runs four phases in this order, then reschedules if work remains:
 
 1. **Plan** — query WASM (`view_query`, `member_positions`, `visible_region`); decide which entities are active and at what LOD; enumerate wanted chunks with priorities. Owned by [[planning-domain]].
 2. **Upload** — drain decoded chunks from the [[cpu-cache]] to the GPU worker, filtered by what the worker still wants and bounded by the per-frame byte budget.
-3. **Render** — slice or volume path; throttled if only `dataDirty` changed (≈30 fps cap on chunk-arrival redraws), immediate if `viewDirty`. Owned by [[gpu-residency]] downstream of `renderLoop.ts`.
+3. **Render** — slice or volume path; throttled if only `residencyDirty` changed (≈30 fps cap on chunk-arrival redraws), immediate if `interactiveDirty`. Owned by [[gpu-residency]] downstream of `renderLoop.ts`.
 4. **Minimap** — same indirection lookups, smaller atlas, render-key skips when stationary.
 
 ## Sub-systems and where to read more
@@ -45,4 +45,4 @@ Every RAF tick runs four phases in this order, then reschedules if work remains:
 - **Worker eviction reporting is async** — the worker posts `chunksEvicted` (evicted + skipped); the main thread reconciles against `proxyDeliveredToWorker` and `sentSet` on receipt. Forgetting this drift causes "I sent it, why didn't it draw?" symptoms.
 - **Hysteresis bands of ±5px around each promotion threshold** prevent flapping when the user dwells near a boundary. If you tune thresholds in `planning.ts`, keep the band; without it, plates oscillate between modes during normal scroll.
 - **Catalog-aware degradation** — if planning wants a proxy that the server's `AssetCatalog` doesn't advertise, it degrades one tier finer (e.g., wanted well-as-proxy but no `WellProxy3D` available → drop to fields-with-proxy-fallback). This is silent; observable only via the debug panel.
-- **`dataDirty` is throttled (~33ms) but the tick still runs in the gap to keep uploading.** Only the *render* is throttled. If you change this, expect either visible jitter (no throttle) or upload starvation (throttling the whole tick).
+- **`residencyDirty` is throttled (~33ms) but the tick still runs in the gap to keep uploading.** Only the *render* is throttled. If you change this, expect either visible jitter (no throttle) or upload starvation (throttling the whole tick).

@@ -11,7 +11,7 @@ From "user A pans" to "user B's viewport reflects A's new position" (when B is f
 
 1. **User A interacts** — pan, zoom, mouse-move, slice scrub.
 2. **Local apply** — `applyAndSend.ts::applyViewportCommand` calls `wasmScene.apply_command(json)`. Scene's `apply_viewport(cmd)` mutates the local viewport state and bumps the `view` or `selection` epoch.
-3. **Render-loop dirty** — the command sets `viewDirty` so the local render reflects immediately.
+3. **Render-loop dirty** — the command sets `interactiveDirty` so the local render reflects immediately.
 4. **Throttled emit** — `applyViewportCommand` queues a `presence` message. `bridge.ts` throttles at ~50 ms; the latest queued payload wins (older queued payloads are dropped).
 5. **Wire** — `{type: "presence", camera, view, display}` JSON to the WebSocket.
 6. **Server** ([[lucida-server]] `handler.rs`) — `Session::update_presence` mutates `clients[id]` in place. Constructs `ServerMessage::PresenceUpdate { client_id, camera, view, display }` and broadcasts via `BroadcastItem::PresenceUpdate { sender, json }`.
@@ -42,7 +42,7 @@ The server-side path is identical: `Session::update_dataset_presence` → `Serve
 
 ## Latency
 
-- Local render after user input: **immediate** (`viewDirty` is throttle-exempt — see [[decisions/pull-based-raf-with-typed-dirty]]).
+- Local render after user input: **immediate** (`interactiveDirty` is throttle-exempt — see [[decisions/pull-based-raf-with-typed-dirty]]).
 - Wire latency to the next-hop server: 1–10 ms typical.
 - Server fan-out: O(n) per peer; for typical n<10, sub-millisecond.
 - Receiver render: next RAF — ≤16 ms.

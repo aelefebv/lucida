@@ -1,7 +1,7 @@
 /** Pull-based render loop: coalesces chunk arrivals into a single RAF tick. */
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
-import { DATA_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { PlanningEpochs } from "./pipeline/planning.ts";
 import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
@@ -21,9 +21,9 @@ export class RenderLoop {
   private canvas: HTMLCanvasElement;
   private mode: "slice" | "volume";
 
-  private viewDirty = true;
-  private dataDirty = false;
-  private lastDataRenderTime = 0;
+  private interactiveDirty = true;
+  private residencyDirty = false;
+  private lastResidencyRenderTime = 0;
   private rafId: number | null = null;
   private unsubs = new Map<string, () => void>();
 
@@ -53,7 +53,7 @@ export class RenderLoop {
     this.canvas = opts.canvas;
     this.mode = opts.mode;
     this.cpuCacheUnsub = this.session.cpuCache.subscribe(() => {
-      this.dataDirty = true;
+      this.residencyDirty = true;
       this.scheduleIfNeeded();
     });
   }
@@ -64,7 +64,7 @@ export class RenderLoop {
     this.client.onChunksEvicted = (datasetId: string, evicted: string[], skipped: string[]) => {
       this.orchestrator.handleChunksEvicted(datasetId, evicted, skipped);
       if (evicted.length > 0) {
-        this.dataDirty = true;
+        this.residencyDirty = true;
         this.scheduleIfNeeded();
       }
     };
@@ -74,12 +74,12 @@ export class RenderLoop {
     this.client.onWantedSetDelta = (_epochs, missing) => {
       this.orchestrator.handleWantedSetDelta(missing);
       if (missing.length > 0) {
-        this.dataDirty = true;
+        this.residencyDirty = true;
         this.scheduleIfNeeded();
       }
     };
 
-    this.viewDirty = true;
+    this.interactiveDirty = true;
     this.scheduleIfNeeded();
   }
 
@@ -113,7 +113,7 @@ export class RenderLoop {
 
   addDataset(id: string, manifest: DatasetManifest): void {
     this.datasets.set(id, { manifest });
-    this.viewDirty = true;
+    this.interactiveDirty = true;
     this.scheduleIfNeeded();
   }
 
@@ -161,7 +161,7 @@ export class RenderLoop {
       }
     }
 
-    this.viewDirty = true;
+    this.interactiveDirty = true;
     this.scheduleIfNeeded();
   }
 
@@ -196,13 +196,13 @@ export class RenderLoop {
     return [...ids];
   }
 
-  markViewDirty(): void {
-    this.viewDirty = true;
+  markInteractiveDirty(): void {
+    this.interactiveDirty = true;
     this.scheduleIfNeeded();
   }
 
-  markDataDirty(): void {
-    this.dataDirty = true;
+  markResidencyDirty(): void {
+    this.residencyDirty = true;
     this.scheduleIfNeeded();
   }
 
@@ -215,14 +215,14 @@ export class RenderLoop {
       this.sliceZ = z;
       this.sliceT = t;
       this.sliceC = c;
-      this.viewDirty = true;
+      this.interactiveDirty = true;
       this.scheduleIfNeeded();
     }
   }
 
   setRenderScale(s: number): void {
     this._renderScale = s;
-    this.viewDirty = true;
+    this.interactiveDirty = true;
     this.scheduleIfNeeded();
   }
 
@@ -231,7 +231,7 @@ export class RenderLoop {
     if (size !== undefined) this.minimapState.size = size;
     this.minimapState.overlayCallback = overlayCallback ?? null;
     if (enabled) {
-      this.viewDirty = true;
+      this.interactiveDirty = true;
       this.scheduleIfNeeded();
     }
   }
@@ -242,7 +242,7 @@ export class RenderLoop {
   }
 
   private scheduleIfNeeded(): void {
-    if ((this.viewDirty || this.dataDirty) && this.rafId === null) {
+    if ((this.interactiveDirty || this.residencyDirty) && this.rafId === null) {
       this.rafId = requestAnimationFrame(this.tick);
     }
   }
@@ -263,11 +263,11 @@ export class RenderLoop {
   private tick = (): void => {
     this.rafId = null;  // clear so scheduleIfNeeded can re-schedule
 
-    if (!this.viewDirty && !this.dataDirty) return;
+    if (!this.interactiveDirty && !this.residencyDirty) return;
 
     // AssetCatalog not yet wired (brief window before the first server
     // snapshot lazily constructs it on Session). Reschedule — once the
-    // catalog appears, the next markViewDirty/markDataDirty triggers a tick.
+    // catalog appears, the next markInteractiveDirty/markResidencyDirty triggers a tick.
     if (!this.session.assetCatalog) {
       this.scheduleIfNeeded();
       return;
@@ -280,20 +280,20 @@ export class RenderLoop {
     }
     let shouldRender = false;
 
-    if (this.viewDirty) {
+    if (this.interactiveDirty) {
       // View changed — render immediately
-      this.viewDirty = false;
-      this.dataDirty = false;
-      this.lastDataRenderTime = now;
+      this.interactiveDirty = false;
+      this.residencyDirty = false;
+      this.lastResidencyRenderTime = now;
       shouldRender = true;
-    } else if (this.dataDirty) {
-      if (now - this.lastDataRenderTime >= DATA_RENDER_INTERVAL_MS) {
+    } else if (this.residencyDirty) {
+      if (now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS) {
         // Enough time elapsed since last data render — render now
-        this.dataDirty = false;
-        this.lastDataRenderTime = now;
+        this.residencyDirty = false;
+        this.lastResidencyRenderTime = now;
         shouldRender = true;
       }
-      // else: data dirty but debounce not elapsed — still run tick for uploads, skip render
+      // else: residency dirty but debounce not elapsed — still run tick for uploads, skip render
     }
 
     const ctx = this.buildContext();
@@ -304,11 +304,11 @@ export class RenderLoop {
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
       if (tickSlice(ctx, this.orchestrator, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
-        this.dataDirty = true;
+        this.residencyDirty = true;
       }
     } else {
       if (tickVolume(ctx, this.orchestrator, this.minimapState.pendingFetch, shouldRender)) {
-        this.dataDirty = true;
+        this.residencyDirty = true;
       }
     }
 
@@ -316,7 +316,7 @@ export class RenderLoop {
       debugStats.frameTimeMs = performance.now() - now;
     }
 
-    if (tickMinimapOverview(ctx, this.minimapState)) this.dataDirty = true;
+    if (tickMinimapOverview(ctx, this.minimapState)) this.residencyDirty = true;
     if (shouldRender) tickMinimap(ctx, this.minimapState, this.sliceZ);
 
     // If work remains (budget exhausted or chunks pending), schedule another frame

@@ -65,7 +65,7 @@ export function useIntensityBatcher({
             max: mergedMax,
           }));
           bumpSettingsGeneration();
-          loopRef.current?.markDataDirty();
+          loopRef.current?.markResidencyDirty();
           sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
         }
       }

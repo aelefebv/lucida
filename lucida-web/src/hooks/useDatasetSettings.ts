@@ -84,7 +84,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_dataset_visible", dataset_id: id, visible });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -95,7 +95,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_dataset_opacity", dataset_id: id, opacity });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -107,7 +107,7 @@ export function useDatasetSettings({
       bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
       applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min, max });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
     }
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
@@ -119,7 +119,7 @@ export function useDatasetSettings({
       bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
       applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel: c, gamma });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -131,7 +131,7 @@ export function useDatasetSettings({
       bridgeCallbacksRef.current.breakFollow();
       const c = scene.c();
       applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel: c, colormap });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -143,7 +143,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_channel_visible", dataset_id: id, channel, visible });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -154,7 +154,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel, colormap });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -165,7 +165,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel, min, max });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -176,7 +176,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel, gamma });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -187,7 +187,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_channel_blend_mode", dataset_id: id, blend_mode: blendMode });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -198,7 +198,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_dataset_blend_mode", dataset_id: id, blend_mode: mode });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -209,7 +209,7 @@ export function useDatasetSettings({
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
       applySettingsCommand(scene, { type: "set_dataset_render_mode", dataset_id: id, render_mode: mode });
-      loopRef.current?.markViewDirty();
+      loopRef.current?.markInteractiveDirty();
       bridgeCallbacksRef.current.emitDatasetPresence();
       setLayerSettingsVersion((v) => v + 1);
     }
@@ -223,7 +223,7 @@ export function useDatasetSettings({
         bridgeCallbacksRef.current.breakFollow();
         const c = scene.c();
         applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max });
-        loopRef.current?.markViewDirty();
+        loopRef.current?.markInteractiveDirty();
         bridgeCallbacksRef.current.emitDatasetPresence();
       }
     }
@@ -243,7 +243,7 @@ export function useDatasetSettings({
             bridgeCallbacksRef.current.breakFollow();
             const c = scene.c();
             applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max });
-            loopRef.current?.markViewDirty();
+            loopRef.current?.markInteractiveDirty();
             bridgeCallbacksRef.current.emitDatasetPresence();
           }
         }
@@ -273,7 +273,7 @@ export function useDatasetSettings({
           }
           setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
         }
-        loopRef.current?.markViewDirty();
+        loopRef.current?.markInteractiveDirty();
         bridgeCallbacksRef.current.emitDatasetPresence();
       }
       return next;
@@ -291,7 +291,7 @@ export function useDatasetSettings({
     if (swapIdx < 0 || swapIdx >= order.length) return;
     [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
     applySettingsCommand(scene, { type: "set_dataset_order", order });
-    loopRef.current?.markViewDirty();
+    loopRef.current?.markInteractiveDirty();
     bridgeCallbacksRef.current.emitDatasetPresence();
     setLayerSettingsVersion((v) => v + 1);
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);

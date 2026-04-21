@@ -19,7 +19,7 @@ export function useFlyCameraInput(
   pressedKeysRef: React.RefObject<Set<string>>,
   isActive: boolean,
   emitPresence: () => void,
-  markViewDirty: () => void,
+  markInteractiveDirty: () => void,
   setLowRes: () => void,
   scheduleFullRes: () => void,
 ) {
@@ -107,7 +107,7 @@ export function useFlyCameraInput(
           pitch,
           roll,
         });
-        markViewDirty();
+        markInteractiveDirty();
         setLowRes();
         emitPresence();
         hadInputRef.current = true;
@@ -132,7 +132,7 @@ export function useFlyCameraInput(
     pressedKeysRef,
     applyViewportCommand,
     emitPresence,
-    markViewDirty,
+    markInteractiveDirty,
     setLowRes,
     scheduleFullRes,
   ]);

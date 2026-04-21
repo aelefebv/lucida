@@ -27,10 +27,10 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
      2. `datasetsRef.set(datasetId, {manifest, fetch})`
      3. `initLayerMaps(datasetId)`
      4. `set_channel_visible` per channel
-     5. `loopRef.current.addDataset(datasetId, manifest)` and flip `viewDirty=true`
+     5. `loopRef.current.addDataset(datasetId, manifest)` and flip `interactiveDirty=true`
      6. Pre-allocate `Uint16Array` for the coarsest level
 5. **Next RAF tick** ([[chunk-pipeline]]):
-   1. Orchestrator's `planAndFetch` runs because `viewDirty`.
+   1. Orchestrator's `planAndFetch` runs because `interactiveDirty`.
    2. WASM `view_query(dsId)` returns visible entities with `projected_diagonal_px` and `idealTargetLod`.
    3. [[planning-domain]] decides per-well mode (proxy / fallback / detail), enumerates wanted chunks with priorities.
    4. [[cpu-cache]] `submit(plan)` queues unique requests.
