@@ -8,9 +8,15 @@
  *  - wellModes: per-well badge with promotion mode + LOD
  *  - chunkGrid: LOD chunk grid for the focal entity, colored by status
  *
- * Works in both slice and volume modes via the unified
- * `WasmScene.project_to_screen` (camera handles the mode-specific
- * projection internally).
+ * Both modes (slice + volume) share the same projection pipeline:
+ *
+ *   voxel coords  →  world coords  →  WasmScene.project_to_screen
+ *
+ * The middle step differs by mode. Slice: world == voxel + field
+ * position offset (camera projects voxel space directly). Volume: world
+ * == field model matrix * (voxel / fullVoxel), which maps the field's
+ * unit cube into normalized world space and bakes in the Y-flip and
+ * physical-extent normalization the renderer applies.
  */
 import { useEffect, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
@@ -34,12 +40,6 @@ interface Props {
 }
 
 const POLL_MS = 100;
-/**
- * Hard cap on chunk-grid rectangles per tick. Volume mode can enumerate
- * thousands of cells from large LOD-0 entities; the overlay is meant for
- * a glance, not a complete inventory. Slice-mode plans tend to stay well
- * under this.
- */
 const MAX_CHUNK_RECTS = 600;
 
 const MODE_COLOR: Record<string, string> = {
@@ -56,7 +56,7 @@ const MODE_LABEL: Record<string, string> = {
 
 interface WellBadge {
   key: string;
-  centerX: number; // CSS px
+  centerX: number;
   centerY: number;
   mode: string;
   label: string;
@@ -79,30 +79,69 @@ const STATUS_COLOR: Record<ChunkRect["status"], string> = {
 };
 
 /**
- * Project a world-space point to CSS-pixel screen coordinates via the
- * unified WASM camera projection. Returns null if the point is behind
- * the camera (3D modes only) — slice mode never returns null.
+ * Per-field projection frame. `model === null` means 2D (slice mode):
+ * voxel + position is world. `model !== null` means 3D: voxel /
+ * fullVoxel goes through the model matrix to get world.
  */
+interface FieldFrame {
+  pos: [number, number];
+  fullVoxel: [number, number, number];
+  model: Float32Array | null;
+}
+
+/** Project a world-space point to CSS-pixel screen coords. */
 function projectWorld(
   ws: WasmScene,
-  x: number,
-  y: number,
-  z: number,
+  wx: number,
+  wy: number,
+  wz: number,
   dpr: number,
 ): { x: number; y: number } | null {
-  const arr = ws.project_to_screen(x, y, z);
+  const arr = ws.project_to_screen(wx, wy, wz);
   if (arr.length === 0) return null;
   return { x: arr[0] / dpr, y: arr[1] / dpr };
 }
 
+/** Convert field-local voxel coords to world coords for the active mode. */
+function voxelToWorld(
+  frame: FieldFrame,
+  vx: number,
+  vy: number,
+  vz: number,
+): [number, number, number] {
+  if (frame.model) {
+    const ux = vx / frame.fullVoxel[0];
+    const uy = vy / frame.fullVoxel[1];
+    const uz = vz / frame.fullVoxel[2];
+    const m = frame.model;
+    return [
+      m[0] * ux + m[4] * uy + m[8] * uz + m[12],
+      m[1] * ux + m[5] * uy + m[9] * uz + m[13],
+      m[2] * ux + m[6] * uy + m[10] * uz + m[14],
+    ];
+  }
+  return [frame.pos[0] + vx, frame.pos[1] + vy, vz];
+}
+
+/** Field's world-space centroid (the (0.5, 0.5, 0.5) point of its unit cube). */
+function fieldWorldCenter(frame: FieldFrame): [number, number, number] {
+  return voxelToWorld(
+    frame,
+    frame.fullVoxel[0] / 2,
+    frame.fullVoxel[1] / 2,
+    frame.fullVoxel[2] / 2,
+  );
+}
+
 /**
- * Project the 8 corners of a world-space AABB and reduce to a screen-
- * space AABB. Returns null when no corner survived projection.
+ * Project a field-local voxel-space AABB to a screen-space AABB by
+ * projecting all 8 corners and reducing.
  */
-function projectAabb(
+function projectVoxelAabb(
   ws: WasmScene,
-  min: [number, number, number],
-  max: [number, number, number],
+  frame: FieldFrame,
+  vMin: [number, number, number],
+  vMax: [number, number, number],
   dpr: number,
 ): { x: number; y: number; w: number; h: number } | null {
   let sxMin = Infinity;
@@ -111,10 +150,11 @@ function projectAabb(
   let syMax = -Infinity;
   let any = false;
   for (let i = 0; i < 8; i++) {
-    const cx = i & 1 ? max[0] : min[0];
-    const cy = (i >> 1) & 1 ? max[1] : min[1];
-    const cz = (i >> 2) & 1 ? max[2] : min[2];
-    const p = projectWorld(ws, cx, cy, cz, dpr);
+    const vx = i & 1 ? vMax[0] : vMin[0];
+    const vy = (i >> 1) & 1 ? vMax[1] : vMin[1];
+    const vz = (i >> 2) & 1 ? vMax[2] : vMin[2];
+    const [wx, wy, wz] = voxelToWorld(frame, vx, vy, vz);
+    const p = projectWorld(ws, wx, wy, wz, dpr);
     if (!p) continue;
     any = true;
     if (p.x < sxMin) sxMin = p.x;
@@ -134,7 +174,6 @@ export function DebugOverlays({
   cpuCache,
   viewMode,
 }: Props) {
-  // Mirror the localStorage flags into React state so toggles re-render us.
   const [enabled, setEnabled] = useState<Record<DebugOverlay, boolean>>(() => ({
     wellModes: isOverlayEnabled("wellModes"),
     chunkGrid: isOverlayEnabled("chunkGrid"),
@@ -171,16 +210,41 @@ export function DebugOverlays({
       if (canvasWCss === 0 || canvasHCss === 0) return;
 
       const dpr = devicePixelRatio;
+      const is3D = viewMode === "3d";
 
       const orch = renderLoopRef.current?.getOrchestrator();
       const plans = orch?.getLastPlans();
 
-      // Off-screen culling margin (CSS px). Generous so a badge sitting
-      // near a hidden corner still shows.
+      // Off-screen culling margin (CSS px).
       const xMin = -64;
       const yMin = -32;
       const xMax = canvasWCss + 64;
       const yMax = canvasHCss + 32;
+
+      // Per-tick model-matrix cache; one WASM call per (dsId, imageId)
+      // even when many overlays / wells reference the same field.
+      const modelCache = new Map<string, Float32Array | null>();
+      const getFrame = (dsId: string, imageId: string, lvl0Shape: number[]): FieldFrame => {
+        const cacheKey = `${dsId}|${imageId}`;
+        let model: Float32Array | null | undefined = modelCache.get(cacheKey);
+        if (model === undefined) {
+          if (is3D) {
+            try {
+              model = new Float32Array(ws.member_model_matrix(dsId, imageId));
+            } catch {
+              model = null;
+            }
+          } else {
+            model = null;
+          }
+          modelCache.set(cacheKey, model);
+        }
+        return {
+          pos: [0, 0], // overwritten below
+          fullVoxel: [lvl0Shape[4], lvl0Shape[3], lvl0Shape[2]],
+          model,
+        };
+      };
 
       // ---- Well badges ----
       if (enabled.wellModes && plans) {
@@ -200,13 +264,11 @@ export function DebugOverlays({
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
 
-          // Per-well aggregator. `fields` carries each field's xy
-          // position + (x, y, z) extent — needed to compute the well's
-          // 3D centroid in the unified projection.
+          // Per-well aggregator carrying world centroids of fields.
           const wells = new Map<string, {
             mode: string;
             lod: number | null;
-            fields: Array<{ pos: [number, number]; size: [number, number, number] }>;
+            worldCentroids: Array<[number, number, number]>;
           }>();
 
           const addField = (
@@ -220,21 +282,19 @@ export function DebugOverlays({
             const img = imgById.get(imageId);
             const lvl0 = img?.multiscale.levels[0];
             if (!pos || !lvl0) return;
+            const frame = getFrame(dsId, imageId, lvl0.shape);
+            frame.pos = pos;
+            const worldCenter = fieldWorldCenter(frame);
             let agg = wells.get(wellId);
             if (!agg) {
-              agg = { mode, lod, fields: [] };
+              agg = { mode, lod, worldCentroids: [] };
               wells.set(wellId, agg);
             }
-            agg.fields.push({
-              pos,
-              size: [lvl0.shape[4], lvl0.shape[3], lvl0.shape[2]],
-            });
+            agg.worldCentroids.push(worldCenter);
           };
 
           for (const entry of plan.activeSet) {
             if (entry.mode === "well-as-proxy") {
-              // Synthesize via constituent fields (well isn't in
-              // derived.members so it has no position itself).
               for (const ent of ds.manifest.entities) {
                 if (ent.parent === entry.entityId && ent.kind === "Field") {
                   const img = ds.manifest.images.find(i => i.image_id === ent.id)
@@ -249,19 +309,17 @@ export function DebugOverlays({
           }
 
           for (const [wellId, agg] of wells) {
-            if (agg.fields.length === 0) continue;
+            if (agg.worldCentroids.length === 0) continue;
             let sumX = 0;
             let sumY = 0;
             let sumZ = 0;
-            for (const f of agg.fields) {
-              sumX += f.pos[0] + f.size[0] / 2;
-              sumY += f.pos[1] + f.size[1] / 2;
-              sumZ += f.size[2] / 2;
+            for (const c of agg.worldCentroids) {
+              sumX += c[0];
+              sumY += c[1];
+              sumZ += c[2];
             }
-            const wcx = sumX / agg.fields.length;
-            const wcy = sumY / agg.fields.length;
-            const wcz = sumZ / agg.fields.length;
-            const screen = projectWorld(ws, wcx, wcy, wcz, dpr);
+            const n = agg.worldCentroids.length;
+            const screen = projectWorld(ws, sumX / n, sumY / n, sumZ / n, dpr);
             if (!screen) continue;
             if (screen.x < xMin || screen.y < yMin || screen.x > xMax || screen.y > yMax) {
               continue;
@@ -284,6 +342,7 @@ export function DebugOverlays({
       // ---- Chunk grid for focal entity ----
       if (enabled.chunkGrid && plans && cpuCache) {
         const out: ChunkRect[] = [];
+        const cssCenter = { x: canvasWCss / 2, y: canvasHCss / 2 };
         for (const [dsId, plan] of plans) {
           if (out.length >= MAX_CHUNK_RECTS) break;
           const ds = datasets.get(dsId);
@@ -296,34 +355,34 @@ export function DebugOverlays({
           }
           const imgById = new Map(ds.manifest.images.map(i => [i.image_id, i]));
 
-          // Focal entity = visible field-mode entry whose 3D centroid
-          // projects nearest to the canvas center. Skip entities that
-          // failed to project (behind camera in 3D).
+          // Focal entity = visible field-mode entry whose projected
+          // world centroid is nearest the canvas center. Skip entities
+          // that fail to project (behind camera in 3D).
           let focal: typeof plan.activeSet[number] | null = null;
           let focalDist = Infinity;
-          const cssCenter = { x: canvasWCss / 2, y: canvasHCss / 2 };
+          let focalFrame: FieldFrame | null = null;
           for (const entry of plan.activeSet) {
             if (entry.mode === "well-as-proxy") continue;
             const pos = positions[entry.entityId];
             const img = imgById.get(entry.imageId);
             const lvl0 = img?.multiscale.levels[0];
             if (!pos || !lvl0) continue;
-            const ecx = pos[0] + lvl0.shape[4] / 2;
-            const ecy = pos[1] + lvl0.shape[3] / 2;
-            const ecz = lvl0.shape[2] / 2;
-            const sp = projectWorld(ws, ecx, ecy, ecz, dpr);
+            const frame = getFrame(dsId, entry.imageId, lvl0.shape);
+            frame.pos = pos;
+            const wc = fieldWorldCenter(frame);
+            const sp = projectWorld(ws, wc[0], wc[1], wc[2], dpr);
             if (!sp) continue;
             const d = (sp.x - cssCenter.x) ** 2 + (sp.y - cssCenter.y) ** 2;
             if (d < focalDist) {
               focalDist = d;
               focal = entry;
+              focalFrame = frame;
             }
           }
-          if (!focal) continue;
+          if (!focal || !focalFrame) continue;
 
-          const pos = positions[focal.entityId];
           const img = imgById.get(focal.imageId);
-          if (!pos || !img) continue;
+          if (!img) continue;
           const lvl0 = img.multiscale.levels[0];
           const lvl = img.multiscale.levels[focal.targetLod];
           if (!lvl0 || !lvl) continue;
@@ -347,18 +406,22 @@ export function DebugOverlays({
           const maxRow = Math.ceil(lvlY / chunkPxY);
           const maxZ = Math.ceil(lvlZ / chunkPxZ);
 
-          // Restrict iteration to the visible region reported by WASM.
-          // This is the same region the planner uses for cell
-          // enumeration, so we won't miss visible cells but will skip
-          // the rest of the grid (essential in 3D, where a single LOD
-          // can have thousands of cells).
+          // Restrict iteration via the visible region from WASM. In 2D
+          // this is voxel coords (matches focalFrame.pos); in 3D it's
+          // voxel coords too — visible_region is derived in voxel space
+          // for both modes, just with different culling logic upstream.
           let vrJson: string | null = null;
           try {
             vrJson = ws.visible_region(dsId);
           } catch {
             vrJson = null;
           }
-          let xyBounds: [number, number, number, number] = [0, 0, fullX, fullY];
+          let xyBounds: [number, number, number, number] = [
+            focalFrame.pos[0],
+            focalFrame.pos[1],
+            focalFrame.pos[0] + fullX,
+            focalFrame.pos[1] + fullY,
+          ];
           let zRange: [number, number] = [0, fullZ];
           if (vrJson && vrJson !== "null") {
             try {
@@ -369,18 +432,16 @@ export function DebugOverlays({
               // keep defaults
             }
           }
-          const localMinX = xyBounds[0] - pos[0];
-          const localMaxX = xyBounds[2] - pos[0];
-          const localMinY = xyBounds[1] - pos[1];
-          const localMaxY = xyBounds[3] - pos[1];
+          const localMinX = xyBounds[0] - focalFrame.pos[0];
+          const localMaxX = xyBounds[2] - focalFrame.pos[0];
+          const localMinY = xyBounds[1] - focalFrame.pos[1];
+          const localMaxY = xyBounds[3] - focalFrame.pos[1];
           if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) continue;
 
           const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
           const colEnd = Math.min(maxCol, Math.max(0, Math.ceil(localMaxX / chunkWorldX)));
           const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
           const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
-          // In slice mode the visible z range is a single slice; in
-          // volume the planner gives the full z extent.
           const zStart = Math.max(0, Math.floor(zRange[0] / chunkWorldZ));
           const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(zRange[1] / chunkWorldZ)));
 
@@ -397,17 +458,17 @@ export function DebugOverlays({
               for (let col = colStart; col < colEnd; col++) {
                 if (out.length >= MAX_CHUNK_RECTS) break;
                 const key = `${focal.targetLod}/${t}/${c}/${iz}/${row}/${col}`;
-                const minWorld: [number, number, number] = [
-                  pos[0] + col * chunkWorldX,
-                  pos[1] + row * chunkWorldY,
+                const vMin: [number, number, number] = [
+                  col * chunkWorldX,
+                  row * chunkWorldY,
                   iz * chunkWorldZ,
                 ];
-                const maxWorld: [number, number, number] = [
-                  pos[0] + (col + 1) * chunkWorldX,
-                  pos[1] + (row + 1) * chunkWorldY,
+                const vMax: [number, number, number] = [
+                  (col + 1) * chunkWorldX,
+                  (row + 1) * chunkWorldY,
                   (iz + 1) * chunkWorldZ,
                 ];
-                const rect = projectAabb(ws, minWorld, maxWorld, dpr);
+                const rect = projectVoxelAabb(ws, focalFrame, vMin, vMax, dpr);
                 if (!rect) continue;
                 if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
                   continue;
@@ -436,8 +497,6 @@ export function DebugOverlays({
     tick();
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
-    // We deliberately depend on `enabled` so flipping a toggle restarts
-    // the interval (and clears stale state via the early-out above).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef]);
 
