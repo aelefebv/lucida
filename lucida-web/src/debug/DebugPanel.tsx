@@ -63,8 +63,8 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
-  wellModes: "Per-well badge over the canvas: promotion mode (WP/FP/FD) + target LOD. Slice mode only.",
-  chunkGrid: "LOD chunk grid for the focal entity, color-coded by status (cached / in-flight / planned). Slice mode only.",
+  wellModes: "Per-well badge over the canvas: promotion mode (WP/FP/FD) + target LOD.",
+  chunkGrid: "LOD chunk grid for the focal entity, color-coded by status (cached / in-flight / planned). Capped at ~600 cells.",
 };
 
 interface CatalogSnap {
@@ -1197,7 +1197,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             <div className="debug-section" key={`ovs-${loggingTick}`}>
               <div className="debug-title">Overlays</div>
               <div style={{ color: "#888", fontSize: "0.75rem", marginBottom: 6 }}>
-                Visual layers drawn over the canvas. Slice mode only.
+                Visual layers drawn over the canvas. Slice + volume modes both work.
               </div>
               {DEBUG_OVERLAYS.map(name => {
                 const on = isOverlayEnabled(name);

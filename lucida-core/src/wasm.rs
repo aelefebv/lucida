@@ -271,6 +271,22 @@ impl WasmScene {
         self.inner.camera.effective_zoom()
     }
 
+    /// Project a world-space point to screen-space pixel coordinates,
+    /// using whichever camera mode is active. Returns a 2-element
+    /// `Vec<f64>` `[x, y]` in physical pixels (pre-DPR-divide), or an
+    /// empty `Vec` if the point is behind the camera in 3D modes
+    /// (slice mode never returns empty).
+    ///
+    /// Empty-vec is the wasm-bindgen-friendly stand-in for `Option`:
+    /// JS callers should treat `result.length === 0` as "behind the
+    /// camera" and otherwise use `[result[0], result[1]]`.
+    pub fn project_to_screen(&self, x: f64, y: f64, z: f64) -> Vec<f64> {
+        match self.inner.camera.project_to_screen([x, y, z]) {
+            Some([sx, sy]) => vec![sx, sy],
+            None => Vec::new(),
+        }
+    }
+
     pub fn world_bounds(&self) -> String {
         match &self.inner.camera {
             Camera::Slice(v) => {
