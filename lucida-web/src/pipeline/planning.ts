@@ -200,6 +200,43 @@ export interface RequestPlan {
    * CpuCache routes these to `ContentSource.fetchProxy`.
    */
   proxyRequests: ProxyRequest[];
+  /**
+   * Counters accumulated during this plan run. Always present; cost is
+   * negligible (a few integer adds per grid cell). Consumers (DebugPanel,
+   * tests) read it post-hoc to surface decision rationale (catalog
+   * degradations) and culling effectiveness.
+   */
+  stats: PlanStats;
+}
+
+/**
+ * Per-plan accumulator. Counters are summed across all `iterateChunks`
+ * calls (detail + runway + overview lanes) and across all entities.
+ */
+export interface PlanStats {
+  /** How many times catalog-aware promotion downgraded a well's mode. */
+  catalogDegradations: number;
+  /** Frustum / visible-region culling stages. */
+  culling: PlanCullingStats;
+}
+
+export interface PlanCullingStats {
+  /** Total grid cells inspected, before any culling. */
+  considered: number;
+  /** Cells inside the entity's local xy-bounds intersection. */
+  afterXyBounds: number;
+  /** Cells additionally inside the z-range. */
+  afterZRange: number;
+  /** Cells additionally surviving the frustum half-plane test. */
+  afterFrustum: number;
+}
+
+/** Construct a fresh, zeroed PlanStats accumulator. */
+export function emptyPlanStats(): PlanStats {
+  return {
+    catalogDegradations: 0,
+    culling: { considered: 0, afterXyBounds: 0, afterZRange: 0, afterFrustum: 0 },
+  };
 }
 
 export interface ChunkRequest {
@@ -462,6 +499,7 @@ export function promote(
   entities: EntitySnapshot[],
   previousActiveSet: ActiveSetEntry[],
   catalog: AssetCatalogSnapshot | null = null,
+  stats: PlanStats | null = null,
 ): ActiveSetEntry[] {
   // Index previous active set by well id (for `well-as-proxy`) or by
   // parent well id (for field-mode entries) so both lookups land on the
@@ -508,6 +546,7 @@ export function promote(
 
     if (desired === "well-as-proxy" && !wellHasProxy) {
       desired = "fields-with-proxy-fallback";
+      if (stats) stats.catalogDegradations++;
     }
     if (
       desired === "fields-with-proxy-fallback" &&
@@ -515,6 +554,7 @@ export function promote(
       !wellHasProxy
     ) {
       desired = "fields-with-detail";
+      if (stats) stats.catalogDegradations++;
     }
 
     if (desired === "well-as-proxy") {
@@ -735,6 +775,7 @@ export function iterateChunks(
   visibleRegion: VisibleRegion,
   selection: SelectionState,
   cacheState: CacheStateSnapshot,
+  stats: PlanStats | null = null,
 ): ChunkRequest[] {
   const requests: ChunkRequest[] = [];
 
@@ -765,6 +806,7 @@ export function iterateChunks(
         c,
         cachedSet,
         requests,
+        stats,
       );
     }
   }
@@ -786,6 +828,7 @@ function iterateGridCells(
   c: number,
   cachedSet: Set<string> | undefined,
   out: ChunkRequest[],
+  stats: PlanStats | null = null,
 ): void {
   // 5D indices: [T=0, C=1, Z=2, Y=3, X=4]
   const levelX = levelGeo.shape[4];
@@ -814,6 +857,11 @@ function iterateGridCells(
   const maxRow = levelGeo.grid_shape[3];
   const maxZ = levelGeo.grid_shape[2];
 
+  // Whole-grid count is "considered" — every cell at this (level, channel)
+  // that could have been emitted before culling.
+  const totalCells = maxCol * maxRow * maxZ;
+  if (stats) stats.culling.considered += totalCells;
+
   // Offset visible region by entity position to get local coords.
   const localMinX = region.xyBounds[0] - entity.position[0];
   const localMinY = region.xyBounds[1] - entity.position[1];
@@ -832,6 +880,14 @@ function iterateGridCells(
 
   const zStart = Math.max(0, Math.floor(region.zRange[0] / chunkWorldZ));
   const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(region.zRange[1] / chunkWorldZ)));
+
+  if (stats) {
+    const colsKept = Math.max(0, colEnd - colStart);
+    const rowsKept = Math.max(0, rowEnd - rowStart);
+    const zsKept = Math.max(0, zEnd - zStart);
+    stats.culling.afterXyBounds += colsKept * rowsKept * maxZ;
+    stats.culling.afterZRange += colsKept * rowsKept * zsKept;
+  }
 
   for (let iz = zStart; iz < zEnd; iz++) {
     for (let row = rowStart; row < rowEnd; row++) {
@@ -854,6 +910,7 @@ function iterateGridCells(
             continue;
           }
         }
+        if (stats) stats.culling.afterFrustum++;
 
         const key = chunkKey(level, selection.t, c, iz, row, col);
 
@@ -910,11 +967,14 @@ function computePriority(
  * single {@link RequestPlan}.
  */
 export function plan(snapshot: PlanningSnapshot): RequestPlan {
+  const stats = emptyPlanStats();
+
   // Step 1: Promote (three-tier, S6).
   const activeSet = promote(
     snapshot.entities,
     snapshot.previousActiveSet,
     snapshot.assetCatalog,
+    stats,
   );
 
   // Step 2: Build entity lookup.
@@ -965,6 +1025,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
       snapshot.visibleRegion,
       snapshot.selection,
       snapshot.cacheState,
+      stats,
     );
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
@@ -1036,6 +1097,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
         snapshot.visibleRegion,
         runwaySelection,
         snapshot.cacheState,
+        stats,
       );
       for (const req of chunks) {
         const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
@@ -1073,6 +1135,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
       snapshot.visibleRegion,
       snapshot.selection,
       snapshot.cacheState,
+      stats,
     );
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
@@ -1093,7 +1156,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
   };
 
   // Step 8: Return.
-  return { requests: allRequests, activeSet, epochs, proxyRequests };
+  return { requests: allRequests, activeSet, epochs, proxyRequests, stats };
 }
 
 // ---------------------------------------------------------------------------

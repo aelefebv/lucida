@@ -10,18 +10,7 @@ import { debugStats, type DebugStats } from "./debugStats.ts";
 import { DEBUG_CATEGORIES, isDebugEnabled, setDebugEnabled, type DebugCategory } from "./logging.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
-import type { ImageSpec } from "../manifestTypes.ts";
 import type { DatasetState } from "../types.ts";
-import { plan } from "../pipeline/planning.ts";
-import type {
-  PlanningSnapshot,
-  EntitySnapshot,
-  VisibleRegion,
-  SelectionState,
-  ActiveSetEntry,
-  RequestPlan,
-  PlanningEpochs,
-} from "../pipeline/planning.ts";
 import type { CacheTelemetry } from "../pipeline/cpuCache.ts";
 import type { Session } from "../session.ts";
 import "./DebugPanel.css";
@@ -126,6 +115,259 @@ function fmtBytes(bytes: number): string {
   return `${bytes}B`;
 }
 
+/** Truncate a long id to "...lastN" form, leaving short ids untouched. */
+function shortId(id: string, max = 16): string {
+  if (id.length <= max) return id;
+  return "..." + id.slice(-(max - 3));
+}
+
+/** Body of the Planning tab — split out so the inline JSX stays readable. */
+function PlanningTabBody({
+  planning,
+  datasets,
+  renderLoopRef,
+}: {
+  planning: DebugStats["planning"];
+  datasets: Map<string, DatasetState>;
+  renderLoopRef: React.RefObject<RenderLoop | null> | undefined;
+}) {
+  const entries = Object.values(planning.byDataset);
+  if (entries.length === 0) {
+    return (
+      <div className="debug-section">
+        <div style={{ color: "#666" }}>
+          No planning data yet. Open a dataset to populate.
+        </div>
+      </div>
+    );
+  }
+
+  const dumpPlans = () => {
+    const orch = renderLoopRef?.current?.getOrchestrator();
+    if (!orch) {
+      console.warn("[DebugPanel] orchestrator not available");
+      return;
+    }
+    const plans = orch.getLastPlans();
+    console.group("[DebugPanel] last plans");
+    for (const [dsId, plan] of plans) {
+      const lanes: Record<string, typeof plan.requests> = {
+        detail: [],
+        runway: [],
+        overview: [],
+      };
+      for (const r of plan.requests) lanes[r.lane].push(r);
+      console.group(
+        `${dsId}: ${plan.requests.length} chunks (${lanes.detail.length} D / ${lanes.runway.length} R / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
+      );
+      for (const lane of ["detail", "runway", "overview"] as const) {
+        if (lanes[lane].length === 0) continue;
+        console.groupCollapsed(`${lane}: ${lanes[lane].length}`);
+        console.table(
+          lanes[lane].slice(0, 50).map(r => ({
+            chunkKey: r.chunkKey,
+            level: r.level,
+            entityId: r.entityId,
+            priority: r.priority,
+          })),
+        );
+        if (lanes[lane].length > 50) {
+          console.log(`(+${lanes[lane].length - 50} more)`);
+        }
+        console.groupEnd();
+      }
+      if (plan.proxyRequests.length > 0) {
+        console.groupCollapsed(`proxies: ${plan.proxyRequests.length}`);
+        console.table(plan.proxyRequests.slice(0, 50));
+        console.groupEnd();
+      }
+      console.groupEnd();
+    }
+    console.groupEnd();
+  };
+
+  const dumpActiveSets = () => {
+    const orch = renderLoopRef?.current?.getOrchestrator();
+    if (!orch) {
+      console.warn("[DebugPanel] orchestrator not available");
+      return;
+    }
+    const plans = orch.getLastPlans();
+    console.group("[DebugPanel] last active sets");
+    for (const [dsId, plan] of plans) {
+      console.groupCollapsed(`${dsId}: ${plan.activeSet.length} entries`);
+      console.table(
+        plan.activeSet.map(e => ({
+          entityId: e.entityId,
+          mode: e.mode,
+          targetLod: e.targetLod,
+          range: `${e.detailOwnedLodRange[0]}-${e.detailOwnedLodRange[1]}`,
+          proxyKind: e.proxyKind ?? "",
+          proxyAvailable: e.proxyAvailable,
+          wellProxyAvailable: e.wellProxyAvailable,
+        })),
+      );
+      console.groupEnd();
+    }
+    console.groupEnd();
+  };
+
+  return (
+    <>
+      <div className="debug-section">
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={dumpPlans}>Dump plans → console</button>
+          <button onClick={dumpActiveSets}>Dump active sets → console</button>
+        </div>
+      </div>
+      {entries.map(p => (
+        <PlanningDatasetSection
+          key={p.datasetId}
+          p={p}
+          name={datasets.get(p.datasetId)?.manifest?.name ?? p.datasetId}
+        />
+      ))}
+    </>
+  );
+}
+
+/** One per-dataset section in the Planning tab. */
+function PlanningDatasetSection({
+  p,
+  name,
+}: {
+  p: import("./debugStats.ts").PlanningDatasetDebug;
+  name: string;
+}) {
+  const wellsTotal =
+    p.wellsByMode.wellAsProxy +
+    p.wellsByMode.fieldsWithProxyFallback +
+    p.wellsByMode.fieldsWithDetail;
+  const cull = p.culling;
+  // Avoid divide-by-zero when no cells were considered (no visible
+  // entities at all). Show the percentage retained at each stage so
+  // "is culling actually doing work?" is answerable at a glance.
+  const pct = (n: number) =>
+    cull.considered > 0 ? `${((n / cull.considered) * 100).toFixed(0)}%` : "—";
+
+  return (
+    <>
+      <div className="debug-section">
+        <div className="debug-title" title={p.datasetId}>
+          {name}
+        </div>
+        <div>
+          <span style={{ color: "#4f4" }}>D:{p.lanes.detail}</span>{" "}
+          <span style={{ color: "#ff4" }}>R:{p.lanes.runway}</span>{" "}
+          <span style={{ color: "#88f" }}>O:{p.lanes.overview}</span>{" "}
+          <span style={{ color: "#aaa" }}>· proxies:{p.proxyCount}</span>{" "}
+          <span style={{ color: "#aaa" }}>· total chunks:{p.totalChunks}</span>
+        </div>
+        {p.catalogDegradations > 0 && (
+          <div style={{ color: "#fb4", marginTop: 4 }}>
+            ⚠ catalog degradations this plan: {p.catalogDegradations}
+          </div>
+        )}
+      </div>
+
+      {wellsTotal > 0 && (
+        <div className="debug-section">
+          <div className="debug-title">Wells by mode ({wellsTotal} wells)</div>
+          <div>
+            <span style={{ color: modeColor("well-as-proxy") }}>
+              well-proxy: {p.wellsByMode.wellAsProxy}
+            </span>{" "}
+            ·{" "}
+            <span style={{ color: modeColor("fields-with-proxy-fallback") }}>
+              fallback: {p.wellsByMode.fieldsWithProxyFallback}
+            </span>{" "}
+            ·{" "}
+            <span style={{ color: modeColor("fields-with-detail") }}>
+              detail: {p.wellsByMode.fieldsWithDetail}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {p.lodBreakdown.length > 0 && (
+        <div className="debug-section">
+          <div className="debug-title">Per-LOD (planned / cached / in-flight)</div>
+          <div className="debug-member-list">
+            {p.lodBreakdown.map(row => (
+              <div key={row.level} className="debug-member-row">
+                <span className="debug-member-id">L{row.level}</span>
+                <span style={{ color: row.planned > 0 ? "#4f4" : "#666" }}>
+                  {row.planned}
+                </span>
+                <span style={{ color: "#88f" }}>{row.cached}</span>
+                <span style={{ color: row.inFlight > 0 ? "#ff4" : "#666" }}>
+                  {row.inFlight}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="debug-section">
+        <div className="debug-title">Frustum culling</div>
+        <div style={{ fontSize: 11 }}>
+          considered: {cull.considered}
+          {" → "}
+          xy: {cull.afterXyBounds} ({pct(cull.afterXyBounds)})
+          {" → "}
+          z: {cull.afterZRange} ({pct(cull.afterZRange)})
+          {" → "}
+          frustum: {cull.afterFrustum} ({pct(cull.afterFrustum)})
+        </div>
+      </div>
+
+      {p.focalEntity && (
+        <div className="debug-section">
+          <div className="debug-title">Focal entity</div>
+          <div title={p.focalEntity.entityId}>
+            <span className="debug-member-id">{shortId(p.focalEntity.entityId, 24)}</span>{" "}
+            <span style={{ color: "#888" }}>
+              ({p.focalEntity.kind}
+              {p.focalEntity.parentWellId && (
+                <>
+                  {" / parent "}
+                  <span title={p.focalEntity.parentWellId}>
+                    {shortId(p.focalEntity.parentWellId, 18)}
+                  </span>
+                </>
+              )}
+              )
+            </span>
+          </div>
+          <div style={{ marginTop: 4 }}>
+            mode:{" "}
+            <span style={{ color: modeColor(p.focalEntity.mode) }}>
+              {modeLabel(p.focalEntity.mode)}
+            </span>{" "}
+            <span style={{ color: "#888", fontSize: 10 }}>
+              ({p.focalEntity.modeReason})
+            </span>
+          </div>
+          <div>
+            diag: {fmt(p.focalEntity.projectedDiagonalPx, 1)}px · area:{" "}
+            {fmt(p.focalEntity.projectedAreaPx2, 0)}px² · imp:{" "}
+            {fmt(p.focalEntity.importance, 2)}
+          </div>
+          <div>
+            target L{p.focalEntity.idealTargetLod} · range{" "}
+            {p.focalEntity.detailOwnedRange[0]}-{p.focalEntity.detailOwnedRange[1]}{" "}
+            · chunks: {p.focalEntity.chunkCount}
+            {p.focalEntity.topPriority !== null && (
+              <> · top p{fmt(p.focalEntity.topPriority, 0)}</>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets, sessionRef, renderLoopRef, style }: DebugPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("render");
   const [snap, setSnap] = useState<DebugStats>({ ...debugStats });
@@ -136,16 +378,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     lastRayPick: null,
   });
   const lastRayPickRef = useRef<SceneQuerySnap["lastRayPick"]>(null);
-
-  // Planning tab state
-  const prevActiveSetRef = useRef<ActiveSetEntry[]>([]);
-  const prevRequestEpochRef = useRef(0);
-  const [planResult, setPlanResult] = useState<RequestPlan | null>(null);
-  const [planDebugInfo, setPlanDebugInfo] = useState<{
-    visibleRegion: VisibleRegion | null;
-    entityCount: number;
-    entityPositions: [string, [number, number]][];
-  } | null>(null);
 
   // Cache tab state
   const [cacheTelemetry, setCacheTelemetry] = useState<CacheTelemetry | null>(null);
@@ -225,144 +457,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
           const vqJson = ws.view_query(datasetId);
           const viewQuery = vqJson && vqJson !== "null" ? JSON.parse(vqJson) : null;
           setSceneSnap({ epochs, viewQuery, lastRayPick: lastRayPickRef.current });
-
-          // Assemble PlanningSnapshot and run plan()
-          if (viewQuery && datasets.size > 0) {
-            try {
-              // Epochs
-              const sceneEpochs = epochs ?? { content: 0, layout: 0, view: 0, selection: 0 };
-              const planningEpochs: PlanningEpochs = {
-                ...sceneEpochs,
-                asset: 0,
-                request: prevRequestEpochRef.current,
-              };
-
-              // Find dataset manifest
-              const dsEntry = datasets.get(datasetId);
-              const manifest = dsEntry?.manifest;
-
-              // Build position lookup from WASM member positions
-              // (composed layout placement + transform edge offsets)
-              const positionByEntity = new Map<string, [number, number]>();
-              try {
-                const posJson = ws.member_positions(datasetId);
-                const positions: Record<string, [number, number]> = JSON.parse(posJson);
-                for (const [entityId, pos] of Object.entries(positions)) {
-                  positionByEntity.set(entityId, pos);
-                }
-              } catch {
-                // fallback: no positions
-              }
-
-              // Build image spec lookup
-              const imageSpecById = new Map<string, ImageSpec>();
-              if (manifest) {
-                for (const img of manifest.images) {
-                  imageSpecById.set(img.image_id, img);
-                }
-              }
-
-              // Build parent lookup so S6 promotion can group fields by
-              // their parent well.
-              const parentByEntityId = new Map<string, string | null>();
-              if (manifest) {
-                for (const ent of manifest.entities) {
-                  parentByEntityId.set(ent.id, ent.parent ?? null);
-                }
-              }
-
-              // Map view query entities to EntitySnapshots
-              const entities: EntitySnapshot[] = viewQuery.visible_entities.map(
-                (e: NonNullable<SceneQuerySnap["viewQuery"]>["visible_entities"][number]) => {
-                  const imgSpec = imageSpecById.get(e.image_id);
-                  const numLevels = imgSpec ? imgSpec.multiscale.levels.length : 1;
-                  const levels = imgSpec ? imgSpec.multiscale.levels : [];
-                  const position = positionByEntity.get(e.entity_id) ?? [0, 0] as [number, number];
-
-                  return {
-                    entityId: e.entity_id,
-                    imageId: e.image_id,
-                    kind: e.kind as "Image" | "Well" | "Field",
-                    visible: e.visible,
-                    projectedDiagonalPx: e.projected_diagonal_px,
-                    projectedAreaPx2: e.projected_area_px2,
-                    centroidWorld: e.centroid_world,
-                    idealTargetLod: e.ideal_target_lod,
-                    importance: e.importance,
-                    numLevels,
-                    levels,
-                    position,
-                    parentId: parentByEntityId.get(e.entity_id) ?? null,
-                  } satisfies EntitySnapshot;
-                },
-              );
-
-              // Visible region
-              const vrJson = ws.visible_region(datasetId);
-              const vr = vrJson && vrJson !== "null" ? JSON.parse(vrJson) : null;
-              const visibleRegion: VisibleRegion = vr
-                ? {
-                    xyBounds: vr.xy_bounds,
-                    zRange: vr.z_range,
-                    effectiveZoom: vr.effective_zoom,
-                    sortCenter: vr.sort_center,
-                    frustumPlanes: vr.frustum_planes,
-                  }
-                : { xyBounds: [0, 0, 1024, 1024], zRange: [0, 1], effectiveZoom: 1, sortCenter: null, frustumPlanes: null };
-
-              // Selection state
-              const mode = ws.camera_mode();
-
-              // Visible channels: parse dataset settings for channel visibility
-              let visibleChannels: number[] = [ws.c()];
-              try {
-                const allSettingsJson = ws.all_dataset_settings();
-                const allSettings = JSON.parse(allSettingsJson);
-                const dsSettings = allSettings[datasetId];
-                if (dsSettings?.channel_settings && dsSettings.channel_settings.length > 0) {
-                  const channels: number[] = [];
-                  for (let i = 0; i < dsSettings.channel_settings.length; i++) {
-                    if (dsSettings.channel_settings[i].visible) channels.push(i);
-                  }
-                  if (channels.length > 0) visibleChannels = channels;
-                }
-              } catch {
-                // fallback to [ws.c()]
-              }
-
-              const selection: SelectionState = {
-                t: ws.t(),
-                c: ws.c(),
-                z: ws.z(),
-                visibleChannels,
-                renderMode: mode === "slice" ? "slice" : "volume",
-                interactionState: "idle",
-              };
-
-              const snapshot: PlanningSnapshot = {
-                epochs: planningEpochs,
-                entities,
-                visibleRegion,
-                selection,
-                cacheState: { cached: new Map(), inFlight: new Map() },
-                workerWantedSet: { missing: new Map() },
-                previousActiveSet: prevActiveSetRef.current,
-                assetCatalog: null,
-              };
-
-              const result = plan(snapshot);
-              setPlanResult(result);
-              setPlanDebugInfo({
-                visibleRegion,
-                entityCount: entities.length,
-                entityPositions: entities.map(e => [e.entityId, e.position]),
-              });
-              prevActiveSetRef.current = result.activeSet;
-              prevRequestEpochRef.current = result.epochs.request;
-            } catch {
-              // Planning failed, keep previous result
-            }
-          }
         } catch {
           // WASM not ready or dataset removed
         }
@@ -966,104 +1060,11 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
         )}
 
         {activeTab === "planning" && (
-          <>
-            {planResult ? (
-              <>
-                {/* Active Set */}
-                {(() => {
-                  const wellProxy = planResult.activeSet.filter(e => e.mode === "well-as-proxy");
-                  const fieldsProxy = planResult.activeSet.filter(e => e.mode === "fields-with-proxy-fallback");
-                  const fieldsDetail = planResult.activeSet.filter(e => e.mode === "fields-with-detail");
-                  return (
-                    <div className="debug-section">
-                      <div className="debug-title">
-                        Active Set ({wellProxy.length} well-proxy / {fieldsProxy.length} fields+proxy / {fieldsDetail.length} fields-detail)
-                      </div>
-                      <div className="debug-member-list">
-                        {planResult.activeSet.slice(0, 15).map((e) => (
-                          <div key={e.entityId} className="debug-member-row">
-                            <span className="debug-member-id" title={e.entityId}>
-                              {e.entityId.length > 12 ? "..." + e.entityId.slice(-10) : e.entityId}
-                            </span>
-                            <span style={{ color: modeColor(e.mode) }}>{modeLabel(e.mode)}</span>
-                            <span>L{e.targetLod}</span>
-                            <span>s{e.seedDetailLod}</span>
-                            <span title={`range: ${e.detailOwnedLodRange[0]}-${e.detailOwnedLodRange[1]}`}>
-                              {e.detailOwnedLodRange[0]}-{e.detailOwnedLodRange[1]}
-                            </span>
-                          </div>
-                        ))}
-                        {planResult.activeSet.length > 15 && (
-                          <div className="debug-more">+{planResult.activeSet.length - 15} more</div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                {/* Requests by Lane */}
-                {(() => {
-                  const detail = planResult.requests.filter(r => r.lane === "detail").length;
-                  const runway = planResult.requests.filter(r => r.lane === "runway").length;
-                  const overview = planResult.requests.filter(r => r.lane === "overview").length;
-                  return (
-                    <div className="debug-section">
-                      <div className="debug-title">Requests: {planResult.requests.length} total</div>
-                      <div>detail: {detail}</div>
-                      <div>runway: {runway}</div>
-                      <div>overview: {overview}</div>
-                    </div>
-                  );
-                })()}
-
-                {/* Top Requests */}
-                {planResult.requests.length > 0 && (
-                  <div className="debug-section">
-                    <div className="debug-title">Top Requests</div>
-                    <div className="debug-member-list">
-                      {planResult.requests.slice(0, 10).map((r, i) => (
-                        <div key={`${r.entityId}:${r.chunkKey}:${i}`} className="debug-member-row">
-                          <span className="debug-member-id" title={r.chunkKey}>
-                            {r.chunkKey}
-                          </span>
-                          <span>{r.lane === "detail" ? "D" : r.lane === "runway" ? "R" : "O"}</span>
-                          <span>p{fmt(r.priority, 0)}</span>
-                          <span className="debug-member-id" title={r.entityId}>
-                            {r.entityId.length > 12 ? "..." + r.entityId.slice(-10) : r.entityId}
-                          </span>
-                        </div>
-                      ))}
-                      {planResult.requests.length > 10 && (
-                        <div className="debug-more">+{planResult.requests.length - 10} more</div>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {/* VisibleRegion debug */}
-                {planDebugInfo?.visibleRegion && (
-                  <div className="debug-section">
-                    <div className="debug-title">VisibleRegion</div>
-                    <div>xy: [{planDebugInfo.visibleRegion.xyBounds.map(v => fmt(v, 0)).join(", ")}]</div>
-                    <div>z: [{planDebugInfo.visibleRegion.zRange.join(", ")}]</div>
-                    <div>zoom: {fmt(planDebugInfo.visibleRegion.effectiveZoom, 4)}</div>
-                    <div>frustum: {planDebugInfo.visibleRegion.frustumPlanes ? `${planDebugInfo.visibleRegion.frustumPlanes.length} planes` : "null"}</div>
-                    {planDebugInfo.visibleRegion.frustumPlanes && (
-                      <div style={{ fontSize: 9, color: "#777" }}>
-                        {planDebugInfo.visibleRegion.frustumPlanes.map((p, i) => (
-                          <div key={i}>p{i}: [{p.map(v => v.toExponential(2)).join(", ")}]</div>
-                        ))}
-                      </div>
-                    )}
-                    <div>sort: {planDebugInfo.visibleRegion.sortCenter ? `[${planDebugInfo.visibleRegion.sortCenter.map(v => fmt(v, 0)).join(", ")}]` : "null"}</div>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="debug-section">
-                <div style={{ color: "#666" }}>Waiting for data...</div>
-              </div>
-            )}
-          </>
+          <PlanningTabBody
+            planning={snap.planning}
+            datasets={datasets}
+            renderLoopRef={renderLoopRef}
+          />
         )}
         {activeTab === "catalog" && (
           <>

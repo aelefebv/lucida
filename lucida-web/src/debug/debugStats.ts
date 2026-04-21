@@ -28,6 +28,74 @@ export interface OrchMemberDebug {
   mixedLevels: boolean;
 }
 
+/**
+ * Per-dataset planning snapshot. Populated by the orchestrator after each
+ * full plan() run; replayed onto cache-hit ticks so the panel doesn't
+ * blink to zero between non-planning frames.
+ *
+ * Single datasets and plates use the same shape. For single, `wellsByMode`
+ * collapses to a single "fields-with-detail" count; the per-LOD breakdown
+ * carries the heavy lifting (it's the dominant signal for "is my LOD
+ * selection sane").
+ */
+export interface PlanningDatasetDebug {
+  datasetId: string;
+  /** Total chunk requests in the plan, broken down by lane. */
+  lanes: { detail: number; runway: number; overview: number };
+  /** Proxy requests in the plan (separate from chunk lanes). */
+  proxyCount: number;
+  /** Total chunk requests in the plan (sum of `lanes`). */
+  totalChunks: number;
+  /** Chunk requests grouped by LOD level — independent of lane. */
+  byLevel: Record<number, number>;
+  /**
+   * Per-LOD breakdown for the focused dataset. One entry per LOD that
+   * appears in the plan, with cross-references against the CPU cache.
+   */
+  lodBreakdown: Array<{
+    level: number;
+    planned: number;
+    cached: number;
+    inFlight: number;
+  }>;
+  /** Frustum / xy / z culling stages, summed across all entities. */
+  culling: {
+    considered: number;
+    afterXyBounds: number;
+    afterZRange: number;
+    afterFrustum: number;
+  };
+  /** Number of times catalog-aware promotion downgraded a well's mode. */
+  catalogDegradations: number;
+  /** Active-set entries grouped by S6 promotion mode. */
+  wellsByMode: {
+    wellAsProxy: number;
+    fieldsWithProxyFallback: number;
+    fieldsWithDetail: number;
+  };
+  /**
+   * Entity nearest the viewport center (or null if no visible entities).
+   * Drives the focal-entity inspector in the Planning tab.
+   */
+  focalEntity: {
+    entityId: string;
+    parentWellId: string | null;
+    kind: string;
+    projectedDiagonalPx: number;
+    projectedAreaPx2: number;
+    importance: number;
+    idealTargetLod: number;
+    detailOwnedRange: [number, number];
+    mode: string;
+    /** Human-readable reason for the chosen mode (threshold band). */
+    modeReason: string;
+    /** Lowest priority value across this entity's chunk requests, or null. */
+    topPriority: number | null;
+    /** How many chunk requests this entity contributed to the plan. */
+    chunkCount: number;
+  } | null;
+}
+
 /** Orchestrator debug snapshot, populated per planning cycle. */
 export interface OrchDebug {
   /** Active set entries from plan() */
@@ -117,6 +185,16 @@ export interface DebugStats {
   // Orchestrator debug
   orch: OrchDebug | null;
 
+  /**
+   * Planning section. Per-dataset because both the lane counts and the
+   * LOD breakdown vary per dataset; a single key gives us a panel that
+   * groups naturally and avoids the "last dataset wins" aliasing in
+   * `orch`. Empty object until the first plan() runs.
+   */
+  planning: {
+    byDataset: Record<string, PlanningDatasetDebug>;
+  };
+
   // Upload path debug (per frame)
   uploadDebug: {
     atlasConfigSent: boolean;
@@ -151,6 +229,7 @@ export const debugStats: DebugStats = {
   memberStats: [],
   mode: "",
   orch: null,
+  planning: { byDataset: {} },
   uploadDebug: null,
 };
 

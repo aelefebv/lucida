@@ -23,7 +23,7 @@ import {
   getActiveChannels,
   compositeKey,
 } from "../tickCommon.ts";
-import { plan } from "./planning.ts";
+import { plan, emptyPlanStats } from "./planning.ts";
 import type {
   PlanningSnapshot,
   ActiveSetEntry,
@@ -32,6 +32,7 @@ import type {
   VisibleRegion,
   SelectionState,
   ChunkRequest,
+  RequestPlan,
 } from "./planning.ts";
 import type {
   CpuCache,
@@ -39,7 +40,11 @@ import type {
   ReadyProxyDelivery,
 } from "./cpuCache.ts";
 import type { ProxyRequest } from "./planning.ts";
-import { debugStats, type OrchDebug } from "../debug/debugStats.ts";
+import {
+  debugStats,
+  type OrchDebug,
+  type PlanningDatasetDebug,
+} from "../debug/debugStats.ts";
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -212,6 +217,163 @@ function synthesizeWellRosterEntry(
   };
 }
 
+/**
+ * Translate a focal entity's projected diagonal into a human-readable
+ * mode-band classification. Mirrors the logic in `chooseWellMode`
+ * (planning.ts) so the panel can explain *why* the focal entity is in
+ * its current mode without us threading that reason through the active
+ * set entry shape.
+ */
+function modeReason(diagPx: number): string {
+  if (diagPx < 75) return `${diagPx.toFixed(0)}px < 75 → clearly proxy`;
+  if (diagPx > 155) return `${diagPx.toFixed(0)}px > 155 → clearly detail`;
+  if (diagPx >= 85 && diagPx <= 145) return `${diagPx.toFixed(0)}px ∈ [85, 145] → clearly fallback`;
+  if (diagPx < 85) return `${diagPx.toFixed(0)}px ∈ [75, 85] hysteresis band`;
+  return `${diagPx.toFixed(0)}px ∈ [145, 155] hysteresis band`;
+}
+
+/**
+ * Build the per-dataset planning debug snapshot. Pure function — derives
+ * everything from the plan, the entity list, and the current cache
+ * snapshot. No internal state.
+ *
+ * Cross-references plan.requests with cpuCache.snapshot() to compute
+ * cached/in-flight counts per LOD; consumes plan.stats for catalog
+ * degradations and culling counters; picks a focal entity from the
+ * visible entities by viewport-center proximity.
+ */
+function buildPlanningDatasetDebug(
+  dsId: string,
+  result: RequestPlan,
+  entities: EntitySnapshot[],
+  entityById: Map<string, EntitySnapshot>,
+  visibleRegion: VisibleRegion,
+  cpuCache: CpuCache,
+): PlanningDatasetDebug {
+  const lanes = { detail: 0, runway: 0, overview: 0 };
+  const byLevel: Record<number, number> = {};
+  for (const r of result.requests) {
+    lanes[r.lane]++;
+    byLevel[r.level] = (byLevel[r.level] ?? 0) + 1;
+  }
+
+  // Per-LOD breakdown: planned (from plan), cached + in-flight (from cache).
+  const cacheSnap = cpuCache.snapshot();
+  const cached: Record<number, number> = {};
+  const inFlight: Record<number, number> = {};
+  const activeEntityIds = new Set(result.activeSet.map(e => e.entityId));
+  for (const eid of activeEntityIds) {
+    const cs = cacheSnap.cached.get(eid);
+    if (cs) {
+      for (const k of cs) {
+        const lvl = parseInt(k, 10);
+        if (Number.isFinite(lvl)) cached[lvl] = (cached[lvl] ?? 0) + 1;
+      }
+    }
+    const fs = cacheSnap.inFlight.get(eid);
+    if (fs) {
+      for (const k of fs) {
+        const lvl = parseInt(k, 10);
+        if (Number.isFinite(lvl)) inFlight[lvl] = (inFlight[lvl] ?? 0) + 1;
+      }
+    }
+  }
+  const allLevels = new Set<number>([
+    ...Object.keys(byLevel).map(Number),
+    ...Object.keys(cached).map(Number),
+    ...Object.keys(inFlight).map(Number),
+  ]);
+  const lodBreakdown = [...allLevels]
+    .sort((a, b) => a - b)
+    .map(level => ({
+      level,
+      planned: byLevel[level] ?? 0,
+      cached: cached[level] ?? 0,
+      inFlight: inFlight[level] ?? 0,
+    }));
+
+  // Wells by mode. Field-mode entries are deduped by parent well so
+  // counts represent *wells* in each mode, not active-set entries.
+  // Image-only datasets fall through with each image as its own "well"
+  // (parentId is null → wellId == entityId), so a single dataset shows
+  // up as one count without special-casing.
+  const wellsByMode = {
+    wellAsProxy: 0,
+    fieldsWithProxyFallback: 0,
+    fieldsWithDetail: 0,
+  };
+  const wellsSeen = new Set<string>();
+  for (const e of result.activeSet) {
+    if (e.mode === "well-as-proxy") {
+      wellsByMode.wellAsProxy++;
+      continue;
+    }
+    const ent = entityById.get(e.entityId);
+    const wellId = ent?.parentId ?? e.entityId;
+    if (wellsSeen.has(wellId)) continue;
+    wellsSeen.add(wellId);
+    if (e.mode === "fields-with-proxy-fallback") wellsByMode.fieldsWithProxyFallback++;
+    else if (e.mode === "fields-with-detail") wellsByMode.fieldsWithDetail++;
+  }
+
+  // Focal entity: visible entity with centroid nearest viewport-center
+  // (xy midpoint of the visible region — z ignored since the focal
+  // inspector is mostly used for slice-mode navigation).
+  const cx = (visibleRegion.xyBounds[0] + visibleRegion.xyBounds[2]) / 2;
+  const cy = (visibleRegion.xyBounds[1] + visibleRegion.xyBounds[3]) / 2;
+  let focal: EntitySnapshot | null = null;
+  let bestDist = Infinity;
+  for (const e of entities) {
+    if (!e.visible) continue;
+    const dx = e.centroidWorld[0] - cx;
+    const dy = e.centroidWorld[1] - cy;
+    const d = dx * dx + dy * dy;
+    if (d < bestDist) {
+      bestDist = d;
+      focal = e;
+    }
+  }
+  let focalEntity: PlanningDatasetDebug["focalEntity"] = null;
+  if (focal) {
+    const focalId = focal.entityId;
+    const entry = result.activeSet.find(e => e.entityId === focalId);
+    let topPriority: number | null = null;
+    let chunkCount = 0;
+    for (const r of result.requests) {
+      if (r.entityId !== focalId) continue;
+      chunkCount++;
+      if (topPriority === null || r.priority < topPriority) topPriority = r.priority;
+    }
+    focalEntity = {
+      entityId: focal.entityId,
+      parentWellId: focal.parentId ?? null,
+      kind: focal.kind,
+      projectedDiagonalPx: focal.projectedDiagonalPx,
+      projectedAreaPx2: focal.projectedAreaPx2,
+      importance: focal.importance,
+      idealTargetLod: focal.idealTargetLod,
+      detailOwnedRange: entry?.detailOwnedLodRange ?? [0, 0],
+      mode: entry?.mode ?? "unknown",
+      modeReason: modeReason(focal.projectedDiagonalPx),
+      topPriority,
+      chunkCount,
+    };
+  }
+
+  return {
+    datasetId: dsId,
+    lanes,
+    proxyCount: result.proxyRequests.length,
+    totalChunks: result.requests.length,
+    byLevel,
+    lodBreakdown,
+    culling: result.stats.culling,
+    catalogDegradations: result.stats.catalogDegradations,
+    wellsByMode,
+    focalEntity,
+  };
+}
+
 export class Orchestrator {
   private previousActiveSet = new Map<string, ActiveSetEntry[]>();
   private lastEpochs: PlanningEpochs | null = null;
@@ -243,6 +405,13 @@ export class Orchestrator {
   private _lastCachedKeyCounts = new Map<string, number>();
   /** Last filtered requests, kept for the deliverToWorker resend pass on cache hits. */
   private _lastFilteredRequests: ChunkRequest[] = [];
+  /**
+   * Per-dataset snapshot of the most recent full `plan()` output. Held so
+   * the DebugPanel "dump" buttons can print all datasets, not just the
+   * last one in iteration order. Cleared per-dataset by
+   * {@link clearMemberResources}.
+   */
+  private _lastPlanByDataset = new Map<string, RequestPlan>();
   /**
    * Last proxy requests produced by `plan()`, kept for the deliverToWorker
    * proxy resend pass on cache hits (see `:735-751`). Not re-submitted to
@@ -440,6 +609,21 @@ export class Orchestrator {
       this._lastRequests = result.requests;
       this._lastVisibleRegion = visibleRegion;
       this._lastEntities = entities;
+      this._lastPlanByDataset.set(dsId, result);
+
+      const entityById = new Map(entities.map(e => [e.entityId, e]));
+
+      // Per-dataset planning debug snapshot (lanes, per-LOD breakdown,
+      // wells-by-mode, focal entity, culling stages, catalog
+      // degradations). Computed before downstream side-effects so the
+      // panel reflects what `plan()` actually produced for this dataset
+      // — not, for example, the post-LOD-filter view used by the upload
+      // path. Cache-hit ticks leave the previous snapshot in place.
+      if (debugStats.enabled) {
+        debugStats.planning.byDataset[dsId] = buildPlanningDatasetDebug(
+          dsId, result, entities, entityById, visibleRegion, ctx.cpuCache,
+        );
+      }
 
       // Annotate proxy requests with the real dataset id (Planning emits
       // an empty default since it has no per-dataset context).
@@ -486,7 +670,6 @@ export class Orchestrator {
       // building a precomputed model matrix that maps the unit cube
       // [0,1]^3 onto that AABB, and stashing the well's entityId for
       // proxy descriptor lookup in the worker.
-      const entityById = new Map(entities.map(e => [e.entityId, e]));
       const fieldsByWell = new Map<string, EntitySnapshot[]>();
       for (const entity of entities) {
         if (entity.kind === "Field" && entity.parentId) {
@@ -595,6 +778,7 @@ export class Orchestrator {
         activeSet: result.activeSet,
         proxyRequests: result.proxyRequests,
         epochs: currentEpochs,
+        stats: result.stats,
       });
 
       // Debug stats
@@ -895,6 +1079,22 @@ export class Orchestrator {
     // it's a no-op (the dataset entry survives, which is correct — the
     // dataset itself wasn't removed).
     this.lastViewEpochByDataset.delete(workerMemberId);
+
+    // Drop the planning debug entry. Same dataset-vs-member ambiguity:
+    // member ids never match a key in `planning.byDataset`, so the delete
+    // is a no-op for those calls. Dataset removal sees both an explicit
+    // dataset call and per-member calls; one of them clears.
+    delete debugStats.planning.byDataset[workerMemberId];
+    this._lastPlanByDataset.delete(workerMemberId);
+  }
+
+  /**
+   * Snapshot of the most recent full `plan()` output per dataset. Used
+   * by the DebugPanel "dump" buttons to print categorized request lists.
+   * Returns the live Map — callers must not mutate.
+   */
+  getLastPlans(): ReadonlyMap<string, RequestPlan> {
+    return this._lastPlanByDataset;
   }
 
   /**
@@ -1068,6 +1268,7 @@ export class Orchestrator {
       activeSet: [],
       proxyRequests: [proxyRequest],
       epochs,
+      stats: emptyPlanStats(),
     });
   }
 

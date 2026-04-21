@@ -16,6 +16,7 @@ import type {
   ProxyRequest,
   RequestPlan,
 } from "./planning.ts";
+import { emptyPlanStats } from "./planning.ts";
 
 // ---------------------------------------------------------------------------
 // Test Factories
@@ -175,6 +176,7 @@ function makePlan(
       request: 1,
       ...epochs,
     },
+    stats: emptyPlanStats(),
   };
 }
 
@@ -398,6 +400,7 @@ describe("CpuCache", () => {
         activeSet: [],
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+        stats: emptyPlanStats(),
       });
       expect(cache.telemetry().inFlightProxyCount).toBe(1);
 
@@ -440,6 +443,7 @@ describe("CpuCache", () => {
           content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1,
           ...epochs,
         },
+        stats: emptyPlanStats(),
       };
     }
 
@@ -503,6 +507,7 @@ describe("CpuCache", () => {
         activeSet: [],
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+        stats: emptyPlanStats(),
       });
 
       // At least one request should be queued.
@@ -633,6 +638,7 @@ describe("CpuCache", () => {
         activeSet: [makeActiveEntry("entity-A", "image-A")],
         proxyRequests: [proxyA],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+        stats: emptyPlanStats(),
       });
       await flush();
 
@@ -647,6 +653,7 @@ describe("CpuCache", () => {
         activeSet: [makeActiveEntry("entity-B", "image-B")],
         proxyRequests: [proxyB],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+        stats: emptyPlanStats(),
       });
       await flush();
 
@@ -1130,6 +1137,7 @@ describe("CpuCache", () => {
           request: 1,
           ...epochs,
         },
+        stats: emptyPlanStats(),
       };
     }
 
