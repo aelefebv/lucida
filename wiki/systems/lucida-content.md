@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-20
 ---
 
 # lucida-content
@@ -34,7 +34,7 @@ The crate exists so that [[lucida-store]] can produce the manifest without pulli
 - **`shape` and `chunk_shape` are always 5D** (`[T, C, Z, Y, X]`), normalized via `normalize_to_5d` even when the source dataset has fewer axes. Missing dimensions are filled with size 1.
 - **`grid_shape[d] == shape[d].div_ceil(chunk_shape[d])`** for every dimension. Asserted in import tests; downstream planning relies on this without re-checking.
 - **Field-to-well transforms exist for every field in a plate.** Either grid-derived (computed by `build_grid_field_transforms`) or stage-derived (taken from OME translation, converted to voxel units in [[lucida-store]]).
-- **`source_layouts` always contains at least the default layout** for plates. Empty for singles. `default_layout_id` points into the list when present.
+- **`source_layouts` is never empty.** Singles get one layout with a single placement at `[0, 0]` for the image entity. Plates get one layout with one placement per well. In both cases `default_layout_id` points into the list. (Field-within-well positions are *not* in the layout — see [[layout-system]].)
 
 ## Gotchas
 

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-20
 ---
 
 # Layout System
@@ -39,6 +39,7 @@ When `SetActiveLayout` references an unknown layout ID, derived state falls back
 ## Gotchas
 
 - **Layout `id` is the dedupe key**, not `name`. Two layouts with the same name and different IDs both register; same ID re-registers as a no-op. Builder code that generates layout IDs procedurally (e.g. `derived:dense`) needs to keep the ID stable across regenerations.
+- **For plates, `placements` only positions wells.** Field-within-well offsets come from `TransformEdge`s (built by `lucida_content::plate::build_grid_field_transforms` for grid plates, or from OME translation for stage-positioned plates). A reader looking at a plate's source layout will see N well placements and zero field placements — that's correct, not a bug.
 - **Position is `[x, y]` in world units**, not `[y, x]`. The same convention as the layout source, but easy to get wrong if you're translating from chunk-key conventions (which are TCZYX, with X last).
 - **Layout switches force a `derived` rebuild for that dataset only**, not all datasets. This is correct — but if you have 50 plates loaded and you switch each in sequence, expect 50 derived rebuilds in quick succession. The epoch bumps once per switch.
 - **The layout epoch (`epochs.layout`) bumps on `RegisterLayout` too**, not just `SetActiveLayout`. Consumers (e.g. the LayoutSwitcher dropdown populating) want this; the planner doesn't (the active layout didn't change). The orchestrator's epoch fast-path treats them as a single bucket — a `RegisterLayout` will trigger one (cheap) plan re-run.

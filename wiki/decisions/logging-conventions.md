@@ -12,7 +12,7 @@ Cross-process conventions for debug logging. Trial-run on the dataset-opening fl
 - **Server (Rust)**: route everything through `tracing`. Wrap each cross-boundary handler in a named `info_span!` so concurrent operations don't interleave into mush. The subscriber is configured with `FmtSpan::CLOSE` so every instrumented function emits a span-close event with elapsed time — no manual timing needed. No `eprintln!` in instrumented flows.
 - **Client (TypeScript)**: route through a single `bridgeLog(event, data)` helper in `lucida-web/src/bridge.ts`. The helper always injects `wsReadyState` and is gated on a category registry (`lucida-web/src/debug/logging.ts`) backed by `localStorage.debug`. Production builds stay quiet by default.
 - **WASM (Rust-in-browser)**: route through the [`wasm_log!`] macro in `lucida-core/src/wasm_log.rs`. Same category gating; JS pushes the enabled set into WASM via `set_debug_categories(csv)` on init and on toggle.
-- **Naming**: events as `dot.separated.scope` (`open_remote_dataset.send`, `scene.dataset_opened.applied`); spans as `snake_case_noun` (`dataset_open`, `chunk_serve`). The event prefix matches the wire command name or subsystem when applicable.
+- **Naming**: events as `dot.separated.scope`, all lowercase, `snake_case` segments. Spans as `snake_case_noun` (`dataset_open`, `chunk_serve`). The category prefix in brackets (`[bridge]`, `[wasm]`) already names the subsystem, so the event names the *flow* — see [Event-prefix rule](#event-prefix-rule) below.
 
 ## Why
 
@@ -59,6 +59,18 @@ Three ways to enable:
 - **Programmatic**: `setDebugEnabled("bridge", true)` from `debug/logging.ts`.
 
 Adding a new client category: append to `DEBUG_CATEGORIES` in `lucida-web/src/debug/logging.ts` and add a description to `LOGGING_CATEGORY_DESCRIPTIONS` in `DebugPanel.tsx`. The panel renders it automatically.
+
+### Event-prefix rule
+
+The first segment of an event name picks one of three sources, in this priority order:
+
+1. **Wire command name** — when the event corresponds to a command's lifecycle (send, receipt, server-side phases, failure). Example: `open_remote_dataset.send`, `open_remote_dataset.broadcast_sent`. A reader debugging "what happened during this command?" greps the command name.
+2. **Function or module name** — when the event is internal JS-side flow not tied to a single wire command. Example: `setup_fetch_pipeline.start`, `setup_fetch_pipeline.complete`. The prefix tells the reader exactly where the log was emitted, so jumping to the source is one grep.
+3. **Subsystem name** — for generic infrastructure that isn't command- or function-specific. Examples: `ws.connected`, `ws.bad_message`, `apply_command.failed` (catch-all that fires for any command type).
+
+**WASM is a special case.** WASM-side events use a 3-segment form: `<subsystem>.<wire_command>.<action>` (e.g. `scene.dataset_opened.applied`). The subsystem prefix duplicates the `[wasm]` line marker but adds clarity for grep across mixed-source log streams (since the wire command segment makes the event self-describing without having to read the line marker).
+
+When in doubt: **the prefix should be the most useful word to grep for.** If you're debugging the open flow as a whole, `open_remote_dataset` covers 1a; `setup_fetch_pipeline` covers 1b. Two greps, but each prefix is honest about what generated it.
 
 ### Timing patterns
 

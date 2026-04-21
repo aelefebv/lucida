@@ -48,7 +48,7 @@ Same code path, different `DatasetManifest`:
 | --------------------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | `manifest.kind`       | `"Single"`                                                            | `{Plate: {rows, columns, positioning_mode, has_stage_positions}}`           |
 | Entities              | one `Image`                                                           | many `Well` (parents) + `Field` (children); images attach to fields         |
-| Layouts               | trivial                                                               | `source_layouts[].placements` position fields in well-local space; wells in plate-space |
+| Layouts               | one placement at `[0, 0]` for the image entity                        | `source_layouts[].placements` position **wells** in plate-space; field-within-well offsets come from `TransformEdge`s (`build_grid_field_transforms` for grid plates; OME translation for stage-positioned) |
 | Planning treats it as | a singleton "well group" with one field (`planning.ts:437-443`)       | grouped by `parentId` (`planning.ts:374-447`)                               |
 
 So **plate complexity lives entirely in planning** (where it groups, promotes, and synthesizes well proxies). The fetch/cache/render layers below see the same chunk requests either way, just more of them and with extra `WellProxy3D`/`FieldProxy3D` request kinds.
