@@ -61,7 +61,7 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
   render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
   cache: "CPU cache backpressure, failure bursts, eviction bursts",
-  orch: "Orchestrator events — cold state rebuild churn (sustained non-view invalidation)",
+  orch: "Orchestrator events — cold-state rebuild churn, upload budget exhaustion, resend storm, drain waste",
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
@@ -1119,23 +1119,125 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   })()}
                 </div>
 
-                {/* Upload path debug */}
-                {snap.uploadDebug && (
+                {/* Upload (CPU → GPU) — per-tick + rolling. Per-tick
+                    answers "what just happened?"; rolling answers "is
+                    the upload path keeping up?". Resend ratio > 50%
+                    means atlas thrashing; filter ratio > 50% means
+                    decoded chunks aren't wanted by the GPU. */}
+                {snap.upload.tick && (
                   <div className="debug-section" style={{
-                    background: snap.uploadDebug.chunksCacheMiss > 0 ? "#4a3311" : undefined,
+                    background: snap.upload.tick.budgetExhausted ? "#4a3311" : undefined,
                   }}>
-                    <div className="debug-title">Upload Path</div>
-                    <div>stateKey: {snap.uploadDebug.stateKey}</div>
-                    <div>prevStateKey: {snap.uploadDebug.prevStateKey}</div>
-                    <div>atlas config sent: {snap.uploadDebug.atlasConfigSent ? "YES" : "no"}</div>
-                    <div>
-                      chunks: {snap.uploadDebug.chunksAttempted} attempted,{" "}
-                      <span style={{ color: "#4f4" }}>{snap.uploadDebug.chunksUploaded} uploaded</span>,{" "}
-                      <span style={{ color: "#ff4" }}>{snap.uploadDebug.chunksSentSkip} sent-skip</span>,{" "}
-                      <span style={{ color: snap.uploadDebug.chunksCacheMiss > 0 ? "#f44" : "#888" }}>
-                        {snap.uploadDebug.chunksCacheMiss} cache-miss
-                      </span>
-                    </div>
+                    <div className="debug-title">Upload (CPU → GPU)</div>
+                    {(() => {
+                      const t = snap.upload.tick;
+                      const drained = t.drainedChunks + t.drainedProxies;
+                      const uploaded = t.uploadedChunks + t.uploadedProxies;
+                      const skipBits = [
+                        t.skippedPrefetch > 0 && `prefetch:${t.skippedPrefetch}`,
+                        t.skippedOverview > 0 && `overview:${t.skippedOverview}`,
+                        t.skippedWrongLod > 0 && `wrongLod:${t.skippedWrongLod}`,
+                        t.skippedAlreadySent > 0 && `alreadySent:${t.skippedAlreadySent}`,
+                        t.skippedNoMeta > 0 && `noMeta:${t.skippedNoMeta}`,
+                      ].filter(Boolean) as string[];
+                      const resendUploads = t.resendChunkUploads + t.resendProxyUploads;
+                      const bytePct = t.bytesBudget > 0
+                        ? Math.min(100, Math.round((t.bytesUploaded / t.bytesBudget) * 100))
+                        : 0;
+                      return (
+                        <>
+                          <div>
+                            Drained: {drained}{" "}
+                            <span style={{ color: "#888" }}>
+                              ({t.drainedChunks}c / {t.drainedProxies}p)
+                            </span>
+                          </div>
+                          <div>
+                            <span style={{ color: "#4f4" }}>Uploaded: {uploaded}</span>{" "}
+                            <span style={{ color: "#888" }}>
+                              ({t.uploadedChunks}c / {t.uploadedProxies}p)
+                            </span>
+                          </div>
+                          {skipBits.length > 0 && (
+                            <div style={{ color: "#fb4", fontSize: 11 }}>
+                              skipped: {skipBits.join(" · ")}
+                            </div>
+                          )}
+                          <div style={{ marginTop: 4 }}>
+                            Bytes: {fmtBytes(t.bytesUploaded)} / {fmtBytes(t.bytesBudget)} ({bytePct}%)
+                            {t.budgetExhausted && (
+                              <span style={{ color: "#f44", marginLeft: 6 }}>EXHAUSTED</span>
+                            )}
+                          </div>
+                          <div className="debug-bar-track">
+                            <div className="debug-bar-fill" style={{
+                              width: `${bytePct}%`,
+                              background: t.budgetExhausted ? "#f44" : "#4f4",
+                            }} />
+                          </div>
+                          {(resendUploads > 0
+                            || t.resendChunksConsidered > 0
+                            || t.resendProxiesConsidered > 0) && (
+                            <div style={{ marginTop: 4, fontSize: 11 }}>
+                              <span style={{ color: "#888" }}>resend: </span>
+                              <span style={{ color: resendUploads > 0 ? "#fb4" : "#666" }}>
+                                {resendUploads} uploaded
+                              </span>{" "}
+                              <span style={{ color: "#888" }}>
+                                ({t.resendChunkUploads}c / {t.resendProxyUploads}p,{" "}
+                                {t.resendChunksConsidered + t.resendProxiesConsidered} considered)
+                              </span>
+                            </div>
+                          )}
+                        </>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Upload — rolling stats */}
+                {snap.upload.rolling && (
+                  <div className="debug-section">
+                    <div className="debug-title">Upload (rolling 1s)</div>
+                    {(() => {
+                      const r = snap.upload.rolling;
+                      const fmtRatio = (n: number) =>
+                        Number.isNaN(n) ? "—" : `${(n * 100).toFixed(0)}%`;
+                      const resendBad = !Number.isNaN(r.resendRatio) && r.resendRatio > 0.5;
+                      const filterBad = !Number.isNaN(r.filterRatio) && r.filterRatio > 0.5;
+                      return (
+                        <>
+                          <div>
+                            {fmtBytes(r.bytesPerSec)}/s · {r.uploadsPerSec} uploads/s
+                          </div>
+                          <div>
+                            <span style={{ color: resendBad ? "#fb4" : "#888" }}>
+                              resend: {fmtRatio(r.resendRatio)}
+                            </span>
+                            {" · "}
+                            <span style={{ color: filterBad ? "#fb4" : "#888" }}>
+                              filtered: {fmtRatio(r.filterRatio)}
+                            </span>
+                          </div>
+                          {r.uploadSizeP50 !== null && (
+                            <div style={{ color: "#888", fontSize: 11 }}>
+                              size p50: {fmtBytes(r.uploadSizeP50)}
+                              {" · "}
+                              p95: {fmtBytes(r.uploadSizeP95 ?? 0)}
+                            </div>
+                          )}
+                          {r.budgetExhaustedTicksLastSecond > 0 && (
+                            <div style={{ color: "#fb4", fontSize: 11 }}>
+                              budget exhausted: {r.budgetExhaustedTicksLastSecond} tick(s) in last 1s
+                            </div>
+                          )}
+                          <div style={{ color: "#888", fontSize: 11, marginTop: 4 }}>
+                            total: {fmtBytes(r.totalBytes)} ·{" "}
+                            {r.totalUploads.toLocaleString()} uploads
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
                 )}
 

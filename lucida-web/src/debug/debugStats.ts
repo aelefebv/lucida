@@ -265,17 +265,111 @@ export interface DebugStats {
     byDataset: Record<string, PlanningDatasetDebug>;
   };
 
-  // Upload path debug (per frame)
-  uploadDebug: {
-    atlasConfigSent: boolean;
-    stateKey: string;
-    prevStateKey: string;
-    chunksAttempted: number;
-    chunksUploaded: number;
-    chunksCacheHit: number;
-    chunksCacheMiss: number;
-    chunksSentSkip: number;
-  } | null;
+  /**
+   * CPU → GPU upload telemetry. Populated by `deliverToWorker` each
+   * tick. Two views:
+   *
+   * - `tick`: snapshot of the most recent `deliverToWorker` call —
+   *   what got drained, what got uploaded vs filtered, bytes against
+   *   budget, resend pass results.
+   * - `rolling`: 1s-windowed rates and ratios for "is the upload path
+   *   keeping up?" plus cumulative totals and an upload-size sketch.
+   *
+   * Both are `null` until the first `deliverToWorker` call lands.
+   */
+  upload: {
+    tick: UploadTickStats | null;
+    rolling: UploadRollingStats | null;
+  };
+}
+
+/**
+ * Per-tick `deliverToWorker` snapshot. Resets at the start of each
+ * call; published at the end. Drives the Orch tab's per-tick pane.
+ */
+export interface UploadTickStats {
+  /** Items returned by `cpuCache.drain(budget)` this tick. */
+  drainedChunks: number;
+  drainedProxies: number;
+  /** Items actually posted to the worker this tick. */
+  uploadedChunks: number;
+  uploadedProxies: number;
+  /** Bytes actually posted (from delivery `data.byteLength`). */
+  bytesUploaded: number;
+  /** Drain byte budget passed in by the caller. */
+  bytesBudget: number;
+  /**
+   * Drain stopped early because remaining budget hit zero. NOT a
+   * function of bytesUploaded reaching bytesBudget: a single chunk
+   * larger than remaining will still be uploaded and trigger this.
+   */
+  budgetExhausted: boolean;
+  // Skip reasons during the drain pass (one entry per drained item):
+  /** Lane was `prefetch` — pre-cached for future timepoint. */
+  skippedPrefetch: number;
+  /** Lane was `overview` — minimap path owns these. */
+  skippedOverview: number;
+  /** Chunk level didn't match `targetLevelByImage[imageId]`. Stale plan. */
+  skippedWrongLod: number;
+  /** Chunk already in `deliverySentToWorker` for the worker memberId. */
+  skippedAlreadySent: number;
+  /** Couldn't resolve dataset/imageSpec/level meta — should be ~0; bug indicator. */
+  skippedNoMeta: number;
+  // Resend pass — separate from drain because it indicates worker
+  // eviction churn rather than fresh decode work.
+  resendChunkUploads: number;
+  resendProxyUploads: number;
+  resendChunksConsidered: number;
+  resendChunksAlreadySent: number;
+  resendChunksNotCached: number;
+  resendProxiesConsidered: number;
+  resendProxiesAlreadyDelivered: number;
+  resendProxiesNotCached: number;
+}
+
+/**
+ * 1s rolling upload stats. Computed by pruning a per-event log to a
+ * 1s window. NaN ratios mean "no events in window" — render as `—`.
+ */
+export interface UploadRollingStats {
+  /** Bytes/sec across all uploads (drain + resend) in the last 1s. */
+  bytesPerSec: number;
+  /** Uploads/sec (chunks + proxies). */
+  uploadsPerSec: number;
+  /**
+   * Ratio of uploads sourced from the resend pass. High = atlas
+   * thrashing (worker is evicting faster than fresh decodes can fill).
+   */
+  resendRatio: number;
+  /**
+   * Ratio of drained items that were filtered out (skippedAnything ÷
+   * drained). High = decode pool burning cycles on chunks the GPU
+   * doesn't want anymore.
+   */
+  filterRatio: number;
+  /** p50 / p95 of upload byte sizes over the last N samples. */
+  uploadSizeP50: number | null;
+  uploadSizeP95: number | null;
+  // Cumulative since session start
+  totalBytes: number;
+  totalUploads: number;
+  /** Number of `deliverToWorker` calls in window where budgetExhausted=true. */
+  budgetExhaustedTicksLastSecond: number;
+}
+
+/** Initialize a zeroed UploadTickStats. */
+export function emptyUploadTickStats(): UploadTickStats {
+  return {
+    drainedChunks: 0, drainedProxies: 0,
+    uploadedChunks: 0, uploadedProxies: 0,
+    bytesUploaded: 0, bytesBudget: 0,
+    budgetExhausted: false,
+    skippedPrefetch: 0, skippedOverview: 0, skippedWrongLod: 0,
+    skippedAlreadySent: 0, skippedNoMeta: 0,
+    resendChunkUploads: 0, resendProxyUploads: 0,
+    resendChunksConsidered: 0, resendChunksAlreadySent: 0, resendChunksNotCached: 0,
+    resendProxiesConsidered: 0, resendProxiesAlreadyDelivered: 0, resendProxiesNotCached: 0,
+  };
 }
 
 export const debugStats: DebugStats = {
@@ -300,7 +394,7 @@ export const debugStats: DebugStats = {
   mode: "",
   orch: null,
   planning: { byDataset: {} },
-  uploadDebug: null,
+  upload: { tick: null, rolling: null },
 };
 
 /** Reset per-frame counters. Call at the start of each tick. */

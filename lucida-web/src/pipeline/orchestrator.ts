@@ -43,10 +43,13 @@ import type { ProxyRequest } from "./planning.ts";
 import {
   debugStats,
   emptyColdStateDebug,
+  emptyUploadTickStats,
   type OrchDebug,
   type ColdStateDebug,
   type ColdStateCauseCounts,
   type PlanningDatasetDebug,
+  type UploadTickStats,
+  type UploadRollingStats,
 } from "../debug/debugStats.ts";
 import { debugLog } from "../debug/logging.ts";
 
@@ -82,6 +85,35 @@ const COLD_STATE_CHURN_LOG_RATE_LIMIT_MS = 2000;
 /** Per-epoch cause keys we attribute rebuilds to. */
 const COLD_STATE_EPOCH_KEYS = ["content", "layout", "view", "selection", "asset"] as const;
 type ColdStateCauseKey = (typeof COLD_STATE_EPOCH_KEYS)[number];
+
+// ---------------------------------------------------------------------------
+// Upload (CPU → GPU hand-off) telemetry constants
+// ---------------------------------------------------------------------------
+
+/** Rolling window for bytes/sec, uploads/sec, ratios, exhausted-tick count. */
+const UPLOAD_WINDOW_MS = 1000;
+
+/** Bounded sample buffer for p50/p95 upload byte size. */
+const UPLOAD_SIZE_SAMPLES = 120;
+
+/** Consecutive ticks of `budgetExhausted=true` before logging. */
+const UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD = 3;
+
+/** Resend ratio above which `upload.resend_storm` arms (atlas thrashing). */
+const UPLOAD_RESEND_RATIO_THRESHOLD = 0.5;
+
+/** Filter ratio above which `upload.drain_waste` arms (decoded chunks unwanted). */
+const UPLOAD_FILTER_RATIO_THRESHOLD = 0.5;
+
+/**
+ * Sustain duration for resend_storm and drain_waste before a log fires.
+ * Mirrors the cold-state churn pattern — short bursts during transitions
+ * (e.g. zoom transitions) are normal and shouldn't spam the console.
+ */
+const UPLOAD_LOG_SUSTAIN_MS = 2000;
+
+/** Don't re-log the same condition more often than this. */
+const UPLOAD_LOG_RATE_LIMIT_MS = 2000;
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -515,6 +547,56 @@ export class Orchestrator {
   private coldStateChurnState = {
     aboveThresholdSince: null as number | null,
     lastLogAt: 0,
+  };
+
+  // -------------------------------------------------------------------------
+  // Upload telemetry (deliverToWorker). See UPLOAD_* constants above.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Per-tick stats for the in-progress `deliverToWorker` call. Reset
+   * to zero at the start of each call; sendDeliveryToWorker /
+   * sendProxyDeliveryToWorker mutate the skip/byte fields directly.
+   * Published to debugStats and pushed onto the rolling window at end
+   * of tick.
+   */
+  private currentUploadStats: UploadTickStats = emptyUploadTickStats();
+
+  /**
+   * Rolling 1s window of upload events. Each successful upload (drain
+   * or resend, chunk or proxy) appends one entry; pruned on each
+   * `deliverToWorker` call.
+   */
+  private uploadEvents: Array<{
+    at: number;
+    bytes: number;
+    isResend: boolean;
+  }> = [];
+  /**
+   * Rolling 1s window of per-tick aggregates. Lets us compute the
+   * filter ratio (drained vs filtered) and the
+   * `budgetExhaustedTicksLastSecond` count without re-summing per
+   * upload event.
+   */
+  private uploadTickWindow: Array<{
+    at: number;
+    drained: number;
+    uploaded: number;
+    skipped: number;
+    budgetExhausted: boolean;
+  }> = [];
+  /** Bounded sample buffer for p50/p95 upload size. FIFO. */
+  private uploadSizeSamples: number[] = [];
+  private uploadTotalBytes = 0;
+  private uploadTotalUploads = 0;
+  private uploadConsecutiveExhausted = 0;
+  /** Sustained-condition state for the three upload log events. */
+  private uploadLogState = {
+    budgetExhaustedLastLogAt: 0,
+    resendStormSince: null as number | null,
+    resendStormLastLogAt: 0,
+    drainWasteSince: null as number | null,
+    drainWasteLastLogAt: 0,
   };
 
   planAndFetch(
@@ -1137,15 +1219,207 @@ export class Orchestrator {
     };
   }
 
+  // -------------------------------------------------------------------------
+  // Upload telemetry helpers — see UPLOAD_* constants and private fields above.
+  // -------------------------------------------------------------------------
+
+  /** Record one upload event (drain-path or resend-path) into the rolling window. */
+  private recordUploadEvent(now: number, bytes: number, isResend: boolean): void {
+    this.uploadEvents.push({ at: now, bytes, isResend });
+    this.uploadSizeSamples.push(bytes);
+    if (this.uploadSizeSamples.length > UPLOAD_SIZE_SAMPLES) {
+      this.uploadSizeSamples.shift();
+    }
+    this.uploadTotalBytes += bytes;
+    this.uploadTotalUploads += 1;
+  }
+
+  /**
+   * Aggregate `currentUploadStats` into the rolling window, derive
+   * rolling stats, fire anomaly logs, and publish to debugStats.
+   * Called at the end of each `deliverToWorker` invocation.
+   */
+  private publishUploadStats(now: number): void {
+    const skipped =
+      this.currentUploadStats.skippedPrefetch +
+      this.currentUploadStats.skippedOverview +
+      this.currentUploadStats.skippedWrongLod +
+      this.currentUploadStats.skippedAlreadySent +
+      this.currentUploadStats.skippedNoMeta;
+    const drained =
+      this.currentUploadStats.drainedChunks + this.currentUploadStats.drainedProxies;
+    const uploaded =
+      this.currentUploadStats.uploadedChunks + this.currentUploadStats.uploadedProxies;
+    this.uploadTickWindow.push({
+      at: now,
+      drained,
+      uploaded,
+      skipped,
+      budgetExhausted: this.currentUploadStats.budgetExhausted,
+    });
+
+    const cutoff = now - UPLOAD_WINDOW_MS;
+    while (this.uploadEvents.length > 0 && this.uploadEvents[0].at < cutoff) {
+      this.uploadEvents.shift();
+    }
+    while (this.uploadTickWindow.length > 0 && this.uploadTickWindow[0].at < cutoff) {
+      this.uploadTickWindow.shift();
+    }
+
+    let bytesInWindow = 0;
+    let uploadsInWindow = 0;
+    let resendUploads = 0;
+    for (const e of this.uploadEvents) {
+      bytesInWindow += e.bytes;
+      uploadsInWindow += 1;
+      if (e.isResend) resendUploads += 1;
+    }
+    let drainedInWindow = 0;
+    let skippedInWindow = 0;
+    let exhaustedTicks = 0;
+    for (const t of this.uploadTickWindow) {
+      drainedInWindow += t.drained;
+      skippedInWindow += t.skipped;
+      if (t.budgetExhausted) exhaustedTicks += 1;
+    }
+
+    let p50: number | null = null;
+    let p95: number | null = null;
+    if (this.uploadSizeSamples.length > 0) {
+      const sorted = [...this.uploadSizeSamples].sort((a, b) => a - b);
+      p50 = sorted[Math.floor(sorted.length * 0.5)];
+      p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+    }
+
+    const rolling: UploadRollingStats = {
+      // Window is exactly UPLOAD_WINDOW_MS = 1000 ms, so bytes-in-window
+      // equals bytes-per-sec by construction.
+      bytesPerSec: bytesInWindow,
+      uploadsPerSec: uploadsInWindow,
+      resendRatio: uploadsInWindow > 0 ? resendUploads / uploadsInWindow : NaN,
+      filterRatio: drainedInWindow > 0 ? skippedInWindow / drainedInWindow : NaN,
+      uploadSizeP50: p50,
+      uploadSizeP95: p95,
+      totalBytes: this.uploadTotalBytes,
+      totalUploads: this.uploadTotalUploads,
+      budgetExhaustedTicksLastSecond: exhaustedTicks,
+    };
+
+    this.maybeLogUploadAnomalies(now, rolling);
+
+    if (debugStats.enabled) {
+      debugStats.upload = {
+        tick: { ...this.currentUploadStats },
+        rolling,
+      };
+    }
+  }
+
+  /**
+   * Three sustained-anomaly detectors:
+   *
+   * 1. `upload.budget_exhausted_sustained` — N consecutive ticks where
+   *    `budgetExhausted=true`. Indicates the CPU→GPU pipe is saturated;
+   *    upload work is being deferred to subsequent ticks.
+   * 2. `upload.resend_storm` — most uploads come from the resend pass,
+   *    sustained > 2s. Worker is evicting faster than fresh decodes
+   *    can fill; usually pool capacity vs working set mismatch.
+   * 3. `upload.drain_waste` — most drained chunks are filtered out,
+   *    sustained > 2s. Decode pool is burning cycles on chunks the GPU
+   *    no longer wants — often a planning/wanted-set sync issue.
+   */
+  private maybeLogUploadAnomalies(now: number, rolling: UploadRollingStats): void {
+    // 1. Sustained budget exhaustion — count consecutive ticks.
+    if (this.currentUploadStats.budgetExhausted) {
+      this.uploadConsecutiveExhausted += 1;
+      if (
+        this.uploadConsecutiveExhausted >= UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD &&
+        now - this.uploadLogState.budgetExhaustedLastLogAt >= UPLOAD_LOG_RATE_LIMIT_MS
+      ) {
+        debugLog("orch", "upload.budget_exhausted_sustained", {
+          consecutiveTicks: this.uploadConsecutiveExhausted,
+          bytesUploadedThisTick: this.currentUploadStats.bytesUploaded,
+          bytesBudget: this.currentUploadStats.bytesBudget,
+        });
+        this.uploadLogState.budgetExhaustedLastLogAt = now;
+      }
+    } else {
+      this.uploadConsecutiveExhausted = 0;
+    }
+
+    // 2. Resend storm.
+    if (
+      !Number.isNaN(rolling.resendRatio) &&
+      rolling.resendRatio > UPLOAD_RESEND_RATIO_THRESHOLD
+    ) {
+      if (this.uploadLogState.resendStormSince === null) {
+        this.uploadLogState.resendStormSince = now;
+      } else {
+        const sustained = now - this.uploadLogState.resendStormSince;
+        if (
+          sustained >= UPLOAD_LOG_SUSTAIN_MS &&
+          now - this.uploadLogState.resendStormLastLogAt >= UPLOAD_LOG_RATE_LIMIT_MS
+        ) {
+          debugLog("orch", "upload.resend_storm", {
+            resendRatio: rolling.resendRatio,
+            uploadsPerSec: rolling.uploadsPerSec,
+            sustainedMs: Math.round(sustained),
+          });
+          this.uploadLogState.resendStormLastLogAt = now;
+        }
+      }
+    } else {
+      this.uploadLogState.resendStormSince = null;
+    }
+
+    // 3. Drain waste.
+    if (
+      !Number.isNaN(rolling.filterRatio) &&
+      rolling.filterRatio > UPLOAD_FILTER_RATIO_THRESHOLD
+    ) {
+      if (this.uploadLogState.drainWasteSince === null) {
+        this.uploadLogState.drainWasteSince = now;
+      } else {
+        const sustained = now - this.uploadLogState.drainWasteSince;
+        if (
+          sustained >= UPLOAD_LOG_SUSTAIN_MS &&
+          now - this.uploadLogState.drainWasteLastLogAt >= UPLOAD_LOG_RATE_LIMIT_MS
+        ) {
+          debugLog("orch", "upload.drain_waste", {
+            filterRatio: rolling.filterRatio,
+            skippedWrongLod: this.currentUploadStats.skippedWrongLod,
+            skippedAlreadySent: this.currentUploadStats.skippedAlreadySent,
+            skippedPrefetch: this.currentUploadStats.skippedPrefetch,
+            skippedOverview: this.currentUploadStats.skippedOverview,
+            sustainedMs: Math.round(sustained),
+          });
+          this.uploadLogState.drainWasteLastLogAt = now;
+        }
+      }
+    } else {
+      this.uploadLogState.drainWasteSince = null;
+    }
+  }
+
   /**
    * Deliver decoded chunks to the GPU worker via RenderClient.
    * Replaces uploadChunksForMembers() -- called from slicePath/volumePath after S5.3.
+   *
+   * Telemetry: writes per-tick stats to `currentUploadStats` and pushes
+   * to the rolling window via `publishUploadStats`. Skip reasons are
+   * incremented either inline (for lane / wrong-lod filters that the
+   * caller checks) or inside `sendDeliveryToWorker` (for the
+   * already-sent / no-meta cases the helper detects).
    */
   deliverToWorker(
     ctx: TickContext,
     budget: number,
     sliceZ: number | null,
   ): boolean {
+    const tickStart = performance.now();
+    this.currentUploadStats = emptyUploadTickStats();
+    this.currentUploadStats.bytesBudget = budget;
+
     const multiChannel = ctx.scene.multi_channel();
     const epochs = this.lastEpochs ?? { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
     let remaining = budget;
@@ -1159,6 +1433,10 @@ export class Orchestrator {
 
     // Drain new deliveries from CpuCache
     const deliveries = ctx.cpuCache.drain(budget);
+    for (const d of deliveries) {
+      if (d.kind === "proxy") this.currentUploadStats.drainedProxies++;
+      else this.currentUploadStats.drainedChunks++;
+    }
 
     // Send each delivery to the worker.
     for (const delivery of deliveries) {
@@ -1168,6 +1446,9 @@ export class Orchestrator {
         // upload.
         const sent = this.sendProxyDeliveryToWorker(ctx, delivery, epochs);
         if (sent > 0) {
+          this.currentUploadStats.uploadedProxies++;
+          this.currentUploadStats.bytesUploaded += sent;
+          this.recordUploadEvent(tickStart, sent, false);
           remaining -= sent;
           if (remaining <= 0) {
             budgetExhausted = true;
@@ -1179,17 +1460,32 @@ export class Orchestrator {
       // Chunk path. Skip prefetch (pre-cached for future timepoints),
       // overview (minimap path), and wrong-LOD chunks (stale requests
       // from a previous plan).
-      if (delivery.lane === "prefetch" || delivery.lane === "overview") continue;
+      if (delivery.lane === "prefetch") {
+        this.currentUploadStats.skippedPrefetch++;
+        continue;
+      }
+      if (delivery.lane === "overview") {
+        this.currentUploadStats.skippedOverview++;
+        continue;
+      }
       const target = targetLevelByImage.get(delivery.imageId);
-      if (target === undefined || delivery.level !== target) continue;
+      if (target === undefined || delivery.level !== target) {
+        this.currentUploadStats.skippedWrongLod++;
+        continue;
+      }
       const sent = this.sendDeliveryToWorker(ctx, delivery, multiChannel, sliceZ, epochs);
       if (sent > 0) {
+        this.currentUploadStats.uploadedChunks++;
+        this.currentUploadStats.bytesUploaded += sent;
+        this.recordUploadEvent(tickStart, sent, false);
         remaining -= sent;
         if (remaining <= 0) {
           budgetExhausted = true;
           break;
         }
       }
+      // sent === 0 → skippedAlreadySent or skippedNoMeta — the helper
+      // mutated currentUploadStats accordingly.
     }
 
     // Re-send evicted chunks (budget permitting).
@@ -1199,15 +1495,26 @@ export class Orchestrator {
       for (const req of this._lastFilteredRequests) {
         if (budgetExhausted) break;
         if (req.lane === "prefetch") continue;
+        this.currentUploadStats.resendChunksConsidered++;
+
         const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
         const ss = this.deliverySentToWorker.get(wid);
-        if (ss?.has(req.chunkKey)) continue;
+        if (ss?.has(req.chunkKey)) {
+          this.currentUploadStats.resendChunksAlreadySent++;
+          continue;
+        }
 
         const cached = ctx.cpuCache.getCachedChunk(req.entityId, req.chunkKey);
-        if (!cached) continue;
+        if (!cached) {
+          this.currentUploadStats.resendChunksNotCached++;
+          continue;
+        }
 
         const sent = this.sendDeliveryToWorker(ctx, cached, multiChannel, sliceZ, epochs);
         if (sent > 0) {
+          this.currentUploadStats.resendChunkUploads++;
+          this.currentUploadStats.bytesUploaded += sent;
+          this.recordUploadEvent(tickStart, sent, true);
           remaining -= sent;
           if (remaining <= 0) budgetExhausted = true;
         }
@@ -1224,20 +1531,34 @@ export class Orchestrator {
     if (!budgetExhausted && this._lastProxyRequests.length > 0) {
       for (const req of this._lastProxyRequests) {
         if (budgetExhausted) break;
-        if (this.proxyDeliveredToWorker.has(this.proxyKeyFromRequest(req))) continue;
+        this.currentUploadStats.resendProxiesConsidered++;
+
+        if (this.proxyDeliveredToWorker.has(this.proxyKeyFromRequest(req))) {
+          this.currentUploadStats.resendProxiesAlreadyDelivered++;
+          continue;
+        }
 
         const cached = ctx.cpuCache.getCachedProxy(
           req.datasetId, req.entityId, req.kind, req.t, req.c,
         );
-        if (!cached) continue;
+        if (!cached) {
+          this.currentUploadStats.resendProxiesNotCached++;
+          continue;
+        }
 
         const sent = this.sendProxyDeliveryToWorker(ctx, cached, epochs);
         if (sent > 0) {
+          this.currentUploadStats.resendProxyUploads++;
+          this.currentUploadStats.bytesUploaded += sent;
+          this.recordUploadEvent(tickStart, sent, true);
           remaining -= sent;
           if (remaining <= 0) budgetExhausted = true;
         }
       }
     }
+
+    this.currentUploadStats.budgetExhausted = budgetExhausted;
+    this.publishUploadStats(tickStart);
 
     return deliveries.length > 0 || budgetExhausted;
   }
@@ -1349,12 +1670,21 @@ export class Orchestrator {
         break;
       }
     }
-    if (!dsManifest) return 0;
+    if (!dsManifest) {
+      this.currentUploadStats.skippedNoMeta++;
+      return 0;
+    }
 
     const imageSpec = dsManifest.images.find(img => img.image_id === delivery.imageId);
-    if (!imageSpec) return 0;
+    if (!imageSpec) {
+      this.currentUploadStats.skippedNoMeta++;
+      return 0;
+    }
     const levelMeta = imageSpec.multiscale.levels[delivery.level];
-    if (!levelMeta) return 0;
+    if (!levelMeta) {
+      this.currentUploadStats.skippedNoMeta++;
+      return 0;
+    }
 
     const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;    // [T, C, Z, Y, X]
     const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
@@ -1366,7 +1696,10 @@ export class Orchestrator {
       this.deliverySentToWorker.set(workerMemberId, sentSet);
     }
 
-    if (sentSet.has(delivery.chunkKey)) return 0;
+    if (sentSet.has(delivery.chunkKey)) {
+      this.currentUploadStats.skippedAlreadySent++;
+      return 0;
+    }
 
     const chunkData = {
       data: delivery.data,
