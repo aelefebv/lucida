@@ -601,19 +601,6 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             {tab.label}
           </button>
         ))}
-        <span
-          title="Cold-state rebuild indicator — pulses on every full plan/rebuild tick"
-          style={{
-            marginLeft: "auto",
-            alignSelf: "center",
-            paddingRight: 6,
-            color: coldStatePulse.color,
-            fontFamily: "monospace",
-            fontSize: 12,
-          }}
-        >
-          {coldStatePulse.glyph}
-        </span>
       </div>
       <div className="debug-tab-content">
         {activeTab === "render" && (
@@ -1044,9 +1031,27 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                 )}
 
                 {/* Cold state — epoch fast-path stats, rebuild rate,
-                    per-epoch cause attribution, and rebuild timing. */}
+                    per-epoch cause attribution, and rebuild timing. The
+                    pulse next to the title is a visceral activity
+                    indicator (one bright frame per rebuild + 500ms
+                    afterglow) so frequency is readable at a glance. */}
                 <div className="debug-section">
-                  <div className="debug-title">Cold State</div>
+                  <div
+                    className="debug-title"
+                    style={{ display: "flex", alignItems: "center", gap: 6 }}
+                  >
+                    <span>Cold State</span>
+                    <span
+                      title="Pulses on every full plan/rebuild tick"
+                      style={{
+                        color: coldStatePulse.color,
+                        fontFamily: "monospace",
+                        fontSize: 12,
+                      }}
+                    >
+                      {coldStatePulse.glyph}
+                    </span>
+                  </div>
                   <div>
                     {snap.orch.epochCacheHit ? (
                       <span style={{ color: "#4f4" }}>HIT (plan skipped)</span>
