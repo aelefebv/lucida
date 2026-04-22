@@ -492,6 +492,28 @@ export class Orchestrator {
   private deliverySentToWorker = new Map<string, Set<string>>();
 
   /**
+   * Chunks the GPU worker has reported as `skipped` (atlas full +
+   * incoming farther than the farthest existing slot). The resend pass
+   * checks this set before attempting an upload; without it, the
+   * pass would re-send the same too-far chunks every tick because
+   * `handleChunksEvicted` removes them from `deliverySentToWorker`,
+   * driving the `upload.resend_storm` and `upload.budget_exhausted`
+   * anomalies. Cleared on every cold-state rebuild — the camera or
+   * active set may have shifted enough that previously-too-far chunks
+   * now fit. Keyed by workerMemberId (mirrors `deliverySentToWorker`).
+   */
+  private deliveryRejectedByWorker = new Map<string, Set<string>>();
+
+  /**
+   * Reverse lookup from `workerMemberId` to `entityId`, rebuilt during
+   * the rebuild path from `_lastFilteredRequests`. Needed by
+   * `handleChunksEvicted` to resolve the cpuCache entityId for
+   * `markRejected` calls — workerMemberId is composite for multi-channel
+   * (`imageId:chN`) and may differ from entityId entirely (plate fields).
+   */
+  private widToEntityId = new Map<string, string>();
+
+  /**
    * Tracks proxies already uploaded to the GPU worker. Composite key:
    * `${datasetId}|${entityId}|${proxyKind}|${t}|${c}`. Mirrors
    * `deliverySentToWorker` for chunks: cleared on full-plan ticks,
@@ -581,8 +603,14 @@ export class Orchestrator {
   private uploadTickWindow: Array<{
     at: number;
     drained: number;
+    drainedChunks: number;
     uploaded: number;
     skipped: number;
+    skippedPrefetch: number;
+    skippedOverview: number;
+    skippedWrongLod: number;
+    skippedAlreadySent: number;
+    skippedNoMeta: number;
     budgetExhausted: boolean;
   }> = [];
   /** Bounded sample buffer for p50/p95 upload size. FIFO. */
@@ -656,6 +684,15 @@ export class Orchestrator {
       }
       return this.cachedResult;
     }
+
+    // Cold-state rebuild path. Drop worker-rejection state on both
+    // sides — the camera, active set, or selection has shifted enough
+    // that previously-too-far chunks may now fit. The per-dataset loop
+    // below re-populates `widToEntityId` from the new
+    // `_lastFilteredRequests`.
+    this.deliveryRejectedByWorker.clear();
+    this.widToEntityId.clear();
+    ctx.cpuCache.clearRejected();
 
     // Step 2 — Settings
     const settings = getSceneSettings(ctx.scene);
@@ -818,6 +855,15 @@ export class Orchestrator {
       });
 
       this._lastFilteredRequests = filteredRequests;
+      // Build wid → entityId for this dataset so handleChunksEvicted
+      // can resolve `cpuCache.markRejected(entityId, ...)` from the
+      // worker's report (which carries workerMemberId, not entityId).
+      // Multi-dataset case: rebuilt cumulatively across the loop since
+      // we clear once at the top of the rebuild path.
+      for (const req of filteredRequests) {
+        const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
+        this.widToEntityId.set(wid, req.entityId);
+      }
       // Note: proxy delivery tracking is NOT cleared here. Worker proxy pools
       // persist across cold states (they're created lazily in getOrCreateProxyPool
       // and only destroyed on dataset removal). Re-sending proxies on every full
@@ -1253,8 +1299,14 @@ export class Orchestrator {
     this.uploadTickWindow.push({
       at: now,
       drained,
+      drainedChunks: this.currentUploadStats.drainedChunks,
       uploaded,
       skipped,
+      skippedPrefetch: this.currentUploadStats.skippedPrefetch,
+      skippedOverview: this.currentUploadStats.skippedOverview,
+      skippedWrongLod: this.currentUploadStats.skippedWrongLod,
+      skippedAlreadySent: this.currentUploadStats.skippedAlreadySent,
+      skippedNoMeta: this.currentUploadStats.skippedNoMeta,
       budgetExhausted: this.currentUploadStats.budgetExhausted,
     });
 
@@ -1275,13 +1327,39 @@ export class Orchestrator {
       if (e.isResend) resendUploads += 1;
     }
     let drainedInWindow = 0;
+    let drainedChunksInWindow = 0;
     let skippedInWindow = 0;
     let exhaustedTicks = 0;
+    let winSkippedPrefetch = 0;
+    let winSkippedOverview = 0;
+    let winSkippedWrongLod = 0;
+    let winSkippedAlreadySent = 0;
+    let winSkippedNoMeta = 0;
     for (const t of this.uploadTickWindow) {
       drainedInWindow += t.drained;
+      drainedChunksInWindow += t.drainedChunks;
       skippedInWindow += t.skipped;
+      winSkippedPrefetch += t.skippedPrefetch;
+      winSkippedOverview += t.skippedOverview;
+      winSkippedWrongLod += t.skippedWrongLod;
+      winSkippedAlreadySent += t.skippedAlreadySent;
+      winSkippedNoMeta += t.skippedNoMeta;
       if (t.budgetExhausted) exhaustedTicks += 1;
     }
+    const skippedInWindowByCause = {
+      skippedPrefetch: winSkippedPrefetch,
+      skippedOverview: winSkippedOverview,
+      skippedWrongLod: winSkippedWrongLod,
+      skippedAlreadySent: winSkippedAlreadySent,
+      skippedNoMeta: winSkippedNoMeta,
+    };
+    // Upload-bound counts: chunks that were *meant* to upload to the
+    // main GPU atlas. Excludes prefetch (cache-only), overview
+    // (minimap path), and proxies (separate atlas + always-uploads).
+    const drainedUploadBoundInWindow =
+      drainedChunksInWindow - winSkippedPrefetch - winSkippedOverview;
+    const skippedUploadBoundInWindow =
+      winSkippedWrongLod + winSkippedAlreadySent + winSkippedNoMeta;
 
     let p50: number | null = null;
     let p95: number | null = null;
@@ -1297,7 +1375,10 @@ export class Orchestrator {
       bytesPerSec: bytesInWindow,
       uploadsPerSec: uploadsInWindow,
       resendRatio: uploadsInWindow > 0 ? resendUploads / uploadsInWindow : NaN,
-      filterRatio: drainedInWindow > 0 ? skippedInWindow / drainedInWindow : NaN,
+      filterRatio:
+        drainedUploadBoundInWindow > 0
+          ? skippedUploadBoundInWindow / drainedUploadBoundInWindow
+          : NaN,
       uploadSizeP50: p50,
       uploadSizeP95: p95,
       totalBytes: this.uploadTotalBytes,
@@ -1305,7 +1386,13 @@ export class Orchestrator {
       budgetExhaustedTicksLastSecond: exhaustedTicks,
     };
 
-    this.maybeLogUploadAnomalies(now, rolling);
+    this.maybeLogUploadAnomalies(now, rolling, {
+      drainedInWindow,
+      skippedInWindow,
+      drainedUploadBoundInWindow,
+      skippedUploadBoundInWindow,
+      byCause: skippedInWindowByCause,
+    });
 
     if (debugStats.enabled) {
       debugStats.upload = {
@@ -1328,7 +1415,23 @@ export class Orchestrator {
    *    sustained > 2s. Decode pool is burning cycles on chunks the GPU
    *    no longer wants — often a planning/wanted-set sync issue.
    */
-  private maybeLogUploadAnomalies(now: number, rolling: UploadRollingStats): void {
+  private maybeLogUploadAnomalies(
+    now: number,
+    rolling: UploadRollingStats,
+    window: {
+      drainedInWindow: number;
+      skippedInWindow: number;
+      drainedUploadBoundInWindow: number;
+      skippedUploadBoundInWindow: number;
+      byCause: {
+        skippedPrefetch: number;
+        skippedOverview: number;
+        skippedWrongLod: number;
+        skippedAlreadySent: number;
+        skippedNoMeta: number;
+      };
+    },
+  ): void {
     // 1. Sustained budget exhaustion — count consecutive ticks.
     if (this.currentUploadStats.budgetExhausted) {
       this.uploadConsecutiveExhausted += 1;
@@ -1386,11 +1489,21 @@ export class Orchestrator {
           now - this.uploadLogState.drainWasteLastLogAt >= UPLOAD_LOG_RATE_LIMIT_MS
         ) {
           debugLog("orch", "upload.drain_waste", {
+            // filterRatio is now upload-bound: skipped non-prefetch /
+            // (drained chunks − prefetch − overview). High = real
+            // planning/wanted-set sync issue (chunks meant to upload
+            // got filtered for stale-LOD, already-sent, or no-meta).
             filterRatio: rolling.filterRatio,
-            skippedWrongLod: this.currentUploadStats.skippedWrongLod,
-            skippedAlreadySent: this.currentUploadStats.skippedAlreadySent,
-            skippedPrefetch: this.currentUploadStats.skippedPrefetch,
-            skippedOverview: this.currentUploadStats.skippedOverview,
+            drainedUploadBoundInWindow: window.drainedUploadBoundInWindow,
+            skippedUploadBoundInWindow: window.skippedUploadBoundInWindow,
+            skippedWrongLod: window.byCause.skippedWrongLod,
+            skippedAlreadySent: window.byCause.skippedAlreadySent,
+            skippedNoMeta: window.byCause.skippedNoMeta,
+            // Informational — prefetch/overview decode load doesn't
+            // count toward the ratio, but it's useful context for
+            // "was the decode pool busy this window?".
+            skippedPrefetch: window.byCause.skippedPrefetch,
+            skippedOverview: window.byCause.skippedOverview,
             sustainedMs: Math.round(sustained),
           });
           this.uploadLogState.drainWasteLastLogAt = now;
@@ -1504,6 +1617,14 @@ export class Orchestrator {
           continue;
         }
 
+        // Worker rejected this chunk under the current camera (atlas
+        // full + too far). Don't re-attempt until the next cold-state
+        // rebuild clears `deliveryRejectedByWorker`.
+        if (this.deliveryRejectedByWorker.get(wid)?.has(req.chunkKey)) {
+          this.currentUploadStats.resendChunksRejected++;
+          continue;
+        }
+
         const cached = ctx.cpuCache.getCachedChunk(req.entityId, req.chunkKey);
         if (!cached) {
           this.currentUploadStats.resendChunksNotCached++;
@@ -1563,12 +1684,57 @@ export class Orchestrator {
     return deliveries.length > 0 || budgetExhausted;
   }
 
-  /** Remove evicted/skipped chunk keys from the sent-to-worker tracking. */
-  handleChunksEvicted(workerMemberId: string, evicted: string[], skipped: string[]): void {
+  /**
+   * Process a worker `chunksEvicted` report.
+   *
+   * `evicted` chunks were in the atlas and got displaced by closer
+   * arrivals — they should be re-eligible for upload (the orch may
+   * still want them under the same plan).
+   *
+   * `skipped` chunks never made it into the atlas (full + incoming
+   * farther than the farthest existing slot). Without rejection
+   * tracking they would be re-sent every tick by the resend pass,
+   * driving `upload.resend_storm`. We add them to
+   * `deliveryRejectedByWorker` so the resend pass can short-circuit,
+   * and forward to `cpuCache.markRejected` so the cache stops
+   * re-fetching them under eviction churn.
+   *
+   * Both sets are removed from `deliverySentToWorker` (skipped chunks
+   * were optimistically added there by `sendDeliveryToWorker`). Both
+   * are also removed from `deliveryRejectedByWorker` for evicted
+   * chunks, since acceptance + later eviction proves the chunk was
+   * deliverable.
+   */
+  handleChunksEvicted(
+    workerMemberId: string,
+    evicted: string[],
+    skipped: string[],
+    cpuCache: CpuCache,
+  ): void {
     const sentSet = this.deliverySentToWorker.get(workerMemberId);
     if (sentSet) {
       for (const key of evicted) sentSet.delete(key);
       for (const key of skipped) sentSet.delete(key);
+    }
+
+    if (evicted.length > 0) {
+      const rejectedSet = this.deliveryRejectedByWorker.get(workerMemberId);
+      if (rejectedSet) {
+        for (const key of evicted) rejectedSet.delete(key);
+      }
+    }
+
+    if (skipped.length > 0) {
+      let rejectedSet = this.deliveryRejectedByWorker.get(workerMemberId);
+      if (!rejectedSet) {
+        rejectedSet = new Set();
+        this.deliveryRejectedByWorker.set(workerMemberId, rejectedSet);
+      }
+      const entityId = this.widToEntityId.get(workerMemberId);
+      for (const key of skipped) {
+        rejectedSet.add(key);
+        if (entityId) cpuCache.markRejected(entityId, key);
+      }
     }
   }
 
@@ -1615,6 +1781,8 @@ export class Orchestrator {
   /** Clear all delivery state for a member (e.g. on dataset removal). */
   clearMemberResources(workerMemberId: string): void {
     this.deliverySentToWorker.delete(workerMemberId);
+    this.deliveryRejectedByWorker.delete(workerMemberId);
+    this.widToEntityId.delete(workerMemberId);
     // Drop proxy delivery tracking entries scoped to this member's dataset
     // so a re-add of the same dataset doesn't skip resends. Keys are
     // `${datasetId}|${entityId}|${kind}|${t}|${c}` — workerMemberId is

@@ -322,6 +322,13 @@ export interface UploadTickStats {
   resendChunksConsidered: number;
   resendChunksAlreadySent: number;
   resendChunksNotCached: number;
+  /**
+   * Chunks the worker has reported as `skipped` (atlas full + farther
+   * than the farthest existing slot). Tracked in the orchestrator's
+   * `deliveryRejectedByWorker` map and skipped by the resend pass until
+   * the next plan rebuild clears the rejection state.
+   */
+  resendChunksRejected: number;
   resendProxiesConsidered: number;
   resendProxiesAlreadyDelivered: number;
   resendProxiesNotCached: number;
@@ -342,9 +349,14 @@ export interface UploadRollingStats {
    */
   resendRatio: number;
   /**
-   * Ratio of drained items that were filtered out (skippedAnything ÷
-   * drained). High = decode pool burning cycles on chunks the GPU
-   * doesn't want anymore.
+   * Ratio of *upload-bound* drained chunks that were filtered out:
+   * `(skippedWrongLod + skippedAlreadySent + skippedNoMeta) /
+   *  (drainedChunks − skippedPrefetch − skippedOverview)`.
+   *
+   * Excludes prefetch (cache-only by design), overview (minimap path),
+   * and proxies (separate atlas, never skipped). High = real
+   * planning / wanted-set sync issue — chunks the orch *meant* to
+   * upload to the main GPU atlas got filtered.
    */
   filterRatio: number;
   /** p50 / p95 of upload byte sizes over the last N samples. */
@@ -368,6 +380,7 @@ export function emptyUploadTickStats(): UploadTickStats {
     skippedAlreadySent: 0, skippedNoMeta: 0,
     resendChunkUploads: 0, resendProxyUploads: 0,
     resendChunksConsidered: 0, resendChunksAlreadySent: 0, resendChunksNotCached: 0,
+    resendChunksRejected: 0,
     resendProxiesConsidered: 0, resendProxiesAlreadyDelivered: 0, resendProxiesNotCached: 0,
   };
 }

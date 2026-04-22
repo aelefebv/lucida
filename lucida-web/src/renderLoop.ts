@@ -84,7 +84,7 @@ export class RenderLoop {
     // When the worker evicts or skips chunks, update the orchestrator's delivery
     // tracking so they can be re-sent. Evictions trigger a new tick.
     this.client.onChunksEvicted = (datasetId: string, evicted: string[], skipped: string[]) => {
-      this.orchestrator.handleChunksEvicted(datasetId, evicted, skipped);
+      this.orchestrator.handleChunksEvicted(datasetId, evicted, skipped, this.session.cpuCache);
       if (evicted.length > 0) {
         this.setDirty("residency", "chunks_evicted");
       }

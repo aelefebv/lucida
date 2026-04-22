@@ -313,6 +313,18 @@ export class CpuCache {
    */
   private submitTick = 0;
 
+  /**
+   * Chunks the GPU worker reported as `skipped` (atlas full, incoming
+   * farther than farthest existing slot). The orchestrator calls
+   * {@link markRejected} on each one and {@link clearRejected} on every
+   * cold-state rebuild, so the set reflects "wanted but not deliverable
+   * under the current camera". `submit()` skips enqueuing rejected
+   * chunks for fetch — and crucially, does NOT refresh `lastSeenTick`
+   * on cached-but-rejected entries, so the active-detail eviction
+   * sweeps them out before useful chunks. Keyed entityId → Set<chunkKey>.
+   */
+  private rejectedKeys = new Map<string, Set<string>>();
+
   // Listeners notified when new chunks become ready
   private listeners: (() => void)[] = [];
 
@@ -420,6 +432,15 @@ export class CpuCache {
       const key = this.inFlightKey(req);
 
       this.totalRequests++;
+
+      // Worker has rejected this chunk under the current camera (atlas
+      // full + too far). Skip without refreshing `lastSeenTick` so the
+      // active-detail eviction can sweep the cached copy out — keeping
+      // it would burn budget on residency that won't reach the GPU.
+      // Cleared on the next cold-state rebuild via `clearRejected()`.
+      if (this.rejectedKeys.get(req.entityId)?.has(req.chunkKey)) {
+        continue;
+      }
 
       // Already cached? Refresh priority + lastSeenTick on the entry so
       // eviction can see the chunk is still wanted and at what urgency.
@@ -569,6 +590,45 @@ export class CpuCache {
       }
       this.activeEntityIds.delete(entityId);
     }
+  }
+
+  /**
+   * Mark a chunk as rejected by the GPU worker (atlas full + too far).
+   * Subsequent `submit()` calls skip it: no fetch enqueue, no
+   * `lastSeenTick` refresh on a cached copy. Cancels an in-flight fetch
+   * for the same key if one is still running — its bytes are already
+   * spoken for and no consumer will use the result.
+   *
+   * The orchestrator owns the rejection lifecycle and clears the set
+   * via {@link clearRejected} on every cold-state rebuild.
+   */
+  markRejected(entityId: string, chunkKey: string): void {
+    let set = this.rejectedKeys.get(entityId);
+    if (!set) {
+      set = new Set();
+      this.rejectedKeys.set(entityId, set);
+    }
+    if (set.has(chunkKey)) return;
+    set.add(chunkKey);
+
+    const key = `${entityId}/${chunkKey}`;
+    const inFlightEntry = this.inFlight.get(key);
+    if (inFlightEntry) {
+      inFlightEntry.controller.abort();
+      this.inFlightBytes -= inFlightEntry.estimatedBytes;
+      this.inFlight.delete(key);
+      this.pendingEnqueuedAt.delete(key);
+    }
+  }
+
+  /**
+   * Clear all worker-rejection markings. Called by the orchestrator on
+   * every cold-state rebuild (any of content/layout/view/selection/asset
+   * epoch changed) — the camera or active set may have shifted enough
+   * that previously-too-far chunks now fit.
+   */
+  clearRejected(): void {
+    this.rejectedKeys.clear();
   }
 
   /** Pull decoded buffers up to budget. Returns new deliveries only. */
@@ -946,6 +1006,7 @@ export class CpuCache {
     this.activeEntityIds.clear();
     this.epochHistory = [];
     this.failures.clear();
+    this.rejectedKeys.clear();
     this.lruCounter = 0;
     this.submitTick = 0;
 

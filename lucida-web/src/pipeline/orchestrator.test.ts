@@ -30,6 +30,8 @@ function createMockCpuCache(): CpuCache {
     updateConfig: vi.fn(),
     subscribe: vi.fn(() => () => {}),
     reset: vi.fn(),
+    markRejected: vi.fn(),
+    clearRejected: vi.fn(),
   } as unknown as CpuCache;
 }
 
@@ -584,6 +586,8 @@ describe("proxy delivery tracking", () => {
       updateConfig: vi.fn(),
       subscribe: vi.fn(() => () => {}),
       reset: vi.fn(),
+      markRejected: vi.fn(),
+      clearRejected: vi.fn(),
     } as unknown as CpuCache;
   }
 
