@@ -126,6 +126,17 @@ export interface OrchDebug {
   hasMixedLevels: boolean;
   /** Whether this was an epoch cache hit (plan() skipped) */
   epochCacheHit: boolean;
+  /**
+   * Cold-state rebuild telemetry. Counts and rates for `planAndFetch`
+   * fast-path hits vs full rebuilds, with per-epoch cause attribution
+   * and timing. Surfaced in DebugPanel "Render" tab + a header pulse.
+   *
+   * Populated on every tick of `planAndFetch` (both hit and rebuild
+   * paths). The cumulative counters (`rebuilds`/`cacheHits`/`causeTotal`)
+   * grow monotonically; the windowed counters are pruned to the last
+   * second of activity.
+   */
+  coldState: ColdStateDebug;
   /** VisibleRegion from WASM (for coordinate debugging) */
   visibleRegion: { xyBounds: [number, number, number, number]; zRange: [number, number]; effectiveZoom: number } | null;
   /** First few entity positions + level0 shape (for overlap debugging) */
@@ -135,6 +146,65 @@ export interface OrchDebug {
     fullShape: [number, number] | null; // [fullX, fullY] from level 0
     cachedKeys: number; // how many keys getCachedKeys returned
   }>;
+}
+
+/** Per-epoch cause attribution counters. */
+export interface ColdStateCauseCounts {
+  content: number;
+  layout: number;
+  view: number;
+  selection: number;
+  asset: number;
+}
+
+export interface ColdStateDebug {
+  /** Cumulative rebuilds since session start. */
+  rebuilds: number;
+  /** Cumulative cache hits since session start. */
+  cacheHits: number;
+  /** Hit rate over the last 1s window (0..1). NaN if no events yet. */
+  hitRate: number;
+  /** Rebuilds in the last 1s rolling window. */
+  rebuildsLastSecond: number;
+  /** Cache hits in the last 1s rolling window. */
+  hitsLastSecond: number;
+  /**
+   * Per-epoch invalidation counts in the last 1s window. A single
+   * rebuild can bump multiple epochs (e.g. view + selection during a
+   * t-scrub with camera motion), so the sum may exceed `rebuildsLastSecond`.
+   */
+  causeLastSecond: ColdStateCauseCounts;
+  /** Cumulative per-epoch invalidation counts since session start. */
+  causeTotal: ColdStateCauseCounts;
+  /** Wall-clock ms for the most recent rebuild (planAndFetch non-fast-path). */
+  lastRebuildMs: number | null;
+  /** p50 of last-N rebuild durations (60-sample window). */
+  rebuildP50Ms: number | null;
+  /** p95 of last-N rebuild durations. */
+  rebuildP95Ms: number | null;
+  /**
+   * `performance.now()` timestamp of the last rebuild. The DebugPanel
+   * polls every ~200ms and computes `now - lastRebuildAt` to drive the
+   * header pulse afterglow.
+   */
+  lastRebuildAt: number;
+}
+
+/** Initialize a zeroed ColdStateDebug snapshot. */
+export function emptyColdStateDebug(): ColdStateDebug {
+  return {
+    rebuilds: 0,
+    cacheHits: 0,
+    hitRate: NaN,
+    rebuildsLastSecond: 0,
+    hitsLastSecond: 0,
+    causeLastSecond: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
+    causeTotal: { content: 0, layout: 0, view: 0, selection: 0, asset: 0 },
+    lastRebuildMs: null,
+    rebuildP50Ms: null,
+    rebuildP95Ms: null,
+    lastRebuildAt: 0,
+  };
 }
 
 export interface DebugStats {

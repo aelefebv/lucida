@@ -42,9 +42,46 @@ import type {
 import type { ProxyRequest } from "./planning.ts";
 import {
   debugStats,
+  emptyColdStateDebug,
   type OrchDebug,
+  type ColdStateDebug,
+  type ColdStateCauseCounts,
   type PlanningDatasetDebug,
 } from "../debug/debugStats.ts";
+import { debugLog } from "../debug/logging.ts";
+
+// ---------------------------------------------------------------------------
+// Cold-state rebuild telemetry constants
+// ---------------------------------------------------------------------------
+//
+// `planAndFetch` either takes the epoch fast-path (cache hit) or runs a full
+// rebuild. We track both paths so the panel can show hit rate, rebuild rate,
+// per-epoch cause attribution, and timing — and so we can flag pathological
+// non-view churn.
+
+/** Rolling-window size for hit/rebuild rates and cause attribution. */
+const COLD_STATE_WINDOW_MS = 1000;
+
+/** Bounded sample buffer for p50/p95 rebuild duration. */
+const COLD_STATE_DURATION_SAMPLES = 60;
+
+/**
+ * Threshold above which sustained non-view rebuild churn is considered
+ * pathological. View-epoch churn is expected during camera motion;
+ * other epochs (selection, content, layout, asset) bumping at >30/s is
+ * almost always a bug.
+ */
+const COLD_STATE_CHURN_THRESHOLD_PER_SEC = 30;
+
+/** How long the rate must stay above threshold before a log fires. */
+const COLD_STATE_CHURN_SUSTAIN_MS = 2000;
+
+/** Don't re-log churn more often than this. */
+const COLD_STATE_CHURN_LOG_RATE_LIMIT_MS = 2000;
+
+/** Per-epoch cause keys we attribute rebuilds to. */
+const COLD_STATE_EPOCH_KEYS = ["content", "layout", "view", "selection", "asset"] as const;
+type ColdStateCauseKey = (typeof COLD_STATE_EPOCH_KEYS)[number];
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -437,10 +474,55 @@ export class Orchestrator {
   /** Wanted-set from the GPU worker — entityId → Set<chunkKey> of missing chunks. */
   private workerWantedSet = new Map<string, Set<string>>();
 
+  // -------------------------------------------------------------------------
+  // Cold-state rebuild telemetry. See COLD_STATE_* constants above.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Rolling 1s window of cold-state events. Each tick of `planAndFetch`
+   * appends one entry (either a hit or a rebuild); entries older than
+   * `COLD_STATE_WINDOW_MS` are pruned in {@link pruneColdStateWindow}.
+   * The DebugPanel "Render" tab + header pulse derive from this.
+   */
+  private coldStateEvents: Array<{
+    at: number;
+    kind: "hit" | "rebuild";
+    /** Empty for hits and for the very first rebuild (no prior epochs to diff). */
+    causes: ColdStateCauseKey[];
+    /** Wall-clock duration of the rebuild path; undefined for hits. */
+    durationMs?: number;
+  }> = [];
+  private coldStateRebuildCount = 0;
+  private coldStateHitCount = 0;
+  private coldStateCauseTotal: ColdStateCauseCounts = {
+    content: 0, layout: 0, view: 0, selection: 0, asset: 0,
+  };
+  /** Bounded sample buffer for p50/p95 rebuild duration. FIFO. */
+  private coldStateRebuildDurations: number[] = [];
+  private coldStateLastRebuildAt = 0;
+  private coldStateLastRebuildMs: number | null = null;
+  /**
+   * Cached `ColdStateDebug` snapshot. Updated each tick by
+   * {@link publishColdStateDebug}. Read by both the hit and rebuild
+   * branches of `planAndFetch` to populate `debugStats.orch.coldState`.
+   */
+  private coldStateDebug: ColdStateDebug = emptyColdStateDebug();
+  /**
+   * Sustained-non-view-churn detector. `aboveThresholdSince` tracks the
+   * timestamp at which we crossed `COLD_STATE_CHURN_THRESHOLD_PER_SEC`;
+   * `lastLogAt` rate-limits `cold_state.churn` events.
+   */
+  private coldStateChurnState = {
+    aboveThresholdSince: null as number | null,
+    lastLogAt: 0,
+  };
+
   planAndFetch(
     ctx: TickContext,
     minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   ): OrchestratorResult | null {
+    const tickStart = performance.now();
+
     // Step 1 — Epoch check
     const rawEpochs = JSON.parse(ctx.scene.epochs());
     const currentEpochs: PlanningEpochs = {
@@ -457,17 +539,28 @@ export class Orchestrator {
       request: this.requestEpoch,
     };
 
-    if (
-      this.lastEpochs &&
-      this.cachedResult &&
-      currentEpochs.content === this.lastEpochs.content &&
-      currentEpochs.layout === this.lastEpochs.layout &&
-      currentEpochs.view === this.lastEpochs.view &&
-      currentEpochs.selection === this.lastEpochs.selection &&
-      currentEpochs.asset === this.lastEpochs.asset
-    ) {
+    // Diff against last epochs — drives both the cache-hit decision and
+    // the per-epoch cause attribution we publish to coldState telemetry.
+    // The first call sees `lastEpochs == null` and falls through to
+    // rebuild with empty causes (init has no causes to attribute).
+    const hasPrior = this.lastEpochs !== null && this.cachedResult !== null;
+    let isHit = false;
+    const causes: ColdStateCauseKey[] = [];
+    if (hasPrior) {
+      const last = this.lastEpochs!;
+      if (currentEpochs.content !== last.content) causes.push("content");
+      if (currentEpochs.layout !== last.layout) causes.push("layout");
+      if (currentEpochs.view !== last.view) causes.push("view");
+      if (currentEpochs.selection !== last.selection) causes.push("selection");
+      if (currentEpochs.asset !== last.asset) causes.push("asset");
+      isHit = causes.length === 0;
+    }
+
+    if (isHit) {
+      this.recordColdStateHit(tickStart);
       if (debugStats.enabled && debugStats.orch) {
         debugStats.orch.epochCacheHit = true;
+        debugStats.orch.coldState = this.coldStateDebug;
       }
       // Replay member stats from the last full planning run so the panel
       // doesn't blink to "Visible: 0 / 0" between non-planning ticks.
@@ -819,6 +912,9 @@ export class Orchestrator {
         members: [],
         hasMixedLevels: false,
         epochCacheHit: false,
+        // Replaced after `recordColdStateRebuild` below — placeholder
+        // here so the type checks during the in-progress assembly.
+        coldState: this.coldStateDebug,
         visibleRegion: null,
         entityDiag: [],
       };
@@ -902,7 +998,143 @@ export class Orchestrator {
         numLevels: debugStats.numLevels,
       };
     }
+
+    // Cold-state telemetry: record this rebuild's cause + duration, then
+    // refresh the snapshot we attached to orchDebug above. Doing this
+    // *after* step 4 means the OrchDebug published this tick reflects
+    // the rebuild we just did.
+    const tickEnd = performance.now();
+    this.recordColdStateRebuild(tickStart, causes, tickEnd - tickStart);
+    if (debugStats.enabled && debugStats.orch) {
+      debugStats.orch.coldState = this.coldStateDebug;
+    }
+
     return this.cachedResult;
+  }
+
+  // -------------------------------------------------------------------------
+  // Cold-state telemetry helpers — see private fields above for state.
+  // -------------------------------------------------------------------------
+
+  private recordColdStateHit(now: number): void {
+    this.coldStateHitCount++;
+    this.coldStateEvents.push({ at: now, kind: "hit", causes: [] });
+    this.pruneColdStateWindow(now);
+    this.publishColdStateDebug();
+  }
+
+  private recordColdStateRebuild(
+    now: number,
+    causes: ColdStateCauseKey[],
+    durationMs: number,
+  ): void {
+    this.coldStateRebuildCount++;
+    for (const c of causes) this.coldStateCauseTotal[c]++;
+    this.coldStateLastRebuildAt = now;
+    this.coldStateLastRebuildMs = durationMs;
+    this.coldStateRebuildDurations.push(durationMs);
+    if (this.coldStateRebuildDurations.length > COLD_STATE_DURATION_SAMPLES) {
+      this.coldStateRebuildDurations.shift();
+    }
+    this.coldStateEvents.push({ at: now, kind: "rebuild", causes, durationMs });
+    this.pruneColdStateWindow(now);
+    this.maybeLogColdStateChurn(now);
+    this.publishColdStateDebug();
+  }
+
+  private pruneColdStateWindow(now: number): void {
+    const cutoff = now - COLD_STATE_WINDOW_MS;
+    while (this.coldStateEvents.length > 0 && this.coldStateEvents[0].at < cutoff) {
+      this.coldStateEvents.shift();
+    }
+  }
+
+  /**
+   * Sustained-non-view-churn detector. Camera motion legitimately bumps
+   * `view` at high rates, so we ignore it here; any *other* epoch
+   * sustaining > {@link COLD_STATE_CHURN_THRESHOLD_PER_SEC} for >
+   * {@link COLD_STATE_CHURN_SUSTAIN_MS} fires one rate-limited log line
+   * with the dominant cause. Mirrors the `cache.backpressure` pattern.
+   */
+  private maybeLogColdStateChurn(now: number): void {
+    let nonViewRebuilds = 0;
+    const causeCounts: Record<string, number> = {};
+    for (const e of this.coldStateEvents) {
+      if (e.kind !== "rebuild") continue;
+      let nonView = false;
+      for (const c of e.causes) {
+        if (c === "view") continue;
+        nonView = true;
+        causeCounts[c] = (causeCounts[c] ?? 0) + 1;
+      }
+      if (nonView) nonViewRebuilds++;
+    }
+
+    const above = nonViewRebuilds > COLD_STATE_CHURN_THRESHOLD_PER_SEC;
+    if (!above) {
+      this.coldStateChurnState.aboveThresholdSince = null;
+      return;
+    }
+
+    if (this.coldStateChurnState.aboveThresholdSince === null) {
+      this.coldStateChurnState.aboveThresholdSince = now;
+      return;
+    }
+
+    const sustainedFor = now - this.coldStateChurnState.aboveThresholdSince;
+    const sinceLastLog = now - this.coldStateChurnState.lastLogAt;
+    if (sustainedFor < COLD_STATE_CHURN_SUSTAIN_MS) return;
+    if (sinceLastLog < COLD_STATE_CHURN_LOG_RATE_LIMIT_MS) return;
+
+    const dominant =
+      Object.entries(causeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "?";
+    debugLog("orch", "cold_state.churn", {
+      rebuildsLastSec: this.coldStateEvents.filter(e => e.kind === "rebuild").length,
+      nonViewRebuildsLastSec: nonViewRebuilds,
+      dominantCause: dominant,
+      causeCountsLastSec: causeCounts,
+      sustainedMs: Math.round(sustainedFor),
+    });
+    this.coldStateChurnState.lastLogAt = now;
+  }
+
+  private publishColdStateDebug(): void {
+    let rebuilds = 0;
+    let hits = 0;
+    const causeLastSecond: ColdStateCauseCounts = {
+      content: 0, layout: 0, view: 0, selection: 0, asset: 0,
+    };
+    for (const e of this.coldStateEvents) {
+      if (e.kind === "rebuild") {
+        rebuilds++;
+        for (const c of e.causes) causeLastSecond[c]++;
+      } else {
+        hits++;
+      }
+    }
+    const total = rebuilds + hits;
+
+    let p50: number | null = null;
+    let p95: number | null = null;
+    if (this.coldStateRebuildDurations.length > 0) {
+      const sorted = [...this.coldStateRebuildDurations].sort((a, b) => a - b);
+      p50 = sorted[Math.floor(sorted.length * 0.5)];
+      p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
+    }
+
+    this.coldStateDebug = {
+      rebuilds: this.coldStateRebuildCount,
+      cacheHits: this.coldStateHitCount,
+      hitRate: total > 0 ? hits / total : NaN,
+      rebuildsLastSecond: rebuilds,
+      hitsLastSecond: hits,
+      causeLastSecond,
+      causeTotal: { ...this.coldStateCauseTotal },
+      lastRebuildMs: this.coldStateLastRebuildMs,
+      rebuildP50Ms: p50,
+      rebuildP95Ms: p95,
+      lastRebuildAt: this.coldStateLastRebuildAt,
+    };
   }
 
   /**

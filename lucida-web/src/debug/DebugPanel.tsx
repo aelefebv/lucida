@@ -61,6 +61,7 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
   render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
   cache: "CPU cache backpressure, failure bursts, eviction bursts",
+  orch: "Orchestrator events — cold state rebuild churn (sustained non-view invalidation)",
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
@@ -576,6 +577,18 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     setLoggingTick(t => t + 1);
   };
 
+  // Cold-state header pulse: bright orange while a rebuild was within the
+  // last poll interval, dim after that, gray when idle. The 500ms afterglow
+  // ensures fast rebuilds aren't lost between 200ms polls.
+  const coldStatePulse = (() => {
+    const at = snap.orch?.coldState?.lastRebuildAt ?? 0;
+    if (at === 0) return { color: "#444", glyph: "○" };
+    const ms = performance.now() - at;
+    if (ms < 200) return { color: "#fb4", glyph: "●" };
+    if (ms < 500) return { color: "#963", glyph: "◐" };
+    return { color: "#444", glyph: "○" };
+  })();
+
   return (
     <div className="debug-panel" style={style}>
       <div className="debug-tab-bar">
@@ -588,6 +601,19 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             {tab.label}
           </button>
         ))}
+        <span
+          title="Cold-state rebuild indicator — pulses on every full plan/rebuild tick"
+          style={{
+            marginLeft: "auto",
+            alignSelf: "center",
+            paddingRight: 6,
+            color: coldStatePulse.color,
+            fontFamily: "monospace",
+            fontSize: 12,
+          }}
+        >
+          {coldStatePulse.glyph}
+        </span>
       </div>
       <div className="debug-tab-content">
         {activeTab === "render" && (
@@ -1017,10 +1043,75 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                   </div>
                 )}
 
-                {/* Epoch cache status */}
+                {/* Cold state — epoch fast-path stats, rebuild rate,
+                    per-epoch cause attribution, and rebuild timing. */}
                 <div className="debug-section">
-                  <div className="debug-title">Orchestrator</div>
-                  <div>Epoch cache: {snap.orch.epochCacheHit ? "HIT (plan skipped)" : "MISS (re-planned)"}</div>
+                  <div className="debug-title">Cold State</div>
+                  <div>
+                    {snap.orch.epochCacheHit ? (
+                      <span style={{ color: "#4f4" }}>HIT (plan skipped)</span>
+                    ) : (
+                      <span style={{ color: "#fb4" }}>MISS (re-planned)</span>
+                    )}
+                  </div>
+                  {(() => {
+                    const cs = snap.orch.coldState;
+                    if (!cs || cs.rebuilds + cs.cacheHits === 0) {
+                      return <div style={{ color: "#666", marginTop: 4 }}>no events yet</div>;
+                    }
+                    const total = cs.rebuilds + cs.cacheHits;
+                    const cumPct = (cs.cacheHits / total) * 100;
+                    const winPct = Number.isNaN(cs.hitRate) ? null : cs.hitRate * 100;
+                    return (
+                      <>
+                        <div style={{ marginTop: 4 }}>
+                          Total: {cs.rebuilds} rebuilds · {cs.cacheHits} hits ({fmt(cumPct, 0)}%)
+                        </div>
+                        <div>
+                          Last 1s: {cs.rebuildsLastSecond} rebuilds · {cs.hitsLastSecond} hits
+                          {winPct !== null && (
+                            <span style={{ color: "#888" }}> ({fmt(winPct, 0)}% hits)</span>
+                          )}
+                        </div>
+                        {cs.rebuildsLastSecond > 0 && (
+                          <div style={{ marginTop: 4 }}>
+                            <span style={{ color: "#888" }}>Causes (1s): </span>
+                            {(() => {
+                              const entries = (Object.entries(cs.causeLastSecond) as [
+                                keyof typeof cs.causeLastSecond, number,
+                              ][])
+                                .filter(([, n]) => n > 0)
+                                .sort((a, b) => b[1] - a[1]);
+                              if (entries.length === 0) {
+                                return <span style={{ color: "#666" }}>—</span>;
+                              }
+                              return entries.map(([k, n], i) => (
+                                <span key={k} style={{ marginRight: 6 }}>
+                                  <span style={{
+                                    color: k === "view" ? "#888" : "#fb4",
+                                  }}>
+                                    {k}:{n}
+                                  </span>
+                                  {i < entries.length - 1 && " "}
+                                </span>
+                              ));
+                            })()}
+                          </div>
+                        )}
+                        {cs.lastRebuildMs !== null && (
+                          <div style={{ marginTop: 4 }}>
+                            Build: {fmt(cs.lastRebuildMs, 1)}ms
+                            {cs.rebuildP50Ms !== null && (
+                              <span style={{ color: "#888" }}>
+                                {" "}· p50 {fmt(cs.rebuildP50Ms, 1)}ms · p95{" "}
+                                {fmt(cs.rebuildP95Ms ?? 0, 1)}ms
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
 
                 {/* Upload path debug */}
