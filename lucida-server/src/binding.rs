@@ -5,8 +5,10 @@ use lucida_content::ImageId;
 use lucida_protocol::DatasetOpened;
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::ServerBindingSeed;
+use lucida_store::layout::ChunkByteLayout;
 use object_store::ObjectStore;
 
+use crate::decode::{BloscCompressor, BloscConfig, BloscShuffle, StorageCompression};
 use crate::proxy::{ProxyCache, ProxyGenerator};
 
 /// Operational storage binding. Owns live resources.
@@ -32,23 +34,26 @@ pub struct ServerBinding {
 }
 
 /// Compiled key-to-path mapper. Built once at import from per-image binding seeds.
-/// Used per chunk request to resolve logical keys to object store paths.
+/// Used per chunk request to resolve logical keys to object store paths and to
+/// look up the per-level compression + byte-slicing info.
 pub struct ChunkResolver {
     images: HashMap<ImageId, ImageResolver>,
-}
-
-/// What storage compression an image uses (detected at import from codec chain).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StorageCompression {
-    None,
-    Lz4,
-    Zstd,
 }
 
 struct ImageResolver {
     axes_names: Vec<String>,
     store_prefix: Option<String>,
-    storage_compression: StorageCompression,
+    /// Per-level compression + byte layout. Indexed by level index.
+    levels: Vec<LevelInfo>,
+}
+
+/// What the chunk-fetch path needs to know about one level of one image:
+/// how the bytes are compressed on disk, and whether to slice them down to
+/// the canonical 5D chunk size after decompression.
+#[derive(Debug, Clone, Copy)]
+pub struct LevelInfo {
+    pub compression: StorageCompression,
+    pub chunk_byte_layout: ChunkByteLayout,
 }
 
 impl ChunkResolver {
@@ -58,15 +63,40 @@ impl ChunkResolver {
             .images
             .iter()
             .map(|img| {
-                // Detect storage compression from the codec chain of level 0.
-                let storage_compression = img.storage_codecs.first()
-                    .map(|sc| detect_compression(&sc.codecs))
-                    .unwrap_or(StorageCompression::None);
+                // Detect storage compression per level. Codec slots that fall
+                // through to `None` (unknown codec name) preserve the existing
+                // pre-#447 behavior; Slice 2 of #447 will turn that into a
+                // hard import error so unknown codecs cannot reach this point.
+                let levels: Vec<LevelInfo> = img
+                    .storage_codecs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, sc)| {
+                        let compression = detect_compression(&sc.codecs);
+                        // Defensive: chunk_byte_layouts is in lock-step with
+                        // storage_codecs at import time. If it isn't (e.g.
+                        // older snapshot), fall back to a no-slice canonical
+                        // layout so we don't truncate.
+                        let chunk_byte_layout = img
+                            .chunk_byte_layouts
+                            .get(i)
+                            .copied()
+                            .unwrap_or(ChunkByteLayout {
+                                canonical_byte_size: 0,
+                                on_disk_byte_size: 0,
+                                needs_slicing: false,
+                            });
+                        LevelInfo {
+                            compression,
+                            chunk_byte_layout,
+                        }
+                    })
+                    .collect();
 
                 let resolver = ImageResolver {
                     axes_names: img.axes_names.clone(),
                     store_prefix: img.store_prefix.clone(),
-                    storage_compression,
+                    levels,
                 };
                 (img.image_id.clone(), resolver)
             })
@@ -74,11 +104,12 @@ impl ChunkResolver {
         ChunkResolver { images }
     }
 
-    /// What storage compression does this image use?
-    pub fn storage_compression(&self, image_id: &ImageId) -> StorageCompression {
-        self.images.get(image_id)
-            .map(|img| img.storage_compression)
-            .unwrap_or(StorageCompression::None)
+    /// Look up per-level info (compression + byte layout) for a given image
+    /// and level. Returns `None` if either the image or the level is unknown.
+    pub fn level_info(&self, image_id: &ImageId, level: u32) -> Option<LevelInfo> {
+        self.images
+            .get(image_id)
+            .and_then(|img| img.levels.get(level as usize).copied())
     }
 
     /// Resolve a canonical chunk key to an object store path for a given image.
@@ -93,12 +124,26 @@ impl ChunkResolver {
 }
 
 /// Detect storage compression from a Zarr v3 codec chain.
-fn detect_compression(codecs: &[serde_json::Value]) -> StorageCompression {
+///
+/// Recognized:
+/// - `lz4` / `numcodecs/lz4` → [`StorageCompression::Lz4`]
+/// - `zstd` / `numcodecs/zstd` → [`StorageCompression::Zstd`]
+/// - `blosc` with cname=zstd, shuffle ∈ {noshuffle, shuffle, bitshuffle},
+///   typesize ∈ {1, 2, 4} → [`StorageCompression::Blosc`]
+///
+/// Falls back to [`StorageCompression::None`] for unrecognized codecs (will
+/// become a hard import-time error in Slice 2 of PRD #447).
+pub fn detect_compression(codecs: &[serde_json::Value]) -> StorageCompression {
     for codec in codecs {
         if let Some(name) = codec.get("name").and_then(|n| n.as_str()) {
             match name {
                 "numcodecs/lz4" | "lz4" => return StorageCompression::Lz4,
                 "numcodecs/zstd" | "zstd" => return StorageCompression::Zstd,
+                "blosc" => {
+                    if let Some(config) = parse_blosc_config(codec.get("configuration")) {
+                        return StorageCompression::Blosc(config);
+                    }
+                }
                 _ => {}
             }
         }
@@ -106,11 +151,44 @@ fn detect_compression(codecs: &[serde_json::Value]) -> StorageCompression {
     StorageCompression::None
 }
 
+/// Validate a blosc codec's `configuration` object against the supported
+/// subset. Returns `None` if any field is missing, malformed, or outside the
+/// supported subset — caller treats that as `StorageCompression::None`
+/// (Slice 1 behavior; Slice 2 of #447 turns it into a hard error).
+fn parse_blosc_config(config: Option<&serde_json::Value>) -> Option<BloscConfig> {
+    let cfg = config?;
+    let cname = cfg.get("cname")?.as_str()?;
+    let shuffle_str = cfg.get("shuffle")?.as_str()?;
+    let typesize = cfg.get("typesize")?.as_u64()?;
+
+    let cname = match cname {
+        "zstd" => BloscCompressor::Zstd,
+        _ => return None,
+    };
+    let shuffle = match shuffle_str {
+        "noshuffle" => BloscShuffle::None,
+        "shuffle" => BloscShuffle::Byte,
+        "bitshuffle" => BloscShuffle::Bit,
+        _ => return None,
+    };
+    let typesize = match typesize {
+        1 | 2 | 4 => typesize as u8,
+        _ => return None,
+    };
+
+    Some(BloscConfig {
+        typesize,
+        cname,
+        shuffle,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lucida_content::ImageId;
     use lucida_store::import_types::{ImageBindingSeed, ServerBindingSeed};
+    use serde_json::json;
 
     fn make_seed(images: Vec<ImageBindingSeed>) -> ServerBindingSeed {
         ServerBindingSeed { images }
@@ -122,6 +200,7 @@ mod tests {
             axes_names: axes.into_iter().map(String::from).collect(),
             store_prefix: prefix.map(String::from),
             storage_codecs: vec![],
+            chunk_byte_layouts: vec![],
         }
     }
 
@@ -215,5 +294,105 @@ mod tests {
             .unwrap();
         assert!(!path1.contains("B/2/0"));
         assert!(!path3.contains("B/2/0"));
+    }
+
+    // --- detect_compression / parse_blosc_config tests ---
+
+    #[test]
+    fn detect_lz4_variants() {
+        let lz4_codec = json!([
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "lz4"}
+        ]);
+        let nc_lz4_codec = json!([
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "numcodecs/lz4"}
+        ]);
+        assert_eq!(
+            detect_compression(lz4_codec.as_array().unwrap()),
+            StorageCompression::Lz4
+        );
+        assert_eq!(
+            detect_compression(nc_lz4_codec.as_array().unwrap()),
+            StorageCompression::Lz4
+        );
+    }
+
+    #[test]
+    fn detect_blosc_zstd_bitshuffle_typesize_2() {
+        let codec = json!([
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {
+                "name": "blosc",
+                "configuration": {
+                    "typesize": 2,
+                    "cname": "zstd",
+                    "shuffle": "bitshuffle",
+                    "blocksize": 0,
+                    "clevel": 3
+                }
+            }
+        ]);
+        let comp = detect_compression(codec.as_array().unwrap());
+        match comp {
+            StorageCompression::Blosc(cfg) => {
+                assert_eq!(cfg.typesize, 2);
+                assert_eq!(cfg.cname, BloscCompressor::Zstd);
+                assert_eq!(cfg.shuffle, BloscShuffle::Bit);
+            }
+            other => panic!("expected Blosc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_blosc_unknown_cname_falls_through() {
+        // blosclz as inner cname not yet supported → falls through to None
+        // (Slice 2 of #447 will reject this at import time).
+        let codec = json!([
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {
+                "name": "blosc",
+                "configuration": {
+                    "typesize": 2,
+                    "cname": "blosclz",
+                    "shuffle": "bitshuffle"
+                }
+            }
+        ]);
+        assert_eq!(
+            detect_compression(codec.as_array().unwrap()),
+            StorageCompression::None
+        );
+    }
+
+    #[test]
+    fn detect_blosc_unsupported_typesize_falls_through() {
+        let codec = json!([
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {
+                "name": "blosc",
+                "configuration": {
+                    "typesize": 8,
+                    "cname": "zstd",
+                    "shuffle": "bitshuffle"
+                }
+            }
+        ]);
+        assert_eq!(
+            detect_compression(codec.as_array().unwrap()),
+            StorageCompression::None
+        );
+    }
+
+    #[test]
+    fn detect_unknown_codec_falls_through() {
+        let codec = json!([
+            {"name": "bytes", "configuration": {"endian": "little"}},
+            {"name": "gzip"}
+        ]);
+        assert_eq!(
+            detect_compression(codec.as_array().unwrap()),
+            StorageCompression::None
+        );
     }
 }

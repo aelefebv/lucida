@@ -2,9 +2,44 @@
 //!
 //! Factored out of [`crate::handler::serve_chunk_from_store`] (originally
 //! at handler.rs lines 486-523) so the proxy generator can reuse the
-//! same lz4/zstd handling.
+//! same lz4/zstd/blosc handling.
 
-use crate::binding::StorageCompression;
+pub mod blosc;
+
+/// What storage compression an image uses (detected at import from the codec
+/// chain). Pinned-axis byte slicing is handled separately via
+/// [`crate::binding::ChunkByteLayout`]; this enum only describes how to turn
+/// the on-disk bytes back into raw voxel bytes.
+///
+/// `Blosc` carries a validated [`BloscConfig`] so the decoder can cross-check
+/// the on-disk header (typesize, shuffle, compressor code) against what the
+/// codec chain promised.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageCompression {
+    None,
+    Lz4,
+    Zstd,
+    Blosc(BloscConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BloscConfig {
+    pub typesize: u8,
+    pub cname: BloscCompressor,
+    pub shuffle: BloscShuffle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BloscCompressor {
+    Zstd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BloscShuffle {
+    None,
+    Byte,
+    Bit,
+}
 
 /// Errors decoding compressed storage bytes back to raw voxel bytes.
 #[derive(thiserror::Error, Debug)]
@@ -13,6 +48,8 @@ pub enum DecodeError {
     Lz4(String),
     #[error("zstd decode failed: {0}")]
     Zstd(String),
+    #[error("blosc decode failed: {0}")]
+    Blosc(#[from] blosc::BloscError),
 }
 
 /// Decode `storage_bytes` according to `compression`, returning the raw
@@ -21,6 +58,7 @@ pub enum DecodeError {
 /// - `None` → returns a copy of the input.
 /// - `Lz4` → `lz4_flex::decompress_size_prepended`.
 /// - `Zstd` → `zstd::stream::decode_all`.
+/// - `Blosc(config)` → [`blosc::decode_blosc`] with the validated config.
 pub fn decode_storage_bytes(
     storage_bytes: &[u8],
     compression: StorageCompression,
@@ -31,6 +69,8 @@ pub fn decode_storage_bytes(
             .map_err(|e| DecodeError::Lz4(e.to_string())),
         StorageCompression::Zstd => zstd::stream::decode_all(std::io::Cursor::new(storage_bytes))
             .map_err(|e| DecodeError::Zstd(e.to_string())),
+        StorageCompression::Blosc(config) => blosc::decode_blosc(storage_bytes, &config)
+            .map_err(DecodeError::Blosc),
     }
 }
 

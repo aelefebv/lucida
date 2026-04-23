@@ -220,6 +220,7 @@ pub async fn build_single_field_dataset(
             // No codecs → StorageCompression::None, matching the raw
             // bytes we put into the store below.
             storage_codecs: vec![],
+            chunk_byte_layouts: vec![],
         }],
     }));
 

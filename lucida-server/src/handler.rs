@@ -282,19 +282,25 @@ pub async fn handle_client(
                     match chunk_msg {
                         ChunkMessage::ChunkRequest { dataset_id, image_id, key } => {
                             // Look up the server binding for this dataset.
+                            // Parse the level prefix from the chunk key to
+                            // pick the right per-level compression + byte
+                            // layout. Malformed keys default to level 0 —
+                            // serve_chunk_from_store will fail-fast at
+                            // resolve time.
+                            let level = parse_level_from_chunk_key(&key);
                             let binding = {
                                 let sess = session.lock().await;
                                 sess.server_bindings.get(&dataset_id).map(|b| {
-                                    let compression = b.resolver.storage_compression(&image_id);
-                                    (b.resolver.resolve(&image_id, &key), compression, b.cache.clone())
+                                    let level_info = b.resolver.level_info(&image_id, level);
+                                    (b.resolver.resolve(&image_id, &key), level_info, b.cache.clone())
                                 })
                             };
-                            if let Some((resolved, compression, cache)) = binding {
+                            if let Some((resolved, level_info, cache)) = binding {
                                 let unicast_routes_clone = Arc::clone(&unicast_routes);
                                 tokio::spawn(async move {
                                     serve_chunk_from_store(
                                         id, &dataset_id, &image_id, &key,
-                                        resolved.as_deref(), compression, &cache,
+                                        resolved.as_deref(), level_info, &cache,
                                         &unicast_routes_clone,
                                     ).await;
                                 });
@@ -691,17 +697,31 @@ async fn handle_open_remote_dataset(
 /// pre-generation task.
 const PROXY_TARGET_LONG_AXIS: u32 = 128;
 
+/// Parse the level prefix from a canonical chunk key (`"{level}/t/c/z/y/x"`).
+/// Returns `0` if the key is malformed or missing a numeric prefix — the
+/// caller's resolve step will turn that into a clean per-key failure.
+fn parse_level_from_chunk_key(key: &str) -> u32 {
+    key.split('/').next().and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
 /// Read a chunk from a CachedStore and send it to the requesting client.
 ///
 /// `object_path` is the pre-resolved object store path from the ChunkResolver.
 /// If `None`, the image_id was unknown and the request is rejected.
+///
+/// `level_info` carries per-level compression + byte-slicing metadata. When
+/// `level_info.chunk_byte_layout.needs_slicing` is true, the decoded bytes
+/// are truncated to `canonical_byte_size` to drop the pinned-axis trailing
+/// slices (PRD #447, Slice 1). A `None` `level_info` (unknown image or
+/// level — e.g. older snapshot) falls back to no-compression-no-slicing
+/// so legacy datasets keep working.
 async fn serve_chunk_from_store(
     client_id: ClientId,
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: &str,
     object_path: Option<&str>,
-    storage_compression: crate::binding::StorageCompression,
+    level_info: Option<crate::binding::LevelInfo>,
     cache: &Arc<CachedStore>,
     unicast_routes: &UnicastRoutes,
 ) {
@@ -715,6 +735,15 @@ async fn serve_chunk_from_store(
         }
     };
 
+    let level_info = level_info.unwrap_or(crate::binding::LevelInfo {
+        compression: crate::decode::StorageCompression::None,
+        chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
+            canonical_byte_size: 0,
+            on_disk_byte_size: 0,
+            needs_slicing: false,
+        },
+    });
+
     tracing::trace!(dataset = %dataset_id, image = %image_id, key = chunk_key, path = object_path, "serving chunk");
     let obj_path = Path::from(object_path);
     let storage_bytes = match cache.get_bytes(&obj_path).await {
@@ -727,13 +756,13 @@ async fn serve_chunk_from_store(
 
     // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
     // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
-    let bytes: Vec<u8> = match decode_storage_bytes(&storage_bytes, storage_compression) {
+    let mut bytes: Vec<u8> = match decode_storage_bytes(&storage_bytes, level_info.compression) {
         Ok(raw) => {
             tracing::debug!(
                 key = chunk_key,
                 compressed = storage_bytes.len(),
                 decompressed = raw.len(),
-                compression = ?storage_compression,
+                compression = ?level_info.compression,
                 "chunk decoded"
             );
             raw
@@ -743,6 +772,16 @@ async fn serve_chunk_from_store(
             return;
         }
     };
+
+    // Pinned-axis prefix slice. Defensive: if the canonical_byte_size is
+    // larger than what we got back (e.g. stale layout cache, fixture without
+    // proper layout), skip the truncation and let downstream catch it.
+    if level_info.chunk_byte_layout.needs_slicing
+        && bytes.len() >= level_info.chunk_byte_layout.canonical_byte_size
+        && level_info.chunk_byte_layout.canonical_byte_size > 0
+    {
+        bytes.truncate(level_info.chunk_byte_layout.canonical_byte_size);
+    }
 
     // Build binary response: [client_id: u32 LE][key_len: u16 LE][key][data]
     // The composite key is "{dataset_id}/{image_id}/{chunk_key}".

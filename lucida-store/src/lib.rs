@@ -3,6 +3,7 @@ pub mod cache;
 pub mod import;
 pub mod import_types;
 pub mod ingest;
+pub mod layout;
 pub(crate) mod parse;
 
 /// The canonical 5D axis names in order.

@@ -276,7 +276,19 @@ async fn fetch_dense_volume(
         .ok_or(BuildSourceError::TooLarge)?;
     let mut out = vec![0u16; total_voxels];
 
-    let storage_compression = resolver.storage_compression(&image.image_id);
+    // Per-level compression + byte-slicing layout. Defensive: a missing
+    // level_info (older snapshot or test fixture without per-level info)
+    // falls back to no compression and no slicing.
+    let level_info = resolver
+        .level_info(&image.image_id, level as u32)
+        .unwrap_or(crate::binding::LevelInfo {
+            compression: crate::decode::StorageCompression::None,
+            chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
+                canonical_byte_size: 0,
+                on_disk_byte_size: 0,
+                needs_slicing: false,
+            },
+        });
 
     for gz in 0..grid_z {
         for gy in 0..grid_y {
@@ -295,12 +307,18 @@ async fn fetch_dense_volume(
                         message: e.to_string(),
                     })?;
 
-                let raw = decode_storage_bytes(&storage_bytes, storage_compression)
+                let mut raw = decode_storage_bytes(&storage_bytes, level_info.compression)
                     .map_err(|e| BuildSourceError::Decode {
                         image: image.image_id.clone(),
                         key: key.clone(),
                         source: e,
                     })?;
+                // Pinned-axis prefix slice — see [`lucida_store::layout`].
+                if level_info.chunk_byte_layout.needs_slicing
+                    && raw.len() >= level_info.chunk_byte_layout.canonical_byte_size
+                {
+                    raw.truncate(level_info.chunk_byte_layout.canonical_byte_size);
+                }
 
                 // Edge truncation: the last grid cell on each axis may be
                 // partial. Compute the in-bounds extent for this chunk.

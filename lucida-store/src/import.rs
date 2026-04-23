@@ -14,6 +14,7 @@ use lucida_protocol::*;
 
 use crate::backend::StoreError;
 use crate::import_types::*;
+use crate::layout::{compute_chunk_byte_layout, ChunkByteLayout};
 use crate::parse;
 
 /// Import a dataset from an OME-Zarr store.
@@ -55,6 +56,12 @@ async fn import_single_image(
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
+    let chunk_byte_layouts = build_chunk_byte_layouts(
+        &axes_names,
+        &level_metas,
+        data_type_size(data_type),
+        &layout.pinned,
+    )?;
 
     let entity_id = EntityId(id.to_string());
     let image_id = ImageId(id.to_string());
@@ -76,7 +83,7 @@ async fn import_single_image(
             axes,
             levels,
             data_type,
-            pinned_axes: layout.pinned,
+            pinned_axes: layout.pinned.clone(),
         },
     };
 
@@ -121,6 +128,7 @@ async fn import_single_image(
                     codecs: meta.codecs.clone(),
                 })
                 .collect(),
+            chunk_byte_layouts,
         }],
     };
 
@@ -278,6 +286,12 @@ async fn import_plate(
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
+    let chunk_byte_layouts = build_chunk_byte_layouts(
+        &axes_names,
+        &level_metas,
+        data_type_size(data_type),
+        &layout.pinned,
+    )?;
 
     let positioning_mode = if has_stage_positions {
         PositioningMode::Stage
@@ -448,6 +462,7 @@ async fn import_plate(
                         codecs: meta.codecs.clone(),
                     })
                     .collect(),
+                chunk_byte_layouts: chunk_byte_layouts.clone(),
             });
         }
     }
@@ -526,6 +541,39 @@ fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
             "unsupported data type: {other}"
         ))),
     }
+}
+
+fn data_type_size(dt: DataType) -> u8 {
+    match dt {
+        DataType::Uint8 => 1,
+        DataType::Uint16 => 2,
+        DataType::Uint32 | DataType::Float32 => 4,
+        DataType::Float64 => 8,
+    }
+}
+
+fn build_chunk_byte_layouts(
+    axes_names: &[String],
+    level_metas: &[parse::ArrayMeta],
+    dtype_size: u8,
+    pinned: &[PinnedAxis],
+) -> Result<Vec<ChunkByteLayout>, StoreError> {
+    level_metas
+        .iter()
+        .enumerate()
+        .map(|(i, meta)| {
+            compute_chunk_byte_layout(
+                axes_names,
+                &meta.chunk_grid.configuration.chunk_shape,
+                dtype_size,
+                pinned,
+            )
+            .map_err(|e| match e {
+                StoreError::Metadata(msg) => StoreError::Metadata(format!("level {i}: {msg}")),
+                other => other,
+            })
+        })
+        .collect()
 }
 
 fn warn_pinned_axes(dataset_id: &str, pinned: &[PinnedAxis]) {
@@ -1587,6 +1635,186 @@ mod tests {
             result.binding_seed.images[0].axes_names,
             vec!["t", "c", "z", "m", "y", "x"],
         );
+
+        // PRD #447 Slice 1: chunk_byte_layouts captures the m=2 chunk
+        // requiring prefix slicing — canonical chunk is 2048*1504*2=6160384
+        // bytes; on-disk chunk is twice that.
+        assert_eq!(result.binding_seed.images[0].chunk_byte_layouts.len(), 1);
+        let layout = result.binding_seed.images[0].chunk_byte_layouts[0];
+        assert!(layout.needs_slicing);
+        assert_eq!(layout.canonical_byte_size, 2048 * 1504 * 2);
+        assert_eq!(layout.on_disk_byte_size, 2 * 2048 * 1504 * 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Helper for PRD #447 Slice 1 tests: synthesize a 6D OME-Zarr fixture
+    /// with custom axes order and chunk shape so we can exercise the
+    /// non-prefix rejection path.
+    fn create_6d_fixture_with_axes(
+        dir: &std::path::Path,
+        axes: &[&str],
+        shape: &[u64],
+        chunk: &[u64],
+        codec_after_bytes: Option<serde_json::Value>,
+    ) {
+        fs::create_dir_all(dir).unwrap();
+
+        let axes_json: Vec<serde_json::Value> = axes
+            .iter()
+            .map(|name| {
+                let kind = match name.to_lowercase().as_str() {
+                    "t" => "time",
+                    "c" => "channel",
+                    _ => "space",
+                };
+                serde_json::json!({"name": name, "type": kind})
+            })
+            .collect();
+
+        let scale: Vec<f64> = vec![1.0; axes.len()];
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "multiscales": [{
+                        "version": "0.5",
+                        "name": "img",
+                        "axes": axes_json,
+                        "datasets": [{
+                            "path": "0",
+                            "coordinateTransformations": [{"type": "scale", "scale": scale}]
+                        }]
+                    }]
+                }
+            }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        let level_dir = dir.join("0");
+        fs::create_dir_all(&level_dir).unwrap();
+
+        let mut codecs = vec![serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}})];
+        if let Some(c) = codec_after_bytes {
+            codecs.push(c);
+        }
+
+        let arr = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": shape,
+            "data_type": "uint16",
+            "chunk_grid": { "name": "regular", "configuration": { "chunk_shape": chunk } },
+            "codecs": codecs,
+            "fill_value": 0
+        });
+        fs::write(
+            level_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&arr).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// PRD #447 Slice 1: 6D-with-m + lz4 codec + m chunk_size=2 →
+    /// import succeeds; the binding seed records lz4 in storage_codecs and
+    /// `needs_slicing == true` in chunk_byte_layouts.
+    #[tokio::test]
+    async fn import_6d_with_m_and_lz4_compresses_and_slices() {
+        let dir = temp_dir("import_6d_m_lz4");
+        create_6d_fixture_with_axes(
+            &dir,
+            &["t", "c", "z", "m", "y", "x"],
+            &[1, 1, 1, 4, 64, 64],
+            &[1, 1, 1, 2, 64, 64],
+            Some(serde_json::json!({"name": "numcodecs/lz4", "configuration": {}})),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "lz4-6d", "lz4 6D")
+            .await
+            .unwrap();
+
+        let layout = result.binding_seed.images[0].chunk_byte_layouts[0];
+        assert!(layout.needs_slicing, "chunk_size=2 on m axis should need slicing");
+        assert_eq!(layout.canonical_byte_size, 64 * 64 * 2);
+        assert_eq!(layout.on_disk_byte_size, 2 * 64 * 64 * 2);
+
+        // The lz4 codec should be recorded in storage_codecs (server-side
+        // detection happens in ChunkResolver::new).
+        assert_eq!(result.binding_seed.images[0].storage_codecs.len(), 1);
+        let codecs = &result.binding_seed.images[0].storage_codecs[0].codecs;
+        assert!(
+            codecs.iter().any(|c| c.get("name").and_then(|n| n.as_str()) == Some("numcodecs/lz4")),
+            "expected lz4 in storage_codecs: {codecs:?}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PRD #447 Slice 1: 6D-with-m + blosc-zstd-bitshuffle → import
+    /// succeeds and records the blosc codec in storage_codecs (decode happens
+    /// at chunk-fetch time, not import time).
+    #[tokio::test]
+    async fn import_6d_with_m_and_blosc() {
+        let dir = temp_dir("import_6d_m_blosc");
+        create_6d_fixture_with_axes(
+            &dir,
+            &["t", "c", "z", "m", "y", "x"],
+            &[1, 1, 1, 4, 64, 64],
+            &[1, 1, 1, 2, 64, 64],
+            Some(serde_json::json!({
+                "name": "blosc",
+                "configuration": {
+                    "typesize": 2,
+                    "cname": "zstd",
+                    "shuffle": "bitshuffle",
+                    "blocksize": 0,
+                    "clevel": 3
+                }
+            })),
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "blosc-6d", "blosc 6D")
+            .await
+            .unwrap();
+
+        let codecs = &result.binding_seed.images[0].storage_codecs[0].codecs;
+        assert!(
+            codecs.iter().any(|c| c.get("name").and_then(|n| n.as_str()) == Some("blosc")),
+            "expected blosc in storage_codecs: {codecs:?}",
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PRD #447 Slice 1: non-prefix axis layout (e.g. `[t,c,z,y,m,x]` with
+    /// y_chunk > 1) is rejected at import with an error that names the
+    /// offending axis and the phrase "non-prefix".
+    #[tokio::test]
+    async fn import_rejects_non_prefix_pinned_axis_layout() {
+        let dir = temp_dir("import_6d_m_nonprefix");
+        create_6d_fixture_with_axes(
+            &dir,
+            &["t", "c", "z", "y", "m", "x"],
+            &[1, 1, 1, 64, 4, 64],
+            &[1, 1, 1, 64, 2, 64],
+            None,
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "bad-6d", "Bad 6D")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains('m'), "error should name 'm': {msg}");
+        assert!(msg.contains("non-prefix"), "error should say 'non-prefix': {msg}");
 
         let _ = fs::remove_dir_all(&dir);
     }
