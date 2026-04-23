@@ -25,7 +25,9 @@ The split exists because mixing them led to either over-broadcasting (server-onl
 - `backend.rs` — `open(url)` → `Arc<dyn ObjectStore>`. URL scheme routing: `/path` (local), `gs://`, `s3://`, `http(s)://`
 - `cache.rs` — `CachedStore`: byte-level LRU wrapping any `ObjectStore`
 - `import.rs` — `import_dataset`: detects plate vs single-image from OME metadata, builds `ImportResult`
-- `import_types.rs` — `ImportResult`, `ServerBindingSeed`, `ImageBindingSeed`, `StorageCodecInfo`
+- `import_types.rs` — `ImportResult`, `ServerBindingSeed`, `ImageBindingSeed`, `LevelBindingInfo`
+- `codec.rs` — `StorageCompression`, `BloscConfig`, `BloscCompressor`, `BloscShuffle`. Parses + validates a Zarr v3 codec chain into Lucida's structured codec types. Validation runs at import per level and produces per-level errors (e.g. `level 2: blosc cname 'lz4' is not supported`). See [[gotchas/blosc-support]] for the supported subset.
+- `layout.rs` — `ChunkByteLayout { canonical_byte_size, on_disk_byte_size, needs_slicing }` and `compute_chunk_byte_layout`. Walks the raw axes list against the chunk shape, applies the prefix-eligibility rule, and returns the layout the decoder uses to truncate non-canonical chunks. See [[gotchas/non-canonical-axes#prefix-slice-handling-post-slice-1]].
 - `parse.rs` — Zarr v3 metadata parsing helpers
 - `ingest/` — plate scanner, plate reader, TIFF reader, OME-Zarr writer, pyramid generation. Used by ingest tooling.
 
@@ -40,7 +42,17 @@ The split exists because mixing them led to either over-broadcasting (server-onl
 - **Logical chunk keys are always 5D `level/t/c/z/y/x`**, even when the dataset has fewer or more axes. `chunk_key_to_store_path` walks the dataset's *raw* axes list to construct the on-disk path: it strips canonical-subset axes (e.g. for a `[c,y,x]` dataset, t/z drop out) and injects `"0"` for canonical-superset axes (e.g. for a CZI `[t,c,z,m,y,x]` mosaic, the m position gets `"0"` — the axis is pinned to index 0 by `lucida-content::normalize::classify_axes`). Clients and planners don't have to special-case axis variants.
 - **Plate fields are entities; well placement is a layout.** The import builds field entities (`{id}:field:{path}`) parented to well entities (`{id}:well:{path}`) and emits a source layout that places the wells, not the fields. Field-to-well transforms encode each FOV's intra-well position.
 - **Stage-positioned plates have translations in physical units (microns)** in OME-Zarr, but lucida composes transforms in voxel units. The import converts using the level-0 X/Y scale before forming the `field → well` transform. See [[gotchas/stage-translations-are-microns]].
-- **Storage codecs are detected from level 0** and recorded as a per-image `storage_codecs` list. Currently consulted only for compression detection; preserved per-level so future code can support per-LOD codec differences.
+- **Storage codecs are validated at import time, per level.** Each level's codec chain is parsed into `StorageCompression` (in `codec.rs`); unsupported codecs surface as a structured error naming the level and offending property rather than silently passing compressed bytes through to the client. See [[gotchas/blosc-support]].
+
+## Binding-seed shape (post-Slice 2)
+
+`ImageBindingSeed` carries per-level decoder + chunk-layout information as a single structured field:
+
+- `levels: Vec<LevelBindingInfo>` where `LevelBindingInfo { level_index, compression, chunk_byte_layout }`.
+
+This replaces the older parallel `storage_codecs: Vec<...>` + `chunk_byte_layouts: Vec<...>` pair, which was easy to misindex (and made it tempting to store loose codec JSON). Consumers (`ChunkResolver::level_info(image_id, level)`, `serve_chunk_from_store`, `build_server_proxy_source`) take the level index and read both fields off one record.
+
+The seed remains server-private — never broadcast. See [[decisions/three-output-import-model]] for why.
 
 ## Gotchas
 

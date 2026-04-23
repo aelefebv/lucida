@@ -15,6 +15,12 @@ export function asUint16(buf: ArrayBuffer, dataType: string): Uint16Array {
     dst.set(src);
     return dst;
   }
+  if (buf.byteLength % 2 !== 0) {
+    throw new Error(
+      `asUint16: buffer byteLength ${buf.byteLength} is not a multiple of 2 ` +
+      `(server likely returned a compressed or wrong-shape chunk)`,
+    );
+  }
   return new Uint16Array(buf);
 }
 
@@ -33,6 +39,14 @@ export function asUint16Slice(
     const dst = new Uint16Array(length);
     dst.set(src);
     return dst;
+  }
+  const requiredBytes = offset * 2 + length * 2;
+  if (requiredBytes > buf.byteLength) {
+    throw new Error(
+      `asUint16Slice: requested offset=${offset} length=${length} ` +
+      `(${requiredBytes} bytes) exceeds buffer byteLength ${buf.byteLength} ` +
+      `(server likely returned a compressed or wrong-shape chunk)`,
+    );
   }
   return new Uint16Array(buf, offset * 2, length);
 }

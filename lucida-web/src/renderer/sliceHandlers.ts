@@ -323,6 +323,12 @@ export function handleSliceChunkData(
     }
 
     const isU8 = chunk.dataType === "uint8" || chunk.dataType === "Uint8";
+    if (!isU8 && chunk.data.byteLength % 2 !== 0) {
+      throw new Error(
+        `slice chunk ${chunk.key}: byteLength ${chunk.data.byteLength} is not a multiple of 2 ` +
+        `(server likely returned a compressed or wrong-shape chunk)`,
+      );
+    }
     const rawView = isU8 ? new Uint8Array(chunk.data) : new Uint16Array(chunk.data);
     const r = sampleIntensityRange(rawView, perChunkSamples);
     if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
