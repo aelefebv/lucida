@@ -756,6 +756,7 @@ pub(crate) mod test_helpers {
                         scale: [1.0, 1.0, 1.0, 1.0, 1.0],
                     }],
                     data_type: DataType::Uint16,
+                    pinned_axes: vec![],
                 },
             }],
             vec![],
@@ -837,6 +838,7 @@ pub(crate) mod test_helpers {
                     ],
                     levels,
                     data_type: DataType::Uint16,
+                    pinned_axes: vec![],
                 },
             }],
             vec![],
@@ -914,6 +916,7 @@ pub(crate) mod test_helpers {
                         scale: [1.0, 1.0, 1.0, 1.0, 1.0],
                     }],
                     data_type: DataType::Uint16,
+                    pinned_axes: vec![],
                 },
             });
 

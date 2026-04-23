@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-23
 ---
 
 # lucida-store
@@ -37,7 +37,7 @@ The split exists because mixing them led to either over-broadcasting (server-onl
 
 ## Invariants
 
-- **Chunk keys are always 5D `level/t/c/z/y/x`**, even when the dataset has fewer axes. `chunk_key_to_store_path` strips the missing dimensions when building the on-disk path. This means clients and planners don't have to special-case axis subsets.
+- **Logical chunk keys are always 5D `level/t/c/z/y/x`**, even when the dataset has fewer or more axes. `chunk_key_to_store_path` walks the dataset's *raw* axes list to construct the on-disk path: it strips canonical-subset axes (e.g. for a `[c,y,x]` dataset, t/z drop out) and injects `"0"` for canonical-superset axes (e.g. for a CZI `[t,c,z,m,y,x]` mosaic, the m position gets `"0"` — the axis is pinned to index 0 by `lucida-content::normalize::classify_axes`). Clients and planners don't have to special-case axis variants.
 - **Plate fields are entities; well placement is a layout.** The import builds field entities (`{id}:field:{path}`) parented to well entities (`{id}:well:{path}`) and emits a source layout that places the wells, not the fields. Field-to-well transforms encode each FOV's intra-well position.
 - **Stage-positioned plates have translations in physical units (microns)** in OME-Zarr, but lucida composes transforms in voxel units. The import converts using the level-0 X/Y scale before forming the `field → well` transform. See [[gotchas/stage-translations-are-microns]].
 - **Storage codecs are detected from level 0** and recorded as a per-image `storage_codecs` list. Currently consulted only for compression detection; preserved per-level so future code can support per-LOD codec differences.

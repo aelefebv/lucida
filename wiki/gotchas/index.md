@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-04-23
 ---
 
 # Gotchas
@@ -21,3 +21,4 @@ Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of th
 - [[wasm-rebuild-after-rust-changes]] — `npm run build:wasm` is the second half of every Rust change
 - [[stage-translations-are-microns]] — OME-Zarr stores stage positions in microns; `lucida-store` converts to voxels at import
 - [[proxy-priority-not-honored]] — `priority` parameter on `ProxyGenerator::request` exists for API stability but FIFO today
+- [[non-canonical-axes]] — OME-Zarr axes outside `{t,c,z,y,x}` (e.g. CZI `m` mosaic) are silently pinned to index 0; only the first slice is visible

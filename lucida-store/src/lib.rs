@@ -9,28 +9,32 @@ pub(crate) mod parse;
 const ALL_DIMS: [&str; 5] = ["t", "c", "z", "y", "x"];
 
 /// Convert a logical chunk key `"level/t/c/z/y/x"` to the on-disk Zarr v3
-/// store path, including only the dimensions that actually exist in the dataset.
+/// store path. The on-disk path always follows the dataset's raw axes order,
+/// emitting one coordinate per dimension actually present on disk.
 ///
-/// When `axes` contains all 5 dimensions `["t","c","z","y","x"]`, the result is
-/// identical to the legacy format: `"{level}/c/{t}/{c}/{z}/{y}/{x}"`.
-///
-/// For datasets with fewer axes (e.g. `["c","y","x"]`), the canonical chunk key
-/// still uses all 5 slots `"level/t/c/z/y/x"` (with 0 for missing dims), but
-/// the on-disk path only includes the axes that exist.
+/// Three cases handled uniformly by walking the raw `axes` list in order:
+/// - canonical-equal `["t","c","z","y","x"]` → `"{level}/c/{t}/{c}/{z}/{y}/{x}"`
+/// - canonical-subset `["c","y","x"]` → `"{level}/c/{c}/{y}/{x}"` (only the dims that exist)
+/// - canonical-superset `["t","c","z","m","y","x"]` → `"{level}/c/{t}/{c}/{z}/0/{y}/{x}"`
+///   (a `"0"` is injected for each non-canonical axis — these axes are pinned
+///   to index 0; see `lucida-content::normalize` for the canonical set)
 pub fn chunk_key_to_store_path(key: &str, axes: &[String]) -> String {
     let parts: Vec<&str> = key.splitn(6, '/').collect();
-    if parts.len() == 6 {
-        // parts[0] = level, parts[1..6] = t, c, z, y, x (canonical 5D order)
-        let coords: Vec<&str> = ALL_DIMS
-            .iter()
-            .enumerate()
-            .filter(|(_, dim)| axes.iter().any(|a| a.as_str() == **dim))
-            .map(|(i, _)| parts[i + 1]) // +1 to skip the level part
-            .collect();
-        format!("{}/c/{}", parts[0], coords.join("/"))
-    } else {
-        key.to_string()
+    if parts.len() != 6 {
+        return key.to_string();
     }
+    // parts[0] = level, parts[1..6] = canonical 5D coords in t,c,z,y,x order.
+    let coords: Vec<&str> = axes
+        .iter()
+        .map(|name| {
+            ALL_DIMS
+                .iter()
+                .position(|d| d.eq_ignore_ascii_case(name))
+                .map(|i| parts[i + 1])
+                .unwrap_or("0")
+        })
+        .collect();
+    format!("{}/c/{}", parts[0], coords.join("/"))
 }
 
 /// Legacy 5D convenience wrapper — assumes all 5 axes are present.
@@ -111,6 +115,56 @@ mod tests {
         assert_eq!(
             chunk_key_to_store_path("0/0/0/0/7/3", &axes(&["y", "x"])),
             "0/c/7/3"
+        );
+    }
+
+    #[test]
+    fn chunk_key_6d_with_m() {
+        // axes = [t, c, z, m, y, x] — CZI mosaic case.
+        // Key: "0/0/3/0/0/0" → level=0, t=0, c=3, z=0, y=0, x=0.
+        // m is non-canonical — pinned to "0" in the on-disk path.
+        // Store path: "0/c/0/3/0/0/0/0" (6 coords, "0" injected at m position).
+        assert_eq!(
+            chunk_key_to_store_path("0/0/3/0/0/0", &axes(&["t", "c", "z", "m", "y", "x"])),
+            "0/c/0/3/0/0/0/0"
+        );
+    }
+
+    #[test]
+    fn chunk_key_7d_with_two_non_canonical() {
+        // axes = [t, c, z, m, s, y, x] — two non-canonical axes between z and y.
+        // Key: "1/0/2/5/4/3" → level=1, t=0, c=2, z=5, y=4, x=3.
+        // Both m and s pinned to "0".
+        // Store path: "1/c/0/2/5/0/0/4/3" (7 coords, two "0"s).
+        assert_eq!(
+            chunk_key_to_store_path(
+                "1/0/2/5/4/3",
+                &axes(&["t", "c", "z", "m", "s", "y", "x"])
+            ),
+            "1/c/0/2/5/0/0/4/3"
+        );
+    }
+
+    #[test]
+    fn chunk_key_3d_with_m() {
+        // axes = [m, y, x] — single non-canonical axis among 3D.
+        // Key: "2/0/0/0/8/4" → level=2, y=8, x=4.
+        // m pinned to "0".
+        // Store path: "2/c/0/8/4" (3 coords, "0" at m).
+        assert_eq!(
+            chunk_key_to_store_path("2/0/0/0/8/4", &axes(&["m", "y", "x"])),
+            "2/c/0/8/4"
+        );
+    }
+
+    #[test]
+    fn chunk_key_case_insensitive_axes() {
+        // Mixed-case axis names should be treated identically to lowercase
+        // (matches `lucida-content::normalize::axis_index` semantics).
+        // axes = [T, C, Z, M, Y, X]. Key: "0/0/3/0/0/0".
+        assert_eq!(
+            chunk_key_to_store_path("0/0/3/0/0/0", &axes(&["T", "C", "Z", "M", "Y", "X"])),
+            "0/c/0/3/0/0/0/0"
         );
     }
 }

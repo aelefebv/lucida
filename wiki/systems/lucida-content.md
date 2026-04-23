@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-20
+modified: 2026-04-23
 ---
 
 # lucida-content
@@ -15,13 +15,13 @@ The crate exists so that [[lucida-store]] can produce the manifest without pulli
 
 - `id.rs` — newtype IDs: `DatasetId`, `EntityId`, `ImageId`, `LayoutId`. All wrap `String` to prevent accidental cross-domain mixing.
 - `entity.rs` — `Entity { id, kind, parent, labels }`, `EntityKind { Image, Field, Well }`, `EntityLabels` (display name, well row/column, field index, etc.)
-- `image.rs` — `ImageSpec`, `MultiscaleInfo`, `LevelGeometry { level_index, shape, chunk_shape, grid_shape, scale }`, `Axis`, `AxisKind`, `DataType`
+- `image.rs` — `ImageSpec`, `MultiscaleInfo`, `LevelGeometry { level_index, shape, chunk_shape, grid_shape, scale }`, `Axis`, `AxisKind`, `DataType`, `PinnedAxis`
 - `transform.rs` — `TransformEdge { from, to, transform }`, `VoxelTransform` (4×4 matrix in voxel units)
 - `layout.rs` — `LayoutSpec { id, name, placements }`, `EntityPlacement { entity_id, position }`
 - `kind.rs` — `DatasetKind::Single` vs `DatasetKind::Plate { rows, columns, positioning_mode, has_stage_positions }`, `PositioningMode`
 - `graph.rs` — `DatasetManifest` itself: holds entities, transforms, images, source layouts, default layout id
 - `plate.rs` — `build_grid_field_transforms`, `build_plate_layout`, `PlateLayoutError`
-- `normalize.rs` — `normalize_to_5d` for axis padding when datasets have fewer than 5 axes
+- `normalize.rs` — `normalize_to_5d` for axis padding when datasets have fewer than 5 axes; `classify_axes` for splitting a raw OME-Zarr axes list into canonical `{t,c,z,y,x}` and pinned non-canonical members
 
 ## Interactions
 
@@ -31,7 +31,8 @@ The crate exists so that [[lucida-store]] can produce the manifest without pulli
 ## Invariants
 
 - **Every entity is one of `Image`, `Field`, or `Well`.** Singles produce one `Image` entity; plates produce `Well` parents with `Field` children. Bare `Image` entities have no parent.
-- **`shape` and `chunk_shape` are always 5D** (`[T, C, Z, Y, X]`), normalized via `normalize_to_5d` even when the source dataset has fewer axes. Missing dimensions are filled with size 1.
+- **`shape` and `chunk_shape` are always 5D** (`[T, C, Z, Y, X]`), normalized via `normalize_to_5d` even when the source dataset has fewer or more axes. Missing canonical dimensions are filled with size 1.
+- **`MultiscaleInfo.axes` is strictly canonical** — anything outside `{t,c,z,y,x}` is filtered out by `classify_axes` and surfaced separately in `MultiscaleInfo.pinned_axes` (each entry carries name, raw size, and the index it was pinned to — always `0` today). For a CZI mosaic with axes `[t,c,z,m,y,x]`, `axes.len()` is `5` and `pinned_axes` has one entry for `m`. The raw axes list is preserved on `ImageBindingSeed.axes_names` so [[lucida-store]]'s `chunk_key_to_store_path` can inject `0` at non-canonical positions when constructing on-disk paths.
 - **`grid_shape[d] == shape[d].div_ceil(chunk_shape[d])`** for every dimension. Asserted in import tests; downstream planning relies on this without re-checking.
 - **Field-to-well transforms exist for every field in a plate.** Either grid-derived (computed by `build_grid_field_transforms`) or stage-derived (taken from OME translation, converted to voxel units in [[lucida-store]]).
 - **`source_layouts` is never empty.** Singles get one layout with a single placement at `[0, 0]` for the image entity. Plates get one layout with one placement per well. In both cases `default_layout_id` points into the list. (Field-within-well positions are *not* in the layout — see [[layout-system]].)

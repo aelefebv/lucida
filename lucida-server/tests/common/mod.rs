@@ -199,6 +199,7 @@ pub async fn build_single_field_dataset(
                     scale: [1.0; 5],
                 }],
                 data_type: DataType::Uint16,
+                pinned_axes: vec![],
             },
         }],
         vec![],

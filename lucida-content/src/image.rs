@@ -14,12 +14,30 @@ pub struct MultiscaleInfo {
     pub axes: Vec<Axis>,
     pub levels: Vec<LevelGeometry>,
     pub data_type: DataType,
+    /// Non-canonical axes (anything outside `{t,c,z,y,x}`) that were dropped
+    /// from the canonical 5D shape and pinned to a fixed index when reading
+    /// chunks. Empty for normal datasets.
+    #[serde(default)]
+    pub pinned_axes: Vec<PinnedAxis>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Axis {
     pub name: String,
     pub kind: AxisKind,
+}
+
+/// A non-canonical OME-Zarr axis that has been pinned to a fixed index.
+///
+/// Some OME-Zarr exports (notably CZI mosaics with an `m` axis) include axes
+/// outside the canonical `{t,c,z,y,x}` set. Lucida pins each such axis to
+/// `pinned_index` (always `0` today) and exposes the dropped metadata here so
+/// future UI work can surface it without revisiting the parse layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PinnedAxis {
+    pub name: String,
+    pub size: u64,
+    pub pinned_index: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,5 +104,29 @@ mod tests {
             scale: [1.0, 1.0, 1.0, 1.0, 1.0],
         };
         assert_eq!(level.grid_shape, [1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn multiscale_info_deserializes_without_pinned_axes() {
+        // Backward-compat: snapshots from older servers omit `pinned_axes`.
+        // `#[serde(default)]` should yield an empty Vec rather than failing.
+        let json = serde_json::json!({
+            "axes": [
+                {"name": "z", "kind": "Space"},
+                {"name": "y", "kind": "Space"},
+                {"name": "x", "kind": "Space"}
+            ],
+            "levels": [{
+                "level_index": 0,
+                "shape": [1, 1, 10, 256, 256],
+                "chunk_shape": [1, 1, 1, 128, 128],
+                "grid_shape": [1, 1, 10, 2, 2],
+                "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+            }],
+            "data_type": "Uint16"
+        });
+        let info: MultiscaleInfo = serde_json::from_value(json).unwrap();
+        assert_eq!(info.axes.len(), 3);
+        assert!(info.pinned_axes.is_empty());
     }
 }

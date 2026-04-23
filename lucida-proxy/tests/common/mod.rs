@@ -118,6 +118,7 @@ pub fn single_image_graph(
                 axes: standard_axes(),
                 levels,
                 data_type: DataType::Uint16,
+                pinned_axes: vec![],
             },
         }],
         vec![],
@@ -177,6 +178,7 @@ pub fn well_graph_with_fields(
                 axes: standard_axes(),
                 levels: levels.clone(),
                 data_type: DataType::Uint16,
+                pinned_axes: vec![],
             },
         });
     }

@@ -239,6 +239,7 @@ fn sample_register(dataset_id: &DatasetId) -> DatasetOpened {
                     scale: [1.0, 1.0, 1.0, 1.0, 1.0],
                 }],
                 data_type: DataType::Uint16,
+                pinned_axes: vec![],
             },
         }],
         vec![],

@@ -35,6 +35,18 @@ export interface MultiscaleInfo {
   axes: { name: string; kind: string }[];
   levels: LevelGeometry[];
   data_type: string;
+  /**
+   * Non-canonical axes (anything outside `{t,c,z,y,x}`) that were dropped
+   * from the canonical 5D shape and pinned to a fixed index when reading
+   * chunks. Optional/absent on payloads from older servers.
+   */
+  pinned_axes?: PinnedAxis[];
+}
+
+export interface PinnedAxis {
+  name: string;
+  size: number;
+  pinned_index: number;
 }
 
 export interface LevelGeometry {

@@ -9,7 +9,7 @@ use object_store::ObjectStore;
 use object_store::path::Path;
 
 use lucida_content::*;
-use lucida_content::normalize::normalize_to_5d;
+use lucida_content::normalize::{classify_axes, normalize_to_5d};
 use lucida_protocol::*;
 
 use crate::backend::StoreError;
@@ -51,7 +51,9 @@ async fn import_single_image(
     let level_metas = parse::read_level_metas(store, "", &level_entries).await?;
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
-    let axes = build_axes(&axes_names);
+    let layout = classify_axes(&axes_names, &level_metas[0].shape);
+    warn_pinned_axes(id, &layout.pinned);
+    let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
 
     let entity_id = EntityId(id.to_string());
@@ -74,6 +76,7 @@ async fn import_single_image(
             axes,
             levels,
             data_type,
+            pinned_axes: layout.pinned,
         },
     };
 
@@ -271,7 +274,9 @@ async fn import_plate(
     let (full_shape_5d, _full_chunk_5d) = parse::extract_full_res(&level_metas, &axes_names);
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
-    let axes = build_axes(&axes_names);
+    let layout = classify_axes(&axes_names, &level_metas[0].shape);
+    warn_pinned_axes(id, &layout.pinned);
+    let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
 
     let positioning_mode = if has_stage_positions {
@@ -422,6 +427,7 @@ async fn import_plate(
                     axes: axes.clone(),
                     levels: levels.clone(),
                     data_type,
+                    pinned_axes: layout.pinned.clone(),
                 },
             });
 
@@ -519,6 +525,16 @@ fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
         other => Err(StoreError::Metadata(format!(
             "unsupported data type: {other}"
         ))),
+    }
+}
+
+fn warn_pinned_axes(dataset_id: &str, pinned: &[PinnedAxis]) {
+    for axis in pinned {
+        eprintln!(
+            "[lucida-store] dataset {dataset_id:?}: axis '{}' (size {}) is non-canonical \
+             and was pinned to index {}; only that slice will be visible",
+            axis.name, axis.size, axis.pinned_index,
+        );
     }
 }
 
@@ -1456,6 +1472,120 @@ mod tests {
             (t1.transform.matrix()[13] - 400.0).abs() < 1e-9,
             "FOV 1 ty should be 400 (Y scale 0.5 still applied), got {}",
             t1.transform.matrix()[13],
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Create a minimal single-image OME-Zarr fixture with a non-canonical `m`
+    /// axis between `z` and `y` (mimics CZI mosaic exports). Only metadata —
+    /// no chunk bytes (the import path is metadata-only).
+    fn create_6d_with_m_fixture(dir: &std::path::Path) {
+        fs::create_dir_all(dir).unwrap();
+
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "multiscales": [{
+                        "version": "0.5",
+                        "name": "ScanRegion0",
+                        "axes": [
+                            {"name": "t", "type": "time"},
+                            {"name": "c", "type": "channel"},
+                            {"name": "z", "type": "space"},
+                            {"name": "m", "type": "space"},
+                            {"name": "y", "type": "space"},
+                            {"name": "x", "type": "space"}
+                        ],
+                        "datasets": [{
+                            "path": "0",
+                            "coordinateTransformations": [{
+                                "type": "scale",
+                                "scale": [1.0, 1.0, 0.75, 1.0, 0.34, 0.34]
+                            }]
+                        }]
+                    }]
+                }
+            }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        let level_dir = dir.join("0");
+        fs::create_dir_all(&level_dir).unwrap();
+        let arr = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "array",
+            "shape": [1, 4, 1, 6, 2048, 1504],
+            "data_type": "uint16",
+            "chunk_grid": {
+                "name": "regular",
+                "configuration": { "chunk_shape": [1, 1, 1, 2, 2048, 1504] }
+            },
+            "codecs": [
+                {"name": "bytes", "configuration": {"endian": "little"}}
+            ],
+            "fill_value": 0
+        });
+        fs::write(
+            level_dir.join("zarr.json"),
+            serde_json::to_string_pretty(&arr).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// End-to-end: a 6D OME-Zarr with a non-canonical `m` axis ingests
+    /// without error. The canonical `axes` list is filtered to length 5,
+    /// `pinned_axes` captures the dropped `m`, and the binding seed
+    /// preserves the raw 6-axis list so the chunk-path resolver can inject
+    /// `0` at the m position.
+    #[tokio::test]
+    async fn import_6d_with_non_canonical_m_axis() {
+        let dir = temp_dir("import_6d_m");
+        create_6d_with_m_fixture(&dir);
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let result = import_dataset(&store, "czi-test", "CZI Test")
+            .await
+            .unwrap();
+
+        assert!(matches!(result.manifest.kind, DatasetKind::Single));
+        assert_eq!(result.manifest.images().len(), 1);
+
+        let multiscale = &result.manifest.images()[0].multiscale;
+
+        // axes is canonical-only, length 5, no `m`.
+        assert_eq!(multiscale.axes.len(), 5);
+        let names: Vec<&str> = multiscale.axes.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["t", "c", "z", "y", "x"]);
+
+        // pinned_axes captures the dropped `m`.
+        assert_eq!(
+            multiscale.pinned_axes,
+            vec![PinnedAxis {
+                name: "m".to_string(),
+                size: 6,
+                pinned_index: 0,
+            }]
+        );
+
+        // Level shape is canonical 5D, m's size 6 is dropped.
+        assert_eq!(multiscale.levels.len(), 1);
+        assert_eq!(multiscale.levels[0].shape, [1, 4, 1, 2048, 1504]);
+        assert_eq!(multiscale.levels[0].chunk_shape, [1, 1, 1, 2048, 1504]);
+
+        // Binding seed retains the raw 6-axis list so the on-disk path
+        // resolver can inject 0 at the m position.
+        assert_eq!(result.binding_seed.images.len(), 1);
+        assert_eq!(
+            result.binding_seed.images[0].axes_names,
+            vec!["t", "c", "z", "m", "y", "x"],
         );
 
         let _ = fs::remove_dir_all(&dir);

@@ -110,6 +110,7 @@ mod tests {
                         scale: [1.0, 1.0, 1.0, 0.5, 0.5],
                     }],
                     data_type: DataType::Uint16,
+                    pinned_axes: vec![],
                 },
             }],
             vec![],
