@@ -13,8 +13,9 @@ use lucida_content::normalize::{classify_axes, normalize_to_5d};
 use lucida_protocol::*;
 
 use crate::backend::StoreError;
+use crate::codec::parse_codec_chain;
 use crate::import_types::*;
-use crate::layout::{compute_chunk_byte_layout, ChunkByteLayout};
+use crate::layout::compute_chunk_byte_layout;
 use crate::parse;
 
 /// Import a dataset from an OME-Zarr store.
@@ -56,7 +57,7 @@ async fn import_single_image(
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
-    let chunk_byte_layouts = build_chunk_byte_layouts(
+    let level_bindings = build_level_binding_infos(
         &axes_names,
         &level_metas,
         data_type_size(data_type),
@@ -120,15 +121,7 @@ async fn import_single_image(
             image_id,
             axes_names,
             store_prefix: None,
-            storage_codecs: level_metas
-                .iter()
-                .enumerate()
-                .map(|(i, meta)| StorageCodecInfo {
-                    level_index: i as u32,
-                    codecs: meta.codecs.clone(),
-                })
-                .collect(),
-            chunk_byte_layouts,
+            levels: level_bindings,
         }],
     };
 
@@ -286,7 +279,7 @@ async fn import_plate(
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
     let levels = build_level_geometries(&level_entries, &level_metas, &axes_names);
-    let chunk_byte_layouts = build_chunk_byte_layouts(
+    let level_bindings = build_level_binding_infos(
         &axes_names,
         &level_metas,
         data_type_size(data_type),
@@ -454,15 +447,7 @@ async fn import_plate(
                 image_id,
                 axes_names: axes_names.clone(),
                 store_prefix: Some(fov.store_prefix.clone()),
-                storage_codecs: level_metas
-                    .iter()
-                    .enumerate()
-                    .map(|(i, meta)| StorageCodecInfo {
-                        level_index: i as u32,
-                        codecs: meta.codecs.clone(),
-                    })
-                    .collect(),
-                chunk_byte_layouts: chunk_byte_layouts.clone(),
+                levels: level_bindings.clone(),
             });
         }
     }
@@ -552,17 +537,30 @@ fn data_type_size(dt: DataType) -> u8 {
     }
 }
 
-fn build_chunk_byte_layouts(
+/// Build per-level [`LevelBindingInfo`] for a single image (or for the
+/// representative FOV of a plate, since OME-Zarr plates require all FOVs to
+/// share the same multiscale shape and codec chain).
+///
+/// Each level is validated independently with [`parse_codec_chain`] and
+/// [`compute_chunk_byte_layout`]; any error is wrapped with the offending
+/// level index so the user can locate it in their dataset (e.g.
+/// `"level 0: unsupported codec 'gzip' in storage chain"`). The first
+/// failing level short-circuits — we don't accumulate all failures.
+fn build_level_binding_infos(
     axes_names: &[String],
     level_metas: &[parse::ArrayMeta],
     dtype_size: u8,
     pinned: &[PinnedAxis],
-) -> Result<Vec<ChunkByteLayout>, StoreError> {
+) -> Result<Vec<LevelBindingInfo>, StoreError> {
     level_metas
         .iter()
         .enumerate()
         .map(|(i, meta)| {
-            compute_chunk_byte_layout(
+            let compression = parse_codec_chain(&meta.codecs).map_err(|e| match e {
+                StoreError::Metadata(msg) => StoreError::Metadata(format!("level {i}: {msg}")),
+                other => other,
+            })?;
+            let chunk_byte_layout = compute_chunk_byte_layout(
                 axes_names,
                 &meta.chunk_grid.configuration.chunk_shape,
                 dtype_size,
@@ -571,6 +569,11 @@ fn build_chunk_byte_layouts(
             .map_err(|e| match e {
                 StoreError::Metadata(msg) => StoreError::Metadata(format!("level {i}: {msg}")),
                 other => other,
+            })?;
+            Ok(LevelBindingInfo {
+                level_index: i as u32,
+                compression,
+                chunk_byte_layout,
             })
         })
         .collect()
@@ -1636,11 +1639,13 @@ mod tests {
             vec!["t", "c", "z", "m", "y", "x"],
         );
 
-        // PRD #447 Slice 1: chunk_byte_layouts captures the m=2 chunk
-        // requiring prefix slicing — canonical chunk is 2048*1504*2=6160384
-        // bytes; on-disk chunk is twice that.
-        assert_eq!(result.binding_seed.images[0].chunk_byte_layouts.len(), 1);
-        let layout = result.binding_seed.images[0].chunk_byte_layouts[0];
+        // PRD #447 Slice 2: levels[0].chunk_byte_layout captures the m=2
+        // chunk requiring prefix slicing — canonical chunk is
+        // 2048*1504*2 = 6160384 bytes; on-disk chunk is twice that.
+        assert_eq!(result.binding_seed.images[0].levels.len(), 1);
+        let level0 = &result.binding_seed.images[0].levels[0];
+        assert_eq!(level0.level_index, 0);
+        let layout = level0.chunk_byte_layout;
         assert!(layout.needs_slicing);
         assert_eq!(layout.canonical_byte_size, 2048 * 1504 * 2);
         assert_eq!(layout.on_disk_byte_size, 2 * 2048 * 1504 * 2);
@@ -1721,9 +1726,9 @@ mod tests {
         .unwrap();
     }
 
-    /// PRD #447 Slice 1: 6D-with-m + lz4 codec + m chunk_size=2 →
-    /// import succeeds; the binding seed records lz4 in storage_codecs and
-    /// `needs_slicing == true` in chunk_byte_layouts.
+    /// PRD #447 Slice 2: 6D-with-m + lz4 codec + m chunk_size=2 →
+    /// import succeeds; the binding seed records [`StorageCompression::Lz4`]
+    /// and `needs_slicing == true` in the per-level info.
     #[tokio::test]
     async fn import_6d_with_m_and_lz4_compresses_and_slices() {
         let dir = temp_dir("import_6d_m_lz4");
@@ -1740,26 +1745,22 @@ mod tests {
             .await
             .unwrap();
 
-        let layout = result.binding_seed.images[0].chunk_byte_layouts[0];
+        assert_eq!(result.binding_seed.images[0].levels.len(), 1);
+        let level0 = &result.binding_seed.images[0].levels[0];
+        let layout = level0.chunk_byte_layout;
         assert!(layout.needs_slicing, "chunk_size=2 on m axis should need slicing");
         assert_eq!(layout.canonical_byte_size, 64 * 64 * 2);
         assert_eq!(layout.on_disk_byte_size, 2 * 64 * 64 * 2);
 
-        // The lz4 codec should be recorded in storage_codecs (server-side
-        // detection happens in ChunkResolver::new).
-        assert_eq!(result.binding_seed.images[0].storage_codecs.len(), 1);
-        let codecs = &result.binding_seed.images[0].storage_codecs[0].codecs;
-        assert!(
-            codecs.iter().any(|c| c.get("name").and_then(|n| n.as_str()) == Some("numcodecs/lz4")),
-            "expected lz4 in storage_codecs: {codecs:?}",
-        );
+        // The lz4 codec should be recognized at parse time, before the
+        // binding ever reaches the chunk-fetch path.
+        assert_eq!(level0.compression, crate::codec::StorageCompression::Lz4);
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// PRD #447 Slice 1: 6D-with-m + blosc-zstd-bitshuffle → import
-    /// succeeds and records the blosc codec in storage_codecs (decode happens
-    /// at chunk-fetch time, not import time).
+    /// PRD #447 Slice 2: 6D-with-m + blosc-zstd-bitshuffle → import
+    /// succeeds and records the validated [`BloscConfig`] in level info.
     #[tokio::test]
     async fn import_6d_with_m_and_blosc() {
         let dir = temp_dir("import_6d_m_blosc");
@@ -1785,11 +1786,15 @@ mod tests {
             .await
             .unwrap();
 
-        let codecs = &result.binding_seed.images[0].storage_codecs[0].codecs;
-        assert!(
-            codecs.iter().any(|c| c.get("name").and_then(|n| n.as_str()) == Some("blosc")),
-            "expected blosc in storage_codecs: {codecs:?}",
-        );
+        let level0 = &result.binding_seed.images[0].levels[0];
+        match level0.compression {
+            crate::codec::StorageCompression::Blosc(cfg) => {
+                assert_eq!(cfg.cname, crate::codec::BloscCompressor::Zstd);
+                assert_eq!(cfg.shuffle, crate::codec::BloscShuffle::Bit);
+                assert_eq!(cfg.typesize, 2);
+            }
+            other => panic!("expected Blosc compression, got {other:?}"),
+        }
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1815,6 +1820,189 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains('m'), "error should name 'm': {msg}");
         assert!(msg.contains("non-prefix"), "error should say 'non-prefix': {msg}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Helper for PRD #447 Slice 2 rejection tests: synthesize a single-image
+    /// 5D OME-Zarr with one or more pyramid levels and a custom codec chain
+    /// per level. Each level shares the same shape/chunk; only the codec
+    /// chain varies. The fixture is metadata-only (no chunk bytes).
+    fn create_5d_fixture_with_per_level_codecs(
+        dir: &std::path::Path,
+        per_level_codecs: &[Vec<serde_json::Value>],
+    ) {
+        fs::create_dir_all(dir).unwrap();
+
+        let datasets: Vec<serde_json::Value> = (0..per_level_codecs.len())
+            .map(|i| {
+                serde_json::json!({
+                    "path": i.to_string(),
+                    "coordinateTransformations": [{
+                        "type": "scale",
+                        "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+                    }]
+                })
+            })
+            .collect();
+
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {
+                "ome": {
+                    "version": "0.5",
+                    "multiscales": [{
+                        "version": "0.5",
+                        "name": "img",
+                        "axes": [
+                            {"name": "t", "type": "time"},
+                            {"name": "c", "type": "channel"},
+                            {"name": "z", "type": "space"},
+                            {"name": "y", "type": "space"},
+                            {"name": "x", "type": "space"}
+                        ],
+                        "datasets": datasets
+                    }]
+                }
+            }
+        });
+        fs::write(
+            dir.join("zarr.json"),
+            serde_json::to_string_pretty(&root).unwrap(),
+        )
+        .unwrap();
+
+        for (i, codecs) in per_level_codecs.iter().enumerate() {
+            let level_dir = dir.join(i.to_string());
+            fs::create_dir_all(&level_dir).unwrap();
+            let arr = serde_json::json!({
+                "zarr_format": 3,
+                "node_type": "array",
+                "shape": [1, 1, 1, 64, 64],
+                "data_type": "uint16",
+                "chunk_grid": {
+                    "name": "regular",
+                    "configuration": { "chunk_shape": [1, 1, 1, 64, 64] }
+                },
+                "codecs": codecs,
+                "fill_value": 0
+            });
+            fs::write(
+                level_dir.join("zarr.json"),
+                serde_json::to_string_pretty(&arr).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// PRD #447 Slice 2: an unknown codec name (`gzip`) at level 0 fails
+    /// import with a message that names both the offending codec and the
+    /// level index.
+    #[tokio::test]
+    async fn import_rejects_unknown_codec_with_level_and_name() {
+        let dir = temp_dir("import_reject_gzip_l0");
+        create_5d_fixture_with_per_level_codecs(
+            &dir,
+            &[vec![
+                serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}}),
+                serde_json::json!({"name": "gzip"}),
+            ]],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "gzip-bad", "gzip bad")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Metadata(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("gzip"), "error should name 'gzip': {msg}");
+        assert!(msg.contains("level 0"), "error should mention 'level 0': {msg}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PRD #447 Slice 2: a `bytes` codec with `endian: "big"` fails import
+    /// with a message that names the offending value.
+    #[tokio::test]
+    async fn import_rejects_big_endian_bytes_codec() {
+        let dir = temp_dir("import_reject_big_endian");
+        create_5d_fixture_with_per_level_codecs(
+            &dir,
+            &[vec![
+                serde_json::json!({"name": "bytes", "configuration": {"endian": "big"}}),
+            ]],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "big-endian-bad", "big endian bad")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Metadata(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("big"), "error should mention 'big': {msg}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PRD #447 Slice 2: a mid-pyramid codec change (level 0 lz4, level 1
+    /// `gzip`) fails import with a message that pinpoints level 1.
+    #[tokio::test]
+    async fn import_rejects_mid_pyramid_unknown_codec() {
+        let dir = temp_dir("import_reject_mid_pyramid");
+        create_5d_fixture_with_per_level_codecs(
+            &dir,
+            &[
+                vec![
+                    serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}}),
+                    serde_json::json!({"name": "lz4"}),
+                ],
+                vec![
+                    serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}}),
+                    serde_json::json!({"name": "gzip"}),
+                ],
+            ],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "mid-pyramid-bad", "mid-pyramid bad")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Metadata(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("level 1"), "error should mention 'level 1': {msg}");
+        assert!(msg.contains("gzip"), "error should name 'gzip': {msg}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PRD #447 Slice 2: blosc with an unsupported `cname` (`blosclz`) fails
+    /// import with a message that names the offending value verbatim.
+    #[tokio::test]
+    async fn import_rejects_blosc_with_unsupported_cname() {
+        let dir = temp_dir("import_reject_blosc_blosclz");
+        create_5d_fixture_with_per_level_codecs(
+            &dir,
+            &[vec![
+                serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}}),
+                serde_json::json!({
+                    "name": "blosc",
+                    "configuration": {
+                        "cname": "blosclz",
+                        "shuffle": "bitshuffle",
+                        "typesize": 2
+                    }
+                }),
+            ]],
+        );
+
+        let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let err = import_dataset(&store, "blosc-blosclz", "blosc blosclz")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::Metadata(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("blosclz"), "error should name 'blosclz': {msg}");
 
         let _ = fs::remove_dir_all(&dir);
     }

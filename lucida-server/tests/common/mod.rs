@@ -217,10 +217,11 @@ pub async fn build_single_field_dataset(
                 "x".into(),
             ],
             store_prefix: None,
-            // No codecs → StorageCompression::None, matching the raw
+            // No per-level info → ChunkResolver::level_info returns None for
+            // every level lookup; the chunk-fetch path then falls back to
+            // StorageCompression::None and no slicing, matching the raw
             // bytes we put into the store below.
-            storage_codecs: vec![],
-            chunk_byte_layouts: vec![],
+            levels: vec![],
         }],
     }));
 

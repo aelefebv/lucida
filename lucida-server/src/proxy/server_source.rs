@@ -282,6 +282,7 @@ async fn fetch_dense_volume(
     let level_info = resolver
         .level_info(&image.image_id, level as u32)
         .unwrap_or(crate::binding::LevelInfo {
+            level_index: level as u32,
             compression: crate::decode::StorageCompression::None,
             chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
                 canonical_byte_size: 0,

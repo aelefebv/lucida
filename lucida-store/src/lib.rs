@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod cache;
+pub mod codec;
 pub mod import;
 pub mod import_types;
 pub mod ingest;

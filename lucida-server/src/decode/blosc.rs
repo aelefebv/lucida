@@ -15,7 +15,7 @@
 //! block, byte-transpose into `typesize` planes of 8 bytes, then bit-transpose
 //! each plane as an 8×8 bit matrix. Trailing elements (N % 8) are left raw.
 
-use super::{BloscConfig, BloscShuffle};
+use lucida_store::codec::{BloscConfig, BloscShuffle};
 
 /// Errors decoding a Blosc-compressed buffer.
 #[derive(thiserror::Error, Debug)]
@@ -275,7 +275,7 @@ mod tests {
     fn cfg(typesize: u8, shuffle: BloscShuffle) -> BloscConfig {
         BloscConfig {
             typesize,
-            cname: super::super::BloscCompressor::Zstd,
+            cname: lucida_store::codec::BloscCompressor::Zstd,
             shuffle,
         }
     }

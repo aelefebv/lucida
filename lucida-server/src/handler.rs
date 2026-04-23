@@ -736,6 +736,7 @@ async fn serve_chunk_from_store(
     };
 
     let level_info = level_info.unwrap_or(crate::binding::LevelInfo {
+        level_index: 0,
         compression: crate::decode::StorageCompression::None,
         chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
             canonical_byte_size: 0,

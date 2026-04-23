@@ -3,43 +3,16 @@
 //! Factored out of [`crate::handler::serve_chunk_from_store`] (originally
 //! at handler.rs lines 486-523) so the proxy generator can reuse the
 //! same lz4/zstd/blosc handling.
+//!
+//! The compression *types* live in [`lucida_store::codec`] because that's
+//! where the import-time codec-chain validator runs (PRD #447 Slice 2 /
+//! issue #449). This module owns the actual decompression logic that needs
+//! the `zstd` / `lz4_flex` crate dependencies, which `lucida-store`
+//! deliberately does not pull in.
 
 pub mod blosc;
 
-/// What storage compression an image uses (detected at import from the codec
-/// chain). Pinned-axis byte slicing is handled separately via
-/// [`crate::binding::ChunkByteLayout`]; this enum only describes how to turn
-/// the on-disk bytes back into raw voxel bytes.
-///
-/// `Blosc` carries a validated [`BloscConfig`] so the decoder can cross-check
-/// the on-disk header (typesize, shuffle, compressor code) against what the
-/// codec chain promised.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StorageCompression {
-    None,
-    Lz4,
-    Zstd,
-    Blosc(BloscConfig),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BloscConfig {
-    pub typesize: u8,
-    pub cname: BloscCompressor,
-    pub shuffle: BloscShuffle,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BloscCompressor {
-    Zstd,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BloscShuffle {
-    None,
-    Byte,
-    Bit,
-}
+pub use lucida_store::codec::StorageCompression;
 
 /// Errors decoding compressed storage bytes back to raw voxel bytes.
 #[derive(thiserror::Error, Debug)]
