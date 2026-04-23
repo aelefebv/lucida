@@ -2,6 +2,15 @@
 Check the GLOSSARY.md for terminology.
 
 ## Quick start
+### One time only installs
+1. [Install rust](https://rust-lang.org/tools/install/)
+1. [Install pnpm](https://pnpm.io/installation)
+1. [Install wasm-pack](https://formulae.brew.sh/formula/wasm-pack)
+1. [Install node](https://nodejs.org/en/download)
+```bash 
+(cd lucida-web && pnpm install)
+```
+
 ### Terminal 1:
 ``` bash
 (cd lucida-core && cargo test)
@@ -10,8 +19,8 @@ cargo run -p lucida-server
 
 ### Terminal 2:
 ``` bash
-(cd lucida-web && npm run build:wasm)
-(cd lucida-web && npm run dev)
+(cd lucida-web && pnpm run build:wasm)
+(cd lucida-web && pnpm run dev)
 ```
 
 ## Specifics
@@ -19,7 +28,7 @@ cargo run -p lucida-server
 ### When you change Rust code (lucida-core/):
 
 1. `cargo test -p lucida-core`
-1. `cd lucida-web && npm run build:wasm` — rebuild the wasm package
+1. `cd lucida-web && pnpm run build:wasm` — rebuild the wasm package
 
 ### When you change TypeScript code (lucida-web/):
 
@@ -35,7 +44,7 @@ cd lucida-py && maturin develop
 
 ```bash
 cargo test -p lucida-core
-cd lucida-web && npm run build:wasm
+cd lucida-web && pnpm run build:wasm
 cd ..
 ```
 
@@ -50,7 +59,7 @@ Three processes need to be running:
 cargo run -p lucida-server
 
 # Terminal 2: web dev server
-cd lucida-web && npm run dev
+cd lucida-web && pnpm run dev
 
 # Terminal 3 (optional): Python
 cd lucida-py && maturin develop
