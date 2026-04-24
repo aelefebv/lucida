@@ -21,5 +21,6 @@ Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of th
 - [[wasm-rebuild-after-rust-changes]] — `npm run build:wasm` is the second half of every Rust change
 - [[stage-translations-are-microns]] — OME-Zarr stores stage positions in microns; `lucida-store` converts to voxels at import
 - [[proxy-priority-not-honored]] — `priority` parameter on `ProxyGenerator::request` exists for API stability but FIFO today
-- [[non-canonical-axes]] — OME-Zarr axes outside `{t,c,z,y,x}` (e.g. CZI `m` mosaic) are silently pinned to index 0; only the first slice is visible. Pinned axes with `chunk_size > 1` are handled via prefix-slicing (post-Slice 1)
+- [[non-canonical-axes]] — OME-Zarr axes outside `{t,c,z,y,x}` (e.g. CZI `m` mosaic) are silently pinned to index 0; only the first slice is visible. Pinned axes and canonical-indexed axes (`t`, `c`) with `chunk_size > 1` are handled via post-decode byte slicing
 - [[blosc-support]] — Blosc decoder supports a deliberately narrow subset (Blosc1 + zstd inner + typesize ∈ {1,2,4}); everything else is rejected at import time
+- [[wire-chunk-key-conventions]] — wire chunk keys split asymmetrically: `t/c` are voxel coords, `z/y/x` are chunk-grid coords. The divide-and-slice for `t/c` happens server-side

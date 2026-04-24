@@ -1,46 +1,106 @@
 //! Per-level chunk byte-layout helper.
 //!
-//! Computes whether a level's on-disk chunks need to be byte-sliced down to
-//! the canonical 5D chunk shape, and returns the byte size to slice to.
+//! Computes the byte range within the decompressed on-disk chunk that
+//! corresponds to one wire-format chunk (1 t, 1 c, all z, all y, all x).
+//! Two cases produce non-trivial slices:
 //!
-//! Background: when an OME-Zarr has non-canonical axes (e.g. CZI's `m`), the
-//! recent pin-fix (PRD #444) injects a `"0"` into the on-disk Zarr v3 chunk
-//! path so the chunk file is found, but the file itself can contain more than
-//! the canonical 5D chunk's worth of bytes if the pinned axis has chunk_size
-//! > 1. This helper detects that case and tells [`crate::serve_chunk`-style
-//! callers] to truncate the decompressed bytes to a contiguous prefix.
+//! 1. **Pinned axes** (PRD #444/447). When an OME-Zarr has non-canonical
+//!    axes (e.g. CZI's `m`), the on-disk chunk file may bundle multiple
+//!    pinned-index slices together. Pinned-index 0 is always picked, and
+//!    when its chunk_size > 1 the canonical bytes are the prefix of the
+//!    on-disk bytes.
 //!
-//! The "contiguous prefix" approach only works when the pinned slice
-//! coincides with the first `canonical_byte_size` bytes of the on-disk chunk
-//! in C-order. The eligibility rule (see [`compute_chunk_byte_layout`]) covers
-//! all CZI-style `[t, c, z, m, y, x]` exports where pinned axes precede the
-//! canonical spatial axes; non-prefix layouts (e.g. `[..., y, m, x]`) are
-//! rejected with a clear error so we fail at import time, not at chunk fetch.
+//! 2. **Canonical-indexed axes** (PRD #451 / this module). When a
+//!    canonical axis `t` or `c` itself has chunk_size > 1, the on-disk
+//!    chunk holds N timepoints/channels concatenated. The wire chunk key
+//!    addresses one timepoint/channel; the server picks the right one by
+//!    computing an intra-chunk offset.
+//!
+//! Both cases are handled uniformly by [`ChunkByteLayout::slice_range`],
+//! which takes the intra-chunk `(t, c)` indices and returns the
+//! `(offset, size)` byte range to extract from the decompressed bytes.
+//! For the canonical-5D case (no pinned axes, chunk_size 1 on t and c),
+//! the result is `(0, canonical_byte_size)` — equivalent to the old
+//! "no slicing needed" path.
+//!
+//! The contiguous-slice approach has an eligibility constraint: in the
+//! raw axes order, every "outer" axis (pinned ∪ canonical-indexed t,c)
+//! with chunk_size > 1 must precede every "inner" axis (canonical-kept
+//! z,y,x) with chunk_size > 1. When violated, [`compute_chunk_byte_layout`]
+//! returns an error naming the offending axis so import fails loudly
+//! rather than producing wrong pixels at chunk-fetch time.
 
 use lucida_content::PinnedAxis;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::StoreError;
 
-/// How many bytes one decompressed on-disk chunk holds, and how many of those
-/// bytes correspond to the canonical 5D chunk's `m=0` (etc.) slice.
+/// How the canonical wire-chunk slice is laid out within the decompressed
+/// on-disk chunk bytes.
+///
+/// `byte_stride_t` and `byte_stride_c` are the C-order byte distances
+/// between consecutive indices on the canonical-indexed axes. They are 0
+/// when the axis is absent from the on-disk layout or when its
+/// `chunk_size == 1` (in which case the modulo is irrelevant).
+/// `chunk_size_t` and `chunk_size_c` are carried on the layout so
+/// [`Self::slice_range`] can take wire voxel coords directly and reduce
+/// them to intra-chunk indices in one place.
+///
+/// For canonical 5D datasets with `chunk_shape[t] == chunk_shape[c] == 1`,
+/// all callers see `slice_range(_, _) == (0, canonical_byte_size)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkByteLayout {
-    /// Bytes the canonical 5D pipeline expects per chunk
-    /// (= product of canonical chunk dims × dtype size).
+    /// Bytes the canonical 5D pipeline expects per wire chunk request
+    /// (= product of kept canonical chunk dims [z, y, x] × dtype size).
+    /// One wire chunk request always returns this many bytes regardless
+    /// of how the on-disk chunk packs t/c/m/etc.
     pub canonical_byte_size: usize,
-    /// Bytes one full decompressed on-disk chunk holds
-    /// (= product of all raw chunk dims × dtype size).
+    /// Bytes one full decompressed on-disk chunk holds (= product of all
+    /// raw chunk dims × dtype size). Used as a defensive bound check at
+    /// the slice site.
     pub on_disk_byte_size: usize,
-    /// `true` if `canonical_byte_size != on_disk_byte_size` and the decode
-    /// pipeline must truncate to the canonical prefix. `false` for canonical
-    /// 5D datasets and for 6D-with-m where the pinned axis has chunk_size 1.
-    pub needs_slicing: bool,
+    /// C-order byte stride for the canonical `t` axis within the on-disk
+    /// chunk. 0 if `t` is absent or its chunk_size is 1.
+    pub byte_stride_t: usize,
+    /// C-order byte stride for the canonical `c` axis within the on-disk
+    /// chunk. 0 if `c` is absent or its chunk_size is 1.
+    pub byte_stride_c: usize,
+    /// On-disk chunk size on the `t` axis (1 if `t` is absent). Used to
+    /// reduce wire `t` to an intra-chunk index inside [`Self::slice_range`].
+    pub chunk_size_t: u64,
+    /// On-disk chunk size on the `c` axis (1 if `c` is absent).
+    pub chunk_size_c: u64,
 }
 
-/// Compute [`ChunkByteLayout`] for one level. Errors when the pinned axes are
-/// not in a contiguous-prefix-sliceable position; the message names the
-/// offending axis so users know what to look for in their OME-Zarr metadata.
+impl ChunkByteLayout {
+    /// Compute the `(offset, size)` byte range for one wire chunk request.
+    ///
+    /// `wire_t` and `wire_c` are the voxel coordinates from the wire chunk
+    /// key (e.g. `c=3` means channel 3). The function reduces them to
+    /// intra-chunk indices via `wire_value % chunk_size`. For typical
+    /// OME-Zarrs (chunk_size 1 on t and c), the result is always
+    /// `(0, canonical_byte_size)`.
+    pub fn slice_range(&self, wire_t: u64, wire_c: u64) -> (usize, usize) {
+        let intra_t = if self.chunk_size_t > 1 {
+            wire_t % self.chunk_size_t
+        } else {
+            0
+        };
+        let intra_c = if self.chunk_size_c > 1 {
+            wire_c % self.chunk_size_c
+        } else {
+            0
+        };
+        let offset = (intra_t as usize)
+            .saturating_mul(self.byte_stride_t)
+            .saturating_add((intra_c as usize).saturating_mul(self.byte_stride_c));
+        (offset, self.canonical_byte_size)
+    }
+}
+
+/// Compute [`ChunkByteLayout`] for one level. Errors when the axes order
+/// is not contiguous-prefix-sliceable; the message names the offending
+/// axis so users know what to look for in their OME-Zarr metadata.
 ///
 /// `axes` is the raw OME axes list (e.g. `["t","c","z","m","y","x"]`).
 /// `chunk_shape` parallels `axes` (one entry per axis).
@@ -48,10 +108,11 @@ pub struct ChunkByteLayout {
 /// [`lucida_content::normalize::classify_axes`].
 ///
 /// Eligibility rule: in the raw axes list, after eliminating axes whose
-/// `chunk_shape` entry is 1 (those don't iterate within the chunk), every
-/// pinned axis must precede every canonical axis. When this holds, in C-order
-/// byte layout the slice with all pinned coordinates equal to `pinned_index`
-/// (always 0 today) coincides with the first `canonical_byte_size` bytes.
+/// `chunk_shape` entry is 1, every "outer" axis (pinned ∪ canonical
+/// indexed `t`/`c`) must precede every "inner" axis (canonical kept
+/// `z`/`y`/`x`). When this holds, in C-order byte layout one wire-chunk
+/// slice is a contiguous range whose offset is determined entirely by
+/// the intra-chunk `(t, c)` indices.
 pub fn compute_chunk_byte_layout(
     axes: &[String],
     chunk_shape: &[u64],
@@ -71,15 +132,19 @@ pub fn compute_chunk_byte_layout(
         .map(|p| p.name.to_lowercase())
         .collect();
 
-    // Per-axis byte-size product across all axes; same for canonical-only.
-    // Use u128 for the intermediate product to defensively avoid overflow on
-    // pathological inputs, then check the result fits in usize.
+    // Per-axis byte-size product across all axes (on_disk) and across just
+    // the kept canonical axes z/y/x (canonical). t and c are "indexed" —
+    // one wire chunk request returns 1 t × 1 c worth, so they contribute
+    // factor 1 to canonical regardless of their on-disk chunk size.
+    // Use u128 for the intermediate product to defensively avoid overflow
+    // on pathological inputs, then check the result fits in usize.
     let mut on_disk: u128 = dtype_size as u128;
     let mut canonical: u128 = dtype_size as u128;
     for (i, name) in axes.iter().enumerate() {
         let dim = chunk_shape[i] as u128;
+        let lower = name.to_lowercase();
         on_disk = on_disk.saturating_mul(dim);
-        if !pinned_names.contains(&name.to_lowercase()) {
+        if is_kept_canonical(&lower) {
             canonical = canonical.saturating_mul(dim);
         }
     }
@@ -91,39 +156,93 @@ pub fn compute_chunk_byte_layout(
         StoreError::Metadata("canonical chunk byte size exceeds usize".to_string())
     })?;
 
-    let needs_slicing = on_disk_byte_size != canonical_byte_size;
+    // Compute byte strides for the canonical-indexed axes (t, c) by
+    // walking right-to-left and accumulating dtype_size × ∏ inner dims.
+    let mut byte_stride_t: usize = 0;
+    let mut byte_stride_c: usize = 0;
+    let mut current_stride: u128 = dtype_size as u128;
+    for i in (0..axes.len()).rev() {
+        let lower = axes[i].to_lowercase();
+        match lower.as_str() {
+            "t" => {
+                byte_stride_t = usize::try_from(current_stride).map_err(|_| {
+                    StoreError::Metadata("t byte stride exceeds usize".to_string())
+                })?;
+            }
+            "c" => {
+                byte_stride_c = usize::try_from(current_stride).map_err(|_| {
+                    StoreError::Metadata("c byte stride exceeds usize".to_string())
+                })?;
+            }
+            _ => {}
+        }
+        let dim = chunk_shape[i] as u128;
+        current_stride = current_stride.saturating_mul(dim);
+    }
 
-    // Prefix-eligibility: among non-trivial (chunk_size > 1) axes, every
-    // pinned axis must come before every canonical axis. A pinned axis with
-    // chunk_size 1 is trivially fine (it doesn't iterate, so it doesn't break
-    // the byte layout); same for canonical chunk_size 1.
-    if needs_slicing {
-        let mut seen_canonical_with_chunk_gt_1 = false;
-        for (i, name) in axes.iter().enumerate() {
-            if chunk_shape[i] <= 1 {
-                continue;
+    // Look up the chunk_size on t and c (default 1 when the axis is
+    // absent — semantically a single index). Zero out the corresponding
+    // stride when the chunk_size is 1 so `slice_range` can short-circuit.
+    let t_idx = axes.iter().position(|a| a.eq_ignore_ascii_case("t"));
+    let chunk_size_t = t_idx.map(|i| chunk_shape[i]).unwrap_or(1);
+    if chunk_size_t <= 1 {
+        byte_stride_t = 0;
+    }
+    let c_idx = axes.iter().position(|a| a.eq_ignore_ascii_case("c"));
+    let chunk_size_c = c_idx.map(|i| chunk_shape[i]).unwrap_or(1);
+    if chunk_size_c <= 1 {
+        byte_stride_c = 0;
+    }
+
+    // Eligibility: among chunk_size > 1 axes, every outer (pinned ∪
+    // canonical-indexed t,c) must precede every inner (canonical-kept
+    // z,y,x). Equivalent to: once we've seen a kept-canonical axis with
+    // chunk_size > 1, no subsequent axis may be outer with chunk_size > 1.
+    let mut seen_inner_with_chunk_gt_1 = false;
+    for (i, name) in axes.iter().enumerate() {
+        if chunk_shape[i] <= 1 {
+            continue;
+        }
+        let lower = name.to_lowercase();
+        let is_pinned = pinned_names.contains(&lower);
+        let is_indexed = is_canonical_indexed(&lower);
+        let is_outer = is_pinned || is_indexed;
+        if is_outer {
+            if seen_inner_with_chunk_gt_1 {
+                let kind = if is_pinned {
+                    "non-canonical (pinned)"
+                } else {
+                    "canonical-indexed (t/c)"
+                };
+                return Err(StoreError::Metadata(format!(
+                    "axis '{}' (chunk_size {}) is {} and falls in a non-prefix position; \
+                     contiguous slicing requires all indexed and pinned axes to precede any \
+                     kept canonical axis (z, y, x) with chunk_size > 1 (axes order: {:?})",
+                    name, chunk_shape[i], kind, axes,
+                )));
             }
-            let is_pinned = pinned_names.contains(&name.to_lowercase());
-            if is_pinned {
-                if seen_canonical_with_chunk_gt_1 {
-                    return Err(StoreError::Metadata(format!(
-                        "axis '{}' (chunk_size {}) is non-canonical and falls in a non-prefix position; \
-                         contiguous-prefix slicing requires all pinned axes to come before any canonical \
-                         spatial axis with chunk_size > 1 (axes order: {:?})",
-                        name, chunk_shape[i], axes,
-                    )));
-                }
-            } else {
-                seen_canonical_with_chunk_gt_1 = true;
-            }
+        } else {
+            // Kept canonical (z, y, x) with chunk_size > 1.
+            seen_inner_with_chunk_gt_1 = true;
         }
     }
 
     Ok(ChunkByteLayout {
         canonical_byte_size,
         on_disk_byte_size,
-        needs_slicing,
+        byte_stride_t,
+        byte_stride_c,
+        chunk_size_t,
+        chunk_size_c,
     })
+}
+
+fn is_kept_canonical(lower_name: &str) -> bool {
+    matches!(lower_name, "z" | "y" | "x")
+}
+
+fn is_canonical_indexed(lower_name: &str) -> bool {
+    matches!(lower_name, "t" | "c")
 }
 
 #[cfg(test)]
@@ -151,14 +270,16 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(!layout.needs_slicing);
         assert_eq!(layout.canonical_byte_size, 256 * 256 * 2);
         assert_eq!(layout.on_disk_byte_size, layout.canonical_byte_size);
+        assert_eq!(layout.byte_stride_t, 0);
+        assert_eq!(layout.byte_stride_c, 0);
+        assert_eq!(layout.slice_range(0, 0), (0, 256 * 256 * 2));
     }
 
     #[test]
     fn six_d_with_m_chunk_size_2_slices() {
-        // The user's CZI export.
+        // The CZI export from PRD #447.
         let layout = compute_chunk_byte_layout(
             &axes(&["t", "c", "z", "m", "y", "x"]),
             &[1, 1, 1, 2, 2048, 1504],
@@ -166,9 +287,13 @@ mod tests {
             &[pinned("m", 6)],
         )
         .unwrap();
-        assert!(layout.needs_slicing);
         assert_eq!(layout.canonical_byte_size, 2048 * 1504 * 2);
         assert_eq!(layout.on_disk_byte_size, 2 * 2048 * 1504 * 2);
+        // Strides are 0 because chunk_size on t and c is 1.
+        assert_eq!(layout.byte_stride_t, 0);
+        assert_eq!(layout.byte_stride_c, 0);
+        // Pinned m=0 prefix slice — same as old needs_slicing + truncate.
+        assert_eq!(layout.slice_range(0, 0), (0, 2048 * 1504 * 2));
     }
 
     #[test]
@@ -180,9 +305,11 @@ mod tests {
             &[pinned("m", 6)],
         )
         .unwrap();
-        assert!(!layout.needs_slicing);
         assert_eq!(layout.canonical_byte_size, 2048 * 1504 * 2);
         assert_eq!(layout.on_disk_byte_size, layout.canonical_byte_size);
+        assert_eq!(layout.byte_stride_t, 0);
+        assert_eq!(layout.byte_stride_c, 0);
+        assert_eq!(layout.slice_range(0, 0), (0, 2048 * 1504 * 2));
     }
 
     #[test]
@@ -195,7 +322,6 @@ mod tests {
             &[pinned("m", 4), pinned("s", 6)],
         )
         .unwrap();
-        assert!(layout.needs_slicing);
         assert_eq!(layout.canonical_byte_size, 2048 * 1504 * 2);
         assert_eq!(layout.on_disk_byte_size, 2 * 2 * 2048 * 1504 * 2);
     }
@@ -211,7 +337,10 @@ mod tests {
             &[pinned("m", 4), pinned("s", 4)],
         )
         .unwrap();
-        assert!(layout.needs_slicing);
+        // canonical = z(absent)=1 × y=1 × x=1504 × dtype = 1504 × 2.
+        assert_eq!(layout.canonical_byte_size, 1504 * 2);
+        // on_disk = m=2 × y=1 × s=2 × x=1504 × dtype = 4 × 1504 × 2.
+        assert_eq!(layout.on_disk_byte_size, 4 * 1504 * 2);
     }
 
     #[test]
@@ -267,5 +396,172 @@ mod tests {
                 .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("length mismatch"), "{msg}");
+    }
+
+    // PRD #451: canonical-indexed (t, c) chunk_size > 1 cases.
+
+    #[test]
+    fn lif_test_shape_c_bundled() {
+        // The lif_test.ome.zarr from PRD #451: 5 channels in one chunk.
+        let layout = compute_chunk_byte_layout(
+            &axes(&["t", "c", "z", "y", "x"]),
+            &[1, 5, 1, 1024, 1024],
+            2,
+            &[],
+        )
+        .unwrap();
+        // canonical = 1 × 1024 × 1024 × 2 (one channel's worth)
+        assert_eq!(layout.canonical_byte_size, 1024 * 1024 * 2);
+        // on_disk = 5 channels × canonical = 10 MB
+        assert_eq!(layout.on_disk_byte_size, 5 * 1024 * 1024 * 2);
+        // byte_stride_c = bytes per increment of c = 1 z × 1024 y × 1024 x × 2
+        assert_eq!(layout.byte_stride_c, 1024 * 1024 * 2);
+        // byte_stride_t = 0 because chunk_t == 1
+        assert_eq!(layout.byte_stride_t, 0);
+        assert_eq!(layout.chunk_size_c, 5);
+        assert_eq!(layout.chunk_size_t, 1);
+        // slice_range for wire c=3: offset = 3 × 2 MB = 6 MB
+        assert_eq!(
+            layout.slice_range(0, 3),
+            (3 * 1024 * 1024 * 2, 1024 * 1024 * 2)
+        );
+        // wire c=7 wraps to intra c=2 (7 % 5)
+        assert_eq!(
+            layout.slice_range(0, 7),
+            (2 * 1024 * 1024 * 2, 1024 * 1024 * 2)
+        );
+    }
+
+    #[test]
+    fn timepoint_bundled() {
+        // Hypothetical 3-timepoints-per-chunk OME-Zarr.
+        let layout = compute_chunk_byte_layout(
+            &axes(&["t", "c", "z", "y", "x"]),
+            &[3, 1, 1, 1024, 1024],
+            2,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(layout.canonical_byte_size, 1024 * 1024 * 2);
+        assert_eq!(layout.on_disk_byte_size, 3 * 1024 * 1024 * 2);
+        // byte_stride_t = 1 c × 1 z × 1024 y × 1024 x × 2 = 2 MB
+        assert_eq!(layout.byte_stride_t, 1024 * 1024 * 2);
+        // byte_stride_c = 0 because chunk_c == 1
+        assert_eq!(layout.byte_stride_c, 0);
+        assert_eq!(layout.chunk_size_t, 3);
+        // slice_range for wire t=2: offset = 2 × 2 MB = 4 MB
+        assert_eq!(
+            layout.slice_range(2, 0),
+            (2 * 1024 * 1024 * 2, 1024 * 1024 * 2)
+        );
+    }
+
+    #[test]
+    fn multi_axis_bundled() {
+        // 2 timepoints × 5 channels × 3 z-slices per chunk.
+        let layout = compute_chunk_byte_layout(
+            &axes(&["t", "c", "z", "y", "x"]),
+            &[2, 5, 3, 64, 64],
+            2,
+            &[],
+        )
+        .unwrap();
+        // canonical = 3 z × 64 y × 64 x × 2 = 24576 bytes
+        assert_eq!(layout.canonical_byte_size, 3 * 64 * 64 * 2);
+        // on_disk = 2 × 5 × 24576 = 245760
+        assert_eq!(layout.on_disk_byte_size, 2 * 5 * 3 * 64 * 64 * 2);
+        // byte_stride_c = 3 × 64 × 64 × 2 = 24576 (canonical, since z, y, x inner)
+        assert_eq!(layout.byte_stride_c, 3 * 64 * 64 * 2);
+        // byte_stride_t = 5 × 24576 = 122880
+        assert_eq!(layout.byte_stride_t, 5 * 3 * 64 * 64 * 2);
+        assert_eq!(layout.chunk_size_t, 2);
+        assert_eq!(layout.chunk_size_c, 5);
+        // slice_range for wire (t=1, c=2): offset = 1 × 122880 + 2 × 24576 = 172032
+        assert_eq!(
+            layout.slice_range(1, 2),
+            (5 * 3 * 64 * 64 * 2 + 2 * 3 * 64 * 64 * 2, 3 * 64 * 64 * 2)
+        );
+    }
+
+    #[test]
+    fn canonical_indexed_plus_pinned() {
+        // [t, c, z, m, y, x] with chunk_c=5 and chunk_m=2: both outer (c is
+        // canonical-indexed, m is pinned), both before y, x. Eligible.
+        let layout = compute_chunk_byte_layout(
+            &axes(&["t", "c", "z", "m", "y", "x"]),
+            &[1, 5, 1, 2, 1024, 1024],
+            2,
+            &[pinned("m", 4)],
+        )
+        .unwrap();
+        // canonical = 1 z × 1024 y × 1024 x × 2 = 2 MB
+        assert_eq!(layout.canonical_byte_size, 1024 * 1024 * 2);
+        // on_disk = 5 c × 2 m × canonical = 20 MB
+        assert_eq!(layout.on_disk_byte_size, 5 * 2 * 1024 * 1024 * 2);
+        // byte_stride_c = 1 z × 2 m × 1024 y × 1024 x × 2 = 4 MB
+        assert_eq!(layout.byte_stride_c, 2 * 1024 * 1024 * 2);
+        // For wire c=3 with m pinned to 0: offset = 3 × 4 MB = 12 MB; size = 2 MB
+        assert_eq!(
+            layout.slice_range(0, 3),
+            (3 * 2 * 1024 * 1024 * 2, 1024 * 1024 * 2)
+        );
+    }
+
+    #[test]
+    fn rejects_canonical_indexed_after_kept_canonical() {
+        // [t, z, c, y, x] with both z_chunk > 1 and c_chunk > 1 — z (kept,
+        // chunk>1) comes before c (indexed, chunk>1). Slicing one channel
+        // requires gathering across z-blocks; not contiguous.
+        let err = compute_chunk_byte_layout(
+            &axes(&["t", "z", "c", "y", "x"]),
+            &[1, 3, 5, 1024, 1024],
+            2,
+            &[],
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains('c'), "error should name 'c': {msg}");
+        assert!(msg.contains("non-prefix"), "error should say 'non-prefix': {msg}");
+        assert!(
+            msg.contains("canonical-indexed"),
+            "error should classify the axis: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_pinned_after_kept_canonical_with_canonical_indexed_chunked() {
+        // [t, c, y, m, x] with chunk_y > 1 and chunk_m > 1: m (pinned) comes
+        // after y (kept, chunk>1). Same kind of failure as PRD #447.
+        let err = compute_chunk_byte_layout(
+            &axes(&["t", "c", "y", "m", "x"]),
+            &[1, 5, 1024, 2, 1024],
+            2,
+            &[pinned("m", 4)],
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains('m'), "error should name 'm': {msg}");
+        assert!(msg.contains("non-prefix"), "{msg}");
+    }
+
+    #[test]
+    fn axis_absent_means_zero_stride() {
+        // [c, y, x] (no t, no z) with chunk_c = 4.
+        let layout = compute_chunk_byte_layout(
+            &axes(&["c", "y", "x"]),
+            &[4, 100, 200],
+            2,
+            &[],
+        )
+        .unwrap();
+        // canonical = 100 × 200 × 2 = 40000
+        assert_eq!(layout.canonical_byte_size, 100 * 200 * 2);
+        assert_eq!(layout.on_disk_byte_size, 4 * 100 * 200 * 2);
+        assert_eq!(layout.byte_stride_t, 0);
+        assert_eq!(layout.byte_stride_c, 100 * 200 * 2);
+        assert_eq!(layout.chunk_size_t, 1);
+        assert_eq!(layout.chunk_size_c, 4);
+        // wire t=99 is irrelevant (axis absent → modulo-reduced to 0).
+        assert_eq!(layout.slice_range(99, 2), (2 * 100 * 200 * 2, 100 * 200 * 2));
     }
 }

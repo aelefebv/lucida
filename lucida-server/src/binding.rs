@@ -70,18 +70,29 @@ impl ChunkResolver {
         ChunkResolver { images }
     }
 
-    /// Look up per-level info (compression + byte layout) for a given image
-    /// and level. Returns `None` if either the image or the level is unknown.
+    /// Look up per-level info (compression + byte layout + chunk shape) for
+    /// a given image and level. Returns `None` if either the image or the
+    /// level is unknown.
     pub fn level_info(&self, image_id: &ImageId, level: u32) -> Option<LevelInfo> {
         self.images
             .get(image_id)
-            .and_then(|img| img.levels.get(level as usize).copied())
+            .and_then(|img| img.levels.get(level as usize).cloned())
     }
 
-    /// Resolve a canonical chunk key to an object store path for a given image.
+    /// Resolve a canonical chunk key to an object store path for a given
+    /// image. Uses the per-level chunk_shape to translate wire `t`/`c` voxel
+    /// coords into disk-grid coords (PRD #451). Falls back to all-1s if the
+    /// level isn't in the binding (e.g. malformed key) — preserves the
+    /// pre-PRD-#451 behavior on legacy paths.
     pub fn resolve(&self, image_id: &ImageId, key: &str) -> Option<String> {
         let img = self.images.get(image_id)?;
-        let store_path = lucida_store::chunk_key_to_store_path(key, &img.axes_names);
+        let level = parse_level_from_chunk_key(key);
+        let chunk_shape: Vec<u64> = img
+            .levels
+            .get(level as usize)
+            .map(|l| l.chunk_shape.clone())
+            .unwrap_or_else(|| vec![1; img.axes_names.len()]);
+        let store_path = lucida_store::chunk_key_to_store_path(key, &img.axes_names, &chunk_shape);
         Some(match &img.store_prefix {
             Some(prefix) => format!("{prefix}/{store_path}"),
             None => store_path,
@@ -89,11 +100,19 @@ impl ChunkResolver {
     }
 }
 
+/// Parse the level prefix from a canonical chunk key (`"{level}/t/c/z/y/x"`).
+/// Returns 0 if the key is malformed.
+fn parse_level_from_chunk_key(key: &str) -> u32 {
+    key.split('/').next().and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lucida_content::ImageId;
+    use lucida_store::codec::StorageCompression;
     use lucida_store::import_types::{ImageBindingSeed, ServerBindingSeed};
+    use lucida_store::layout::ChunkByteLayout;
 
     fn make_seed(images: Vec<ImageBindingSeed>) -> ServerBindingSeed {
         ServerBindingSeed { images }
@@ -105,6 +124,34 @@ mod tests {
             axes_names: axes.into_iter().map(String::from).collect(),
             store_prefix: prefix.map(String::from),
             levels: vec![],
+        }
+    }
+
+    /// Build an image seed with one level whose `chunk_shape` is provided.
+    /// All other level fields are stub values — these tests only exercise
+    /// resolve(), not the slice path.
+    fn make_image_seed_with_chunk(
+        id: &str,
+        axes: Vec<&str>,
+        chunk_shape: Vec<u64>,
+    ) -> ImageBindingSeed {
+        ImageBindingSeed {
+            image_id: ImageId(id.to_string()),
+            axes_names: axes.into_iter().map(String::from).collect(),
+            store_prefix: None,
+            levels: vec![LevelBindingInfo {
+                level_index: 0,
+                compression: StorageCompression::None,
+                chunk_shape,
+                chunk_byte_layout: ChunkByteLayout {
+                    canonical_byte_size: 0,
+                    on_disk_byte_size: 0,
+                    byte_stride_t: 0,
+                    byte_stride_c: 0,
+                    chunk_size_t: 1,
+                    chunk_size_c: 1,
+                },
+            }],
         }
     }
 
@@ -132,8 +179,24 @@ mod tests {
         let expected = lucida_store::chunk_key_to_store_path(
             "2/0/0/5/3/2",
             &["z".to_string(), "y".to_string(), "x".to_string()],
+            &[1, 1, 1],
         );
         assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn resolve_c_bundled_divides_channel() {
+        // PRD #451: lif_test-shaped binding. Wire c=3 with chunk_c=5 → disk c=0.
+        let seed = make_seed(vec![make_image_seed_with_chunk(
+            "lif",
+            vec!["t", "c", "z", "y", "x"],
+            vec![1, 5, 1, 1024, 1024],
+        )]);
+        let resolver = ChunkResolver::new(&seed);
+        let path = resolver
+            .resolve(&ImageId("lif".into()), "0/0/3/0/0/0")
+            .unwrap();
+        assert_eq!(path, "0/c/0/0/0/0/0");
     }
 
     #[test]

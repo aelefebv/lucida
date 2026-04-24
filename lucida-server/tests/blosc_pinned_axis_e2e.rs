@@ -141,11 +141,15 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
     let store = lucida_store::backend::open(dir.to_str().unwrap()).unwrap();
     let result = import_dataset(&store, "blosc-e2e", "Blosc E2E").await.unwrap();
 
-    // Sanity: the binding seed records blosc + needs_slicing.
+    // Sanity: the binding seed records blosc + a non-trivial slice
+    // (canonical_byte_size != on_disk_byte_size means slicing is needed).
     let img_seed = &result.binding_seed.images[0];
     let level0 = &img_seed.levels[0];
     let layout = level0.chunk_byte_layout;
-    assert!(layout.needs_slicing, "m=2 chunk must need slicing");
+    assert_ne!(
+        layout.canonical_byte_size, layout.on_disk_byte_size,
+        "m=2 chunk must require slicing",
+    );
     assert_eq!(layout.canonical_byte_size, EXPECTED_M0_BYTES.len());
     assert_eq!(layout.on_disk_byte_size, 2 * EXPECTED_M0_BYTES.len());
 
@@ -175,8 +179,12 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
         "decoded bytes should equal the on-disk byte size before slicing",
     );
 
-    if level_info.chunk_byte_layout.needs_slicing {
-        decoded.truncate(level_info.chunk_byte_layout.canonical_byte_size);
+    // PRD #451: slice down via slice_range. For pinned-axis-only fixtures
+    // (chunk_size 1 on t and c), this is `(0, canonical_byte_size)` —
+    // equivalent to the old `bytes.truncate(canonical_byte_size)`.
+    let (offset, size) = level_info.chunk_byte_layout.slice_range(0, 0);
+    if size > 0 && offset + size <= decoded.len() {
+        decoded = decoded[offset..offset + size].to_vec();
     }
 
     assert_eq!(

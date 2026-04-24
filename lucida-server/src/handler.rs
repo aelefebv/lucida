@@ -704,17 +704,33 @@ fn parse_level_from_chunk_key(key: &str) -> u32 {
     key.split('/').next().and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
+/// Parse the wire `(t, c)` voxel coordinates from a canonical chunk key
+/// (`"{level}/t/c/z/y/x"`). Returns `(0, 0)` if the key is malformed —
+/// downstream slice math then yields the canonical prefix, matching
+/// pre-PRD-#451 behavior on legacy paths.
+fn parse_t_c_from_chunk_key(key: &str) -> (u64, u64) {
+    let mut parts = key.split('/');
+    let _level = parts.next();
+    let t = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let c = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (t, c)
+}
+
 /// Read a chunk from a CachedStore and send it to the requesting client.
 ///
 /// `object_path` is the pre-resolved object store path from the ChunkResolver.
 /// If `None`, the image_id was unknown and the request is rejected.
 ///
-/// `level_info` carries per-level compression + byte-slicing metadata. When
-/// `level_info.chunk_byte_layout.needs_slicing` is true, the decoded bytes
-/// are truncated to `canonical_byte_size` to drop the pinned-axis trailing
-/// slices (PRD #447, Slice 1). A `None` `level_info` (unknown image or
-/// level — e.g. older snapshot) falls back to no-compression-no-slicing
-/// so legacy datasets keep working.
+/// `level_info` carries per-level compression, on-disk chunk_shape, and
+/// the canonical-byte slice layout. The wire `(t, c)` coords are parsed
+/// from `chunk_key` and reduced to intra-chunk indices via
+/// `wire_value % chunk_shape[axis]`; the resulting `(offset, size)` from
+/// [`ChunkByteLayout::slice_range`] picks the requested timepoint/channel
+/// out of the decompressed on-disk chunk (PRD #447 + #451).
+///
+/// A `None` `level_info` (unknown image or level — e.g. older snapshot)
+/// falls back to no-compression-no-slicing so legacy datasets keep
+/// working.
 async fn serve_chunk_from_store(
     client_id: ClientId,
     dataset_id: &DatasetId,
@@ -738,10 +754,14 @@ async fn serve_chunk_from_store(
     let level_info = level_info.unwrap_or(crate::binding::LevelInfo {
         level_index: 0,
         compression: crate::decode::StorageCompression::None,
+        chunk_shape: Vec::new(),
         chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
             canonical_byte_size: 0,
             on_disk_byte_size: 0,
-            needs_slicing: false,
+            byte_stride_t: 0,
+            byte_stride_c: 0,
+            chunk_size_t: 1,
+            chunk_size_c: 1,
         },
     });
 
@@ -774,14 +794,16 @@ async fn serve_chunk_from_store(
         }
     };
 
-    // Pinned-axis prefix slice. Defensive: if the canonical_byte_size is
-    // larger than what we got back (e.g. stale layout cache, fixture without
-    // proper layout), skip the truncation and let downstream catch it.
-    if level_info.chunk_byte_layout.needs_slicing
-        && bytes.len() >= level_info.chunk_byte_layout.canonical_byte_size
-        && level_info.chunk_byte_layout.canonical_byte_size > 0
-    {
-        bytes.truncate(level_info.chunk_byte_layout.canonical_byte_size);
+    // Pick out the requested (t, c) slice from the decompressed on-disk
+    // chunk. For canonical 5D / chunk_size 1 datasets, slice_range returns
+    // (0, canonical_byte_size) and this is equivalent to the old prefix
+    // truncate. For chunk_size > 1 on t/c (PRD #451) or pinned-axis
+    // bundling (PRD #447), the offset/size pick out exactly one
+    // timepoint/channel's bytes.
+    let (wire_t, wire_c) = parse_t_c_from_chunk_key(chunk_key);
+    let (offset, size) = level_info.chunk_byte_layout.slice_range(wire_t, wire_c);
+    if size > 0 && offset.checked_add(size).map_or(false, |end| end <= bytes.len()) {
+        bytes = bytes[offset..offset + size].to_vec();
     }
 
     // Build binary response: [client_id: u32 LE][key_len: u16 LE][key][data]

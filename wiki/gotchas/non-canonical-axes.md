@@ -26,30 +26,40 @@ The pin is plumbed through two seams:
 
 Without (2), every chunk fetch would 404 because the path would be missing the `m` coordinate component.
 
-## Prefix-slice handling (post-Slice 1)
+## Post-decode byte slicing
 
-The path-injection trick covers the case where each canonical chunk lives in its own on-disk file. CZI mosaics commonly violate that assumption: `chunk_shape` along `m` is often `2`, so a single on-disk chunk byte stream contains both `m=0` and `m=1`. After path injection the server reads the right file, but the buffer is twice as large as the canonical pipeline expects, and the client's `new Uint16Array(buf)` either explodes or paints garbage.
+The path-injection trick covers the case where each canonical chunk lives in its own on-disk file. Two situations bundle multiple canonical-chunks worth of data into one on-disk file:
 
-The fix is byte-level prefix slicing at the decode step, computed once at import.
+1. **Pinned axes with `chunk_size > 1`** (CZI mosaics, PRD #447). `chunk_shape` along `m` is often `2`, so a single on-disk chunk contains both `m=0` and `m=1`. The server reads the right file but the buffer is `2×` the canonical size.
+2. **Canonical-indexed axes (`t`, `c`) with `chunk_size > 1`** (LIF/Bioformats multichannel exports, PRD #451). `chunk_shape[c] = 5` packs all 5 channels into a single on-disk chunk; wire requests for ch0–ch4 all need the same disk file but different byte ranges within it.
 
-- `lucida-store::layout::compute_chunk_byte_layout` runs at import per level and returns `ChunkByteLayout { canonical_byte_size, on_disk_byte_size, needs_slicing }`.
-- When `needs_slicing == true`, `serve_chunk_from_store` (and `build_server_proxy_source`) decode the storage-compressed chunk and then truncate the resulting buffer to `canonical_byte_size` before shipping it to the client. This drops the trailing `m=1`/`m=2`/etc. slices that share the on-disk chunk file with `m=0`.
-- The per-level layout is carried on the server-private binding seed (see [[lucida-store#interactions]]).
+Both cases share one mechanism: byte-level slicing at the decode step, computed once at import.
 
-### Eligibility rule
+- `lucida-store::layout::compute_chunk_byte_layout` runs at import per level and returns `ChunkByteLayout { canonical_byte_size, on_disk_byte_size, byte_stride_t, byte_stride_c, chunk_size_t, chunk_size_c }`.
+- `ChunkByteLayout::slice_range(wire_t, wire_c) -> (offset, size)` is the single seam used by `serve_chunk_from_store` and `build_server_proxy_source`. It reduces wire `t/c` voxel coords to intra-chunk indices (`wire_value % chunk_size`) and returns the byte range to extract from the decompressed bytes. For canonical 5D and pinned-only datasets, the result is `(0, canonical_byte_size)` — equivalent to the pre-PRD-#451 `bytes.truncate(canonical_byte_size)` path.
+- The per-level layout is carried on the server-private binding seed (see [[lucida-store#binding-seed-shape]]).
 
-Prefix slicing is only correct when the canonical-axes slice falls in a *contiguous prefix* of the on-disk byte buffer. In C-order byte layout that holds iff, after eliminating axes whose `chunk_size == 1` (those contribute a single index either way), every pinned axis comes before every canonical axis in the raw axes list. With all pinned coords = 0, the canonical sub-block then coincides with the first `canonical_byte_size` bytes.
+### Eligibility rule (unified outer/inner)
+
+Slicing is only correct when the requested wire-chunk slice falls in a *contiguous range* of the on-disk byte buffer. In C-order byte layout that holds iff, after eliminating axes whose `chunk_size == 1`, every "outer" axis precedes every "inner" axis in the raw axes list:
+
+- **Outer set** = pinned axes ∪ canonical-indexed axes (`t`, `c`)
+- **Inner set** = canonical-kept axes (`z`, `y`, `x`)
+
+When the rule holds, the wire-chunk slice for `(intra_t, intra_c)` (with all pinned coords = 0) is contiguous starting at `intra_t × byte_stride_t + intra_c × byte_stride_c` with length `canonical_byte_size`.
 
 Examples that satisfy the rule:
 
-- `[t, c, z, m, y, x]` with `chunk_shape = [1, 1, 1, 2, 2048, 1504]` — all canonical axes (`t,c,z,y,x`) preceded by `m`. Canonical sub-block is the first `2048 × 1504 × 2 bytes` of an `2 × 2048 × 1504 × 2 bytes` on-disk chunk.
-- `[m, t, c, z, y, x]` — same idea, pinned axis trivially first.
+- `[t, c, z, m, y, x]` with `chunk_shape = [1, 1, 1, 2, 2048, 1504]` — outer `m` (chunk>1) precedes inner `y, x` (chunk>1). Pinned `m=0` slice is the first `2048 × 1504 × 2` bytes of a `2 × 2048 × 1504 × 2` on-disk chunk.
+- `[t, c, z, y, x]` with `chunk_shape = [1, 5, 1, 1024, 1024]` (the lif_test case) — outer `c` (chunk=5) precedes inner `y, x` (chunk>1). Wire `c=3` slice is bytes `[6 MB .. 8 MB]` of a 10 MB on-disk chunk.
+- `[t, c, z, m, y, x]` with `chunk_shape = [1, 5, 1, 2, 1024, 1024]` — both `c` (canonical-indexed) and `m` (pinned) are outer; both precede `y, x`. Eligible.
 
 Examples rejected at import:
 
-- `[t, c, z, y, m, x]` with `y_chunk > 1` — `y` (canonical) precedes `m` (pinned). With all pinned coords = 0 the canonical slice is interleaved every two `x`-rows, not a contiguous prefix. The error is roughly `axis 'm' (chunk_size 2) is non-canonical and falls in a non-prefix position`.
+- `[t, c, z, y, m, x]` with `y_chunk > 1` and `m_chunk > 1` — `m` (outer, pinned) follows `y` (inner, kept canonical). Error: `axis 'm' ... non-canonical (pinned) ... non-prefix position`.
+- `[t, z, c, y, x]` with `z_chunk > 1` and `c_chunk > 1` — `c` (outer, canonical-indexed) follows `z` (inner, kept canonical). Error: `axis 'c' ... canonical-indexed (t/c) ... non-prefix position`.
 
-The "drop axes with `chunk_size == 1`" relaxation matters: many CZI exports have e.g. `t` or `z` as a non-canonical axis with chunk_size 1, where ordering doesn't matter because there is exactly one slice along that axis.
+The "drop axes with `chunk_size == 1`" relaxation matters: many real exports have intermediate axes with chunk_size 1 (e.g. `z`, `t`) that don't iterate within a chunk, so their position relative to "outer" axes doesn't constrain anything.
 
 ## What this is not
 

@@ -18,7 +18,7 @@ Welcome to the Lucida repo wiki. Start with [[AGENT]] if you're an agent or new 
 - [[systems/index|Systems]] (18 articles) — crates (`lucida-core`, `lucida-server`, `lucida-store`, `lucida-protocol`, `lucida-content`, `lucida-cli`, `lucida-proxy`, `lucida-py`, `lucida-web`) and web subsystems (chunk pipeline, planning, CPU cache, GPU residency, worker protocol, scene state and epochs, presence and follow, layouts, multichannel and colormaps)
 - [[decisions/index|Decisions]] (12 articles) — ADR-style records of architectural choices, all derived from code analysis (rationale inferred — see each article for the disclaimer)
 - [[flows/index|Flows]] (6 articles) — end-to-end traces: dataset opening, chunk lifecycle, presence propagation, follow chain resolution, document command application, proxy generation
-- [[gotchas/index|Gotchas]] (12 articles) — tribal knowledge, footguns, build-system quirks
+- [[gotchas/index|Gotchas]] (15 articles) — tribal knowledge, footguns, build-system quirks
 
 ## Quick paths
 

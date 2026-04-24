@@ -573,6 +573,7 @@ fn build_level_binding_infos(
             Ok(LevelBindingInfo {
                 level_index: i as u32,
                 compression,
+                chunk_shape: meta.chunk_grid.configuration.chunk_shape.clone(),
                 chunk_byte_layout,
             })
         })
@@ -1646,7 +1647,7 @@ mod tests {
         let level0 = &result.binding_seed.images[0].levels[0];
         assert_eq!(level0.level_index, 0);
         let layout = level0.chunk_byte_layout;
-        assert!(layout.needs_slicing);
+        assert_ne!(layout.canonical_byte_size, layout.on_disk_byte_size);
         assert_eq!(layout.canonical_byte_size, 2048 * 1504 * 2);
         assert_eq!(layout.on_disk_byte_size, 2 * 2048 * 1504 * 2);
 
@@ -1728,7 +1729,8 @@ mod tests {
 
     /// PRD #447 Slice 2: 6D-with-m + lz4 codec + m chunk_size=2 →
     /// import succeeds; the binding seed records [`StorageCompression::Lz4`]
-    /// and `needs_slicing == true` in the per-level info.
+    /// and the per-level layout reflects pinned-axis prefix slicing
+    /// (canonical_byte_size != on_disk_byte_size).
     #[tokio::test]
     async fn import_6d_with_m_and_lz4_compresses_and_slices() {
         let dir = temp_dir("import_6d_m_lz4");
@@ -1748,7 +1750,10 @@ mod tests {
         assert_eq!(result.binding_seed.images[0].levels.len(), 1);
         let level0 = &result.binding_seed.images[0].levels[0];
         let layout = level0.chunk_byte_layout;
-        assert!(layout.needs_slicing, "chunk_size=2 on m axis should need slicing");
+        assert_ne!(
+            layout.canonical_byte_size, layout.on_disk_byte_size,
+            "chunk_size=2 on m axis should require slicing",
+        );
         assert_eq!(layout.canonical_byte_size, 64 * 64 * 2);
         assert_eq!(layout.on_disk_byte_size, 2 * 64 * 64 * 2);
 

@@ -284,10 +284,14 @@ async fn fetch_dense_volume(
         .unwrap_or(crate::binding::LevelInfo {
             level_index: level as u32,
             compression: crate::decode::StorageCompression::None,
+            chunk_shape: Vec::new(),
             chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
                 canonical_byte_size: 0,
                 on_disk_byte_size: 0,
-                needs_slicing: false,
+                byte_stride_t: 0,
+                byte_stride_c: 0,
+                chunk_size_t: 1,
+                chunk_size_c: 1,
             },
         });
 
@@ -314,11 +318,17 @@ async fn fetch_dense_volume(
                         key: key.clone(),
                         source: e,
                     })?;
-                // Pinned-axis prefix slice — see [`lucida_store::layout`].
-                if level_info.chunk_byte_layout.needs_slicing
-                    && raw.len() >= level_info.chunk_byte_layout.canonical_byte_size
+                // Slice down to the canonical (1 t × 1 c × all z × all y × all x)
+                // byte range — see [`lucida_store::layout`]. The proxy
+                // generator iterates one (t, c) at a time, so wire t/c are the
+                // values it just wrote into the chunk key.
+                let (offset, size) = level_info
+                    .chunk_byte_layout
+                    .slice_range(t as u64, c as u64);
+                if size > 0
+                    && offset.checked_add(size).map_or(false, |end| end <= raw.len())
                 {
-                    raw.truncate(level_info.chunk_byte_layout.canonical_byte_size);
+                    raw = raw[offset..offset + size].to_vec();
                 }
 
                 // Edge truncation: the last grid cell on each axis may be
