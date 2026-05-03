@@ -3,7 +3,7 @@ created: 2026-04-18
 modified: 2026-04-19
 ---
 
-# AGENT.md — Lucida Repo Wiki
+# CLAUDE.md — Lucida Repo Wiki
 
 This is a **code-repo wiki** capturing the *why and how it hangs together* layer of the Lucida codebase. The code itself is ground truth for *what* the system does — read it directly when you need exact behavior. This wiki earns its keep by capturing **intent, connective tissue, gotchas, invariants, and in-flight state** that aren't visible from the source alone.
 
@@ -13,7 +13,7 @@ This wiki supersedes the repo's earlier root-level docs for navigational purpose
 
 When you start a task, read in this order:
 
-1. **`AGENT.md`** (this file) — navigation guide
+1. **`CLAUDE.md`** (this file) — navigation guide
 2. **`now.md`** — current snapshot: active refactors, in-flight work, recent shifts
 3. **`index.md`** — root entry point with links to every category
 4. **Relevant category indexes** — `systems/index.md`, `decisions/index.md`, `flows/index.md`, `gotchas/index.md`

@@ -5,7 +5,7 @@ modified: 2026-04-18
 
 # Lucida Wiki — Index
 
-Welcome to the Lucida repo wiki. Start with [[AGENT]] if you're an agent or new contributor — it explains conventions and navigation order.
+Welcome to the Lucida repo wiki. Start with [[CLAUDE]] if you're an agent or new contributor — it explains conventions and navigation order.
 
 ## Living state
 
@@ -22,7 +22,7 @@ Welcome to the Lucida repo wiki. Start with [[AGENT]] if you're an agent or new 
 
 ## Quick paths
 
-- "I'm new — where do I start?" → [[AGENT]] then [[now]] then [[systems/index|Systems]]
+- "I'm new — where do I start?" → [[CLAUDE]] then [[now]] then [[systems/index|Systems]]
 - "How does X work end-to-end?" → [[flows/index|Flows]]
 - "Why was X done that way?" → [[decisions/index|Decisions]]
 - "I just hit a weird build/runtime issue" → [[gotchas/index|Gotchas]]
