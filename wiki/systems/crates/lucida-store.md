@@ -1,12 +1,12 @@
 ---
 created: 2026-04-18
-modified: 2026-04-23
+modified: 2026-05-07
 ---
 
 
 # lucida-store
 
-Storage abstraction and import pipeline. Wraps `object_store` to give the server a uniform handle on local filesystems, GCS, S3, and HTTP static stores; reads OME-Zarr metadata and produces the three-part [[decisions/three-output-import-model|ImportResult]] (`DatasetManifest`, `FetchSource`, `ServerBindingSeed`).
+Storage abstraction and import pipeline. Wraps `object_store` to give the server a uniform handle on local filesystems, GCS, S3, and HTTP static stores; reads OME-Zarr metadata and produces the three-part [[decisions/0005-three-output-import-model|ImportResult]] (`DatasetManifest`, `FetchSource`, `ServerBindingSeed`).
 
 The crate also includes ingest tooling under `ingest/` for converting plate readers and TIFF stacks into OME-Zarr — used by `lucida-cli` and `extras/`.
 
@@ -18,7 +18,7 @@ Importing a dataset produces information for three different audiences:
 - **`FetchSource`** — how the client should fetch chunk bytes. Currently always `Proxied` (server-mediated WebSocket binary frames). Future variants will support direct fetches.
 - **`ServerBindingSeed`** — what the server needs to resolve chunk keys to object-store paths and decode storage compression. Server-private; never sent to clients.
 
-The split exists because mixing them led to either over-broadcasting (server-only details leaked to clients) or under-broadcasting (clients had to round-trip to the server for things they could compute themselves). See [[decisions/three-output-import-model]].
+The split exists because mixing them led to either over-broadcasting (server-only details leaked to clients) or under-broadcasting (clients had to round-trip to the server for things they could compute themselves). See [[decisions/0005-three-output-import-model]].
 
 ## Module map
 
@@ -54,7 +54,7 @@ The split exists because mixing them led to either over-broadcasting (server-onl
 
 `chunk_shape` parallels `ImageBindingSeed.axes_names` (one entry per on-disk axis) and is consumed by the resolver to translate wire `t/c` voxel coords into disk-grid coords. `chunk_byte_layout` carries the precomputed strides + chunk sizes used by the slice step. Consumers (`ChunkResolver::level_info(image_id, level)`, `serve_chunk_from_store`, `build_server_proxy_source`) take the level index and read all fields off one record.
 
-The seed remains server-private — never broadcast. See [[decisions/three-output-import-model]] for why.
+The seed remains server-private — never broadcast. See [[decisions/0005-three-output-import-model]] for why.
 
 `LevelBindingInfo` is `Clone` (not `Copy`) since the introduction of `chunk_shape: Vec<u64>`.
 

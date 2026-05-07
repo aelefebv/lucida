@@ -1,11 +1,11 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # GPU Residency
 
-How chunk bytes become atlas slots become indirection-buffer entries become shader-sampled pixels. Lives in `lucida-web/src/renderer/`. All WebGPU work happens inside `gpu.worker.ts` on a dedicated Web Worker — see [[decisions/gpu-on-dedicated-worker]].
+How chunk bytes become atlas slots become indirection-buffer entries become shader-sampled pixels. Lives in `lucida-web/src/renderer/`. All WebGPU work happens inside `gpu.worker.ts` on a dedicated Web Worker — see [[decisions/0003-gpu-on-dedicated-worker]].
 
 ## Atlases and indirection
 
@@ -55,7 +55,7 @@ When the worker evicts an atlas slot to make room:
 2. Includes the now-missing chunks in the next `wantedSetDelta`.
 3. Main thread clears `proxyDeliveredToWorker` for the missing keys → next drain re-uploads if the chunk is still in the [[cpu-cache]], or re-requests if it's already gone.
 
-This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — eviction churn cascades. See [[decisions/multi-pool-atlases]].
+This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — eviction churn cascades. See [[decisions/0004-multi-pool-atlases]].
 
 ## Interactions
 

@@ -1,11 +1,9 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # All GPU Work on a Dedicated Web Worker
-
-> **Note**: This decision article is derived from code analysis. The rationale is inferred. If you have authoritative context, run `/repo-wiki-update` to enrich it.
 
 ## Decision
 

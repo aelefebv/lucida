@@ -1,11 +1,9 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Three-Output Import Model
-
-> **Note**: This decision article is derived from code analysis. The rationale is inferred. If you have authoritative context, run `/repo-wiki-update` to enrich it.
 
 ## Decision
 
@@ -52,4 +50,4 @@ The renames moved the names toward what they actually describe (the manifest is 
 - [[lucida-store]] — the import implementation
 - [[lucida-protocol]] — the wire types
 - [[lucida-content]] — the manifest data model
-- [[decisions/content-source-vs-fetch-source]] — the JS/wire naming split
+- [[decisions/0006-content-source-vs-fetch-source]] — the JS/wire naming split

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-19
+modified: 2026-05-07
 ---
 
 # lucida-core
@@ -41,7 +41,7 @@ Module-level only — see the source for signatures.
 ## Invariants
 
 - **`Scene::apply` is the conventional mutation path.** Every command — document or viewport — should flow through it. Helpers (`Scene::register_dataset`, `remove_dataset`, `ensure_channel`) are also `pub fn (&mut self)` so the rule is enforced by review, not the type system. Bypassing `apply` skips epoch bumps and derived-state rebuilds (see [[scene-state-and-epochs]]).
-- **Document commands and viewport commands are disjoint enums** — `DocumentCommand` is shared/sequenced, `ViewportCommand` is local-only. The `Command` wrapper uses `#[serde(untagged)]` to deserialize either from the same JSON shape — the server uses this to decide what to broadcast (see [[decisions/document-vs-viewport-split]]).
+- **Document commands and viewport commands are disjoint enums** — `DocumentCommand` is shared/sequenced, `ViewportCommand` is local-only. The `Command` wrapper uses `#[serde(untagged)]` to deserialize either from the same JSON shape — the server uses this to decide what to broadcast (see [[decisions/0001-document-vs-viewport-split]]).
 - **Epochs only increase.** A fresh `Scene` starts at zero on every counter; `Scene::apply` is the only writer. Consumers compare epoch values to decide whether to reprocess.
 - **`SetActiveLayout` requires special ordering** in `Scene::apply` — document state is applied first, then derived state is rebuilt. All other document commands do their side effects first. The reason is that derived-state computation needs to read the freshly-applied layout selection from `document.active_layout_ids`. See `lucida-core/src/command.rs:121` for the explicit early-return branch.
 

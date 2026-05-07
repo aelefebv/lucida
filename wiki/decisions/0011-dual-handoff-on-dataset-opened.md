@@ -1,11 +1,9 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Dual Hand-off on DatasetOpened (WASM + JS)
-
-> **Note**: This decision article is derived from code analysis. The rationale is inferred. If you have authoritative context, run `/repo-wiki-update` to enrich it.
 
 ## Decision
 
@@ -27,7 +25,7 @@ Both sides observe the same `DatasetOpened` event but consume different parts of
 A single ingestion path would force one of two compromises:
 
 - **WASM does everything**, including managing JS-side fetch state — but fetch state lives in JS (promise tables, network plumbing, decode pool). Crossing the WASM boundary for every fetch detail is expensive.
-- **JS does everything**, including building Scene state — but that reimplements [[lucida-core]] and breaks the [[decisions/wasm-scene-as-source-of-truth|WASM-as-source-of-truth invariant]].
+- **JS does everything**, including building Scene state — but that reimplements [[lucida-core]] and breaks the [[decisions/0007-wasm-scene-as-source-of-truth|WASM-as-source-of-truth invariant]].
 
 Splitting at the event boundary is the cleanest cut: each side does what it owns; the event is the synchronization point.
 

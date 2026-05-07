@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Minimap Skip-When-Stationary via Render Key
@@ -36,4 +36,4 @@ The minimap renders are cheap individually but add up: each frame's render is on
 
 - [[chunk-pipeline]] — minimap is one of four phases per tick
 - [[lucida-web]]
-- [[decisions/pull-based-raf-with-typed-dirty]] — related render-skip mechanism
+- [[decisions/0009-pull-based-raf-with-typed-dirty]] — related render-skip mechanism

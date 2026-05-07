@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Temporal Runway — Won't Implement

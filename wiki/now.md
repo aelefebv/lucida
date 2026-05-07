@@ -1,44 +1,32 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Now — Lucida Current State
 
-Snapshot of what's active in the Lucida codebase. Refresh with `/repo-wiki-now` after significant shifts.
+Snapshot of what's active. Refresh via the `/repo-wiki` now pass after significant shifts.
 
-## Wiki status
+## In flight
 
-Bootstrapped 2026-04-18 via `/repo-wiki-init` followed by `/repo-wiki-derive` across the whole repo. The wiki now has:
+- **OME-Zarr expansion** — non-standard input handling (CZI 6D mosaics, `chunk_shape>1` on canonical-indexed `t`/`c`, non-canonical axes). Most recent work targets PRD #451. See [[lucida-store]]; touches [[gotchas/non-canonical-axes]] and [[gotchas/blosc-support]] (both may need refresh — see [[queue]]).
+- **`lucida-store` redesign** — PRD #148, server-side chunk serving + storage abstraction.
 
-- 9 crate/package articles in [[systems/index|Systems]]
-- 9 web subsystem articles in [[systems/index|Systems]]
-- 11 [[decisions/index|Decisions]] derived from code analysis (rationale is inferred — enrich via `/repo-wiki-update` or `/repo-wiki-interview` when you have authoritative context)
-- 6 end-to-end [[flows/index|Flows]]
-- 12 [[gotchas/index|Gotchas]]
+## Recently shipped (since 2026-04-18)
 
-Source-of-truth narrative docs at the repo root remain authoritative until folded into the wiki:
+- **OME-Zarr stack:** Blosc decoder + pinned-axis prefix slice for CZI 6D (`90a3dbc`); `lucida-store::codec` extraction with structured per-level binding seed and strict import validation (`b995ae6`); canonical-indexed `t`/`c` `chunk_shape>1` support (`c4be26c`); non-canonical axis handling (`185c429`); 1c manifest shape facts + anomaly check (`ef01e16`).
+- **Instrumentation sweep:** planning ([[planning-domain]]) and CPU cache ([[cpu-cache]]) telemetry; debug overlays for chunkGrid + planning, now in 3D (`6b66140`); render-loop + upload-to-GPU telemetry; cold-state hit rate / cause attribution / churn log. Multiple DebugPanel tab rewrites ("Render", "Planning", "Logging").
+- **Atlas-rejection resend storm fix** + `drain_waste` filterRatio redefinition (`8bd1c29`).
+- **Y-flip in 3D voxel→world** + smarter active-detail eviction (`d8c11fd`).
+- **27 pre-existing TS errors cleared** in `lucida-web` (`593eb8d`).
+- **Logging conventions** doc refreshed (`cf074d6`); see [[decisions/0012-logging-conventions]] — still violates article guardrails ([[queue]]).
+- **Wiki structural refactor** — numbered ADRs (`0001-…` through `0012-…`), `systems/{crates,subsystems}/` split, `topics/` layer added, glossary stub removed.
 
-- `CHUNK_PIPELINE.md` — long-form chunk lifecycle trace; [[chunk-pipeline]] cites it
-- `CLAUDE.md` — agent entry point (currently points at `ARCHITECTURE.md` and `DOMAINS.md` which don't exist; cross-reference may be stale)
+## Open questions
 
-Project memory at `~/.claude/projects/-Users-austin-GitHub-lucida/memory/MEMORY.md` carries pointers to recent project-state docs.
+See [[queue]]. Key ones: PRDs to fold into `wiki/inputs/`, planning threshold rationale, [[decisions/0010-temporal-runway-not-implemented]] still holding, several gotchas may need refresh after recent OME-Zarr work and TS cleanup.
 
-## Recent shifts (from git log, as of 2026-04-18)
+## Source material
 
-- `1718e9a` — wire envelope shape clarified; `ContentSource` (JS) vs `FetchSource` (wire) split documented in `CHUNK_PIPELINE.md`. See [[decisions/content-source-vs-fetch-source]].
-- `c1d982d` — rename: `ContentGraph → DatasetManifest`, `ClientFetchDescriptor → FetchSource`, `register_dataset → dataset_opened`. See [[decisions/three-output-import-model]].
-- `9908f8b` — removed unused docs and code
-- `4aec276` — DOMAINS step 9: unified semantic fallback chain in slice/volume shaders. Documented in [[gpu-residency#semantic-fallback-chain]].
-- `b0a5985` — perf: hoist `EntityDescriptor` read out of volume ray-march loop. Mentioned in [[gpu-residency]].
-
-## In-flight (per project memory)
-
-- **Chunk pipeline structural cleanup** — upload loop unified (#253). Remaining: resolve GPU state duplication (do after progressive LOD fixes).
-- **lucida-store redesign** — PRD #148, storage abstraction layer with server-side chunk serving.
-
-## Next wiki actions to consider
-
-- Drop PRDs (#378 worker protocol, #383 GPU residency, #393 shared atlas pools, #397 proxies, #148 store redesign) into `wiki/inputs/` and run `/repo-wiki-compile` to enrich the derived decision articles with authoritative rationale.
-- Run `/repo-wiki-interview` to capture any tribal knowledge that's not visible in the code (e.g., why specific threshold constants in [[planning-domain]] are tuned the way they are).
-- After significant code shifts, run `/repo-wiki-update` to refresh affected articles.
+- `CHUNK_PIPELINE.md` at repo root — long-form chunk-lifecycle authoritative trace; [[chunk-pipeline]] points at it.
+- Project memory at `~/.claude/projects/-Users-austin-code-lucida/memory/MEMORY.md` carries pointers to recent project-state docs.

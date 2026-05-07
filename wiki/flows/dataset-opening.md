@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-20
+modified: 2026-05-07
 ---
 
 # Flow: Dataset Opening
@@ -57,12 +57,12 @@ A second `open_remote_dataset` for the same URL is **fast** — the server's URL
 
 The wire command is named `open_remote_dataset` even though the URL can already point to a local-to-the-server path (`lucida-store/src/backend.rs::open` routes `/path/...` and `file://` to `LocalFileSystem`). "Remote" here means *remote-from-the-browser* — the browser cannot read bytes itself, so it always asks the server.
 
-The name is forward-looking: [[decisions/content-source-vs-fetch-source|FetchSource]] reserves a `Local` variant for a future browser-side path (OPFS, File System Access API, drag-drop) where bytes never traverse the server. If that lands, the sibling command would be `OpenLocalDataset`. Until then, every dataset goes through this flow regardless of where the bytes live.
+The name is forward-looking: [[decisions/0006-content-source-vs-fetch-source|FetchSource]] reserves a `Local` variant for a future browser-side path (OPFS, File System Access API, drag-drop) where bytes never traverse the server. If that lands, the sibling command would be `OpenLocalDataset`. Until then, every dataset goes through this flow regardless of where the bytes live.
 
 ## Related
 
 - [[chunk-pipeline]] — every step from planning forward
-- [[decisions/dual-handoff-on-dataset-opened]] — why WASM and JS both consume the event
-- [[decisions/three-output-import-model]] — the `ImportResult` shape
+- [[decisions/0011-dual-handoff-on-dataset-opened]] — why WASM and JS both consume the event
+- [[decisions/0005-three-output-import-model]] — the `ImportResult` shape
 - [[lucida-server]]
 - [[lucida-store]]

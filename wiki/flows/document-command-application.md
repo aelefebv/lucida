@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Flow: Document Command Application
@@ -63,6 +63,6 @@ Server-originated, similar to `DatasetOpened`. Reserved for S5+ when proxy avail
 ## Related
 
 - [[scene-state-and-epochs]]
-- [[decisions/document-vs-viewport-split]]
+- [[decisions/0001-document-vs-viewport-split]]
 - [[lucida-server]]
 - [[lucida-core]]

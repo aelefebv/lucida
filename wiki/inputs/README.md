@@ -1,18 +1,18 @@
 ---
 created: 2026-04-18
-modified: 2026-04-19
+modified: 2026-05-07
 ---
 
 # inputs/ — Read-Only Source Material
 
-This directory holds source material that Lucida wiki skills compile *from*. Drop in any text-format reference document — RFCs, design docs, PR descriptions, meeting notes, exported Linear/GitHub tickets, slide-deck notes, transcripts.
+This directory holds source material that the `/repo-wiki` compile pass reads *from*. Drop in any text-format reference document — RFCs, design docs, PR descriptions, meeting notes, exported Linear/GitHub tickets, slide-deck notes, transcripts.
 
 ## Conventions
 
-- **Skills never modify files in this directory.** It's read-only as far as the wiki suite is concerned.
+- **The wiki skill never modifies files in this directory.** It's read-only as far as the suite is concerned.
 - File format is flexible: `.md`, `.txt`, `.pdf`, `.html` all work.
 - Filename should hint at the content (e.g., `prd-378-worker-protocol.md`, `rfc-import-pipeline.md`, `meeting-2026-03-12-gpu-eviction.md`).
-- When `repo-wiki-compile` folds an input into an article, it cites the source filename in the resulting article — that's the lightweight tracking mechanism.
+- When the compile pass folds an input into an article, it cites the source filename in the resulting article via a `<!-- compiled from inputs/{filename} -->` comment — that's the lightweight tracking mechanism.
 
 ## Suggested first additions for Lucida
 

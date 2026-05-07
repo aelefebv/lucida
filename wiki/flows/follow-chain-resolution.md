@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Flow: Follow Chain Resolution
@@ -88,5 +88,5 @@ Steer is a follow-from-the-other-side: the sender asks the server to make `clien
 ## Related
 
 - [[presence-and-follow-mode]]
-- [[decisions/peer-to-peer-follow-mode]]
+- [[decisions/0002-peer-to-peer-follow-mode]]
 - [[lucida-server]]

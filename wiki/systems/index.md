@@ -1,13 +1,18 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Systems
 
-Major modules and subsystems within Lucida. One article per system, capturing purpose, boundaries, dependencies, and surprising behaviors.
+Major modules and subsystems within Lucida. Articles are split into two sub-folders by what they describe:
 
-## Crates
+- **`crates/`** — one article per Cargo workspace member. Crate boundaries are durable; these articles describe what each crate owns.
+- **`subsystems/`** — web-internal modules and cross-cutting concepts (chunk pipeline, GPU residency, etc.). These live inside `lucida-web/src/` (or span `lucida-web` + `lucida-server` like the chunk pipeline) and are runtime-architecture concepts, not crates.
+
+`[[wiki-link]]` resolution is by basename, so `[[lucida-core]]` and `[[chunk-pipeline]]` continue to work unqualified after the split.
+
+## Crates (`crates/`)
 
 - [[lucida-core]] — Rust library compiled to native + WASM; owns the Scene model, command vocabulary, view query, and ray pick
 - [[lucida-server]] — Tokio + Axum WebSocket relay; sequences document commands, brokers presence, opens datasets, serves chunks and proxies
@@ -19,7 +24,7 @@ Major modules and subsystems within Lucida. One article per system, capturing pu
 - [[lucida-py]] — Python bindings via `pyo3` + `maturin`; `PyScene` and `PyStore`
 - [[lucida-web]] — React 19 + Vite 7 + WebGPU frontend; thin orchestration over the WASM Scene
 
-## Web subsystems
+## Subsystems (`subsystems/`)
 
 - [[chunk-pipeline]] — overview of the end-to-end path from dataset URL to pixels; pointer to the deep trace in `CHUNK_PIPELINE.md`
 - [[planning-domain]] — wanted-set computation, LOD promotion with hysteresis, lane-based priority formula

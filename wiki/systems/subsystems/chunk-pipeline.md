@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Chunk Pipeline
@@ -37,7 +37,7 @@ Every RAF tick runs four phases in this order, then reschedules if work remains:
 - **Priority is a single scalar, lower wins.** The formula is `laneOffset + (1 - importance) * 500 + distance * 10`. Lanes are `DETAIL=0`, `PROXY=500`, `PREFETCH=1000`, `OVERVIEW=2000`. Centered, important detail wins (~0); far prefetch loses (~1500+).
 - **`CpuCache` is the sole fetch path.** The old `SharedChunkQueue` was deleted in S5; nothing else fetches.
 - **Atlas eviction is pure LRU per pool.** The orchestrator drives "what should be there"; the GPU worker just reports what it lost via `chunksEvicted` and the next `wantedSetDelta`.
-- **Plate proxy pools are keyed by `(datasetId, kind, slotDims, channel)`.** The `channel` axis matters because each channel composites independently and pool capacity is per-pool — see [[decisions/multi-pool-atlases]].
+- **Plate proxy pools are keyed by `(datasetId, kind, slotDims, channel)`.** The `channel` axis matters because each channel composites independently and pool capacity is per-pool — see [[decisions/0004-multi-pool-atlases]].
 
 ## Gotchas
 

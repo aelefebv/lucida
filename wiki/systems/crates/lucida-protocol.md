@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # lucida-protocol
@@ -33,7 +33,7 @@ All four modules are re-exported via `pub use` so consumers do `use lucida_proto
 
 ## Invariants
 
-- **`ContentSource` (JS/TS) is distinct from `FetchSource` (wire)** — the rename in commit `c1d982d` and clarification in `1718e9a` made this explicit. The wire envelope carries `FetchSource`; the web client wraps it in a `ContentSource` class for in-browser fetch orchestration. Don't conflate them. See [[decisions/content-source-vs-fetch-source]].
+- **`ContentSource` (JS/TS) is distinct from `FetchSource` (wire)** — the rename in commit `c1d982d` and clarification in `1718e9a` made this explicit. The wire envelope carries `FetchSource`; the web client wraps it in a `ContentSource` class for in-browser fetch orchestration. Don't conflate them. See [[decisions/0006-content-source-vs-fetch-source]].
 - **`AssetCatalog` is monotonic across `AssetCatalogDelta` merges.** The `apply_asset_catalog_delta` document command merges by entity, deduping `ProxyKind` lists. Same delta applied twice produces the same catalog. See the `apply_asset_catalog_delta_idempotent_on_repeat` test in `lucida-core/src/protocol.rs`.
 - **Wire format names are pinned via explicit `serde` tags**, not derived from `Debug`. `ProxyKind::WellProxy3D` serializes as the literal string `"WellProxy3D"`, asserted by the `proxy_kind_str` helper in the server. Renaming a variant requires touching both ends.
 

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Flow: Presence Propagation
@@ -42,7 +42,7 @@ The server-side path is identical: `Session::update_dataset_presence` → `Serve
 
 ## Latency
 
-- Local render after user input: **immediate** (`interactiveDirty` is throttle-exempt — see [[decisions/pull-based-raf-with-typed-dirty]]).
+- Local render after user input: **immediate** (`interactiveDirty` is throttle-exempt — see [[decisions/0009-pull-based-raf-with-typed-dirty]]).
 - Wire latency to the next-hop server: 1–10 ms typical.
 - Server fan-out: O(n) per peer; for typical n<10, sub-millisecond.
 - Receiver render: next RAF — ≤16 ms.
@@ -53,4 +53,4 @@ End-to-end (panner finger → follower screen): ~30–50 ms typical, dominated b
 
 - [[presence-and-follow-mode]]
 - [[flows/follow-chain-resolution]]
-- [[decisions/document-vs-viewport-split]]
+- [[decisions/0001-document-vs-viewport-split]]

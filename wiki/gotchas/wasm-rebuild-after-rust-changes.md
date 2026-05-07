@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # WASM Rebuild After Rust Changes
@@ -49,4 +49,4 @@ The cost is the manual rebuild step in the dev loop, mitigated by it being scrip
 - `README.md` — the dev loop walk-through
 - [[lucida-core]]
 - [[lucida-web]]
-- [[decisions/wasm-scene-as-source-of-truth]]
+- [[decisions/0007-wasm-scene-as-source-of-truth]]

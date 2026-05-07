@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-19
+modified: 2026-05-07
 ---
 
 # lucida-web
@@ -11,7 +11,7 @@ This article is a roadmap. The substantive content for each subsystem lives in i
 
 ## Why a thin client over WASM
 
-The web client doesn't reimplement the Scene model. It doesn't decide what's visible, what LOD to use, or where entities project to on screen — it asks WASM. This split exists because the same questions need answers on the server, the CLI, and the Python bindings, and we'd otherwise have to re-implement view-query math four times. See [[decisions/wasm-scene-as-source-of-truth]].
+The web client doesn't reimplement the Scene model. It doesn't decide what's visible, what LOD to use, or where entities project to on screen — it asks WASM. This split exists because the same questions need answers on the server, the CLI, and the Python bindings, and we'd otherwise have to re-implement view-query math four times. See [[decisions/0007-wasm-scene-as-source-of-truth]].
 
 Practically, the web client owns:
 
@@ -72,7 +72,7 @@ Subdirectories:
 
 ## Invariants
 
-- **All GPU work is on the worker.** The main thread never touches WebGPU directly; the canvas is transferred via `OffscreenCanvas`. See [[decisions/gpu-on-dedicated-worker]].
+- **All GPU work is on the worker.** The main thread never touches WebGPU directly; the canvas is transferred via `OffscreenCanvas`. See [[decisions/0003-gpu-on-dedicated-worker]].
 - **`interactiveDirty` and `residencyDirty` are throttled differently.** `interactiveDirty` renders immediately; `residencyDirty` waits ~33ms. The reason and consequence are in [[chunk-pipeline]].
 - **The classification gate is call-site discipline, not a runtime predicate.** `applyDocumentCommand` (sends to server, awaits Ack/CommandBroadcast) vs `applyViewportCommand` (applies locally + emits presence) is the choice point; the Rust side enforces it at compile time via the disjoint `DocumentCommand` / `ViewportCommand` enums. Misclassifying a viewport command as a document command floods peers; misclassifying a document command as viewport silently drops shared state. See [[gotchas/document-vs-viewport-classification]].
 - **`Scene::apply_command` is called for every incoming command broadcast** so all clients converge on the same document state. Local viewport commands take a separate path (`applyViewportCommand`).

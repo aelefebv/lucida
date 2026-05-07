@@ -1,11 +1,9 @@
 ---
 created: 2026-04-18
-modified: 2026-04-20
+modified: 2026-05-07
 ---
 
 # ContentSource (JS) vs FetchSource (wire)
-
-> **Note**: This decision article is derived from code analysis. The rationale is inferred. If you have authoritative context, run `/repo-wiki-update` to enrich it.
 
 ## Decision
 
@@ -49,4 +47,4 @@ The `register_dataset → dataset_opened` server-event rename in commit `c1d982d
 
 - [[lucida-protocol]] — wire types
 - [[chunk-pipeline]] — where ContentSource is invoked in the fetch path
-- [[decisions/three-output-import-model]] — the broader split that FetchSource is part of
+- [[decisions/0005-three-output-import-model]] — the broader split that FetchSource is part of

@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Flow: Proxy Generation (S5)
@@ -36,7 +36,7 @@ After a dataset opens, [[lucida-server]] kicks off best-effort background pre-ge
    Key is `proxy/{entity_id}/{kind_str}/T{:05}_C{:03}` where `kind_str` is `WellProxy3D` or `FieldProxy3D` (literal strings — see `proxy_kind_str`).
 6. **Client `bridge.ts::handleBinary`** parses the frame. Key prefix `proxy/` routes it to a separate proxy promise table (not the chunk pending-fetch map).
 7. **Orchestrator** receives the proxy asset, posts a `proxyAsset` message over [[worker-protocol]] to the GPU worker.
-8. **Worker** allocates a slot in the appropriate proxy pool (keyed by `(datasetId, kind, slotDims, channel)` — see [[decisions/multi-pool-atlases]]) and writes the voxel buffer. Updates the descriptor's proxy slot handle for that entity.
+8. **Worker** allocates a slot in the appropriate proxy pool (keyed by `(datasetId, kind, slotDims, channel)` — see [[decisions/0004-multi-pool-atlases]]) and writes the voxel buffer. Updates the descriptor's proxy slot handle for that entity.
 9. **Render** — next frame, the shader's [[gpu-residency#semantic-fallback-chain|fallback chain]] now has the proxy as a candidate.
 
 ## Trace: pre-generation on dataset open
@@ -77,4 +77,4 @@ The alternative — letting `lucida-proxy` do its own async I/O — would couple
 - [[lucida-server]] — the wrapper layer
 - [[gpu-residency]] — where proxies land in the GPU
 - [[planning-domain]] — what triggers proxy demand
-- [[decisions/multi-pool-atlases]]
+- [[decisions/0004-multi-pool-atlases]]

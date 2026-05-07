@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-07
 ---
 
 # Document vs Viewport Command Classification
@@ -14,7 +14,7 @@ Misclassifying a viewport command as a document command, or vice versa, has loud
 
 ## How to classify
 
-The split is documented in [[decisions/document-vs-viewport-split]]. Quick rule:
+The split is documented in [[decisions/0001-document-vs-viewport-split]]. Quick rule:
 
 - Does the change affect **what's loaded** (datasets, layouts, asset catalogs)? → **DocumentCommand**.
 - Does the change affect **how I'm looking at it** (camera, slice index, contrast, channel visibility)? → **ViewportCommand**.
@@ -50,6 +50,6 @@ The defense is reading the wire payload format on the server (which differentiat
 
 ## Related
 
-- [[decisions/document-vs-viewport-split]]
+- [[decisions/0001-document-vs-viewport-split]]
 - [[scene-state-and-epochs]] — epochs reflect the split
 - [[presence-and-follow-mode]] — the presence side

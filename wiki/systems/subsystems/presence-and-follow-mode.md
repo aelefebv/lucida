@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-19
+modified: 2026-05-07
 ---
 
 # Presence and Follow Mode
@@ -11,7 +11,7 @@ Presence is the per-client ephemeral state — viewport, cursor, follow target, 
 
 The intuitive model — one "presenter" client whose viewport drives everyone else — collapses as soon as more than two people are involved. Real collaboration has small cliques following each other, with people drifting in and out of the group.
 
-Peer-to-peer follow lets every client independently choose whom to follow (or no one). The server-side validation prevents loops and chains-of-followers, but otherwise stays out of the way. See [[decisions/peer-to-peer-follow-mode]].
+Peer-to-peer follow lets every client independently choose whom to follow (or no one). The server-side validation prevents loops and chains-of-followers, but otherwise stays out of the way. See [[decisions/0002-peer-to-peer-follow-mode]].
 
 ## Five wire messages
 
