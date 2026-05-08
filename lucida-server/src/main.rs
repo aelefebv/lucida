@@ -153,22 +153,66 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         proxy_config,
     };
 
-    // Slice 1 (issue #456) ships only the stub principal extractor; the
-    // env-driven selection of stub vs. Google JWT lands in slice 4.
-    let extractor = auth::middleware::default_extractor();
+    // Slice 2 (issue #457): real session store + cookie-based extractor.
+    // The dev-login endpoint (mounted only in debug builds) is the
+    // session minter until OAuth lands in slice 4.
+    let auth_config = Arc::new(auth::AuthConfig::from_env());
+    eprintln!(
+        "auth: cookie={} db={} idle_timeout={}s hard_cap={}s",
+        auth_config.cookie_name,
+        auth_config.db_path.display(),
+        auth_config.idle_timeout.as_secs(),
+        auth_config.hard_cap.as_secs(),
+    );
+    let session_store = match auth::SqliteSessionStore::open(&auth_config.db_path).await {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            eprintln!("failed to open session store: {e}");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
+    let session_store_dyn: Arc<dyn auth::LoginSessionStore> = session_store.clone();
 
-    let app = Router::new()
+    let extractor = auth::middleware::build_extractor(
+        Arc::clone(&auth_config),
+        Arc::clone(&session_store_dyn),
+    );
+
+    let dev_login_state = auth::handlers::DevLoginState {
+        config: Arc::clone(&auth_config),
+        store: Arc::clone(&session_store_dyn),
+    };
+
+    let mut auth_router: Router<()> =
+        Router::new().route("/auth/whoami", get(auth::handlers::whoami));
+    if auth::is_dev_mode() {
+        eprintln!("auth: dev mode — exposing POST /auth/dev/login");
+        auth_router = auth_router.route(
+            "/auth/dev/login",
+            post(auth::handlers::dev_login).with_state(dev_login_state),
+        );
+    }
+
+    // The WS / browse / admin routes carry `AppState`; the auth routes
+    // are stateless from the perspective of this router (the dev-login
+    // route binds its own `DevLoginState` via `with_state`). Build the
+    // AppState half first, finalize state with `.with_state(state)`,
+    // then merge the already-finalized auth router on top so axum's
+    // type-level state plumbing stays happy.
+    let app_state_router = Router::new()
         .route("/", get(ws_handler))
         .route("/ws", get(ws_handler))
         .route("/api/browse", get(browse::browse_handler))
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
-        .route("/auth/whoami", get(auth::handlers::whoami))
+        .with_state(state);
+
+    let app = app_state_router
+        .merge(auth_router)
         .layer(axum::middleware::from_fn_with_state(
             extractor,
             auth::middleware::auth_middleware,
         ))
-        .layer(CorsLayer::permissive())
-        .with_state(state);
+        .layer(CorsLayer::permissive());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:9876")
         .await

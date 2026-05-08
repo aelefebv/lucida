@@ -22,7 +22,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::json;
 
-use crate::auth::principal::{AuthError, PrincipalExtractor};
+use crate::auth::config::AuthConfig;
+use crate::auth::principal::{AuthError, PrincipalExtractor, SessionCookieExtractor};
+use crate::auth::session_store::LoginSessionStore;
 
 /// Shared handle to the active extractor. Wired into the router's
 /// state so middleware closures can grab it without holding a
@@ -87,11 +89,16 @@ pub fn accepts_html(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Build a default extractor for use when no other configuration is
-/// provided. Today returns the stub; slice 4 replaces this with the
-/// `LUCIDA_AUTH` env-driven selection.
-pub fn default_extractor() -> SharedExtractor {
-    Arc::new(crate::auth::principal::StubPrincipalExtractor::new())
+/// Build the production extractor from a config + a session store. Used
+/// by `main.rs` so the binding lives next to the rest of the auth
+/// module's wiring decisions. Slice 7 will replace the body of this
+/// helper with `LUCIDA_AUTH`-driven selection between the cookie
+/// extractor and a future Google-flow variant.
+pub fn build_extractor(
+    config: Arc<AuthConfig>,
+    store: Arc<dyn LoginSessionStore>,
+) -> SharedExtractor {
+    Arc::new(SessionCookieExtractor::new(config, store))
 }
 
 #[cfg(test)]
@@ -106,8 +113,11 @@ mod tests {
     use lucida_core::auth_principal::AuthPrincipal;
     use tower::ServiceExt;
 
-    use crate::auth::principal::{StubPrincipalExtractor, AuthError, PrincipalExtractor};
+    use crate::auth::principal::{AuthError, PrincipalExtractor};
+    use crate::auth::session_store::LoginSession;
+    use crate::auth::session_store_memory::MemorySessionStore;
     use async_trait::async_trait;
+    use chrono::{Duration as ChronoDuration, Utc};
 
     /// Echo handler that returns whatever `AuthPrincipal` it sees in
     /// extensions. Used to assert the middleware actually attached one.
@@ -125,12 +135,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn middleware_attaches_stub_principal_to_extensions() {
-        let extractor: SharedExtractor = Arc::new(StubPrincipalExtractor::new());
+    async fn middleware_attaches_principal_via_session_cookie() {
+        let store = Arc::new(MemorySessionStore::new());
+        let now = Utc::now();
+        store
+            .create(LoginSession {
+                id: "s1".into(),
+                email: "dev@local".into(),
+                display_name: "Local Dev".into(),
+                picture_url: None,
+                created_at: now,
+                last_used_at: now,
+                expires_at: now + ChronoDuration::hours(24),
+            })
+            .await
+            .unwrap();
+
+        let config = Arc::new(AuthConfig::for_tests());
+        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
         let app = router_with_extractor(extractor);
 
         let req = Request::builder()
             .uri("/echo")
+            .header("cookie", "lucida_session=s1")
             .body(Body::empty())
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
@@ -138,23 +165,14 @@ mod tests {
 
         let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
         let p: AuthPrincipal = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(p, StubPrincipalExtractor::principal());
-    }
-
-    /// Always-fail extractor used to exercise the 401 branch without
-    /// waiting for the real cookie/session machinery.
-    struct AlwaysUnauth;
-
-    #[async_trait]
-    impl PrincipalExtractor for AlwaysUnauth {
-        async fn extract(&self, _: &axum::http::request::Parts) -> Result<AuthPrincipal, AuthError> {
-            Err(AuthError::Unauthenticated)
-        }
+        assert_eq!(p.email, "dev@local");
     }
 
     #[tokio::test]
-    async fn middleware_returns_401_when_extractor_fails() {
-        let extractor: SharedExtractor = Arc::new(AlwaysUnauth);
+    async fn middleware_returns_401_when_no_cookie() {
+        let store = Arc::new(MemorySessionStore::new());
+        let config = Arc::new(AuthConfig::for_tests());
+        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
         let app = router_with_extractor(extractor);
 
         let req = Request::builder()
@@ -167,6 +185,30 @@ mod tests {
         let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "unauthenticated");
+    }
+
+    /// Exercise the 5xx branch via a hand-rolled extractor that
+    /// returns `Internal`. Keeps coverage on the not-the-caller's-fault
+    /// path even though no production code path emits it today.
+    struct AlwaysInternal;
+
+    #[async_trait]
+    impl PrincipalExtractor for AlwaysInternal {
+        async fn extract(&self, _: &axum::http::request::Parts) -> Result<AuthPrincipal, AuthError> {
+            Err(AuthError::Internal("simulated".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn middleware_surfaces_internal_errors_as_500() {
+        let extractor: SharedExtractor = Arc::new(AlwaysInternal);
+        let app = router_with_extractor(extractor);
+        let req = Request::builder()
+            .uri("/echo")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]
