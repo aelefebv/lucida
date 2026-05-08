@@ -35,7 +35,13 @@
 //! - `extractors` — slice 6's `AdminRequired` axum extractor: pulls
 //!   the principal out of extensions and 403s on `!is_admin`. Handlers
 //!   wear it declaratively rather than hand-rolling the gate.
+//! - `cleanup` — slice 8's hourly background sweep that drops expired
+//!   `login_sessions` and `pending_auth` rows so storage growth stays
+//!   bounded over the life of a long-running deployment.
 
+#[cfg(test)]
+mod audit_event_tests;
+pub mod cleanup;
 pub mod config;
 pub mod cookie;
 pub mod error_page;
@@ -52,6 +58,7 @@ pub mod session_store_memory;
 pub mod session_store_sqlite;
 pub mod unauth_landing;
 
+pub use cleanup::{spawn as spawn_cleanup, CleanupState};
 pub use config::{AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig};
 pub use extractors::AdminRequired;
 pub use google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
@@ -67,9 +74,15 @@ pub use session_store_memory::MemorySessionStore;
 pub use session_store_sqlite::{SqliteSessionStore, StoreOpenError};
 
 /// Returns true if this binary should expose the dev-only auth surface
-/// (currently `POST /auth/dev/login`). Slice 2 gates on
-/// `cfg!(debug_assertions)` per PRD #455 §"Important design notes" —
-/// the full LUCIDA_AUTH=disabled vs google selection lands in slice 7.
-pub fn is_dev_mode() -> bool {
-    cfg!(debug_assertions)
+/// (currently `POST /auth/dev/login`).
+///
+/// Slice 2 gated on `cfg!(debug_assertions)` because `AuthMode::Disabled`
+/// hadn't been validated yet. Slice 8 (per slice 7's hand-off note now
+/// that mode is first-class) gates on `mode == AuthMode::Disabled`
+/// instead: the dev-login route only lands when auth is intentionally
+/// off (loopback default + auto-detect, or explicit `LUCIDA_AUTH=disabled`).
+/// A release build running with auth disabled still gets the dev shortcut;
+/// a debug build configured for Google OAuth doesn't expose it.
+pub fn is_dev_mode(config: &config::AuthConfig) -> bool {
+    matches!(config.mode, config::AuthMode::Disabled)
 }

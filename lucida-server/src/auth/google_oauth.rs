@@ -64,6 +64,13 @@ pub struct VerifiedClaims {
 
 /// Failure modes from the OAuth client. Distinguished so the handler
 /// can pick the right `auth.signin.error.*` event name and HTTP status.
+///
+/// Slice 8 adds `Network` for the cases where reqwest itself fails
+/// (DNS, TCP, TLS) reaching Google's token endpoint or JWKS endpoint.
+/// Previously these were rolled into `CodeExchange` / `JwksFetch`, which
+/// made the operator log line read "code exchange failed: dns error" —
+/// useful but blurred two distinct dashboards (Google rejected our code
+/// vs we couldn't reach Google at all).
 #[derive(Debug, Error)]
 pub enum OAuthError {
     #[error("token endpoint exchange failed: {0}")]
@@ -72,6 +79,8 @@ pub enum OAuthError {
     JwksFetch(String),
     #[error("JWT validation failed: {0}")]
     JwtInvalid(String),
+    #[error("network failure reaching Google: {0}")]
+    Network(String),
 }
 
 /// The bytes Google returns from the token endpoint on success. We
@@ -204,7 +213,7 @@ impl GoogleOAuthClient {
             ])
             .send()
             .await
-            .map_err(|e| OAuthError::CodeExchange(e.to_string()))?;
+            .map_err(|e| classify_transport_error(e, OAuthError::CodeExchange))?;
 
         let status = res.status();
         if !status.is_success() {
@@ -323,6 +332,27 @@ impl GoogleOAuthClient {
     }
 }
 
+/// Classify a `reqwest::Error` as either a transport-layer failure (DNS,
+/// TCP connect, TLS handshake, request timeout) or a fall-through that
+/// the caller maps to its own variant (HTTP-level error, body decode).
+/// Returns the transport variant directly; otherwise calls `fallback` to
+/// build the caller's preferred variant from the stringified error.
+///
+/// Why not just check `is_status` and inverse: `reqwest::Error` doesn't
+/// expose a single "transport vs protocol" boolean, so we look for the
+/// signals that mean "we never reached Google" (`is_connect`, `is_timeout`,
+/// `is_request`) and fall through on everything else.
+fn classify_transport_error<F>(e: reqwest::Error, fallback: F) -> OAuthError
+where
+    F: FnOnce(String) -> OAuthError,
+{
+    if e.is_connect() || e.is_timeout() || e.is_request() {
+        OAuthError::Network(e.to_string())
+    } else {
+        fallback(e.to_string())
+    }
+}
+
 async fn fetch_jwks(
     http: &reqwest::Client,
     jwks_uri: &str,
@@ -331,7 +361,7 @@ async fn fetch_jwks(
         .get(jwks_uri)
         .send()
         .await
-        .map_err(|e| OAuthError::JwksFetch(e.to_string()))?;
+        .map_err(|e| classify_transport_error(e, OAuthError::JwksFetch))?;
     if !res.status().is_success() {
         return Err(OAuthError::JwksFetch(format!(
             "status {}",
