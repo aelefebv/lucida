@@ -42,9 +42,28 @@ uuid = { version = "1", features = ["v4"] }
 # surgical control over Set-Cookie attributes (HttpOnly, Secure
 # auto-detect, SameSite=Lax, Max-Age tied to the hard cap).
 cookie = "0.18"
+# Slice 4 (PRD #455): Google OAuth integration. `reqwest` with
+# rustls-tls (matches sqlx) drives the token exchange and JWKS fetch.
+# `jsonwebtoken` validates Google ID-token signatures and standard
+# claims. `base64` + `urlencoding` are pulled in directly so the
+# state-token + redirect-URL builders don't depend on `reqwest`'s
+# private re-exports.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "charset"] }
+jsonwebtoken = "9"
+base64 = "0.22"
+urlencoding = "2"
 
 [dev-dependencies]
 tempfile = "3"
 bytes = "1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Slice 4 mock-Google harness: spins up an axum app on an ephemeral
+# port that pretends to be Google's /token + /certs. `rsa` mints the
+# fake signing key; the integration test signs a JWT with it and
+# asserts the lucida server validates it via the cached JWKS.
+rsa = { version = "0.9", features = ["sha2"] }
+# `urlencoding` is also pulled in by the runtime crate but cargo's
+# strict feature unification means listing it here lets the test
+# import it without a workspace round-trip.
+urlencoding = "2"

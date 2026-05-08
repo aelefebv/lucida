@@ -153,17 +153,36 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         proxy_config,
     };
 
-    // Slice 2 (issue #457): real session store + cookie-based extractor.
-    // The dev-login endpoint (mounted only in debug builds) is the
-    // session minter until OAuth lands in slice 4.
-    let auth_config = Arc::new(auth::AuthConfig::from_env());
+    // Slice 2 (issue #457) landed the session store + cookie extractor.
+    // Slice 4 (issue #460) layers the Google OAuth flow on top: when
+    // `LUCIDA_AUTH=google`, the server fail-fasts on missing
+    // credentials, opens the pending_auth store, primes the JWKS
+    // cache, and mounts /auth/start + /auth/callback alongside the
+    // existing endpoints.
+    let auth_config = match auth::AuthConfig::from_env() {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            eprintln!("auth config error: {e}");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
     eprintln!(
-        "auth: cookie={} db={} idle_timeout={}s hard_cap={}s",
+        "auth: mode={:?} cookie={} db={} idle_timeout={}s hard_cap={}s",
+        auth_config.mode,
         auth_config.cookie_name,
         auth_config.db_path.display(),
         auth_config.idle_timeout.as_secs(),
         auth_config.hard_cap.as_secs(),
     );
+    if let Some(g) = auth_config.google.as_ref() {
+        eprintln!(
+            "auth: google client_id={}…{} redirect_uri={} jwks_uri={}",
+            &g.client_id.chars().take(6).collect::<String>(),
+            &g.client_id.chars().rev().take(4).collect::<String>(),
+            g.redirect_uri,
+            g.jwks_uri,
+        );
+    }
     let session_store = match auth::SqliteSessionStore::open(&auth_config.db_path).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
@@ -172,6 +191,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         }
     };
     let session_store_dyn: Arc<dyn auth::LoginSessionStore> = session_store.clone();
+    // Pending-auth store rides the same SQLite pool the session store
+    // opened (one DB, one migration system, one connection budget).
+    let pending_store: Arc<dyn auth::PendingAuthStore> = Arc::new(
+        auth::SqlitePendingAuthStore::new(session_store.pool().clone()),
+    );
 
     let extractor = auth::middleware::build_extractor(
         Arc::clone(&auth_config),
@@ -187,39 +211,72 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         store: Arc::clone(&session_store_dyn),
     };
 
-    let mut auth_router: Router<()> = Router::new()
+    // Two auth-route flavors so the OAuth flow doesn't bounce itself:
+    //   * `authed_router` — `/auth/whoami` and `/auth/logout`. These
+    //     read the principal/cookie, so they MUST run through the auth
+    //     middleware (whoami specifically returns 401 when missing).
+    //   * `public_router` — `/auth/start`, `/auth/callback`, and the
+    //     dev-only `/auth/dev/login`. These mint sessions and must NOT
+    //     be wrapped — otherwise an unauthed user hitting `/auth/start`
+    //     would be 401'd into the unauth landing, which then redirects
+    //     back to `/auth/start` (infinite loop).
+    let authed_auth_router: Router<()> = Router::new()
         .route("/auth/whoami", get(auth::handlers::whoami))
         .route(
             "/auth/logout",
             post(auth::handlers::logout).with_state(logout_state),
         );
+
+    let mut public_auth_router: Router<()> = Router::new();
+    if let Some(g) = auth_config.google.clone() {
+        let google_client = match auth::GoogleOAuthClient::new(Arc::new(g)).await {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                eprintln!("auth: failed to initialize Google client: {e}");
+                return Err(std::io::Error::other(e.to_string()));
+            }
+        };
+        let oauth_state = auth::handlers::OAuthState {
+            config: Arc::clone(&auth_config),
+            session_store: Arc::clone(&session_store_dyn),
+            pending_store: Arc::clone(&pending_store),
+            google: Arc::clone(&google_client),
+        };
+        public_auth_router = public_auth_router
+            .route(
+                "/auth/start",
+                get(auth::handlers::auth_start)
+                    .post(auth::handlers::auth_start)
+                    .with_state(oauth_state.clone()),
+            )
+            .route(
+                "/auth/callback",
+                get(auth::handlers::auth_callback).with_state(oauth_state),
+            );
+    }
     if auth::is_dev_mode() {
         eprintln!("auth: dev mode — exposing POST /auth/dev/login");
-        auth_router = auth_router.route(
+        public_auth_router = public_auth_router.route(
             "/auth/dev/login",
             post(auth::handlers::dev_login).with_state(dev_login_state),
         );
     }
 
-    // The WS / browse / admin routes carry `AppState`; the auth routes
-    // are stateless from the perspective of this router (the dev-login
-    // route binds its own `DevLoginState` via `with_state`). Build the
-    // AppState half first, finalize state with `.with_state(state)`,
-    // then merge the already-finalized auth router on top so axum's
-    // type-level state plumbing stays happy.
+    // App routes carry the auth middleware; public auth routes don't.
     let app_state_router = Router::new()
         .route("/", get(ws_handler))
         .route("/ws", get(ws_handler))
         .route("/api/browse", get(browse::browse_handler))
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
-        .with_state(state);
-
-    let app = app_state_router
-        .merge(auth_router)
+        .with_state(state)
+        .merge(authed_auth_router)
         .layer(axum::middleware::from_fn_with_state(
             extractor,
             auth::middleware::auth_middleware,
-        ))
+        ));
+
+    let app = app_state_router
+        .merge(public_auth_router)
         .layer(CorsLayer::permissive());
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:9876")

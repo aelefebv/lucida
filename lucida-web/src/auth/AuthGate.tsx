@@ -1,9 +1,13 @@
 // Top-level wrapper rendered above `<App />`. Drives `useAuthState`
 // and gates the app until authentication resolves.
 //
-// Slice 1 (issue #456): the unauthenticated branch shows a placeholder
-// "not signed in" screen — the real `UnauthLanding` (which captures
-// `location.hash` and redirects to `/auth/start`) lands in slice 4.
+// Slice 4 (issue #460) replaces the slice-1 `UnauthPlaceholder` with
+// the real `UnauthLanding`, which mirrors the inline HTML the server
+// middleware returns for fresh browser navigations: capture
+// `location.hash`, redirect to `/auth/start`. This branch only fires
+// when the SPA is already mounted and whoami flips to unauth (e.g.
+// the user signed out, or their session expired in the open tab).
+// Cold-start unauth is handled server-side before React boots.
 //
 // Slice 3 (issue #459): publishes the resolved principal and the
 // `signOut` action through `AuthSessionContext` so the new
@@ -12,6 +16,7 @@
 
 import type { ReactNode } from "react";
 import { AuthSessionContext } from "./AuthSession.ts";
+import { UnauthLanding } from "./UnauthLanding.tsx";
 import { useAuthState } from "./useAuthState.ts";
 
 interface AuthGateProps {
@@ -26,7 +31,7 @@ export function AuthGate({ children }: AuthGateProps) {
   }
 
   if (!("authenticated" in state) || !state.authenticated) {
-    return <UnauthPlaceholder />;
+    return <UnauthLanding />;
   }
 
   return (
@@ -42,22 +47,6 @@ function AuthLoading() {
   return (
     <div style={{ padding: "2rem", color: "#888" }}>
       Checking authentication...
-    </div>
-  );
-}
-
-// Placeholder for the slice-4 `UnauthLanding`. Kept intentionally
-// minimal so it's obvious in code review that the real sign-in UX has
-// not landed yet.
-function UnauthPlaceholder() {
-  return (
-    <div style={{ padding: "2rem" }}>
-      <h2>Not signed in</h2>
-      <p>
-        Sign-in flow has not been wired up yet. This placeholder lands in
-        slice 1 of the auth project (issue #456); the real sign-in
-        landing comes in slice 4.
-      </p>
     </div>
   );
 }

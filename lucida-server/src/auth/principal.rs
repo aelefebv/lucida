@@ -23,6 +23,7 @@ use lucida_core::auth_principal::AuthPrincipal;
 
 use super::config::AuthConfig;
 use super::cookie::read_session_cookie;
+use super::google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 use super::session_store::{LoginSession, LoginSessionStore};
 
 /// Failure modes from extracting a principal off an inbound request.
@@ -140,6 +141,91 @@ impl PrincipalExtractor for SessionCookieExtractor {
             // lands in a later slice (out of scope here).
             is_admin: true,
         })
+    }
+}
+
+/// Convert a Google ID-token's verified claims into the
+/// `AuthPrincipal` we persist on the new `LoginSession` row at
+/// callback time. Slice 4 deliberately accepts any verified email so
+/// the end-to-end flow works against the mock harness; slice 5 layers
+/// hosted-domain + email_verified rejection on top.
+///
+/// `display_name` falls back to the local part of the email when
+/// Google's `name` claim is absent (rare, but happens for accounts
+/// without a populated profile). `is_admin` is `false` until
+/// `LUCIDA_ADMIN_EMAILS` plumbing arrives in a later slice.
+pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
+    let display_name = claims.name.clone().unwrap_or_else(|| {
+        claims
+            .email
+            .split('@')
+            .next()
+            .unwrap_or(&claims.email)
+            .to_string()
+    });
+    AuthPrincipal {
+        email: claims.email.clone(),
+        display_name,
+        picture_url: claims.picture.clone(),
+        is_admin: false,
+    }
+}
+
+/// `PrincipalExtractor` adapter that runs Google's JWT validator on a
+/// `Bearer` token in the `Authorization` header.
+///
+/// Slice 4 wires this as the authoritative extractor when
+/// `LUCIDA_AUTH=google`; in practice production relies on the session
+/// cookie path because the callback handler mints a `LoginSession` row
+/// out of the validated claims, so per-request JWT extraction is
+/// optional. Keeping the adapter around lets slice 5+ wire in
+/// integrations that bypass the cookie (CLI, server-to-server) without
+/// re-implementing JWT validation in two places.
+pub struct GoogleJwtPrincipalExtractor {
+    google: Arc<GoogleOAuthClient>,
+}
+
+impl GoogleJwtPrincipalExtractor {
+    pub fn new(google: Arc<GoogleOAuthClient>) -> Self {
+        Self { google }
+    }
+
+    /// Validate `id_token` and convert it to an `AuthPrincipal`. Used
+    /// directly by `/auth/callback` — the handler doesn't go through the
+    /// `PrincipalExtractor` trait because it's holding the token in
+    /// hand from the code-exchange step.
+    pub async fn principal_from_id_token(
+        &self,
+        id_token: &str,
+    ) -> Result<AuthPrincipal, OAuthError> {
+        let claims = self.google.validate_id_token(id_token).await?;
+        Ok(principal_from_claims(&claims))
+    }
+}
+
+#[async_trait]
+impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
+    async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
+        let header = req
+            .headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or(AuthError::Unauthenticated)?;
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or(AuthError::Unauthenticated)?;
+
+        match self.google.validate_id_token(token).await {
+            Ok(claims) => Ok(principal_from_claims(&claims)),
+            Err(OAuthError::JwtInvalid(msg)) => {
+                debug!(error = %msg, "google_extractor.jwt_invalid");
+                Err(AuthError::Unauthenticated)
+            }
+            Err(other) => {
+                error!(error = %other, "google_extractor.internal");
+                Err(AuthError::Internal(other.to_string()))
+            }
+        }
     }
 }
 
@@ -287,5 +373,36 @@ mod tests {
             AuthError::Internal("oops".into()).status_code(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+    }
+
+    // -- principal_from_claims (slice 4) ---------------------------------
+
+    #[test]
+    fn principal_from_claims_uses_name_when_present() {
+        let claims = VerifiedClaims {
+            email: "alice@example.com".into(),
+            email_verified: true,
+            name: Some("Alice Example".into()),
+            picture: Some("https://example.com/a.png".into()),
+            hd: None,
+        };
+        let p = principal_from_claims(&claims);
+        assert_eq!(p.email, "alice@example.com");
+        assert_eq!(p.display_name, "Alice Example");
+        assert_eq!(p.picture_url.as_deref(), Some("https://example.com/a.png"));
+        assert!(!p.is_admin, "is_admin defaults false; admin plumbing later");
+    }
+
+    #[test]
+    fn principal_from_claims_falls_back_to_email_local_part() {
+        let claims = VerifiedClaims {
+            email: "noname@example.com".into(),
+            email_verified: true,
+            name: None,
+            picture: None,
+            hd: None,
+        };
+        let p = principal_from_claims(&claims);
+        assert_eq!(p.display_name, "noname");
     }
 }

@@ -6,17 +6,28 @@
 //! ## 401 response shape
 //!
 //! Per PRD #455 §"REST API contract", unauthenticated requests to HTML
-//! routes will eventually render the `UnauthLanding` page (so the JS
-//! shim can capture `location.hash` for the OAuth roundtrip), while
-//! API routes get bare JSON. Slice 4 lands the real branching plus the
-//! HTML page; this slice ships a placeholder that returns JSON for
-//! every route. The route-classification surface lives here so future
-//! slices have one obvious place to extend.
+//! routes render the `UnauthLanding` page (so the JS shim can capture
+//! `location.hash` for the OAuth roundtrip), while API routes get bare
+//! JSON. Slice 4 (issue #460) lands that branching: HTML navigation
+//! gets `200 + text/html` carrying the JS shim, API clients get
+//! `401 + JSON`. The classification helper (`accepts_html`) is also
+//! used by the integration test to assert correct branching without
+//! standing up a real browser.
+//!
+//! ## Avoiding redirect loops
+//!
+//! `/auth/start`, `/auth/callback`, `/auth/whoami`, `/auth/logout`,
+//! and the dev-only `/auth/dev/login` MUST NOT serve the unauth
+//! landing themselves — doing so would either bounce the user back to
+//! `/auth/start` from `/auth/start` (infinite loop) or hide the
+//! callback's session-mint from the browser. Slice 4 keeps these
+//! routes on a separate router that the auth middleware never wraps.
 
 use std::sync::Arc;
 
+use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap};
+use axum::http::{header, HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -25,6 +36,7 @@ use serde_json::json;
 use crate::auth::config::AuthConfig;
 use crate::auth::principal::{AuthError, PrincipalExtractor, SessionCookieExtractor};
 use crate::auth::session_store::LoginSessionStore;
+use crate::auth::unauth_landing::UNAUTH_LANDING_HTML;
 
 /// Shared handle to the active extractor. Wired into the router's
 /// state so middleware closures can grab it without holding a
@@ -57,10 +69,27 @@ pub async fn auth_middleware(
     }
 }
 
-/// Build a 401 (or 5xx) response. Today: bare JSON regardless of
-/// route. Slice 4 will branch on `accepts_html(headers)` to render the
-/// JS-shim landing page for HTML navigations.
-fn unauthenticated_response(err: &AuthError, _headers: &HeaderMap) -> Response {
+/// Build a 401 (or 5xx) response.
+///
+/// Slice 4 (issue #460) branches HTML vs JSON on the request's
+/// `Accept` header. HTML navigations get the unauth landing page
+/// (which JS-shims to `/auth/start`) at `200 OK` so the page actually
+/// renders — a 401 with HTML body would still show the body, but
+/// keeping the success status removes one source of confused browser
+/// devtools chatter for the handoff page. API clients keep the bare
+/// JSON 401. `Internal` errors stay bare-JSON for both shapes; an
+/// HTML page that says "internal error" without context is worse
+/// than a 500 that the browser renders as plain text.
+fn unauthenticated_response(err: &AuthError, headers: &HeaderMap) -> Response {
+    if matches!(err, AuthError::Unauthenticated) && accepts_html(headers) {
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            Body::from(UNAUTH_LANDING_HTML),
+        )
+            .into_response();
+    }
+
     let status = err.status_code();
     let code = match err {
         AuthError::Unauthenticated => "unauthenticated",
@@ -226,5 +255,38 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(header::ACCEPT, "application/json".parse().unwrap());
         assert!(!accepts_html(&headers));
+    }
+
+    /// Slice 4 (issue #460): HTML navigations get the unauth landing
+    /// page back instead of the bare JSON 401 the API path uses.
+    #[tokio::test]
+    async fn middleware_returns_unauth_landing_html_to_browsers() {
+        let store = Arc::new(MemorySessionStore::new());
+        let config = Arc::new(AuthConfig::for_tests());
+        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let app = router_with_extractor(extractor);
+
+        let req = Request::builder()
+            .uri("/echo")
+            .header(header::ACCEPT, "text/html,application/xhtml+xml")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.starts_with("text/html"));
+
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.contains("/auth/start"), "shim must point at /auth/start");
+        assert!(
+            body.contains("encodeURIComponent"),
+            "shim must url-encode hash + path",
+        );
     }
 }

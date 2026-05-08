@@ -1,25 +1,30 @@
 //! Auth HTTP handlers.
 //!
 //! Slice 2 (PRD #455) landed `/auth/whoami` (kept from slice 1) and
-//! `/auth/dev/login`. Slice 3 (PRD #455 §"Logout flow", issue #459)
-//! lands `/auth/logout`. The remaining OAuth endpoints (`/auth/start`,
-//! `/auth/callback`, `/auth/error`) arrive in later slices.
+//! `/auth/dev/login`. Slice 3 (issue #459) lands `/auth/logout`. Slice
+//! 4 (issue #460) lands the OAuth flow: `/auth/start` and
+//! `/auth/callback`. `/auth/error` arrives in slice 5.
 
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
+use base64::Engine;
 use chrono::{Duration as ChronoDuration, Utc};
+use serde::Deserialize;
 use serde_json::json;
-use tracing::info;
+use tracing::{error, info, warn};
 
 use lucida_core::auth_principal::AuthPrincipal;
 
 use super::config::AuthConfig;
 use super::cookie::{build_clearing_cookie, build_session_cookie, read_session_cookie, request_is_https};
+use super::google_oauth::{GoogleOAuthClient, OAuthError};
+use super::pending_auth::{PendingAuth, PendingAuthStore};
+use super::principal::principal_from_claims;
 use super::session_store::{LoginSession, LoginSessionStore};
 
 /// `GET /auth/whoami` — returns the current `AuthPrincipal` JSON when
@@ -168,6 +173,274 @@ pub async fn logout<B>(
         [(SET_COOKIE, cookie_header), (LOCATION, "/".to_string())],
     )
         .into_response()
+}
+
+// -- /auth/start + /auth/callback (slice 4) -------------------------------
+
+/// State for the OAuth-flow handlers. Mirrors the `DevLoginState` /
+/// `LogoutState` pattern: only the wiring each handler actually needs,
+/// so unit tests can construct it without standing up the full
+/// `AppState`.
+#[derive(Clone)]
+pub struct OAuthState {
+    pub config: Arc<AuthConfig>,
+    pub session_store: Arc<dyn LoginSessionStore>,
+    pub pending_store: Arc<dyn PendingAuthStore>,
+    pub google: Arc<GoogleOAuthClient>,
+}
+
+/// Body / query payload accepted by `/auth/start`. Both shapes flow
+/// into the same `StartRequest`: the JS shim POSTs JSON, the
+/// noscript fallback hits with query params. Hash defaults to `""` so
+/// callers omitting it (CLI, tests) don't have to think about it.
+#[derive(Debug, Deserialize, Default)]
+pub struct StartRequest {
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub hash: Option<String>,
+}
+
+/// `POST /auth/start` (also accepts `GET` for the noscript fallback
+/// from the unauth landing).
+///
+/// Generates a 256-bit state token, stashes the intended path + hash
+/// in `pending_auth`, and 302s to Google's authorization URL with the
+/// token in the `state` parameter. Per ADR-0013 the hash is captured
+/// here so a `#view=…` link survives the redirect round-trip.
+pub async fn auth_start(
+    State(state): State<OAuthState>,
+    Query(query): Query<StartRequest>,
+    body: Option<Json<StartRequest>>,
+) -> Response {
+    // JSON body wins when present (the typical JS shim path); query
+    // params are the fallback. We dedupe with a small helper so the
+    // "first non-empty wins" rule lives in one place.
+    let json_payload = body.map(|j| j.0).unwrap_or_default();
+    let path = first_nonempty(&[json_payload.path.as_deref(), query.path.as_deref()])
+        .unwrap_or("/")
+        .to_string();
+    let hash = first_nonempty(&[json_payload.hash.as_deref(), query.hash.as_deref()])
+        .unwrap_or("")
+        .to_string();
+
+    let state_token = random_state_token();
+    let now = Utc::now();
+    if let Err(e) = state
+        .pending_store
+        .insert(PendingAuth {
+            state_token: state_token.clone(),
+            intended_path: path,
+            intended_hash: hash,
+            created_at: now,
+        })
+        .await
+    {
+        error!(error = %e, "auth.signin.start.pending_insert_failed");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "internal" })),
+        )
+            .into_response();
+    }
+
+    let url = state.google.authorize_url(&state_token);
+    info!("auth.signin.start");
+    (StatusCode::FOUND, [(LOCATION, url)]).into_response()
+}
+
+/// Query params Google redirects back with. We only use `code` and
+/// `state`; Google may also send `scope`, `authuser`, etc, all of
+/// which we ignore.
+#[derive(Debug, Deserialize)]
+pub struct CallbackQuery {
+    pub code: Option<String>,
+    pub state: Option<String>,
+    /// Google sets this on user-cancel ("access_denied") or other
+    /// upstream errors. We surface it in the log and 400 the request.
+    pub error: Option<String>,
+}
+
+/// `GET /auth/callback?code=…&state=…`
+///
+/// Validates the state token (consume from pending_auth → 400 on
+/// missing/expired/already-used), exchanges the code with Google,
+/// validates the JWT, mints a `LoginSession`, sets the cookie, and
+/// 302s to the originally-captured path + hash.
+pub async fn auth_callback(
+    State(state): State<OAuthState>,
+    Query(query): Query<CallbackQuery>,
+    req: Request<axum::body::Body>,
+) -> Response {
+    let (parts, _body) = req.into_parts();
+
+    if let Some(err) = query.error.as_deref() {
+        // User cancelled or Google bailed before issuing a code. We
+        // can't recover; log it and 400.
+        warn!(error = %err, "auth.signin.callback.upstream_error");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "upstream", "detail": err })),
+        )
+            .into_response();
+    }
+
+    let code = match query.code.as_deref() {
+        Some(c) if !c.is_empty() => c,
+        _ => {
+            warn!("auth.signin.callback.missing_code");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "missing_code" })),
+            )
+                .into_response();
+        }
+    };
+
+    let state_token = match query.state.as_deref() {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            warn!("auth.signin.error.state_mismatch");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "state_missing" })),
+            )
+                .into_response();
+        }
+    };
+
+    let pending = match state.pending_store.consume(state_token).await {
+        Ok(Some(row)) => row,
+        Ok(None) => {
+            // Missing or already-used. The named log event the slice's
+            // acceptance criteria call out.
+            warn!(state = %state_token, "auth.signin.error.state_mismatch");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "state_mismatch" })),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            error!(error = %e, "auth.signin.callback.pending_consume_failed");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal" })),
+            )
+                .into_response();
+        }
+    };
+
+    let claims = match state.google.exchange_and_validate(code).await {
+        Ok(c) => c,
+        Err(OAuthError::CodeExchange(detail)) => {
+            error!(error = %detail, "auth.signin.error.code_exchange");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "code_exchange" })),
+            )
+                .into_response();
+        }
+        Err(OAuthError::JwtInvalid(detail)) => {
+            error!(error = %detail, "auth.signin.error.jwt_invalid");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "jwt_invalid" })),
+            )
+                .into_response();
+        }
+        Err(OAuthError::JwksFetch(detail)) => {
+            error!(error = %detail, "auth.signin.error.jwks_fetch");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "jwks_fetch" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Slice 4 deliberately accepts any verified email so the
+    // mock-Google round-trip works end-to-end. Slice 5 layers the
+    // hosted-domain + email_verified checks on top here.
+    let principal = principal_from_claims(&claims);
+
+    let now = Utc::now();
+    let id = uuid::Uuid::new_v4().to_string();
+    let session = LoginSession {
+        id: id.clone(),
+        email: principal.email.clone(),
+        display_name: principal.display_name.clone(),
+        picture_url: principal.picture_url.clone(),
+        created_at: now,
+        last_used_at: now,
+        expires_at: now
+            + ChronoDuration::from_std(state.config.hard_cap)
+                .unwrap_or(ChronoDuration::hours(720)),
+    };
+    if let Err(e) = state.session_store.create(session).await {
+        error!(error = %e, email = %principal.email, "auth.signin.error.session_create");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "session_create" })),
+        )
+            .into_response();
+    }
+
+    let cookie_header = build_session_cookie(&state.config, &id, request_is_https(&parts));
+    let target = redirect_target(&pending.intended_path, &pending.intended_hash);
+    info!(
+        email = %principal.email,
+        session_id = %id,
+        target = %target,
+        "auth.signin.success",
+    );
+
+    (
+        StatusCode::FOUND,
+        [(SET_COOKIE, cookie_header), (LOCATION, target)],
+    )
+        .into_response()
+}
+
+/// Build the Location: header for the post-callback 302. Path comes
+/// straight from the captured intent; hash gets a leading `#` if it
+/// isn't already present (the JS shim strips it before posting; the
+/// noscript fallback might pass it through).
+///
+/// Path defaults to `/` when empty (defensive — the shim always
+/// supplies one in practice).
+pub(crate) fn redirect_target(intended_path: &str, intended_hash: &str) -> String {
+    let path = if intended_path.is_empty() {
+        "/"
+    } else {
+        intended_path
+    };
+    if intended_hash.is_empty() {
+        path.to_string()
+    } else if intended_hash.starts_with('#') {
+        format!("{path}{intended_hash}")
+    } else {
+        format!("{path}#{intended_hash}")
+    }
+}
+
+/// Generate a 256-bit cryptographically-random state token, base64url
+/// encoded (no padding) so it slots into a query param without further
+/// escaping. PRD #455 calls out 256 bits as the minimum.
+pub(crate) fn random_state_token() -> String {
+    let bytes: [u8; 32] = rand::random();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn first_nonempty<'a>(opts: &[Option<&'a str>]) -> Option<&'a str> {
+    for opt in opts {
+        if let Some(v) = opt
+            && !v.is_empty()
+        {
+            return Some(*v);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -410,5 +683,46 @@ mod tests {
         assert_eq!(res.status(), StatusCode::FOUND);
         let set_cookie = res.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
         assert!(set_cookie.contains("Max-Age=0"));
+    }
+
+    // -- redirect_target + random_state_token (slice 4) -----------------
+
+    #[test]
+    fn redirect_target_appends_hash_when_present() {
+        assert_eq!(redirect_target("/dataset", "view=abc"), "/dataset#view=abc");
+    }
+
+    #[test]
+    fn redirect_target_preserves_existing_hash_marker() {
+        // The shim strips the leading '#' before posting; the
+        // noscript fallback might not. Both shapes must produce a
+        // single '#' in the output.
+        assert_eq!(redirect_target("/", "#b=42"), "/#b=42");
+    }
+
+    #[test]
+    fn redirect_target_omits_hash_separator_when_empty() {
+        assert_eq!(redirect_target("/foo", ""), "/foo");
+    }
+
+    #[test]
+    fn redirect_target_defaults_path_to_slash_when_empty() {
+        assert_eq!(redirect_target("", "view=a"), "/#view=a");
+    }
+
+    #[test]
+    fn random_state_token_is_distinct_and_url_safe() {
+        let a = random_state_token();
+        let b = random_state_token();
+        assert_ne!(a, b);
+        // 32 bytes -> 43 base64url chars (no padding).
+        assert_eq!(a.len(), 43);
+        // Char set: A-Z a-z 0-9 _ -. No padding `=`, no `+` or `/`.
+        for c in a.chars() {
+            assert!(
+                c.is_ascii_alphanumeric() || c == '-' || c == '_',
+                "unexpected char {c:?} in state token",
+            );
+        }
     }
 }
