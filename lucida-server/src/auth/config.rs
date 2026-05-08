@@ -11,6 +11,7 @@
 //! so it lives on `CookieConfig` next to the request scheme rather than
 //! being baked in here.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -164,6 +165,13 @@ pub struct AuthConfig {
     /// presence-of-required-fields in `from_env` so handlers can
     /// `unwrap()` it without rechecking.
     pub google: Option<GoogleOAuthConfig>,
+    /// Slice 5 (PRD #455 §"Hosted-domain validation"): when non-empty,
+    /// callbacks reject any JWT whose `hd` claim isn't in this set.
+    /// Empty = no restriction (the OSS-permissive default; matches
+    /// "any verified Google email" per user-story 11). Both this set
+    /// and the `hd` claim are lowercased before comparison so casing
+    /// drift in env vars or upstream tokens never silently rejects.
+    pub allowed_hosted_domains: HashSet<String>,
 }
 
 impl AuthConfig {
@@ -198,6 +206,9 @@ impl AuthConfig {
                 .unwrap_or_else(|_| PathBuf::from(DEFAULT_DB_FILENAME)),
             mode,
             google,
+            allowed_hosted_domains: parse_allowed_hosted_domains(
+                std::env::var("LUCIDA_ALLOWED_HOSTED_DOMAINS").ok().as_deref(),
+            ),
         })
     }
 
@@ -214,6 +225,7 @@ impl AuthConfig {
             db_path: PathBuf::from(":memory:"),
             mode: AuthMode::Disabled,
             google: None,
+            allowed_hosted_domains: HashSet::new(),
         }
     }
 
@@ -284,6 +296,23 @@ fn parse_hours_env(name: &str) -> Option<Duration> {
         .map(|hours| Duration::from_secs(hours * 3600))
 }
 
+/// Parse the `LUCIDA_ALLOWED_HOSTED_DOMAINS` env var into a lowercased
+/// `HashSet`. None / empty / whitespace-only → empty set ("no
+/// restriction" — the OSS-permissive default per ADR-0017). Comma-
+/// separated; whitespace around entries is tolerated. Duplicate entries
+/// collapse via the set semantics, lowercase normalization avoids
+/// `Calicolabs.com` vs `calicolabs.com` near-misses since both env-var
+/// authoring and Google's `hd` claim should be treated case-insensitively.
+pub(crate) fn parse_allowed_hosted_domains(raw: Option<&str>) -> HashSet<String> {
+    let Some(raw) = raw else {
+        return HashSet::new();
+    };
+    raw.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +354,47 @@ mod tests {
         assert_eq!(g.auth_uri, "https://mock/oauth2/v2/auth");
         assert_eq!(g.token_uri, "https://mock/token");
         assert_eq!(g.jwks_uri, "https://mock/certs");
+    }
+
+    // -- LUCIDA_ALLOWED_HOSTED_DOMAINS parsing (slice 5) ----------------
+
+    #[test]
+    fn allowed_hosted_domains_unset_is_empty_set() {
+        let set = parse_allowed_hosted_domains(None);
+        assert!(set.is_empty(), "unset env var = no restriction");
+    }
+
+    #[test]
+    fn allowed_hosted_domains_empty_string_is_empty_set() {
+        assert!(parse_allowed_hosted_domains(Some("")).is_empty());
+        assert!(parse_allowed_hosted_domains(Some("   ")).is_empty());
+        assert!(
+            parse_allowed_hosted_domains(Some(",,")).is_empty(),
+            "all-empty entries collapse",
+        );
+    }
+
+    #[test]
+    fn allowed_hosted_domains_single_value() {
+        let set = parse_allowed_hosted_domains(Some("calicolabs.com"));
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("calicolabs.com"));
+    }
+
+    #[test]
+    fn allowed_hosted_domains_multi_value_with_whitespace() {
+        let set = parse_allowed_hosted_domains(Some("calicolabs.com, othercorp.com ,third.org"));
+        assert_eq!(set.len(), 3);
+        assert!(set.contains("calicolabs.com"));
+        assert!(set.contains("othercorp.com"));
+        assert!(set.contains("third.org"));
+    }
+
+    #[test]
+    fn allowed_hosted_domains_lowercased_for_case_insensitive_match() {
+        let set = parse_allowed_hosted_domains(Some("Calicolabs.COM,OtherCorp.com"));
+        assert!(set.contains("calicolabs.com"));
+        assert!(set.contains("othercorp.com"));
+        assert!(!set.contains("Calicolabs.COM"), "values are normalized");
     }
 }

@@ -227,7 +227,14 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::logout).with_state(logout_state),
         );
 
-    let mut public_auth_router: Router<()> = Router::new();
+    // /auth/error is available regardless of auth mode — if the user
+    // somehow reaches it (a stale link, a misconfigured deployment),
+    // we still render the generic page rather than 404. Mounted on
+    // the public router so the auth middleware never wraps it (the
+    // user is unauthenticated by definition when they're being told
+    // to retry sign-in).
+    let mut public_auth_router: Router<()> = Router::new()
+        .route("/auth/error", get(auth::error_page::auth_error));
     if let Some(g) = auth_config.google.clone() {
         let google_client = match auth::GoogleOAuthClient::new(Arc::new(g)).await {
             Ok(c) => Arc::new(c),

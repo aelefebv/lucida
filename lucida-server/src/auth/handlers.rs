@@ -24,7 +24,7 @@ use super::config::AuthConfig;
 use super::cookie::{build_clearing_cookie, build_session_cookie, read_session_cookie, request_is_https};
 use super::google_oauth::{GoogleOAuthClient, OAuthError};
 use super::pending_auth::{PendingAuth, PendingAuthStore};
-use super::principal::principal_from_claims;
+use super::principal::{principal_or_rejection_from_claims, RejectionReason};
 use super::session_store::{LoginSession, LoginSessionStore};
 
 /// `GET /auth/whoami` — returns the current `AuthPrincipal` JSON when
@@ -263,10 +263,22 @@ pub struct CallbackQuery {
 
 /// `GET /auth/callback?code=…&state=…`
 ///
-/// Validates the state token (consume from pending_auth → 400 on
-/// missing/expired/already-used), exchanges the code with Google,
-/// validates the JWT, mints a `LoginSession`, sets the cookie, and
-/// 302s to the originally-captured path + hash.
+/// Validates the state token, exchanges the code with Google,
+/// validates the JWT, applies slice-5's hosted-domain + email_verified
+/// checks, mints a `LoginSession`, sets the cookie, and 302s to the
+/// originally-captured path + hash.
+///
+/// Slice 5 (PRD #455 §"Error UX") changes the failure shape: instead
+/// of returning JSON 4xx/5xx (slice 4 default), every failure 302s to
+/// `/auth/error?code=…`. Two flavors:
+///
+/// * `code=hd_mismatch` / `code=unverified` — user-fixable rejections
+///   from the slice-5 policy. Detail params (attempted_email,
+///   allowed_domains) included so the page can render the actionable
+///   message from the PRD.
+/// * `code=auth_failed` — every other error path (state mismatch,
+///   code exchange failure, JWT invalid, store failure). Deliberately
+///   vague to the user; logs hold details server-side.
 pub async fn auth_callback(
     State(state): State<OAuthState>,
     Query(query): Query<CallbackQuery>,
@@ -275,25 +287,17 @@ pub async fn auth_callback(
     let (parts, _body) = req.into_parts();
 
     if let Some(err) = query.error.as_deref() {
-        // User cancelled or Google bailed before issuing a code. We
-        // can't recover; log it and 400.
+        // User cancelled or Google bailed before issuing a code. Same
+        // generic page as other auth_failed branches; logs differ.
         warn!(error = %err, "auth.signin.callback.upstream_error");
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "upstream", "detail": err })),
-        )
-            .into_response();
+        return redirect_to_error(&[("code", "auth_failed")]);
     }
 
     let code = match query.code.as_deref() {
         Some(c) if !c.is_empty() => c,
         _ => {
             warn!("auth.signin.callback.missing_code");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "missing_code" })),
-            )
-                .into_response();
+            return redirect_to_error(&[("code", "auth_failed")]);
         }
     };
 
@@ -301,11 +305,7 @@ pub async fn auth_callback(
         Some(s) if !s.is_empty() => s,
         _ => {
             warn!("auth.signin.error.state_mismatch");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "state_missing" })),
-            )
-                .into_response();
+            return redirect_to_error(&[("code", "auth_failed")]);
         }
     };
 
@@ -315,19 +315,11 @@ pub async fn auth_callback(
             // Missing or already-used. The named log event the slice's
             // acceptance criteria call out.
             warn!(state = %state_token, "auth.signin.error.state_mismatch");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "state_mismatch" })),
-            )
-                .into_response();
+            return redirect_to_error(&[("code", "auth_failed")]);
         }
         Err(e) => {
             error!(error = %e, "auth.signin.callback.pending_consume_failed");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "internal" })),
-            )
-                .into_response();
+            return redirect_to_error(&[("code", "auth_failed")]);
         }
     };
 
@@ -335,34 +327,57 @@ pub async fn auth_callback(
         Ok(c) => c,
         Err(OAuthError::CodeExchange(detail)) => {
             error!(error = %detail, "auth.signin.error.code_exchange");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "code_exchange" })),
-            )
-                .into_response();
+            return redirect_to_error(&[("code", "auth_failed")]);
         }
         Err(OAuthError::JwtInvalid(detail)) => {
             error!(error = %detail, "auth.signin.error.jwt_invalid");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "jwt_invalid" })),
-            )
-                .into_response();
+            return redirect_to_error(&[("code", "auth_failed")]);
         }
         Err(OAuthError::JwksFetch(detail)) => {
             error!(error = %detail, "auth.signin.error.jwks_fetch");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "jwks_fetch" })),
-            )
-                .into_response();
+            return redirect_to_error(&[("code", "auth_failed")]);
         }
     };
 
-    // Slice 4 deliberately accepts any verified email so the
-    // mock-Google round-trip works end-to-end. Slice 5 layers the
-    // hosted-domain + email_verified checks on top here.
-    let principal = principal_from_claims(&claims);
+    // Slice 5 policy: email_verified + (optional) hd allowlist. The
+    // raw mapping (`principal_from_claims`) is applied inside
+    // `principal_or_rejection_from_claims` on accept; on reject we
+    // emit the audit event the PRD specifies and bounce to the error
+    // page with the structured detail params.
+    let principal = match principal_or_rejection_from_claims(
+        &claims,
+        &state.config.allowed_hosted_domains,
+    ) {
+        Ok(p) => p,
+        Err(RejectionReason::Unverified { attempted_email }) => {
+            warn!(
+                attempted_email = %attempted_email,
+                "auth.signin.rejected.unverified",
+            );
+            return redirect_to_error(&[
+                ("code", "unverified"),
+                ("attempted_email", attempted_email.as_str()),
+            ]);
+        }
+        Err(RejectionReason::HdMismatch {
+            attempted_email,
+            attempted_hd,
+            allowed_domains,
+        }) => {
+            let allowed_csv = allowed_domains.join(",");
+            warn!(
+                attempted_email = %attempted_email,
+                attempted_hd = %attempted_hd.as_deref().unwrap_or("<none>"),
+                allowed_domains = %allowed_csv,
+                "auth.signin.rejected.hd_mismatch",
+            );
+            return redirect_to_error(&[
+                ("code", "hd_mismatch"),
+                ("attempted_email", attempted_email.as_str()),
+                ("allowed_domains", allowed_csv.as_str()),
+            ]);
+        }
+    };
 
     let now = Utc::now();
     let id = uuid::Uuid::new_v4().to_string();
@@ -379,11 +394,7 @@ pub async fn auth_callback(
     };
     if let Err(e) = state.session_store.create(session).await {
         error!(error = %e, email = %principal.email, "auth.signin.error.session_create");
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": "session_create" })),
-        )
-            .into_response();
+        return redirect_to_error(&[("code", "auth_failed")]);
     }
 
     let cookie_header = build_session_cookie(&state.config, &id, request_is_https(&parts));
@@ -400,6 +411,25 @@ pub async fn auth_callback(
         [(SET_COOKIE, cookie_header), (LOCATION, target)],
     )
         .into_response()
+}
+
+/// Build a 302 redirect to `/auth/error` with the supplied
+/// query-param pairs. Pulled into a helper so the four-or-so failure
+/// branches stay one line each. Each value is URL-encoded; absent
+/// keys are omitted entirely (no `?code=&attempted_email=…` shapes).
+pub(crate) fn redirect_to_error(params: &[(&str, &str)]) -> Response {
+    let qs = params
+        .iter()
+        .filter(|(_, v)| !v.is_empty())
+        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let location = if qs.is_empty() {
+        "/auth/error".to_string()
+    } else {
+        format!("/auth/error?{qs}")
+    };
+    (StatusCode::FOUND, [(LOCATION, location)]).into_response()
 }
 
 /// Build the Location: header for the post-callback 302. Path comes
