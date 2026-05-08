@@ -5,6 +5,7 @@ modified: 2026-05-07
 
 # Queue — Open Questions
 
+
 Open architectural questions, areas to investigate, and decisions to revisit. Add items as they surface; resolve them via interview, decision article, or by closing them out as no-longer-relevant.
 
 ## Format
@@ -19,6 +20,9 @@ Each item is a short bullet. Add a date when raised. Link to an article or PR wh
 - **2026-04-18** — [[decisions/0010-temporal-runway-not-implemented]] is recorded as "won't implement" — but does that decision still hold? Worth a re-check after any plate-FPS or scrubbing UX feedback.
 - **2026-05-07** — `decisions/0012-logging-conventions.md` is ~127 lines with code blocks longer than 3 lines, violating the article guardrails. Decide whether to compress (most of the "How to apply" section is operational guide content) or split it into a flow/system article plus a short ADR.
 - **2026-05-07** — Three gotchas may be stale after recent commits and need a verify-and-update pass: [[gotchas/preexisting-ts-build-errors]] (27 errors cleared in `593eb8d` — likely fully stale), [[gotchas/blosc-support]] (decoder extended in `90a3dbc` for CZI 6D — may understate current support), [[gotchas/non-canonical-axes]] (`185c429` added explicit handling — may understate current behavior).
+- **2026-05-07** — Auth cutover for saved bookmarks: bookmarks created during the pre-auth dev period will have `created_by: "dev@local"` (or similar stub principal). When real Google auth ships, decide migration strategy: (a) wipe the dev table (probably fine since pre-production), (b) leave entries as orphaned/admin-deletable, or (c) prompt users to re-claim entries on first authenticated login. Resolve when auth ships.
+- **2026-05-07** — Undo/redo system (future scope, surfaced during saved-views grilling): proposed dedicated undo/redo for milestone events (dataset opened/removed, active layout changed) — *not* via browser back/forward + `pushState`. Saved-views feature deliberately uses `replaceState` only so back-button stays clean; an in-app undo/redo lives separately and would track milestone document/viewport mutations independently of URL state.
+- **2026-05-07** — Saved-views feature (in design): the capture excludes `selectedDatasetId` (UI focus only — doesn't affect rendered pixels). Wrinkle to revisit during implementation: when a recipient opens a shared view, their `selectedDatasetId` may not match the sender's, so the dimension/contrast controls in side panels operate on a different dataset than the sender was tweaking. Pixels are identical; *follow-up exploration* from the shared view starts on the wrong control surface. Decide at implementation time whether to (a) accept the wrinkle, (b) include `selectedDatasetId` in the capture record after all, or (c) auto-select the first visible / most-prominent dataset on apply.
 
 ## Resolved
 
