@@ -131,15 +131,20 @@ impl PrincipalExtractor for SessionCookieExtractor {
             }
         });
 
+        // Slice 6: derive is_admin per-request from the configured
+        // allowlist. Admin status is *not* persisted on the LoginSession
+        // row — promote/demote is a config-change-and-restart, takes
+        // effect on the principal's next request. Both sides lowercased
+        // so casing drift between env var and JWT email never demotes.
+        let is_admin = self
+            .config
+            .admin_emails
+            .contains(&row.email.to_ascii_lowercase());
         Ok(AuthPrincipal {
             email: row.email,
             display_name: row.display_name,
             picture_url: row.picture_url,
-            // Slice 2 doesn't have admin roles wired yet — the dev
-            // endpoint mints sessions with is_admin: true so existing
-            // admin endpoints keep working in dev. Real role plumbing
-            // lands in a later slice (out of scope here).
-            is_admin: true,
+            is_admin,
         })
     }
 }
@@ -157,8 +162,11 @@ impl PrincipalExtractor for SessionCookieExtractor {
 ///
 /// `display_name` falls back to the local part of the email when
 /// Google's `name` claim is absent (rare, but happens for accounts
-/// without a populated profile). `is_admin` is `false` until
-/// `LUCIDA_ADMIN_EMAILS` plumbing arrives in a later slice.
+/// without a populated profile). `is_admin` is left `false` here; the
+/// slice-6 [`principal_or_rejection_from_claims`] caller overlays the
+/// derived value after the policy checks pass. Direct callers that
+/// don't go through that wrapper (none today) would need to apply the
+/// admin lookup themselves.
 pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
     let display_name = claims.name.clone().unwrap_or_else(|| {
         claims
@@ -220,9 +228,14 @@ pub enum RejectionReason {
 /// claim's `hd` value before comparison. Both sides being lowercased
 /// matches Calico's `calicolabs.com` and any future domain entries
 /// the operator might author with mixed case.
+///
+/// Slice 6: `admin_emails` (lowercased entries) drives `is_admin` on
+/// the accepted principal — same mechanism the cookie extractor uses,
+/// so callback-minted and cookie-extracted principals can't disagree.
 pub fn principal_or_rejection_from_claims(
     claims: &VerifiedClaims,
     allowed: &std::collections::HashSet<String>,
+    admin_emails: &std::collections::HashSet<String>,
 ) -> Result<AuthPrincipal, RejectionReason> {
     if !claims.email_verified {
         return Err(RejectionReason::Unverified {
@@ -248,7 +261,9 @@ pub fn principal_or_rejection_from_claims(
             });
         }
     }
-    Ok(principal_from_claims(claims))
+    let mut principal = principal_from_claims(claims);
+    principal.is_admin = admin_emails.contains(&principal.email.to_ascii_lowercase());
+    Ok(principal)
 }
 
 /// `PrincipalExtractor` adapter that runs Google's JWT validator on a
@@ -329,6 +344,21 @@ pub(crate) mod test_helpers {
         )
     }
 
+    /// Like [`make_extractor_with`] but seeds the config's admin set
+    /// with the supplied emails. Slice 6 tests use this to assert
+    /// per-request admin derivation works through the cookie path.
+    pub fn make_extractor_with_admins(
+        store: Arc<MemorySessionStore>,
+        admin_emails: &[&str],
+    ) -> SessionCookieExtractor {
+        let mut cfg = AuthConfig::for_tests();
+        cfg.admin_emails = admin_emails.iter().map(|s| s.to_string()).collect();
+        SessionCookieExtractor::new(
+            Arc::new(cfg),
+            store as Arc<dyn LoginSessionStore>,
+        )
+    }
+
     pub fn fresh_session(id: &str) -> LoginSession {
         let now = Utc::now();
         LoginSession {
@@ -386,6 +416,50 @@ mod tests {
         let p = ext.extract(&parts).await.unwrap();
         assert_eq!(p.email, "dev@local");
         assert_eq!(p.display_name, "Local Dev");
+        // Slice 6: empty admin set in for_tests() = principal not admin.
+        assert!(!p.is_admin, "no admin set configured = not admin");
+    }
+
+    // -- is_admin derivation in cookie path (slice 6) ---------------------
+
+    #[tokio::test]
+    async fn cookie_extractor_marks_admin_when_email_in_set() {
+        let store = Arc::new(MemorySessionStore::new());
+        store.create(fresh_session("admin-cookie")).await.unwrap();
+
+        let ext = make_extractor_with_admins(Arc::clone(&store), &["dev@local"]);
+        let parts = parts_with_cookie(Some("admin-cookie"));
+        let p = ext.extract(&parts).await.unwrap();
+        assert!(p.is_admin);
+    }
+
+    #[tokio::test]
+    async fn cookie_extractor_marks_non_admin_when_email_not_in_set() {
+        let store = Arc::new(MemorySessionStore::new());
+        store.create(fresh_session("nonadmin-cookie")).await.unwrap();
+
+        let ext = make_extractor_with_admins(Arc::clone(&store), &["someone@else.com"]);
+        let parts = parts_with_cookie(Some("nonadmin-cookie"));
+        let p = ext.extract(&parts).await.unwrap();
+        assert!(!p.is_admin);
+    }
+
+    #[tokio::test]
+    async fn cookie_extractor_admin_match_is_case_insensitive() {
+        // Persist a casing-shifted email on the row (mirrors what an
+        // upstream provider might mint) and confirm the lowercased
+        // env-var-derived set still matches.
+        let store = Arc::new(MemorySessionStore::new());
+        let mut row = fresh_session("admin-mixed");
+        row.email = "AuStin@CalicoLabs.com".to_string();
+        store.create(row).await.unwrap();
+
+        // The parser would have lowercased the env var; tests bypass the
+        // parser, so seed the lowercased form directly.
+        let ext = make_extractor_with_admins(Arc::clone(&store), &["austin@calicolabs.com"]);
+        let parts = parts_with_cookie(Some("admin-mixed"));
+        let p = ext.extract(&parts).await.unwrap();
+        assert!(p.is_admin);
     }
 
     #[tokio::test]
@@ -494,6 +568,12 @@ mod tests {
         values.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Empty admin set — slice 6 callers pass this whenever the test is
+    /// only exercising slice-5 hosted-domain behavior.
+    fn no_admins() -> HashSet<String> {
+        HashSet::new()
+    }
+
     fn verified(email: &str, hd: Option<&str>) -> VerifiedClaims {
         VerifiedClaims {
             email: email.into(),
@@ -510,7 +590,8 @@ mod tests {
         claims.email_verified = false;
         // Even though hd would pass, unverified must reject first.
         let allowed = allowed_set(&["calicolabs.com"]);
-        let err = principal_or_rejection_from_claims(&claims, &allowed).unwrap_err();
+        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
+            .unwrap_err();
         assert_eq!(
             err,
             RejectionReason::Unverified {
@@ -523,7 +604,8 @@ mod tests {
     fn rejection_hd_missing_when_allowlist_nonempty() {
         let claims = verified("alice@gmail.com", None); // personal Gmail
         let allowed = allowed_set(&["calicolabs.com"]);
-        let err = principal_or_rejection_from_claims(&claims, &allowed).unwrap_err();
+        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
+            .unwrap_err();
         match err {
             RejectionReason::HdMismatch {
                 attempted_email,
@@ -542,7 +624,8 @@ mod tests {
     fn rejection_hd_not_in_allowlist() {
         let claims = verified("alice@othercorp.com", Some("othercorp.com"));
         let allowed = allowed_set(&["calicolabs.com"]);
-        let err = principal_or_rejection_from_claims(&claims, &allowed).unwrap_err();
+        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
+            .unwrap_err();
         match err {
             RejectionReason::HdMismatch {
                 attempted_hd: Some(h),
@@ -556,7 +639,8 @@ mod tests {
     fn accept_when_hd_matches_allowlist() {
         let claims = verified("alice@calicolabs.com", Some("calicolabs.com"));
         let allowed = allowed_set(&["calicolabs.com"]);
-        let p = principal_or_rejection_from_claims(&claims, &allowed).unwrap();
+        let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
+            .unwrap();
         assert_eq!(p.email, "alice@calicolabs.com");
     }
 
@@ -566,7 +650,8 @@ mod tests {
         // whatever Google sent. Match must still succeed.
         let claims = verified("alice@calicolabs.com", Some("CalicoLabs.COM"));
         let allowed = allowed_set(&["calicolabs.com"]);
-        let p = principal_or_rejection_from_claims(&claims, &allowed).unwrap();
+        let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
+            .unwrap();
         assert_eq!(p.email, "alice@calicolabs.com");
     }
 
@@ -576,9 +661,13 @@ mod tests {
         // verified Google email gets through, hd present or not.
         let allowed: HashSet<String> = HashSet::new();
         let with_hd = verified("alice@calicolabs.com", Some("calicolabs.com"));
-        assert!(principal_or_rejection_from_claims(&with_hd, &allowed).is_ok());
+        assert!(
+            principal_or_rejection_from_claims(&with_hd, &allowed, &no_admins()).is_ok()
+        );
         let without_hd = verified("personal@gmail.com", None);
-        assert!(principal_or_rejection_from_claims(&without_hd, &allowed).is_ok());
+        assert!(
+            principal_or_rejection_from_claims(&without_hd, &allowed, &no_admins()).is_ok()
+        );
     }
 
     #[test]
@@ -587,7 +676,8 @@ mod tests {
         // Insert in reverse-sort order; the rejection must still come
         // back sorted so the user-facing message is deterministic.
         let allowed = allowed_set(&["zlast.com", "acorp.com", "mid.org"]);
-        let err = principal_or_rejection_from_claims(&claims, &allowed).unwrap_err();
+        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
+            .unwrap_err();
         match err {
             RejectionReason::HdMismatch { allowed_domains, .. } => {
                 assert_eq!(
@@ -597,5 +687,44 @@ mod tests {
             }
             _ => panic!("expected HdMismatch"),
         }
+    }
+
+    // -- is_admin derivation (slice 6) -----------------------------------
+
+    #[test]
+    fn principal_is_admin_when_email_in_admin_set() {
+        let claims = verified("austin@calicolabs.com", Some("calicolabs.com"));
+        let allowed = allowed_set(&["calicolabs.com"]);
+        let admins = allowed_set(&["austin@calicolabs.com"]);
+        let p = principal_or_rejection_from_claims(&claims, &allowed, &admins).unwrap();
+        assert!(p.is_admin, "matched email must yield is_admin: true");
+    }
+
+    #[test]
+    fn principal_is_not_admin_when_email_missing_from_admin_set() {
+        let claims = verified("alice@calicolabs.com", Some("calicolabs.com"));
+        let allowed = allowed_set(&["calicolabs.com"]);
+        let admins = allowed_set(&["bob@calicolabs.com"]);
+        let p = principal_or_rejection_from_claims(&claims, &allowed, &admins).unwrap();
+        assert!(!p.is_admin);
+    }
+
+    #[test]
+    fn principal_is_not_admin_when_admin_set_empty() {
+        let claims = verified("anyone@calicolabs.com", Some("calicolabs.com"));
+        let allowed = allowed_set(&["calicolabs.com"]);
+        let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap();
+        assert!(!p.is_admin, "no admins configured = nobody is admin");
+    }
+
+    #[test]
+    fn admin_match_is_case_insensitive_via_principal_email() {
+        // Operator might author the env var with capitalized casing
+        // (parser lowercases) and Google might emit a casing-shifted
+        // email; lookup must still match.
+        let claims = verified("AuStin@CalicoLabs.com", None);
+        let admins = allowed_set(&["austin@calicolabs.com"]); // already lowercased by parser
+        let p = principal_or_rejection_from_claims(&claims, &no_admins(), &admins).unwrap();
+        assert!(p.is_admin, "lowercased lookup must match casing-shifted JWT email");
     }
 }

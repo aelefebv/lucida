@@ -8,14 +8,19 @@
 //!   [`clear_proxy_cache`] directly (synchronous, no auth).
 //! - `POST /admin/clear-proxy-cache?dataset=<url>` invokes
 //!   [`admin_clear_proxy_cache`], which runs [`clear_proxy_cache`] inside a
-//!   `spawn_blocking` after gating on the `LUCIDA_ADMIN_TOKEN` env var.
+//!   `spawn_blocking` after the auth middleware + `AdminRequired`
+//!   extractor confirm an admin principal.
 //!
 //! ## Auth
 //!
-//! The HTTP endpoint requires `Authorization: Bearer <token>` matching the
-//! `LUCIDA_ADMIN_TOKEN` environment variable. If the env var is not set,
-//! the endpoint replies `503 Service Unavailable` ("admin disabled"). We
-//! intentionally do not ship a default token — admin must be opted into.
+//! Slice 6 (PRD #455 §"Permission model") replaces the slice-pre-auth
+//! `LUCIDA_ADMIN_TOKEN` Bearer check with the auth-middleware path:
+//! the request must carry a valid session cookie (or the admin route
+//! 401s through the middleware), and the resulting `AuthPrincipal`
+//! must have `is_admin: true` (or [`AdminRequired`](crate::auth::AdminRequired)
+//! 403s with `{"error":"forbidden"}`). Admin status itself is derived
+//! per-request from `LUCIDA_ADMIN_EMAILS`; if the env var is unset
+//! the route 403s for everyone.
 //!
 //! ## URL hash scheme
 //!
@@ -30,10 +35,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
+use crate::auth::AdminRequired;
 use crate::AppState;
 use crate::handler::dataset_url_hash16;
 
@@ -158,19 +164,20 @@ pub struct ClearResponse {
     pub files: usize,
 }
 
-/// `POST /admin/clear-proxy-cache`. Auth: `Authorization: Bearer <token>`
-/// where `<token>` matches the `LUCIDA_ADMIN_TOKEN` env var.
+/// `POST /admin/clear-proxy-cache`. Auth: requires a session cookie
+/// whose principal has `is_admin: true`. The auth middleware handles
+/// the cookie -> principal -> 401 path; [`AdminRequired`] handles the
+/// `is_admin` -> 403 path. If `LUCIDA_ADMIN_EMAILS` is unset (no
+/// admins configured) every request 403s here.
 ///
-/// - 503 if `LUCIDA_ADMIN_TOKEN` is not set.
-/// - 401 if the header is missing or doesn't match.
+/// - 401 if the request has no valid session (auth middleware).
+/// - 403 if the principal isn't an admin ([`AdminRequired`]).
 /// - 200 with [`ClearResponse`] on success.
 pub async fn admin_clear_proxy_cache(
+    _admin: AdminRequired,
     State(app): State<AppState>,
     Query(q): Query<ClearQuery>,
-    headers: HeaderMap,
 ) -> Result<Json<ClearResponse>, (StatusCode, String)> {
-    check_admin_auth(&headers)?;
-
     let cache_dir = app.proxy_cache_dir();
     let dataset = q.dataset;
     let outcome = tokio::task::spawn_blocking(move || {
@@ -185,28 +192,6 @@ pub async fn admin_clear_proxy_cache(
         datasets: outcome.datasets,
         files: outcome.files,
     }))
-}
-
-/// Verify the request carries a valid admin token. Returns the same
-/// status codes documented on [`admin_clear_proxy_cache`].
-///
-/// Exposed at crate scope for tests; not a stable part of the public API.
-pub fn check_admin_auth(headers: &HeaderMap) -> Result<(), (StatusCode, String)> {
-    let token = std::env::var("LUCIDA_ADMIN_TOKEN").map_err(|_| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "admin disabled".to_string(),
-        )
-    })?;
-    let auth = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let expected = format!("Bearer {token}");
-    if auth != expected {
-        return Err((StatusCode::UNAUTHORIZED, "invalid token".to_string()));
-    }
-    Ok(())
 }
 
 /// Re-export of the canonical default cache dir, so `main.rs` and tests

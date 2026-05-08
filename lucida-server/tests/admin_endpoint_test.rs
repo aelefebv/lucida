@@ -1,93 +1,66 @@
 //! HTTP-level tests for `POST /admin/clear-proxy-cache`.
 //!
-//! Builds a minimal axum `Router` containing just the admin route +
-//! `AppState` and drives it with `tower::ServiceExt::oneshot`. We don't
-//! need a TCP listener — axum services are just `tower::Service`s, so we
-//! can hand them constructed `Request`s directly.
+//! Slice 6 (PRD #455): the endpoint is now gated by the auth middleware
+//! + the `AdminRequired` extractor. There's no env-var token check
+//! anymore — admin-ness is derived from the principal's email against
+//! the `LUCIDA_ADMIN_EMAILS`-seeded set on `AuthConfig`.
 //!
 //! Cases covered:
-//!   - `LUCIDA_ADMIN_TOKEN` unset → 503.
-//!   - Missing `Authorization` → 401.
-//!   - Wrong token → 401.
-//!   - Correct token → 200, cache cleared.
-//!   - Correct token + `?dataset=URL` → 200, only that subdir cleared.
+//!   - No session cookie → 401 (auth middleware rejects).
+//!   - Session cookie for a non-admin email → 403 (AdminRequired).
+//!   - Session cookie for an admin email → 200, cache cleared.
+//!   - Same, with `?dataset=URL` → 200, only that subdir cleared.
+//!   - Empty admin set → admin email lookup misses → 403 (the
+//!     "no admin configured" path; matches PRD §"Admin role bootstrap").
 //!
-//! The env var is global state, so the tests gate around a `Mutex` and
-//! restore the previous value at the end. They run serially via the
-//! mutex, so `cargo test` parallelism stays correct without `--test-threads=1`.
+//! The router is built from the same auth-middleware + extractor pieces
+//! `main.rs` wires, but with a `MemorySessionStore` instead of SQLite.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use axum::middleware::from_fn_with_state;
 use axum::routing::post;
 use axum::Router;
+use chrono::{Duration as ChronoDuration, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tokio::sync::{broadcast, Mutex};
 use tower::ServiceExt;
 
 use lucida_server::admin::admin_clear_proxy_cache;
+use lucida_server::auth::middleware::{auth_middleware, build_extractor};
+use lucida_server::auth::session_store::{LoginSession, LoginSessionStore};
+use lucida_server::auth::{AuthConfig, MemorySessionStore};
 use lucida_server::handler::dataset_url_hash16;
 use lucida_server::session::Session;
 use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
 
-const ADMIN_TOKEN: &str = "test_secret";
 const URL_A: &str = "gs://lucida-test/datasets/dataset-a.zarr";
 const URL_B: &str = "gs://lucida-test/datasets/dataset-b.zarr";
+const ADMIN_EMAIL: &str = "admin@calicolabs.com";
+const NONADMIN_EMAIL: &str = "alice@calicolabs.com";
 
-/// Serializes env var mutations across tests in this file. The
-/// `LUCIDA_ADMIN_TOKEN` env var is process-global, so concurrent tests
-/// would race without this. We keep the lock in a `OnceLock` so each
-/// test grabs the same one.
-fn env_lock() -> &'static StdMutex<()> {
-    static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| StdMutex::new(()))
-}
+/// Build a router with the admin route + the auth middleware, wired to
+/// an `AppState` whose proxy cache root is `cache_dir`. `admin_emails`
+/// drives the `is_admin` derivation in the cookie extractor.
+fn build_router(
+    cache_dir: &Path,
+    store: Arc<MemorySessionStore>,
+    admin_emails: HashSet<String>,
+) -> Router {
+    let mut config = AuthConfig::for_tests();
+    config.admin_emails = admin_emails;
+    let config = Arc::new(config);
 
-/// Set or clear `LUCIDA_ADMIN_TOKEN` for the duration of the returned
-/// guard. Drop restores the previous value (or removes the var if it
-/// was unset). Holds the global env lock, so callers serialize against
-/// each other.
-struct EnvGuard {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    previous: Option<String>,
-}
+    let extractor =
+        build_extractor(Arc::clone(&config), Arc::clone(&store) as Arc<dyn LoginSessionStore>);
 
-impl EnvGuard {
-    fn set(value: Option<&str>) -> Self {
-        // SAFETY: env mutation is only safe single-threaded; we serialize
-        // via the global mutex so no other test thread is racing.
-        let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var("LUCIDA_ADMIN_TOKEN").ok();
-        unsafe {
-            match value {
-                Some(v) => std::env::set_var("LUCIDA_ADMIN_TOKEN", v),
-                None => std::env::remove_var("LUCIDA_ADMIN_TOKEN"),
-            }
-        }
-        Self { _lock: lock, previous }
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            match &self.previous {
-                Some(v) => std::env::set_var("LUCIDA_ADMIN_TOKEN", v),
-                None => std::env::remove_var("LUCIDA_ADMIN_TOKEN"),
-            }
-        }
-    }
-}
-
-/// Build a router with just the admin route, wired to `AppState` whose
-/// `proxy_config.cache_dir` points at the given directory.
-fn build_router(cache_dir: &Path) -> Router {
-    let state = AppState {
+    let app_state = AppState {
         session: Arc::new(Mutex::new(Session::new())),
         tx: broadcast::channel::<BroadcastItem>(8).0,
         next_id: Arc::new(AtomicU64::new(0)),
@@ -98,9 +71,35 @@ fn build_router(cache_dir: &Path) -> Router {
             concurrency: 1,
         },
     };
+
     Router::new()
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
-        .with_state(state)
+        .with_state(app_state)
+        .layer(from_fn_with_state(extractor, auth_middleware))
+}
+
+/// Mint a fresh session for `email` and return its cookie ID.
+async fn seed_session(store: &MemorySessionStore, email: &str) -> String {
+    let id = format!("sess-{email}");
+    let now = Utc::now();
+    store
+        .create(LoginSession {
+            id: id.clone(),
+            email: email.to_string(),
+            display_name: email.to_string(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: now,
+            expires_at: now + ChronoDuration::hours(24),
+        })
+        .await
+        .unwrap();
+    id
+}
+
+/// Convenience: build the cookie header value the cookie extractor reads.
+fn cookie_header(session_id: &str) -> String {
+    format!("lucida_session={session_id}")
 }
 
 /// Hex-encode a 16-byte hash to 32 lowercase chars (matches `proxy::cache`).
@@ -131,11 +130,15 @@ async fn body_to_string(body: Body) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+fn admins(emails: &[&str]) -> HashSet<String> {
+    emails.iter().map(|s| s.to_string()).collect()
+}
+
 #[tokio::test]
-async fn returns_503_when_admin_token_unset() {
-    let _env = EnvGuard::set(None);
+async fn returns_401_without_session_cookie() {
     let tmp = tempfile::tempdir().unwrap();
-    let app = build_router(tmp.path());
+    let store = Arc::new(MemorySessionStore::new());
+    let app = build_router(tmp.path(), store, admins(&[ADMIN_EMAIL]));
 
     let req = Request::builder()
         .method("POST")
@@ -143,56 +146,65 @@ async fn returns_503_when_admin_token_unset() {
         .body(Body::empty())
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn returns_403_when_principal_not_admin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemorySessionStore::new());
+    let cookie_id = seed_session(&store, NONADMIN_EMAIL).await;
+
+    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[ADMIN_EMAIL]));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/admin/clear-proxy-cache")
+        .header("cookie", cookie_header(&cookie_id))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
     let body = body_to_string(res.into_body()).await;
-    assert!(body.contains("admin disabled"), "got {body:?}");
+    let json: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["error"], "forbidden");
 }
 
 #[tokio::test]
-async fn returns_401_when_authorization_header_missing() {
-    let _env = EnvGuard::set(Some(ADMIN_TOKEN));
+async fn returns_403_when_admin_set_empty() {
+    // PRD: "Empty/unset → empty set (no admins; admin endpoints return
+    // 403 for everyone)." A logged-in user with no configured admins
+    // must still be rejected.
     let tmp = tempfile::tempdir().unwrap();
-    let app = build_router(tmp.path());
+    let store = Arc::new(MemorySessionStore::new());
+    let cookie_id = seed_session(&store, ADMIN_EMAIL).await;
 
+    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[])); // empty
     let req = Request::builder()
         .method("POST")
         .uri("/admin/clear-proxy-cache")
+        .header("cookie", cookie_header(&cookie_id))
         .body(Body::empty())
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
-async fn returns_401_when_token_wrong() {
-    let _env = EnvGuard::set(Some(ADMIN_TOKEN));
-    let tmp = tempfile::tempdir().unwrap();
-    let app = build_router(tmp.path());
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/admin/clear-proxy-cache")
-        .header("authorization", "Bearer not_the_token")
-        .body(Body::empty())
-        .unwrap();
-    let res = app.oneshot(req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
-}
-
-#[tokio::test]
-async fn returns_200_with_correct_token_and_clears_all() {
-    let _env = EnvGuard::set(Some(ADMIN_TOKEN));
+async fn returns_200_with_admin_session_and_clears_all() {
     let tmp = tempfile::tempdir().unwrap();
     let dir_a = populate_dataset(tmp.path(), URL_A);
     let dir_b = populate_dataset(tmp.path(), URL_B);
     assert!(dir_a.exists());
     assert!(dir_b.exists());
 
-    let app = build_router(tmp.path());
+    let store = Arc::new(MemorySessionStore::new());
+    let cookie_id = seed_session(&store, ADMIN_EMAIL).await;
+
+    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[ADMIN_EMAIL]));
     let req = Request::builder()
         .method("POST")
         .uri("/admin/clear-proxy-cache")
-        .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("cookie", cookie_header(&cookie_id))
         .body(Body::empty())
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
@@ -210,20 +222,20 @@ async fn returns_200_with_correct_token_and_clears_all() {
 
 #[tokio::test]
 async fn returns_200_and_clears_only_specified_dataset() {
-    let _env = EnvGuard::set(Some(ADMIN_TOKEN));
     let tmp = tempfile::tempdir().unwrap();
     let dir_a = populate_dataset(tmp.path(), URL_A);
     let dir_b = populate_dataset(tmp.path(), URL_B);
 
-    let app = build_router(tmp.path());
-    // Encode the URL into the query string so axum's Query extractor
-    // sees the full value.
+    let store = Arc::new(MemorySessionStore::new());
+    let cookie_id = seed_session(&store, ADMIN_EMAIL).await;
+
+    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[ADMIN_EMAIL]));
     let encoded = urlencode(URL_A);
     let uri = format!("/admin/clear-proxy-cache?dataset={encoded}");
     let req = Request::builder()
         .method("POST")
         .uri(uri)
-        .header("authorization", format!("Bearer {ADMIN_TOKEN}"))
+        .header("cookie", cookie_header(&cookie_id))
         .body(Body::empty())
         .unwrap();
     let res = app.oneshot(req).await.unwrap();
@@ -236,6 +248,45 @@ async fn returns_200_and_clears_only_specified_dataset() {
 
     assert!(!dir_a.exists(), "A should be cleared");
     assert!(dir_b.exists(), "B should be untouched");
+}
+
+/// Integration test from the slice 6 acceptance criteria: a dev-login
+/// session for `dev@local`, with `dev@local` in the admin set, can hit
+/// the admin endpoint.
+#[tokio::test]
+async fn dev_local_session_with_dev_local_admin_allowlist_succeeds() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemorySessionStore::new());
+    let cookie_id = seed_session(&store, "dev@local").await;
+
+    let app = build_router(tmp.path(), Arc::clone(&store), admins(&["dev@local"]));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/admin/clear-proxy-cache")
+        .header("cookie", cookie_header(&cookie_id))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+/// Same dev-login session, but no admin emails configured: must 403.
+/// This is the "env var unset" half of the acceptance criteria.
+#[tokio::test]
+async fn dev_local_session_without_admin_allowlist_403s() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Arc::new(MemorySessionStore::new());
+    let cookie_id = seed_session(&store, "dev@local").await;
+
+    let app = build_router(tmp.path(), Arc::clone(&store), admins(&[]));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/admin/clear-proxy-cache")
+        .header("cookie", cookie_header(&cookie_id))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
 
 /// Minimal percent-encoder for the handful of characters in our test
