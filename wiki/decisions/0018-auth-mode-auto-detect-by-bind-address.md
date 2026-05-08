@@ -3,6 +3,7 @@ created: 2026-05-08
 modified: 2026-05-08
 ---
 
+
 # Auth Mode Auto-Detect by Bind Address
 
 > Status: Proposed (in design — feature not yet implemented; PRD #455).
@@ -60,11 +61,11 @@ Both are acceptable trade-offs given the safety win. Documented in the OSS quick
 
 ## How this decision shows up in code
 
-To be filled in during implementation. Anchors:
-
-- `lucida-server::main` — replaces hardcoded `0.0.0.0:9876` bind with parsing of `LUCIDA_BIND`.
-- `lucida-server::auth::config` — `AuthConfig::from_env()` performs the auto-detect logic, validates `LUCIDA_INSECURE` opt-in, fails fast on misconfiguration.
-- README / quickstart — documents the auto-detect behavior and the override flag.
+- `lucida-server::auth::config::AuthConfig::from_env_map` — performs the auto-detect logic. Reads `LUCIDA_BIND` first (default `127.0.0.1:9876`), then if `LUCIDA_AUTH` is unset infers the mode from `bind_addr.ip().is_loopback()`. The dangerous `Disabled + non-loopback` combination errors with `AuthConfigError::InsecureRequiresOptIn` unless `LUCIDA_INSECURE=1` is also set.
+- `lucida-server::auth::config::AuthMode::parse` — fails on unknown values (e.g. `LUCIDA_AUTH=microsoft` is fatal at boot, not silently fallthrough).
+- `lucida-server::main::run_serve` — calls `AuthConfig::from_env`, emits `auth.startup` (info, with mode + bind), `auth.startup.config_error` (error, before fail-fast exit), and `auth.startup.insecure_mode` (warn, when `insecure_acknowledged`).
+- `lucida-server::auth::is_dev_mode` — slice 8 gates the dev-only `/auth/dev/login` route on `mode == AuthMode::Disabled` (was `cfg!(debug_assertions)` in slice 2). A release build with auto-detected disabled mode still gets the dev shortcut; a debug build with Google OAuth configured does not.
+- `lucida-server/tests/auth_config_e2e.rs` — exercises every from-env permutation (loopback default, public default → Google, public + disabled → error, public + disabled + insecure → ok with banner).
 
 ## Related
 

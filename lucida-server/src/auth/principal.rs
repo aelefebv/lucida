@@ -26,6 +26,33 @@ use super::cookie::read_session_cookie;
 use super::google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 use super::session_store::{LoginSession, LoginSessionStore};
 
+/// Best-effort client-IP for slice-8 audit-event fields. Looks at
+/// `X-Forwarded-For` first (proxy-aware) and falls back to the connection
+/// info axum exposes via `Parts::extensions` if present. Returns `None`
+/// when nothing is available — empty string in the audit field is fine
+/// (the operator running localhost dev won't have a forwarded IP).
+///
+/// We deliberately don't promise this is the *real* client; an attacker
+/// can spoof `X-Forwarded-For` if no trusted proxy strips it. The audit
+/// log is a starting point for forensics, not a source of truth.
+pub(crate) fn client_ip(parts: &Parts) -> Option<String> {
+    if let Some(hv) = parts.headers.get("x-forwarded-for")
+        && let Ok(s) = hv.to_str()
+    {
+        // Per RFC 7239 the leftmost address is the originating client.
+        if let Some(first) = s.split(',').next() {
+            let trimmed = first.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    parts
+        .extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
+}
+
 /// Failure modes from extracting a principal off an inbound request.
 ///
 /// `Unauthenticated` is the common case (no session cookie, missing
@@ -77,18 +104,36 @@ impl SessionCookieExtractor {
         Self { config, store }
     }
 
-    /// Decide whether a row is still valid given the current time.
-    /// Two checks: idle-timeout (last_used_at + idle_timeout >= now)
-    /// and hard-cap (expires_at >= now). Either failing kills the
-    /// session. Pure function; tested independently.
-    fn is_session_active(&self, row: &LoginSession, now: chrono::DateTime<Utc>) -> bool {
+    /// Why a row failed activeness, for slice-8 audit-logging branching.
+    /// `Active` = still valid. The two failure variants drive distinct
+    /// `auth.session.expired.*` event names so ops can tell idle drift
+    /// (a quiet user) apart from hard-cap rotations (a 30-day re-auth).
+    fn classify_session(
+        &self,
+        row: &LoginSession,
+        now: chrono::DateTime<Utc>,
+    ) -> SessionStatus {
         if row.expires_at <= now {
-            return false;
+            return SessionStatus::HardCapExpired;
         }
         let idle_deadline = row.last_used_at
-            + chrono::Duration::from_std(self.config.idle_timeout).unwrap_or(chrono::Duration::zero());
-        idle_deadline > now
+            + chrono::Duration::from_std(self.config.idle_timeout)
+                .unwrap_or(chrono::Duration::zero());
+        if idle_deadline <= now {
+            return SessionStatus::IdleExpired;
+        }
+        SessionStatus::Active
     }
+
+}
+
+/// See [`SessionCookieExtractor::classify_session`] — three-state result
+/// over (active, idle-expired, hard-cap-expired).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionStatus {
+    Active,
+    IdleExpired,
+    HardCapExpired,
 }
 
 #[async_trait]
@@ -97,27 +142,63 @@ impl PrincipalExtractor for SessionCookieExtractor {
         let session_id = read_session_cookie(req, &self.config.cookie_name)
             .ok_or(AuthError::Unauthenticated)?;
 
-        let row = self
+        // Capture request-context fields once for any audit events
+        // emitted below. Email is unknown until we look up the row;
+        // ip + user-agent come from request headers.
+        let user_agent = req
+            .headers
+            .get(axum::http::header::USER_AGENT)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let ip = client_ip(req).unwrap_or_default();
+
+        let row = match self
             .store
             .get(&session_id)
             .await
             .map_err(|e| {
                 error!(error = %e, "session_store.get.failed");
                 AuthError::Internal(e.to_string())
-            })?
-            .ok_or(AuthError::Unauthenticated)?;
+            })? {
+            Some(row) => row,
+            None => {
+                // Cookie present, no DB row. PRD #455 §"Audit logging":
+                // dedicated debug event so ops can tell stale cookies
+                // (post-logout, post-sweep) apart from the no-cookie
+                // case. We don't have an email here — we never minted a
+                // session for this id, by definition.
+                debug!(
+                    ip = %ip,
+                    user_agent = %user_agent,
+                    "auth.failure.unknown_session",
+                );
+                return Err(AuthError::Unauthenticated);
+            }
+        };
 
         let now = Utc::now();
-        if !self.is_session_active(&row, now) {
-            // Either idle-expired or hard-capped. Either way, treat as
-            // unauthenticated. Sweep (slice 8) will eventually drop the
-            // row; we don't bother deleting here to keep the extract
-            // path read-only.
-            debug!(
-                session_id = %row.id,
-                "session_extractor.expired",
-            );
-            return Err(AuthError::Unauthenticated);
+        match self.classify_session(&row, now) {
+            SessionStatus::Active => {}
+            SessionStatus::IdleExpired => {
+                // Sweep (slice 8) will eventually drop the row; we don't
+                // bother deleting here to keep the extract path read-only.
+                debug!(
+                    email = %row.email,
+                    ip = %ip,
+                    user_agent = %user_agent,
+                    "auth.session.expired.idle",
+                );
+                return Err(AuthError::Unauthenticated);
+            }
+            SessionStatus::HardCapExpired => {
+                debug!(
+                    email = %row.email,
+                    ip = %ip,
+                    user_agent = %user_agent,
+                    "auth.session.expired.hard_cap",
+                );
+                return Err(AuthError::Unauthenticated);
+            }
         }
 
         // Race-and-tolerate touch. Spawn a task so the response isn't

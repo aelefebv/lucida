@@ -66,13 +66,17 @@ The trade-off: if someone leaves the org mid-session, they retain access until t
 
 ## How this decision shows up in code
 
-To be filled in during implementation. Anchors:
-
-- `lucida-server::auth::session_store` — `LoginSessionStore` trait + SQLite implementation.
-- `lucida-server::auth::middleware` — axum middleware that runs principal extraction on every request.
-- `lucida-server::auth::handlers` — `/auth/start`, `/auth/callback`, `/auth/logout`, `/auth/whoami`.
-- `lucida-server::auth::google_oauth` — encapsulates Google integration; the deepest piece.
-- `lucida-core::auth_principal` — `AuthPrincipal` struct shared between server and any future Rust client.
+- `lucida-server::auth::session_store` — `LoginSessionStore` trait + the row type (`LoginSession` with id/email/display_name/picture_url/created_at/last_used_at/expires_at). Object-safe so the extractor holds `Arc<dyn LoginSessionStore>`.
+- `lucida-server::auth::session_store_sqlite::SqliteSessionStore` — production backend; `WAL` journal for non-blocking touch writes; pool of 5; migrations bundled at compile time.
+- `lucida-server::auth::session_store_memory::MemorySessionStore` — in-memory store used by unit and integration tests.
+- `lucida-server::auth::pending_auth*` — parallel trio for the in-flight OAuth `state` token (`PendingAuthStore` trait, SQLite + memory backends). `consume` is atomic single-use to prevent state replay.
+- `lucida-server::auth::middleware::auth_middleware` — axum layer that runs the configured `PrincipalExtractor`, attaches `AuthPrincipal` to request extensions on success, and returns either the unauth-landing HTML (browsers) or bare JSON 401 (API clients) on failure.
+- `lucida-server::auth::handlers` — `/auth/whoami`, `/auth/logout`, `/auth/start`, `/auth/callback`, `/auth/error` (slice 5 user-fixable rejection page), and the dev-only `/auth/dev/login` (slice 8 gates on `AuthMode::Disabled`).
+- `lucida-server::auth::google_oauth::GoogleOAuthClient` — authorization-URL builder, token-endpoint POST, JWKS cache (24 h TTL + on-validation-failure refresh), JWT validation. Slice 8 distinguishes `OAuthError::Network` from `OAuthError::CodeExchange` so the audit-log dashboard can split "Google rejected our code" from "we couldn't reach Google."
+- `lucida-server::auth::cookie` — single source of truth for the `Set-Cookie` attribute set (`HttpOnly`, `Secure` auto-detected, `SameSite=Lax`, `Path=/`, `Max-Age` matching the hard cap).
+- `lucida-server::auth::cleanup` — slice 8's hourly background sweep that drops expired session and pending-auth rows. Spawned at startup; warm-up of 60s before the first sweep.
+- `lucida-server::auth::extractors::AdminRequired` — slice 6 axum extractor: pulls the principal from extensions and 403s when `!is_admin`.
+- `lucida-core::auth_principal::AuthPrincipal` — the type handlers see; provider-agnostic.
 
 ## Related
 

@@ -83,7 +83,7 @@ struct ClearArgs {
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     ws.on_upgrade(move |socket| async move {
-        eprintln!("client {id} connected");
+        tracing::info!(client_id = id, "ws.client_connected");
         handler::handle_client(
             id,
             socket,
@@ -133,10 +133,12 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         cache_dir: proxy_cache_dir,
         concurrency: proxy_concurrency,
     };
-    eprintln!(
-        "proxy cache dir: {} | concurrency: {}",
-        proxy_config.cache_dir.display(),
-        proxy_config.concurrency
+    // Slice 8: migrate to tracing per ADR 0012 (operational logs go
+    // through the configured subscriber so RUST_LOG filtering applies).
+    tracing::info!(
+        cache_dir = %proxy_config.cache_dir.display(),
+        concurrency = proxy_config.concurrency,
+        "proxy.config",
     );
 
     let session = Arc::new(Mutex::new(Session::new()));
@@ -163,15 +165,25 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let auth_config = match auth::AuthConfig::from_env() {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            eprintln!("auth config error: {e}");
+            // Slice 7 (PRD #455 §"Audit logging") emits this before the
+            // fail-fast exit so ops can grep `auth.startup.config_error`
+            // for "server refused to start because of bad config".
+            tracing::error!(error = %e, "auth.startup.config_error");
             return Err(std::io::Error::other(e.to_string()));
         }
     };
     // Operator-facing startup line: mode + bind together so a glance
     // at the boot log answers "is this server reachable, and is it
     // protected?" Per ADR-0018 both signals should be visible together.
+    // Stable string mode tag (per slice 7 hand-off note): `"google"` /
+    // `"disabled"` lands cleanly in audit pipelines that key off the
+    // exact string rather than the Debug-formatted variant.
+    let mode_str = match auth_config.mode {
+        auth::AuthMode::Google => "google",
+        auth::AuthMode::Disabled => "disabled",
+    };
     tracing::info!(
-        mode = ?auth_config.mode,
+        mode = %mode_str,
         bind = %auth_config.bind_addr,
         cookie = %auth_config.cookie_name,
         db = %auth_config.db_path.display(),
@@ -185,9 +197,14 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // banner is multi-line on purpose so it survives log truncation
     // and stands out in `journalctl` / k8s logs.
     if auth_config.insecure_acknowledged {
+        // Structured audit event so the signal lands in the audit log
+        // pipeline alongside the other `auth.*` events, not just the
+        // operator-eyeballed stderr banner. PRD #455 §"Audit logging"
+        // names this event explicitly.
         tracing::warn!(
             bind = %auth_config.bind_addr,
-            "AUTH DISABLED on a non-loopback bind — server is exposed without authentication",
+            mode = %mode_str,
+            "auth.startup.insecure_mode",
         );
         eprintln!("============================================================");
         eprintln!("WARNING: LUCIDA_INSECURE=1 is set");
@@ -207,7 +224,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let session_store = match auth::SqliteSessionStore::open(&auth_config.db_path).await {
         Ok(s) => Arc::new(s),
         Err(e) => {
-            eprintln!("failed to open session store: {e}");
+            tracing::error!(error = %e, "auth.startup.session_store_open_failed");
             return Err(std::io::Error::other(e.to_string()));
         }
     };
@@ -260,7 +277,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         let google_client = match auth::GoogleOAuthClient::new(Arc::new(g)).await {
             Ok(c) => Arc::new(c),
             Err(e) => {
-                eprintln!("auth: failed to initialize Google client: {e}");
+                tracing::error!(error = %e, "auth.startup.google_client_init_failed");
                 return Err(std::io::Error::other(e.to_string()));
             }
         };
@@ -282,8 +299,12 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
                 get(auth::handlers::auth_callback).with_state(oauth_state),
             );
     }
-    if auth::is_dev_mode() {
-        eprintln!("auth: dev mode — exposing POST /auth/dev/login");
+    if auth::is_dev_mode(&auth_config) {
+        // Slice 8: gate on the validated `AuthMode::Disabled` rather
+        // than `cfg!(debug_assertions)`. A release build deployed with
+        // `LUCIDA_AUTH=disabled` (or auto-detect on a loopback bind)
+        // gets the dev shortcut; a debug build wired to Google does not.
+        tracing::info!("auth.dev_login.exposed");
         public_auth_router = public_auth_router.route(
             "/auth/dev/login",
             post(auth::handlers::dev_login).with_state(dev_login_state),
@@ -307,6 +328,25 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .merge(public_auth_router)
         .layer(CorsLayer::permissive());
 
+    // Slice 8: hourly background sweep of expired session + pending-auth
+    // rows. Spawned here (after stores are open, before the listener
+    // accepts connections) so the loop runs for the lifetime of the
+    // process. Holding the JoinHandle keeps the task alive — dropping
+    // the handle would abort the spawned future. Operational logs only
+    // (no PII per row); per-user audit lives in `auth.signin.success`
+    // and `auth.logout`.
+    let _cleanup_handle = auth::spawn_cleanup(auth::CleanupState {
+        config: Arc::clone(&auth_config),
+        session_store: Arc::clone(&session_store_dyn),
+        pending_store: Arc::clone(&pending_store),
+    });
+    tracing::info!(
+        startup_delay_s = auth::cleanup::STARTUP_DELAY.as_secs(),
+        interval_s = auth::cleanup::SWEEP_INTERVAL.as_secs(),
+        pending_ttl_s = auth::cleanup::PENDING_TTL.as_secs(),
+        "auth.cleanup.spawned",
+    );
+
     // ADR-0018: LUCIDA_BIND defaults to 127.0.0.1:9876 (loopback) so
     // `cargo run --bin lucida-server` is friction-free for local dev.
     // Set LUCIDA_BIND=0.0.0.0:9876 (or a deployment-specific interface)
@@ -317,8 +357,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
         .unwrap_or_else(|e| panic!("failed to bind to {bind_addr}: {e}"));
-    tracing::info!(bind = %bind_addr, "lucida-server listening");
-    eprintln!("lucida-server listening on http://{bind_addr}");
+    tracing::info!(bind = %bind_addr, "server.listening");
 
     axum::serve(listener, app).await.expect("server error");
     Ok(())

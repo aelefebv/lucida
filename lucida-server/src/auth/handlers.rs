@@ -334,7 +334,15 @@ pub async fn auth_callback(
             return redirect_to_error(&[("code", "auth_failed")]);
         }
         Err(OAuthError::JwksFetch(detail)) => {
-            error!(error = %detail, "auth.signin.error.jwks_fetch");
+            // Treated as a network-flavored failure: a JWKS fetch only
+            // runs at this depth when the cached set is missing the
+            // required `kid` and a refresh attempt failed. Surface as
+            // network so dashboards group with the new `network` event.
+            error!(error = %detail, "auth.signin.error.network");
+            return redirect_to_error(&[("code", "auth_failed")]);
+        }
+        Err(OAuthError::Network(detail)) => {
+            error!(error = %detail, "auth.signin.error.network");
             return redirect_to_error(&[("code", "auth_failed")]);
         }
     };
