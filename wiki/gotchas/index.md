@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-23
+modified: 2026-05-08
 ---
 
 # Gotchas
@@ -24,3 +24,4 @@ Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of th
 - [[non-canonical-axes]] — OME-Zarr axes outside `{t,c,z,y,x}` (e.g. CZI `m` mosaic) are silently pinned to index 0; only the first slice is visible. Pinned axes and canonical-indexed axes (`t`, `c`) with `chunk_size > 1` are handled via post-decode byte slicing
 - [[blosc-support]] — Blosc decoder supports a deliberately narrow subset (Blosc1 + zstd inner + typesize ∈ {1,2,4}); everything else is rejected at import time
 - [[wire-chunk-key-conventions]] — wire chunk keys split asymmetrically: `t/c` are voxel coords, `z/y/x` are chunk-grid coords. The divide-and-slice for `t/c` happens server-side
+- [[oss-config-defaults]] — `LUCIDA_*` env var contract, common misconfigurations (bind + auth mode mismatch, TLS-terminating-proxy cookie issue, hosted domain edge cases)

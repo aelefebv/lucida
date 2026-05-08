@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-08
 ---
 
 # lucida-server
@@ -19,19 +19,22 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 ## Module map
 
 - `lib.rs` — `AppState`, `BroadcastItem` (the in-process pub/sub envelope), `ProxyConfig`
-- `main.rs` — Axum server entry point; wires WebSocket handler and admin routes
+- `main.rs` — Axum server entry point; wires WebSocket handler, admin routes, and the two-router split for [[auth]]
 - `handler.rs` — per-client connection loop: snapshot → broadcast subscribe → inbound dispatch (`ClientMessage` / `ChunkMessage` / `AssetMessage` / binary chunk relay)
 - `session.rs` — `Session` state: `DocumentState` + history ring buffer + per-client `PresenceState` + `server_bindings: HashMap<DatasetId, ServerBinding>`
 - `binding.rs` — `ServerBinding`, `ChunkResolver`, `StorageCompression` detection from Zarr v3 codec chain
 - `decode.rs` — Lz4/Zstd → raw decode, shared between chunk-serve and proxy generation
 - `proxy/` — server-side proxy infrastructure: `ProxyCache` (per-dataset on-disk cache), `ProxyGenerator` (bounded-concurrency, in-flight dedup), `ServerProxySource` (adapter from `CachedStore` to `lucida-proxy`'s sync trait)
+- `auth/` — Google OAuth + session cookies + admin allowlist + cleanup sweep + audit logging. See [[auth]] for the deep-dive.
 - `browse.rs` / `admin.rs` — HTTP routes for filesystem browsing and admin operations (e.g. clear proxy cache)
+- `migrations/` — versioned SQL migrations applied at startup (sqlx). First persistent state in the server.
 
 ## Interactions
 
 - **Inputs from clients**: `ClientMessage` (commands, presence, cursor, follow, dataset-open requests), `ChunkMessage::ChunkRequest`, `AssetMessage::AssetRequest`, raw binary frames (peer-to-peer chunk relay format).
 - **Outputs to clients**: `ServerMessage` (snapshot, broadcasts, peer events, `DatasetOpened`, `OpenDatasetFailed`, `AssetCatalogUpdate`), binary chunk frames (`[client_id u32 LE][key_len u16 LE][key][bytes]`), binary proxy frames (same envelope + 64-byte `lucida_proxy::ProxyHeader` + voxels).
-- **Dependencies**: [[lucida-core]] for the Scene/document model, [[lucida-content]] for `DatasetManifest`, [[lucida-protocol]] for wire types, [[lucida-store]] for storage backends and import, [[lucida-proxy]] for the synchronous proxy generation algorithm. `object_store` for cloud abstraction. `axum`, `tokio`, `tokio-tungstenite` for the network stack.
+- **Auth gate**: every non-`/auth/*` route runs through middleware that extracts an `AuthPrincipal` from the `lucida_session` cookie. Public routes (`/auth/start`, `/auth/callback`, `/auth/error`, `/auth/dev/login` in dev) live in a separate router half. See [[auth]].
+- **Dependencies**: [[lucida-core]] for the Scene/document model, [[lucida-content]] for `DatasetManifest`, [[lucida-protocol]] for wire types, [[lucida-store]] for storage backends and import, [[lucida-proxy]] for the synchronous proxy generation algorithm. `object_store` for cloud abstraction. `axum`, `tokio`, `tokio-tungstenite` for the network stack. `sqlx` (sqlite), `jsonwebtoken`, `reqwest` for auth.
 
 ## Invariants
 
@@ -47,3 +50,4 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 - **Proxy cache directories are keyed by 16-byte URL hash**, not `DatasetId`. The hash is the same BLAKE3 prefix used for `DatasetId` so the two stay in lockstep — see the comment on `dataset_url_hash16`.
 - **Pre-generation on dataset open is best-effort.** S5 spawns a background task to pre-build `(T=0, C=0)` proxies for every advertised entity. Failures are logged and dropped — the open succeeds either way; client-side fetches will surface the failure on their own path.
 - **Storage compression is detected from the codec chain** at level 0 only and assumed uniform across levels. If a dataset uses different compression at different LODs, this assumption breaks silently.
+- **First persistent state in the server.** SQLite database (`lucida.db` + `.db-shm` + `.db-wal`) holds login sessions, pending OAuth states, and (PRD #454) bookmarks. `LUCIDA_DB_PATH` configures the path; default is CWD-relative — set to an absolute path in production. See [[gotchas/oss-config-defaults]].
