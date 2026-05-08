@@ -64,8 +64,17 @@ export class Bridge {
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCursor: string | null = null;
 
-  constructor(handlers: BridgeHandlers, port = 9876) {
-    this.url = `ws://localhost:${port}`;
+  constructor(handlers: BridgeHandlers, urlOverride?: string) {
+    // Same-origin WebSocket so the lucida_session cookie is sent on
+    // the upgrade handshake (browsers refuse cross-origin cookies on
+    // WS upgrades with SameSite=Lax). Vite dev server proxies `/ws`
+    // to the backend; production serves both from one origin.
+    if (urlOverride) {
+      this.url = urlOverride;
+    } else {
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      this.url = `${proto}//${window.location.host}/ws`;
+    }
     this.handlers = handlers;
     this.connect();
   }
