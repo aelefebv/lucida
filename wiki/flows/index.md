@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-08
 ---
 
 # Flows
@@ -15,3 +15,4 @@ End-to-end traces showing how data or control moves through Lucida. Each article
 - [[follow-chain-resolution]] — `set_follow` validation, transitive flatten into stars, disconnect-driven reset
 - [[document-command-application]] — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client
 - [[proxy-generation]] — on-demand `AssetRequest` → bounded-concurrency generator with in-flight dedup → on-disk cache → binary frame back
+- [[auth-signin]] — unauthed visit → JS shim captures hash → /auth/start → Google → /auth/callback → state validate → JWT validate → session create → cookie + 302 to original URL

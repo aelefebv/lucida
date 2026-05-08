@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-08
 ---
 
 # Systems
@@ -26,6 +26,7 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 
 ## Subsystems (`subsystems/`)
 
+- [[auth]] — backend-mediated Google OAuth + httpOnly session cookies; `PrincipalExtractor` trait is the OSS provider extension point
 - [[chunk-pipeline]] — overview of the end-to-end path from dataset URL to pixels; pointer to the deep trace in `CHUNK_PIPELINE.md`
 - [[planning-domain]] — wanted-set computation, LOD promotion with hysteresis, lane-based priority formula
 - [[cpu-cache]] — sole chunk fetch path; tiered LRU eviction; decode pool dispatch; drain to GPU
