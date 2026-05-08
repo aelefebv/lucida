@@ -1,4 +1,5 @@
 .app {
+  position: relative; /* anchors absolute-positioned ProfileMenu */
   display: flex;
   flex-direction: row;
   align-items: stretch;

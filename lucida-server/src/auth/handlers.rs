@@ -1,15 +1,14 @@
 //! Auth HTTP handlers.
 //!
-//! Slice 2 (PRD #455) lands `/auth/whoami` (slice 1, kept) and
-//! `/auth/dev/login` (new — dev-only convenience that mints a
-//! `dev@local` session). The other endpoints documented in PRD #455
-//! §"REST API contract" (`/auth/start`, `/auth/callback`,
-//! `/auth/logout`, `/auth/error`) land in later slices.
+//! Slice 2 (PRD #455) landed `/auth/whoami` (kept from slice 1) and
+//! `/auth/dev/login`. Slice 3 (PRD #455 §"Logout flow", issue #459)
+//! lands `/auth/logout`. The remaining OAuth endpoints (`/auth/start`,
+//! `/auth/callback`, `/auth/error`) arrive in later slices.
 
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::header::SET_COOKIE;
+use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
@@ -20,7 +19,7 @@ use tracing::info;
 use lucida_core::auth_principal::AuthPrincipal;
 
 use super::config::AuthConfig;
-use super::cookie::{build_session_cookie, request_is_https};
+use super::cookie::{build_clearing_cookie, build_session_cookie, read_session_cookie, request_is_https};
 use super::session_store::{LoginSession, LoginSessionStore};
 
 /// `GET /auth/whoami` — returns the current `AuthPrincipal` JSON when
@@ -97,6 +96,76 @@ pub async fn dev_login<B>(
         StatusCode::OK,
         [(SET_COOKIE, cookie_header)],
         Json(principal),
+    )
+        .into_response()
+}
+
+/// State for `/auth/logout`. Mirrors `DevLoginState` shape: just the
+/// pieces logout needs, so tests don't need to construct the full
+/// `AppState`. Logout reads the cookie, deletes the session row (if
+/// present), and writes a clearing cookie back.
+#[derive(Clone)]
+pub struct LogoutState {
+    pub config: Arc<AuthConfig>,
+    pub store: Arc<dyn LoginSessionStore>,
+}
+
+/// `POST /auth/logout` — local-only sign-out.
+///
+/// Idempotent: the response shape (302 + clearing cookie) is identical
+/// whether or not the request carried a valid session cookie, so the
+/// web client can call it without first checking auth state. We
+/// deliberately do **not** federate to Google's revoke endpoint — see
+/// `wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.md`
+/// §"Logout" for the rationale (the ID token isn't held past login).
+///
+/// Returns 302 to `/`. fetch() in the web client follows redirects by
+/// default but the body of `/` is irrelevant — useAuthState refreshes
+/// via `/auth/whoami` after the call resolves, which then returns 401.
+pub async fn logout<B>(
+    State(state): State<LogoutState>,
+    req: Request<B>,
+) -> Response {
+    let (parts, _body) = req.into_parts();
+    let session_id = read_session_cookie(&parts, &state.config.cookie_name);
+
+    // Try to look up the email for the audit log before deletion. We
+    // don't fail logout when the lookup errors — the deletion attempt
+    // (and the cookie clear) still need to happen. Storage errors
+    // surface in tracing but not to the client.
+    let email = match &session_id {
+        Some(id) => match state.store.get(id).await {
+            Ok(Some(row)) => Some(row.email),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, "logout.lookup_email.failed");
+                None
+            }
+        },
+        None => None,
+    };
+
+    if let Some(id) = session_id.as_deref()
+        && let Err(e) = state.store.delete(id).await
+    {
+        // Even on store failure, fall through to clear the cookie.
+        // Worst case the row lingers until the slice-8 sweep; the
+        // browser is forced unauthenticated immediately, which is
+        // the user-visible promise of logout.
+        tracing::error!(error = %e, "logout.delete_session.failed");
+    }
+
+    // Always emit the audit event so the absence of a row in the audit
+    // log distinguishes "user never clicked sign-out" from "endpoint
+    // hit but storage hiccuped." Email may be None for cookieless
+    // calls or expired/unknown sessions; that's fine — slice 8 will
+    // expand the audit shape, this slice just lands the event.
+    info!(email = email.as_deref().unwrap_or("<unknown>"), "auth.logout");
+
+    let cookie_header = build_clearing_cookie(&state.config, request_is_https(&parts));
+    (
+        StatusCode::FOUND,
+        [(SET_COOKIE, cookie_header), (LOCATION, "/".to_string())],
     )
         .into_response()
 }
@@ -245,5 +314,101 @@ mod tests {
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // -- /auth/logout (slice 3) -------------------------------------------
+
+    fn logout_state_with(store: Arc<MemorySessionStore>) -> LogoutState {
+        LogoutState {
+            config: Arc::new(AuthConfig::for_tests()),
+            store: store as Arc<dyn LoginSessionStore>,
+        }
+    }
+
+    fn logout_app(state: LogoutState) -> Router {
+        Router::new().route("/auth/logout", post(logout).with_state(state))
+    }
+
+    #[tokio::test]
+    async fn logout_with_valid_cookie_deletes_session_and_clears_cookie() {
+        let store = Arc::new(MemorySessionStore::new());
+        let now = Utc::now();
+        store
+            .create(LoginSession {
+                id: "kill-me".into(),
+                email: "dev@local".into(),
+                display_name: "Local Dev".into(),
+                picture_url: None,
+                created_at: now,
+                last_used_at: now,
+                expires_at: now + ChronoDuration::hours(24),
+            })
+            .await
+            .unwrap();
+
+        let app = logout_app(logout_state_with(Arc::clone(&store)));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/logout")
+            .header("cookie", "lucida_session=kill-me")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::FOUND);
+        let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
+        assert_eq!(location, "/");
+
+        let set_cookie = res.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
+        assert!(set_cookie.contains("lucida_session="));
+        assert!(set_cookie.contains("Max-Age=0"));
+        assert!(set_cookie.contains("Path=/"));
+        assert!(set_cookie.contains("SameSite=Lax"));
+
+        // The row must be gone after logout.
+        assert!(store.get("kill-me").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn logout_without_cookie_is_idempotent() {
+        let store = Arc::new(MemorySessionStore::new());
+        let app = logout_app(logout_state_with(Arc::clone(&store)));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/logout")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::FOUND);
+        assert_eq!(
+            res.headers().get(LOCATION).unwrap().to_str().unwrap(),
+            "/"
+        );
+        let set_cookie = res.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
+        assert!(set_cookie.contains("Max-Age=0"));
+        // No rows existed; no rows now.
+        assert!(store.is_empty());
+    }
+
+    /// Even when the cookie names a session that no longer exists, we
+    /// still 302 + clear (so a stale tab in the browser sees its
+    /// cookie evicted). Mirrors the "delete is idempotent" promise on
+    /// the store.
+    #[tokio::test]
+    async fn logout_with_unknown_session_id_still_302s_and_clears() {
+        let store = Arc::new(MemorySessionStore::new());
+        let app = logout_app(logout_state_with(Arc::clone(&store)));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/auth/logout")
+            .header("cookie", "lucida_session=ghost")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+
+        assert_eq!(res.status(), StatusCode::FOUND);
+        let set_cookie = res.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
+        assert!(set_cookie.contains("Max-Age=0"));
     }
 }

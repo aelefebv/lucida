@@ -17,9 +17,9 @@
 //!   retired in this slice.
 //! - `middleware` — axum middleware that runs the extractor and
 //!   attaches the resulting principal to request extensions.
-//! - `handlers` — `/auth/whoami` and the dev-only
-//!   `/auth/dev/login`. The OAuth-flow endpoints (`/auth/start`,
-//!   `/auth/callback`, `/auth/logout`, `/auth/error`) land in later
+//! - `handlers` — `/auth/whoami`, `/auth/logout` (slice 3), and the
+//!   dev-only `/auth/dev/login`. The OAuth-flow endpoints
+//!   (`/auth/start`, `/auth/callback`, `/auth/error`) land in later
 //!   slices.
 
 pub mod config;

@@ -4,8 +4,14 @@
 // Slice 1 (issue #456): the unauthenticated branch shows a placeholder
 // "not signed in" screen — the real `UnauthLanding` (which captures
 // `location.hash` and redirects to `/auth/start`) lands in slice 4.
+//
+// Slice 3 (issue #459): publishes the resolved principal and the
+// `signOut` action through `AuthSessionContext` so the new
+// `ProfileMenu` (and any future authed-subtree consumer) can read
+// them without prop-drilling.
 
 import type { ReactNode } from "react";
+import { AuthSessionContext } from "./AuthSession.ts";
 import { useAuthState } from "./useAuthState.ts";
 
 interface AuthGateProps {
@@ -13,7 +19,7 @@ interface AuthGateProps {
 }
 
 export function AuthGate({ children }: AuthGateProps) {
-  const state = useAuthState();
+  const { state, signOut } = useAuthState();
 
   if ("status" in state && state.status === "loading") {
     return <AuthLoading />;
@@ -23,7 +29,11 @@ export function AuthGate({ children }: AuthGateProps) {
     return <UnauthPlaceholder />;
   }
 
-  return <>{children}</>;
+  return (
+    <AuthSessionContext.Provider value={{ principal: state.principal, signOut }}>
+      {children}
+    </AuthSessionContext.Provider>
+  );
 }
 
 // Minimal "checking auth" screen. The whoami probe is fast on the

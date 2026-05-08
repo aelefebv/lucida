@@ -9,6 +9,7 @@ import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
+import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
 import { DebugOverlays } from "./debug/DebugOverlays.tsx";
 import { debugStats } from "./debug/debugStats.ts";
@@ -301,6 +302,10 @@ function App() {
 
   return (
     <div className="app">
+      {/* ProfileMenu floats over the top-right corner of the app
+          chrome. Absolute-positioning keeps it out of the existing
+          flex layout so the LayerPanel + canvas geometry is untouched. */}
+      <ProfileMenu />
       <LayerPanel
         layers={layers.layerInfos}
         selectedLayerId={selectedDatasetId}

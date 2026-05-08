@@ -182,9 +182,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         config: Arc::clone(&auth_config),
         store: Arc::clone(&session_store_dyn),
     };
+    let logout_state = auth::handlers::LogoutState {
+        config: Arc::clone(&auth_config),
+        store: Arc::clone(&session_store_dyn),
+    };
 
-    let mut auth_router: Router<()> =
-        Router::new().route("/auth/whoami", get(auth::handlers::whoami));
+    let mut auth_router: Router<()> = Router::new()
+        .route("/auth/whoami", get(auth::handlers::whoami))
+        .route(
+            "/auth/logout",
+            post(auth::handlers::logout).with_state(logout_state),
+        );
     if auth::is_dev_mode() {
         eprintln!("auth: dev mode — exposing POST /auth/dev/login");
         auth_router = auth_router.route(
