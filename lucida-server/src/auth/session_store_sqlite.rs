@@ -96,6 +96,13 @@ impl SqliteSessionStore {
 
         Ok(Self { pool })
     }
+
+    /// Borrow the underlying connection pool. Slice 4 (PRD #455)
+    /// derives `SqlitePendingAuthStore` from the same pool so both
+    /// stores share a single SQLite file + connection budget.
+    pub fn pool(&self) -> &SqlitePool {
+        &self.pool
+    }
 }
 
 fn map_err(e: sqlx::Error) -> SessionStoreError {
