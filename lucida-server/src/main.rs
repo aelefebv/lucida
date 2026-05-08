@@ -13,6 +13,7 @@ use tokio::sync::{broadcast, Mutex};
 use tower_http::cors::CorsLayer;
 
 use lucida_server::admin::{self, admin_clear_proxy_cache};
+use lucida_server::auth;
 use lucida_server::session::Session;
 use lucida_server::{browse, handler, AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
 
@@ -152,11 +153,20 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         proxy_config,
     };
 
+    // Slice 1 (issue #456) ships only the stub principal extractor; the
+    // env-driven selection of stub vs. Google JWT lands in slice 4.
+    let extractor = auth::middleware::default_extractor();
+
     let app = Router::new()
         .route("/", get(ws_handler))
         .route("/ws", get(ws_handler))
         .route("/api/browse", get(browse::browse_handler))
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
+        .route("/auth/whoami", get(auth::handlers::whoami))
+        .layer(axum::middleware::from_fn_with_state(
+            extractor,
+            auth::middleware::auth_middleware,
+        ))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

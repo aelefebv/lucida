@@ -1,3 +1,4 @@
+pub mod auth_principal;
 pub mod camera;
 pub mod chunk;
 pub mod command;

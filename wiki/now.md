@@ -12,6 +12,11 @@ Snapshot of what's active. Refresh via the `/repo-wiki` now pass after significa
 - **OME-Zarr expansion** — non-standard input handling (CZI 6D mosaics, `chunk_shape>1` on canonical-indexed `t`/`c`, non-canonical axes). Most recent work targets PRD #451. See [[lucida-store]]; touches [[gotchas/non-canonical-axes]] and [[gotchas/blosc-support]] (both may need refresh — see [[queue]]).
 - **`lucida-store` redesign** — PRD #148, server-side chunk serving + storage abstraction.
 
+## Designed, on hold
+
+- **Authentication** — PRD #455. Google OAuth via backend-mediated Authorization Code flow + httpOnly session cookies + SQLite-stored sessions. Configurable from day one for OSS release (no `calicolabs.com` literal in code). Auto-detects auth mode by bind address (loopback → stub, non-loopback → real Google). Design captured in PRD + ADRs [[decisions/0016-backend-mediated-oauth-with-session-cookies]], [[decisions/0017-configurable-from-day-one-for-oss-release]], [[decisions/0018-auth-mode-auto-detect-by-bind-address]]. Implements the `AuthPrincipal` abstraction defined in [[decisions/0015-server-stored-bookmarks-and-auth-seam]]. Unblocks saved views (PRD #454) when shipped.
+- **Saved views** — PRD #454. URL-as-app-state (`#view=…`) plus server-stored named bookmarks (`#b=<id>`) with a sidebar. Design fully captured in PRD + ADRs [[decisions/0013-url-as-app-state-for-saved-views]], [[decisions/0014-local-file-datasets-personal-only-in-saved-views]], [[decisions/0015-server-stored-bookmarks-and-auth-seam]]. **Blocked: pending auth (PRD #455) shipping** — bookmarks consume an `AuthPrincipal` abstraction that needs a real extractor before this can ship. Pickup-after-auth notes in PRD §Prerequisites; auth-cutover migration question in [[queue]].
+
 ## Recently shipped (since 2026-04-18)
 
 - **OME-Zarr stack:** Blosc decoder + pinned-axis prefix slice for CZI 6D (`90a3dbc`); `lucida-store::codec` extraction with structured per-level binding seed and strict import validation (`b995ae6`); canonical-indexed `t`/`c` `chunk_shape>1` support (`c4be26c`); non-canonical axis handling (`185c429`); 1c manifest shape facts + anomaly check (`ef01e16`).
