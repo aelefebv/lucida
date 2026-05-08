@@ -347,6 +347,7 @@ pub async fn auth_callback(
     let principal = match principal_or_rejection_from_claims(
         &claims,
         &state.config.allowed_hosted_domains,
+        &state.config.admin_emails,
     ) {
         Ok(p) => p,
         Err(RejectionReason::Unverified { attempted_email }) => {
@@ -597,7 +598,77 @@ mod tests {
         let bytes = to_bytes(whoami_res.into_body(), 64 * 1024).await.unwrap();
         let p: AuthPrincipal = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(p.email, "dev@local");
-        assert!(p.is_admin);
+        // Slice 6: is_admin is now derived per-request from the
+        // configured admin set, not persisted on the LoginSession. The
+        // dev-login response body still carries `is_admin: true` (dev
+        // convenience; covered by `dev_login_creates_session_and_sets_cookie`)
+        // but a /whoami trip through the cookie extractor recomputes it
+        // from `AuthConfig::admin_emails`. `for_tests()` seeds an empty
+        // set, so the principal seen here must be non-admin.
+        assert!(!p.is_admin, "empty admin set in for_tests() = non-admin");
+    }
+
+    /// Variant: when the test config DOES seed `dev@local` as admin,
+    /// the cookie extractor's per-request derivation must yield
+    /// `is_admin: true` for the dev session. This is the slice 6
+    /// equivalent of the previous "dev session is always admin"
+    /// promise — now controlled by config rather than baked in.
+    #[tokio::test]
+    async fn dev_login_then_whoami_is_admin_when_dev_email_in_admin_set() {
+        let store: Arc<MemorySessionStore> = Arc::new(MemorySessionStore::new());
+        let mut cfg = AuthConfig::for_tests();
+        cfg.admin_emails = ["dev@local".to_string()].into_iter().collect();
+        let config = Arc::new(cfg);
+        let dev = DevLoginState {
+            config: Arc::clone(&config),
+            store: Arc::clone(&store) as Arc<dyn LoginSessionStore>,
+        };
+        let extractor: SharedExtractor = Arc::new(SessionCookieExtractor::new(
+            Arc::clone(&config),
+            Arc::clone(&store) as Arc<dyn LoginSessionStore>,
+        ));
+
+        let app = Router::new()
+            .route("/auth/whoami", get(whoami))
+            .layer(from_fn_with_state(extractor, auth_middleware))
+            .route("/auth/dev/login", post(dev_login).with_state(dev));
+
+        let mint_res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/dev/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie_pair = mint_res
+            .headers()
+            .get(SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+
+        let whoami_res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/auth/whoami")
+                    .header("cookie", cookie_pair)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(whoami_res.status(), StatusCode::OK);
+        let bytes = to_bytes(whoami_res.into_body(), 64 * 1024).await.unwrap();
+        let p: AuthPrincipal = serde_json::from_slice(&bytes).unwrap();
+        assert!(p.is_admin, "dev@local in admin_emails = is_admin");
     }
 
     #[tokio::test]

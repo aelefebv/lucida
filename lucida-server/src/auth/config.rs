@@ -172,6 +172,14 @@ pub struct AuthConfig {
     /// and the `hd` claim are lowercased before comparison so casing
     /// drift in env vars or upstream tokens never silently rejects.
     pub allowed_hosted_domains: HashSet<String>,
+    /// Slice 6 (PRD #455 §"Admin role bootstrap"): emails granted
+    /// `is_admin: true` at principal-extraction time. Empty = no admins
+    /// (admin-only endpoints return 403 for everyone). Lowercased at
+    /// parse time; the principal email is also lowercased before lookup
+    /// so casing drift never silently demotes. Admin status is derived
+    /// per-request, not persisted on `LoginSession` — promote/demote is
+    /// a config-change-and-restart that takes effect on the next request.
+    pub admin_emails: HashSet<String>,
 }
 
 impl AuthConfig {
@@ -209,6 +217,9 @@ impl AuthConfig {
             allowed_hosted_domains: parse_allowed_hosted_domains(
                 std::env::var("LUCIDA_ALLOWED_HOSTED_DOMAINS").ok().as_deref(),
             ),
+            admin_emails: parse_admin_emails(
+                std::env::var("LUCIDA_ADMIN_EMAILS").ok().as_deref(),
+            ),
         })
     }
 
@@ -226,6 +237,7 @@ impl AuthConfig {
             mode: AuthMode::Disabled,
             google: None,
             allowed_hosted_domains: HashSet::new(),
+            admin_emails: HashSet::new(),
         }
     }
 
@@ -304,6 +316,24 @@ fn parse_hours_env(name: &str) -> Option<Duration> {
 /// `Calicolabs.com` vs `calicolabs.com` near-misses since both env-var
 /// authoring and Google's `hd` claim should be treated case-insensitively.
 pub(crate) fn parse_allowed_hosted_domains(raw: Option<&str>) -> HashSet<String> {
+    parse_lowercased_csv(raw)
+}
+
+/// Parse the `LUCIDA_ADMIN_EMAILS` env var into a lowercased `HashSet`.
+/// Same shape as the hosted-domains parser: None / empty / whitespace-only
+/// → empty set (no admins; admin-only endpoints 403 for everyone). The
+/// principal email is also lowercased before lookup, so casing mismatch
+/// between env var and JWT email never silently demotes.
+pub(crate) fn parse_admin_emails(raw: Option<&str>) -> HashSet<String> {
+    parse_lowercased_csv(raw)
+}
+
+/// Comma-separated, whitespace-tolerant, lowercased, empty-collapsing
+/// parser. Both [`parse_allowed_hosted_domains`] and
+/// [`parse_admin_emails`] share this shape; the helper keeps the
+/// behavior identical so case-sensitivity bugs don't drift between the
+/// two env vars.
+fn parse_lowercased_csv(raw: Option<&str>) -> HashSet<String> {
     let Some(raw) = raw else {
         return HashSet::new();
     };
@@ -396,5 +426,52 @@ mod tests {
         assert!(set.contains("calicolabs.com"));
         assert!(set.contains("othercorp.com"));
         assert!(!set.contains("Calicolabs.COM"), "values are normalized");
+    }
+
+    // -- LUCIDA_ADMIN_EMAILS parsing (slice 6) --------------------------
+
+    #[test]
+    fn admin_emails_unset_is_empty_set() {
+        let set = parse_admin_emails(None);
+        assert!(set.is_empty(), "unset env var = no admins");
+    }
+
+    #[test]
+    fn admin_emails_empty_string_is_empty_set() {
+        assert!(parse_admin_emails(Some("")).is_empty());
+        assert!(parse_admin_emails(Some("   ")).is_empty());
+        assert!(parse_admin_emails(Some(",,")).is_empty(), "all-empty entries collapse");
+    }
+
+    #[test]
+    fn admin_emails_single_value() {
+        let set = parse_admin_emails(Some("austin@calicolabs.com"));
+        assert_eq!(set.len(), 1);
+        assert!(set.contains("austin@calicolabs.com"));
+    }
+
+    #[test]
+    fn admin_emails_multi_value_with_whitespace() {
+        let set = parse_admin_emails(Some("a@x.com, b@x.com ,c@y.org"));
+        assert_eq!(set.len(), 3);
+        assert!(set.contains("a@x.com"));
+        assert!(set.contains("b@x.com"));
+        assert!(set.contains("c@y.org"));
+    }
+
+    #[test]
+    fn admin_emails_lowercased_for_case_insensitive_match() {
+        // Operator authoring `AuStin@CalicoLabs.com` in the env var must
+        // still match a JWT-derived `austin@calicolabs.com` principal.
+        let set = parse_admin_emails(Some("AuStin@CalicoLabs.com,Other@x.COM"));
+        assert!(set.contains("austin@calicolabs.com"));
+        assert!(set.contains("other@x.com"));
+        assert!(!set.contains("AuStin@CalicoLabs.com"), "values are normalized");
+    }
+
+    #[test]
+    fn for_tests_seeds_empty_admin_emails() {
+        let cfg = AuthConfig::for_tests();
+        assert!(cfg.admin_emails.is_empty(), "tests start with no admins");
     }
 }

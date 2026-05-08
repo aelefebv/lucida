@@ -32,10 +32,14 @@
 //! - `error_page` — slice 5's `/auth/error` server-rendered page;
 //!   user-facing destination after callback rejections (hd mismatch,
 //!   unverified email, generic auth failure).
+//! - `extractors` — slice 6's `AdminRequired` axum extractor: pulls
+//!   the principal out of extensions and 403s on `!is_admin`. Handlers
+//!   wear it declaratively rather than hand-rolling the gate.
 
 pub mod config;
 pub mod cookie;
 pub mod error_page;
+pub mod extractors;
 pub mod google_oauth;
 pub mod handlers;
 pub mod middleware;
@@ -49,6 +53,7 @@ pub mod session_store_sqlite;
 pub mod unauth_landing;
 
 pub use config::{AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig};
+pub use extractors::AdminRequired;
 pub use google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 pub use pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
 pub use pending_auth_memory::MemoryPendingAuthStore;
