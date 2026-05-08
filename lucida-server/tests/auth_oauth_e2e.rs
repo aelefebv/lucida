@@ -42,7 +42,7 @@ use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
 use rsa::traits::PublicKeyParts;
 use rsa::{BigUint, RsaPrivateKey, RsaPublicKey};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 
@@ -223,13 +223,28 @@ fn mint_id_token(
     picture: &str,
     hd: Option<&str>,
 ) -> String {
+    mint_id_token_full(private_pem, email, name, picture, hd, true)
+}
+
+/// Slice 5 needs to forge tokens with `email_verified: false` to
+/// exercise the unverified-rejection path. `mint_id_token` keeps the
+/// slice-4 default of `true` so existing call sites don't need
+/// updating.
+fn mint_id_token_full(
+    private_pem: &str,
+    email: &str,
+    name: &str,
+    picture: &str,
+    hd: Option<&str>,
+    email_verified: bool,
+) -> String {
     let now = Utc::now().timestamp();
     let claims = TestClaims {
         iss: TEST_ISSUER,
         aud: TEST_CLIENT_ID,
         sub: "test-subject-id-12345",
         email,
-        email_verified: true,
+        email_verified,
         name,
         picture,
         iat: now,
@@ -251,10 +266,18 @@ struct LucidaApp {
 }
 
 async fn build_lucida_app(mock_base: &str) -> LucidaApp {
+    build_lucida_app_with_allowed_domains(mock_base, &[]).await
+}
+
+/// Slice 5 entry point: same wiring as `build_lucida_app` but with
+/// `LUCIDA_ALLOWED_HOSTED_DOMAINS` set to the supplied list. Empty
+/// list = OSS-permissive default (any verified email accepted).
+async fn build_lucida_app_with_allowed_domains(
+    mock_base: &str,
+    allowed: &[&str],
+) -> LucidaApp {
     let mut config = AuthConfig::for_tests_google(TEST_CLIENT_ID, TEST_REDIRECT_URI, mock_base);
-    // Lucida's google client validates against this issuer list; the
-    // helper sets it to ["https://test-issuer"], matching mint_id_token.
-    let _ = &mut config;
+    config.allowed_hosted_domains = allowed.iter().map(|s| s.to_string()).collect();
 
     let arc_config = Arc::new(config);
     let session_store = Arc::new(MemorySessionStore::new());
@@ -283,8 +306,10 @@ async fn build_lucida_app(mock_base: &str) -> LucidaApp {
         .route("/auth/whoami", get(whoami))
         .layer(from_fn_with_state(extractor, auth_middleware));
 
-    // Public half: /auth/start + /auth/callback. NOT wrapped in the
-    // middleware (would loop). Mirrors `main.rs`'s split.
+    // Public half: /auth/start + /auth/callback + /auth/error. NOT
+    // wrapped in the middleware (would loop). Mirrors `main.rs`'s
+    // split. /auth/error is plumbed in slice 5 so the integration
+    // test can probe the redirect target end-to-end.
     let public = Router::new()
         .route(
             "/auth/start",
@@ -293,6 +318,10 @@ async fn build_lucida_app(mock_base: &str) -> LucidaApp {
         .route(
             "/auth/callback",
             get(auth_callback).with_state(oauth_state),
+        )
+        .route(
+            "/auth/error",
+            get(lucida_server::auth::error_page::auth_error),
         );
 
     let router = authed.merge(public);
@@ -401,7 +430,10 @@ async fn full_oauth_flow_lands_user_at_intended_path_with_hash() {
 }
 
 #[tokio::test]
-async fn callback_with_unknown_state_returns_400_and_state_mismatch() {
+async fn callback_with_unknown_state_redirects_to_auth_failed() {
+    // Slice 5 changed the failure shape: instead of JSON 400, every
+    // failure 302s to /auth/error?code=auth_failed (generic; details
+    // stay in server logs to avoid aiding reconnaissance).
     let keys = build_test_keys();
     let (mock_base, _mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
     let app = build_lucida_app(&mock_base).await;
@@ -411,10 +443,9 @@ async fn callback_with_unknown_state_returns_400_and_state_mismatch() {
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
-    let v: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v["error"], "state_mismatch");
+    assert_eq!(res.status(), StatusCode::FOUND);
+    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert_eq!(location, "/auth/error?code=auth_failed");
 }
 
 #[tokio::test]
@@ -448,22 +479,23 @@ async fn callback_replay_of_consumed_state_returns_400() {
     let cb_res = app.router.clone().oneshot(cb_req).await.unwrap();
     assert_eq!(cb_res.status(), StatusCode::FOUND);
 
-    // Replay the same state token — must 400.
+    // Replay the same state token — slice 5: 302 to /auth/error?code=auth_failed.
     let replay = Request::builder()
         .uri(&format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(replay).await.unwrap();
-    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
-    let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
-    let v: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v["error"], "state_mismatch");
+    assert_eq!(res.status(), StatusCode::FOUND);
+    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert_eq!(location, "/auth/error?code=auth_failed");
 }
 
 #[tokio::test]
-async fn callback_with_invalid_jwt_signature_returns_500_jwt_invalid() {
+async fn callback_with_invalid_jwt_signature_redirects_to_auth_failed() {
     // Use a fresh keypair for the JWKS but sign with a *different*
-    // private key — the signature must fail validation.
+    // private key — the signature must fail validation. Slice 5 makes
+    // this 302 to /auth/error?code=auth_failed (vague to user;
+    // detail in the server logs).
     let presented = build_test_keys();
     let (mock_base, mock_state) = spawn_mock_google(presented.jwks_json.clone()).await;
     let app = build_lucida_app(&mock_base).await;
@@ -495,10 +527,9 @@ async fn callback_with_invalid_jwt_signature_returns_500_jwt_invalid() {
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
-    assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
-    let v: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(v["error"], "jwt_invalid");
+    assert_eq!(res.status(), StatusCode::FOUND);
+    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert_eq!(location, "/auth/error?code=auth_failed");
 }
 
 #[tokio::test]
@@ -517,6 +548,201 @@ async fn auth_start_via_query_params_works_too() {
     let res = app.router.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FOUND);
     assert_eq!(app.pending_store.len(), 1);
+}
+
+// -- slice 5: hosted-domain + email_verified --------------------------
+
+/// `LUCIDA_ALLOWED_HOSTED_DOMAINS=allowedcorp.com` + a JWT with
+/// `hd: othercorp.com`: callback must NOT mint a session, MUST 302 to
+/// `/auth/error?code=hd_mismatch&attempted_email=…&allowed_domains=…`.
+#[tokio::test]
+async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
+    let keys = build_test_keys();
+    let (mock_base, mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
+    let app = build_lucida_app_with_allowed_domains(&mock_base, &["allowedcorp.com"]).await;
+
+    // /auth/start to mint a state token.
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/auth/start")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"path": "/dataset/x", "hash": ""}).to_string()))
+        .unwrap();
+    let start_res = app.router.clone().oneshot(start_req).await.unwrap();
+    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+
+    // Forge JWT with disallowed hd.
+    let bad = mint_id_token(
+        &keys.private_pem,
+        "alice@othercorp.com",
+        "Alice Other",
+        "https://example.com/a.png",
+        Some("othercorp.com"),
+    );
+    *mock_state.queued_id_token.lock().unwrap() = Some(bad);
+
+    let cb_req = Request::builder()
+        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.router.clone().oneshot(cb_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FOUND);
+
+    // No session minted: cookie absent + store empty.
+    assert!(
+        res.headers().get(SET_COOKIE).is_none(),
+        "rejection must not set the session cookie",
+    );
+    assert_eq!(app.session_store.len(), 0, "no session row on rejection");
+
+    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert!(
+        location.starts_with("/auth/error?"),
+        "must redirect to /auth/error, got {location}",
+    );
+    assert!(location.contains("code=hd_mismatch"));
+    // urlencoding encodes `@` as %40
+    assert!(
+        location.contains("attempted_email=alice%40othercorp.com"),
+        "missing attempted_email in {location}",
+    );
+    assert!(
+        location.contains("allowed_domains=allowedcorp.com"),
+        "missing allowed_domains in {location}",
+    );
+
+    // Spot-check the rendered error page since the redirect target
+    // is server-rendered: GET it and assert the message contains the
+    // user-facing copy from the PRD.
+    let err_req = Request::builder().uri(location).body(Body::empty()).unwrap();
+    let err_res = app.router.oneshot(err_req).await.unwrap();
+    assert_eq!(err_res.status(), StatusCode::OK);
+    let body_bytes = to_bytes(err_res.into_body(), 64 * 1024).await.unwrap();
+    let body = std::str::from_utf8(&body_bytes).unwrap();
+    assert!(body.contains("alice@othercorp.com"), "page must echo email");
+    assert!(body.contains("allowedcorp.com"), "page must echo allowed domain");
+    assert!(
+        body.contains(r#"href="/auth/start""#),
+        "page must offer retry link",
+    );
+}
+
+/// Same setup, but JWT's hd matches the allowlist: callback must mint
+/// the session as today (slice-4 happy path is preserved).
+#[tokio::test]
+async fn callback_with_allowed_hd_succeeds_and_mints_session() {
+    let keys = build_test_keys();
+    let (mock_base, mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
+    let app = build_lucida_app_with_allowed_domains(&mock_base, &["allowedcorp.com"]).await;
+
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/auth/start")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
+        .unwrap();
+    let start_res = app.router.clone().oneshot(start_req).await.unwrap();
+    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+
+    let good = mint_id_token(
+        &keys.private_pem,
+        "bob@allowedcorp.com",
+        "Bob Allowed",
+        "https://example.com/b.png",
+        Some("allowedcorp.com"),
+    );
+    *mock_state.queued_id_token.lock().unwrap() = Some(good);
+
+    let cb_req = Request::builder()
+        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.router.oneshot(cb_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert!(res.headers().get(SET_COOKIE).is_some(), "session cookie expected");
+    assert_eq!(app.session_store.len(), 1);
+    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert_eq!(location, "/", "lands at intended path, not /auth/error");
+}
+
+/// JWT with `email_verified: false` (and hd matching the allowlist)
+/// must reject with `code=unverified` regardless.
+#[tokio::test]
+async fn callback_with_unverified_email_redirects_to_unverified() {
+    let keys = build_test_keys();
+    let (mock_base, mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
+    let app = build_lucida_app_with_allowed_domains(&mock_base, &["allowedcorp.com"]).await;
+
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/auth/start")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
+        .unwrap();
+    let start_res = app.router.clone().oneshot(start_req).await.unwrap();
+    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+
+    let token = mint_id_token_full(
+        &keys.private_pem,
+        "charlie@allowedcorp.com",
+        "Charlie Unverified",
+        "https://example.com/c.png",
+        Some("allowedcorp.com"),
+        false, // email_verified
+    );
+    *mock_state.queued_id_token.lock().unwrap() = Some(token);
+
+    let cb_req = Request::builder()
+        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.router.oneshot(cb_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert!(res.headers().get(SET_COOKIE).is_none(), "no cookie on rejection");
+    assert_eq!(app.session_store.len(), 0);
+    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert!(location.contains("code=unverified"), "got {location}");
+    assert!(
+        location.contains("attempted_email=charlie%40allowedcorp.com"),
+        "got {location}",
+    );
+}
+
+/// Empty allowlist (the OSS-permissive default): any verified Google
+/// email is accepted, with or without an `hd` claim.
+#[tokio::test]
+async fn empty_allowlist_accepts_any_verified_email() {
+    let keys = build_test_keys();
+    let (mock_base, mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
+    let app = build_lucida_app(&mock_base).await; // empty allowed_hosted_domains
+
+    let start_req = Request::builder()
+        .method("POST")
+        .uri("/auth/start")
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
+        .unwrap();
+    let start_res = app.router.clone().oneshot(start_req).await.unwrap();
+    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+
+    // Personal Gmail (no hd): must succeed under the OSS-permissive default.
+    let token = mint_id_token(
+        &keys.private_pem,
+        "personal@gmail.com",
+        "Personal Account",
+        "https://example.com/p.png",
+        None,
+    );
+    *mock_state.queued_id_token.lock().unwrap() = Some(token);
+
+    let cb_req = Request::builder()
+        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .body(Body::empty())
+        .unwrap();
+    let res = app.router.oneshot(cb_req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FOUND);
+    assert!(res.headers().get(SET_COOKIE).is_some());
+    assert_eq!(app.session_store.len(), 1, "permissive default accepts");
 }
 
 // -- helpers -------------------------------------------------------------

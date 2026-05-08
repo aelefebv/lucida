@@ -146,9 +146,14 @@ impl PrincipalExtractor for SessionCookieExtractor {
 
 /// Convert a Google ID-token's verified claims into the
 /// `AuthPrincipal` we persist on the new `LoginSession` row at
-/// callback time. Slice 4 deliberately accepts any verified email so
-/// the end-to-end flow works against the mock harness; slice 5 layers
-/// hosted-domain + email_verified rejection on top.
+/// callback time.
+///
+/// Slice 4 produced this raw mapping; slice 5 layers the
+/// hosted-domain + `email_verified` checks on top via
+/// [`principal_or_rejection_from_claims`]. This function stays
+/// pure-mapping (no policy) so other call sites that already enforce
+/// policy elsewhere (e.g. the future `GoogleJwtPrincipalExtractor`
+/// path for non-OAuth-callback flows) aren't double-checking.
 ///
 /// `display_name` falls back to the local part of the email when
 /// Google's `name` claim is absent (rare, but happens for accounts
@@ -169,6 +174,81 @@ pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
         picture_url: claims.picture.clone(),
         is_admin: false,
     }
+}
+
+/// Why a callback rejected an otherwise-valid JWT.
+///
+/// Slice 5 (PRD #455 §"Hosted-domain validation"). The two variants
+/// map 1:1 to the user-fixable error pages defined in §"Error UX":
+///
+/// * `Unverified` — Google says `email_verified: false`. User can fix
+///   this in their Google account settings; we don't accept the email
+///   either way (not knowing whether the address is theirs is the
+///   whole point of `email_verified`).
+/// * `HdMismatch` — JWT was valid but `hd` claim is missing or not in
+///   `LUCIDA_ALLOWED_HOSTED_DOMAINS`. User can fix by signing in with
+///   a different account that matches the allowed domain.
+///
+/// Carries the structured fields the callback handler logs and the
+/// error page renders. `attempted_hd` is `None` when the user signed
+/// in with a personal Gmail (no `hd` claim); the error page surfaces
+/// that case as "personal account".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RejectionReason {
+    Unverified {
+        attempted_email: String,
+    },
+    HdMismatch {
+        attempted_email: String,
+        attempted_hd: Option<String>,
+        allowed_domains: Vec<String>,
+    },
+}
+
+/// Apply slice 5's hosted-domain + email-verified policy on top of the
+/// raw mapping. Returns the principal on accept, or a structured
+/// rejection that the handler turns into a `/auth/error` redirect.
+///
+/// Order matters: `email_verified` is checked first because an
+/// unverified email shouldn't be considered for *any* allow-list
+/// decision (an attacker who can claim "alice@calicolabs.com" without
+/// proving control would otherwise look like a legitimate Calico user
+/// to the hd check). When `allowed` is empty the hd branch is skipped
+/// entirely — the OSS-permissive default per ADR-0017.
+///
+/// `allowed` contains lowercased domain strings; we lowercase the
+/// claim's `hd` value before comparison. Both sides being lowercased
+/// matches Calico's `calicolabs.com` and any future domain entries
+/// the operator might author with mixed case.
+pub fn principal_or_rejection_from_claims(
+    claims: &VerifiedClaims,
+    allowed: &std::collections::HashSet<String>,
+) -> Result<AuthPrincipal, RejectionReason> {
+    if !claims.email_verified {
+        return Err(RejectionReason::Unverified {
+            attempted_email: claims.email.clone(),
+        });
+    }
+    if !allowed.is_empty() {
+        let claim_hd_lower = claims.hd.as_ref().map(|s| s.to_ascii_lowercase());
+        let allowed_match = claim_hd_lower
+            .as_deref()
+            .map(|h| allowed.contains(h))
+            .unwrap_or(false);
+        if !allowed_match {
+            // Sort for deterministic log + error-page rendering. The
+            // set itself has no order; the user-facing string would
+            // otherwise be jittery across runs.
+            let mut allowed_sorted: Vec<String> = allowed.iter().cloned().collect();
+            allowed_sorted.sort();
+            return Err(RejectionReason::HdMismatch {
+                attempted_email: claims.email.clone(),
+                attempted_hd: claims.hd.clone(),
+                allowed_domains: allowed_sorted,
+            });
+        }
+    }
+    Ok(principal_from_claims(claims))
 }
 
 /// `PrincipalExtractor` adapter that runs Google's JWT validator on a
@@ -404,5 +484,118 @@ mod tests {
         };
         let p = principal_from_claims(&claims);
         assert_eq!(p.display_name, "noname");
+    }
+
+    // -- principal_or_rejection_from_claims (slice 5) --------------------
+
+    use std::collections::HashSet;
+
+    fn allowed_set(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn verified(email: &str, hd: Option<&str>) -> VerifiedClaims {
+        VerifiedClaims {
+            email: email.into(),
+            email_verified: true,
+            name: Some("Test User".into()),
+            picture: None,
+            hd: hd.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn rejection_unverified_takes_precedence_over_hd_check() {
+        let mut claims = verified("alice@calicolabs.com", Some("calicolabs.com"));
+        claims.email_verified = false;
+        // Even though hd would pass, unverified must reject first.
+        let allowed = allowed_set(&["calicolabs.com"]);
+        let err = principal_or_rejection_from_claims(&claims, &allowed).unwrap_err();
+        assert_eq!(
+            err,
+            RejectionReason::Unverified {
+                attempted_email: "alice@calicolabs.com".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn rejection_hd_missing_when_allowlist_nonempty() {
+        let claims = verified("alice@gmail.com", None); // personal Gmail
+        let allowed = allowed_set(&["calicolabs.com"]);
+        let err = principal_or_rejection_from_claims(&claims, &allowed).unwrap_err();
+        match err {
+            RejectionReason::HdMismatch {
+                attempted_email,
+                attempted_hd,
+                allowed_domains,
+            } => {
+                assert_eq!(attempted_email, "alice@gmail.com");
+                assert_eq!(attempted_hd, None, "personal account = no hd");
+                assert_eq!(allowed_domains, vec!["calicolabs.com".to_string()]);
+            }
+            _ => panic!("expected HdMismatch, got {err:?}"),
+        }
+    }
+
+    #[test]
+    fn rejection_hd_not_in_allowlist() {
+        let claims = verified("alice@othercorp.com", Some("othercorp.com"));
+        let allowed = allowed_set(&["calicolabs.com"]);
+        let err = principal_or_rejection_from_claims(&claims, &allowed).unwrap_err();
+        match err {
+            RejectionReason::HdMismatch {
+                attempted_hd: Some(h),
+                ..
+            } => assert_eq!(h, "othercorp.com"),
+            _ => panic!("expected HdMismatch, got {err:?}"),
+        }
+    }
+
+    #[test]
+    fn accept_when_hd_matches_allowlist() {
+        let claims = verified("alice@calicolabs.com", Some("calicolabs.com"));
+        let allowed = allowed_set(&["calicolabs.com"]);
+        let p = principal_or_rejection_from_claims(&claims, &allowed).unwrap();
+        assert_eq!(p.email, "alice@calicolabs.com");
+    }
+
+    #[test]
+    fn accept_hd_match_is_case_insensitive() {
+        // Allowlist already lowercased by the parser; the claim is
+        // whatever Google sent. Match must still succeed.
+        let claims = verified("alice@calicolabs.com", Some("CalicoLabs.COM"));
+        let allowed = allowed_set(&["calicolabs.com"]);
+        let p = principal_or_rejection_from_claims(&claims, &allowed).unwrap();
+        assert_eq!(p.email, "alice@calicolabs.com");
+    }
+
+    #[test]
+    fn accept_when_allowlist_empty_and_email_verified() {
+        // OSS-permissive default: no domain restriction means any
+        // verified Google email gets through, hd present or not.
+        let allowed: HashSet<String> = HashSet::new();
+        let with_hd = verified("alice@calicolabs.com", Some("calicolabs.com"));
+        assert!(principal_or_rejection_from_claims(&with_hd, &allowed).is_ok());
+        let without_hd = verified("personal@gmail.com", None);
+        assert!(principal_or_rejection_from_claims(&without_hd, &allowed).is_ok());
+    }
+
+    #[test]
+    fn rejection_hd_mismatch_with_multiple_allowed_domains_is_sorted() {
+        let claims = verified("alice@evil.com", Some("evil.com"));
+        // Insert in reverse-sort order; the rejection must still come
+        // back sorted so the user-facing message is deterministic.
+        let allowed = allowed_set(&["zlast.com", "acorp.com", "mid.org"]);
+        let err = principal_or_rejection_from_claims(&claims, &allowed).unwrap_err();
+        match err {
+            RejectionReason::HdMismatch { allowed_domains, .. } => {
+                assert_eq!(
+                    allowed_domains,
+                    vec!["acorp.com".to_string(), "mid.org".to_string(), "zlast.com".to_string()],
+                );
+            }
+            _ => panic!("expected HdMismatch"),
+        }
     }
 }

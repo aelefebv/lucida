@@ -24,14 +24,18 @@
 //! - `middleware` — axum middleware that runs the extractor and
 //!   attaches the resulting principal to request extensions.
 //! - `handlers` — `/auth/whoami`, `/auth/logout` (slice 3),
-//!   `/auth/start` and `/auth/callback` (slice 4), and the dev-only
-//!   `/auth/dev/login`. `/auth/error` lands in slice 5.
+//!   `/auth/start` and `/auth/callback` (slice 4), `/auth/error`
+//!   (slice 5), and the dev-only `/auth/dev/login`.
 //! - `unauth_landing` — small inline HTML the middleware serves on an
 //!   unauth HTML navigation; carries the JS shim that captures
 //!   `location.hash` before redirecting to `/auth/start`.
+//! - `error_page` — slice 5's `/auth/error` server-rendered page;
+//!   user-facing destination after callback rejections (hd mismatch,
+//!   unverified email, generic auth failure).
 
 pub mod config;
 pub mod cookie;
+pub mod error_page;
 pub mod google_oauth;
 pub mod handlers;
 pub mod middleware;
@@ -50,8 +54,8 @@ pub use pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
 pub use pending_auth_memory::MemoryPendingAuthStore;
 pub use pending_auth_sqlite::SqlitePendingAuthStore;
 pub use principal::{
-    principal_from_claims, AuthError, GoogleJwtPrincipalExtractor, PrincipalExtractor,
-    SessionCookieExtractor,
+    principal_from_claims, principal_or_rejection_from_claims, AuthError,
+    GoogleJwtPrincipalExtractor, PrincipalExtractor, RejectionReason, SessionCookieExtractor,
 };
 pub use session_store::{LoginSession, LoginSessionStore, SessionStoreError};
 pub use session_store_memory::MemorySessionStore;
