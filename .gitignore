@@ -205,3 +205,8 @@ lucida-core/pkg/
 .claude/
 /.claude
 wiki/.obsidian
+
+# Lucida SQLite database (auth sessions, bookmarks)
+/lucida.db
+/lucida.db-shm
+/lucida.db-wal

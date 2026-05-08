@@ -14,11 +14,16 @@
 
 import { useEffect, useRef } from "react";
 
-/** Where /auth/start lives on the same origin. */
+/** Where /auth/start lives on the same origin. Relative — Vite dev
+ *  proxies `/auth/*` to the backend; production serves the web bundle
+ *  from the same origin as lucida-server. Cross-origin would break
+ *  SameSite=Lax cookies on the resulting redirect chain. */
 const AUTH_START_PATH = "/auth/start";
 
-/** Default to the localhost dev server when running through Vite. */
-const SERVER_BASE = "http://localhost:9876";
+/** Empty so URLs build as `/auth/start?...` (browser resolves against
+ *  current origin). Kept as a constant so tests can still find the
+ *  path-portion via toContain. */
+const SERVER_BASE = "";
 
 /** Build the redirect URL. Exported so unit tests can verify the shape
  * without driving a navigation. Path always defaults to `/` if empty

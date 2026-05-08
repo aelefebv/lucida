@@ -13,8 +13,12 @@
 
 import type { AuthPrincipal, AuthState } from "./types.ts";
 
-export const WHOAMI_URL = "http://localhost:9876/auth/whoami";
-export const LOGOUT_URL = "http://localhost:9876/auth/logout";
+// Relative paths so the browser sees a single origin (Vite dev proxies
+// `/auth/*` to the backend in development; in production lucida-server
+// serves the web bundle from the same origin). Cross-origin would
+// silently break SameSite=Lax cookies.
+export const WHOAMI_URL = "/auth/whoami";
+export const LOGOUT_URL = "/auth/logout";
 
 export type FetchLike = (
   input: string,
