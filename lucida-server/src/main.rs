@@ -154,11 +154,12 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     };
 
     // Slice 2 (issue #457) landed the session store + cookie extractor.
-    // Slice 4 (issue #460) layers the Google OAuth flow on top: when
-    // `LUCIDA_AUTH=google`, the server fail-fasts on missing
-    // credentials, opens the pending_auth store, primes the JWKS
-    // cache, and mounts /auth/start + /auth/callback alongside the
-    // existing endpoints.
+    // Slice 4 (issue #460) layers the Google OAuth flow on top.
+    // Slice 7 (issue #462) consolidates env-var validation here:
+    // `LUCIDA_BIND`, the auto-detect-by-bind auth-mode default, and
+    // the `LUCIDA_INSECURE=1` opt-in for the "disabled + public bind"
+    // combination all live in `AuthConfig::from_env`. Failures are
+    // fatal at startup with a named-variable error message.
     let auth_config = match auth::AuthConfig::from_env() {
         Ok(c) => Arc::new(c),
         Err(e) => {
@@ -166,21 +167,41 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             return Err(std::io::Error::other(e.to_string()));
         }
     };
-    eprintln!(
-        "auth: mode={:?} cookie={} db={} idle_timeout={}s hard_cap={}s",
-        auth_config.mode,
-        auth_config.cookie_name,
-        auth_config.db_path.display(),
-        auth_config.idle_timeout.as_secs(),
-        auth_config.hard_cap.as_secs(),
+    // Operator-facing startup line: mode + bind together so a glance
+    // at the boot log answers "is this server reachable, and is it
+    // protected?" Per ADR-0018 both signals should be visible together.
+    tracing::info!(
+        mode = ?auth_config.mode,
+        bind = %auth_config.bind_addr,
+        cookie = %auth_config.cookie_name,
+        db = %auth_config.db_path.display(),
+        idle_timeout_s = auth_config.idle_timeout.as_secs(),
+        hard_cap_s = auth_config.hard_cap.as_secs(),
+        "auth.startup",
     );
+    // Audit signal: explicit acknowledgment that we're running with
+    // auth disabled on a non-loopback bind. This combination should
+    // raise eyebrows in code review (ADR-0018 §"Consequences"); the
+    // banner is multi-line on purpose so it survives log truncation
+    // and stands out in `journalctl` / k8s logs.
+    if auth_config.insecure_acknowledged {
+        tracing::warn!(
+            bind = %auth_config.bind_addr,
+            "AUTH DISABLED on a non-loopback bind — server is exposed without authentication",
+        );
+        eprintln!("============================================================");
+        eprintln!("WARNING: LUCIDA_INSECURE=1 is set");
+        eprintln!("AUTH DISABLED on bind {} — server is exposed", auth_config.bind_addr);
+        eprintln!("without authentication. Do not use in production.");
+        eprintln!("============================================================");
+    }
     if let Some(g) = auth_config.google.as_ref() {
-        eprintln!(
-            "auth: google client_id={}…{} redirect_uri={} jwks_uri={}",
-            &g.client_id.chars().take(6).collect::<String>(),
-            &g.client_id.chars().rev().take(4).collect::<String>(),
-            g.redirect_uri,
-            g.jwks_uri,
+        tracing::info!(
+            client_id_prefix = %g.client_id.chars().take(6).collect::<String>(),
+            client_id_suffix = %g.client_id.chars().rev().take(4).collect::<String>(),
+            redirect_uri = %g.redirect_uri,
+            jwks_uri = %g.jwks_uri,
+            "auth.google.configured",
         );
     }
     let session_store = match auth::SqliteSessionStore::open(&auth_config.db_path).await {
@@ -286,10 +307,18 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .merge(public_auth_router)
         .layer(CorsLayer::permissive());
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:9876")
+    // ADR-0018: LUCIDA_BIND defaults to 127.0.0.1:9876 (loopback) so
+    // `cargo run --bin lucida-server` is friction-free for local dev.
+    // Set LUCIDA_BIND=0.0.0.0:9876 (or a deployment-specific interface)
+    // to expose on all interfaces; production deployments must do so
+    // explicitly. Pre-slice-7 deployments that relied on the old
+    // hardcoded 0.0.0.0 default need to set LUCIDA_BIND going forward.
+    let bind_addr = auth_config.bind_addr;
+    let listener = tokio::net::TcpListener::bind(bind_addr)
         .await
-        .expect("failed to bind to port 9876");
-    eprintln!("lucida-server listening on http://0.0.0.0:9876");
+        .unwrap_or_else(|e| panic!("failed to bind to {bind_addr}: {e}"));
+    tracing::info!(bind = %bind_addr, "lucida-server listening");
+    eprintln!("lucida-server listening on http://{bind_addr}");
 
     axum::serve(listener, app).await.expect("server error");
     Ok(())
