@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { UrlSync, parseViewHash } from "./urlSync.ts";
+import { UrlSync, parseViewHash, parseBookmarkHash } from "./urlSync.ts";
 import { encode } from "./encoder.ts";
 import { SavedViewApplier } from "./applier.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
+import type { Bookmark } from "./bookmarksApi.ts";
 
 function emptyView(): SavedView {
   return {
@@ -229,5 +230,137 @@ describe("UrlSync", () => {
     sync.destroy();
     await new Promise((r) => setTimeout(r, 80));
     expect(win.location.hash).toBe("");
+  });
+});
+
+describe("parseBookmarkHash", () => {
+  it("returns null for empty hash", () => {
+    expect(parseBookmarkHash("")).toBeNull();
+    expect(parseBookmarkHash("#")).toBeNull();
+  });
+
+  it("extracts the bookmark id from #b=<id>", () => {
+    expect(parseBookmarkHash("#b=abc-123")).toBe("abc-123");
+    expect(parseBookmarkHash("b=abc-123")).toBe("abc-123");
+  });
+
+  it("returns null for non-b keys", () => {
+    expect(parseBookmarkHash("#view=xxx")).toBeNull();
+    expect(parseBookmarkHash("#foo=bar")).toBeNull();
+  });
+
+  it("rejects ids with special characters (defense against junk URLs)", () => {
+    expect(parseBookmarkHash("#b=abc/def")).toBeNull();
+    expect(parseBookmarkHash("#b=abc def")).toBeNull();
+    expect(parseBookmarkHash("#b=")).toBeNull();
+  });
+
+  it("accepts UUID-like ids", () => {
+    expect(parseBookmarkHash("#b=550e8400-e29b-41d4-a716-446655440000"))
+      .toBe("550e8400-e29b-41d4-a716-446655440000");
+  });
+
+  it("decodes URI-encoded ids before validating", () => {
+    expect(parseBookmarkHash("#b=550e8400-e29b")).toBe("550e8400-e29b");
+  });
+});
+
+describe("UrlSync — #b=<id> bootstrap", () => {
+  let win: Window;
+  let applier: FakeApplier;
+  let captureBuilder: () => SavedView | null;
+  let view: SavedView;
+
+  beforeEach(() => {
+    view = emptyView();
+    applier = new FakeApplier();
+    captureBuilder = () => view;
+  });
+
+  it("fetches the bookmark, hands its view to the applier, and rewrites URL to #view=…", async () => {
+    win = makeFakeWindow("#b=abc-123");
+    const fetchedViews: SavedView[] = [];
+    const sentinelView = emptyView();
+    sentinelView.view.t = 42;
+    const stub = vi.fn(async (id: string): Promise<Bookmark | null> => {
+      fetchedViews.push(sentinelView);
+      return {
+        id,
+        name: "test",
+        created_by: "alice@example.com",
+        created_by_name: "Alice",
+        created_at: "2026-05-08T12:00:00Z",
+        datasets: [],
+        view: sentinelView,
+      };
+    });
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchBookmark: stub,
+    });
+    await sync.bootstrap();
+
+    expect(stub).toHaveBeenCalledWith("abc-123");
+    expect(applier.apply).toHaveBeenCalledOnce();
+    expect(applier.applied[0].view.t).toBe(42);
+    // URL collapses to #view=… so a subsequent pan re-applies live state,
+    // not the bookmark's frozen snapshot.
+    expect(win.location.hash.startsWith("#view=")).toBe(true);
+    sync.destroy();
+  });
+
+  it("returns gracefully when the bookmark id is unknown (404)", async () => {
+    win = makeFakeWindow("#b=missing");
+    const stub = vi.fn(async (): Promise<Bookmark | null> => null);
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchBookmark: stub,
+    });
+    await sync.bootstrap();
+    expect(stub).toHaveBeenCalled();
+    expect(applier.apply).not.toHaveBeenCalled();
+    sync.destroy();
+  });
+
+  it("returns gracefully on fetch error without crashing", async () => {
+    win = makeFakeWindow("#b=err");
+    const stub = vi.fn(async (): Promise<Bookmark | null> => {
+      throw new Error("network down");
+    });
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchBookmark: stub,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await sync.bootstrap();
+    expect(applier.apply).not.toHaveBeenCalled();
+    warn.mockRestore();
+    sync.destroy();
+  });
+
+  it("popstate to a #b=<id> URL re-applies through the same path", async () => {
+    win = makeFakeWindow("#b=xyz");
+    const sentinel = emptyView();
+    sentinel.view.t = 99;
+    const stub = vi.fn(async (id: string): Promise<Bookmark | null> => ({
+      id,
+      name: "x",
+      created_by: "alice@example.com",
+      created_by_name: "Alice",
+      created_at: "2026-05-08T12:00:00Z",
+      datasets: [],
+      view: sentinel,
+    }));
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchBookmark: stub,
+    });
+    sync.start();
+    (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
+    // Drain the bookmark fetch + apply microtasks.
+    await new Promise((r) => setTimeout(r, 5));
+    expect(applier.apply).toHaveBeenCalledOnce();
+    expect(applier.applied[0].view.t).toBe(99);
+    sync.destroy();
   });
 });

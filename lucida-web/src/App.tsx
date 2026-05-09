@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { DimensionControls } from "./components/DimensionControls.tsx";
@@ -10,8 +10,10 @@ import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
 import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
+import { BookmarkSidebar } from "./components/BookmarkSidebar.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
+import { useAuthSession } from "./auth/AuthSession.ts";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
 import { DebugOverlays } from "./debug/DebugOverlays.tsx";
 import { debugStats } from "./debug/debugStats.ts";
@@ -30,6 +32,11 @@ import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import "./App.css";
 
 function App() {
+  // Authenticated principal — provided by <AuthGate> above us; throws if
+  // accessed unauthenticated. We forward the email to the BookmarkSidebar
+  // for the "Mine only" filter (and to bookmark creation telemetry).
+  const authSession = useAuthSession();
+
   // Foundation hooks
   const scene = useWasmScene();
   const render = useRenderClient();
@@ -109,9 +116,20 @@ function App() {
     bumpRemoteDocumentVersion,
   });
 
-  // SavedView wiring (PRD #454, slice 1). Mounts the URL→scene sync,
-  // exposes the share-button capture, and gives the loading banner a
-  // handle on apply progress. Hook order matters: must come *after*
+  // Resolves the selected-dataset wrinkle (option c, [[wiki/queue]]
+  // 2026-05-07): on apply, re-target `selectedDatasetId` at the first
+  // visible dataset so dimension/contrast controls land on something
+  // the recipient can see. Stable identity so the subscribe effect in
+  // useSavedViewSync doesn't relift every render.
+  const handleApplyResult = useCallback((firstVisibleId: string | null) => {
+    if (firstVisibleId === null) return;
+    setSelectedDatasetId(firstVisibleId);
+  }, []);
+
+  // SavedView wiring (PRD #454, slices 1+3). Mounts the URL→scene sync,
+  // exposes the share-button capture, gives the loading banner a handle
+  // on apply progress, and forwards apply summaries for the
+  // selectedDatasetId wrinkle. Hook order matters: must come *after*
   // `useBridge` so we can hand the applier the bridge functions, and
   // *before* the savedViewHooksRef populate below.
   const savedViewSync = useSavedViewSync({
@@ -122,6 +140,7 @@ function App() {
     // remote scene mutation bumps one or the other, which is exactly
     // what we want the URL to track.
     changeTick: datasetsVersion + remoteDocumentVersion,
+    onApplyResult: handleApplyResult,
   });
 
   // Populate the bridge ↔ applier hook ref after the applier exists.
@@ -314,6 +333,31 @@ function App() {
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
+
+  // Loaded dataset URLs derived from the live capture builder. The
+  // BookmarkSidebar uses these to filter `GET /api/bookmarks?dataset=…`
+  // — so the user only sees bookmarks that touch the datasets they
+  // currently have open. Recomputed on every dataset/document change
+  // (datasetsVersion + remoteDocumentVersion).
+  const loadedDatasetUrls = useMemo(() => {
+    const view = savedViewSync.captureBuilder();
+    return view ? view.datasets : [];
+    // Both versions force a recompute when datasets change. The
+    // captureBuilder identity is stable across renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [savedViewSync.captureBuilder, datasetsVersion, remoteDocumentVersion]);
+
+  // Active layout name for the default bookmark name (e.g. "plate · Grid").
+  // Falls back to null when no dataset/layout is selected.
+  const activeLayoutName = useMemo(() => {
+    if (!selectedDatasetId) return null;
+    if (!layoutRegistry) return null;
+    const activeId = layoutRegistry.activeId(selectedDatasetId);
+    if (!activeId) return null;
+    const spec = layoutRegistry.getSpec(selectedDatasetId, activeId);
+    return spec?.name ?? activeId;
+  }, [selectedDatasetId, layoutRegistry]);
   const [lastClickScreen, setLastClickScreen] = useState<[number, number] | null>(null);
   const handleDebugToggle = useCallback(() => {
     setShowDebug(prev => {
@@ -566,6 +610,19 @@ function App() {
             Browse Local
           </button>
           <ShareToolbarButton getCurrentSavedView={savedViewSync.captureBuilder} />
+          <button
+            onClick={() => setShowBookmarkSidebar((v) => !v)}
+            title={showBookmarkSidebar ? "Hide bookmarks" : "Show bookmarks"}
+            style={{
+              padding: "0.375rem 0.75rem",
+              fontSize: "0.875rem",
+              whiteSpace: "nowrap",
+              background: showBookmarkSidebar ? "#646cff" : undefined,
+              color: showBookmarkSidebar ? "#fff" : undefined,
+            }}
+          >
+            Bookmarks
+          </button>
         </div>
         {showFileBrowser && (
           <FileBrowser
@@ -578,6 +635,14 @@ function App() {
           <p style={{ color: "#f44" }}>{render.renderError || bridge.remoteDatasetError}</p>
         )}
       </div>
+      <BookmarkSidebar
+        loadedDatasets={loadedDatasetUrls}
+        currentUserEmail={authSession.principal.email}
+        getCurrentSavedView={savedViewSync.captureBuilder}
+        activeLayoutName={activeLayoutName}
+        visible={showBookmarkSidebar}
+        style={{ width: 280, minWidth: 280, height: "100vh" }}
+      />
     </div>
   );
 }

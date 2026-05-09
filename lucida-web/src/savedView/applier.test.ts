@@ -298,6 +298,71 @@ describe("SavedViewApplier", () => {
     applier.notifyDatasetOpened(id);
     await p;
   });
+
+  // --- selectedDatasetId wrinkle resolution (option c) -------------------
+
+  it("emits ApplyResult with the first visible dataset after apply", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a", "ds-b"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+
+    const results: Array<{ first: string | null; visible: string[] }> = [];
+    applier.subscribeApplyResult((r) => {
+      results.push({ first: r.firstVisibleDatasetId, visible: r.visibleDatasetIds });
+    });
+
+    const v = emptyView();
+    v.datasets = []; // both already loaded
+    v.dataset_order = ["ds-a", "ds-b"];
+    v.dataset_settings = {
+      "ds-a": { visible: false, opacity: 1, contrast_min: 0, contrast_max: 1, gamma: 1, blend_mode: "alpha" },
+      "ds-b": { visible: true,  opacity: 1, contrast_min: 0, contrast_max: 1, gamma: 1, blend_mode: "alpha" },
+    };
+    await applier.apply(v);
+
+    expect(results).toHaveLength(1);
+    expect(results[0].first).toBe("ds-b");
+    expect(results[0].visible).toEqual(["ds-b"]);
+  });
+
+  it("ApplyResult uses dataset_order when populated", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a", "ds-b", "ds-c"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const results: Array<string | null> = [];
+    applier.subscribeApplyResult((r) => results.push(r.firstVisibleDatasetId));
+
+    const v = emptyView();
+    v.dataset_order = ["ds-c", "ds-a", "ds-b"];
+    // No per-dataset settings = default visible.
+    await applier.apply(v);
+    expect(results[0]).toBe("ds-c");
+  });
+
+  it("ApplyResult emits null when nothing is visible", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const results: Array<string | null> = [];
+    applier.subscribeApplyResult((r) => results.push(r.firstVisibleDatasetId));
+
+    const v = emptyView();
+    v.dataset_order = ["ds-a"];
+    v.dataset_settings = {
+      "ds-a": { visible: false, opacity: 1, contrast_min: 0, contrast_max: 1, gamma: 1, blend_mode: "alpha" },
+    };
+    await applier.apply(v);
+    expect(results[0]).toBeNull();
+  });
+
+  it("subscribeApplyResult unsubscribe stops further callbacks", async () => {
+    const scene = createMockScene({ datasetIds: ["ds-a"] });
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    let count = 0;
+    const unsub = applier.subscribeApplyResult(() => { count++; });
+    await applier.apply(emptyView());
+    expect(count).toBe(1);
+    unsub();
+    await applier.apply(emptyView());
+    expect(count).toBe(1);
+  });
 });
 
 describe("clampViewIndices", () => {
