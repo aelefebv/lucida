@@ -231,6 +231,19 @@ describe("UrlSync", () => {
     await new Promise((r) => setTimeout(r, 80));
     expect(win.location.hash).toBe("");
   });
+
+  it("re-arms after destroy + start (Strict-Mode mount→unmount→mount cycle)", async () => {
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      debounceMs: 30,
+      window: win,
+    });
+    sync.start();
+    sync.destroy();
+    sync.start();
+    sync.notifyChange();
+    await new Promise((r) => setTimeout(r, 80));
+    expect(win.location.hash.startsWith("#view=")).toBe(true);
+  });
 });
 
 describe("parseBookmarkHash", () => {
