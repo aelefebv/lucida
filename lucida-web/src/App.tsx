@@ -138,9 +138,15 @@ function App() {
     sendCommand: bridge.sendCommand,
     // The change tick combines doc and dataset versions: any local or
     // remote scene mutation bumps one or the other, which is exactly
-    // what we want the URL to track.
+    // what we want the URL to track. (Viewport-only mutations bypass
+    // these counters and are handled via the emitPresence wrapper below.)
     changeTick: datasetsVersion + remoteDocumentVersion,
     onApplyResult: handleApplyResult,
+    loopRef: render.loopRef,
+    setC: dims.setC,
+    setT: dims.setT,
+    setZ: dims.setZ,
+    setViewMode: dims.setViewMode,
   });
 
   // Populate the bridge ↔ applier hook ref after the applier exists.
@@ -165,11 +171,26 @@ function App() {
     () => 0,
   );
 
-  // Populate callback refs — runs during render, before effects fire
+  // Wrapped emitPresence/emitDatasetPresence — every viewport mutation
+  // co-taps urlSync.notifyChange() so the URL stays in sync (Bug #1 fix:
+  // changeTick alone doesn't bump on viewport-only mutations like
+  // pan/zoom/T/C/Z/contrast). Used here AND threaded into SliceViewer /
+  // VolumeViewer / PlateSelector / handleCameraModeToggle / usePreUpload
+  // — anywhere a viewport mutation already calls bridge.emitPresence.
+  const emitPresenceWithUrl = useCallback(() => {
+    bridge.emitPresence();
+    savedViewSync.notifyChange();
+  }, [bridge, savedViewSync]);
+  const emitDatasetPresenceWithUrl = useCallback(() => {
+    bridge.emitDatasetPresence();
+    savedViewSync.notifyChange();
+  }, [bridge, savedViewSync]);
+
+  // Populate callback refs — runs during render, before effects fire.
   bridgeCallbacksRef.current = {
     sendCommand: bridge.sendCommand,
-    emitPresence: bridge.emitPresence,
-    emitDatasetPresence: bridge.emitDatasetPresence,
+    emitPresence: emitPresenceWithUrl,
+    emitDatasetPresence: emitDatasetPresenceWithUrl,
     breakFollow: bridge.breakFollow,
   };
   datasetCallbacksRef.current = {
@@ -241,7 +262,7 @@ function App() {
     datasetsRef,
     loopRef: render.loopRef,
     wasmSceneRef: scene.wasmSceneRef,
-    emitPresence: bridge.emitPresence,
+    emitPresence: emitPresenceWithUrl,
   });
 
   const [cursorLabels, setCursorLabels] = useState<CursorLabel[]>([]);
@@ -318,10 +339,10 @@ function App() {
     const newMode = ws.camera_mode();
     setCameraMode(newMode);
     bridge.breakFollow();
-    bridge.emitPresence();
+    emitPresenceWithUrl();
     render.loopRef.current?.markInteractiveDirty();
     render.canvasRef.current?.focus();
-  }, [scene.wasmSceneRef, bridge, render.loopRef, render.canvasRef]);
+  }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef, render.canvasRef]);
 
   const [urlInput, setUrlInput] = useState("");
   const handleUrlKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -471,7 +492,7 @@ function App() {
                 client={render.client}
                 canvas={render.canvasRef.current!}
                 remoteDocumentVersion={remoteDocumentVersion}
-                emitPresence={bridge.emitPresence}
+                emitPresence={emitPresenceWithUrl}
                 breakFollow={bridge.breakFollow}
                 sendCursor={bridge.sendCursor}
                 loopRef={render.loopRef}
@@ -499,7 +520,7 @@ function App() {
                     const ws = scene.wasmSceneRef.current;
                     if (!ws) return;
                     applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
-                    bridge.emitPresence();
+                    emitPresenceWithUrl();
                     render.loopRef.current?.markInteractiveDirty();
                   }}
                 />
@@ -513,7 +534,7 @@ function App() {
                 client={render.client}
                 canvas={render.canvasRef.current!}
                 remoteDocumentVersion={remoteDocumentVersion}
-                emitPresence={bridge.emitPresence}
+                emitPresence={emitPresenceWithUrl}
                 breakFollow={bridge.breakFollow}
                 sendCursor={bridge.sendCursor}
                 t={dims.t}

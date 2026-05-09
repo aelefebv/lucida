@@ -363,6 +363,99 @@ describe("SavedViewApplier", () => {
     await applier.apply(emptyView());
     expect(count).toBe(1);
   });
+
+  // --- apply-complete channel (Bug #2 / #3 fix) -------------------------
+
+  it("subscribeApplyComplete fires exactly once per apply", async () => {
+    const scene = createMockScene();
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    let count = 0;
+    applier.subscribeApplyComplete(() => { count++; });
+
+    await applier.apply(emptyView());
+    expect(count).toBe(1);
+
+    await applier.apply(emptyView());
+    expect(count).toBe(2);
+  });
+
+  it("subscribeApplyComplete fires AFTER the WASM mutations (post-apply state visible)", async () => {
+    // The fix relies on subscribers being able to read post-apply state
+    // via the live scene. Verify the applier writes the view's c/t/z
+    // BEFORE the apply-complete callback fires.
+    const scene = createMockScene();
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    let setCSeen = false;
+    let setTSeen = false;
+    let setZSeen = false;
+    applier.subscribeApplyComplete(() => {
+      setCSeen = scene.calls.some((c) => c.includes('"type":"set_c"'));
+      setTSeen = scene.calls.some((c) => c.includes('"type":"set_t"'));
+      setZSeen = scene.calls.some((c) => c.includes('"type":"set_z_range"'));
+    });
+    const v = emptyView();
+    v.view.t = 5;
+    v.view.c = 2;
+    await applier.apply(v);
+    expect(setCSeen).toBe(true);
+    expect(setTSeen).toBe(true);
+    expect(setZSeen).toBe(true);
+  });
+
+  it("subscribeApplyComplete fires while inProgress is still true", async () => {
+    // Subscribers want post-apply state but BEFORE the inProgress flag
+    // flips back; this lets urlSync stay suppressed for the duration of
+    // the apply-complete handler's render-dirty + state-sync work.
+    const scene = createMockScene();
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    let inProgressDuringCallback = false;
+    applier.subscribeApplyComplete(() => {
+      inProgressDuringCallback = applier.isInProgress();
+    });
+    await applier.apply(emptyView());
+    expect(inProgressDuringCallback).toBe(true);
+    expect(applier.isInProgress()).toBe(false);
+  });
+
+  it("subscribeApplyComplete unsubscribe stops further callbacks", async () => {
+    const scene = createMockScene();
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    let count = 0;
+    const unsub = applier.subscribeApplyComplete(() => { count++; });
+    await applier.apply(emptyView());
+    expect(count).toBe(1);
+    unsub();
+    await applier.apply(emptyView());
+    expect(count).toBe(1);
+  });
+
+  it("subscribeApplyComplete supports multiple subscribers", async () => {
+    const scene = createMockScene();
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    let a = 0;
+    let b = 0;
+    applier.subscribeApplyComplete(() => { a++; });
+    applier.subscribeApplyComplete(() => { b++; });
+    await applier.apply(emptyView());
+    expect(a).toBe(1);
+    expect(b).toBe(1);
+  });
+
+  // Bug #3 root-cause coverage: per-channel state captured in the view
+  // is written via set_c. The apply-complete listener can read post-apply
+  // state to push back into React; here we verify the WASM-side write
+  // landed (the React-side mirror is covered in useSavedViewSync.test.ts).
+  it("set_c includes the captured channel value (Bug #3 root cause)", async () => {
+    const scene = createMockScene();
+    const applier = new SavedViewApplier(bridge, () => scene as never, fakeIdForUrl);
+    const v = emptyView();
+    v.view.c = 2;
+    await applier.apply(v);
+
+    const setCCall = scene.calls.find((c) => c.includes('"type":"set_c"'));
+    expect(setCCall).toBeDefined();
+    expect(JSON.parse(setCCall!)).toMatchObject({ type: "set_c", c: 2 });
+  });
 });
 
 describe("clampViewIndices", () => {
