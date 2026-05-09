@@ -103,9 +103,15 @@ pub trait BookmarkStore: Send + Sync + 'static {
         new_name: &str,
     ) -> Result<Option<Bookmark>, StoreError>;
 
-    /// Delete a bookmark. Returns `Ok(false)` when the id doesn't match.
-    /// The `bookmark_datasets` side rows are cascaded via the FK.
-    async fn delete(&self, id: &str) -> Result<bool, StoreError>;
+    /// Delete a bookmark and return the row that was removed. Returns
+    /// `Ok(None)` when the id doesn't match. The `bookmark_datasets`
+    /// side rows are cascaded via the FK.
+    ///
+    /// Slice 4 (PRD #454 issue #477) needs the deleted bookmark's
+    /// `dataset_urls` to scope the `BookmarkChanged { Deleted }`
+    /// broadcast — returning the row from `delete` avoids a separate
+    /// `get` round-trip plus the race window between the two queries.
+    async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,12 +299,41 @@ impl BookmarkStore for SqliteBookmarkStore {
         self.get(id).await
     }
 
-    async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+    async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
         // `ON DELETE CASCADE` on bookmark_datasets requires
         // `PRAGMA foreign_keys = ON` per-connection; sqlx doesn't enable
         // it by default. Belt-and-braces: explicit DELETE on the side
         // table inside a transaction keeps the rows in sync regardless.
+        //
+        // Read the row + datasets inside the same transaction so the
+        // returned `Bookmark` matches the row we removed even if a
+        // concurrent writer was racing. The row goes back to the caller
+        // so the slice-4 broadcast can scope on `dataset_urls` without
+        // a second round-trip.
         let mut tx = self.pool.begin().await.map_err(map_sql)?;
+        let row = sqlx::query(
+            r#"
+            SELECT id, name, created_by, created_by_name, created_at, view_json
+            FROM bookmarks
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        let Some(row) = row else {
+            tx.commit().await.map_err(map_sql)?;
+            return Ok(None);
+        };
+        let dataset_rows = sqlx::query(
+            "SELECT dataset_url FROM bookmark_datasets WHERE bookmark_id = ? ORDER BY dataset_url",
+        )
+        .bind(id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(map_sql)?;
+        let datasets: Vec<String> = dataset_rows.into_iter().map(|r| r.get("dataset_url")).collect();
         sqlx::query("DELETE FROM bookmark_datasets WHERE bookmark_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -310,7 +345,12 @@ impl BookmarkStore for SqliteBookmarkStore {
             .await
             .map_err(map_sql)?;
         tx.commit().await.map_err(map_sql)?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            // Theoretically the SELECT saw the row but the DELETE didn't;
+            // surface as None so the caller treats it as "not found".
+            return Ok(None);
+        }
+        Ok(Some(row_to_bookmark(row, datasets)?))
     }
 }
 
@@ -448,9 +488,9 @@ impl BookmarkStore for MemoryBookmarkStore {
         Ok(Some(row.clone()))
     }
 
-    async fn delete(&self, id: &str) -> Result<bool, StoreError> {
+    async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
         let mut rows = self.rows.lock().expect("memory bookmark store mutex poisoned");
-        Ok(rows.remove(id).is_some())
+        Ok(rows.remove(id))
     }
 }
 
@@ -687,11 +727,19 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(store.delete(&b.id).await.unwrap());
+        // delete returns the removed bookmark (datasets included) so the
+        // slice-4 broadcast can scope on `dataset_urls` without a second
+        // get round-trip.
+        let removed = store.delete(&b.id).await.unwrap().expect("row removed");
+        assert_eq!(removed.id, b.id);
+        assert_eq!(
+            removed.datasets.iter().cloned().collect::<std::collections::HashSet<_>>(),
+            ["u1".to_string(), "u2".to_string()].into_iter().collect(),
+        );
         assert!(store.get(&b.id).await.unwrap().is_none());
-        // delete on missing returns false (idempotent-ish — the caller
+        // delete on missing returns None (idempotent-ish — the caller
         // can tell whether their request actually removed something).
-        assert!(!store.delete(&b.id).await.unwrap());
+        assert!(store.delete(&b.id).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -722,7 +770,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(s.delete(&b.id).await.unwrap());
+        assert!(s.delete(&b.id).await.unwrap().is_some());
         // No rows should overlap the now-deleted dataset URL.
         let r = s
             .list_by_dataset_overlap(&["only-this-bookmark.zarr".into()])

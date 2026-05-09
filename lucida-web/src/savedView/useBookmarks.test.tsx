@@ -14,6 +14,7 @@ import {
   useBookmarks,
   type Bookmark,
 } from "./useBookmarks.ts";
+import type { Bridge, BookmarkChangedListener } from "../bridge.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
 
 function emptyView(): SavedView {
@@ -86,20 +87,47 @@ function HookHarness({
   loadedDatasets,
   email,
   out,
+  bridge,
 }: {
   loadedDatasets: string[];
   email: string | null;
   out: Captured;
+  bridge?: Bridge | null;
 }) {
   const handle = useBookmarks({
     loadedDatasets,
     currentUserEmail: email,
+    bridge,
   });
   useEffect(() => {
     out.current = handle;
   });
   // Render something so testing-library doesn't complain.
   return <div data-testid="loaded">{handle.allBookmarks.length}</div>;
+}
+
+/** Minimal Bridge stand-in exposing only the broadcast subscription
+ *  surface useBookmarks consumes. Casting to `Bridge` is safe because
+ *  the hook reaches for nothing else. */
+function makeStubBridge() {
+  const listeners: BookmarkChangedListener[] = [];
+  const stub = {
+    subscribeBookmarkChanged(cb: BookmarkChangedListener) {
+      listeners.push(cb);
+      return () => {
+        const i = listeners.indexOf(cb);
+        if (i >= 0) listeners.splice(i, 1);
+      };
+    },
+  } as unknown as Bridge;
+  return {
+    bridge: stub,
+    /** Fire a `bookmark_changed` broadcast at every subscriber. */
+    fire: (id: string, action: "created" | "updated" | "deleted", urls: string[] = []) => {
+      for (const cb of listeners.slice()) cb(id, action, urls);
+    },
+    listenerCount: () => listeners.length,
+  };
 }
 
 describe("useBookmarks — loading lifecycle", () => {
@@ -287,6 +315,152 @@ describe("useBookmarks — CRUD wrappers", () => {
     ).rejects.toMatchObject({ status: 403 });
     // Rolled back.
     expect(out.current?.allBookmarks.some((b) => b.id === "b1")).toBe(true);
+  });
+});
+
+// PRD #454 slice 4: live BookmarkChanged subscription. Verifies the
+// hook reconciles local state in response to bridge-dispatched
+// broadcasts: refetch + merge on Created/Updated, drop on Deleted.
+describe("useBookmarks — BookmarkChanged subscription (slice 4)", () => {
+  it("subscribes when a bridge is supplied and unsubscribes on unmount", async () => {
+    apiSpy.responder = () => jsonResponse(200, []);
+    const stub = makeStubBridge();
+    const out: Captured = { current: null };
+    const { unmount } = render(
+      <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+    );
+    await act(async () => { /* flush mount */ });
+    expect(stub.listenerCount()).toBe(1);
+    unmount();
+    expect(stub.listenerCount()).toBe(0);
+  });
+
+  it("ignores broadcasts when bridge is null", async () => {
+    apiSpy.responder = () => jsonResponse(200, []);
+    const out: Captured = { current: null };
+    await act(async () => {
+      render(<HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={null} />);
+    });
+    // No bridge → never subscribes; no crash on null.
+    expect(out.current?.allBookmarks).toEqual([]);
+  });
+
+  it("on Created: refetches the bookmark by id and inserts it", async () => {
+    const created = makeBm({ id: "fresh", name: "freshly created" });
+    let getCalls = 0;
+    apiSpy.responder = (url, init) => {
+      if (init?.method === "GET" || init?.method === undefined) {
+        if (url.endsWith("/api/bookmarks/fresh")) {
+          getCalls++;
+          return jsonResponse(200, created);
+        }
+        return jsonResponse(200, []); // initial list
+      }
+      return jsonResponse(500, {});
+    };
+    const stub = makeStubBridge();
+    const out: Captured = { current: null };
+    await act(async () => {
+      render(
+        <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+      );
+    });
+    expect(out.current?.allBookmarks).toEqual([]);
+    await act(async () => {
+      stub.fire("fresh", "created", ["gs://b/a.zarr"]);
+    });
+    // Wait a tick for the apiGet then setState to flush.
+    await act(async () => { /* flush microtasks */ });
+    expect(getCalls).toBe(1);
+    expect(out.current?.allBookmarks.find((b) => b.id === "fresh")).toBeDefined();
+  });
+
+  it("on Updated: refetches and replaces existing entry in place", async () => {
+    const original = makeBm({ id: "b1", name: "v1" });
+    const updated = { ...original, name: "v2 (updated by peer)" };
+    apiSpy.responder = (url, init) => {
+      if (init?.method === "GET" || init?.method === undefined) {
+        if (url.endsWith("/api/bookmarks/b1")) {
+          return jsonResponse(200, updated);
+        }
+        return jsonResponse(200, [original]); // initial list
+      }
+      return jsonResponse(500, {});
+    };
+    const stub = makeStubBridge();
+    const out: Captured = { current: null };
+    await act(async () => {
+      render(
+        <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+      );
+    });
+    expect(out.current?.allBookmarks.find((b) => b.id === "b1")?.name).toBe("v1");
+    await act(async () => {
+      stub.fire("b1", "updated");
+    });
+    await act(async () => { /* flush microtasks */ });
+    const merged = out.current?.allBookmarks.find((b) => b.id === "b1");
+    expect(merged?.name).toBe("v2 (updated by peer)");
+    // Doesn't double the row.
+    expect(out.current?.allBookmarks.filter((b) => b.id === "b1")).toHaveLength(1);
+  });
+
+  it("on Deleted: removes the row from local state without refetching", async () => {
+    const bm = makeBm({ id: "doomed" });
+    let getCalls = 0;
+    apiSpy.responder = (url, init) => {
+      if (init?.method === "GET" || init?.method === undefined) {
+        if (url.endsWith("/api/bookmarks/doomed")) {
+          getCalls++;
+          return jsonResponse(404, {});
+        }
+        return jsonResponse(200, [bm]); // initial list
+      }
+      return jsonResponse(500, {});
+    };
+    const stub = makeStubBridge();
+    const out: Captured = { current: null };
+    await act(async () => {
+      render(
+        <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+      );
+    });
+    expect(out.current?.allBookmarks.some((b) => b.id === "doomed")).toBe(true);
+    await act(async () => {
+      stub.fire("doomed", "deleted");
+    });
+    expect(out.current?.allBookmarks.some((b) => b.id === "doomed")).toBe(false);
+    expect(getCalls).toBe(0); // no refetch on delete
+  });
+
+  it("self-broadcast Created after optimistic insert reconciles without duplicating", async () => {
+    const created = makeBm({ id: "self", name: "my fresh" });
+    apiSpy.responder = (url, init) => {
+      if (init?.method === "POST") return jsonResponse(201, created);
+      if (init?.method === "GET" || init?.method === undefined) {
+        if (url.endsWith("/api/bookmarks/self")) return jsonResponse(200, created);
+        return jsonResponse(200, []);
+      }
+      return jsonResponse(500, {});
+    };
+    const stub = makeStubBridge();
+    const out: Captured = { current: null };
+    await act(async () => {
+      render(
+        <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+      );
+    });
+    await act(async () => {
+      await out.current?.createBookmark("my fresh", [], emptyView());
+    });
+    expect(out.current?.allBookmarks.filter((b) => b.id === "self")).toHaveLength(1);
+    // Self-broadcast arrives next.
+    await act(async () => {
+      stub.fire("self", "created");
+    });
+    await act(async () => { /* flush refetch */ });
+    // Still exactly one entry — broadcast-driven refetch matches on id and replaces.
+    expect(out.current?.allBookmarks.filter((b) => b.id === "self")).toHaveLength(1);
   });
 });
 

@@ -71,7 +71,14 @@ async fn build_app() -> Router {
         build_extractor(Arc::clone(&config), session_store.clone() as Arc<dyn LoginSessionStore>);
 
     let bookmark_store: Arc<dyn BookmarkStore> = Arc::new(MemoryBookmarkStore::new());
-    let bookmarks_state = BookmarksState { store: bookmark_store };
+    let bookmarks_state = BookmarksState {
+        store: bookmark_store,
+        // Slice 4 plumbing: this REST-only test doesn't drive the
+        // broadcast path (no live WebSocket session); leaving these
+        // None makes the handlers no-op the broadcast call.
+        session: None,
+        unicast_routes: None,
+    };
 
     // Mirror main.rs router shape: bookmarks live on the protected
     // (post-middleware) half; /auth/dev/login lives on the unprotected

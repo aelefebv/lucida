@@ -48,8 +48,35 @@ export interface BridgeHandlers {
    * be called with an empty `delta.added` only as a sanity check (no-op).
    */
   onAssetCatalogUpdate?: (datasetId: string, deltaJson: string) => void;
+  /**
+   * PRD #454 slice 4: cross-peer bookmark-sidebar updates. Fired when
+   * the server broadcasts a `bookmark_changed` message because some
+   * client mutated a bookmark whose dataset URLs overlap a loaded
+   * dataset in this session. `useBookmarks` uses this to refetch
+   * (Created/Updated) or remove from local state (Deleted) without
+   * waiting for a manual refresh.
+   */
+  onBookmarkChanged?: (
+    id: string,
+    action: BookmarkAction,
+    datasetUrls: string[],
+  ) => void;
   onDisconnect?: () => void;
 }
+
+/** Mirror of `lucida_core::protocol::BookmarkAction` (lowercase wire form). */
+export type BookmarkAction = "created" | "updated" | "deleted";
+
+/** Listener for cross-peer `bookmark_changed` broadcasts. Subscribed to
+ *  via [`Bridge.subscribeBookmarkChanged`] — the WS handler invokes
+ *  every registered listener in registration order. Fan-out lives on
+ *  the bridge so feature code (e.g. `useBookmarks`) doesn't have to
+ *  thread a pub-sub through React props. */
+export type BookmarkChangedListener = (
+  id: string,
+  action: BookmarkAction,
+  datasetUrls: string[],
+) => void;
 
 export class Bridge {
   private ws: WebSocket | null = null;
@@ -63,6 +90,10 @@ export class Bridge {
   private pendingDatasetPresence: string | null = null;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCursor: string | null = null;
+  /** PRD #454 slice 4: bookmark-sidebar cross-peer subscribers. Owned
+   *  on the bridge so feature code subscribes via a stable handle
+   *  instead of wiring callbacks through React props. */
+  private bookmarkChangedListeners: BookmarkChangedListener[] = [];
 
   constructor(handlers: BridgeHandlers, urlOverride?: string) {
     // Same-origin WebSocket so the lucida_session cookie is sent on
@@ -141,6 +172,24 @@ export class Bridge {
               JSON.stringify(msg.delta ?? { added: [] }),
             );
             break;
+          case "bookmark_changed": {
+            const action = msg.action as BookmarkAction;
+            const datasetUrls: string[] = Array.isArray(msg.dataset_urls)
+              ? msg.dataset_urls
+              : [];
+            const id: string = typeof msg.id === "string" ? msg.id : "";
+            this.handlers.onBookmarkChanged?.(id, action, datasetUrls);
+            for (const cb of this.bookmarkChangedListeners) {
+              try {
+                cb(id, action, datasetUrls);
+              } catch (e) {
+                bridgeLog("bookmark_changed.listener_threw", {
+                  error: e instanceof Error ? e.message : String(e),
+                });
+              }
+            }
+            break;
+          }
         }
       } catch (e) {
         bridgeLog("ws.bad_message", {
@@ -262,6 +311,17 @@ export class Bridge {
         }
       }, 50);
     }
+  }
+
+  /** Subscribe to cross-peer `bookmark_changed` broadcasts. Returns
+   *  an unsubscribe function. Listeners run in registration order;
+   *  exceptions in a listener are logged but don't break the chain. */
+  subscribeBookmarkChanged(cb: BookmarkChangedListener): () => void {
+    this.bookmarkChangedListeners.push(cb);
+    return () => {
+      const idx = this.bookmarkChangedListeners.indexOf(cb);
+      if (idx >= 0) this.bookmarkChangedListeners.splice(idx, 1);
+    };
   }
 
   /** Low-level send (raw JSON string). */

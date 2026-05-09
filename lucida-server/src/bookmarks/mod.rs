@@ -27,10 +27,12 @@
 //! || principal.is_admin`. POST always overwrites `created_by` /
 //! `created_by_name` from the principal — body fields can't spoof.
 
+pub mod broadcast;
 pub mod handlers;
 pub mod routes;
 pub mod store;
 
+pub use broadcast::{broadcast_bookmark_change, BroadcastSummary};
 pub use store::{
     Bookmark, BookmarkStore, MemoryBookmarkStore, SqliteBookmarkStore, StoreError,
 };

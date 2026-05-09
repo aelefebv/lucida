@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Bridge, bridgeLog, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
+export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import type { DatasetManifest, FetchSource } from "../manifestTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
@@ -69,6 +70,12 @@ export function useBridge({
   bumpRemoteDocumentVersion,
 }: Params) {
   const sessionRef = useRef<Session | null>(null);
+  /** Mirrors `sessionRef.current?.bridge` as React state so consumers
+   *  (slice 4: `useBookmarks` for `bookmark_changed` subscriptions)
+   *  re-run effects when the bridge becomes available. The bridge
+   *  is constructed once inside the wasm-ready effect; we set this
+   *  state immediately after assigning `sessionRef.current`. */
+  const [bridge, setBridge] = useState<Bridge | null>(null);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
@@ -408,6 +415,10 @@ export function useBridge({
     };
     const bridge = new Bridge(handlers);
     sessionRef.current = new Session({ bridge, contentSource, cpuCache, decodePool });
+    // Slice 4: publish the bridge as React state so consumer hooks
+    // (useBookmarks subscribes to `bookmark_changed`) can take a
+    // dependency on it and run their subscribe effect once it's live.
+    setBridge(bridge);
   }, [wasmReady]);
 
   function setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource) {
@@ -614,6 +625,9 @@ export function useBridge({
 
   return {
     sessionRef,
+    /** Slice 4: live bridge once the WS is constructed. `null` until
+     *  the wasm-ready effect has run. */
+    bridge,
     peers,
     myId,
     followTarget,
