@@ -70,8 +70,13 @@ export class UrlSync {
     this.fetchBookmark = options.fetchBookmark ?? defaultFetchBookmark;
   }
 
-  /** Hook the popstate listener. Must be called once after construction. */
+  /** Hook the popstate listener. Idempotent + re-armable after `destroy()`
+   *  so React 18 Strict-Mode's mount→unmount→mount effect cycle (which
+   *  double-invokes the cleanup before the second mount) doesn't leave the
+   *  sync permanently destroyed. */
   start(): void {
+    this.destroyed = false;
+    if (this.popstateHandler !== null) return;
     this.popstateHandler = () => {
       // popstate fires for back/forward navigation. Re-apply whatever's
       // in the URL. If applier is busy, skip to avoid race.
