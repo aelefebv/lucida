@@ -14,6 +14,7 @@ use tower_http::cors::CorsLayer;
 
 use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
+use lucida_server::bookmarks;
 use lucida_server::session::Session;
 use lucida_server::{browse, handler, AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
 
@@ -265,6 +266,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::logout).with_state(logout_state),
         );
 
+    // PRD #454 slice 2: server-stored bookmarks. Same SQLite pool the
+    // auth stores ride; the bookmarks router lands on the protected
+    // half so every handler sees an `AuthPrincipal` in extensions.
+    let bookmark_store = std::sync::Arc::new(bookmarks::SqliteBookmarkStore::new(
+        session_store.pool().clone(),
+    ));
+    let bookmarks_state = bookmarks::handlers::BookmarksState {
+        store: bookmark_store as std::sync::Arc<dyn bookmarks::BookmarkStore>,
+    };
+    let bookmarks_router: Router<()> = bookmarks::routes::router(bookmarks_state);
+
     // /auth/error is available regardless of auth mode — if the user
     // somehow reaches it (a stale link, a misconfigured deployment),
     // we still render the generic page rather than 404. Mounted on
@@ -319,6 +331,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
         .with_state(state)
         .merge(authed_auth_router)
+        .merge(bookmarks_router)
         .layer(axum::middleware::from_fn_with_state(
             extractor,
             auth::middleware::auth_middleware,

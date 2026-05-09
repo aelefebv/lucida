@@ -7,6 +7,7 @@
 pub mod admin;
 pub mod auth;
 pub mod binding;
+pub mod bookmarks;
 pub mod browse;
 pub mod decode;
 pub mod handler;
