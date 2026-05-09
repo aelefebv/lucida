@@ -23,9 +23,9 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0010-temporal-runway-not-implemented]] — GPU-side runway not pursued; CPU-side runway + scrubbing eviction is sufficient (2026-04-17)
 - [[decisions/0011-dual-handoff-on-dataset-opened]] — `DatasetOpened` event splits into WASM `apply_command` and JS `setupFetchPipeline`
 - [[decisions/0012-logging-conventions]] — `tracing` spans on the server, `bridgeLog` helper on the client, `dot.scope` event names (2026-04-20)
-- [[decisions/0013-url-as-app-state-for-saved-views]] — saved views are debounced URL-hash writes (Google-Maps-style); refresh preserves view; sharing = copy URL (2026-05-07, proposed)
-- [[decisions/0014-local-file-datasets-personal-only-in-saved-views]] — local-file paths in saved views work for sender refresh but warn on share; no auto-conversion to served URLs (2026-05-07, proposed)
-- [[decisions/0015-server-stored-bookmarks-and-auth-seam]] — SQLite-backed bookmarks (server's first persistent state); `AuthPrincipal` trait abstracts the auth provider (2026-05-07, proposed)
+- [[decisions/0013-url-as-app-state-for-saved-views]] — saved views are debounced URL-hash writes (Google-Maps-style); refresh preserves view; sharing = copy URL (2026-05-07; accepted 2026-05-08)
+- [[decisions/0014-local-file-datasets-personal-only-in-saved-views]] — local-file paths in saved views work for sender refresh but warn on share; no auto-conversion to served URLs (2026-05-07; accepted 2026-05-08)
+- [[decisions/0015-server-stored-bookmarks-and-auth-seam]] — SQLite-backed bookmarks; `AuthPrincipal` trait abstracts the auth provider; side-table over JSON1 for any-overlap query (2026-05-07; accepted 2026-05-08)
 - [[decisions/0016-backend-mediated-oauth-with-session-cookies]] — Google OAuth flow runs server-side; httpOnly session cookie; no JWT in JS; SameSite=Lax + REST discipline for CSRF (2026-05-08, proposed)
 - [[decisions/0017-configurable-from-day-one-for-oss-release]] — every Calico-specific value lives in env vars; `PrincipalExtractor` trait is the OSS provider extension point (2026-05-08, proposed)
 - [[decisions/0018-auth-mode-auto-detect-by-bind-address]] — `LUCIDA_AUTH` defaults derived from bind address; loopback → disabled, non-loopback → google; `LUCIDA_INSECURE=1` overrides (2026-05-08, proposed)

@@ -36,3 +36,4 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - [[presence-and-follow-mode]] — peer-to-peer presence, transitive follow chains, throttling
 - [[layout-system]] — registered layouts, `SetActiveLayout`, derived placement rebuilds
 - [[multichannel-and-colormaps]] — per-channel state, 15 LUTs, composite key naming
+- [[saved-views]] — `#view=…` URL-as-app-state + server-stored `#b=<id>` bookmarks; spans `lucida-core` (schema), `lucida-web` (encoder/applier/sidebar), `lucida-server` (SQLite store + REST + broadcast)

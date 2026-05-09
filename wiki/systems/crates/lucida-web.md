@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-08
 ---
 
 # lucida-web
@@ -53,6 +53,8 @@ The pipeline (planning → fetch → GPU upload → render) is documented end-to
 - `tickCommon.ts` — shared tick helpers
 - `session.ts` — session state container
 - `colormaps.ts` — 15 colormap LUTs (gray, magenta, green, cyan, red, blue, yellow, viridis, inferno, plasma, magma, turbo, hot, cool, jet)
+- `savedView/` — web side of [[saved-views]]: `encoder.ts` (deep, gzip+base64url with default-stripping), `applier.ts` (deep, async orchestrator with `applyInProgress` flag and `subscribeApplyResult` channel), `urlSync.ts` (deep, debounced `replaceState` + popstate + bootstrap from `#view=…` and `#b=<id>`), `captureBuilder.ts`, `bookmarksApi.ts`, `useBookmarks.ts`, `types.ts`. Components: `BookmarkSidebar.tsx`, `ShareToolbarButton.tsx`, `LoadingViewBanner.tsx`.
+- `auth/` — [[auth]] consumer: `whoami.ts`, `useAuthState.ts`, `AuthGate.tsx`, `AuthSession.tsx`, `ProfileMenu.tsx`, `UnauthLanding.tsx`.
 - `types.ts` — shared TS types
 
 Subdirectories:

@@ -1,11 +1,11 @@
 ---
 created: 2026-05-07
-modified: 2026-05-07
+modified: 2026-05-08
 ---
 
 # URL-as-App-State for Saved Views
 
-> Status: Proposed (in design — feature not yet implemented).
+> Status: Accepted (implemented in PRs #478, #480 — landed 2026-05-08).
 
 ## Decision
 
@@ -52,12 +52,14 @@ The runtime cost is negligible: `history.replaceState` is microseconds; encoding
 
 ## How this decision shows up in code
 
-To be filled in during implementation. Anchors:
-
-- A new debounced URL-writer hook in `lucida-web` listens to viewport changes (already-existing presence-emit path is the natural co-tap).
-- A bootstrap parse step in `App.tsx` (or equivalent) handles `#view=…` on initial load and on `popstate`.
-- The encoder/decoder pair lives in a new module — encoder strips defaults; decoder applies defaults then overlays the encoded delta.
-- The capture record includes datasets and active layouts (DocumentState surface) plus camera/view/display/dataset_order/dataset_settings (PresenceState surface). See [[presence-and-follow-mode]] for the wire shape it mirrors.
+- `lucida-core/src/saved_view.rs` — `SavedView` struct + `dataset_id_for_url` helper. Shared schema between web (encode/decode) and server (validate/store).
+- `lucida-web/src/savedView/encoder.ts` — pure `encode`/`decode` with `CompressionStream` (gzip) + base64url + default-stripping. Owns the `v: 1` discipline.
+- `lucida-web/src/savedView/applier.ts` — async orchestrator implementing the apply order from PRD §"Apply flow at the recipient." Manages `applyInProgress` flag.
+- `lucida-web/src/savedView/urlSync.ts` — debounced `replaceState` + `popstate` listener + bootstrap on initial load (`#view=…` and `#b=<id>`).
+- `lucida-web/src/hooks/useSavedViewSync.ts` — React wiring; constructs urlSync + applier; subscribes to `DatasetOpened`/`OpenDatasetFailed` via `useBridge`.
+- `lucida-web/src/components/ShareToolbarButton.tsx` — Copy URL toolbar button with size/local-file/4KB warnings.
+- `lucida-web/src/components/LoadingViewBanner.tsx` — recipient apply progress.
+- See [[saved-views]] subsystem article and [[flows/saved-view-recipient-apply]] for end-to-end traces.
 
 ## Related
 

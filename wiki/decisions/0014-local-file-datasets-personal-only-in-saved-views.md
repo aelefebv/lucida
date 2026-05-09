@@ -1,11 +1,11 @@
 ---
 created: 2026-05-07
-modified: 2026-05-07
+modified: 2026-05-08
 ---
 
 # Local-File Datasets Are Personal-Only in Saved Views
 
-> Status: Proposed (in design — feature not yet implemented).
+> Status: Accepted (implemented in PR #478 via `ShareToolbarButton.tsx`'s local-file warning toast — landed 2026-05-08).
 
 ## Decision
 

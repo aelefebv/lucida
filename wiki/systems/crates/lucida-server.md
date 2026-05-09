@@ -27,7 +27,8 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 - `proxy/` — server-side proxy infrastructure: `ProxyCache` (per-dataset on-disk cache), `ProxyGenerator` (bounded-concurrency, in-flight dedup), `ServerProxySource` (adapter from `CachedStore` to `lucida-proxy`'s sync trait)
 - `auth/` — Google OAuth + session cookies + admin allowlist + cleanup sweep + audit logging. See [[auth]] for the deep-dive.
 - `browse.rs` / `admin.rs` — HTTP routes for filesystem browsing and admin operations (e.g. clear proxy cache)
-- `migrations/` — versioned SQL migrations applied at startup (sqlx). First persistent state in the server.
+- `migrations/` — versioned SQL migrations applied at startup (sqlx). Persistent state grew with [[auth]] (`login_sessions`, `pending_auth`) and [[saved-views]] (`bookmarks` + `bookmark_datasets`).
+- `bookmarks/` — server side of [[saved-views]]: `store.rs` (deep, `BookmarkStore` trait + SQLite + memory impls), `handlers.rs` (REST `/api/bookmarks/*` gated by `AuthPrincipal`), `broadcast.rs` (best-effort `BookmarkChanged` dispatch scoped by overlapping loaded datasets).
 
 ## Interactions
 
@@ -50,4 +51,5 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 - **Proxy cache directories are keyed by 16-byte URL hash**, not `DatasetId`. The hash is the same BLAKE3 prefix used for `DatasetId` so the two stay in lockstep — see the comment on `dataset_url_hash16`.
 - **Pre-generation on dataset open is best-effort.** S5 spawns a background task to pre-build `(T=0, C=0)` proxies for every advertised entity. Failures are logged and dropped — the open succeeds either way; client-side fetches will surface the failure on their own path.
 - **Storage compression is detected from the codec chain** at level 0 only and assumed uniform across levels. If a dataset uses different compression at different LODs, this assumption breaks silently.
-- **First persistent state in the server.** SQLite database (`lucida.db` + `.db-shm` + `.db-wal`) holds login sessions, pending OAuth states, and (PRD #454) bookmarks. `LUCIDA_DB_PATH` configures the path; default is CWD-relative — set to an absolute path in production. See [[gotchas/oss-config-defaults]].
+- **Persistent state lives in SQLite** (`lucida.db` + `.db-shm` + `.db-wal`). Holds login sessions and pending OAuth states ([[auth]]); bookmarks + their indexed dataset side-table ([[saved-views]]). `LUCIDA_DB_PATH` configures the path; default is CWD-relative — set to an absolute path in production. See [[gotchas/oss-config-defaults]].
+- **`PRAGMA foreign_keys` is per-connection.** SQLite cascades only fire when this PRAGMA is on, and sqlx doesn't enable it by default per pool connection. The bookmarks store does explicit two-table delete inside a transaction (belt-and-braces); the FK in the migration is documentation more than enforcement. Same caveat applies to any future SQLite-backed feature.

@@ -1,11 +1,11 @@
 ---
 created: 2026-05-07
-modified: 2026-05-07
+modified: 2026-05-08
 ---
 
 # Server-Stored Bookmarks and the AuthPrincipal Seam
 
-> Status: Proposed (in design — feature not yet implemented; on hold pending Google auth landing).
+> Status: Accepted (implemented in PRs #479, #480, #481 — landed 2026-05-08). Auth seam realized via the existing `SessionCookieExtractor` rather than the originally-sketched `StubPrincipalExtractor` (auth landed first, so the stub was never wired).
 
 ## Decision
 
@@ -78,15 +78,14 @@ The trait is also the natural carrier for evolving capabilities: today `is_admin
 
 ## How this decision shows up in code
 
-To be filled in during implementation. Anchors:
-
-- `lucida-server::bookmarks::store` — `BookmarkStore` trait + SQLite implementation + in-memory implementation for tests.
-- `lucida-server::bookmarks::handlers` — REST endpoint handlers (`GET`/`POST`/`PATCH`/`DELETE` under `/api/bookmarks`).
-- `lucida-server::bookmarks::broadcast` — wires CUD operations to the existing Session broadcast mechanism.
-- `lucida-server::bookmarks::migrations` — versioned schema migrations.
-- `lucida-server::auth::principal` — `PrincipalExtractor` trait, `AuthPrincipal` struct, `StubPrincipalExtractor` for dev. Real `GoogleJwtPrincipalExtractor` lands separately as part of the auth project.
-- `lucida-core::saved_view` — the `SavedView` schema, shared between web and server.
-- `lucida-core::protocol` — new `ServerMessage::BookmarkChanged` variant.
+- `lucida-server/src/bookmarks/store.rs` — `BookmarkStore` trait + `SqliteBookmarkStore` + `MemoryBookmarkStore`. Two-table schema (`bookmarks` for the row + `bookmark_datasets` indexed for any-overlap query). Picked side-table over JSON1 to work on every SQLite build and make `EXPLAIN QUERY PLAN` regression-guardable. `delete` returns `Result<Option<Bookmark>, _>` so the broadcast helper can scope by the deleted row's `dataset_urls`.
+- `lucida-server/src/bookmarks/handlers.rs` — REST handlers under `/api/bookmarks`. POST overwrites `created_by` from `AuthPrincipal` (request body cannot spoof). PATCH/DELETE check `bookmark.created_by == principal.email || principal.is_admin`. Hand-rolled `parse_dataset_params` against `RawQuery` for repeated `?dataset=…` (Axum's default `Query<T>` drops repeats; see [[gotchas/axum-query-multivalue]]).
+- `lucida-server/src/bookmarks/broadcast.rs` — best-effort affected-client computation + dispatch. Empty `dataset_urls` falls through as broadcast-to-all.
+- `lucida-server/migrations/20260508000003_create_bookmarks.sql` — versioned migration; runs on startup via the existing sqlx pipeline that auth set up.
+- `lucida-core/src/auth_principal.rs` — `AuthPrincipal` struct (shared seam type). Lives in `lucida-core` so future provider extractors don't pull in lucida-server.
+- `lucida-server/src/auth/principal.rs` — `PrincipalExtractor` trait + `SessionCookieExtractor` (production path; cookie-based, not pure-JWT) + `GoogleJwtPrincipalExtractor` (Bearer-JWT for future CLI/server-to-server flows). The originally-sketched `StubPrincipalExtractor` was never built — auth landed first so bookmarks consume the real extractor directly.
+- `lucida-core/src/saved_view.rs` — the `SavedView` schema, shared between web and server.
+- `lucida-core/src/protocol.rs` — `ServerMessage::BookmarkChanged { id, action, dataset_urls }` variant + `BookmarkAction` enum. **First `ServerMessage` variant without a `seq`** — session-scoped notification, not a sequenced document command. See [[saved-views]] §"BookmarkChanged is unsequenced."
 
 ## Related
 

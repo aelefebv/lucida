@@ -16,3 +16,4 @@ End-to-end traces showing how data or control moves through Lucida. Each article
 - [[document-command-application]] — client → server `seq` assignment → broadcast (with `Ack` to sender) → WASM `apply_command` on every client
 - [[proxy-generation]] — on-demand `AssetRequest` → bounded-concurrency generator with in-flight dedup → on-disk cache → binary frame back
 - [[auth-signin]] — unauthed visit → JS shim captures hash → /auth/start → Google → /auth/callback → state validate → JWT validate → session create → cookie + 302 to original URL
+- [[saved-view-recipient-apply]] — `#view=…` or `#b=<id>` URL → bootstrap parse → diff datasets → open missing → apply layouts/settings/camera in order → `applyInProgress` flag prevents feedback loop → `selectedDatasetId` auto-selects to first visible

@@ -25,3 +25,5 @@ Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of th
 - [[blosc-support]] — Blosc decoder supports a deliberately narrow subset (Blosc1 + zstd inner + typesize ∈ {1,2,4}); everything else is rejected at import time
 - [[wire-chunk-key-conventions]] — wire chunk keys split asymmetrically: `t/c` are voxel coords, `z/y/x` are chunk-grid coords. The divide-and-slice for `t/c` happens server-side
 - [[oss-config-defaults]] — `LUCIDA_*` env var contract, common misconfigurations (bind + auth mode mismatch, TLS-terminating-proxy cookie issue, hosted domain edge cases)
+- [[saved-view-credentials-in-urls]] — dataset URLs in `#view=…` saved views are exposed via clipboard, browser history, screenshots; presigned URLs and credentialed URLs leak to anyone with the link
+- [[axum-query-multivalue]] — Axum's default `Query<T>` extractor silently drops repeated keys (`?dataset=A&dataset=B` → only `B` reaches the handler)

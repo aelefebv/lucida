@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-08
 ---
 
 # lucida-core
@@ -30,13 +30,15 @@ Module-level only — see the source for signatures.
 
 - `scene/` — `Scene`, `DocumentState`, `DerivedState`, `DatasetDisplaySettings`, `Colormap`, layout resolution
 - `command.rs` — `Command`, `DocumentCommand`, `ViewportCommand`; `Scene::apply` is the single mutator
-- `protocol.rs` — `ClientMessage`, `ServerMessage`, `ChunkMessage`, `PresenceState`
+- `protocol.rs` — `ClientMessage`, `ServerMessage`, `ChunkMessage`, `PresenceState`. `ServerMessage::BookmarkChanged { id, action, dataset_urls }` is the **first variant without a `seq`** — session-scoped notification for [[saved-views]], not a sequenced document command.
 - `epoch.rs` — `SceneEpochs` (content/layout/view/selection/asset)
 - `camera.rs` — `Slice` (2D), `Arcball` (3D orbit), `Fly` (3D first-person)
 - `view.rs` / `query.rs` — `ViewState`, `view_query` returning per-entity projected size + ideal LOD
 - `ray.rs` — `Ray`, `RayHit` for picking
 - `chunk.rs` / `transform.rs` — chunk plan synthesis and 4×4 voxel transforms
 - `wasm.rs` — `wasm-bindgen` wrappers; only compiled for `target_arch = "wasm32"`
+- `saved_view.rs` — `SavedView` schema (capture record for [[saved-views]]); `dataset_id_for_url` BLAKE3 helper. Shared between web encoder/decoder and server bookmark store.
+- `auth_principal.rs` — `AuthPrincipal` struct (shared seam type for [[auth]]; consumed by [[saved-views]])
 
 ## Invariants
 
