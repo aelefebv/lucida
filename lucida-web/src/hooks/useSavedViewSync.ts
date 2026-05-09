@@ -16,6 +16,8 @@ import { SavedViewApplier } from "../savedView/applier.ts";
 import { UrlSync } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
 import type { SavedView } from "../savedView/types.ts";
+import type { RenderLoop } from "../renderLoop.ts";
+import { bumpSettingsGeneration } from "../tickCommon.ts";
 
 interface Params {
   /** Returns the live `WasmScene`, or null if not yet loaded. */
@@ -35,6 +37,17 @@ interface Params {
    *  dataset on apply (so dimension/contrast controls operate on
    *  something the user can see). */
   onApplyResult?: (firstVisibleDatasetId: string | null) => void;
+  /** Render loop ref. The applier writes to WASM only; without marking
+   *  interactive+residency dirty, the RAF-pull-based loop sits idle
+   *  until the next user input (Bug #2 root cause). */
+  loopRef: React.RefObject<RenderLoop | null>;
+  /** React-side dim mirrors. The applier writes set_c/set_t/set_z_range
+   *  to WASM; without these the C/T/Z sliders stay stale (e.g. bookmark
+   *  saved on ch2 opens with the C slider showing 0; Bug #3 root cause). */
+  setC: React.Dispatch<React.SetStateAction<number>>;
+  setT: React.Dispatch<React.SetStateAction<number>>;
+  setZ: React.Dispatch<React.SetStateAction<number>>;
+  setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
 }
 
 interface SyncBundle {
@@ -50,10 +63,19 @@ export function useSavedViewSync({
   changeTick,
   debounceMs,
   onApplyResult,
+  loopRef,
+  setC,
+  setT,
+  setZ,
+  setViewMode,
 }: Params): {
   applier: SavedViewApplier;
   captureBuilder: () => SavedView | null;
   trackedSendOpen: (url: string) => void;
+  /** Schedule a debounced URL write. App.tsx wraps this into the
+   *  `emitPresence`/`emitDatasetPresence` callbacks so every viewport
+   *  mutation co-taps the URL (Bug #1 fix). Stable identity. */
+  notifyChange: () => void;
 } {
   // Construct everything lazily on first render via useState's initializer
   // (runs exactly once). Avoids the React-19 "no ref access during render"
@@ -142,9 +164,40 @@ export function useSavedViewSync({
     });
   }, [bundle.applier, onApplyResult]);
 
+  // Apply-complete: refresh the render loop (Bug #2) and push post-apply
+  // C/T/Z/viewMode back to React state (Bug #3). The applier writes to
+  // WASM only; without this the RAF loop sits idle until the next user
+  // input and the slider mirrors stay stale. Mirrors the bridge's
+  // follow/presence-update flow (useBridge.ts onPresenceUpdate / onFollowChanged).
+  useEffect(() => {
+    return bundle.applier.subscribeApplyComplete(() => {
+      const scene = getScene();
+      if (!scene) return;
+      try {
+        setZ(scene.z());
+        setT(scene.t());
+        setC(scene.c());
+        setViewMode(scene.camera_mode() !== "slice" ? "3d" : "2d");
+      } catch (e) {
+        console.warn("[SavedView] post-apply state read failed:", e);
+      }
+      bumpSettingsGeneration();
+      loopRef.current?.markInteractiveDirty("savedview_apply");
+      loopRef.current?.markResidencyDirty("savedview_apply");
+    });
+  }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode]);
+
+  // Stable notifyChange: App.tsx wraps emitPresence/emitDatasetPresence
+  // so every viewport mutation co-taps the URL (Bug #1 fix). Forwards
+  // to the underlying UrlSync; identity is stable across renders.
+  const notifyChange = useCallback(() => {
+    bundle.urlSync.notifyChange();
+  }, [bundle.urlSync]);
+
   return {
     applier: bundle.applier,
     captureBuilder,
     trackedSendOpen,
+    notifyChange,
   };
 }

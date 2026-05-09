@@ -86,6 +86,14 @@ export interface ApplyResult {
 
 export type ApplyResultListener = (r: ApplyResult) => void;
 
+/** Fires once at the end of every `apply()` (success or partial-failure),
+ *  inside the `try` block before the inProgress flag flips back to false.
+ *  Subscribers can read post-apply scene state via the live `getScene()`
+ *  passed to the applier. Used in `useSavedViewSync` to mark the render
+ *  loop dirty + bump the dataset-settings generation + push post-apply
+ *  C/T/Z back to React state (since the applier writes to WASM only). */
+export type ApplyCompleteListener = () => void;
+
 // --- Implementation ----------------------------------------------------
 
 const IDLE_STATE: ApplierState = {
@@ -100,6 +108,7 @@ export class SavedViewApplier {
   private state: ApplierState = IDLE_STATE;
   private listeners = new Set<StateListener>();
   private applyResultListeners = new Set<ApplyResultListener>();
+  private applyCompleteListeners = new Set<ApplyCompleteListener>();
   // Pending opens keyed by computed dataset id (we don't get the URL back
   // in the DatasetOpened broadcast — only the manifest, which carries the
   // server-assigned id derived from the URL). The applier resolves each
@@ -144,6 +153,18 @@ export class SavedViewApplier {
   subscribeApplyResult(fn: ApplyResultListener): () => void {
     this.applyResultListeners.add(fn);
     return () => { this.applyResultListeners.delete(fn); };
+  }
+
+  /** Subscribe to a one-shot "apply done" event fired once at the end of
+   *  every `apply()` (success or partial-failure), AFTER WASM mutations
+   *  but BEFORE the `inProgress` flag flips back to false. Subscribers
+   *  read post-apply scene state via the same `getScene()` the applier
+   *  uses; the render-loop and React-side dim mirrors get refreshed
+   *  through this channel (see useSavedViewSync). Distinct from
+   *  `subscribeApplyResult` (which is about UI focus / selectedDatasetId). */
+  subscribeApplyComplete(fn: ApplyCompleteListener): () => void {
+    this.applyCompleteListeners.add(fn);
+    return () => { this.applyCompleteListeners.delete(fn); };
   }
 
   getState(): ApplierState {
@@ -317,6 +338,11 @@ export class SavedViewApplier {
       // 2026-05-07): emit the post-apply visibility set so consumers
       // can re-target UI focus at something the recipient can see.
       this.emitApplyResult(sceneAfter, view);
+
+      // Fires inside the try (before the inProgress flag flips back) so
+      // subscribers can read post-apply scene state and trigger render
+      // refresh + React-state sync. See `useSavedViewSync` for usage.
+      for (const fn of this.applyCompleteListeners) fn();
     } finally {
       // Ratchet the inProgress flag down regardless of any throw.
       this.setState({ ...this.state, inProgress: false });
