@@ -27,3 +27,5 @@ Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of th
 - [[oss-config-defaults]] — `LUCIDA_*` env var contract, common misconfigurations (bind + auth mode mismatch, TLS-terminating-proxy cookie issue, hosted domain edge cases)
 - [[saved-view-credentials-in-urls]] — dataset URLs in `#view=…` saved views are exposed via clipboard, browser history, screenshots; presigned URLs and credentialed URLs leak to anyone with the link
 - [[axum-query-multivalue]] — Axum's default `Query<T>` extractor silently drops repeated keys (`?dataset=A&dataset=B` → only `B` reaches the handler)
+- [[strict-mode-destroyable-classes]] — class instances with a `destroyed` flag set in `destroy()` get permanently disabled in dev (Strict-Mode double-invokes mount effects); `start()` must reset the flag
+- [[saved-view-client-only-state]] — JS-only preferences (e.g. `autoContrastMap`) that mutate WASM state need a dedicated SavedView field or recipients silently override with their defaults

@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-05-09
 ---
 
 # Saved Views
@@ -23,6 +23,7 @@ Full design rationale in [[decisions/0013-url-as-app-state-for-saved-views]] (th
 - `v: 1` — schema version. Decoder rejects payloads without it. `v > 1` decodes known fields with a console warning (best-effort, never refuse — refusing means a stale tab opening a fresh link breaks).
 - `datasets`, `active_layouts`, `dataset_order`, `dataset_settings` — multi-dataset shape and per-dataset visibility/contrast/colormap.
 - `camera`, `view`, `display` — same types as `PresenceState`.
+- `auto_contrast: HashMap<DatasetId, bool>` — JS-side preference (lives in `useDatasetSettings.autoContrastMap`, not in WASM) that round-trips explicitly so the recipient's intensity batcher doesn't immediately overwrite captured contrast values. Pattern to follow when adding new client-only state — see [[gotchas/saved-view-client-only-state]].
 
 Notable exclusions per [[decisions/0013-url-as-app-state-for-saved-views]]: `selectedDatasetId` (UI focus only — but see "selectedDatasetId wrinkle" below), `following` (sender's follow target irrelevant to recipient), `cursor` (mouse position is noise), `client_id` (not portable).
 
@@ -90,6 +91,8 @@ Resolution (option c per [[queue]]): the applier auto-selects the first *visible
 - **`captureBuilder` excludes a dataset from a `SavedView` if `dataset_settings[id]` doesn't exist** — happens for datasets opened by a peer (URL not in this client's URL→DatasetId map). The exclusion is silent.
 - **Pre-auth `dev@local` bookmarks** created during the auth design phase carry `created_by: "dev@local"`. Cutover policy at production rollout is recorded in [[queue]].
 - **Dataset URLs in saved views are visible to anyone with the link.** Presigned URLs and similar credentialed URLs are exposed via clipboard, browser history, screenshots, copy-paste. See [[gotchas/saved-view-credentials-in-urls]].
+- **`UrlSync` is one-shot-by-default in dev.** React Strict-Mode double-invokes mount effects; without re-arming `start()` after `destroy()`, the URL silently never updates. Bit us in PR #483 hours after shipping. See [[gotchas/strict-mode-destroyable-classes]].
+- **JS-only preferences don't round-trip without a dedicated SavedView field.** WASM scene state captures cleanly via `export_presence`; React-state preferences (e.g. `autoContrastMap`) that *mutate* WASM state from the JS side will be silently overridden by the recipient's defaults. Caught with auto-contrast in PR #484. See [[gotchas/saved-view-client-only-state]] for the fix pattern when adding new client-only preferences.
 
 ## Related
 
