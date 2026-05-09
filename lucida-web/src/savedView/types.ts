@@ -111,4 +111,10 @@ export interface SavedView {
   display: DisplayState;
   dataset_order: DatasetId[];
   dataset_settings: Record<DatasetId, DatasetDisplaySettings>;
+  /** Per-dataset auto-contrast preference. Client-side state (not in
+   *  the WASM scene); captured + restored so manually-set contrast
+   *  values aren't immediately overwritten by the recipient's
+   *  intensity batcher. Optional in the wire format — empty/omitted
+   *  means "use default (true) for every dataset". */
+  auto_contrast?: Record<DatasetId, boolean>;
 }

@@ -32,11 +32,16 @@ import { SAVED_VIEW_VERSION } from "./types.ts";
  * sender actually has source-of-truth for.
  */
 export type UrlByDatasetId = ReadonlyMap<DatasetId, string>;
+export type AutoContrastByDatasetId = ReadonlyMap<DatasetId, boolean>;
 
 export interface CaptureInputs {
   scene: WasmScene;
   /** URL→DatasetId map maintained alongside dataset opens. */
   urlByDatasetId: UrlByDatasetId;
+  /** Per-dataset auto-contrast flag, sourced from
+   *  `useDatasetSettings.autoContrastMap`. Optional — omitted when no
+   *  per-dataset preference has been set (slice-1 callers). */
+  autoContrastByDatasetId?: AutoContrastByDatasetId;
 }
 
 /**
@@ -46,7 +51,7 @@ export interface CaptureInputs {
  * them to a recipient. (See [[decisions/0014-local-file-datasets-personal-only-in-saved-views]]
  * for the local-file warning that the share button surfaces.)
  */
-export function buildCapture({ scene, urlByDatasetId }: CaptureInputs): SavedView {
+export function buildCapture({ scene, urlByDatasetId, autoContrastByDatasetId }: CaptureInputs): SavedView {
   const presence = JSON.parse(scene.export_presence()) as {
     camera: Camera;
     view: ViewState;
@@ -88,6 +93,19 @@ export function buildCapture({ scene, urlByDatasetId }: CaptureInputs): SavedVie
     if (url !== undefined) orderedUrls.push(url);
   }
 
+  // auto-contrast: capture the per-dataset preference for every dataset
+  // we know the URL for. The decoder treats absence as "true" (the
+  // default for new datasets), so we only need to emit explicit `false`
+  // entries — but we capture both for forward-compat (the encoder strips
+  // defaults).
+  const autoContrast: Record<DatasetId, boolean> = {};
+  if (autoContrastByDatasetId) {
+    for (const dsId of datasetIds) {
+      const flag = autoContrastByDatasetId.get(dsId);
+      if (flag !== undefined) autoContrast[dsId] = flag;
+    }
+  }
+
   return {
     v: SAVED_VIEW_VERSION,
     datasets: orderedUrls,
@@ -97,6 +115,7 @@ export function buildCapture({ scene, urlByDatasetId }: CaptureInputs): SavedVie
     display: presence.display,
     dataset_order: datasetPresence.dataset_order,
     dataset_settings: datasetPresence.dataset_settings,
+    auto_contrast: Object.keys(autoContrast).length > 0 ? autoContrast : undefined,
   };
 }
 

@@ -91,6 +91,15 @@ pub struct SavedView {
     /// settings. Mirrors [`crate::scene::Scene::dataset_settings`].
     #[serde(default)]
     pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+
+    /// Per-dataset auto-contrast preference. Client-side state (lives in
+    /// `useDatasetSettings.autoContrastMap` on the web client, not in the
+    /// WASM scene). Captured + restored so manually-set contrast values
+    /// aren't immediately overwritten by the recipient's auto-contrast
+    /// intensity batcher (`useIntensityBatcher.ts`). `true` is the
+    /// default for any dataset not present in the map.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub auto_contrast: HashMap<DatasetId, bool>,
 }
 
 impl SavedView {
@@ -106,6 +115,7 @@ impl SavedView {
             display: DisplayState::default(),
             dataset_order: Vec::new(),
             dataset_settings: HashMap::new(),
+            auto_contrast: HashMap::new(),
         }
     }
 }
@@ -206,6 +216,27 @@ mod tests {
         assert!(back.active_layouts.is_empty());
         assert!(back.dataset_order.is_empty());
         assert!(back.dataset_settings.is_empty());
+        assert!(back.auto_contrast.is_empty());
+    }
+
+    #[test]
+    fn auto_contrast_round_trips() {
+        let mut v = SavedView::empty([800, 600]);
+        v.auto_contrast.insert(DatasetId("ds-aaaa".into()), false);
+        v.auto_contrast.insert(DatasetId("ds-bbbb".into()), true);
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains("\"auto_contrast\""));
+        let back: SavedView = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.auto_contrast.len(), 2);
+        assert_eq!(back.auto_contrast.get(&DatasetId("ds-aaaa".into())), Some(&false));
+        assert_eq!(back.auto_contrast.get(&DatasetId("ds-bbbb".into())), Some(&true));
+    }
+
+    #[test]
+    fn empty_auto_contrast_is_skipped_on_serialize() {
+        let v = SavedView::empty([800, 600]);
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(!json.contains("auto_contrast"), "empty map should be skipped");
     }
 
     #[test]

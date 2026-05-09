@@ -147,6 +147,8 @@ function App() {
     setT: dims.setT,
     setZ: dims.setZ,
     setViewMode: dims.setViewMode,
+    autoContrastMapRef: layers.autoContrastMapRef,
+    setAutoContrastMap: layers.setAutoContrastMap,
   });
 
   // Populate the bridge ↔ applier hook ref after the applier exists.

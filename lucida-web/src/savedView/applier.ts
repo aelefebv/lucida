@@ -92,7 +92,7 @@ export type ApplyResultListener = (r: ApplyResult) => void;
  *  passed to the applier. Used in `useSavedViewSync` to mark the render
  *  loop dirty + bump the dataset-settings generation + push post-apply
  *  C/T/Z back to React state (since the applier writes to WASM only). */
-export type ApplyCompleteListener = () => void;
+export type ApplyCompleteListener = (view: SavedView) => void;
 
 // --- Implementation ----------------------------------------------------
 
@@ -341,8 +341,10 @@ export class SavedViewApplier {
 
       // Fires inside the try (before the inProgress flag flips back) so
       // subscribers can read post-apply scene state and trigger render
-      // refresh + React-state sync. See `useSavedViewSync` for usage.
-      for (const fn of this.applyCompleteListeners) fn();
+      // refresh + React-state sync. The applied view is passed so
+      // listeners can restore client-only state (e.g. autoContrastMap).
+      // See `useSavedViewSync` for usage.
+      for (const fn of this.applyCompleteListeners) fn(view);
     } finally {
       // Ratchet the inProgress flag down regardless of any throw.
       this.setState({ ...this.state, inProgress: false });
