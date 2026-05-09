@@ -188,6 +188,20 @@ describe("SavedView encoder", () => {
       // index-1 default restored
       expect(back.dataset_settings["ds-x"].channel_settings![1].colormap).toBe("green");
     });
+
+    it("auto_contrast: false entries round-trip; true entries are stripped (default)", async () => {
+      const v = emptySliceView();
+      v.auto_contrast = { "ds-a": false, "ds-b": true, "ds-c": false };
+      const back = await decode(await encode(v));
+      expect(back.auto_contrast).toEqual({ "ds-a": false, "ds-c": false });
+    });
+
+    it("auto_contrast: undefined when only true entries present", async () => {
+      const v = emptySliceView();
+      v.auto_contrast = { "ds-a": true, "ds-b": true };
+      const back = await decode(await encode(v));
+      expect(back.auto_contrast).toBeUndefined();
+    });
   });
 
   describe("version handling", () => {

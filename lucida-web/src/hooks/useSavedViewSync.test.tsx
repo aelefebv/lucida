@@ -10,7 +10,7 @@
 // without a wasm init (mirrors applier.test.ts's injected fakeIdForUrl).
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { act, render } from "@testing-library/react";
 
 // Mock lucida-core BEFORE importing the hook so the import-time
@@ -112,6 +112,9 @@ function HookHarness({ scene, out, loopRef, initial }: HarnessProps) {
   const [c, setC] = useState(initial?.c ?? 0);
   const [t, setT] = useState(initial?.t ?? 0);
   const [viewMode, setViewMode] = useState<"2d" | "3d">(initial?.viewMode ?? "2d");
+  const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
+  const autoContrastMapRef = useRef(autoContrastMap);
+  autoContrastMapRef.current = autoContrastMap;
   const handle = useSavedViewSync({
     getScene: () => scene as unknown as Parameters<typeof useSavedViewSync>[0]["getScene"] extends () => infer R ? R : never,
     sendOpenRemoteDataset: () => {},
@@ -123,6 +126,8 @@ function HookHarness({ scene, out, loopRef, initial }: HarnessProps) {
     setT,
     setZ,
     setViewMode,
+    autoContrastMapRef,
+    setAutoContrastMap,
   });
   useEffect(() => {
     out.current = handle;

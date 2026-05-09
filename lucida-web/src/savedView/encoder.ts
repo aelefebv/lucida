@@ -119,6 +119,15 @@ function stripDefaults(view: SavedView): Record<string, unknown> {
   if (Object.keys(settings_stripped).length > 0) {
     out.dataset_settings = settings_stripped;
   }
+  // auto_contrast: only emit non-default (`false`) entries — the recipient
+  // applies `true` for any dataset not present in the map.
+  if (view.auto_contrast) {
+    const stripped: Record<string, boolean> = {};
+    for (const [id, val] of Object.entries(view.auto_contrast)) {
+      if (val === false) stripped[id] = false;
+    }
+    if (Object.keys(stripped).length > 0) out.auto_contrast = stripped;
+  }
   return out;
 }
 
@@ -202,6 +211,7 @@ function restoreDefaults(obj: Record<string, unknown>): SavedView {
     display: restoreDisplay(obj.display),
     dataset_order: (obj.dataset_order as string[] | undefined) ?? [],
     dataset_settings: restoreDatasetSettingsMap(obj.dataset_settings),
+    auto_contrast: (obj.auto_contrast as Record<string, boolean> | undefined) ?? undefined,
   };
   return out;
 }

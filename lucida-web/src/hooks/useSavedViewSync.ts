@@ -48,6 +48,12 @@ interface Params {
   setT: React.Dispatch<React.SetStateAction<number>>;
   setZ: React.Dispatch<React.SetStateAction<number>>;
   setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
+  /** Per-dataset auto-contrast preference (read for capture, restored on
+   *  apply). Lives in `useDatasetSettings.autoContrastMap`. Without this
+   *  round-trip, recipient's auto-contrast immediately overwrites the
+   *  captured contrast values via the intensity batcher. */
+  autoContrastMapRef: React.RefObject<Map<string, boolean>>;
+  setAutoContrastMap: React.Dispatch<React.SetStateAction<Map<string, boolean>>>;
 }
 
 interface SyncBundle {
@@ -68,6 +74,8 @@ export function useSavedViewSync({
   setT,
   setZ,
   setViewMode,
+  autoContrastMapRef,
+  setAutoContrastMap,
 }: Params): {
   applier: SavedViewApplier;
   captureBuilder: () => SavedView | null;
@@ -87,7 +95,11 @@ export function useSavedViewSync({
       const scene = getScene();
       if (!scene) return null;
       try {
-        return buildCapture({ scene, urlByDatasetId });
+        return buildCapture({
+          scene,
+          urlByDatasetId,
+          autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
+        });
       } catch (e) {
         console.warn("[SavedView] capture failed:", e);
         return null;
@@ -113,12 +125,16 @@ export function useSavedViewSync({
     const scene = getScene();
     if (!scene) return null;
     try {
-      return buildCapture({ scene, urlByDatasetId: bundle.urlByDatasetId });
+      return buildCapture({
+        scene,
+        urlByDatasetId: bundle.urlByDatasetId,
+        autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
+      });
     } catch (e) {
       console.warn("[SavedView] capture failed:", e);
       return null;
     }
-  }, [getScene, bundle.urlByDatasetId]);
+  }, [getScene, bundle.urlByDatasetId, autoContrastMapRef]);
 
   // Wrap user-facing sendOpenRemoteDataset so URL→DatasetId tracking
   // catches every local open (FileBrowser, URL bar, applier).
@@ -170,7 +186,7 @@ export function useSavedViewSync({
   // input and the slider mirrors stay stale. Mirrors the bridge's
   // follow/presence-update flow (useBridge.ts onPresenceUpdate / onFollowChanged).
   useEffect(() => {
-    return bundle.applier.subscribeApplyComplete(() => {
+    return bundle.applier.subscribeApplyComplete((view) => {
       const scene = getScene();
       if (!scene) return;
       try {
@@ -181,11 +197,29 @@ export function useSavedViewSync({
       } catch (e) {
         console.warn("[SavedView] post-apply state read failed:", e);
       }
+      // Restore client-only auto-contrast preference. Without this, the
+      // recipient's intensity batcher (default `true` per dataset)
+      // immediately overwrites the captured contrast values. Per the
+      // capture rule (defaults stripped), absent entries mean `true`;
+      // explicit `false` entries are the meaningful ones to restore.
+      if (view.auto_contrast) {
+        setAutoContrastMap((prev) => {
+          let changed = false;
+          const next = new Map(prev);
+          for (const [id, flag] of Object.entries(view.auto_contrast!)) {
+            if (next.get(id) !== flag) {
+              next.set(id, flag);
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      }
       bumpSettingsGeneration();
       loopRef.current?.markInteractiveDirty("savedview_apply");
       loopRef.current?.markResidencyDirty("savedview_apply");
     });
-  }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode]);
+  }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode, setAutoContrastMap]);
 
   // Stable notifyChange: App.tsx wraps emitPresence/emitDatasetPresence
   // so every viewport mutation co-taps the URL (Bug #1 fix). Forwards
