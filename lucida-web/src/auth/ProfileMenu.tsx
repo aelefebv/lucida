@@ -1,5 +1,6 @@
 // ProfileMenu — avatar + display name + email + Sign Out, dropdown
-// menu in the top-right corner of the app chrome.
+// menu in the bottom-left corner of the app chrome (moved from
+// top-right so the bookmark sidebar header isn't occluded).
 //
 // Slice 3 (issue #459) introduces this component. Reads the current
 // principal and `signOut` from `<AuthGate>`'s `AuthSessionContext`
@@ -17,8 +18,10 @@ import { useAuthSession } from "./AuthSession.ts";
 export function ProfileMenu() {
   const { principal, signOut } = useAuthSession();
   const [open, setOpen] = useState(false);
+  const [hovered, setHovered] = useState(false);
   const [pending, setPending] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const nameVisible = hovered || open;
 
   // Close on click-outside. Bound only while the menu is open so we
   // don't pay for a global listener at all times.
@@ -53,8 +56,8 @@ export function ProfileMenu() {
       data-testid="profile-menu"
       style={{
         position: "absolute",
-        top: 8,
-        right: 12,
+        bottom: 8,
+        left: 12,
         zIndex: 100,
         fontSize: "0.875rem",
       }}
@@ -65,24 +68,38 @@ export function ProfileMenu() {
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
+        onFocus={() => setHovered(true)}
+        onBlur={() => setHovered(false)}
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          padding: "4px 8px",
+          gap: nameVisible ? 8 : 0,
+          padding: nameVisible ? "4px 8px" : 4,
           background: "rgba(20, 20, 24, 0.85)",
           color: "#eee",
           border: "1px solid #444",
           borderRadius: 999,
           cursor: "pointer",
           font: "inherit",
+          transition: "padding 150ms ease, gap 150ms ease",
         }}
       >
         <Avatar
           pictureUrl={principal.picture_url}
           displayName={principal.display_name}
         />
-        <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span
+          style={{
+            maxWidth: nameVisible ? 160 : 0,
+            opacity: nameVisible ? 1 : 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            transition: "max-width 150ms ease, opacity 150ms ease",
+          }}
+        >
           {principal.display_name}
         </span>
       </button>
@@ -91,8 +108,8 @@ export function ProfileMenu() {
           role="menu"
           style={{
             position: "absolute",
-            top: "calc(100% + 4px)",
-            right: 0,
+            bottom: "calc(100% + 4px)",
+            left: 0,
             minWidth: 220,
             padding: "8px 0",
             background: "#1a1a1f",

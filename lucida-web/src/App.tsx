@@ -379,7 +379,7 @@ function App() {
 
   return (
     <div className="app">
-      {/* ProfileMenu floats over the top-right corner of the app
+      {/* ProfileMenu floats over the bottom-left corner of the app
           chrome. Absolute-positioning keeps it out of the existing
           flex layout so the LayerPanel + canvas geometry is untouched. */}
       <ProfileMenu />
