@@ -31,7 +31,12 @@ export function AuthGate({ children }: AuthGateProps) {
   }
 
   if (!("authenticated" in state) || !state.authenticated) {
-    return <UnauthLanding />;
+    // `signedOut` rides the enriched /auth/whoami 401 response from
+    // the marker-aware middleware. UnauthLanding renders a static
+    // "Signed out — Sign in again" card when set; auto-bounces
+    // otherwise (cold visit / session expiry mid-tab).
+    const signedOut = "signedOut" in state && state.signedOut === true;
+    return <UnauthLanding signedOut={signedOut} />;
   }
 
   return (

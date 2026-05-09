@@ -45,9 +45,24 @@ User has been idle past the 7-day idle window. Next request triggers a 401 from 
 
 Different shape. `POST /auth/logout` (`auth/handlers.rs::logout`):
 1. Reads cookie, calls `LoginSessionStore::delete(id)`.
-2. Sets clearing cookie (`Set-Cookie: lucida_session=; Max-Age=0; Path=/; …` matching original attributes).
+2. Emits TWO `Set-Cookie` headers (via `AppendHeaders`):
+   - `lucida_session=; Max-Age=0; Path=/; …` — clears the session cookie.
+   - `lucida_signed_out=1; Max-Age=600; HttpOnly; SameSite=Lax; Path=/; …` — sets the marker cookie (per [[decisions/0019-post-logout-marker-cookie-and-prompt-select-account]]).
 3. 302 to `/`.
-4. Browser navigates to `/`; middleware sees no valid cookie; returns unauth landing.
+
+The SPA's `useAuthState.signOut` then `await refresh()`, which re-fetches `/auth/whoami`. The marker-aware middleware returns 401 with body `{ "error": "unauthenticated", "signedOut": true }`. The SPA threads `signedOut: true` onto `AuthState`; `AuthGate` re-renders `<UnauthLanding signedOut />`, which renders a static "Signed out — Sign in again" card instead of auto-bouncing.
+
+In production (lucida-server serves the SPA bundle), a hard refresh routes through the marker-aware middleware HTML branch and gets `SIGNED_OUT_LANDING_HTML` directly — same UX, server-rendered. In dev (vite serves `/`), refresh re-bootstraps the SPA, which re-runs whoami, gets the same `signedOut: true`, and renders the React `SignedOutCard`. Both surfaces converge on the same UX from the same underlying signal.
+
+When the user clicks "Sign in again," `/auth/start` reads the marker:
+- Calls `authorize_url(&state, Some(Prompt::SelectAccount))` so Google's URL gets `&prompt=select_account` — Google shows the account chooser instead of silently passing through its still-active session.
+- Does NOT clear the marker. The marker stays set so a chooser-bail (close tab, click back) followed by return to lucida still hits the static landing → chooser flow.
+
+The marker is **cleared in `/auth/callback` on success**, alongside the new session cookie's Set-Cookie (also via `AppendHeaders`). At that point the session cookie is the source of truth; the marker has done its job. Failure paths (`/auth/error?code=…`) leave the marker alone so the user can retry from `/`.
+
+The marker has a 10-minute TTL as a backstop. Without the marker, `/auth/start` behaves exactly as it does on the cold path — no `prompt=`, friction-free silent pass-through.
+
+Why this shape: Google's authorization session typically outlives lucida's. A naive auto-bounce after logout would 302 → `/auth/start` → Google → silent pass-through → callback → fresh lucida session, defeating the user's intent. The marker plus `prompt=select_account` gives the user a deliberate choice point. Clearing the marker only on callback success means a chooser-bail doesn't silently undo the logout. Auto-bounce is still correct for *passive* unauth (session expired mid-tab), where re-auth without a click is the friction-free behavior the user wants — which is why the marker only flips on after explicit logout.
 
 Logout is local-only — no Google revocation, no federation. See [[decisions/0016-backend-mediated-oauth-with-session-cookies]] §"Why local-only logout."
 

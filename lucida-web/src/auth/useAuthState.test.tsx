@@ -37,6 +37,7 @@ function Probe() {
     if ("authenticated" in state && state.authenticated) {
       return `authed:${state.principal.email}`;
     }
+    if ("signedOut" in state && state.signedOut) return "signed-out";
     return "unauth";
   })();
   return (
@@ -64,12 +65,16 @@ describe("useAuthState", () => {
     expect(fetchAuthState).toHaveBeenCalledTimes(1);
   });
 
-  it("signOut posts logout, then refreshes — state flips to unauth", async () => {
-    // First call (mount) returns authed. Second call (refresh after
-    // signOut) returns unauth — mirrors the real server flow.
+  it("signOut posts logout, then refreshes — state flips to signed-out from enriched whoami", async () => {
+    // Mount whoami → authed. signOut → postLogout, then refresh
+    // whoami which now sees the marker cookie via the enriched 401
+    // body and returns `{ authenticated: false, signedOut: true }`.
+    // No window.location reload — the signal travels via the whoami
+    // response, so the SPA stays mounted and AuthGate flips to the
+    // SignedOutCard branch of UnauthLanding.
     fetchAuthState
       .mockResolvedValueOnce({ authenticated: true, principal: PRINCIPAL })
-      .mockResolvedValueOnce({ authenticated: false });
+      .mockResolvedValueOnce({ authenticated: false, signedOut: true });
     postLogout.mockResolvedValueOnce(undefined);
 
     await act(async () => {
@@ -84,6 +89,6 @@ describe("useAuthState", () => {
     expect(postLogout).toHaveBeenCalledTimes(1);
     // Two whoami calls total: mount + post-signOut refresh.
     expect(fetchAuthState).toHaveBeenCalledTimes(2);
-    expect(screen.getByTestId("state").textContent).toBe("unauth");
+    expect(screen.getByTestId("state").textContent).toBe("signed-out");
   });
 });

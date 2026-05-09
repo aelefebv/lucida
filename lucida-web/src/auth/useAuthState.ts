@@ -17,7 +17,10 @@ export interface AuthStateHandle {
   state: AuthState;
   /** Re-runs `/auth/whoami`; updates `state` to whatever it returns. */
   refresh: () => Promise<void>;
-  /** POSTs `/auth/logout`, then refreshes — flips `state` to unauth. */
+  /** POSTs `/auth/logout`, then refreshes whoami. The server has
+   *  cleared the session and set the `lucida_signed_out` marker; the
+   *  whoami refresh sees the marker via the enriched 401 body and
+   *  flips state to `{ authenticated: false, signedOut: true }`. */
   signOut: () => Promise<void>;
 }
 
@@ -36,6 +39,11 @@ export function useAuthState(): AuthStateHandle {
 
   const signOut = useCallback(async () => {
     await postLogout();
+    // The whoami refresh hits the marker-aware middleware, which
+    // returns 401 + `signedOut: true`. AuthGate renders UnauthLanding
+    // with `signedOut`, which shows the static "Signed out" card
+    // instead of auto-bouncing through Google. No full reload — the
+    // signal travels via the enriched whoami response.
     await refresh();
   }, [refresh]);
 

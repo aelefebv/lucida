@@ -44,7 +44,19 @@ export async function fetchAuthState(fetchImpl: FetchLike = fetch): Promise<Auth
       return { authenticated: false };
     }
   }
-  return { authenticated: false };
+  // 401 (or any other non-200): unauth. Server enriches the JSON body
+  // with `signedOut: true` when the `lucida_signed_out` marker cookie
+  // is present (post-logout). The cookie itself is HttpOnly so JS
+  // can't read it; this is the SPA's only window into "did the user
+  // just sign out?", which UnauthLanding uses to decide between
+  // static-card and auto-bounce. Body parse failure (network blip,
+  // older server) gracefully degrades to the cold-path branch.
+  try {
+    const body = (await res.json()) as { signedOut?: boolean };
+    return { authenticated: false, signedOut: body.signedOut === true };
+  } catch {
+    return { authenticated: false };
+  }
 }
 
 /**

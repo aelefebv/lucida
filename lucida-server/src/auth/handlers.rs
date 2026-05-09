@@ -10,7 +10,7 @@ use std::sync::Arc;
 use axum::extract::{Query, State};
 use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::http::{Request, StatusCode};
-use axum::response::{IntoResponse, Json, Response};
+use axum::response::{AppendHeaders, IntoResponse, Json, Response};
 use axum::Extension;
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, Utc};
@@ -21,8 +21,11 @@ use tracing::{error, info, warn};
 use lucida_core::auth_principal::AuthPrincipal;
 
 use super::config::AuthConfig;
-use super::cookie::{build_clearing_cookie, build_session_cookie, read_session_cookie, request_is_https};
-use super::google_oauth::{GoogleOAuthClient, OAuthError};
+use super::cookie::{
+    build_clearing_cookie, build_clearing_signed_out_marker, build_session_cookie,
+    build_signed_out_marker, read_session_cookie, read_signed_out_marker, request_is_https,
+};
+use super::google_oauth::{GoogleOAuthClient, OAuthError, Prompt};
 use super::pending_auth::{PendingAuth, PendingAuthStore};
 use super::principal::{principal_or_rejection_from_claims, RejectionReason};
 use super::session_store::{LoginSession, LoginSessionStore};
@@ -167,10 +170,23 @@ pub async fn logout<B>(
     // expand the audit shape, this slice just lands the event.
     info!(email = email.as_deref().unwrap_or("<unknown>"), "auth.logout");
 
-    let cookie_header = build_clearing_cookie(&state.config, request_is_https(&parts));
+    // Two Set-Cookie headers: clear `lucida_session`, and set the
+    // `lucida_signed_out` marker. The marker survives the page refresh
+    // that would otherwise route through the auto-bouncing unauth
+    // landing → Google's still-active session → silent re-auth.
+    // Middleware consumes it (serves the static landing) and
+    // `/auth/start` clears it on user-initiated re-sign-in.
+    //
+    // `AppendHeaders` (not `[(name, val); N]`) — Set-Cookie is one of
+    // the few headers that legitimately needs multiple emissions; the
+    // array form would silently overwrite the second on the first.
+    let is_https = request_is_https(&parts);
+    let clearing = build_clearing_cookie(&state.config, is_https);
+    let marker = build_signed_out_marker(&state.config, is_https);
     (
         StatusCode::FOUND,
-        [(SET_COOKIE, cookie_header), (LOCATION, "/".to_string())],
+        AppendHeaders([(SET_COOKIE, clearing), (SET_COOKIE, marker)]),
+        [(LOCATION, "/".to_string())],
     )
         .into_response()
 }
@@ -208,15 +224,42 @@ pub struct StartRequest {
 /// in `pending_auth`, and 302s to Google's authorization URL with the
 /// token in the `state` parameter. Per ADR-0013 the hash is captured
 /// here so a `#view=…` link survives the redirect round-trip.
+///
+/// When the inbound request carries the `lucida_signed_out` marker
+/// cookie (set by `/auth/logout`), this handler asks Google to show
+/// the account chooser (`prompt=select_account`) instead of silently
+/// passing through its still-active session.
+///
+/// **The marker is NOT cleared here.** It's cleared in `/auth/callback`
+/// on success. If the user bails out at Google's chooser (closes the
+/// tab, clicks back) and returns to lucida, the marker must still be
+/// in place so the next `/auth/start` also sends `prompt=select_account`
+/// — otherwise we'd silently re-auth them via Google's still-active
+/// session, defeating the logout. See ADR-0019 §"Why clear in callback,
+/// not start."
+///
+/// Cold-path callers (no marker) get the friction-free silent
+/// pass-through Google does when it has an active session — that's the
+/// design intent for first-visit and post-expiry re-auth (ADR-0016).
 pub async fn auth_start(
     State(state): State<OAuthState>,
     Query(query): Query<StartRequest>,
-    body: Option<Json<StartRequest>>,
+    req: Request<axum::body::Body>,
 ) -> Response {
-    // JSON body wins when present (the typical JS shim path); query
-    // params are the fallback. We dedupe with a small helper so the
-    // "first non-empty wins" rule lives in one place.
-    let json_payload = body.map(|j| j.0).unwrap_or_default();
+    let (parts, body) = req.into_parts();
+
+    let had_signed_out_marker = read_signed_out_marker(&parts.headers);
+
+    // Re-extract the JSON body via axum's own deserializer rather than
+    // listing it in the handler args (which would be Option<Json<…>>
+    // and fight with the consumed-Request shape we need for cookie
+    // reading). For the noscript GET fallback, body is empty/missing
+    // and the JSON parse harmlessly fails, falling through to query
+    // params.
+    let json_payload: StartRequest = match axum::body::to_bytes(body, 64 * 1024).await {
+        Ok(bytes) if !bytes.is_empty() => serde_json::from_slice(&bytes).unwrap_or_default(),
+        _ => StartRequest::default(),
+    };
     let path = first_nonempty(&[json_payload.path.as_deref(), query.path.as_deref()])
         .unwrap_or("/")
         .to_string();
@@ -244,8 +287,9 @@ pub async fn auth_start(
             .into_response();
     }
 
-    let url = state.google.authorize_url(&state_token);
-    info!("auth.signin.start");
+    let prompt = had_signed_out_marker.then_some(Prompt::SelectAccount);
+    let url = state.google.authorize_url(&state_token, prompt);
+    info!(reauth = had_signed_out_marker, "auth.signin.start");
     (StatusCode::FOUND, [(LOCATION, url)]).into_response()
 }
 
@@ -406,7 +450,8 @@ pub async fn auth_callback(
         return redirect_to_error(&[("code", "auth_failed")]);
     }
 
-    let cookie_header = build_session_cookie(&state.config, &id, request_is_https(&parts));
+    let is_https = request_is_https(&parts);
+    let cookie_header = build_session_cookie(&state.config, &id, is_https);
     let target = redirect_target(&pending.intended_path, &pending.intended_hash);
     info!(
         email = %principal.email,
@@ -415,9 +460,17 @@ pub async fn auth_callback(
         "auth.signin.success",
     );
 
+    // Two Set-Cookie headers: set the new session cookie AND clear
+    // the `lucida_signed_out` marker (no-op if it wasn't present, but
+    // emitting unconditionally keeps the response shape simple). The
+    // marker has done its job — the user has successfully re-signed-in.
+    // `AppendHeaders` because the array form `[(K, V); N]` would
+    // overwrite duplicate header names.
+    let clearing_marker = build_clearing_signed_out_marker(&state.config, is_https);
     (
         StatusCode::FOUND,
-        [(SET_COOKIE, cookie_header), (LOCATION, target)],
+        AppendHeaders([(SET_COOKIE, cookie_header), (SET_COOKIE, clearing_marker)]),
+        [(LOCATION, target)],
     )
         .into_response()
 }
@@ -741,11 +794,27 @@ mod tests {
         let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
         assert_eq!(location, "/");
 
-        let set_cookie = res.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
-        assert!(set_cookie.contains("lucida_session="));
-        assert!(set_cookie.contains("Max-Age=0"));
-        assert!(set_cookie.contains("Path=/"));
-        assert!(set_cookie.contains("SameSite=Lax"));
+        // Two Set-Cookie headers expected: clear lucida_session AND
+        // set the lucida_signed_out marker. Iterate get_all so we
+        // don't accidentally only see the first one.
+        let set_cookies: Vec<&str> = res
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        let clearing = set_cookies
+            .iter()
+            .find(|c| c.contains("lucida_session=") && c.contains("Max-Age=0"))
+            .expect("clearing cookie for lucida_session");
+        assert!(clearing.contains("Path=/"));
+        assert!(clearing.contains("SameSite=Lax"));
+        let marker = set_cookies
+            .iter()
+            .find(|c| c.contains("lucida_signed_out=1"))
+            .expect("signed-out marker cookie");
+        assert!(marker.contains("Max-Age=600"));
+        assert!(marker.contains("HttpOnly"));
 
         // The row must be gone after logout.
         assert!(store.get("kill-me").await.unwrap().is_none());
@@ -767,8 +836,16 @@ mod tests {
             res.headers().get(LOCATION).unwrap().to_str().unwrap(),
             "/"
         );
-        let set_cookie = res.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
-        assert!(set_cookie.contains("Max-Age=0"));
+        // Even cookieless callers get the clearing cookie + the marker —
+        // logout's contract is shape-stable regardless of inbound state.
+        let set_cookies: Vec<&str> = res
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert!(set_cookies.iter().any(|c| c.contains("lucida_session=") && c.contains("Max-Age=0")));
+        assert!(set_cookies.iter().any(|c| c.contains("lucida_signed_out=1")));
         // No rows existed; no rows now.
         assert!(store.is_empty());
     }
@@ -790,8 +867,14 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
 
         assert_eq!(res.status(), StatusCode::FOUND);
-        let set_cookie = res.headers().get(SET_COOKIE).unwrap().to_str().unwrap();
-        assert!(set_cookie.contains("Max-Age=0"));
+        let set_cookies: Vec<&str> = res
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert!(set_cookies.iter().any(|c| c.contains("lucida_session=") && c.contains("Max-Age=0")));
+        assert!(set_cookies.iter().any(|c| c.contains("lucida_signed_out=1")));
     }
 
     // -- redirect_target + random_state_token (slice 4) -----------------

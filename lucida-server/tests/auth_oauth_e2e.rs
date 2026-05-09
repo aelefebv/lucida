@@ -382,18 +382,30 @@ async fn full_oauth_flow_lands_user_at_intended_path_with_hash() {
     let cb_res = app.router.clone().oneshot(cb_req).await.unwrap();
     assert_eq!(cb_res.status(), StatusCode::FOUND, "callback must 302");
 
-    // Cookie set + redirect target reconstructed from intent
-    let set_cookie = cb_res
+    // Cookie set + redirect target reconstructed from intent.
+    // Two Set-Cookie headers expected: the new session cookie AND a
+    // clearing-marker for `lucida_signed_out` (no-op when marker
+    // wasn't present, but emitted unconditionally — see ADR-0019).
+    let set_cookies: Vec<String> = cb_res
         .headers()
-        .get(SET_COOKIE)
-        .expect("callback must set cookie")
-        .to_str()
-        .unwrap()
-        .to_string();
-    assert!(set_cookie.contains("lucida_session="));
+        .get_all(SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    let set_cookie = set_cookies
+        .iter()
+        .find(|c| c.contains("lucida_session=") && !c.contains("lucida_session=;"))
+        .expect("session cookie must be set")
+        .clone();
     assert!(set_cookie.contains("HttpOnly"));
     assert!(set_cookie.contains("SameSite=Lax"));
     assert!(set_cookie.contains("Path=/"));
+    assert!(
+        set_cookies
+            .iter()
+            .any(|c| c.contains("lucida_signed_out=") && c.contains("Max-Age=0")),
+        "callback must emit a clearing-marker Set-Cookie",
+    );
 
     let landing = cb_res
         .headers()
@@ -548,6 +560,83 @@ async fn auth_start_via_query_params_works_too() {
     let res = app.router.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FOUND);
     assert_eq!(app.pending_store.len(), 1);
+}
+
+/// Marker-cookie path: when `lucida_signed_out=1` is on the inbound
+/// request, `/auth/start` must include `prompt=select_account` on
+/// Google's authorization URL. **The marker is NOT cleared here** —
+/// it persists across multiple `/auth/start` invocations so the user
+/// can bail out at Google's chooser and come back without losing the
+/// signed-out posture. The marker is cleared by `/auth/callback` on
+/// successful sign-in.
+#[tokio::test]
+async fn auth_start_with_marker_cookie_adds_prompt_but_does_not_clear_marker() {
+    let keys = build_test_keys();
+    let (mock_base, _mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
+    let app = build_lucida_app(&mock_base).await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/auth/start?path=%2F&hash=")
+        .header("cookie", "lucida_signed_out=1")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.router.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FOUND);
+
+    let location = res
+        .headers()
+        .get(LOCATION)
+        .expect("/auth/start must 302")
+        .to_str()
+        .unwrap();
+    assert!(
+        location.contains("prompt=select_account"),
+        "marker-cookie path must request the account chooser, got: {}",
+        location,
+    );
+
+    // The marker must NOT be cleared — it's load-bearing for the
+    // "user bailed out, came back" cycle. /auth/callback clears it
+    // on success.
+    let set_cookies: Vec<_> = res
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .collect();
+    assert!(
+        set_cookies.is_empty(),
+        "/auth/start must not clear the marker; got {} Set-Cookie header(s)",
+        set_cookies.len(),
+    );
+}
+
+/// Cold path (no marker cookie): no `prompt=` on the URL, no clearing
+/// Set-Cookie. Confirms the conditional branch doesn't leak into the
+/// friction-free first-visit / session-expiry path.
+#[tokio::test]
+async fn auth_start_without_marker_cookie_omits_prompt() {
+    let keys = build_test_keys();
+    let (mock_base, _mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
+    let app = build_lucida_app(&mock_base).await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/auth/start?path=%2F&hash=")
+        .body(Body::empty())
+        .unwrap();
+    let res = app.router.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FOUND);
+
+    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
+    assert!(!location.contains("prompt="));
+
+    let set_cookies: Vec<_> = res
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .collect();
+    assert!(set_cookies.is_empty());
 }
 
 // -- slice 5: hosted-domain + email_verified --------------------------

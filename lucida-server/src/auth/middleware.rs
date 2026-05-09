@@ -34,9 +34,10 @@ use axum::Json;
 use serde_json::json;
 
 use crate::auth::config::AuthConfig;
+use crate::auth::cookie::read_signed_out_marker;
 use crate::auth::principal::{AuthError, PrincipalExtractor, SessionCookieExtractor};
 use crate::auth::session_store::LoginSessionStore;
-use crate::auth::unauth_landing::UNAUTH_LANDING_HTML;
+use crate::auth::unauth_landing::{SIGNED_OUT_LANDING_HTML, UNAUTH_LANDING_HTML};
 
 /// Shared handle to the active extractor. Wired into the router's
 /// state so middleware closures can grab it without holding a
@@ -80,12 +81,32 @@ pub async fn auth_middleware(
 /// JSON 401. `Internal` errors stay bare-JSON for both shapes; an
 /// HTML page that says "internal error" without context is worse
 /// than a 500 that the browser renders as plain text.
+///
+/// On HTML routes the page also branches on the `lucida_signed_out`
+/// marker cookie (set by `/auth/logout`). When present, the user just
+/// explicitly logged out — serve the static `SIGNED_OUT_LANDING_HTML`
+/// instead of the auto-bouncing landing, otherwise a refresh would
+/// silently re-auth them through Google's still-active session and
+/// defeat their intent.
+///
+/// On JSON routes (the SPA's `/auth/whoami` polling) we also surface
+/// the marker as `"signedOut": true` in the 401 body. In dev, vite
+/// serves `/` directly so the SPA never sees `SIGNED_OUT_LANDING_HTML`;
+/// the JSON signal is what lets `UnauthLanding` render its static
+/// "Signed out — Sign in again" card instead of auto-bouncing back
+/// through Google. (HttpOnly cookie ⇒ JS can't read the marker
+/// directly; this signal is the SPA's only window into it.)
 fn unauthenticated_response(err: &AuthError, headers: &HeaderMap) -> Response {
     if matches!(err, AuthError::Unauthenticated) && accepts_html(headers) {
+        let body = if read_signed_out_marker(headers) {
+            SIGNED_OUT_LANDING_HTML
+        } else {
+            UNAUTH_LANDING_HTML
+        };
         return (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            Body::from(UNAUTH_LANDING_HTML),
+            Body::from(body),
         )
             .into_response();
     }
@@ -99,9 +120,11 @@ fn unauthenticated_response(err: &AuthError, headers: &HeaderMap) -> Response {
         AuthError::Unauthenticated => None,
         AuthError::Internal(msg) => Some(msg.as_str()),
     };
+    let signed_out =
+        matches!(err, AuthError::Unauthenticated) && read_signed_out_marker(headers);
     (
         status,
-        Json(json!({ "error": code, "detail": detail })),
+        Json(json!({ "error": code, "detail": detail, "signedOut": signed_out })),
     )
         .into_response()
 }
@@ -214,6 +237,36 @@ mod tests {
         let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "unauthenticated");
+        // No marker cookie present → signedOut: false. The SPA reads
+        // this to decide between "render static signed-out card" and
+        // "auto-bounce as cold visit / session expiry."
+        assert_eq!(body["signedOut"], false);
+    }
+
+    /// SPA-facing companion to `middleware_returns_signed_out_landing_when_marker_cookie_present`:
+    /// JSON 401 includes `signedOut: true` when the marker cookie is
+    /// present, so the SPA can render its static signed-out card even
+    /// in dev (where vite serves `/` and the static landing HTML never
+    /// reaches the SPA).
+    #[tokio::test]
+    async fn middleware_returns_401_with_signed_out_true_when_marker_cookie_present() {
+        let store = Arc::new(MemorySessionStore::new());
+        let config = Arc::new(AuthConfig::for_tests());
+        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let app = router_with_extractor(extractor);
+
+        let req = Request::builder()
+            .uri("/echo")
+            .header(header::COOKIE, "lucida_signed_out=1")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "unauthenticated");
+        assert_eq!(body["signedOut"], true);
     }
 
     /// Exercise the 5xx branch via a hand-rolled extractor that
@@ -287,6 +340,43 @@ mod tests {
         assert!(
             body.contains("encodeURIComponent"),
             "shim must url-encode hash + path",
+        );
+        // No marker cookie → must serve the auto-bouncing variant.
+        assert!(
+            body.contains("window.location.replace"),
+            "no marker → auto-bounce landing",
+        );
+    }
+
+    /// Marker cookie (set by `/auth/logout`) flips the landing to the
+    /// static "Signed out" variant — no auto-bounce, click-required
+    /// sign-in. Without this branch, refreshing after logout would
+    /// silently re-auth via Google's still-active session.
+    #[tokio::test]
+    async fn middleware_returns_signed_out_landing_when_marker_cookie_present() {
+        let store = Arc::new(MemorySessionStore::new());
+        let config = Arc::new(AuthConfig::for_tests());
+        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let app = router_with_extractor(extractor);
+
+        let req = Request::builder()
+            .uri("/echo")
+            .header(header::ACCEPT, "text/html,application/xhtml+xml")
+            .header(header::COOKIE, "lucida_signed_out=1")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        // Static signed-out landing markers.
+        assert!(body.contains("Signed out"));
+        assert!(body.contains("Sign in again"));
+        // Crucially: must NOT auto-bounce.
+        assert!(
+            !body.contains("window.location.replace"),
+            "marker present → static landing, no auto-bounce",
         );
     }
 }

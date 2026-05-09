@@ -5,7 +5,7 @@
 // with the captured `pathname + search` and (de-leading-`#`) hash.
 
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { act, cleanup, render } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { UnauthLanding, buildSignInUrl } from "./UnauthLanding.tsx";
 
 afterEach(cleanup);
@@ -68,5 +68,41 @@ describe("UnauthLanding", () => {
       container = r.container;
     });
     expect(container.textContent).toMatch(/Redirecting/i);
+  });
+
+  it("renders the signed-out card and skips auto-bounce when signedOut is true", async () => {
+    const navigate = vi.fn();
+    await act(async () => {
+      render(
+        <UnauthLanding
+          navigate={navigate}
+          location={{ pathname: "/x", search: "", hash: "#h=1" }}
+          signedOut
+        />,
+      );
+    });
+    // Crucially, no automatic navigation — the user has to click.
+    expect(navigate).not.toHaveBeenCalled();
+    expect(screen.getByRole("heading", { name: /Signed out/i })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Sign in again/i })).toBeTruthy();
+  });
+
+  it("signed-out card's button initiates the sign-in bounce on click", async () => {
+    const navigate = vi.fn();
+    await act(async () => {
+      render(
+        <UnauthLanding
+          navigate={navigate}
+          location={{ pathname: "/x", search: "", hash: "#h=1" }}
+          signedOut
+        />,
+      );
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: /Sign in again/i }).click();
+    });
+    expect(navigate).toHaveBeenCalledTimes(1);
+    const url = navigate.mock.calls[0][0] as string;
+    expect(url).toContain("/auth/start?path=%2Fx&hash=h%3D1");
   });
 });

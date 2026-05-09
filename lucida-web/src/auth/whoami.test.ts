@@ -23,14 +23,25 @@ describe("fetchAuthState", () => {
     expect(state).toEqual({ authenticated: true, principal: STUB_PRINCIPAL });
   });
 
-  it("returns unauthenticated on 401", async () => {
+  it("returns unauthenticated on 401 with signedOut: false", async () => {
     const state = await fetchAuthState(
-      fakeFetch(401, { error: "unauthenticated" }),
+      fakeFetch(401, { error: "unauthenticated", signedOut: false }),
     );
-    expect(state).toEqual({ authenticated: false });
+    expect(state).toEqual({ authenticated: false, signedOut: false });
   });
 
-  it("returns unauthenticated on 5xx", async () => {
+  it("propagates signedOut: true from the marker-aware 401 body", async () => {
+    // Server's marker-aware middleware enriches the 401 with
+    // `signedOut: true` when the lucida_signed_out cookie is present.
+    // The SPA reads it to render UnauthLanding's static card instead
+    // of auto-bouncing through Google.
+    const state = await fetchAuthState(
+      fakeFetch(401, { error: "unauthenticated", signedOut: true }),
+    );
+    expect(state).toEqual({ authenticated: false, signedOut: true });
+  });
+
+  it("returns unauthenticated on 5xx (body unparseable)", async () => {
     const state = await fetchAuthState(fakeFetch(500, "boom"));
     expect(state).toEqual({ authenticated: false });
   });

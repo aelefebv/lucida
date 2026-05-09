@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-08
 ---
 
 # Decisions
@@ -29,3 +29,4 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0016-backend-mediated-oauth-with-session-cookies]] — Google OAuth flow runs server-side; httpOnly session cookie; no JWT in JS; SameSite=Lax + REST discipline for CSRF (2026-05-08, proposed)
 - [[decisions/0017-configurable-from-day-one-for-oss-release]] — every Calico-specific value lives in env vars; `PrincipalExtractor` trait is the OSS provider extension point (2026-05-08, proposed)
 - [[decisions/0018-auth-mode-auto-detect-by-bind-address]] — `LUCIDA_AUTH` defaults derived from bind address; loopback → disabled, non-loopback → google; `LUCIDA_INSECURE=1` overrides (2026-05-08, proposed)
+- [[decisions/0019-post-logout-marker-cookie-and-prompt-select-account]] — `lucida_signed_out` marker cookie set by `/auth/logout`; middleware serves a static landing instead of auto-bouncing; `/auth/start` adds `prompt=select_account` and clears the marker (2026-05-08)

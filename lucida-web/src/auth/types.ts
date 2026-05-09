@@ -14,4 +14,4 @@ export interface AuthPrincipal {
 export type AuthState =
   | { status: "loading" }
   | { authenticated: true; principal: AuthPrincipal }
-  | { authenticated: false };
+  | { authenticated: false; signedOut?: boolean };

@@ -22,6 +22,23 @@ use cookie::{Cookie, SameSite};
 
 use super::config::{AuthConfig, SecureCookieMode};
 
+/// Marker cookie set by `/auth/logout` and consumed by middleware +
+/// `/auth/start`. Its presence (no value semantics — empty body would
+/// also work) tells the next request: "this user just signed out, do
+/// not auto-bounce them back through OAuth." Cleared by `/auth/start`
+/// once the user explicitly opts back in. See ADR on post-logout
+/// re-sign-in for the full rationale; cookie attributes mirror
+/// `lucida_session` (HttpOnly + SameSite=Lax + Path=/ + auto Secure).
+pub const SIGNED_OUT_COOKIE_NAME: &str = "lucida_signed_out";
+
+/// TTL for the marker cookie: 10 minutes. A backstop for the rare path
+/// where the user never returns to `/auth/start` to clear it (closed
+/// the tab, walked away). Short enough that "I logged out, came back
+/// the next morning" behaves as a fresh visit (auto-bounce friction-
+/// free), long enough to cover the realistic refresh / new-tab /
+/// bookmark-click windows immediately after logout.
+pub const SIGNED_OUT_TTL_SECS: i64 = 600;
+
 /// Pull the session id out of an inbound request's `Cookie` header.
 ///
 /// Returns the *first* matching cookie value; duplicates are unusual
@@ -93,6 +110,47 @@ pub fn build_session_cookie(
 /// stays in one place (otherwise it's easy to drift Path/SameSite).
 pub fn build_clearing_cookie(config: &AuthConfig, request_is_https: bool) -> String {
     let mut cookie = Cookie::new(config.cookie_name.clone(), "");
+    cookie.set_http_only(true);
+    cookie.set_path("/");
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_max_age(CookieDuration::ZERO);
+    cookie.to_string()
+}
+
+/// True iff the inbound request carries the `lucida_signed_out` marker
+/// cookie. The value isn't inspected — presence is the entire signal.
+/// Takes `&HeaderMap` rather than `&Parts` so the middleware can call
+/// it after destructuring the request without re-borrowing.
+pub fn read_signed_out_marker(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|hv| hv.to_str().ok())
+        .flat_map(|raw| Cookie::split_parse(raw))
+        .filter_map(|res| res.ok())
+        .any(|c| c.name() == SIGNED_OUT_COOKIE_NAME)
+}
+
+/// Build the `Set-Cookie` header that mints the marker. Attributes
+/// mirror `build_session_cookie` — same HttpOnly/Path/SameSite/Secure
+/// semantics — so the marker travels exactly the same trust contour as
+/// the session cookie and isn't readable by JS.
+pub fn build_signed_out_marker(config: &AuthConfig, request_is_https: bool) -> String {
+    let mut cookie = Cookie::new(SIGNED_OUT_COOKIE_NAME, "1");
+    cookie.set_http_only(true);
+    cookie.set_path("/");
+    cookie.set_same_site(SameSite::Lax);
+    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_max_age(CookieDuration::seconds(SIGNED_OUT_TTL_SECS));
+    cookie.to_string()
+}
+
+/// Build the `Set-Cookie` header that clears the marker. Emitted by
+/// `/auth/start` so a successful re-sign-in immediately drops the
+/// marker (rather than waiting for the 10-minute TTL to expire).
+pub fn build_clearing_signed_out_marker(config: &AuthConfig, request_is_https: bool) -> String {
+    let mut cookie = Cookie::new(SIGNED_OUT_COOKIE_NAME, "");
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
@@ -174,5 +232,46 @@ mod tests {
         let header = build_clearing_cookie(&config, false);
         assert!(header.contains("Max-Age=0"));
         assert!(header.contains("lucida_session=;"));
+    }
+
+    #[test]
+    fn read_signed_out_marker_detects_presence() {
+        let parts = parts_with_cookie("lucida_signed_out=1; lucida_session=abc");
+        assert!(read_signed_out_marker(&parts.headers));
+    }
+
+    #[test]
+    fn read_signed_out_marker_absent_when_not_present() {
+        let parts = parts_with_cookie("lucida_session=abc");
+        assert!(!read_signed_out_marker(&parts.headers));
+    }
+
+    #[test]
+    fn build_signed_out_marker_carries_required_attributes() {
+        let config = AuthConfig::for_tests();
+        let header = build_signed_out_marker(&config, true);
+        assert!(header.contains("lucida_signed_out=1"));
+        assert!(header.contains("HttpOnly"));
+        assert!(header.contains("Path=/"));
+        assert!(header.contains("SameSite=Lax"));
+        assert!(header.contains("Secure"));
+        // 10 minute TTL — backstop for the case where /auth/start
+        // never runs to clear the marker.
+        assert!(header.contains("Max-Age=600"));
+    }
+
+    #[test]
+    fn build_signed_out_marker_no_secure_when_not_https() {
+        let config = AuthConfig::for_tests();
+        let header = build_signed_out_marker(&config, false);
+        assert!(!header.contains("Secure"));
+    }
+
+    #[test]
+    fn build_clearing_signed_out_marker_zeroes_max_age() {
+        let config = AuthConfig::for_tests();
+        let header = build_clearing_signed_out_marker(&config, false);
+        assert!(header.contains("Max-Age=0"));
+        assert!(header.contains("lucida_signed_out=;"));
     }
 }

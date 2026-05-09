@@ -47,15 +47,21 @@ export interface UnauthLandingProps {
   navigate?: (url: string) => void;
   /** Override `window.location` for tests. */
   location?: { pathname: string; search: string; hash: string };
+  /** True when the marker-aware /auth/whoami response told us "the
+   *  user just signed out." Suppresses the auto-bounce and renders
+   *  a static "Sign in again" card so we don't immediately re-auth
+   *  them via Google's still-active session. */
+  signedOut?: boolean;
 }
 
-export function UnauthLanding({ navigate, location }: UnauthLandingProps = {}) {
+export function UnauthLanding({ navigate, location, signedOut }: UnauthLandingProps = {}) {
   // useRef + useEffect so a single AuthGate render produces exactly
   // one navigation. React 18+ in strict mode double-invokes effect
   // bodies; the ref guards against navigating twice.
   const navigatedRef = useRef(false);
 
   useEffect(() => {
+    if (signedOut) return;
     if (navigatedRef.current) return;
     navigatedRef.current = true;
     const loc = location ?? window.location;
@@ -67,7 +73,11 @@ export function UnauthLanding({ navigate, location }: UnauthLandingProps = {}) {
       // entry the user can hit back into.
       window.location.replace(url);
     }
-  }, [navigate, location]);
+  }, [navigate, location, signedOut]);
+
+  if (signedOut) {
+    return <SignedOutCard navigate={navigate} location={location} />;
+  }
 
   return (
     <div
@@ -78,6 +88,68 @@ export function UnauthLanding({ navigate, location }: UnauthLandingProps = {}) {
       }}
     >
       Redirecting to sign-in...
+    </div>
+  );
+}
+
+/** Shown when /auth/whoami's enriched 401 indicated `signedOut: true`.
+ *  Static — no auto-bounce. The user clicks "Sign in again" to
+ *  re-enter the OAuth flow; the marker cookie is still set, so
+ *  /auth/start adds prompt=select_account and Google shows the
+ *  account chooser. */
+function SignedOutCard({
+  navigate,
+  location,
+}: {
+  navigate?: (url: string) => void;
+  location?: { pathname: string; search: string; hash: string };
+}) {
+  const onSignIn = () => {
+    const loc = location ?? window.location;
+    const url = buildSignInUrl(loc);
+    if (navigate) navigate(url);
+    else window.location.assign(url);
+  };
+  return (
+    <div
+      style={{
+        minHeight: "100vh",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        background: "#1a1a1f",
+        color: "#eee",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+      }}
+    >
+      <div
+        style={{
+          padding: "24px 32px",
+          border: "1px solid #444",
+          borderRadius: 8,
+          background: "#22222a",
+          maxWidth: 360,
+        }}
+      >
+        <h1 style={{ marginTop: 0 }}>Signed out</h1>
+        <p style={{ color: "#aaa" }}>You've been signed out of lucida.</p>
+        <button
+          type="button"
+          onClick={onSignIn}
+          style={{
+            marginTop: 8,
+            padding: "8px 16px",
+            background: "#646cff",
+            color: "#fff",
+            border: "none",
+            borderRadius: 6,
+            cursor: "pointer",
+            font: "inherit",
+          }}
+        >
+          Sign in again
+        </button>
+      </div>
     </div>
   );
 }

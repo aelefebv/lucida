@@ -77,6 +77,7 @@ All auth boundaries emit `tracing` events at `dot.scope` event names per [[decis
 - [[decisions/0016-backend-mediated-oauth-with-session-cookies]] — flow choice + cookie rationale
 - [[decisions/0017-configurable-from-day-one-for-oss-release]] — OSS posture for env-driven config
 - [[decisions/0018-auth-mode-auto-detect-by-bind-address]] — bind-address safety model
+- [[decisions/0019-post-logout-marker-cookie-and-prompt-select-account]] — `lucida_signed_out` marker cookie + `prompt=select_account` on the post-logout re-sign-in path
 - [[flows/auth-signin]] — end-to-end sign-in trace
 - [[gotchas/oss-config-defaults]] — env-var contract and common misconfigurations
 - [[lucida-server]] — the crate this subsystem lives in

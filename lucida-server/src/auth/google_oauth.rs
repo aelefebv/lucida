@@ -83,6 +83,25 @@ pub enum OAuthError {
     Network(String),
 }
 
+/// OpenID Connect `prompt` parameter values we use. Only `SelectAccount`
+/// is wired today (post-logout re-sign-in, so Google shows the chooser
+/// instead of silently passing through its still-active session). Listed
+/// as a typed enum rather than passing strings so call sites can't typo
+/// the on-the-wire value, and so adding `Login` / `Consent` later is
+/// localized to this enum + the `as_str` arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Prompt {
+    SelectAccount,
+}
+
+impl Prompt {
+    fn as_str(self) -> &'static str {
+        match self {
+            Prompt::SelectAccount => "select_account",
+        }
+    }
+}
+
 /// The bytes Google returns from the token endpoint on success. We
 /// only care about `id_token`; `access_token`, `expires_in`, etc are
 /// irrelevant in the backend-mediated flow (we don't keep a Google
@@ -173,19 +192,30 @@ impl GoogleOAuthClient {
     /// Per PRD #455: scope = `openid email profile`, response_type =
     /// `code`. We omit `access_type=offline` deliberately (no refresh
     /// tokens in v1 — see ADR-0016 §"Why no refresh tokens in v1").
-    pub fn authorize_url(&self, state: &str) -> String {
+    ///
+    /// `prompt` is `Some(Prompt::SelectAccount)` only on the post-logout
+    /// re-sign-in path (`/auth/start` set the `lucida_signed_out` marker
+    /// cookie). Cold and session-expiry paths pass `None` to keep the
+    /// friction-free silent pass-through Google does when its session
+    /// is still active.
+    pub fn authorize_url(&self, state: &str, prompt: Option<Prompt>) -> String {
         // Manual URL build (rather than `reqwest::Url::parse_with_params`)
         // keeps the dependency surface narrow and the output bytewise
         // predictable for assertion in tests.
         let cfg = &self.config;
-        format!(
+        let mut url = format!(
             "{base}?client_id={client_id}&redirect_uri={redirect_uri}&response_type=code&scope={scope}&state={state}",
             base = cfg.auth_uri,
             client_id = urlencoding::encode(&cfg.client_id),
             redirect_uri = urlencoding::encode(&cfg.redirect_uri),
             scope = urlencoding::encode("openid email profile"),
             state = urlencoding::encode(state),
-        )
+        );
+        if let Some(p) = prompt {
+            url.push_str("&prompt=");
+            url.push_str(&urlencoding::encode(p.as_str()));
+        }
+        url
     }
 
     /// Exchange a callback `code` for an ID token. POSTs the
@@ -402,7 +432,7 @@ mod tests {
             })),
         };
 
-        let url = client.authorize_url("state-xyz");
+        let url = client.authorize_url("state-xyz", None);
         assert!(url.starts_with("https://mock/oauth2/v2/auth?"));
         assert!(url.contains("client_id=test-client"));
         // redirect_uri is URL-encoded
@@ -410,5 +440,27 @@ mod tests {
         assert!(url.contains("response_type=code"));
         assert!(url.contains("scope=openid%20email%20profile"));
         assert!(url.contains("state=state-xyz"));
+        // No prompt parameter on the cold path.
+        assert!(!url.contains("prompt="));
+    }
+
+    /// Post-logout re-sign-in path: `/auth/start` saw the marker cookie
+    /// and asked for the account chooser. Google's docs prescribe
+    /// `select_account` as the literal value; the URL-encoded form is
+    /// `select_account` (underscore is reserved-safe).
+    #[test]
+    fn authorize_url_appends_prompt_select_account() {
+        let config = config_with_mock_base("https://mock");
+        let client = GoogleOAuthClient {
+            config: config.clone(),
+            http: reqwest::Client::new(),
+            jwks: Arc::new(RwLock::new(JwksCache {
+                keys: JwkSet { keys: vec![] },
+                fetched_at: Instant::now(),
+            })),
+        };
+
+        let url = client.authorize_url("state-xyz", Some(Prompt::SelectAccount));
+        assert!(url.contains("&prompt=select_account"));
     }
 }
