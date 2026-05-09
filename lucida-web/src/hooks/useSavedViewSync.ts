@@ -29,6 +29,12 @@ interface Params {
   changeTick: number;
   /** Debounce override for tests. Default 350. */
   debounceMs?: number;
+  /** Callback fired after every successful apply; resolves the
+   *  selected-dataset wrinkle ([[wiki/queue]] 2026-05-07, option c) by
+   *  letting App.tsx re-target `selectedDatasetId` at the first visible
+   *  dataset on apply (so dimension/contrast controls operate on
+   *  something the user can see). */
+  onApplyResult?: (firstVisibleDatasetId: string | null) => void;
 }
 
 interface SyncBundle {
@@ -43,6 +49,7 @@ export function useSavedViewSync({
   sendCommand,
   changeTick,
   debounceMs,
+  onApplyResult,
 }: Params): {
   applier: SavedViewApplier;
   captureBuilder: () => SavedView | null;
@@ -122,6 +129,18 @@ export function useSavedViewSync({
   useEffect(() => {
     bundle.urlSync.notifyChange();
   }, [bundle.urlSync, changeTick]);
+
+  // Selected-dataset wrinkle (option c): subscribe to the applier's
+  // post-apply summary and forward to the parent so it can re-target
+  // `selectedDatasetId` at the first visible dataset. Subscription
+  // installs once per applier and lifts/relifts when the consumer
+  // changes its callback identity.
+  useEffect(() => {
+    if (!onApplyResult) return;
+    return bundle.applier.subscribeApplyResult((r) => {
+      onApplyResult(r.firstVisibleDatasetId);
+    });
+  }, [bundle.applier, onApplyResult]);
 
   return {
     applier: bundle.applier,

@@ -70,6 +70,22 @@ export interface ApplierEventChannels {
   notifyOpenFailed: (url: string, error: string) => void;
 }
 
+/** After-apply summary used by callers (App.tsx) to resolve UI-focus
+ *  state that lives outside the WASM scene. The selected-dataset
+ *  wrinkle ([[wiki/queue]] 2026-05-07) is resolved option (c):
+ *  auto-select the first visible dataset on apply so dimension/contrast
+ *  side-panel controls operate on something the recipient can see. */
+export interface ApplyResult {
+  /** Datasets visible after apply (in `dataset_order` order; visibility
+   *  derived from the post-apply scene state). Empty when nothing's loaded. */
+  visibleDatasetIds: string[];
+  /** First entry of `visibleDatasetIds`, or null. Convenience for the
+   *  selectedDatasetId wrinkle (option c). */
+  firstVisibleDatasetId: string | null;
+}
+
+export type ApplyResultListener = (r: ApplyResult) => void;
+
 // --- Implementation ----------------------------------------------------
 
 const IDLE_STATE: ApplierState = {
@@ -83,6 +99,7 @@ const IDLE_STATE: ApplierState = {
 export class SavedViewApplier {
   private state: ApplierState = IDLE_STATE;
   private listeners = new Set<StateListener>();
+  private applyResultListeners = new Set<ApplyResultListener>();
   // Pending opens keyed by computed dataset id (we don't get the URL back
   // in the DatasetOpened broadcast — only the manifest, which carries the
   // server-assigned id derived from the URL). The applier resolves each
@@ -119,6 +136,14 @@ export class SavedViewApplier {
   subscribe(fn: StateListener): () => void {
     this.listeners.add(fn);
     return () => { this.listeners.delete(fn); };
+  }
+
+  /** Subscribe to a one-shot summary fired once at the end of every
+   *  successful (or partial-failure) `apply()`. The selectedDatasetId
+   *  wrinkle resolution (option c) consumes this in `useSavedViewSync`. */
+  subscribeApplyResult(fn: ApplyResultListener): () => void {
+    this.applyResultListeners.add(fn);
+    return () => { this.applyResultListeners.delete(fn); };
   }
 
   getState(): ApplierState {
@@ -287,10 +312,52 @@ export class SavedViewApplier {
       // Step 10: camera last. Use import_presence so the WASM side
       // reapplies camera+view+display in one go (keeping local viewport).
       this.importCameraView(sceneAfter, view.camera);
+
+      // Selected-dataset wrinkle resolution (option c, [[wiki/queue]]
+      // 2026-05-07): emit the post-apply visibility set so consumers
+      // can re-target UI focus at something the recipient can see.
+      this.emitApplyResult(sceneAfter, view);
     } finally {
       // Ratchet the inProgress flag down regardless of any throw.
       this.setState({ ...this.state, inProgress: false });
     }
+  }
+
+  /** Read post-apply visibility from the live scene + the just-applied
+   *  view's `dataset_order`, then notify subscribers so they can pick a
+   *  new selectedDatasetId. */
+  private emitApplyResult(scene: WasmScene, view: SavedView): void {
+    const loaded = new Set<string>(JSON.parse(scene.dataset_ids()) as string[]);
+    // Walk dataset_order first so the "first visible" is well-defined
+    // (matches the order the recipient will see in the layer panel).
+    const visible: string[] = [];
+    const seen = new Set<string>();
+    const considered = view.dataset_order.length > 0
+      ? view.dataset_order
+      : Array.from(loaded);
+    for (const id of considered) {
+      if (!loaded.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      const settings = view.dataset_settings[id];
+      // No per-dataset settings = fall back to "visible" (matches the
+      // applier's earlier write of SetDatasetVisible(false) only for
+      // datasets explicitly removed from the link).
+      const isVisible = settings ? settings.visible !== false : true;
+      if (isVisible) visible.push(id);
+    }
+    // Defensive: catch loaded ids the order didn't list (rare; e.g. a
+    // dataset opened mid-apply).
+    for (const id of loaded) {
+      if (seen.has(id)) continue;
+      const settings = view.dataset_settings[id];
+      const isVisible = settings ? settings.visible !== false : true;
+      if (isVisible) visible.push(id);
+    }
+    const result: ApplyResult = {
+      visibleDatasetIds: visible,
+      firstVisibleDatasetId: visible[0] ?? null,
+    };
+    for (const fn of this.applyResultListeners) fn(result);
   }
 
   // --- Helpers ----------------------------------------------------------

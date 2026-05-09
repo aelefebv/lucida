@@ -10,6 +10,12 @@
 //   - **Inbound** (URL → scene): on initial load, parse `window.location.hash`;
 //     on `popstate`, re-parse and re-apply. Both routed through the
 //     SavedViewApplier so the same step-ordered logic runs in both cases.
+//     Two recognized payload shapes:
+//       * `#view=<inline base64+gzip>` — slice 1
+//       * `#b=<bookmark-id>` — slice 3, fetched via `/api/bookmarks/:id`
+//         then handed to the applier; the URL is then collapsed to its
+//         live `#view=…` form so further pans don't drift the recipient
+//         back to a stale snapshot.
 //
 // The debounce timing is configurable via the constructor for tests
 // (PRD acceptance criterion §"debounce timing configurable for tests").
@@ -17,6 +23,7 @@
 import { encode, decode } from "./encoder.ts";
 import type { SavedView } from "./types.ts";
 import { SavedViewApplier } from "./applier.ts";
+import { getBookmark, type Bookmark } from "./bookmarksApi.ts";
 
 export interface UrlSyncOptions {
   /** ms of idle to wait before writing the URL. Default 350 (mid-range
@@ -24,9 +31,18 @@ export interface UrlSyncOptions {
   debounceMs?: number;
   /** Override `window` for testing. */
   window?: Window;
+  /** Resolve `#b=<id>` to a bookmark. Defaults to the production REST
+   *  helper; tests inject a stub so they don't need a fetch mock. */
+  fetchBookmark?: (id: string) => Promise<Bookmark | null>;
 }
 
 export type CaptureBuilder = () => SavedView | null;
+
+export type FetchBookmark = (id: string) => Promise<Bookmark | null>;
+
+/** Default `#b=<id>` resolver — the slice-2 REST helper.
+ *  Tests inject their own to avoid the production fetch path. */
+const defaultFetchBookmark: FetchBookmark = (id) => getBookmark(id);
 
 export class UrlSync {
   private debounceMs: number;
@@ -40,6 +56,7 @@ export class UrlSync {
 
   private readonly captureBuilder: CaptureBuilder;
   private readonly applier: SavedViewApplier;
+  private readonly fetchBookmark: FetchBookmark;
 
   constructor(
     captureBuilder: CaptureBuilder,
@@ -50,6 +67,7 @@ export class UrlSync {
     this.applier = applier;
     this.debounceMs = options.debounceMs ?? 350;
     this.win = options.window ?? window;
+    this.fetchBookmark = options.fetchBookmark ?? defaultFetchBookmark;
   }
 
   /** Hook the popstate listener. Must be called once after construction. */
@@ -78,15 +96,44 @@ export class UrlSync {
   }
 
   /**
-   * Read `window.location.hash`, parse `#view=…` if present, and apply.
-   * Resolves once the apply has run (or rejects on parse error).
-   * Safe to call multiple times — guarded by the applier's own
+   * Read `window.location.hash`, parse `#view=…` or `#b=<id>` if present,
+   * and apply. Resolves once the apply has run (or rejects on parse
+   * error). Safe to call multiple times — guarded by the applier's own
    * "in progress" check so we never re-enter mid-apply.
+   *
+   * For `#b=<id>`: fetches the bookmark via the slice-2 REST endpoint,
+   * applies its `view`, then `replaceState`s the URL to the inline
+   * `#view=…` form so further pans don't drift the recipient back to
+   * a stale snapshot every time the URL is re-applied (PRD §"URL
+   * semantics across all states", row "Open someone's #b=<id> link").
    */
   async bootstrap(): Promise<void> {
+    if (this.applier.isInProgress()) return;
+
+    const bookmarkId = parseBookmarkHash(this.win.location.hash);
+    if (bookmarkId !== null) {
+      let bookmark: Bookmark | null;
+      try {
+        bookmark = await this.fetchBookmark(bookmarkId);
+      } catch (e) {
+        console.warn("[UrlSync] failed to fetch bookmark:", e);
+        return;
+      }
+      if (bookmark === null) {
+        console.warn(`[UrlSync] bookmark ${bookmarkId} not found`);
+        return;
+      }
+      await this.applier.apply(bookmark.view);
+      // Collapse `#b=<id>` to the live `#view=…` form so the URL reflects
+      // the current scene, not the bookmark's frozen snapshot. Skip if
+      // the apply was a no-op (no scene yet); the next bootstrap will
+      // rewrite when the scene is ready.
+      await this.flushAfterBookmarkApply();
+      return;
+    }
+
     const payload = parseViewHash(this.win.location.hash);
     if (payload === null) return;
-    if (this.applier.isInProgress()) return;
     let view: SavedView;
     try {
       view = await decode(payload);
@@ -95,6 +142,27 @@ export class UrlSync {
       return;
     }
     await this.applier.apply(view);
+  }
+
+  /** Encode and write `#view=…` immediately after a bookmark apply.
+   *  Bypasses the in-progress guard because `apply` has already returned;
+   *  the dedupe-against-lastWritten branch keeps this from looping. */
+  private async flushAfterBookmarkApply(): Promise<void> {
+    if (this.destroyed) return;
+    const view = this.captureBuilder();
+    if (view === null) return;
+    let payload: string;
+    try {
+      payload = await encode(view);
+    } catch (e) {
+      console.warn("[UrlSync] post-bookmark encode failed:", e);
+      return;
+    }
+    const newHash = `#view=${payload}`;
+    const url = `${this.win.location.pathname}${this.win.location.search}${newHash}`;
+    if (url === this.lastWritten) return;
+    this.lastWritten = url;
+    this.win.history.replaceState(this.win.history.state, "", url);
   }
 
   /**
@@ -147,6 +215,26 @@ export function parseViewHash(hash: string): string | null {
     if (eq < 0) continue;
     const key = part.slice(0, eq);
     if (key === "view") return part.slice(eq + 1);
+  }
+  return null;
+}
+
+/** Parse a `#b=<id>` URL hash and return the bookmark id, or null when
+ *  the hash isn't of that shape. Validates the id matches a conservative
+ *  character class (`[A-Za-z0-9._-]+`) — UUID-v4s qualify, and rejecting
+ *  anything else keeps the resolver from issuing wild GETs against the
+ *  bookmarks API for `#b=<%-encoded-junk>`. */
+export function parseBookmarkHash(hash: string): string | null {
+  if (!hash || hash === "#") return null;
+  const stripped = hash.startsWith("#") ? hash.slice(1) : hash;
+  for (const part of stripped.split("&")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const key = part.slice(0, eq);
+    if (key !== "b") continue;
+    const raw = decodeURIComponent(part.slice(eq + 1));
+    if (!/^[A-Za-z0-9._-]+$/.test(raw)) return null;
+    return raw;
   }
   return null;
 }
