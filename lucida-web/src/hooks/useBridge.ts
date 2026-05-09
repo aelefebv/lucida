@@ -13,6 +13,14 @@ import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { VolumeData } from "../types.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 
+/** Callback ref the SavedView applier registers into so it sees the
+ * relevant lifecycle events without useBridge importing applier types
+ * directly. Optional: when null, useBridge skips the call. */
+export interface SavedViewBridgeHooks {
+  onDatasetOpened: (datasetId: string) => void;
+  onOpenDatasetFailed: (url: string, error: string) => void;
+}
+
 interface Params {
   wasmReady: boolean;
   wasmSceneRef: React.RefObject<WasmScene | null>;
@@ -21,6 +29,10 @@ interface Params {
   loopRef: React.RefObject<RenderLoop | null>;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
+  /** Optional ref the SavedView applier populates after construction.
+   * Lets the applier resolve its pending opens without useBridge owning
+   * applier-specific types. */
+  savedViewHooksRef?: React.RefObject<SavedViewBridgeHooks | null>;
   // From useDatasetSettings (called before)
   bumpLayerSettingsVersion: () => void;
   initLayerMaps: (id: string) => void;
@@ -52,6 +64,7 @@ export function useBridge({
   setViewMode,
   setSelectedDatasetId,
   setVolumeMap,
+  savedViewHooksRef,
   bumpDatasetsVersion,
   bumpRemoteDocumentVersion,
 }: Params) {
@@ -212,6 +225,11 @@ export function useBridge({
               reason: "success",
             });
             setWasmScene(scene);
+            // Notify the saved-view applier (if registered) so its
+            // pending-open promise resolves. Safe even when the open
+            // wasn't applier-initiated — `notifyDatasetOpened` is a
+            // no-op for ids it doesn't know.
+            savedViewHooksRef?.current?.onDatasetOpened(cmd.manifest.dataset_id);
           }
           if (cmd.type === "remove_dataset") {
             datasetCallbacksRef.current.removeDataset(cmd.id);
@@ -373,6 +391,7 @@ export function useBridge({
         bridgeLog("open_remote_dataset.failed", { url, error });
         setRemoteDatasetLoading(false);
         setRemoteDatasetError(error);
+        savedViewHooksRef?.current?.onOpenDatasetFailed(url, error);
       },
       onAssetCatalogUpdate: (datasetId, deltaJson) => {
         try {
