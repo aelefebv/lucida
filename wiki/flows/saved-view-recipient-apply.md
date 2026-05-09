@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-05-09
 ---
 
 # Flow: Saved-View Recipient Apply
@@ -33,6 +33,7 @@ The path a `#view=<inline>` or `#b=<id>` URL takes from "user clicks a shared li
    - **View dimensions** (viewport commands): `SetT`, `SetC`, `SetZRange`. Out-of-range values clamp silently to valid range (see [[saved-views|gotcha re: t/c not clamped]]).
    - **Camera last** so the user doesn't see the camera yanking around mid-load.
 8. **Apply-result emission**: applier calls `emitApplyResult({ visibleDatasetIds, firstVisible })`. `useSavedViewSync` forwards via `onApplyResult` → `App.tsx::handleApplyResult` calls `setSelectedDatasetId(firstVisible)` so side-panel controls point at a visible dataset (see [[saved-views]] §"selectedDatasetId wrinkle").
+8b. **Apply-complete emission**: applier calls `subscribeApplyComplete(view)` listeners. `useSavedViewSync` uses this channel to (a) `markInteractiveDirty` + `markResidencyDirty` so the RAF loop redraws (otherwise the view doesn't refresh until next user input — bug 2), (b) push C/T/Z/viewMode back to React state from post-apply WASM state (otherwise the dim sliders show stale values — bug 3), and (c) restore client-only preferences from the applied view (e.g. `auto_contrast` — otherwise recipient's defaults silently overwrite captured values; see [[gotchas/saved-view-client-only-state]]).
 9. **`applyInProgress = false`.** `urlSync` resumes normal write path.
 10. **Failure surfacing**: any `OpenDatasetFailed` is folded into the loading banner state ("Loaded 3 of 4 datasets (1 failed: …)"). Other datasets apply normally — partial-apply policy.
 
