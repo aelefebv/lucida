@@ -108,6 +108,31 @@ pub enum ServerMessage {
         dataset_id: DatasetId,
         delta: AssetCatalogDelta,
     },
+    /// PRD #454 slice 4: a server-stored bookmark was created, renamed,
+    /// or deleted. Broadcast to clients whose session has at least one
+    /// loaded dataset that overlaps `dataset_urls`. The client refetches
+    /// the bookmark by id (on Created/Updated) or removes it from local
+    /// state (on Deleted) — keeping the broadcast payload small.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift (see `wiki/gotchas/scene-document-state-json-compat`).
+    BookmarkChanged {
+        id: String,
+        action: BookmarkAction,
+        dataset_urls: Vec<String>,
+    },
+}
+
+/// PRD #454 slice 4: the kind of mutation a `BookmarkChanged` describes.
+/// Wire encoding is the lowercase variant name (`"created"` / `"updated"`
+/// / `"deleted"`) so the JSON shape stays stable if the Rust enum is
+/// later renamed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BookmarkAction {
+    Created,
+    Updated,
+    Deleted,
 }
 
 /// Chunk-related messages exchanged between clients and server.
@@ -431,6 +456,73 @@ mod tests {
                 assert_eq!(delta.added[0].kinds, vec![ProxyKind::WellProxy3D]);
             }
             _ => panic!("expected AssetCatalogUpdate"),
+        }
+    }
+
+    #[test]
+    fn bookmark_action_serializes_lowercase() {
+        // Wire-stability assertion: action names are the lowercase enum
+        // variant names. The web client matches on these strings; renaming
+        // a variant must not change the JSON.
+        assert_eq!(
+            serde_json::to_string(&BookmarkAction::Created).unwrap(),
+            "\"created\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&BookmarkAction::Updated).unwrap(),
+            "\"updated\"",
+        );
+        assert_eq!(
+            serde_json::to_string(&BookmarkAction::Deleted).unwrap(),
+            "\"deleted\"",
+        );
+        let parsed: BookmarkAction = serde_json::from_str("\"created\"").unwrap();
+        assert_eq!(parsed, BookmarkAction::Created);
+    }
+
+    #[test]
+    fn bookmark_changed_round_trips() {
+        let msg = ServerMessage::BookmarkChanged {
+            id: "abc-123".into(),
+            action: BookmarkAction::Created,
+            dataset_urls: vec!["gs://bucket/a.zarr".into(), "gs://bucket/b.zarr".into()],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"bookmark_changed\""));
+        assert!(json.contains("\"action\":\"created\""));
+        assert!(json.contains("\"id\":\"abc-123\""));
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::BookmarkChanged {
+                id,
+                action,
+                dataset_urls,
+            } => {
+                assert_eq!(id, "abc-123");
+                assert_eq!(action, BookmarkAction::Created);
+                assert_eq!(
+                    dataset_urls,
+                    vec!["gs://bucket/a.zarr".to_string(), "gs://bucket/b.zarr".to_string()],
+                );
+            }
+            _ => panic!("expected BookmarkChanged"),
+        }
+    }
+
+    #[test]
+    fn bookmark_changed_updated_and_deleted_actions_round_trip() {
+        for action in [BookmarkAction::Updated, BookmarkAction::Deleted] {
+            let msg = ServerMessage::BookmarkChanged {
+                id: "id".into(),
+                action,
+                dataset_urls: vec![],
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+            match parsed {
+                ServerMessage::BookmarkChanged { action: a, .. } => assert_eq!(a, action),
+                _ => panic!("expected BookmarkChanged"),
+            }
         }
     }
 

@@ -642,6 +642,7 @@ function App() {
         activeLayoutName={activeLayoutName}
         visible={showBookmarkSidebar}
         style={{ width: 280, minWidth: 280, height: "100vh" }}
+        bridge={bridge.bridge}
       />
     </div>
   );

@@ -26,23 +26,40 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::Mutex;
 use tracing::{error, warn};
 
 use lucida_core::auth_principal::AuthPrincipal;
+use lucida_core::protocol::BookmarkAction;
 use lucida_core::saved_view::SavedView;
 
+use super::broadcast::broadcast_bookmark_change;
 use super::store::{Bookmark, BookmarkStore, StoreError};
+use crate::session::Session;
+use crate::UnicastRoutes;
 
 /// Hard cap on the human-friendly bookmark name (PRD §"Validation").
 /// Counts UTF-8 chars (`.chars().count()`), not bytes — so 200 emoji
 /// bookmark names still fit.
 pub const MAX_NAME_CHARS: usize = 200;
 
-/// State carried by every bookmark handler. Just the store handle —
-/// the principal arrives via request extensions, not state.
+/// State carried by every bookmark handler. Holds the store + the
+/// session/unicast plumbing the slice-4 broadcast helper needs to
+/// reach connected clients. The principal arrives via request
+/// extensions, not state.
+///
+/// The session and unicast handles are optional so test wiring that
+/// only exercises the REST layer can pass `None` and skip the broadcast
+/// path. In production they're always populated from `AppState`.
 #[derive(Clone)]
 pub struct BookmarksState {
     pub store: Arc<dyn BookmarkStore>,
+    /// Live `Session` shared with the WebSocket handler. `None` in
+    /// tests that don't exercise the broadcast.
+    pub session: Option<Arc<Mutex<Session>>>,
+    /// Per-client unicast channels keyed by `ClientId`. `None` in
+    /// tests that don't exercise the broadcast.
+    pub unicast_routes: Option<UnicastRoutes>,
 }
 
 /// Parse `?dataset=A&dataset=B&…` out of a raw query string. axum's
@@ -180,10 +197,13 @@ pub async fn create_bookmark(
         .await
     {
         Ok(b) => {
+            // Slice 4 (PRD #454 issue #477): live cross-peer sidebar
+            // updates. Best-effort — broadcast errors are logged inside
+            // the helper, never propagated to the HTTP response.
+            broadcast_after_mutation(&state, &b.id, BookmarkAction::Created, &b.datasets).await;
+
             // Per #475 acceptance: 201 + Location header pointing at the
-            // newly-minted resource. Slice 4 will additionally broadcast
-            // a `BookmarkChanged` over the websocket; this slice only
-            // commits the row.
+            // newly-minted resource.
             let location = format!("/api/bookmarks/{}", b.id);
             (
                 StatusCode::CREATED,
@@ -222,7 +242,10 @@ pub async fn patch_bookmark(
     }
 
     match state.store.patch_name(&id, &name).await {
-        Ok(Some(b)) => (StatusCode::OK, Json(BookmarkResponse::from(b))).into_response(),
+        Ok(Some(b)) => {
+            broadcast_after_mutation(&state, &b.id, BookmarkAction::Updated, &b.datasets).await;
+            (StatusCode::OK, Json(BookmarkResponse::from(b))).into_response()
+        }
         // patch_name on the row that was just visible should not
         // disappear without a delete in-between; race-and-tolerate as 404.
         Ok(None) => not_found(&id),
@@ -250,11 +273,51 @@ pub async fn delete_bookmark(
     }
 
     match state.store.delete(&id).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Some(removed)) => {
+            // Use the deleted bookmark's `dataset_urls` (returned from
+            // the store on delete) so the broadcast scope matches the
+            // bookmark's actual scope, not whatever subset of datasets
+            // happens to currently be loaded by the deleter.
+            broadcast_after_mutation(
+                &state,
+                &removed.id,
+                BookmarkAction::Deleted,
+                &removed.datasets,
+            )
+            .await;
+            StatusCode::NO_CONTENT.into_response()
+        }
         // Same race window as patch — vanished between get and delete.
-        Ok(false) => not_found(&id),
+        Ok(None) => not_found(&id),
         Err(e) => store_error(e, "bookmarks.delete.store_failed"),
     }
+}
+
+/// Best-effort wrapper around [`broadcast_bookmark_change`]. Skipped
+/// when `state.session` / `state.unicast_routes` are `None` (test
+/// wiring that doesn't drive the broadcast). Logs delivery counts
+/// at trace level so an operator can correlate "I renamed a
+/// bookmark" with "N sidebars updated."
+async fn broadcast_after_mutation(
+    state: &BookmarksState,
+    bookmark_id: &str,
+    action: BookmarkAction,
+    dataset_urls: &[String],
+) {
+    let (Some(session), Some(routes)) = (state.session.as_ref(), state.unicast_routes.as_ref())
+    else {
+        return;
+    };
+    let summary =
+        broadcast_bookmark_change(session, routes, bookmark_id, action, dataset_urls).await;
+    tracing::trace!(
+        bookmark_id = bookmark_id,
+        action = ?action,
+        delivered = summary.delivered,
+        failed = summary.failed,
+        matched_scope = summary.matched_scope,
+        "bookmarks.broadcast.complete",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +422,7 @@ mod tests {
         principal: Option<AuthPrincipal>,
     ) -> Router {
         let p = principal.map(Arc::new);
-        router(BookmarksState { store }).layer(from_fn(
+        router(BookmarksState { store, session: None, unicast_routes: None }).layer(from_fn(
             move |mut req: Request<Body>, next: Next| {
                 let p = p.clone();
                 async move {
@@ -862,9 +925,12 @@ mod tests {
         let extractor: SharedExtractor =
             build_extractor(Arc::clone(&config), Arc::clone(&session_store));
 
-        let app = router(BookmarksState { store }).layer(
-            axum::middleware::from_fn_with_state(extractor, auth_middleware),
-        );
+        let app = router(BookmarksState {
+            store,
+            session: None,
+            unicast_routes: None,
+        })
+        .layer(axum::middleware::from_fn_with_state(extractor, auth_middleware));
 
         // GET list
         let res = app

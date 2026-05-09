@@ -274,6 +274,12 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     ));
     let bookmarks_state = bookmarks::handlers::BookmarksState {
         store: bookmark_store as std::sync::Arc<dyn bookmarks::BookmarkStore>,
+        // Slice 4 (PRD #454 issue #477): plumb the live session +
+        // unicast routes so handlers can broadcast `BookmarkChanged`
+        // to clients with overlapping loaded datasets after every
+        // successful CUD operation.
+        session: Some(Arc::clone(&state.session)),
+        unicast_routes: Some(Arc::clone(&state.unicast_routes)),
     };
     let bookmarks_router: Router<()> = bookmarks::routes::router(bookmarks_state);
 

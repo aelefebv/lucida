@@ -2,9 +2,22 @@
 //
 // Slice 3 acceptance: the sidebar lists bookmarks scoped to currently-loaded
 // datasets, with a substring search across name + creator name + creator
-// email and a "Mine only" toggle. Slice 4 will layer a live WebSocket
-// subscription on top; for now the list refreshes when `loadedDatasets`
-// changes (and on demand via `refresh`).
+// email and a "Mine only" toggle.
+//
+// Slice 4 (PRD #454 issue #477) layers a live WebSocket subscription on
+// top: when any peer mutates a bookmark whose dataset URLs overlap a
+// loaded dataset in this session, the server broadcasts
+// `ServerMessage::BookmarkChanged`. The hook subscribes via
+// `bridge.subscribeBookmarkChanged` and reconciles local state without
+// requiring a manual refresh:
+//   - Created/Updated: refetch by id and merge (insert if missing,
+//     replace if present). Cheaper + more accurate than embedding the
+//     full payload in the broadcast.
+//   - Deleted: remove the entry from local state.
+// Self-broadcasts (the originating client also receives the message)
+// are not filtered — the optimistic local updates from this slice
+// reconcile cleanly because the broadcast-driven refetch returns the
+// same canonical state.
 //
 // CRUD wrappers are optimistic: create inserts immediately and reconciles
 // with the server response; rename patches in-place; delete removes
@@ -13,6 +26,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import type { Bridge } from "../bridge.ts";
 import {
   createBookmark as apiCreate,
   deleteBookmark as apiDelete,
@@ -38,6 +52,12 @@ export interface UseBookmarksOptions {
    *  Used to evaluate the "Mine only" toggle. `null` ≡ no auth resolved
    *  yet — the toggle hides everything when checked. */
   currentUserEmail: string | null;
+  /** Optional WebSocket bridge for live cross-peer updates (slice 4).
+   *  When provided, the hook subscribes to `bookmark_changed` broadcasts
+   *  and reconciles local state on Created/Updated/Deleted events.
+   *  When `null` or `undefined`, the hook degrades cleanly to manual
+   *  refresh — same behavior as before slice 4 landed. */
+  bridge?: Bridge | null;
 }
 
 export interface UseBookmarksHandle {
@@ -68,6 +88,7 @@ export interface UseBookmarksHandle {
 export function useBookmarks({
   loadedDatasets,
   currentUserEmail,
+  bridge,
 }: UseBookmarksOptions): UseBookmarksHandle {
   const [allBookmarks, setAllBookmarks] = useState<Bookmark[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -121,6 +142,41 @@ export function useBookmarks({
     // wrong (drops in-flight optimistic creates).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [datasetsKey]);
+
+  // Slice 4: subscribe to cross-peer broadcasts. Created/Updated → fetch
+  // by id and merge; Deleted → drop from local state. Self-broadcasts
+  // arrive too — they reconcile cleanly because the optimistic state
+  // we already inserted matches what the GET returns.
+  //
+  // The subscription is keyed only on `bridge` identity; it stays
+  // mounted across filter and dataset-set changes so we never miss a
+  // broadcast in the gap between unsubscribe and resubscribe.
+  useEffect(() => {
+    if (!bridge) return;
+    const unsubscribe = bridge.subscribeBookmarkChanged((id, action, _datasetUrls) => {
+      if (action === "deleted") {
+        setAllBookmarks((prev) => prev.filter((b) => b.id !== id));
+        return;
+      }
+      // Created or Updated: refetch the canonical row and merge.
+      void apiGet(id)
+        .then((fetched) => {
+          if (fetched === null) return;
+          setAllBookmarks((prev) => {
+            const idx = prev.findIndex((b) => b.id === fetched.id);
+            if (idx < 0) return [fetched, ...prev];
+            const next = prev.slice();
+            next[idx] = fetched;
+            return next;
+          });
+        })
+        .catch((e) => {
+          // Best-effort — broadcast will resync on the next mutation.
+          console.warn("[useBookmarks] failed to refetch on broadcast:", e);
+        });
+    });
+    return unsubscribe;
+  }, [bridge]);
 
   // --- Filter (purely local; no network) -------------------------------
 
