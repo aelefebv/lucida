@@ -8,6 +8,7 @@ pub(crate) mod mat4;
 pub mod protocol;
 pub mod query;
 pub mod ray;
+pub mod saved_view;
 pub mod scene;
 pub mod transform;
 pub mod view;

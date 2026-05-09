@@ -8,6 +8,8 @@ import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { PlateSelector, extractPlateData } from "./components/PlateSelector.tsx";
+import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
+import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { DebugPanel } from "./debug/DebugPanel.tsx";
@@ -24,6 +26,7 @@ import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
 import { usePreUpload } from "./hooks/usePreUpload.ts";
+import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import "./App.css";
 
 function App() {
@@ -54,6 +57,12 @@ function App() {
   const datasetCallbacksRef = useRef<DatasetCallbacks>({
     removeDataset: () => {},
   });
+  // Populated after useSavedViewSync constructs the applier (below).
+  // The bridge calls into this on `dataset_opened` / `open_dataset_failed`.
+  const savedViewHooksRef = useRef<{
+    onDatasetOpened: (id: string) => void;
+    onOpenDatasetFailed: (url: string, err: string) => void;
+  } | null>(null);
 
   // --- Domain hooks (order matters: earlier hooks use refs for later hooks' values) ---
 
@@ -87,6 +96,7 @@ function App() {
     loopRef: render.loopRef,
     datasetsRef,
     datasetCallbacksRef,
+    savedViewHooksRef,
     bumpLayerSettingsVersion: layers.bumpLayerSettingsVersion,
     initLayerMaps: layers.initLayerMaps,
     setZ: dims.setZ,
@@ -99,8 +109,31 @@ function App() {
     bumpRemoteDocumentVersion,
   });
 
-  const datasets = useDatasets({
+  // SavedView wiring (PRD #454, slice 1). Mounts the URL→scene sync,
+  // exposes the share-button capture, and gives the loading banner a
+  // handle on apply progress. Hook order matters: must come *after*
+  // `useBridge` so we can hand the applier the bridge functions, and
+  // *before* the savedViewHooksRef populate below.
+  const savedViewSync = useSavedViewSync({
+    getScene: () => scene.wasmSceneRef.current,
     sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,
+    sendCommand: bridge.sendCommand,
+    // The change tick combines doc and dataset versions: any local or
+    // remote scene mutation bumps one or the other, which is exactly
+    // what we want the URL to track.
+    changeTick: datasetsVersion + remoteDocumentVersion,
+  });
+
+  // Populate the bridge ↔ applier hook ref after the applier exists.
+  savedViewHooksRef.current = {
+    onDatasetOpened: (id) => savedViewSync.applier.notifyDatasetOpened(id),
+    onOpenDatasetFailed: (url, err) => savedViewSync.applier.notifyOpenFailed(url, err),
+  };
+
+  const datasets = useDatasets({
+    // Wrap so URL→DatasetId tracking is populated for every local open
+    // (FileBrowser-driven, URL-bar-driven, applier-driven).
+    sendOpenRemoteDataset: savedViewSync.trackedSendOpen,
   });
 
   // Layout registry — null until WasmScene is set up; subscribe so the
@@ -472,6 +505,7 @@ function App() {
               viewMode={dims.viewMode}
             />
             <FpsCounter />
+            <LoadingViewBanner applier={savedViewSync.applier} />
             <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
           </div>
           {showDebug && (
@@ -531,6 +565,7 @@ function App() {
           >
             Browse Local
           </button>
+          <ShareToolbarButton getCurrentSavedView={savedViewSync.captureBuilder} />
         </div>
         {showFileBrowser && (
           <FileBrowser
