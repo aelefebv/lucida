@@ -1,35 +1,39 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-13
 ---
 
-# Pre-existing TS Build Errors
+# Pre-existing TS Build Errors (resolved)
 
-## The footgun
+## Current state
 
-`npm run build` in `lucida-web/` reports several TypeScript errors that **are not caused by your changes**. Hunting them down when you're trying to land an unrelated PR wastes hours.
+`pnpm run build` in `lucida-web/` exits 0. `tsc -b` (and `tsc --noEmit -p tsconfig.app.json`) is clean. The three issues described below were resolved as a prerequisite for the deployment Dockerfile build (see [[decisions/0020-single-image-with-servedir]] and PRD #486). Treat this article as a historical record — there is no live footgun to work around.
 
-Known pre-existing issues:
+The bulk of the cleanup landed earlier in commit `593eb8d` ("chore: clear 27 pre-existing TypeScript errors in lucida-web", closing issues #438-#443) on April 20, 2026. This article was finally rewritten to reflect that resolution as Slice 1 of PRD #486 (issue #487), so the deployment SPA build stage can rely on a clean TypeScript build.
 
-- `renderClient.ts` — `SharedArrayBuffer` type incompatibility (browser environment lacks COOP/COEP headers in some configurations)
-- `renderLoop.ts` — unused import warning that the strict config promotes to error
-- `lz4.worker.ts` — `postMessage` overload mismatch
+## Historical note
 
-These are well-known in project memory and live in the "to fix when convenient" pile.
+Earlier in the project, three TS errors were known to surface from `npm run build` and were considered "to fix when convenient":
 
-## What to do
+- `lucida-web/src/renderer/renderClient.ts` — `SharedArrayBuffer` type incompatibility. The browser environment lacks COOP/COEP headers in the dev configuration, and TS5.4+ widened typed-array `.buffer` to `ArrayBufferLike` (i.e. `ArrayBuffer | SharedArrayBuffer`), which broke the worker `postMessage` and WebGPU upload sites that wanted a plain `ArrayBuffer`.
+- `lucida-web/src/renderLoop.ts` — an unused-import that the strict TS config promoted to error. The import had bounced through several attempted fixes; each time, the import got used elsewhere and the fix became wrong.
+- The LZ4 decompression worker (which lives at `lucida-web/src/pipeline/decode.worker.ts`, formerly described in earlier notes as `lz4.worker.ts`) — `postMessage` overload mismatch. The right answer depended on whether the worker ran in a window context, a web worker, or a service worker — and on whether the buffer being transferred was `ArrayBuffer` vs `ArrayBufferLike`.
 
-1. **Don't fix them when you're working on something unrelated.** Leave them alone. Verify that *your* changes don't introduce new errors by diffing the build output before and after your change.
-2. **If you genuinely have time** to fix one, treat it as its own focused PR — these errors have history and the fix may require touching the build config or the runtime environment, not just the source.
-3. **Use `tsc --noEmit -p tsconfig.app.json`** (see [[ts-typecheck-trap]]) for narrower checks during development; that path skips some of the worker-config-only issues.
+The fix pattern (see commit `593eb8d`):
 
-## Why they persist
+- The `SharedArrayBuffer` widening was narrowed at the WebGPU/postMessage boundaries with `as ArrayBuffer` / `as Uint8Array<ArrayBuffer>` casts (7 sites). This is sound because Lucida does not enable cross-origin isolation, so `SharedArrayBuffer` is never the runtime type — the cast asserts what the runtime guarantees.
+- Unused declarations were either deleted (10 cases) or, where deletion would have changed a public signature, the parameter was prefixed with `_`.
+- The decode worker's transfer boundary picked up the same `ArrayBuffer` cast, which selected the correct `postMessage` overload.
 
-- The `SharedArrayBuffer` issue is environmental — the dev server doesn't set the COOP/COEP headers. Setting them breaks other things (third-party iframes, some debug tooling). The team's been waiting for a clean migration story.
-- The unused-import warning has bounced through several attempted fixes; each time, the import gets used elsewhere and the fix becomes wrong.
-- The `lz4.worker.ts` overload issue requires picking which `postMessage` signature to honor — and the right answer depends on whether the worker runs in a window context, a web worker, or a service worker.
+## What this means now
+
+- `pnpm run build` is the right command and it just works.
+- `tsc --noEmit -p tsconfig.app.json` remains the right narrow check during development; see [[ts-typecheck-trap]] for why plain `tsc --noEmit` is a no-op in this repo.
+- If a similar `SharedArrayBuffer` widening error reappears in the future (e.g. after a TypeScript or `@webgpu/types` bump), the established pattern is the narrowing cast at the boundary, with a comment referencing the original issue (#438) so the next reader knows cross-origin isolation isn't supported.
 
 ## Related
 
-- [[ts-typecheck-trap]] — the related "what to actually run" gotcha
+- [[ts-typecheck-trap]] — companion gotcha about `tsc --noEmit` being a no-op without `-p`
+- [[systems/crates/lucida-web]] — the crate these files live in
+- [[decisions/0020-single-image-with-servedir]] — the deployment ADR that depends on a clean `pnpm run build`
 - `lucida-web/package.json` build scripts
