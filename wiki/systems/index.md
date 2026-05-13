@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-05-13
 ---
 
 # Systems
@@ -37,3 +37,4 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - [[layout-system]] — registered layouts, `SetActiveLayout`, derived placement rebuilds
 - [[multichannel-and-colormaps]] — per-channel state, 15 LUTs, composite key naming
 - [[saved-views]] — `#view=…` URL-as-app-state + server-stored `#b=<id>` bookmarks; spans `lucida-core` (schema), `lucida-web` (encoder/applier/sidebar), `lucida-server` (SQLite store + REST + broadcast)
+- [[deployment]] — single-image container shape, env-var contract, persistence model, OAuth + data-backend identity per cloud, Ingress / WebSocket tuning, release flow. Conceptual companion to `extras/deploy/RUNBOOK.md`.

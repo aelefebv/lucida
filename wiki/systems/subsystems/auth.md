@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-05-13
 ---
 
 # Authentication
@@ -80,4 +80,5 @@ All auth boundaries emit `tracing` events at `dot.scope` event names per [[decis
 - [[decisions/0019-post-logout-marker-cookie-and-prompt-select-account]] — `lucida_signed_out` marker cookie + `prompt=select_account` on the post-logout re-sign-in path
 - [[flows/auth-signin]] — end-to-end sign-in trace
 - [[gotchas/oss-config-defaults]] — env-var contract and common misconfigurations
+- [[deployment]] — deploy-time perspective: OAuth provider setup, the `LUCIDA_COOKIE_SECURE=always` requirement behind TLS-terminating ingress, `PrincipalExtractor` extensibility for non-Google providers
 - [[lucida-server]] — the crate this subsystem lives in
