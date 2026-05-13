@@ -15,6 +15,7 @@ use tower_http::cors::CorsLayer;
 use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
 use lucida_server::bookmarks;
+use lucida_server::health;
 use lucida_server::session::Session;
 use lucida_server::{browse, handler, AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
 
@@ -56,13 +57,20 @@ enum Commands {
 #[derive(Args, Debug, Default)]
 struct ServeArgs {
     /// Constrain `/api/browse` to this root directory.
-    #[arg(long)]
+    ///
+    /// Also readable from `LUCIDA_DATA_DIR`. CLI flag wins over env
+    /// var when both are set (clap's default behavior).
+    #[arg(long, env = "LUCIDA_DATA_DIR")]
     data_dir: Option<PathBuf>,
     /// Override the proxy cache root (default: platform user cache dir).
-    #[arg(long)]
+    ///
+    /// Also readable from `LUCIDA_PROXY_CACHE_DIR`. CLI flag wins.
+    #[arg(long, env = "LUCIDA_PROXY_CACHE_DIR")]
     proxy_cache_dir: Option<PathBuf>,
     /// Override the per-generator concurrency cap (default: NCPU/2).
-    #[arg(long)]
+    ///
+    /// Also readable from `LUCIDA_PROXY_CONCURRENCY`. CLI flag wins.
+    #[arg(long, env = "LUCIDA_PROXY_CONCURRENCY")]
     proxy_concurrency: Option<usize>,
 }
 
@@ -75,6 +83,36 @@ struct ClearArgs {
     /// Override the cache directory (default: platform user cache dir).
     #[arg(long)]
     cache_dir: Option<PathBuf>,
+}
+
+// ---------------------------------------------------------------------------
+// Logging-format env var
+//
+// `LUCIDA_LOG_FORMAT={text,json}` (default `text`) switches the
+// tracing-subscriber formatter between the dev-friendly pretty-text
+// output and the production JSON output that log aggregators (Cloud
+// Logging, Loki, ELK, …) consume natively. Unknown values fall back to
+// `Text` so a typo in the deploy manifest doesn't break boot — same
+// posture as `SecureCookieMode::parse` (auth/config.rs:91-101).
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
+impl LogFormat {
+    /// Parse the env-var spelling. Case-insensitive; unknown values
+    /// fall back to `Text` (matches the documented default rather than
+    /// failing boot). Mirror of `SecureCookieMode::parse`.
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "json" => Self::Json,
+            // "text" or anything else falls through to Text.
+            _ => Self::Text,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -99,16 +137,34 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "lucida_server=info".parse().unwrap()),
-        )
-        // Emit a span-close event with elapsed time for every
-        // #[tracing::instrument]-wrapped function. See
-        // wiki/decisions/logging-conventions.md.
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
-        .init();
+    // LUCIDA_LOG_FORMAT={text,json} (default text). Both branches share
+    // the same EnvFilter + FmtSpan::CLOSE config so `RUST_LOG` filtering
+    // and span-close timing per ADR-0012 work identically in either
+    // mode; only the line format differs.
+    let log_format = std::env::var("LUCIDA_LOG_FORMAT")
+        .ok()
+        .map(|raw| LogFormat::parse(&raw))
+        .unwrap_or(LogFormat::Text);
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "lucida_server=info".parse().unwrap());
+    match log_format {
+        LogFormat::Text => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                // Emit a span-close event with elapsed time for every
+                // #[tracing::instrument]-wrapped function. See
+                // wiki/decisions/0012-logging-conventions.
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                .init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .with_env_filter(env_filter)
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                .json()
+                .init();
+        }
+    }
 
     let cli = Cli::parse();
     // Treat "no subcommand" as `serve` with the top-level flags.
@@ -328,6 +384,15 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::dev_login).with_state(dev_login_state),
         );
     }
+
+    // PRD #486 slice 4: liveness/readiness probes. Mounted on the
+    // public router half so the kubelet (which presents no session
+    // cookie) can hit them without being 401'd. Always-200 today; the
+    // split between `/healthz` and `/readyz` exists so future drain-on-
+    // shutdown can flip readiness to 503 while liveness stays 200,
+    // letting the LB stop routing without the kubelet restarting the
+    // pod mid-drain. See `lucida-server/src/health.rs`.
+    public_auth_router = public_auth_router.merge(health::router());
 
     // App routes carry the auth middleware; public auth routes don't.
     let app_state_router = Router::new()

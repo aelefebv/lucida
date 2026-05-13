@@ -11,6 +11,7 @@ pub mod bookmarks;
 pub mod browse;
 pub mod decode;
 pub mod handler;
+pub mod health;
 pub mod proxy;
 pub mod session;
 
