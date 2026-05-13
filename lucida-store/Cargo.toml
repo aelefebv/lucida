@@ -2,6 +2,7 @@
 name = "lucida-store"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 tiff = "0.9"
