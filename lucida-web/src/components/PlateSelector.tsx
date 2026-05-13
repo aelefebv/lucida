@@ -35,6 +35,9 @@ interface PlateSelectorProps {
  *
  * Returns null if the dataset is not a plate.
  */
+// Co-located with the PlateSelector component that consumes it; the
+// fast-refresh ergonomics cost is small vs splitting to a sibling.
+// eslint-disable-next-line react-refresh/only-export-components
 export function extractPlateData(
   manifest: DatasetManifest,
   activeLayoutPlacements?: { entity_id: string; position: [number, number] }[] | null,

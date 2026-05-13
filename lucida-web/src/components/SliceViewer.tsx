@@ -28,7 +28,10 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
 
-  // Create/start render loop
+  // Create/start render loop. Deliberately omits `datasets` (live mutable
+  // Map shared with the parent — RenderLoop reads it each frame),
+  // `onLoopChange` (stable parent callback), and `parentLoopRef` (a ref).
+  // Re-creating the loop on those would tear down GPU state every frame.
   useEffect(() => {
     const loop = new RenderLoop({ session, datasets, client, canvas, mode: "slice" });
     loopRef.current = loop;
@@ -40,7 +43,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       parentLoopRef.current = null;
       onLoopChange(null);
     };
-  }, [session, client, canvas]);
+  }, [session, client, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Update slice params on prop changes and when loop is recreated
   useEffect(() => {
@@ -141,6 +144,11 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     canvas.addEventListener("pointercancel", onPointerUp);
     canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("wheel", onWheel, { passive: false });
+    // Mutating canvas.style.cursor is the lightweight pattern for
+    // grab/grabbing feedback during pointer drag — promoting cursor
+    // state to the parent + a CSS class would re-render the whole
+    // viewport tree on every drag transition.
+    // eslint-disable-next-line react-hooks/immutability
     canvas.style.cursor = dragging ? "grabbing" : "grab";
     return () => {
       canvas.removeEventListener("pointerdown", onPointerDown);

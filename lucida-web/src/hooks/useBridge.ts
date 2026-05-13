@@ -79,7 +79,10 @@ export function useBridge({
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
+  // Mirror followTarget state into a ref for handlers that read it
+  // outside their declaration closure (RAF loops, websocket callbacks).
   const followTargetRef = useRef<ClientId | null>(null);
+  // eslint-disable-next-line react-hooks/refs
   followTargetRef.current = followTarget;
   const [remoteDatasetLoading, setRemoteDatasetLoading] = useState(false);
   const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
@@ -128,6 +131,11 @@ export function useBridge({
                     })),
                   },
                 };
+                // setupFetchPipeline is a hoisted function declaration below;
+                // the forward reference works at runtime via JS hoisting and
+                // is intentional (effect setup needs the helper, helper needs
+                // closures over things declared between).
+                // eslint-disable-next-line react-hooks/immutability
                 setupFetchPipeline(manifest as DatasetManifest, fetchDesc);
               }
               // Mirror the snapshot's asset catalog into the JS-side
@@ -419,7 +427,11 @@ export function useBridge({
     // (useBookmarks subscribes to `bookmark_changed`) can take a
     // dependency on it and run their subscribe effect once it's live.
     setBridge(bridge);
-  }, [wasmReady]);
+    // Intentionally minimal deps: this is the bridge bootstrap effect
+    // that runs once when WASM is ready. Re-running on any of the
+    // listed callback/ref/state-bumper deps would re-mount the entire
+    // WebSocket session and tear down all in-flight downloads.
+  }, [wasmReady]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource) {
     const datasetId = manifest.dataset_id;

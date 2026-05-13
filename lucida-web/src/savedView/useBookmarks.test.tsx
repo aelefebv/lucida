@@ -86,12 +86,12 @@ interface Captured {
 function HookHarness({
   loadedDatasets,
   email,
-  out,
+  outRef,
   bridge,
 }: {
   loadedDatasets: string[];
   email: string | null;
-  out: Captured;
+  outRef: Captured;
   bridge?: Bridge | null;
 }) {
   const handle = useBookmarks({
@@ -100,7 +100,7 @@ function HookHarness({
     bridge,
   });
   useEffect(() => {
-    out.current = handle;
+    outRef.current = handle;
   });
   // Render something so testing-library doesn't complain.
   return <div data-testid="loaded">{handle.allBookmarks.length}</div>;
@@ -133,38 +133,38 @@ function makeStubBridge() {
 describe("useBookmarks — loading lifecycle", () => {
   it("fetches on mount with the loaded-datasets query", async () => {
     apiSpy.responder = () => jsonResponse(200, []);
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={["gs://a.zarr"]} email="alice@example.com" out={out} />);
+      render(<HookHarness loadedDatasets={["gs://a.zarr"]} email="alice@example.com" outRef={outRef} />);
     });
     expect(apiSpy.calls.some((c) => c.url.includes("dataset=gs%3A%2F%2Fa.zarr"))).toBe(true);
   });
 
   it("re-fetches when loadedDatasets changes", async () => {
     apiSpy.responder = () => jsonResponse(200, []);
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     const { rerender } = render(
-      <HookHarness loadedDatasets={["gs://a.zarr"]} email="alice@example.com" out={out} />,
+      <HookHarness loadedDatasets={["gs://a.zarr"]} email="alice@example.com" outRef={outRef} />,
     );
     await act(async () => { /* flush mount */ });
     const before = apiSpy.calls.length;
     await act(async () => {
-      rerender(<HookHarness loadedDatasets={["gs://a.zarr", "gs://b.zarr"]} email="alice@example.com" out={out} />);
+      rerender(<HookHarness loadedDatasets={["gs://a.zarr", "gs://b.zarr"]} email="alice@example.com" outRef={outRef} />);
     });
     expect(apiSpy.calls.length).toBeGreaterThan(before);
   });
 
   it("does NOT re-fetch when an equivalent dataset array (different identity) is passed", async () => {
     apiSpy.responder = () => jsonResponse(200, []);
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     const { rerender } = render(
-      <HookHarness loadedDatasets={["gs://a.zarr"]} email="alice@example.com" out={out} />,
+      <HookHarness loadedDatasets={["gs://a.zarr"]} email="alice@example.com" outRef={outRef} />,
     );
     await act(async () => { /* flush mount */ });
     const before = apiSpy.calls.length;
     // Fresh array with same contents.
     await act(async () => {
-      rerender(<HookHarness loadedDatasets={["gs://a.zarr"]} email="alice@example.com" out={out} />);
+      rerender(<HookHarness loadedDatasets={["gs://a.zarr"]} email="alice@example.com" outRef={outRef} />);
     });
     expect(apiSpy.calls.length).toBe(before);
   });
@@ -175,21 +175,21 @@ describe("useBookmarks — loading lifecycle", () => {
       makeBm({ id: "b2", name: "second" }),
     ];
     apiSpy.responder = () => jsonResponse(200, items);
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@example.com" out={out} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@example.com" outRef={outRef} />);
     });
-    expect(out.current?.allBookmarks).toHaveLength(2);
-    expect(out.current?.bookmarks).toHaveLength(2);
+    expect(outRef.current?.allBookmarks).toHaveLength(2);
+    expect(outRef.current?.bookmarks).toHaveLength(2);
   });
 
   it("surfaces errors via the error field", async () => {
     apiSpy.responder = () => jsonResponse(500, { error: "internal" });
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@example.com" out={out} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@example.com" outRef={outRef} />);
     });
-    expect(out.current?.error).toContain("listBookmarks");
+    expect(outRef.current?.error).toContain("listBookmarks");
   });
 });
 
@@ -201,19 +201,19 @@ describe("useBookmarks — filter logic", () => {
       makeBm({ id: "b3", name: "Random", created_by_name: "Carol", created_by: "carol@x" }),
     ];
     apiSpy.responder = () => jsonResponse(200, items);
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@x" out={out} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} />);
     });
 
-    await act(async () => out.current?.setSearch("alice"));
-    expect(out.current?.bookmarks.map((b) => b.id)).toEqual(["b1"]);
+    await act(async () => outRef.current?.setSearch("alice"));
+    expect(outRef.current?.bookmarks.map((b) => b.id)).toEqual(["b1"]);
 
-    await act(async () => out.current?.setSearch("bob"));
-    expect(out.current?.bookmarks.map((b) => b.id)).toEqual(["b2"]);
+    await act(async () => outRef.current?.setSearch("bob"));
+    expect(outRef.current?.bookmarks.map((b) => b.id)).toEqual(["b2"]);
 
-    await act(async () => out.current?.setSearch("apoptosis"));
-    expect(out.current?.bookmarks.map((b) => b.id)).toEqual(["b1"]);
+    await act(async () => outRef.current?.setSearch("apoptosis"));
+    expect(outRef.current?.bookmarks.map((b) => b.id)).toEqual(["b1"]);
   });
 
   it("Mine only filters by current principal's email", async () => {
@@ -223,26 +223,26 @@ describe("useBookmarks — filter logic", () => {
       makeBm({ id: "b3", created_by: "alice@x" }),
     ];
     apiSpy.responder = () => jsonResponse(200, items);
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@x" out={out} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} />);
     });
 
-    await act(async () => out.current?.setMineOnly(true));
-    expect(out.current?.bookmarks.map((b) => b.id).sort()).toEqual(["b1", "b3"]);
+    await act(async () => outRef.current?.setMineOnly(true));
+    expect(outRef.current?.bookmarks.map((b) => b.id).sort()).toEqual(["b1", "b3"]);
 
-    await act(async () => out.current?.setMineOnly(false));
-    expect(out.current?.bookmarks.map((b) => b.id).sort()).toEqual(["b1", "b2", "b3"]);
+    await act(async () => outRef.current?.setMineOnly(false));
+    expect(outRef.current?.bookmarks.map((b) => b.id).sort()).toEqual(["b1", "b2", "b3"]);
   });
 
   it("Mine only with no resolved principal hides everything", async () => {
     apiSpy.responder = () => jsonResponse(200, [makeBm({ id: "b1", created_by: "alice@x" })]);
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email={null} out={out} />);
+      render(<HookHarness loadedDatasets={[]} email={null} outRef={outRef} />);
     });
-    await act(async () => out.current?.setMineOnly(true));
-    expect(out.current?.bookmarks).toEqual([]);
+    await act(async () => outRef.current?.setMineOnly(true));
+    expect(outRef.current?.bookmarks).toEqual([]);
   });
 });
 
@@ -253,14 +253,14 @@ describe("useBookmarks — CRUD wrappers", () => {
       if (init?.method === "POST") return jsonResponse(201, created);
       return jsonResponse(200, []);
     };
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@x" out={out} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} />);
     });
     await act(async () => {
-      await out.current?.createBookmark("fresh", [], emptyView());
+      await outRef.current?.createBookmark("fresh", [], emptyView());
     });
-    expect(out.current?.allBookmarks.find((b) => b.id === "new")).toBeDefined();
+    expect(outRef.current?.allBookmarks.find((b) => b.id === "new")).toBeDefined();
   });
 
   it("renameBookmark patches and reconciles in place", async () => {
@@ -270,14 +270,14 @@ describe("useBookmarks — CRUD wrappers", () => {
       if (init?.method === "PATCH") return jsonResponse(200, updated);
       return jsonResponse(200, [original]);
     };
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@x" out={out} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} />);
     });
     await act(async () => {
-      await out.current?.renameBookmark("b1", "new");
+      await outRef.current?.renameBookmark("b1", "new");
     });
-    expect(out.current?.allBookmarks.find((b) => b.id === "b1")?.name).toBe("new");
+    expect(outRef.current?.allBookmarks.find((b) => b.id === "b1")?.name).toBe("new");
   });
 
   it("renameBookmark rolls back on failure", async () => {
@@ -286,16 +286,16 @@ describe("useBookmarks — CRUD wrappers", () => {
       if (init?.method === "PATCH") return jsonResponse(403, { error: "forbidden" });
       return jsonResponse(200, [original]);
     };
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@x" out={out} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} />);
     });
     await expect(
       act(async () => {
-        await out.current?.renameBookmark("b1", "new");
+        await outRef.current?.renameBookmark("b1", "new");
       }),
     ).rejects.toMatchObject({ status: 403 });
-    expect(out.current?.allBookmarks.find((b) => b.id === "b1")?.name).toBe("old");
+    expect(outRef.current?.allBookmarks.find((b) => b.id === "b1")?.name).toBe("old");
   });
 
   it("deleteBookmark removes the row and survives rollback on 403", async () => {
@@ -304,17 +304,17 @@ describe("useBookmarks — CRUD wrappers", () => {
       if (init?.method === "DELETE") return jsonResponse(403, { error: "forbidden" });
       return jsonResponse(200, [original]);
     };
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@x" out={out} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} />);
     });
     await expect(
       act(async () => {
-        await out.current?.deleteBookmark("b1");
+        await outRef.current?.deleteBookmark("b1");
       }),
     ).rejects.toMatchObject({ status: 403 });
     // Rolled back.
-    expect(out.current?.allBookmarks.some((b) => b.id === "b1")).toBe(true);
+    expect(outRef.current?.allBookmarks.some((b) => b.id === "b1")).toBe(true);
   });
 });
 
@@ -325,9 +325,9 @@ describe("useBookmarks — BookmarkChanged subscription (slice 4)", () => {
   it("subscribes when a bridge is supplied and unsubscribes on unmount", async () => {
     apiSpy.responder = () => jsonResponse(200, []);
     const stub = makeStubBridge();
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     const { unmount } = render(
-      <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+      <HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} bridge={stub.bridge} />,
     );
     await act(async () => { /* flush mount */ });
     expect(stub.listenerCount()).toBe(1);
@@ -337,12 +337,12 @@ describe("useBookmarks — BookmarkChanged subscription (slice 4)", () => {
 
   it("ignores broadcasts when bridge is null", async () => {
     apiSpy.responder = () => jsonResponse(200, []);
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
-      render(<HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={null} />);
+      render(<HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} bridge={null} />);
     });
     // No bridge → never subscribes; no crash on null.
-    expect(out.current?.allBookmarks).toEqual([]);
+    expect(outRef.current?.allBookmarks).toEqual([]);
   });
 
   it("on Created: refetches the bookmark by id and inserts it", async () => {
@@ -359,20 +359,20 @@ describe("useBookmarks — BookmarkChanged subscription (slice 4)", () => {
       return jsonResponse(500, {});
     };
     const stub = makeStubBridge();
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
       render(
-        <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+        <HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} bridge={stub.bridge} />,
       );
     });
-    expect(out.current?.allBookmarks).toEqual([]);
+    expect(outRef.current?.allBookmarks).toEqual([]);
     await act(async () => {
       stub.fire("fresh", "created", ["gs://b/a.zarr"]);
     });
     // Wait a tick for the apiGet then setState to flush.
     await act(async () => { /* flush microtasks */ });
     expect(getCalls).toBe(1);
-    expect(out.current?.allBookmarks.find((b) => b.id === "fresh")).toBeDefined();
+    expect(outRef.current?.allBookmarks.find((b) => b.id === "fresh")).toBeDefined();
   });
 
   it("on Updated: refetches and replaces existing entry in place", async () => {
@@ -388,21 +388,21 @@ describe("useBookmarks — BookmarkChanged subscription (slice 4)", () => {
       return jsonResponse(500, {});
     };
     const stub = makeStubBridge();
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
       render(
-        <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+        <HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} bridge={stub.bridge} />,
       );
     });
-    expect(out.current?.allBookmarks.find((b) => b.id === "b1")?.name).toBe("v1");
+    expect(outRef.current?.allBookmarks.find((b) => b.id === "b1")?.name).toBe("v1");
     await act(async () => {
       stub.fire("b1", "updated");
     });
     await act(async () => { /* flush microtasks */ });
-    const merged = out.current?.allBookmarks.find((b) => b.id === "b1");
+    const merged = outRef.current?.allBookmarks.find((b) => b.id === "b1");
     expect(merged?.name).toBe("v2 (updated by peer)");
     // Doesn't double the row.
-    expect(out.current?.allBookmarks.filter((b) => b.id === "b1")).toHaveLength(1);
+    expect(outRef.current?.allBookmarks.filter((b) => b.id === "b1")).toHaveLength(1);
   });
 
   it("on Deleted: removes the row from local state without refetching", async () => {
@@ -419,17 +419,17 @@ describe("useBookmarks — BookmarkChanged subscription (slice 4)", () => {
       return jsonResponse(500, {});
     };
     const stub = makeStubBridge();
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
       render(
-        <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+        <HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} bridge={stub.bridge} />,
       );
     });
-    expect(out.current?.allBookmarks.some((b) => b.id === "doomed")).toBe(true);
+    expect(outRef.current?.allBookmarks.some((b) => b.id === "doomed")).toBe(true);
     await act(async () => {
       stub.fire("doomed", "deleted");
     });
-    expect(out.current?.allBookmarks.some((b) => b.id === "doomed")).toBe(false);
+    expect(outRef.current?.allBookmarks.some((b) => b.id === "doomed")).toBe(false);
     expect(getCalls).toBe(0); // no refetch on delete
   });
 
@@ -444,37 +444,37 @@ describe("useBookmarks — BookmarkChanged subscription (slice 4)", () => {
       return jsonResponse(500, {});
     };
     const stub = makeStubBridge();
-    const out: Captured = { current: null };
+    const outRef: Captured = { current: null };
     await act(async () => {
       render(
-        <HookHarness loadedDatasets={[]} email="alice@x" out={out} bridge={stub.bridge} />,
+        <HookHarness loadedDatasets={[]} email="alice@x" outRef={outRef} bridge={stub.bridge} />,
       );
     });
     await act(async () => {
-      await out.current?.createBookmark("my fresh", [], emptyView());
+      await outRef.current?.createBookmark("my fresh", [], emptyView());
     });
-    expect(out.current?.allBookmarks.filter((b) => b.id === "self")).toHaveLength(1);
+    expect(outRef.current?.allBookmarks.filter((b) => b.id === "self")).toHaveLength(1);
     // Self-broadcast arrives next.
     await act(async () => {
       stub.fire("self", "created");
     });
     await act(async () => { /* flush refetch */ });
     // Still exactly one entry — broadcast-driven refetch matches on id and replaces.
-    expect(out.current?.allBookmarks.filter((b) => b.id === "self")).toHaveLength(1);
+    expect(outRef.current?.allBookmarks.filter((b) => b.id === "self")).toHaveLength(1);
   });
 });
 
 describe("relativeTimeFromIso", () => {
   it("renders 'just now' for sub-minute deltas", () => {
     const now = new Date("2026-05-08T12:00:00Z");
-    const out = relativeTimeFromIso("2026-05-08T11:59:50Z", now);
-    expect(out.toLowerCase()).toMatch(/now|second/);
+    const outRef = relativeTimeFromIso("2026-05-08T11:59:50Z", now);
+    expect(outRef.toLowerCase()).toMatch(/now|second/);
   });
 
   it("renders 'X days ago' for multi-day deltas", () => {
     const now = new Date("2026-05-08T12:00:00Z");
-    const out = relativeTimeFromIso("2026-05-05T12:00:00Z", now);
-    expect(out.toLowerCase()).toMatch(/3.*day/);
+    const outRef = relativeTimeFromIso("2026-05-05T12:00:00Z", now);
+    expect(outRef.toLowerCase()).toMatch(/3.*day/);
   });
 
   it("returns empty string for invalid ISO", () => {
@@ -499,8 +499,8 @@ describe("defaultBookmarkName", () => {
 
   it("truncates to 60 chars with an ellipsis", () => {
     const longName = "x".repeat(80);
-    const out = defaultBookmarkName([`gs://b/${longName}`], null);
-    expect(out.length).toBeLessThanOrEqual(60);
-    expect(out.endsWith("…")).toBe(true);
+    const outRef = defaultBookmarkName([`gs://b/${longName}`], null);
+    expect(outRef.length).toBeLessThanOrEqual(60);
+    expect(outRef.endsWith("…")).toBe(true);
   });
 });

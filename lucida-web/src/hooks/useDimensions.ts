@@ -31,9 +31,13 @@ export function useDimensions({
   const [viewMode, setViewMode] = useState<ViewMode>("2d");
   const [multiChannel, setMultiChannel] = useState(false);
 
-  // Union dimension extents across ALL datasets for slider ranges
+  // Union dimension extents across ALL datasets for slider ranges.
+  // datasetsRef holds the live Map; datasetsVersion is the React-side
+  // bumper that triggers a re-render whenever the Map mutates, so reading
+  // .current here always sees the latest set.
   let dimZ = 1, dimC = 1, dimT = 1;
   void datasetsVersion;
+  // eslint-disable-next-line react-hooks/refs
   for (const ds of datasetsRef.current.values()) {
     const shape = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
     dimZ = Math.max(dimZ, shape[2]);
@@ -41,12 +45,16 @@ export function useDimensions({
     dimT = Math.max(dimT, shape[0]);
   }
 
-  // Clamp slider values when union dimensions shrink, and sync to WASM scene
+  // Clamp slider values when union dimensions shrink, and sync to WASM scene.
+  // The clamp is a synchronization with external state (manifest dim union),
+  // not a derivation — z/c/t are user-controlled but must follow the open
+  // dataset's bounds. setState here IS the intended effect.
   useEffect(() => {
     const scene = wasmSceneRef.current;
     let clamped = false;
     if (z >= dimZ) {
       const newZ = dimZ - 1;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setZ(newZ);
       if (scene) applyViewportCommand(scene, { type: "set_z", z: newZ });
       clamped = true;
@@ -66,7 +74,9 @@ export function useDimensions({
     if (clamped) {
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [dimZ, dimC, dimT]);
+    // Deliberately omit z/c/t/wasmSceneRef/bridgeCallbacksRef: the clamp
+    // is a one-shot reaction to dim shrinkage, not a continuous sync.
+  }, [dimZ, dimC, dimT]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleViewModeToggle = useCallback(() => {
     const next = viewMode === "2d" ? "3d" : "2d";

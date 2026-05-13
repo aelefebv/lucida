@@ -247,6 +247,9 @@ export function DebugOverlays({
 
   useEffect(() => {
     if (!anyEnabled) {
+      // Reset to empty when overlays are toggled off — no external state
+      // to subscribe to, the toggle IS the state change we react to.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setBadges([]);
       setChunks([]);
       return;

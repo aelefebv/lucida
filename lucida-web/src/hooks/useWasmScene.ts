@@ -5,7 +5,11 @@ import { getEnabledCategories, onDebugCategoriesChanged } from "../debug/logging
 export function useWasmScene() {
   const [wasmReady, setWasmReady] = useState(false);
   const [wasmScene, setWasmScene] = useState<WasmScene | null>(null);
+  // Ref mirror of the wasmScene state — handlers and downstream
+  // hooks read .current to avoid stale closures over `wasmScene`.
+  // The mirror update is render-phase and idempotent.
   const wasmSceneRef = useRef<WasmScene | null>(null);
+  // eslint-disable-next-line react-hooks/refs
   wasmSceneRef.current = wasmScene;
 
   useEffect(() => {
