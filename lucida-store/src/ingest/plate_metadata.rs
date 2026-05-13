@@ -329,7 +329,9 @@ mod tests {
     }
 
     /// Write a minimal FOV directory with multiscales metadata so read_plate_info
-    /// can parse it.
+    /// can parse it. Currently unused; preserved for future plate-metadata tests
+    /// that exercise read_plate_info against synthesized fixtures.
+    #[allow(dead_code)]
     fn write_fov_fixture(fov_dir: &std::path::Path) {
         use crate::ingest::ome_metadata;
         use crate::ingest::pyramid::LevelData;
