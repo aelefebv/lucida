@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-05-13
 ---
 
 # OSS Config Defaults and the LUCIDA_* Env Var Contract
@@ -21,6 +21,10 @@ The full set is documented in PRD #455 §"Configuration surface". Common ones:
 - `LUCIDA_INSECURE` — explicit acknowledgment for `disabled + non-loopback`.
 - `LUCIDA_DB_PATH` — SQLite file path. Default `./lucida.db` (CWD-relative).
 - `LUCIDA_COOKIE_{NAME,SECURE}` — cookie configuration overrides.
+- `LUCIDA_DATA_DIR` — root for `/api/browse`. Mirrors `--data-dir`; CLI flag wins. (PRD #486 slice 4)
+- `LUCIDA_PROXY_CACHE_DIR` — proxy on-disk cache root. Mirrors `--proxy-cache-dir`; CLI flag wins. (PRD #486 slice 4)
+- `LUCIDA_PROXY_CONCURRENCY` — per-generator concurrency cap. Mirrors `--proxy-concurrency`; CLI flag wins. (PRD #486 slice 4)
+- `LUCIDA_LOG_FORMAT` — `text` (default) or `json`. Switches the tracing subscriber between the dev-friendly pretty formatter and the production JSON formatter that log aggregators consume natively. Unknown values fall back to `text` (mirrors `SecureCookieMode::parse`). (PRD #486 slice 4)
 
 ## Common misconfigurations
 
@@ -61,6 +65,10 @@ Yes. Empty list = OSS-permissive default. Self-hosters may want any verified Goo
 ### "I want to add an admin without restarting"
 
 You can't, today. `LUCIDA_ADMIN_EMAILS` is read once at startup. Promotion = config change + restart, takes effect on the user's next request. Admin status is derived per-request (not stored on the session row), so existing sessions immediately reflect the new admin set after restart.
+
+### "I set LUCIDA_DATA_DIR but my browse handler still serves arbitrary paths"
+
+PRD #486 slice 4 added `env = "LUCIDA_..."` to the existing `--data-dir` (and `--proxy-cache-dir`, `--proxy-concurrency`) clap-derive args. **CLI flags override env vars** — clap's default behavior. So a systemd unit with both `Environment=LUCIDA_DATA_DIR=/var/lib/lucida/data` and `ExecStart=lucida-server --data-dir /tmp` will use `/tmp`, not `/var/lib/lucida/data`. Drop the CLI flag (or remove the env var) when you want the other to win. Verified by the in-tree CLI tests in `lucida-server/src/main.rs`.
 
 ## Database location
 
