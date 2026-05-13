@@ -1,0 +1,71 @@
+# Trim the docker build context so `docker build` ships only what the
+# image actually needs to compile from. Per PRD #486 slice 5 / issue
+# #491, this file exists to:
+#   - keep the build fast (small context = small upload to the daemon)
+#   - keep the build deterministic (rebuild artifacts inside the image
+#     instead of importing host-built ones)
+#   - keep secrets and local dev state out of the build context entirely
+#
+# Anything not listed here is allowed in. The Dockerfile copies what
+# it needs explicitly; everything else is just available if a stage
+# wants it.
+
+# --- build artifacts (rebuilt inside the image) ---------------------
+target/
+target_*/
+**/target/
+node_modules/
+**/node_modules/
+lucida-web/dist/
+lucida-core/pkg/
+
+# --- local dev SQLite (must NOT enter the image) --------------------
+# These are the WAL/SHM/main DB files lucida creates on first run;
+# leaking one into the image would ship some developer's session and
+# saved-view rows to every adopter.
+lucida.db
+lucida.db-shm
+lucida.db-wal
+
+# --- env files / secrets --------------------------------------------
+.env
+.env.*
+*.oauth.json
+*client_secret*.json
+
+# --- VCS + dev-host metadata ----------------------------------------
+.git/
+.gitignore
+.gitattributes
+.github/
+.claude/
+
+# --- documentation (not in the image) -------------------------------
+wiki/
+# Top-level docs only (README.md / CHUNK_PIPELINE.md / CLAUDE.md /
+# AGENTS.md). Leading slash anchors at the build-context root so
+# any future per-crate README.md keeps shipping into the build.
+/*.md
+
+# --- adopter-side artifacts (applied by the adopter, not bundled) ---
+extras/
+
+# --- workspace members not in the image -----------------------------
+# lucida-py is excluded from the rust workspace
+# (`exclude = ["lucida-py"]` in the root Cargo.toml) and is not part
+# of the lucida-server image.
+lucida-py/
+
+# --- editor / OS noise ----------------------------------------------
+.idea/
+.vscode/
+.DS_Store
+*.log
+*.swp
+*.swo
+
+# --- the Dockerfile itself doesn't need to be inside the context ----
+# (docker still reads it from disk; this just keeps it out of any
+# COPY . that a stage might do.)
+Dockerfile
+.dockerignore

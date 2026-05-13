@@ -98,3 +98,27 @@ jobs:
       - name: Build SPA
         working-directory: lucida-web
         run: pnpm run build
+
+  docker:
+    name: Docker smoke build (no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Single-arch (amd64) for speed. Multi-arch is the release
+      # workflow's job (PRD #486 slice 7); for PR signal all we need is
+      # "the Dockerfile still builds end-to-end". `load: true` makes the
+      # built image available to the runner for any later inspection
+      # steps without needing a registry round-trip.
+      - name: Build image (single-arch, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: lucida:ci-smoke
