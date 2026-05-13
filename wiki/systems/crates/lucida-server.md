@@ -1,11 +1,11 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-05-13
 ---
 
 # lucida-server
 
-Tokio + Axum WebSocket relay. Brokers multi-client sessions, sequences shared document commands, broadcasts presence, opens datasets via [[lucida-store]], serves chunks from a `CachedStore`, and (S4+) generates and serves on-demand proxy assets via [[lucida-proxy]].
+Tokio + Axum WebSocket relay. Brokers multi-client sessions, sequences shared document commands, broadcasts presence, opens datasets via [[lucida-store]], serves chunks from a `CachedStore`, and (S4+) generates and serves on-demand proxy assets via [[lucida-proxy]]. Per [[decisions/0020-single-image-with-servedir]] it also serves the SPA bundle directly via `tower-http::ServeDir`, so the production deploy unit can be a single container image and a developer's local `:9876` can render the app without an extra reverse proxy.
 
 ## Why a relay, not a peer-mesh
 
@@ -29,6 +29,7 @@ Presence (cursor, viewport, follow) doesn't need arbitration — it's broadcast 
 - `browse.rs` / `admin.rs` — HTTP routes for filesystem browsing and admin operations (e.g. clear proxy cache)
 - `migrations/` — versioned SQL migrations applied at startup (sqlx). Persistent state grew with [[auth]] (`login_sessions`, `pending_auth`) and [[saved-views]] (`bookmarks` + `bookmark_datasets`).
 - `bookmarks/` — server side of [[saved-views]]: `store.rs` (deep, `BookmarkStore` trait + SQLite + memory impls), `handlers.rs` (REST `/api/bookmarks/*` gated by `AuthPrincipal`), `broadcast.rs` (best-effort `BookmarkChanged` dispatch scoped by overlapping loaded datasets).
+- `static_serve.rs` — SPA-asset router built around `tower-http::ServeDir`. Reads `LUCIDA_WEB_DIST` (default `./lucida-web/dist`); serves the bundle with index-fallback for client-routed deep links, or a build-instructions landing page when the dist dir is missing. Mounted on the **public** router half (no auth wrap) so HTML/JS/CSS aren't 401'd; auth gates remain on `/auth/whoami` polling and `/api/*`. See [[decisions/0020-single-image-with-servedir]].
 
 ## Interactions
 

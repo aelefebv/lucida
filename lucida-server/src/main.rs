@@ -17,6 +17,7 @@ use lucida_server::auth;
 use lucida_server::bookmarks;
 use lucida_server::health;
 use lucida_server::session::Session;
+use lucida_server::static_serve;
 use lucida_server::{browse, handler, AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
 
 // ---------------------------------------------------------------------------
@@ -394,6 +395,24 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // pod mid-drain. See `lucida-server/src/health.rs`.
     public_auth_router = public_auth_router.merge(health::router());
 
+    // ADR-0020: serve the SPA bundle from `LUCIDA_WEB_DIST` (default
+    // `./lucida-web/dist`) via `tower-http::ServeDir`. Lands on the
+    // public router half so HTML/JS/CSS aren't 401'd by the auth
+    // middleware — auth gates remain on `/auth/whoami` polling and
+    // `/api/*` calls. Merged LAST below so route-specific handlers
+    // (`/auth/*`, `/api/*`, `/admin/*`, `/ws`) take precedence and the
+    // SPA fallback only fires for truly unknown paths. The dist
+    // directory is re-stat'd on every request, so a dev who builds the
+    // SPA mid-session sees fresh content without restarting the server.
+    let web_dist = PathBuf::from(
+        std::env::var("LUCIDA_WEB_DIST").unwrap_or_else(|_| "./lucida-web/dist".to_string()),
+    );
+    tracing::info!(
+        web_dist = %web_dist.display(),
+        "static_serve.config",
+    );
+    let static_serve_router = static_serve::router(web_dist);
+
     // App routes carry the auth middleware; public auth routes don't.
     let app_state_router = Router::new()
         .route("/", get(ws_handler))
@@ -410,6 +429,9 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
 
     let app = app_state_router
         .merge(public_auth_router)
+        // ADR-0020: SPA static-serve catch-all. Merged last so the
+        // fallback only fires for paths no other route claimed.
+        .merge(static_serve_router)
         .layer(CorsLayer::permissive());
 
     // Slice 8: hourly background sweep of expired session + pending-auth
