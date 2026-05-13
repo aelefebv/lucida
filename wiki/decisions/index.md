@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-05-13
 ---
 
 # Decisions
@@ -30,3 +30,6 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0017-configurable-from-day-one-for-oss-release]] — every Calico-specific value lives in env vars; `PrincipalExtractor` trait is the OSS provider extension point (2026-05-08, proposed)
 - [[decisions/0018-auth-mode-auto-detect-by-bind-address]] — `LUCIDA_AUTH` defaults derived from bind address; loopback → disabled, non-loopback → google; `LUCIDA_INSECURE=1` overrides (2026-05-08, proposed)
 - [[decisions/0019-post-logout-marker-cookie-and-prompt-select-account]] — `lucida_signed_out` marker cookie set by `/auth/logout`; middleware serves a static landing instead of auto-bouncing; `/auth/start` adds `prompt=select_account` and clears the marker (2026-05-08)
+- [[decisions/0020-single-image-with-servedir]] — `lucida-server` serves the SPA via `tower-http::ServeDir`; production deploy unit is a single container image bundling API + SPA (PRD #486; 2026-05-13, proposed)
+- [[decisions/0021-deployment-artifacts-as-reference-templates]] — `extras/deploy/` ships raw YAML with `<PLACEHOLDER>` values; no Helm chart, no Kustomize overlay, no provider-specific resources upstream (PRD #486; 2026-05-13, proposed)
+- [[decisions/0022-manual-merge-release-please-on-main]] — trunk-based releases via `release-please` on `main` with manual-merge of the release PR; tag push triggers multi-arch image build to ghcr.io (PRD #486; 2026-05-13, proposed)

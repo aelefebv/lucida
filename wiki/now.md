@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-05-13
 ---
 
 # Now — Lucida Current State
@@ -11,6 +11,7 @@ Snapshot of what's active. Refresh via the `/repo-wiki` now pass after significa
 
 - **OME-Zarr expansion** — non-standard input handling (CZI 6D mosaics, `chunk_shape>1` on canonical-indexed `t`/`c`, non-canonical axes). Most recent work targets PRD #451. See [[lucida-store]]; touches [[gotchas/non-canonical-axes]] and [[gotchas/blosc-support]] (both may need refresh — see [[queue]]).
 - **`lucida-store` redesign** — PRD #148, server-side chunk serving + storage abstraction.
+- **Deployment artifacts and release pipeline (PRD #486)** — single-image Dockerfile + reference k8s manifests + `RUNBOOK.md` + CI/release-please/release workflows + `static_serve` and health endpoints in [[lucida-server]] + `LUCIDA_LOG_FORMAT`/`LUCIDA_WEB_DIST` env vars + env-backing of `--data-dir`/`--proxy-cache-dir`/`--proxy-concurrency` CLI flags + clearing the three pre-existing TS errors in [[gotchas/preexisting-ts-build-errors]]. ADRs [[decisions/0020-single-image-with-servedir]] / [[decisions/0021-deployment-artifacts-as-reference-templates]] / [[decisions/0022-manual-merge-release-please-on-main]] proposed.
 
 ## Designed, on hold
 
