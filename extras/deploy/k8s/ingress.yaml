@@ -1,0 +1,110 @@
+# Ingress for the lucida Service.
+#
+# Per ADR-0021 (wiki/decisions/0021-deployment-artifacts-as-reference-templates.md)
+# this stays generic: no provider-specific resources, no annotations
+# pinned to one ingress class, no `BackendConfig` / `FrontendConfig` /
+# `ManagedCertificate` / `IngressClassParams`. Adopters add what their
+# controller needs in their own infra repo.
+#
+# Three things every adopter MUST set or change:
+#   1. metadata.namespace       -> the namespace where you applied the others
+#   2. spec.ingressClassName     -> your installed controller's class name
+#   3. spec.rules[].host + spec.tls[].hosts -> your external hostname
+#
+# WebSocket support: lucida-server uses long-lived WebSockets for the
+# follow-mode + presence channel ([[wiki/decisions/0002-peer-to-peer-follow-mode]]).
+# Most modern ingress controllers handle the HTTP/1.1 `Upgrade: websocket`
+# handshake transparently when the backend's protocol is HTTP, BUT the
+# default idle/read timeouts on each controller are usually short enough
+# (30-60s) to silently drop an idle WS. Per-class snippets below — pick
+# the one that matches your `ingressClassName` and add the annotations
+# in your fork.
+#
+# ----------------------------------------------------------------------
+# ingress-nginx (kubernetes/ingress-nginx)
+# ----------------------------------------------------------------------
+# annotations:
+#   nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+#   nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+#   # Optional, larger uploads (default is 1m):
+#   nginx.ingress.kubernetes.io/proxy-body-size: "32m"
+#
+# ----------------------------------------------------------------------
+# Traefik (traefik.io)
+# ----------------------------------------------------------------------
+# Traefik handles WS automatically. If you front the cluster with a
+# cloud LB that has its own idle timeout, raise that on the LB side.
+# No annotations needed on this Ingress object for WS itself.
+#
+# ----------------------------------------------------------------------
+# HAProxy ingress (haproxytech/kubernetes-ingress)
+# ----------------------------------------------------------------------
+# annotations:
+#   haproxy.org/timeout-server: "1h"
+#   haproxy.org/timeout-tunnel: "1h"
+#
+# ----------------------------------------------------------------------
+# AWS ALB (aws/aws-load-balancer-controller)
+# ----------------------------------------------------------------------
+# annotations:
+#   alb.ingress.kubernetes.io/scheme: internet-facing
+#   alb.ingress.kubernetes.io/target-type: ip
+#   alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
+#   alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=3600
+#   alb.ingress.kubernetes.io/certificate-arn: <YOUR-ACM-ARN>
+#
+# ----------------------------------------------------------------------
+# GKE Ingress (kubernetes.io/ingress.gce / GKE classic L7 ILB+ELB)
+# ----------------------------------------------------------------------
+# GKE Ingress requires its own custom resources to tune timeouts +
+# managed certs. Per ADR-0021 we do NOT ship those upstream. In your
+# fork, attach a `BackendConfig` (with `timeoutSec: 3600`) via the
+# `cloud.google.com/backend-config` annotation on the Service, and a
+# `ManagedCertificate` via the `networking.gke.io/managed-certificates`
+# annotation here. See the GKE docs for current syntax.
+#
+# ----------------------------------------------------------------------
+# TLS: bring your own cert mechanism. The reference uses spec.tls with
+# a Secret name placeholder; replace with cert-manager's auto-issued
+# Secret name, your manually created Secret, or remove the block and
+# rely on a controller-level cert source (ACM ARN, GKE ManagedCertificate,
+# AKS Application Gateway listener cert, etc.).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: lucida
+  namespace: <YOUR-NAMESPACE>
+  labels:
+    app.kubernetes.io/name: lucida
+    app.kubernetes.io/component: server
+  # Add per-class annotations from the comment block above in your fork.
+  # Left empty upstream so the manifest applies cleanly under any
+  # IngressClass without assuming a controller.
+  # annotations: {}
+spec:
+  ingressClassName: <YOUR-INGRESS-CLASS>
+  tls:
+    - hosts:
+        - <YOUR-EXTERNAL-HOSTNAME>
+      # Replace with the Secret holding your TLS cert + key. cert-manager
+      # users typically point this at the Secret it auto-creates from a
+      # Certificate resource. If your controller terminates TLS using a
+      # cert it manages itself (ACM ARN, GKE ManagedCertificate, ...),
+      # delete this whole `tls:` block and configure that on the controller.
+      secretName: <YOUR-TLS-SECRET>
+  rules:
+    - host: <YOUR-EXTERNAL-HOSTNAME>
+      http:
+        paths:
+          # Single backend, prefix `/`. lucida-server serves the SPA
+          # (ServeDir at `/`), the API under `/api`, the auth flow under
+          # `/auth`, the admin endpoints under `/admin`, and the
+          # WebSocket under `/ws` (see ADR-0020). One Ingress path
+          # covers all of them.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: lucida
+                port:
+                  name: http

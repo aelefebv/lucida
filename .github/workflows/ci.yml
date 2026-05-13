@@ -122,3 +122,55 @@ jobs:
           push: false
           load: true
           tags: lucida:ci-smoke
+
+  manifests:
+    name: K8s manifest dry-run (extras/deploy/k8s)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # The reference manifests in extras/deploy/k8s/ ship with
+      # <UPPERCASE-WITH-DASHES> placeholders per ADR-0021. Substitute
+      # them to dummy strings in a scratch directory, then run
+      # `kubectl apply --dry-run=client` to validate schema + structure.
+      # No real cluster involved; this catches typos and apiVersion
+      # regressions without needing a kind/minikube spin-up.
+      - name: Substitute placeholders to dummy values
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/k8s-rendered
+          cp extras/deploy/k8s/*.yaml /tmp/k8s-rendered/
+          # Keep this list aligned with the placeholders documented in
+          # extras/deploy/RUNBOOK.md step 4. Add a substitution here when
+          # you introduce a new <PLACEHOLDER> in the manifests.
+          sed -i \
+            -e 's|<YOUR-NAMESPACE>|lucida-ci|g' \
+            -e 's|<YOUR-REGISTRY>/lucida:<YOUR-TAG>|ghcr.io/example/lucida:dummy|g' \
+            -e 's|<YOUR-OAUTH-CLIENT-ID>|dummy-client-id|g' \
+            -e 's|<YOUR-EXTERNAL-HOSTNAME>|lucida.example.test|g' \
+            -e 's|<YOUR-STORAGE-CLASS>|standard|g' \
+            -e 's|<YOUR-INGRESS-CLASS>|nginx|g' \
+            -e 's|<YOUR-TLS-SECRET>|lucida-tls|g' \
+            /tmp/k8s-rendered/*.yaml
+          # Fail loud if any <PLACEHOLDER> survived the substitution on
+          # an *active* (non-comment) YAML line — otherwise kubectl might
+          # happily accept the literal string and we'd lose the signal
+          # that a new placeholder was added without updating this job.
+          # Comments may legitimately reference placeholders (e.g.,
+          # documentation of optional env vars); we ignore them here.
+          if grep -RnE '<[A-Z][A-Z0-9-]+>' /tmp/k8s-rendered/ | grep -vE ':[[:space:]]*#'; then
+            echo "::error::Unsubstituted placeholder on a non-comment line — add the matching sed line above."
+            exit 1
+          fi
+
+      # actions/setup-kubectl ships kubectl directly; no kind/minikube
+      # needed for client-side dry-run. We pin a recent stable; bump as
+      # the project's k8s baseline moves.
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.30.0
+
+      - name: kubectl apply --dry-run=client
+        run: kubectl apply --dry-run=client -f /tmp/k8s-rendered/

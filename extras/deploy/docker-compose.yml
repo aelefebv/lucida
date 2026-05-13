@@ -1,0 +1,103 @@
+# Single-host docker-compose alternative to the Kubernetes manifests.
+#
+# Use this for small/personal/lab deploys on a single VM (or a homelab
+# host). Production should prefer the k8s manifests in ./k8s — they get
+# you probes, rollouts, and a uniform secrets story for free. This file
+# is the equivalent shape: one container, one named volume mounted at
+# /var/lib/lucida, env vars mirroring the k8s Deployment.
+#
+# Per ADR-0021 (wiki/decisions/0021-deployment-artifacts-as-reference-templates.md)
+# this is a reference template — copy it, replace every <PLACEHOLDER>,
+# own the result. The placeholders are the same ones in k8s/*.yaml.
+#
+# Quick start:
+#   1. Build (or pull) the lucida image; replace <YOUR-REGISTRY>/lucida:<YOUR-TAG>
+#   2. Replace the OAuth client placeholders + the hostname
+#   3. Put LUCIDA_GOOGLE_CLIENT_SECRET in a `.env` next to this file
+#      (NOT committed; see .gitignore patterns in the repo root)
+#   4. `docker compose up -d`
+#   5. Front it with your TLS-terminating reverse proxy (Caddy, Traefik,
+#      nginx, ...) — this compose file does NOT include TLS termination
+#      because every adopter terminates differently.
+services:
+  lucida:
+    image: <YOUR-REGISTRY>/lucida:<YOUR-TAG>
+    container_name: lucida
+    restart: unless-stopped
+    # Bind to the host on 9876. If you put a reverse proxy on the same
+    # host, change this to `127.0.0.1:9876:9876` so only the proxy can
+    # reach it. The default below exposes lucida on the host's external
+    # interface, which is fine if your firewall is the access boundary.
+    ports:
+      - "9876:9876"
+    environment:
+      # ---- Required: bind to all interfaces inside the container ----
+      # ADR-0018: loopback is the dev default. Inside a container the
+      # host reaches in via the published port, so we bind 0.0.0.0.
+      LUCIDA_BIND: "0.0.0.0:9876"
+
+      # ---- Required: production-shaped logging ----
+      # JSON line-per-event. `text` is the dev-friendly pretty formatter.
+      LUCIDA_LOG_FORMAT: "json"
+
+      # ---- Required: where the SPA dist lives in this image ----
+      # The Dockerfile copies lucida-web/dist to /usr/share/lucida/web.
+      LUCIDA_WEB_DIST: "/usr/share/lucida/web"
+
+      # ---- Required: auth mode ----
+      # Use `disabled` + LUCIDA_INSECURE=1 for closed-network labs;
+      # `google` for everything else.
+      LUCIDA_AUTH: "google"
+
+      # ---- Required when LUCIDA_AUTH=google ----
+      LUCIDA_GOOGLE_CLIENT_ID: "<YOUR-OAUTH-CLIENT-ID>"
+      LUCIDA_OAUTH_REDIRECT_URI: "https://<YOUR-EXTERNAL-HOSTNAME>/auth/callback"
+      # The secret comes from .env (docker compose auto-loads ./.env).
+      # Do NOT inline the secret value here.
+      LUCIDA_GOOGLE_CLIENT_SECRET: "${LUCIDA_GOOGLE_CLIENT_SECRET}"
+
+      # ---- Required: where SQLite + the proxy cache live ----
+      # Absolute paths under the bind-mounted volume below.
+      LUCIDA_DB_PATH: "/var/lib/lucida/lucida.db"
+      LUCIDA_PROXY_CACHE_DIR: "/var/lib/lucida/proxy-cache"
+      LUCIDA_DATA_DIR: "/var/lib/lucida/data"
+
+      # ---- Required behind a TLS-terminating reverse proxy ----
+      # The proxy terminates TLS and forwards http:// to this container.
+      # Force `Secure` cookies so they survive the https-origin browser
+      # check. See wiki/gotchas/oss-config-defaults.md.
+      LUCIDA_COOKIE_SECURE: "always"
+
+      # ---- Optional: uncomment as needed ----
+      # Restrict sign-in to one or more Google Workspace `hd` claims.
+      # LUCIDA_ALLOWED_HOSTED_DOMAINS: "<YOUR-WORKSPACE-DOMAIN>"
+
+      # Bootstrap admin allowlist (comma-separated emails).
+      # LUCIDA_ADMIN_EMAILS: "<ADMIN-EMAIL-ONE>,<ADMIN-EMAIL-TWO>"
+
+      # Per-generator concurrency cap for the on-disk proxy cache.
+      # LUCIDA_PROXY_CONCURRENCY: "<INT>"
+
+      # Run with auth disabled on a non-loopback bind. Required explicit
+      # acknowledgment per ADR-0018. Do NOT set this in production
+      # unless your network access controls fully authenticate callers.
+      # LUCIDA_INSECURE: "1"
+    volumes:
+      # Single named volume holding SQLite, the proxy cache, and any
+      # local dataset directory. Same shape as the k8s PVC mount.
+      - lucida-data:/var/lib/lucida
+    healthcheck:
+      # Mirrors the k8s readinessProbe; docker compose uses this to
+      # decide when the service is "healthy" for `depends_on` ordering.
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:9876/readyz"]
+      interval: 10s
+      timeout: 2s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  lucida-data:
+    # Defaults to the local docker volume driver. For host-path bind
+    # mounts (e.g., when you want to back up via host snapshots), add a
+    # `driver_opts` block in your fork or replace the named volume with
+    # a `- /opt/lucida:/var/lib/lucida` style bind in the service.

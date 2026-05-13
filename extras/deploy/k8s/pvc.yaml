@@ -1,0 +1,37 @@
+# Persistent volume for SQLite + the proxy on-disk cache.
+#
+# Why ReadWriteOnce: the lucida Deployment is intentionally a single
+# replica (see deployment.yaml header). SQLite + WAL is single-writer,
+# and the proxy cache is also single-writer. ReadWriteOnce is the
+# correct access mode and the most widely supported across CSI drivers.
+#
+# Why 50Gi: a starting point. The proxy cache dominates disk usage and
+# scales with the breadth of datasets the deployment serves. Adopters
+# with large datasets or long-tail workloads should resize upward; the
+# SQLite database itself stays small (sessions + bookmarks rows).
+# Resizing the PVC after the fact requires a CSI driver that supports
+# `allowVolumeExpansion: true` on the StorageClass.
+#
+# StorageClass placeholder: every cluster has its own. Examples:
+#   - GKE:        standard-rwo, premium-rwo, balanced-rwo
+#   - EKS:        gp3, gp2, io2
+#   - AKS:        managed-csi, managed-premium
+#   - on-prem:    longhorn, openebs-hostpath, rook-ceph-block, local-path
+# Leaving `storageClassName` unset uses the cluster default; we set it
+# explicitly so the manifest is self-documenting and survives default-
+# class changes.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: lucida-data
+  namespace: <YOUR-NAMESPACE>
+  labels:
+    app.kubernetes.io/name: lucida
+    app.kubernetes.io/component: server
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: <YOUR-STORAGE-CLASS>
+  resources:
+    requests:
+      storage: 50Gi
