@@ -843,7 +843,11 @@ mod tests {
         assert_eq!(axes[4].kind, AxisKind::Space);
     }
 
+    // Reads a real OME-Zarr fixture from `example_files/` which isn't checked in.
+    // Run locally with `cargo test -- --ignored` when you have the fixture present;
+    // skipped on CI (no fixture) per `.github/workflows/ci.yml`.
     #[tokio::test]
+    #[ignore = "depends on example_files/yeast_3d_mitochondria.ome.zarr (not in repo)"]
     async fn import_single_image() {
         let store = crate::backend::open(
             &format!(
