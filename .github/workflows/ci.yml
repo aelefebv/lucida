@@ -31,13 +31,16 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --all-features
 
-      # Clippy is non-blocking for now: pre-existing warnings in lucida-content
-      # (collapsible_if in normalize.rs) and other crates accumulated before CI
-      # gated the workspace. Same posture as the web lint step. Cleanup tracked
-      # in the lint-debt follow-up issue.
-      - name: cargo clippy (non-blocking — see follow-up issue)
-        run: cargo clippy --workspace --all-features -- -D warnings
-        continue-on-error: true
+      # Format check: enforces `cargo fmt --all` consistency across the
+      # workspace. The format sweep landed alongside the lint debt cleanup
+      # in #498 (slice A+B); this gate prevents drift from creeping back.
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      # Hard gate as of #498 (slices A–C). All pre-existing clippy errors
+      # have been resolved; new ones must be fixed before merge.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 
   web:
     name: Web (wasm-pack + pnpm)
@@ -83,13 +86,12 @@ jobs:
         working-directory: lucida-web
         run: pnpm exec tsc --noEmit -p tsconfig.app.json
 
-      # Lint is non-blocking for now: ~120 pre-existing errors and warnings
-      # accumulated before CI gated the codebase. Visible signal, not a merge
-      # blocker, until the lint debt is addressed in a follow-up PR.
-      - name: Lint (non-blocking — see follow-up issue)
+      # Hard gate as of #498 (slices A–C). All pre-existing lint errors have
+      # been resolved (with documented per-site eslint-disable directives for
+      # load-bearing patterns the strict eslint-plugin-react-hooks@7 flags).
+      - name: Lint
         working-directory: lucida-web
         run: pnpm run lint
-        continue-on-error: true
 
       - name: Test
         working-directory: lucida-web
