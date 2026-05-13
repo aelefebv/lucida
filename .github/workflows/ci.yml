@@ -164,17 +164,15 @@ jobs:
             exit 1
           fi
 
-      # actions/setup-kubectl ships kubectl directly; no kind/minikube
-      # needed for client-side dry-run. We pin a recent stable; bump as
-      # the project's k8s baseline moves.
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
-        with:
-          version: v1.30.0
+      # kubeconform validates k8s manifests against bundled OpenAPI
+      # schemas — fully offline, no apiserver round-trip required.
+      # `kubectl apply --dry-run=client` doesn't work for offline CI
+      # because even with --validate=false it tries to look up resource
+      # types via REST mapping (hits localhost:8080).
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz -C /usr/local/bin kubeconform
 
-      # --validate=false skips OpenAPI schema validation, which would
-      # otherwise try to fetch the schema from a kube-apiserver (CI has
-      # none). YAML parse + Kubernetes resource shape checks still run;
-      # tighter schema validation can be added later via kubeval/kubeconform.
-      - name: kubectl apply --dry-run=client
-        run: kubectl apply --dry-run=client --validate=false -f /tmp/k8s-rendered/
+      - name: kubeconform validation
+        run: kubeconform -strict -summary /tmp/k8s-rendered/
