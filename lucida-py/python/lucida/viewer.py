@@ -32,7 +32,7 @@ class Viewer:
     def __init__(self, width: int = 800, height: int = 600, port: int = 9876):
         self._scene = PyScene(width, height)
         self._port = port
-        self._url = f"ws://localhost:{port}"
+        self._url = f"ws://localhost:{port}/ws"
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._ws = None

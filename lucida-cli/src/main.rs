@@ -11,7 +11,7 @@ use lucida_core::scene::Scene;
 #[command(name = "lucida-cli", about = "CLI client for lucida-server")]
 struct Cli {
     /// Server WebSocket URL
-    #[arg(long, default_value = "ws://localhost:9876", global = true)]
+    #[arg(long, default_value = "ws://localhost:9876/ws", global = true)]
     server: String,
 
     /// Start from a peer's viewport instead of defaults
