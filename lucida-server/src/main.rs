@@ -414,8 +414,15 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let static_serve_router = static_serve::router(web_dist);
 
     // App routes carry the auth middleware; public auth routes don't.
+    //
+    // ADR-0020: `/` no longer routes to the WebSocket handler — it now
+    // falls through to the SPA `static_serve` fallback below so a browser
+    // hitting `:9876` directly sees the app instead of a 401 / unauth
+    // landing. WebSocket clients use `/ws` (already the canonical path
+    // used by `lucida-web/src/bridge.ts`); `lucida-cli` callers that
+    // relied on the legacy `ws://localhost:9876` default URL must now
+    // pass `--server ws://localhost:9876/ws` explicitly.
     let app_state_router = Router::new()
-        .route("/", get(ws_handler))
         .route("/ws", get(ws_handler))
         .route("/api/browse", get(browse::browse_handler))
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
