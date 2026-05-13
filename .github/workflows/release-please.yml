@@ -1,0 +1,54 @@
+name: Release please
+
+on:
+  push:
+    branches: [main]
+
+# release-please needs to write to the repo (push branch + tag) and open
+# the release PR. No other scopes are required.
+permissions:
+  contents: write
+  pull-requests: write
+
+# Don't race: only one release-please run at a time per ref. The action
+# is idempotent (re-runs reconcile the open PR), but parallel runs waste
+# CI minutes and occasionally lose the rebase race for the release branch.
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Open or update the Release vX.Y.Z PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          # Manifest mode: action reads ./release-please-config.json and
+          # ./.release-please-manifest.json from the repo root for the
+          # workspace + web package layout. Both files land in this slice.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          # Auto-merge is OFF per ADR-0022 (wiki/decisions/0022-...). The
+          # action opens or updates the "chore(release): X.Y.Z" PR; the
+          # maintainer manually merges it when a release is desired. This
+          # lets a solo / small-team maintainer batch related changes
+          # (e.g. a fix: immediately followed by a related feat:) into
+          # one release rather than one-release-per-merge.
+          #
+          # Workflow-trigger gotcha: a tag pushed by the default
+          # GITHUB_TOKEN does NOT trigger downstream workflows like
+          # release.yml. The release PR itself opens fine with the
+          # default token; only the tag-fires-release.yml hop is
+          # affected. Two operator-side resolutions, both documented in
+          # extras/deploy/RUNBOOK.md (lands in slice 6):
+          #   1. Configure a GitHub App or PAT with `workflow` scope
+          #      and pass `token: ${{ secrets.RELEASE_PLEASE_TOKEN }}`
+          #      here. Preferred for repos that release frequently.
+          #   2. After release-please's PR merges, manually re-push the
+          #      tag (`git push origin :refs/tags/vX.Y.Z &&
+          #      git push origin vX.Y.Z`) to trigger release.yml. One-
+          #      time friction per release; acceptable for small teams.
+          # Defaulting to GITHUB_TOKEN here keeps the workflow runnable
+          # out-of-the-box; the operator picks (1) or (2) post-merge.
