@@ -1,0 +1,213 @@
+# Reference Deployment for lucida-server.
+#
+# Per ADR-0021 (wiki/decisions/0021-deployment-artifacts-as-reference-templates.md)
+# this manifest is a documentation-by-example template, not a turnkey
+# deploy. Copy it into your own infra repo, replace every <PLACEHOLDER>,
+# and own the result. The upstream copy stays generic so it works as a
+# reference for any target cluster.
+#
+# Why a single replica:
+#   - The session store and bookmark store are SQLite files on a PVC
+#     (see [[wiki/decisions/0015-server-stored-bookmarks-and-auth-seam]]).
+#     SQLite + WAL is single-writer; multi-replica would require a real
+#     RDBMS migration first.
+#   - The proxy on-disk cache (LUCIDA_PROXY_CACHE_DIR) is also on the
+#     PVC and is single-writer for the same reason.
+#   - Strategy is Recreate so the writer slot is never double-booked
+#     during rollouts (the new pod waits for the old pod to release the
+#     PVC). RollingUpdate would briefly run two writers against the
+#     same SQLite file.
+#
+# Env vars: only LUCIDA_BIND, LUCIDA_LOG_FORMAT, LUCIDA_AUTH, and
+# LUCIDA_WEB_DIST are set unconditionally. Everything else lives in
+# the example Secret + the commented-out optional env block — uncomment
+# the ones your deployment needs. The full contract is documented in
+# wiki/gotchas/oss-config-defaults.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lucida
+  namespace: <YOUR-NAMESPACE>
+  labels:
+    app.kubernetes.io/name: lucida
+    app.kubernetes.io/component: server
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: lucida
+      app.kubernetes.io/component: server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: lucida
+        app.kubernetes.io/component: server
+    spec:
+      serviceAccountName: lucida
+      # Set securityContext per your cluster's PodSecurity profile. The
+      # debian:bookworm-slim runtime image runs as root by default; if
+      # your cluster enforces "restricted" you'll want to add a
+      # non-root user to the Dockerfile and pin runAsUser/runAsGroup
+      # here. Left unset upstream so the manifest stays valid in any
+      # PodSecurity admission mode.
+      containers:
+        - name: lucida
+          # Replace with your registry path + tag. The upstream image
+          # is published per release-please by .github/workflows/release.yml
+          # (PRD #486 slice 7) — adopters generally re-tag into their
+          # own registry for promotion control.
+          image: <YOUR-REGISTRY>/lucida:<YOUR-TAG>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9876
+              protocol: TCP
+          env:
+            # ---- Required: bind to all interfaces inside the pod ----
+            # ADR-0018: the loopback default is for local dev. Inside a
+            # pod the kubelet reaches the container by IP, so we bind
+            # 0.0.0.0. The Service in front of this is the only routable
+            # path; the pod IP isn't exposed.
+            - name: LUCIDA_BIND
+              value: "0.0.0.0:9876"
+
+            # ---- Required: production-shaped logging ----
+            # JSON line-per-event lands well in any log aggregator
+            # (Cloud Logging, Loki, Datadog, ...). Default is `text`
+            # which is the dev-friendly pretty formatter.
+            - name: LUCIDA_LOG_FORMAT
+              value: "json"
+
+            # ---- Required: where the SPA dist lives in this image ----
+            # The Dockerfile copies lucida-web/dist to /usr/share/lucida/web.
+            # Don't change this unless you've also changed the Dockerfile.
+            - name: LUCIDA_WEB_DIST
+              value: "/usr/share/lucida/web"
+
+            # ---- Required: auth mode ----
+            # `google` is the v1 supported provider. `disabled` is for
+            # closed-network deployments (and requires LUCIDA_INSECURE=1
+            # when LUCIDA_BIND is non-loopback — which is always true in
+            # k8s). See wiki/gotchas/oss-config-defaults.md.
+            - name: LUCIDA_AUTH
+              value: "google"
+
+            # ---- Required when LUCIDA_AUTH=google ----
+            # The OAuth client ID is not a secret; the secret is below.
+            - name: LUCIDA_GOOGLE_CLIENT_ID
+              value: "<YOUR-OAUTH-CLIENT-ID>"
+            - name: LUCIDA_OAUTH_REDIRECT_URI
+              value: "https://<YOUR-EXTERNAL-HOSTNAME>/auth/callback"
+            - name: LUCIDA_GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: lucida-google-oauth
+                  key: client_secret
+
+            # ---- Required: where SQLite + the proxy cache live ----
+            # Absolute path under the PVC mount below. The default
+            # CWD-relative `./lucida.db` is brittle in containers; set
+            # an absolute path explicitly.
+            - name: LUCIDA_DB_PATH
+              value: "/var/lib/lucida/lucida.db"
+            - name: LUCIDA_PROXY_CACHE_DIR
+              value: "/var/lib/lucida/proxy-cache"
+            - name: LUCIDA_DATA_DIR
+              value: "/var/lib/lucida/data"
+
+            # ---- Required behind a TLS-terminating ingress ----
+            # The ingress terminates TLS and forwards http:// to the
+            # pod. Lucida's auto-detect of cookie `Secure` looks at
+            # the request scheme; with http it would NOT mark cookies
+            # Secure, and the browser would refuse to set them on the
+            # https origin. Force `always` to bridge the gap.
+            # See wiki/gotchas/oss-config-defaults.md for why we
+            # deliberately don't trust X-Forwarded-Proto.
+            - name: LUCIDA_COOKIE_SECURE
+              value: "always"
+
+            # ---- Optional: uncomment as needed ----
+            # Restrict sign-in to one or more Google Workspace `hd` claims.
+            # Empty / unset = no domain restriction (OSS-permissive default).
+            # - name: LUCIDA_ALLOWED_HOSTED_DOMAINS
+            #   value: "<YOUR-WORKSPACE-DOMAIN>,<YOUR-OTHER-DOMAIN>"
+
+            # Bootstrap admin allowlist (comma-separated emails).
+            # Lower-cased at parse and at match time; whitespace tolerated.
+            # - name: LUCIDA_ADMIN_EMAILS
+            #   value: "<ADMIN-EMAIL-ONE>,<ADMIN-EMAIL-TWO>"
+
+            # Override the default cookie name (`lucida_session`).
+            # - name: LUCIDA_COOKIE_NAME
+            #   value: "<YOUR-COOKIE-NAME>"
+
+            # Session TTL knobs. Defaults documented in
+            # wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.
+            # - name: LUCIDA_SESSION_HARD_CAP_HOURS
+            #   value: "<HOURS>"
+            # - name: LUCIDA_SESSION_IDLE_TIMEOUT_HOURS
+            #   value: "<HOURS>"
+
+            # Per-generator concurrency cap for the on-disk proxy cache.
+            # CLI flag wins over env if both are set.
+            # - name: LUCIDA_PROXY_CONCURRENCY
+            #   value: "<INT>"
+
+            # Privileged "service-to-service" admin token (alternative to
+            # cookie-based admin). Treat as a real secret if you set it.
+            # - name: LUCIDA_ADMIN_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: lucida-admin-token
+            #       key: token
+
+            # Run with auth disabled on a non-loopback bind. Required
+            # explicit acknowledgment per ADR-0018. Do not set this in
+            # production deployments unless your network access controls
+            # are doing the entire job of authenticating callers.
+            # - name: LUCIDA_INSECURE
+            #   value: "1"
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            # Tight cadence so a Recreate rollout converges quickly. The
+            # readiness handler is a synchronous in-process check; no
+            # I/O, so 1s timeout is plenty.
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 1
+            successThreshold: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            # Looser than readiness — a brief stall shouldn't trigger a
+            # restart. lucida-server doesn't have a slow startup phase
+            # today; tighten if that changes.
+            initialDelaySeconds: 10
+            periodSeconds: 20
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
+          resources:
+            # Starting points. Tune from your actual usage. The chunk
+            # pipeline can spike memory under heavy concurrent fetch;
+            # the proxy cache uses disk, not RAM, but the sled-style
+            # in-process indexes scale with cache size.
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/lucida
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: lucida-data

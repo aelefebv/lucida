@@ -1,0 +1,31 @@
+# ClusterIP Service in front of the lucida Deployment.
+#
+# ClusterIP is the right choice upstream because the externally
+# routable surface lives in the Ingress (ingress.yaml). Adopters who
+# don't run an Ingress controller and want a LoadBalancer or NodePort
+# directly should change `type` here — but most production deploys
+# keep ClusterIP and put a real Ingress (or a cloud LB through the
+# Ingress) in front.
+#
+# Port 9876 matches:
+#   - LUCIDA_BIND default port (see wiki/gotchas/oss-config-defaults.md)
+#   - Dockerfile EXPOSE
+#   - The deployment.yaml containerPort name "http"
+apiVersion: v1
+kind: Service
+metadata:
+  name: lucida
+  namespace: <YOUR-NAMESPACE>
+  labels:
+    app.kubernetes.io/name: lucida
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: lucida
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 9876
+      targetPort: http
+      protocol: TCP
