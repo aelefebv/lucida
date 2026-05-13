@@ -1,0 +1,30 @@
+{
+  "release-type": "rust",
+  "bootstrap-sha": "4b6037555ed8f1c0f8b6d9f422708589d73b4ebd",
+  "include-component-in-tag": false,
+  "include-v-in-tag": true,
+  "separate-pull-requests": false,
+  "group-pull-request-title-pattern": "chore(release): ${version}",
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance" },
+    { "type": "revert", "section": "Reverts" },
+    { "type": "docs", "section": "Documentation", "hidden": true },
+    { "type": "chore", "section": "Chores", "hidden": true },
+    { "type": "style", "section": "Styles", "hidden": true },
+    { "type": "test", "section": "Tests", "hidden": true },
+    { "type": "ci", "section": "CI", "hidden": true },
+    { "type": "refactor", "section": "Refactors", "hidden": true }
+  ],
+  "packages": {
+    "lucida-server": { "release-type": "rust" },
+    "lucida-core": { "release-type": "rust" },
+    "lucida-store": { "release-type": "rust" },
+    "lucida-cli": { "release-type": "rust" },
+    "lucida-content": { "release-type": "rust" },
+    "lucida-protocol": { "release-type": "rust" },
+    "lucida-proxy": { "release-type": "rust" },
+    "lucida-web": { "release-type": "node" }
+  }
+}
