@@ -90,11 +90,7 @@ fn camera_vp_f64(cam: &Camera) -> Option<[f64; 16]> {
 
 /// Intersect a ray with z = z_unit in unit [0,1]^3 space.
 /// Returns the (x_unit, y_unit) intersection point, or None if the ray is parallel.
-fn ray_z_intersect(
-    ro: [f64; 3],
-    rd: [f64; 3],
-    z_unit: f64,
-) -> Option<(f64, f64)> {
+fn ray_z_intersect(ro: [f64; 3], rd: [f64; 3], z_unit: f64) -> Option<(f64, f64)> {
     if rd[2].abs() < 1e-12 {
         return None;
     }
@@ -124,7 +120,9 @@ fn transform_point_f64(p: [f64; 3], m: &[f64; 16]) -> [f64; 3] {
 fn ray_aabb_exit(origin: [f64; 3], dir: [f64; 3]) -> [f64; 3] {
     let mut t_far = f64::INFINITY;
     for i in 0..3 {
-        if dir[i].abs() < 1e-12 { continue; }
+        if dir[i].abs() < 1e-12 {
+            continue;
+        }
         let t = if dir[i] > 0.0 {
             (1.0 - origin[i]) / dir[i]
         } else {
@@ -152,7 +150,12 @@ fn transform_dir_f64(d: [f64; 3], m: &[f64; 16]) -> [f64; 3] {
 /// Project a world-space point to screen coords through a view-projection matrix.
 /// Uses `screen_size` (CSS pixels) instead of `view.viewport` (device pixels)
 /// so coordinates match the HTML overlay positioning.
-fn project_to_screen_vp(point: [f64; 3], vp: [f64; 16], screen_w: f64, screen_h: f64) -> Option<(f64, f64)> {
+fn project_to_screen_vp(
+    point: [f64; 3],
+    vp: [f64; 16],
+    screen_w: f64,
+    screen_h: f64,
+) -> Option<(f64, f64)> {
     let x = vp[0] * point[0] + vp[4] * point[1] + vp[8] * point[2] + vp[12];
     let y = vp[1] * point[0] + vp[5] * point[1] + vp[9] * point[2] + vp[13];
     let w = vp[3] * point[0] + vp[7] * point[1] + vp[11] * point[2] + vp[15];
@@ -170,21 +173,18 @@ fn project_to_screen_vp(point: [f64; 3], vp: [f64; 16], screen_w: f64, screen_h:
 fn make_crosshair(x: f32, y: f32, r: f32, g: f32, b: f32) -> [f32; 16] {
     [
         x, y, 0.0, 0.0, // position (voxel), type=0 (crosshair)
-        r, g, b, 0.9,   // color
+        r, g, b, 0.9, // color
         0.0, 0.0, 0.0, 0.0, // end_point (unused)
         0.0, 0.0, 0.0, 0.0, // marker (unused)
     ]
 }
 
 /// Helper to create a ray cursor entry (16 floats).
-fn make_ray(
-    start: [f32; 3], end: [f32; 3], marker: [f32; 3],
-    r: f32, g: f32, b: f32,
-) -> [f32; 16] {
+fn make_ray(start: [f32; 3], end: [f32; 3], marker: [f32; 3], r: f32, g: f32, b: f32) -> [f32; 16] {
     [
         start[0], start[1], start[2], 1.0, // position = start, type=1 (ray)
-        r, g, b, 0.9,                       // color
-        end[0], end[1], end[2], 0.0,         // end_point
+        r, g, b, 0.9, // color
+        end[0], end[1], end[2], 0.0, // end_point
         marker[0], marker[1], marker[2], 0.0, // marker
     ]
 }
@@ -203,25 +203,26 @@ fn voxel_to_world(x: f64, y: f64, z: f64, shape: [u32; 3], model: &[f64; 16]) ->
 /// Compute peer cursor geometry for the GPU and screen positions for labels.
 ///
 /// Each GPU cursor is 16 floats: `[position(4), color(4), end_point(4), marker(4)]`
-pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, screen_w: f64, screen_h: f64) -> CursorOutput {
+pub fn compute_peer_cursors(
+    scene: &Scene,
+    peers: &[PeerInput],
+    my_id: u64,
+    screen_w: f64,
+    screen_h: f64,
+) -> CursorOutput {
     let local_mode = match &scene.camera {
         Camera::Slice(_) => "slice",
         Camera::Arcball(_) | Camera::Fly(_) => "arcball",
     };
 
     let volume_shape = scene.volume_shape();
-    let inv_model_f64: Option<[f64; 16]> = scene.volume_transform().map(|t| {
-        t.inv_model.map(|v| v as f64)
-    });
-    let model_f64: Option<[f64; 16]> = scene.volume_transform().map(|t| {
-        t.model.map(|v| v as f64)
-    });
+    let inv_model_f64: Option<[f64; 16]> = scene
+        .volume_transform()
+        .map(|t| t.inv_model.map(|v| v as f64));
+    let model_f64: Option<[f64; 16]> = scene.volume_transform().map(|t| t.model.map(|v| v as f64));
 
     let identity: [f64; 16] = [
-        1.0, 0.0, 0.0, 0.0,
-        0.0, 1.0, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
 
     let mut output = CursorOutput {
@@ -250,13 +251,21 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
             if local_mode == "slice" {
                 // 2D→2D: pass through voxel coords as crosshair
                 if !peer.label_only {
-                    output.gpu.push(make_crosshair(cursor[0] as f32, cursor[1] as f32, r, g, b));
+                    output
+                        .gpu
+                        .push(make_crosshair(cursor[0] as f32, cursor[1] as f32, r, g, b));
                 }
 
                 if let Camera::Slice(v) = &scene.camera {
                     let sx = (cursor[0] - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
                     let sy = (cursor[1] - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
-                    output.labels.push(LabelOutput { id: peer.id, sx, sy, world: None, voxel: None });
+                    output.labels.push(LabelOutput {
+                        id: peer.id,
+                        sx,
+                        sy,
+                        world: None,
+                        voxel: None,
+                    });
                 }
             } else {
                 // Case B: 3D→3D — unproject peer's cursor, clip to volume, render as ray
@@ -268,10 +277,11 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
                     None => continue,
                 };
 
-                let (ro_world, rd_world) = match unproject_cursor_ray_vp(peer_vp, cursor[0], cursor[1]) {
-                    Some(r) => r,
-                    None => continue,
-                };
+                let (ro_world, rd_world) =
+                    match unproject_cursor_ray_vp(peer_vp, cursor[0], cursor[1]) {
+                        Some(r) => r,
+                        None => continue,
+                    };
 
                 let inv_m = inv_model_f64.as_ref().unwrap_or(&identity);
                 let model = model_f64.as_ref().unwrap_or(&identity);
@@ -279,52 +289,65 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
                 let rd_unit = normalize3(transform_dir_f64(rd_world, inv_m));
 
                 // Compute ray segment through or near the volume
-                let (start_unit, end_unit, marker_unit) =
-                    if let Some(hit_point) = ray_aabb_hit(ro_unit, rd_unit, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]) {
-                        // Ray hits volume: entry to exit with overshoot
-                        let t_past = 0.01;
-                        let interior = [
-                            hit_point[0] + rd_unit[0] * t_past,
-                            hit_point[1] + rd_unit[1] * t_past,
-                            hit_point[2] + rd_unit[2] * t_past,
-                        ];
-                        let exit_point = ray_aabb_exit(interior, rd_unit);
-                        let dx = exit_point[0] - hit_point[0];
-                        let dy = exit_point[1] - hit_point[1];
-                        let dz = exit_point[2] - hit_point[2];
-                        let ray_len = (dx * dx + dy * dy + dz * dz).sqrt();
-                        let overshoot = ray_len * 0.5;
-                        (
-                            [hit_point[0] - rd_unit[0] * overshoot,
-                             hit_point[1] - rd_unit[1] * overshoot,
-                             hit_point[2] - rd_unit[2] * overshoot],
-                            [exit_point[0] + rd_unit[0] * overshoot,
-                             exit_point[1] + rd_unit[1] * overshoot,
-                             exit_point[2] + rd_unit[2] * overshoot],
-                            hit_point,
-                        )
-                    } else {
-                        // Ray misses volume: show ray near the volume center
-                        let center = [0.5, 0.5, 0.5];
-                        // Find closest point on ray to volume center
-                        let oc = [center[0] - ro_unit[0], center[1] - ro_unit[1], center[2] - ro_unit[2]];
-                        let t_closest = oc[0] * rd_unit[0] + oc[1] * rd_unit[1] + oc[2] * rd_unit[2];
-                        let mid = [
-                            ro_unit[0] + rd_unit[0] * t_closest,
-                            ro_unit[1] + rd_unit[1] * t_closest,
-                            ro_unit[2] + rd_unit[2] * t_closest,
-                        ];
-                        let half_len = 1.0; // unit-cube diagonal ≈ 1.73, use 1.0 for each side
-                        (
-                            [mid[0] - rd_unit[0] * half_len,
-                             mid[1] - rd_unit[1] * half_len,
-                             mid[2] - rd_unit[2] * half_len],
-                            [mid[0] + rd_unit[0] * half_len,
-                             mid[1] + rd_unit[1] * half_len,
-                             mid[2] + rd_unit[2] * half_len],
-                            mid,
-                        )
-                    };
+                let (start_unit, end_unit, marker_unit) = if let Some(hit_point) =
+                    ray_aabb_hit(ro_unit, rd_unit, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0])
+                {
+                    // Ray hits volume: entry to exit with overshoot
+                    let t_past = 0.01;
+                    let interior = [
+                        hit_point[0] + rd_unit[0] * t_past,
+                        hit_point[1] + rd_unit[1] * t_past,
+                        hit_point[2] + rd_unit[2] * t_past,
+                    ];
+                    let exit_point = ray_aabb_exit(interior, rd_unit);
+                    let dx = exit_point[0] - hit_point[0];
+                    let dy = exit_point[1] - hit_point[1];
+                    let dz = exit_point[2] - hit_point[2];
+                    let ray_len = (dx * dx + dy * dy + dz * dz).sqrt();
+                    let overshoot = ray_len * 0.5;
+                    (
+                        [
+                            hit_point[0] - rd_unit[0] * overshoot,
+                            hit_point[1] - rd_unit[1] * overshoot,
+                            hit_point[2] - rd_unit[2] * overshoot,
+                        ],
+                        [
+                            exit_point[0] + rd_unit[0] * overshoot,
+                            exit_point[1] + rd_unit[1] * overshoot,
+                            exit_point[2] + rd_unit[2] * overshoot,
+                        ],
+                        hit_point,
+                    )
+                } else {
+                    // Ray misses volume: show ray near the volume center
+                    let center = [0.5, 0.5, 0.5];
+                    // Find closest point on ray to volume center
+                    let oc = [
+                        center[0] - ro_unit[0],
+                        center[1] - ro_unit[1],
+                        center[2] - ro_unit[2],
+                    ];
+                    let t_closest = oc[0] * rd_unit[0] + oc[1] * rd_unit[1] + oc[2] * rd_unit[2];
+                    let mid = [
+                        ro_unit[0] + rd_unit[0] * t_closest,
+                        ro_unit[1] + rd_unit[1] * t_closest,
+                        ro_unit[2] + rd_unit[2] * t_closest,
+                    ];
+                    let half_len = 1.0; // unit-cube diagonal ≈ 1.73, use 1.0 for each side
+                    (
+                        [
+                            mid[0] - rd_unit[0] * half_len,
+                            mid[1] - rd_unit[1] * half_len,
+                            mid[2] - rd_unit[2] * half_len,
+                        ],
+                        [
+                            mid[0] + rd_unit[0] * half_len,
+                            mid[1] + rd_unit[1] * half_len,
+                            mid[2] + rd_unit[2] * half_len,
+                        ],
+                        mid,
+                    )
+                };
 
                 let start = transform_point_f64(start_unit, model);
                 let end = transform_point_f64(end_unit, model);
@@ -336,13 +359,22 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
                     [start[0] as f32, start[1] as f32, start[2] as f32],
                     [end[0] as f32, end[1] as f32, end[2] as f32],
                     marker_world,
-                    r, g, b,
+                    r,
+                    g,
+                    b,
                 ));
 
-                if let Some(local_vp) = camera_vp_f64(&scene.camera) {
-                    if let Some((sx, sy)) = project_to_screen_vp(marker, local_vp, screen_w, screen_h) {
-                        output.labels.push(LabelOutput { id: peer.id, sx, sy, world: Some(marker), voxel: None });
-                    }
+                if let Some(local_vp) = camera_vp_f64(&scene.camera)
+                    && let Some((sx, sy)) =
+                        project_to_screen_vp(marker, local_vp, screen_w, screen_h)
+                {
+                    output.labels.push(LabelOutput {
+                        id: peer.id,
+                        sx,
+                        sy,
+                        world: Some(marker),
+                        voxel: None,
+                    });
                 }
             }
         } else if peer_mode == "arcball" && local_mode == "slice" {
@@ -355,7 +387,8 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
                 None => continue,
             };
 
-            let (ro_world, rd_world) = match unproject_cursor_ray_vp(peer_vp, cursor[0], cursor[1]) {
+            let (ro_world, rd_world) = match unproject_cursor_ray_vp(peer_vp, cursor[0], cursor[1])
+            {
                 Some(r) => r,
                 None => continue,
             };
@@ -379,14 +412,22 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
                     && y_voxel >= 0.0
                     && y_voxel <= shape[1] as f64
                 {
-                    output.gpu.push(make_crosshair(x_voxel as f32, y_voxel as f32, r, g, b));
+                    output
+                        .gpu
+                        .push(make_crosshair(x_voxel as f32, y_voxel as f32, r, g, b));
                 }
 
                 // Always emit label so JS can show edge indicator
                 if let Camera::Slice(v) = &scene.camera {
                     let sx = (x_voxel - v.center[0]) * v.zoom + v.viewport[0] as f64 / 2.0;
                     let sy = (y_voxel - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
-                    output.labels.push(LabelOutput { id: peer.id, sx, sy, world: None, voxel: Some([x_voxel, y_voxel]) });
+                    output.labels.push(LabelOutput {
+                        id: peer.id,
+                        sx,
+                        sy,
+                        world: None,
+                        voxel: Some([x_voxel, y_voxel]),
+                    });
                 }
             }
         } else if peer_mode == "slice" && local_mode == "arcball" {
@@ -398,7 +439,9 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
                 Some(Camera::Slice(_)) => true,
                 _ => true, // mode=="slice" so assume Slice even if camera missing
             };
-            if !peer_view { continue; }
+            if !peer_view {
+                continue;
+            }
 
             // Peer's cursor is in voxel coords (x, y). Get their Z from their view.
             let peer_z = peer.view_z.unwrap_or(0) as f64;
@@ -418,8 +461,16 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
             // Project marker to screen for label
             if let Some(local_vp) = camera_vp_f64(&scene.camera) {
                 let marker_f64 = [marker[0] as f64, marker[1] as f64, marker[2] as f64];
-                if let Some((sx, sy)) = project_to_screen_vp(marker_f64, local_vp, screen_w, screen_h) {
-                    output.labels.push(LabelOutput { id: peer.id, sx, sy, world: Some(marker_f64), voxel: None });
+                if let Some((sx, sy)) =
+                    project_to_screen_vp(marker_f64, local_vp, screen_w, screen_h)
+                {
+                    output.labels.push(LabelOutput {
+                        id: peer.id,
+                        sx,
+                        sy,
+                        world: Some(marker_f64),
+                        voxel: None,
+                    });
                 }
             }
         }
@@ -431,7 +482,7 @@ pub fn compute_peer_cursors(scene: &Scene, peers: &[PeerInput], my_id: u64, scre
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::camera::{Camera, Arcball, Fly};
+    use crate::camera::{Arcball, Camera, Fly};
     use crate::scene::Scene;
 
     fn scene_2d(viewport: [u32; 2]) -> Scene {
@@ -440,7 +491,9 @@ mod tests {
 
     fn register_shape(scene: &mut Scene, shape: [u32; 3]) {
         let reg = crate::scene::test_helpers::make_dataset_opened_with_shape(
-            "default", "default", 1,
+            "default",
+            "default",
+            1,
             [1, 1, shape[0] as u64, shape[1] as u64, shape[2] as u64],
             [1, 1, 1, 128, 128],
             1,
@@ -469,14 +522,32 @@ mod tests {
     }
 
     fn peer(id: u64, cursor: Option<[f64; 2]>, mode: &str) -> PeerInput {
-        PeerInput { id, cursor, mode: mode.into(), camera: None, view_z: None, label_only: false }
+        PeerInput {
+            id,
+            cursor,
+            mode: mode.into(),
+            camera: None,
+            view_z: None,
+            label_only: false,
+        }
     }
 
     /// Create a PeerInput with a camera, using the serde tag as the mode string
     /// (matching how the TypeScript client builds the peer array from camera.mode).
     fn peer_with_camera(id: u64, cursor: Option<[f64; 2]>, camera: Camera) -> PeerInput {
-        let mode = match &camera { Camera::Slice(_) => "slice", Camera::Arcball(_) => "arcball", Camera::Fly(_) => "fly" };
-        PeerInput { id, cursor, mode: mode.into(), camera: Some(camera), view_z: None, label_only: false }
+        let mode = match &camera {
+            Camera::Slice(_) => "slice",
+            Camera::Arcball(_) => "arcball",
+            Camera::Fly(_) => "fly",
+        };
+        PeerInput {
+            id,
+            cursor,
+            mode: mode.into(),
+            camera: Some(camera),
+            view_z: None,
+            label_only: false,
+        }
     }
 
     // --- 2D→2D tests ---
@@ -484,7 +555,13 @@ mod tests {
     #[test]
     fn filters_self() {
         let scene = scene_2d([800, 600]);
-        let result = compute_peer_cursors(&scene, &[peer(1, Some([100.0, 200.0]), "slice")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            &[peer(1, Some([100.0, 200.0]), "slice")],
+            1,
+            800.0,
+            600.0,
+        );
         assert!(result.gpu.is_empty());
     }
 
@@ -498,26 +575,44 @@ mod tests {
     #[test]
     fn filters_cross_mode_without_camera() {
         let scene = scene_2d([800, 600]);
-        let result = compute_peer_cursors(&scene, &[peer(2, Some([0.5, 0.5]), "arcball")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            &[peer(2, Some([0.5, 0.5]), "arcball")],
+            1,
+            800.0,
+            600.0,
+        );
         assert!(result.gpu.is_empty());
     }
 
     #[test]
     fn basic_2d_cursor() {
         let scene = scene_2d([800, 600]);
-        let result = compute_peer_cursors(&scene, &[peer(2, Some([100.0, 200.0]), "slice")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            &[peer(2, Some([100.0, 200.0]), "slice")],
+            1,
+            800.0,
+            600.0,
+        );
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
         assert_eq!(gpu[0], 100.0); // pos_x
         assert_eq!(gpu[1], 200.0); // pos_y
-        assert_eq!(gpu[3], 0.0);   // type=crosshair
-        assert_eq!(gpu[7], 0.9);   // alpha
+        assert_eq!(gpu[3], 0.0); // type=crosshair
+        assert_eq!(gpu[7], 0.9); // alpha
     }
 
     #[test]
     fn screen_position_at_center() {
         let scene = scene_2d([800, 600]);
-        let result = compute_peer_cursors(&scene, &[peer(2, Some([0.0, 0.0]), "slice")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            &[peer(2, Some([0.0, 0.0]), "slice")],
+            1,
+            800.0,
+            600.0,
+        );
         let label = &result.labels[0];
         assert_eq!(label.sx, 400.0);
         assert_eq!(label.sy, 300.0);
@@ -530,7 +625,13 @@ mod tests {
             v.zoom = 2.0;
             v.center = [50.0, 50.0];
         }
-        let result = compute_peer_cursors(&scene, &[peer(2, Some([100.0, 100.0]), "slice")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            &[peer(2, Some([100.0, 100.0]), "slice")],
+            1,
+            800.0,
+            600.0,
+        );
         let label = &result.labels[0];
         assert_eq!(label.sx, 500.0);
         assert_eq!(label.sy, 400.0);
@@ -561,7 +662,8 @@ mod tests {
         scene.view.set_z(50);
 
         let peers = vec![peer_with_camera(
-            2, Some([0.5, 0.5]),
+            2,
+            Some([0.5, 0.5]),
             Camera::Arcball(Arcball::new([800, 600])),
         )];
         let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
@@ -575,7 +677,13 @@ mod tests {
     #[test]
     fn peer_3d_to_local_2d_no_camera_skipped() {
         let scene = scene_2d_with_shape([800, 600], [100, 200, 300]);
-        let result = compute_peer_cursors(&scene, &[peer(2, Some([0.5, 0.5]), "arcball")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            &[peer(2, Some([0.5, 0.5]), "arcball")],
+            1,
+            800.0,
+            600.0,
+        );
         assert!(result.gpu.is_empty());
     }
 
@@ -604,9 +712,18 @@ mod tests {
         let start_z = gpu[2];
         let end_z = gpu[10];
         let marker_z = gpu[14];
-        let (min_z, max_z) = if start_z < end_z { (start_z, end_z) } else { (end_z, start_z) };
-        assert!(marker_z >= min_z && marker_z <= max_z,
-            "marker z={} should be between start z={} and end z={}", marker_z, start_z, end_z);
+        let (min_z, max_z) = if start_z < end_z {
+            (start_z, end_z)
+        } else {
+            (end_z, start_z)
+        };
+        assert!(
+            marker_z >= min_z && marker_z <= max_z,
+            "marker z={} should be between start z={} and end z={}",
+            marker_z,
+            start_z,
+            end_z
+        );
     }
 
     // --- 3D→3D tests (Case B) ---
@@ -618,7 +735,8 @@ mod tests {
         let mut peer_cam = Arcball::new([800, 600]);
         peer_cam.theta = 1.0; // different angle
         let peers = vec![peer_with_camera(
-            2, Some([0.5, 0.5]),
+            2,
+            Some([0.5, 0.5]),
             Camera::Arcball(peer_cam),
         )];
         let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
@@ -630,7 +748,13 @@ mod tests {
     #[test]
     fn peer_3d_to_local_3d_no_camera_skipped() {
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
-        let result = compute_peer_cursors(&scene, &[peer(2, Some([0.5, 0.5]), "arcball")], 1, 800.0, 600.0);
+        let result = compute_peer_cursors(
+            &scene,
+            &[peer(2, Some([0.5, 0.5]), "arcball")],
+            1,
+            800.0,
+            600.0,
+        );
         assert!(result.gpu.is_empty());
     }
 
@@ -721,7 +845,11 @@ mod tests {
         let scene = scene_fly_with_shape([800, 600], [100, 200, 300]);
         let mut arcball_cam = Arcball::new([800, 600]);
         arcball_cam.theta = 1.0;
-        let peers = vec![peer_with_camera(2, Some([0.5, 0.5]), Camera::Arcball(arcball_cam))];
+        let peers = vec![peer_with_camera(
+            2,
+            Some([0.5, 0.5]),
+            Camera::Arcball(arcball_cam),
+        )];
         let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1);
         let gpu = &result.gpu[0];
@@ -732,8 +860,12 @@ mod tests {
     fn fly_peer_without_camera_skipped() {
         // Fly mode but no camera data: should be skipped
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
-        let result = compute_peer_cursors(&scene, &[peer(2, Some([0.5, 0.5]), "fly")], 1, 800.0, 600.0);
-        assert!(result.gpu.is_empty(), "fly peer without camera should be skipped");
+        let result =
+            compute_peer_cursors(&scene, &[peer(2, Some([0.5, 0.5]), "fly")], 1, 800.0, 600.0);
+        assert!(
+            result.gpu.is_empty(),
+            "fly peer without camera should be skipped"
+        );
     }
 
     // --- 3D→2D out-of-bounds label emission ---
@@ -768,11 +900,16 @@ mod tests {
         scene.view.set_z(50);
 
         let peers = vec![peer_with_camera(
-            2, Some([0.5, 0.5]),
+            2,
+            Some([0.5, 0.5]),
             Camera::Arcball(Arcball::new([800, 600])),
         )];
         let result = compute_peer_cursors(&scene, &peers, 1, 800.0, 600.0);
-        assert_eq!(result.gpu.len(), 1, "in-bounds should produce GPU crosshair");
+        assert_eq!(
+            result.gpu.len(),
+            1,
+            "in-bounds should produce GPU crosshair"
+        );
         assert_eq!(result.labels.len(), 1, "in-bounds should produce label");
         assert_eq!(result.labels[0].id, 2);
     }
@@ -785,8 +922,15 @@ mod tests {
         let mut p = peer(2, Some([100.0, 200.0]), "slice");
         p.label_only = true;
         let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
-        assert!(result.gpu.is_empty(), "label_only should produce no GPU data");
-        assert_eq!(result.labels.len(), 1, "label_only should still produce label");
+        assert!(
+            result.gpu.is_empty(),
+            "label_only should produce no GPU data"
+        );
+        assert_eq!(
+            result.labels.len(),
+            1,
+            "label_only should still produce label"
+        );
         assert_eq!(result.labels[0].id, 2);
     }
 
@@ -794,7 +938,11 @@ mod tests {
     fn label_only_3d_still_produces_ray() {
         // 3D→3D always renders the ray (shows viewing direction even for defaulted cursors)
         let scene = scene_3d_with_shape([800, 600], [100, 200, 300]);
-        let mut p = peer_with_camera(2, Some([0.5, 0.5]), Camera::Arcball(Arcball::new([800, 600])));
+        let mut p = peer_with_camera(
+            2,
+            Some([0.5, 0.5]),
+            Camera::Arcball(Arcball::new([800, 600])),
+        );
         p.label_only = true;
         let result = compute_peer_cursors(&scene, &[p], 1, 800.0, 600.0);
         assert_eq!(result.gpu.len(), 1, "3D→3D should always produce ray");

@@ -11,34 +11,28 @@ use crate::command::DocumentCommand;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum BlendMode {
+    #[default]
     Alpha,
     Additive,
     Max,
 }
 
-impl Default for BlendMode {
-    fn default() -> Self {
-        BlendMode::Alpha
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RenderMode {
+    #[default]
     Translucent,
     MaxIntensity,
 }
 
-impl Default for RenderMode {
-    fn default() -> Self {
-        RenderMode::Translucent
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Colormap {
+    #[default]
     Gray,
     Magenta,
     Green,
@@ -54,12 +48,6 @@ pub enum Colormap {
     Hot,
     Cool,
     Jet,
-}
-
-impl Default for Colormap {
-    fn default() -> Self {
-        Colormap::Gray
-    }
 }
 
 impl Colormap {
@@ -234,7 +222,10 @@ impl DocumentState {
                     layouts.push(layout);
                 }
             }
-            DocumentCommand::SetActiveLayout { dataset_id, layout_id } => {
+            DocumentCommand::SetActiveLayout {
+                dataset_id,
+                layout_id,
+            } => {
                 self.active_layout_ids.insert(dataset_id, layout_id);
             }
             DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {

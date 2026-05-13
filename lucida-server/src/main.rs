@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use axum::extract::ws::WebSocketUpgrade;
+use axum::Router;
 use axum::extract::State;
+use axum::extract::ws::WebSocketUpgrade;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
 use clap::{Args, Parser, Subcommand};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tower_http::cors::CorsLayer;
 
 use lucida_server::admin::{self, admin_clear_proxy_cache};
@@ -18,7 +18,7 @@ use lucida_server::bookmarks;
 use lucida_server::health;
 use lucida_server::session::Session;
 use lucida_server::static_serve;
-use lucida_server::{browse, handler, AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
+use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -266,7 +266,10 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         );
         eprintln!("============================================================");
         eprintln!("WARNING: LUCIDA_INSECURE=1 is set");
-        eprintln!("AUTH DISABLED on bind {} — server is exposed", auth_config.bind_addr);
+        eprintln!(
+            "AUTH DISABLED on bind {} — server is exposed",
+            auth_config.bind_addr
+        );
         eprintln!("without authentication. Do not use in production.");
         eprintln!("============================================================");
     }
@@ -293,10 +296,8 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         auth::SqlitePendingAuthStore::new(session_store.pool().clone()),
     );
 
-    let extractor = auth::middleware::build_extractor(
-        Arc::clone(&auth_config),
-        Arc::clone(&session_store_dyn),
-    );
+    let extractor =
+        auth::middleware::build_extractor(Arc::clone(&auth_config), Arc::clone(&session_store_dyn));
 
     let dev_login_state = auth::handlers::DevLoginState {
         config: Arc::clone(&auth_config),
@@ -346,8 +347,8 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // the public router so the auth middleware never wraps it (the
     // user is unauthenticated by definition when they're being told
     // to retry sign-in).
-    let mut public_auth_router: Router<()> = Router::new()
-        .route("/auth/error", get(auth::error_page::auth_error));
+    let mut public_auth_router: Router<()> =
+        Router::new().route("/auth/error", get(auth::error_page::auth_error));
     if let Some(g) = auth_config.google.clone() {
         let google_client = match auth::GoogleOAuthClient::new(Arc::new(g)).await {
             Ok(c) => Arc::new(c),
@@ -531,7 +532,10 @@ mod cli_tests {
     fn legacy_data_dir_at_top_level_parses() {
         let cli = parse(&["--data-dir", "/tmp/foo"]);
         assert!(cli.command.is_none(), "no explicit subcommand");
-        assert_eq!(cli.serve_args.data_dir.as_deref(), Some(std::path::Path::new("/tmp/foo")));
+        assert_eq!(
+            cli.serve_args.data_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/foo"))
+        );
     }
 
     #[test]
@@ -539,7 +543,10 @@ mod cli_tests {
         let cli = parse(&["serve", "--data-dir", "/tmp/foo"]);
         match cli.command.expect("serve subcommand") {
             Commands::Serve(args) => {
-                assert_eq!(args.data_dir.as_deref(), Some(std::path::Path::new("/tmp/foo")));
+                assert_eq!(
+                    args.data_dir.as_deref(),
+                    Some(std::path::Path::new("/tmp/foo"))
+                );
             }
             _ => panic!("expected Serve"),
         }
@@ -556,7 +563,10 @@ mod cli_tests {
         ]);
         match cli.command.expect("clear subcommand") {
             Commands::ClearProxyCache(args) => {
-                assert_eq!(args.cache_dir.as_deref(), Some(std::path::Path::new("/tmp/cache")));
+                assert_eq!(
+                    args.cache_dir.as_deref(),
+                    Some(std::path::Path::new("/tmp/cache"))
+                );
                 assert_eq!(args.dataset.as_deref(), Some("http://example.com/x"));
             }
             _ => panic!("expected ClearProxyCache"),

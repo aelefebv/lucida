@@ -11,14 +11,14 @@
 
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use axum::middleware::from_fn_with_state;
 use axum::routing::get;
-use axum::Router;
 use tower::ServiceExt;
 
-use lucida_server::auth::middleware::{auth_middleware, build_extractor, SharedExtractor};
+use lucida_server::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
 use lucida_server::auth::{AuthConfig, LoginSessionStore, MemorySessionStore};
 use lucida_server::health;
 

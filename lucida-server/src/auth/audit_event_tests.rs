@@ -22,7 +22,7 @@ use tracing::span::{Attributes, Id, Record};
 use tracing::subscriber::with_default;
 use tracing::{Event, Level, Metadata, Subscriber};
 
-use super::cleanup::{sweep_once, CleanupState};
+use super::cleanup::{CleanupState, sweep_once};
 use super::config::AuthConfig;
 use super::pending_auth::{PendingAuth, PendingAuthStore};
 use super::pending_auth_memory::MemoryPendingAuthStore;
@@ -109,7 +109,11 @@ impl Subscriber for CaptureSubscriber {
         self.events
             .lock()
             .expect("capture mutex poisoned")
-            .push(CapturedEvent { name, level, fields });
+            .push(CapturedEvent {
+                name,
+                level,
+                fields,
+            });
     }
 }
 

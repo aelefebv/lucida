@@ -32,7 +32,5 @@ pub mod handlers;
 pub mod routes;
 pub mod store;
 
-pub use broadcast::{broadcast_bookmark_change, BroadcastSummary};
-pub use store::{
-    Bookmark, BookmarkStore, MemoryBookmarkStore, SqliteBookmarkStore, StoreError,
-};
+pub use broadcast::{BroadcastSummary, broadcast_bookmark_change};
+pub use store::{Bookmark, BookmarkStore, MemoryBookmarkStore, SqliteBookmarkStore, StoreError};

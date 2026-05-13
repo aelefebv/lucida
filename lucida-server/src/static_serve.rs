@@ -36,10 +36,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::extract::{Request, State};
-use axum::http::{header, StatusCode};
-use axum::response::{IntoResponse, Response};
 use axum::Router;
+use axum::extract::{Request, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -147,7 +147,7 @@ const MISSING_DIST_HTML: &str = r##"<!DOCTYPE html>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tempfile::TempDir;
     use tower::ServiceExt;
@@ -166,10 +166,7 @@ mod tests {
         let bogus = PathBuf::from("/nonexistent/lucida-web/dist-does-not-exist");
         let app = router(bogus);
 
-        let req = Request::builder()
-            .uri("/")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 
@@ -202,10 +199,7 @@ mod tests {
         write_index(tmp.path(), html);
 
         let app = router(tmp.path().to_path_buf());
-        let req = Request::builder()
-            .uri("/")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
 

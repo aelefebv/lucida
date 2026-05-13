@@ -62,10 +62,7 @@ impl SqliteSessionStore {
             .await
             .map_err(|e| StoreOpenError::Connect(path_str, e))?;
 
-        MIGRATOR
-            .run(&pool)
-            .await
-            .map_err(StoreOpenError::Migrate)?;
+        MIGRATOR.run(&pool).await.map_err(StoreOpenError::Migrate)?;
 
         Ok(Self { pool })
     }
@@ -89,10 +86,7 @@ impl SqliteSessionStore {
             .await
             .map_err(|e| StoreOpenError::Connect(":memory:".into(), e))?;
 
-        MIGRATOR
-            .run(&pool)
-            .await
-            .map_err(StoreOpenError::Migrate)?;
+        MIGRATOR.run(&pool).await.map_err(StoreOpenError::Migrate)?;
 
         Ok(Self { pool })
     }
@@ -156,11 +150,7 @@ impl LoginSessionStore for SqliteSessionStore {
         }))
     }
 
-    async fn touch_last_used(
-        &self,
-        id: &str,
-        now: DateTime<Utc>,
-    ) -> Result<(), SessionStoreError> {
+    async fn touch_last_used(&self, id: &str, now: DateTime<Utc>) -> Result<(), SessionStoreError> {
         // Affecting 0 rows is fine: the session might have been deleted
         // between extractor lookup and this update. Race-and-tolerate.
         sqlx::query("UPDATE login_sessions SET last_used_at = ? WHERE id = ?")

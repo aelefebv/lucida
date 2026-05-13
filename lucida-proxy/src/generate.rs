@@ -18,9 +18,9 @@ use lucida_content::{
     DatasetManifest, Entity, EntityId, EntityKind, ImageSpec, LevelGeometry, VoxelTransform,
 };
 
+use crate::header::source_content_hash;
 use crate::source::{ProxySourceData, SourceError};
 use crate::spec::{ALGORITHM_VERSION, ProxyAsset, ProxyDtype, ProxyHeader, ProxyKind, ProxySpec};
-use crate::header::source_content_hash;
 
 /// Errors returned by [`generate_proxy`].
 #[derive(thiserror::Error, Debug)]
@@ -123,14 +123,7 @@ fn pick_level(levels: &[LevelGeometry], target_long_axis: u32) -> usize {
     }
     // If the loop never updated `chosen` (e.g., even level 0 is too small),
     // fall back to the coarsest available level (last index).
-    if chosen == 0
-        && levels[0].shape[2..5]
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or(0)
-            < threshold
-    {
+    if chosen == 0 && levels[0].shape[2..5].iter().copied().min().unwrap_or(0) < threshold {
         chosen = levels.len() - 1;
     }
     chosen
@@ -174,6 +167,9 @@ fn box_filter_to_target(data: &[u16], dims: [u32; 3], target_long_axis: u32) -> 
                         }
                     }
                 }
+                // Explicit zero check is clearer here than checked_div for a
+                // downsampling average; pixel count of 0 means an empty cell.
+                #[allow(clippy::manual_checked_ops)]
                 let avg = if count == 0 { 0 } else { (acc / count) as u16 };
                 let oi = ((oz * out_y + oy) * out_x + ox) as usize;
                 out[oi] = avg;
@@ -310,8 +306,11 @@ fn aggregate_well(
 
                     // Project well point back into this field's voxel grid.
                     let v = transform_point(&entry.well_to_voxel, [wx, wy, wz]);
-                    let [fz, fy, fx] =
-                        [entry.volume.dims[0] as f64, entry.volume.dims[1] as f64, entry.volume.dims[2] as f64];
+                    let [fz, fy, fx] = [
+                        entry.volume.dims[0] as f64,
+                        entry.volume.dims[1] as f64,
+                        entry.volume.dims[2] as f64,
+                    ];
                     let in_x = v[0];
                     let in_y = v[1];
                     let in_z = v[2];
@@ -456,8 +455,11 @@ fn invert(m: &VoxelTransform) -> Option<VoxelTransform> {
         }
     }
 
-    // Gauss-Jordan inversion with partial pivoting.
+    // Gauss-Jordan inversion with partial pivoting. Indices have semantic
+    // meaning (matrix row/col); enumerate would obscure the algorithm.
+    #[allow(clippy::needless_range_loop)]
     let mut inv = [[0.0f64; 4]; 4];
+    #[allow(clippy::needless_range_loop)]
     for i in 0..4 {
         inv[i][i] = 1.0;
     }
@@ -466,6 +468,7 @@ fn invert(m: &VoxelTransform) -> Option<VoxelTransform> {
         // Find pivot.
         let mut pivot_row = col;
         let mut pivot_val = a[col][col].abs();
+        #[allow(clippy::needless_range_loop)]
         for row in (col + 1)..4 {
             let v = a[row][col].abs();
             if v > pivot_val {

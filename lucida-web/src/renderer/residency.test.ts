@@ -23,8 +23,8 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
     for (const m of metas) totalIndirection += m.gridDims[0] * m.gridDims[1] * m.gridDims[2];
   }
   return {
-    texture: null as any,
-    indirectionBuf: null as any,
+    texture: null as unknown as GPUTexture,
+    indirectionBuf: null as unknown as GPUBuffer,
     indirectionData: new Uint32Array(Math.max(totalIndirection, 1)).fill(0xFFFFFFFF),
     slots: new Map(),
     slotGridIdx: new Int32Array(totalSlots).fill(-1),
@@ -58,8 +58,8 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     [defaultMember, { chunkZ: 32, fullResDepth: 64, levelDepth: 64 }],
   ]);
   return {
-    texture: null as any,
-    indirectionBuf: null as any,
+    texture: null as unknown as GPUTexture,
+    indirectionBuf: null as unknown as GPUBuffer,
     indirectionData: new Uint32Array(Math.max(totalIndirection, 1)).fill(0xFFFFFFFF),
     slots: new Map(),
     slotGridIdx: new Int32Array(totalSlots).fill(-1),

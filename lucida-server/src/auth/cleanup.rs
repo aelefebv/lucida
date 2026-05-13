@@ -100,8 +100,9 @@ pub fn spawn_with_intervals(
 /// retries from a clean slate.
 pub async fn sweep_once(state: &CleanupState) {
     let now = Utc::now();
-    let pending_cutoff = now - chrono::Duration::from_std(PENDING_TTL)
-        .unwrap_or_else(|_| chrono::Duration::seconds(600));
+    let pending_cutoff = now
+        - chrono::Duration::from_std(PENDING_TTL)
+            .unwrap_or_else(|_| chrono::Duration::seconds(600));
 
     let sessions_deleted = match state.session_store.delete_expired(now).await {
         Ok(n) => Some(n),
@@ -184,8 +185,14 @@ mod tests {
     #[tokio::test]
     async fn sweep_deletes_expired_sessions_only() {
         let sessions = Arc::new(MemorySessionStore::new());
-        sessions.create(session_with_expiry("dead", -1)).await.unwrap();
-        sessions.create(session_with_expiry("alive", 24)).await.unwrap();
+        sessions
+            .create(session_with_expiry("dead", -1))
+            .await
+            .unwrap();
+        sessions
+            .create(session_with_expiry("alive", 24))
+            .await
+            .unwrap();
         let pending = Arc::new(MemoryPendingAuthStore::new());
 
         sweep_once(&cleanup_state(Arc::clone(&sessions), pending)).await;
@@ -198,7 +205,10 @@ mod tests {
         let sessions = Arc::new(MemorySessionStore::new());
         let pending = Arc::new(MemoryPendingAuthStore::new());
         // 15 minutes old: past the 10-minute TTL.
-        pending.insert(pending_with_age("expired", 15)).await.unwrap();
+        pending
+            .insert(pending_with_age("expired", 15))
+            .await
+            .unwrap();
         // 5 minutes old: still within window.
         pending.insert(pending_with_age("fresh", 5)).await.unwrap();
 
@@ -261,7 +271,10 @@ mod tests {
     #[tokio::test]
     async fn spawned_loop_runs_periodically() {
         let sessions = Arc::new(MemorySessionStore::new());
-        sessions.create(session_with_expiry("doomed", -5)).await.unwrap();
+        sessions
+            .create(session_with_expiry("doomed", -5))
+            .await
+            .unwrap();
         let pending = Arc::new(MemoryPendingAuthStore::new());
 
         let _handle = spawn_with_intervals(

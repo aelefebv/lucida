@@ -29,8 +29,8 @@ pub struct EntityQueryResult {
 mod tests {
     use super::*;
     use crate::command::DocumentCommand;
-    use crate::scene::test_helpers;
     use crate::scene::Scene;
+    use crate::scene::test_helpers;
     use lucida_content::DatasetId;
 
     #[test]

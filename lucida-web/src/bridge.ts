@@ -10,7 +10,6 @@ export type ClientId = number;
 export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsReadyState?: number) {
   if (!isDebugEnabled("bridge")) return;
   const payload = wsReadyState !== undefined ? { wsReadyState, ...data } : data;
-  // eslint-disable-next-line no-console
   console.log(`[bridge] ${event}`, payload);
 }
 

@@ -2,9 +2,7 @@
 mod common;
 
 use lucida_content::{EntityId, VoxelTransform};
-use lucida_proxy::{
-    ALGORITHM_VERSION, ProxyDtype, ProxyKind, ProxySpec, generate_proxy,
-};
+use lucida_proxy::{ALGORITHM_VERSION, ProxyDtype, ProxyKind, ProxySpec, generate_proxy};
 
 use crate::common::{MockSource, gradient_volume_x, level5, sample, single_image_graph};
 
@@ -115,11 +113,7 @@ fn downsample_anisotropic_proportional_scaling() {
 /// `target_long_axis` larger than the source must not upsample.
 #[test]
 fn downsample_target_larger_than_source_clamps() {
-    let graph = single_image_graph(
-        "img-entity",
-        "img-id",
-        vec![level5(0, [1, 1, 16, 32, 32])],
-    );
+    let graph = single_image_graph("img-entity", "img-id", vec![level5(0, [1, 1, 16, 32, 32])]);
     let mut source = MockSource::default();
     source.insert(
         "img-id",

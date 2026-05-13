@@ -57,7 +57,10 @@ fn mismatched_version_errors() {
     let err = read_header(&mut cur).expect_err("bad version should error");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     let msg = format!("{err}");
-    assert!(msg.contains("version"), "error message should mention version: {msg}");
+    assert!(
+        msg.contains("version"),
+        "error message should mention version: {msg}"
+    );
 }
 
 #[test]

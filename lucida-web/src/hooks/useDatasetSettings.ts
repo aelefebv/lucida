@@ -360,7 +360,6 @@ export function useDatasetSettings({
     });
   };
 
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const layerInfos = buildLayerInfos();
   void datasetsVersion;
   void remoteDocumentVersion;

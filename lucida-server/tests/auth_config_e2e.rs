@@ -76,9 +76,7 @@ fn assert_server_starts(port: u16, env: &[(&str, &str)]) -> String {
         if let Some(status) = child.try_wait().unwrap() {
             // Process exited before we observed a successful bind.
             let stderr = drain(child.stderr.as_mut().unwrap());
-            panic!(
-                "server exited with {status:?} before binding {addr}; stderr=\n{stderr}",
-            );
+            panic!("server exited with {status:?} before binding {addr}; stderr=\n{stderr}",);
         }
         match std::net::TcpStream::connect_timeout(
             &addr.parse().unwrap(),
@@ -147,7 +145,11 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::process::Outpu
             if let Some(mut s) = child.stdout.take() {
                 let _ = s.read_to_end(&mut stdout);
             }
-            return std::process::Output { status, stdout, stderr };
+            return std::process::Output {
+                status,
+                stdout,
+                stderr,
+            };
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -181,10 +183,7 @@ fn loopback_default_starts_with_disabled_auth() {
 fn explicit_disabled_loopback_starts() {
     let port = pick_loopback_port();
     let bind = format!("127.0.0.1:{port}");
-    assert_server_starts(
-        port,
-        &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "disabled")],
-    );
+    assert_server_starts(port, &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "disabled")]);
 }
 
 #[test]
@@ -229,7 +228,10 @@ fn explicit_disabled_non_loopback_without_insecure_fails() {
     );
     // Bind value should appear in the error so an operator can grep
     // for the failure cause in their boot log.
-    assert!(stderr.contains(&port.to_string()), "stderr lacks port: {stderr}");
+    assert!(
+        stderr.contains(&port.to_string()),
+        "stderr lacks port: {stderr}"
+    );
 }
 
 #[test]
@@ -254,8 +256,5 @@ fn unknown_auth_mode_fails() {
 
 #[test]
 fn invalid_bind_address_fails() {
-    assert_server_fails(
-        &[("LUCIDA_BIND", "not-a-socket-addr")],
-        "LUCIDA_BIND",
-    );
+    assert_server_fails(&[("LUCIDA_BIND", "not-a-socket-addr")], "LUCIDA_BIND");
 }

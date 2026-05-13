@@ -9,12 +9,12 @@
 use std::fmt;
 use std::sync::Arc;
 
+use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::http::HttpBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::prefix::PrefixStore;
-use object_store::ObjectStore;
 
 /// Errors from storage backend operations.
 #[derive(Debug)]
@@ -101,8 +101,7 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
     let url = url.strip_prefix("file://").unwrap_or(url);
 
     if url.starts_with('/') {
-        let store = LocalFileSystem::new_with_prefix(url)
-            .map_err(StoreError::ObjectStore)?;
+        let store = LocalFileSystem::new_with_prefix(url).map_err(StoreError::ObjectStore)?;
         Ok(Arc::new(store))
     } else if url.starts_with("gs://") {
         let (bucket, prefix) = parse_gs_url(url)?;
@@ -123,9 +122,7 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
             None => Ok(Arc::new(store)),
         }
     } else if url.starts_with("http://") || url.starts_with("https://") {
-        let store = HttpBuilder::new()
-            .with_url(url)
-            .build()?;
+        let store = HttpBuilder::new().with_url(url).build()?;
         Ok(Arc::new(store))
     } else {
         Err(StoreError::UnsupportedScheme(url.into()))

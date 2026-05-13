@@ -14,20 +14,18 @@ pub struct Snapshot {
 }
 
 type WsSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     Message,
 >;
 
 type WsStream = futures_util::stream::SplitStream<
-    tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
 /// Connect to the server and receive the initial Snapshot.
-pub async fn connect(url: &str) -> Result<(WsSink, WsStream, Snapshot), Box<dyn std::error::Error>> {
+pub async fn connect(
+    url: &str,
+) -> Result<(WsSink, WsStream, Snapshot), Box<dyn std::error::Error>> {
     let (ws, _) = connect_async(url).await?;
     let (sink, mut stream) = ws.split();
 

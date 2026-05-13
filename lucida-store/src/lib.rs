@@ -41,9 +41,7 @@ pub fn chunk_key_to_store_path(key: &str, axes: &[String], chunk_shape: &[u64]) 
         .iter()
         .enumerate()
         .map(|(axis_idx, name)| {
-            let canonical_pos = ALL_DIMS
-                .iter()
-                .position(|d| d.eq_ignore_ascii_case(name));
+            let canonical_pos = ALL_DIMS.iter().position(|d| d.eq_ignore_ascii_case(name));
             match canonical_pos {
                 None => "0".to_string(),
                 Some(canon_idx) => {
@@ -100,10 +98,7 @@ mod tests {
 
     #[test]
     fn chunk_key_5d_convenience() {
-        assert_eq!(
-            chunk_key_to_store_path_5d("2/0/1/5/3/2"),
-            "2/c/0/1/5/3/2"
-        );
+        assert_eq!(chunk_key_to_store_path_5d("2/0/1/5/3/2"), "2/c/0/1/5/3/2");
     }
 
     #[test]
@@ -125,11 +120,7 @@ mod tests {
         // Key: "0/0/2/0/10/5" → level=0, t=0, c=2, z=0, y=10, x=5
         // Store path should be "0/c/2/10/5" (only c, y, x)
         assert_eq!(
-            chunk_key_to_store_path(
-                "0/0/2/0/10/5",
-                &axes(&["c", "y", "x"]),
-                &[1, 1, 1]
-            ),
+            chunk_key_to_store_path("0/0/2/0/10/5", &axes(&["c", "y", "x"]), &[1, 1, 1]),
             "0/c/2/10/5"
         );
     }
@@ -139,11 +130,7 @@ mod tests {
         // axes = [z, y, x]. Key: "1/0/0/3/4/5" → level=1, t=0, c=0, z=3, y=4, x=5
         // Store path: "1/c/3/4/5"
         assert_eq!(
-            chunk_key_to_store_path(
-                "1/0/0/3/4/5",
-                &axes(&["z", "y", "x"]),
-                &[1, 1, 1]
-            ),
+            chunk_key_to_store_path("1/0/0/3/4/5", &axes(&["z", "y", "x"]), &[1, 1, 1]),
             "1/c/3/4/5"
         );
     }
@@ -153,11 +140,7 @@ mod tests {
         // axes = [c, z, y, x]. Key: "0/0/1/5/3/2" → level=0, t=0, c=1, z=5, y=3, x=2
         // Store path: "0/c/1/5/3/2" (all except t)
         assert_eq!(
-            chunk_key_to_store_path(
-                "0/0/1/5/3/2",
-                &axes(&["c", "z", "y", "x"]),
-                &[1, 1, 1, 1]
-            ),
+            chunk_key_to_store_path("0/0/1/5/3/2", &axes(&["c", "z", "y", "x"]), &[1, 1, 1, 1]),
             "0/c/1/5/3/2"
         );
     }
@@ -167,11 +150,7 @@ mod tests {
         // axes = [y, x]. Key: "0/0/0/0/7/3" → level=0, y=7, x=3
         // Store path: "0/c/7/3"
         assert_eq!(
-            chunk_key_to_store_path(
-                "0/0/0/0/7/3",
-                &axes(&["y", "x"]),
-                &[1, 1]
-            ),
+            chunk_key_to_store_path("0/0/0/0/7/3", &axes(&["y", "x"]), &[1, 1]),
             "0/c/7/3"
         );
     }
@@ -215,11 +194,7 @@ mod tests {
         // m pinned to "0".
         // Store path: "2/c/0/8/4" (3 coords, "0" at m).
         assert_eq!(
-            chunk_key_to_store_path(
-                "2/0/0/0/8/4",
-                &axes(&["m", "y", "x"]),
-                &[1, 1, 1]
-            ),
+            chunk_key_to_store_path("2/0/0/0/8/4", &axes(&["m", "y", "x"]), &[1, 1, 1]),
             "2/c/0/8/4"
         );
     }

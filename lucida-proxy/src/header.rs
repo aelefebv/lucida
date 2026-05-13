@@ -136,18 +136,18 @@ pub fn source_content_hash(
     // - For Well: all Field children (sorted by id), then the well itself.
     // - For Field/Image: just the entity itself.
     let mut contributors: Vec<&EntityId> = Vec::new();
-    if let Some(e) = entity {
-        if matches!(e.kind, EntityKind::Well) {
-            let mut child_ids: Vec<&EntityId> = content
-                .entities()
-                .iter()
-                .filter(|c| c.parent.as_ref() == Some(entity_id))
-                .filter(|c| matches!(c.kind, EntityKind::Field))
-                .map(|c| &c.id)
-                .collect();
-            child_ids.sort_by(|a, b| a.0.cmp(&b.0));
-            contributors.extend(child_ids);
-        }
+    if let Some(e) = entity
+        && matches!(e.kind, EntityKind::Well)
+    {
+        let mut child_ids: Vec<&EntityId> = content
+            .entities()
+            .iter()
+            .filter(|c| c.parent.as_ref() == Some(entity_id))
+            .filter(|c| matches!(c.kind, EntityKind::Field))
+            .map(|c| &c.id)
+            .collect();
+        child_ids.sort_by(|a, b| a.0.cmp(&b.0));
+        contributors.extend(child_ids);
     }
     contributors.push(entity_id);
 
@@ -160,9 +160,15 @@ pub fn source_content_hash(
             .transforms()
             .iter()
             .filter(|edge| &edge.from == *cid || &edge.to == *cid)
-            .map(|edge| (edge.from.0.as_str(), edge.to.0.as_str(), *edge.transform.matrix()))
+            .map(|edge| {
+                (
+                    edge.from.0.as_str(),
+                    edge.to.0.as_str(),
+                    *edge.transform.matrix(),
+                )
+            })
             .collect();
-            edges.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+        edges.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
         for (from, to, matrix) in edges {
             hasher.update(b"\nedge:");
             hasher.update(from.as_bytes());

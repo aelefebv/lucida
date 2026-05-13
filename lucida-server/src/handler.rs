@@ -5,13 +5,11 @@ use futures_util::{SinkExt, StreamExt};
 use lucida_content::{DatasetId, EntityKind, ImageId};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, ServerMessage};
-use lucida_protocol::{
-    AssetCatalog, AssetMessage, ProxyAvailability, DatasetOpened,
-};
+use lucida_protocol::{AssetCatalog, AssetMessage, DatasetOpened, ProxyAvailability};
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use object_store::path::Path;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::binding::{ChunkResolver, ServerBinding};
 use crate::decode::decode_storage_bytes;
@@ -146,16 +144,12 @@ pub async fn handle_client(
                                 sess.apply(command.clone())
                             };
 
-                            let broadcast_msg = ServerMessage::CommandBroadcast {
-                                seq,
-                                command,
-                            };
+                            let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
                             let ack_msg = ServerMessage::Ack { seq };
 
                             let _ = tx.send(BroadcastItem::CommandBroadcast {
                                 sender: id,
-                                broadcast_json: serde_json::to_string(&broadcast_msg)
-                                    .unwrap(),
+                                broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
                                 ack_json: serde_json::to_string(&ack_msg).unwrap(),
                             });
                         }
@@ -280,7 +274,11 @@ pub async fn handle_client(
                 // Try as ChunkMessage.
                 if let Ok(chunk_msg) = serde_json::from_str::<ChunkMessage>(&json) {
                     match chunk_msg {
-                        ChunkMessage::ChunkRequest { dataset_id, image_id, key } => {
+                        ChunkMessage::ChunkRequest {
+                            dataset_id,
+                            image_id,
+                            key,
+                        } => {
                             // Look up the server binding for this dataset.
                             // Parse the level prefix from the chunk key to
                             // pick the right per-level compression + byte
@@ -292,20 +290,32 @@ pub async fn handle_client(
                                 let sess = session.lock().await;
                                 sess.server_bindings.get(&dataset_id).map(|b| {
                                     let level_info = b.resolver.level_info(&image_id, level);
-                                    (b.resolver.resolve(&image_id, &key), level_info, b.cache.clone())
+                                    (
+                                        b.resolver.resolve(&image_id, &key),
+                                        level_info,
+                                        b.cache.clone(),
+                                    )
                                 })
                             };
                             if let Some((resolved, level_info, cache)) = binding {
                                 let unicast_routes_clone = Arc::clone(&unicast_routes);
                                 tokio::spawn(async move {
                                     serve_chunk_from_store(
-                                        id, &dataset_id, &image_id, &key,
-                                        resolved.as_deref(), level_info, &cache,
+                                        id,
+                                        &dataset_id,
+                                        &image_id,
+                                        &key,
+                                        resolved.as_deref(),
+                                        level_info,
+                                        &cache,
                                         &unicast_routes_clone,
-                                    ).await;
+                                    )
+                                    .await;
                                 });
                             } else {
-                                eprintln!("server: no binding for dataset {dataset_id} (chunk {key} dropped)");
+                                eprintln!(
+                                    "server: no binding for dataset {dataset_id} (chunk {key} dropped)"
+                                );
                             }
                         }
                         ChunkMessage::ChunkFetch { .. } => {
@@ -362,9 +372,7 @@ pub async fn handle_client(
                 if data.len() < 6 {
                     continue;
                 }
-                let target_id = u32::from_le_bytes([
-                    data[0], data[1], data[2], data[3],
-                ]) as u64;
+                let target_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as u64;
 
                 let senders = unicast_routes.lock().await;
                 if let Some(sender) = senders.get(&target_id) {
@@ -471,10 +479,7 @@ async fn handle_open_remote_dataset(
             let command = DocumentCommand::DatasetOpened(existing.dataset_opened.clone());
             let seq = sess.seq;
             drop(sess);
-            let broadcast_msg = ServerMessage::CommandBroadcast {
-                seq,
-                command,
-            };
+            let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
             let _ = tx.send(BroadcastItem::CommandBroadcast {
                 sender: u64::MAX,
                 broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
@@ -519,7 +524,12 @@ async fn handle_open_remote_dataset(
     // Log import result summary.
     let n_entities = result.manifest.entities().len();
     let n_images = result.manifest.images().len();
-    let n_levels = result.manifest.images().first().map(|i| i.multiscale.levels.len()).unwrap_or(0);
+    let n_levels = result
+        .manifest
+        .images()
+        .first()
+        .map(|i| i.multiscale.levels.len())
+        .unwrap_or(0);
     tracing::info!(
         id = %dataset_id,
         kind = ?result.manifest.kind,
@@ -580,10 +590,7 @@ async fn handle_open_remote_dataset(
     // datasets without collision. The generator owns its own bounded
     // semaphore + in-flight dedup map.
     let url_hash16 = dataset_url_hash16(&url);
-    let proxy_cache = Arc::new(ProxyCache::new(
-        proxy_config.cache_dir.clone(),
-        url_hash16,
-    ));
+    let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
     let proxy_generator = Arc::new(ProxyGenerator::new(
         proxy_cache.clone(),
         cached.clone(),
@@ -643,10 +650,7 @@ async fn handle_open_remote_dataset(
     // Use u64::MAX as sender so no client matches — everyone gets the
     // CommandBroadcast (not an Ack), since the requester hasn't applied
     // the DatasetOpened locally.
-    let broadcast_msg = ServerMessage::CommandBroadcast {
-        seq,
-        command,
-    };
+    let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
 
     let _ = tx.send(BroadcastItem::CommandBroadcast {
         sender: u64::MAX,
@@ -701,7 +705,10 @@ const PROXY_TARGET_LONG_AXIS: u32 = 128;
 /// Returns `0` if the key is malformed or missing a numeric prefix — the
 /// caller's resolve step will turn that into a clean per-key failure.
 fn parse_level_from_chunk_key(key: &str) -> u32 {
-    key.split('/').next().and_then(|s| s.parse().ok()).unwrap_or(0)
+    key.split('/')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 /// Parse the wire `(t, c)` voxel coordinates from a canonical chunk key
@@ -731,6 +738,9 @@ fn parse_t_c_from_chunk_key(key: &str) -> (u64, u64) {
 /// A `None` `level_info` (unknown image or level — e.g. older snapshot)
 /// falls back to no-compression-no-slicing so legacy datasets keep
 /// working.
+// Internal helper threading per-request state from the dispatch site;
+// extracting a struct would just push the bundle one frame up.
+#[allow(clippy::too_many_arguments)]
 async fn serve_chunk_from_store(
     client_id: ClientId,
     dataset_id: &DatasetId,
@@ -802,7 +812,11 @@ async fn serve_chunk_from_store(
     // timepoint/channel's bytes.
     let (wire_t, wire_c) = parse_t_c_from_chunk_key(chunk_key);
     let (offset, size) = level_info.chunk_byte_layout.slice_range(wire_t, wire_c);
-    if size > 0 && offset.checked_add(size).map_or(false, |end| end <= bytes.len()) {
+    if size > 0
+        && offset
+            .checked_add(size)
+            .is_some_and(|end| end <= bytes.len())
+    {
         bytes = bytes[offset..offset + size].to_vec();
     }
 
@@ -873,9 +887,7 @@ async fn serve_asset_request(
     let asset = match generator.request(spec, 1).await {
         Ok(a) => a,
         Err(e) => {
-            eprintln!(
-                "server: proxy generation failed for {entity_id:?}/{kind:?}/T{t}_C{c}: {e}"
-            );
+            eprintln!("server: proxy generation failed for {entity_id:?}/{kind:?}/T{t}_C{c}: {e}");
             return;
         }
     };
@@ -996,20 +1008,10 @@ mod tests {
 
     #[test]
     fn proxy_response_key_format_matches_spec() {
-        let key = proxy_response_key(
-            &EntityId("field-A1".into()),
-            ProxyKind::FieldProxy3D,
-            0,
-            0,
-        );
+        let key = proxy_response_key(&EntityId("field-A1".into()), ProxyKind::FieldProxy3D, 0, 0);
         assert_eq!(key, "proxy/field-A1/FieldProxy3D/T00000_C000");
 
-        let well = proxy_response_key(
-            &EntityId("well-B2".into()),
-            ProxyKind::WellProxy3D,
-            12,
-            3,
-        );
+        let well = proxy_response_key(&EntityId("well-B2".into()), ProxyKind::WellProxy3D, 12, 3);
         assert_eq!(well, "proxy/well-B2/WellProxy3D/T00012_C003");
     }
 

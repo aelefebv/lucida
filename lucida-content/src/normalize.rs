@@ -53,10 +53,10 @@ pub fn classify_axes(axes_names: &[String], raw_shape: &[u64]) -> AxisLayout {
 pub fn normalize_to_5d(values: &[u64], axes: &[String], fill: u64) -> [u64; 5] {
     let mut result = [fill; 5];
     for (i, name) in axes.iter().enumerate() {
-        if let Some(idx) = axis_index(name) {
-            if i < values.len() {
-                result[idx] = values[i];
-            }
+        if let Some(idx) = axis_index(name)
+            && i < values.len()
+        {
+            result[idx] = values[i];
         }
     }
     result
@@ -67,10 +67,10 @@ pub fn normalize_to_5d(values: &[u64], axes: &[String], fill: u64) -> [u64; 5] {
 pub fn normalize_f64_to_5d(values: &[f64], axes: &[String], fill: f64) -> [f64; 5] {
     let mut result = [fill; 5];
     for (i, name) in axes.iter().enumerate() {
-        if let Some(idx) = axis_index(name) {
-            if i < values.len() {
-                result[idx] = values[i];
-            }
+        if let Some(idx) = axis_index(name)
+            && i < values.len()
+        {
+            result[idx] = values[i];
         }
     }
     result
@@ -88,31 +88,19 @@ mod tests {
 
     #[test]
     fn full_5d_axes() {
-        let result = normalize_to_5d(
-            &[1, 2, 3, 4, 5],
-            &axes(&["t", "c", "z", "y", "x"]),
-            0,
-        );
+        let result = normalize_to_5d(&[1, 2, 3, 4, 5], &axes(&["t", "c", "z", "y", "x"]), 0);
         assert_eq!(result, [1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn three_d_axes_zyx() {
-        let result = normalize_to_5d(
-            &[10, 20, 30],
-            &axes(&["z", "y", "x"]),
-            1,
-        );
+        let result = normalize_to_5d(&[10, 20, 30], &axes(&["z", "y", "x"]), 1);
         assert_eq!(result, [1, 1, 10, 20, 30]);
     }
 
     #[test]
     fn two_d_axes_yx() {
-        let result = normalize_to_5d(
-            &[100, 200],
-            &axes(&["y", "x"]),
-            1,
-        );
+        let result = normalize_to_5d(&[100, 200], &axes(&["y", "x"]), 1);
         assert_eq!(result, [1, 1, 1, 100, 200]);
     }
 
@@ -136,21 +124,13 @@ mod tests {
 
     #[test]
     fn f64_three_d_axes_zyx() {
-        let result = normalize_f64_to_5d(
-            &[10.0, 20.0, 30.0],
-            &axes(&["z", "y", "x"]),
-            1.0,
-        );
+        let result = normalize_f64_to_5d(&[10.0, 20.0, 30.0], &axes(&["z", "y", "x"]), 1.0);
         assert_eq!(result, [1.0, 1.0, 10.0, 20.0, 30.0]);
     }
 
     #[test]
     fn f64_two_d_axes_yx() {
-        let result = normalize_f64_to_5d(
-            &[100.0, 200.0],
-            &axes(&["y", "x"]),
-            1.0,
-        );
+        let result = normalize_f64_to_5d(&[100.0, 200.0], &axes(&["y", "x"]), 1.0);
         assert_eq!(result, [1.0, 1.0, 1.0, 100.0, 200.0]);
     }
 
@@ -203,8 +183,16 @@ mod tests {
         assert_eq!(
             layout.pinned,
             vec![
-                PinnedAxis { name: "m".to_string(), size: 4, pinned_index: 0 },
-                PinnedAxis { name: "s".to_string(), size: 5, pinned_index: 0 },
+                PinnedAxis {
+                    name: "m".to_string(),
+                    size: 4,
+                    pinned_index: 0
+                },
+                PinnedAxis {
+                    name: "s".to_string(),
+                    size: 5,
+                    pinned_index: 0
+                },
             ]
         );
     }
@@ -216,8 +204,16 @@ mod tests {
         assert_eq!(
             layout.pinned,
             vec![
-                PinnedAxis { name: "a".to_string(), size: 10, pinned_index: 0 },
-                PinnedAxis { name: "b".to_string(), size: 20, pinned_index: 0 },
+                PinnedAxis {
+                    name: "a".to_string(),
+                    size: 10,
+                    pinned_index: 0
+                },
+                PinnedAxis {
+                    name: "b".to_string(),
+                    size: 20,
+                    pinned_index: 0
+                },
             ]
         );
     }
@@ -245,7 +241,11 @@ mod tests {
         let layout = classify_axes(&axes(&["m", "y", "x"]), &[]);
         assert_eq!(
             layout.pinned,
-            vec![PinnedAxis { name: "m".to_string(), size: 0, pinned_index: 0 }]
+            vec![PinnedAxis {
+                name: "m".to_string(),
+                size: 0,
+                pinned_index: 0
+            }]
         );
     }
 }

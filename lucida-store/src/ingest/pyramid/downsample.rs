@@ -24,8 +24,8 @@ pub fn downsample(src: &LevelData, do_xy: bool, do_z: bool) -> LevelData {
 
 /// Downsample a level by 2x in XY using box averaging. T, C, Z stay the same.
 pub fn downsample_xy(src: &LevelData) -> LevelData {
-    let dst_w = (src.width + 1) / 2;
-    let dst_h = (src.height + 1) / 2;
+    let dst_w = src.width.div_ceil(2);
+    let dst_h = src.height.div_ceil(2);
     let src_plane = (src.width * src.height) as usize;
     let dst_plane = (dst_w * dst_h) as usize;
     let num_planes = (src.timepoints * src.channels * src.depth) as usize;
@@ -33,8 +33,16 @@ pub fn downsample_xy(src: &LevelData) -> LevelData {
     let mut data = vec![0u16; num_planes * dst_plane];
 
     // Precompute edge boundaries: for even src dimensions, bulk covers everything.
-    let bulk_dx_end = if src.width % 2 == 0 { dst_w } else { dst_w - 1 };
-    let bulk_dy_end = if src.height % 2 == 0 { dst_h } else { dst_h - 1 };
+    let bulk_dx_end = if src.width.is_multiple_of(2) {
+        dst_w
+    } else {
+        dst_w - 1
+    };
+    let bulk_dy_end = if src.height.is_multiple_of(2) {
+        dst_h
+    } else {
+        dst_h - 1
+    };
     let src_w = src.width;
 
     data.par_chunks_mut(dst_plane)
@@ -94,7 +102,7 @@ pub fn downsample_xy(src: &LevelData) -> LevelData {
 /// Downsample a level by 2x in Z only, averaging pairs of z-planes.
 /// T, C, XY stay the same.
 pub fn downsample_z_only(src: &LevelData) -> LevelData {
-    let dst_d = (src.depth + 1) / 2;
+    let dst_d = src.depth.div_ceil(2);
     let plane_size = (src.width * src.height) as usize;
     let tc_count = (src.timepoints * src.channels) as usize;
     let dst_total = tc_count * dst_d as usize * plane_size;
@@ -112,10 +120,12 @@ pub fn downsample_z_only(src: &LevelData) -> LevelData {
             let sz1 = sz0 + 1;
 
             let tc_base = tc * src.depth as usize * plane_size;
-            let src0 = &src.data[tc_base + sz0 * plane_size..tc_base + sz0 * plane_size + plane_size];
+            let src0 =
+                &src.data[tc_base + sz0 * plane_size..tc_base + sz0 * plane_size + plane_size];
 
             if sz1 < src.depth as usize {
-                let src1 = &src.data[tc_base + sz1 * plane_size..tc_base + sz1 * plane_size + plane_size];
+                let src1 =
+                    &src.data[tc_base + sz1 * plane_size..tc_base + sz1 * plane_size + plane_size];
                 for i in 0..plane_size {
                     dst_slice[i] = ((src0[i] as u32 + src1[i] as u32) / 2) as u16;
                 }
@@ -139,17 +149,25 @@ pub fn downsample_z_only(src: &LevelData) -> LevelData {
 
 /// Downsample a level by 2x in all three spatial axes (XYZ) using 2x2x2 box averaging.
 pub fn downsample_xyz(src: &LevelData) -> LevelData {
-    let dst_w = (src.width + 1) / 2;
-    let dst_h = (src.height + 1) / 2;
-    let dst_d = (src.depth + 1) / 2;
+    let dst_w = src.width.div_ceil(2);
+    let dst_h = src.height.div_ceil(2);
+    let dst_d = src.depth.div_ceil(2);
     let src_plane = (src.width * src.height) as usize;
     let dst_plane = (dst_w * dst_h) as usize;
     let tc_count = (src.timepoints * src.channels) as usize;
 
     let mut data = vec![0u16; tc_count * dst_d as usize * dst_plane];
 
-    let bulk_dx_end = if src.width % 2 == 0 { dst_w } else { dst_w - 1 };
-    let bulk_dy_end = if src.height % 2 == 0 { dst_h } else { dst_h - 1 };
+    let bulk_dx_end = if src.width.is_multiple_of(2) {
+        dst_w
+    } else {
+        dst_w - 1
+    };
+    let bulk_dy_end = if src.height.is_multiple_of(2) {
+        dst_h
+    } else {
+        dst_h - 1
+    };
     let src_w = src.width;
 
     // Parallel over (tc, dz) output planes
@@ -367,7 +385,7 @@ mod tests {
         let dst = downsample_xy(&src);
         assert_eq!(dst.channels, 2);
         assert_eq!(dst.timepoints, 1);
-        assert_eq!(dst.data[0], 25);  // channel 0
+        assert_eq!(dst.data[0], 25); // channel 0
         assert_eq!(dst.data[1], 250); // channel 1
     }
 
@@ -405,9 +423,9 @@ mod tests {
         // depth=3 → depth=2: first pair averaged, last plane copied
         let src = LevelData {
             data: vec![
-                10, 20,  // z=0
-                30, 40,  // z=1
-                50, 60,  // z=2
+                10, 20, // z=0
+                30, 40, // z=1
+                50, 60, // z=2
             ],
             width: 2,
             height: 1,
@@ -437,7 +455,7 @@ mod tests {
         let dst = downsample_z_only(&src);
         assert_eq!(dst.depth, 1);
         assert_eq!(dst.channels, 2);
-        assert_eq!(dst.data[0], 15);  // c0: (10+20)/2
+        assert_eq!(dst.data[0], 15); // c0: (10+20)/2
         assert_eq!(dst.data[1], 150); // c1: (100+200)/2
     }
 
@@ -466,8 +484,8 @@ mod tests {
         // 2x2x3 → 1x1x2: first pair uses 2x2x2, last plane uses 2x2 XY-only
         let src = LevelData {
             data: vec![
-                10, 20, 30, 40,  // z=0 (2x2)
-                50, 60, 70, 80,  // z=1 (2x2)
+                10, 20, 30, 40, // z=0 (2x2)
+                50, 60, 70, 80, // z=1 (2x2)
                 90, 100, 110, 120, // z=2 (2x2)
             ],
             width: 2,
@@ -492,8 +510,7 @@ mod tests {
         let src = LevelData {
             data: vec![
                 // C=0: z=0, z=1
-                10, 20, 30, 40, 50, 60, 70, 80,
-                // C=1: z=0, z=1
+                10, 20, 30, 40, 50, 60, 70, 80, // C=1: z=0, z=1
                 100, 200, 300, 400, 500, 600, 700, 800,
             ],
             width: 2,
@@ -505,7 +522,7 @@ mod tests {
         let dst = downsample_xyz(&src);
         assert_eq!(dst.channels, 2);
         assert_eq!(dst.depth, 1);
-        assert_eq!(dst.data[0], 45);  // c0
+        assert_eq!(dst.data[0], 45); // c0
         assert_eq!(dst.data[1], 450); // c1
     }
 

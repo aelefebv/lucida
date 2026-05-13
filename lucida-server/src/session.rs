@@ -4,7 +4,7 @@ use lucida_content::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, PresenceState, ServerMessage};
-use lucida_core::scene::{DisplayState, DocumentState, DatasetDisplaySettings};
+use lucida_core::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
 use lucida_core::view::ViewState;
 
 use crate::binding::ServerBinding;
@@ -19,6 +19,12 @@ pub struct Session {
     pub server_bindings: HashMap<DatasetId, ServerBinding>,
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Session {
@@ -202,9 +208,18 @@ mod tests {
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
                     axes: vec![
-                        Axis { name: "z".into(), kind: AxisKind::Space },
-                        Axis { name: "y".into(), kind: AxisKind::Space },
-                        Axis { name: "x".into(), kind: AxisKind::Space },
+                        Axis {
+                            name: "z".into(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".into(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".into(),
+                            kind: AxisKind::Space,
+                        },
                     ],
                     levels: vec![LevelGeometry {
                         level_index: 0,
@@ -223,10 +238,16 @@ mod tests {
         let fetch = FetchSource::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id,
-                wire_format: WireFormat::Raw { data_type: DataType::Uint16 },
+                wire_format: WireFormat::Raw {
+                    data_type: DataType::Uint16,
+                },
             }],
         });
-        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened {
+            manifest,
+            fetch,
+            catalog: AssetCatalog::default(),
+        }
     }
 
     #[test]
@@ -249,7 +270,12 @@ mod tests {
         let reg = make_register("ds1", "test");
         session.apply(DocumentCommand::DatasetOpened(reg));
         assert_eq!(session.document.manifests.len(), 1);
-        assert!(session.document.manifests.contains_key(&DatasetId("ds1".into())));
+        assert!(
+            session
+                .document
+                .manifests
+                .contains_key(&DatasetId("ds1".into()))
+        );
     }
 
     #[test]

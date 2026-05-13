@@ -127,10 +127,8 @@ pub fn compute_chunk_byte_layout(
         )));
     }
 
-    let pinned_names: std::collections::HashSet<String> = pinned
-        .iter()
-        .map(|p| p.name.to_lowercase())
-        .collect();
+    let pinned_names: std::collections::HashSet<String> =
+        pinned.iter().map(|p| p.name.to_lowercase()).collect();
 
     // Per-axis byte-size product across all axes (on_disk) and across just
     // the kept canonical axes z/y/x (canonical). t and c are "indexed" —
@@ -149,12 +147,10 @@ pub fn compute_chunk_byte_layout(
         }
     }
 
-    let on_disk_byte_size = usize::try_from(on_disk).map_err(|_| {
-        StoreError::Metadata("chunk byte size exceeds usize".to_string())
-    })?;
-    let canonical_byte_size = usize::try_from(canonical).map_err(|_| {
-        StoreError::Metadata("canonical chunk byte size exceeds usize".to_string())
-    })?;
+    let on_disk_byte_size = usize::try_from(on_disk)
+        .map_err(|_| StoreError::Metadata("chunk byte size exceeds usize".to_string()))?;
+    let canonical_byte_size = usize::try_from(canonical)
+        .map_err(|_| StoreError::Metadata("canonical chunk byte size exceeds usize".to_string()))?;
 
     // Compute byte strides for the canonical-indexed axes (t, c) by
     // walking right-to-left and accumulating dtype_size × ∏ inner dims.
@@ -165,14 +161,12 @@ pub fn compute_chunk_byte_layout(
         let lower = axes[i].to_lowercase();
         match lower.as_str() {
             "t" => {
-                byte_stride_t = usize::try_from(current_stride).map_err(|_| {
-                    StoreError::Metadata("t byte stride exceeds usize".to_string())
-                })?;
+                byte_stride_t = usize::try_from(current_stride)
+                    .map_err(|_| StoreError::Metadata("t byte stride exceeds usize".to_string()))?;
             }
             "c" => {
-                byte_stride_c = usize::try_from(current_stride).map_err(|_| {
-                    StoreError::Metadata("c byte stride exceeds usize".to_string())
-                })?;
+                byte_stride_c = usize::try_from(current_stride)
+                    .map_err(|_| StoreError::Metadata("c byte stride exceeds usize".to_string()))?;
             }
             _ => {}
         }
@@ -355,9 +349,15 @@ mod tests {
         )
         .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains('\''), "error should quote the axis name: {msg}");
+        assert!(
+            msg.contains('\''),
+            "error should quote the axis name: {msg}"
+        );
         assert!(msg.contains('m'), "error should name 'm': {msg}");
-        assert!(msg.contains("non-prefix"), "error should say 'non-prefix': {msg}");
+        assert!(
+            msg.contains("non-prefix"),
+            "error should say 'non-prefix': {msg}"
+        );
     }
 
     #[test]
@@ -391,9 +391,8 @@ mod tests {
 
     #[test]
     fn rejects_axes_chunk_shape_length_mismatch() {
-        let err =
-            compute_chunk_byte_layout(&axes(&["t", "c", "z", "y", "x"]), &[1, 1, 1], 2, &[])
-                .unwrap_err();
+        let err = compute_chunk_byte_layout(&axes(&["t", "c", "z", "y", "x"]), &[1, 1, 1], 2, &[])
+            .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("length mismatch"), "{msg}");
     }
@@ -521,7 +520,10 @@ mod tests {
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains('c'), "error should name 'c': {msg}");
-        assert!(msg.contains("non-prefix"), "error should say 'non-prefix': {msg}");
+        assert!(
+            msg.contains("non-prefix"),
+            "error should say 'non-prefix': {msg}"
+        );
         assert!(
             msg.contains("canonical-indexed"),
             "error should classify the axis: {msg}"
@@ -547,13 +549,8 @@ mod tests {
     #[test]
     fn axis_absent_means_zero_stride() {
         // [c, y, x] (no t, no z) with chunk_c = 4.
-        let layout = compute_chunk_byte_layout(
-            &axes(&["c", "y", "x"]),
-            &[4, 100, 200],
-            2,
-            &[],
-        )
-        .unwrap();
+        let layout =
+            compute_chunk_byte_layout(&axes(&["c", "y", "x"]), &[4, 100, 200], 2, &[]).unwrap();
         // canonical = 100 × 200 × 2 = 40000
         assert_eq!(layout.canonical_byte_size, 100 * 200 * 2);
         assert_eq!(layout.on_disk_byte_size, 4 * 100 * 200 * 2);
@@ -562,6 +559,9 @@ mod tests {
         assert_eq!(layout.chunk_size_t, 1);
         assert_eq!(layout.chunk_size_c, 4);
         // wire t=99 is irrelevant (axis absent → modulo-reduced to 0).
-        assert_eq!(layout.slice_range(99, 2), (2 * 100 * 200 * 2, 100 * 200 * 2));
+        assert_eq!(
+            layout.slice_range(99, 2),
+            (2 * 100 * 200 * 2, 100 * 200 * 2)
+        );
     }
 }

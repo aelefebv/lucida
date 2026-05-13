@@ -51,8 +51,8 @@ use tracing::warn;
 
 use lucida_core::protocol::{BookmarkAction, ServerMessage};
 
-use crate::session::Session;
 use crate::UnicastRoutes;
+use crate::session::Session;
 
 /// Outcome of a single broadcast attempt. Logged at the call site for
 /// observability ("how many sidebars did this update reach?") and
@@ -126,10 +126,7 @@ pub async fn broadcast_bookmark_change(
     // own handler loop.
     let senders: Vec<_> = {
         let routes = unicast_routes.lock().await;
-        routes
-            .iter()
-            .map(|(id, tx)| (*id, tx.clone()))
-            .collect()
+        routes.iter().map(|(id, tx)| (*id, tx.clone())).collect()
     };
     for (client_id, sender) in senders {
         match sender.send(Message::Text(json.clone().into())) {
@@ -155,7 +152,7 @@ mod tests {
     use std::collections::HashMap;
 
     use lucida_content::{
-        Axis, AxisKind, DatasetId, DatasetKind, DatasetManifest, DataType, Entity, EntityId,
+        Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
         EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo,
     };
     use lucida_core::protocol::{ClientId, ServerMessage};
@@ -165,12 +162,12 @@ mod tests {
     };
     use lucida_store::cache::CachedStore;
     use object_store::memory::InMemory;
-    use tokio::sync::{mpsc, Mutex as TokioMutex};
+    use tokio::sync::{Mutex as TokioMutex, mpsc};
 
+    use crate::UnicastRoutes;
     use crate::binding::{ChunkResolver, ServerBinding};
     use crate::proxy::{ProxyCache, ProxyGenerator};
     use crate::session::Session;
-    use crate::UnicastRoutes;
     use lucida_store::import_types::ServerBindingSeed;
 
     /// Build a `ServerBinding` with the given source URL and just enough
@@ -196,9 +193,18 @@ mod tests {
                 owner: EntityId("e".into()),
                 multiscale: MultiscaleInfo {
                     axes: vec![
-                        Axis { name: "z".into(), kind: AxisKind::Space },
-                        Axis { name: "y".into(), kind: AxisKind::Space },
-                        Axis { name: "x".into(), kind: AxisKind::Space },
+                        Axis {
+                            name: "z".into(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".into(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".into(),
+                            kind: AxisKind::Space,
+                        },
                     ],
                     levels: vec![LevelGeometry {
                         level_index: 0,
@@ -219,7 +225,9 @@ mod tests {
             fetch: FetchSource::Proxied(ProxiedFetchDescriptor {
                 images: vec![ProxiedImageSpec {
                     image_id: ImageId("img".into()),
-                    wire_format: WireFormat::Raw { data_type: DataType::Uint16 },
+                    wire_format: WireFormat::Raw {
+                        data_type: DataType::Uint16,
+                    },
                 }],
             }),
             catalog: AssetCatalog::default(),
@@ -329,7 +337,11 @@ mod tests {
         // Sanity: payload parses back as BookmarkChanged.
         let parsed: ServerMessage = serde_json::from_str(&msgs_a[0]).unwrap();
         match parsed {
-            ServerMessage::BookmarkChanged { id, action, dataset_urls } => {
+            ServerMessage::BookmarkChanged {
+                id,
+                action,
+                dataset_urls,
+            } => {
                 assert_eq!(id, "bm-1");
                 assert_eq!(action, BookmarkAction::Created);
                 assert_eq!(dataset_urls, vec!["gs://bucket/a.zarr".to_string()]);
@@ -400,5 +412,4 @@ mod tests {
         assert_eq!(summary.delivered, 0);
         assert_eq!(summary.failed, 0);
     }
-
 }

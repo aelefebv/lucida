@@ -237,7 +237,6 @@ export function DebugOverlays({
   const [enabled, setEnabled] = useState<Record<DebugOverlay, boolean>>(readEnabled);
   useEffect(() => {
     return onOverlaysChanged(() => setEnabled(readEnabled()));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const anyEnabled = DEBUG_OVERLAYS.some(o => enabled[o]);

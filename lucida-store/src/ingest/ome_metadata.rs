@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::pyramid::LevelData;
 
@@ -170,8 +170,22 @@ mod tests {
     #[test]
     fn multiscales_scale_factors() {
         let levels = vec![
-            LevelData { data: vec![], width: 512, height: 512, depth: 1, channels: 1, timepoints: 1 },
-            LevelData { data: vec![], width: 256, height: 256, depth: 1, channels: 1, timepoints: 1 },
+            LevelData {
+                data: vec![],
+                width: 512,
+                height: 512,
+                depth: 1,
+                channels: 1,
+                timepoints: 1,
+            },
+            LevelData {
+                data: vec![],
+                width: 256,
+                height: 256,
+                depth: 1,
+                channels: 1,
+                timepoints: 1,
+            },
         ];
         let scales = vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0]];
         let attrs = build_multiscales_attrs(&levels, &scales);
@@ -179,22 +193,52 @@ mod tests {
         assert_eq!(ds[0]["path"], "0");
         assert_eq!(ds[1]["path"], "1");
         // Level 1 scale: [1, 1, 1, 2, 2] (TCZYX)
-        assert_eq!(ds[1]["coordinateTransformations"][0]["scale"], json!([1.0, 1.0, 1.0, 2.0, 2.0]));
+        assert_eq!(
+            ds[1]["coordinateTransformations"][0]["scale"],
+            json!([1.0, 1.0, 1.0, 2.0, 2.0])
+        );
     }
 
     #[test]
     fn multiscales_anisotropic_scales() {
         let levels = vec![
-            LevelData { data: vec![], width: 512, height: 512, depth: 100, channels: 1, timepoints: 1 },
-            LevelData { data: vec![], width: 256, height: 256, depth: 100, channels: 1, timepoints: 1 },
-            LevelData { data: vec![], width: 128, height: 128, depth: 50, channels: 1, timepoints: 1 },
+            LevelData {
+                data: vec![],
+                width: 512,
+                height: 512,
+                depth: 100,
+                channels: 1,
+                timepoints: 1,
+            },
+            LevelData {
+                data: vec![],
+                width: 256,
+                height: 256,
+                depth: 100,
+                channels: 1,
+                timepoints: 1,
+            },
+            LevelData {
+                data: vec![],
+                width: 128,
+                height: 128,
+                depth: 50,
+                channels: 1,
+                timepoints: 1,
+            },
         ];
         let scales = vec![[1.0, 1.0, 1.0], [2.0, 2.0, 1.0], [4.0, 4.0, 2.0]];
         let attrs = build_multiscales_attrs(&levels, &scales);
         let ds = &attrs["ome"]["multiscales"][0]["datasets"];
         // Level 1: XY only → z stays 1.0
-        assert_eq!(ds[1]["coordinateTransformations"][0]["scale"], json!([1.0, 1.0, 1.0, 2.0, 2.0]));
+        assert_eq!(
+            ds[1]["coordinateTransformations"][0]["scale"],
+            json!([1.0, 1.0, 1.0, 2.0, 2.0])
+        );
         // Level 2: XY + Z → z=2.0
-        assert_eq!(ds[2]["coordinateTransformations"][0]["scale"], json!([1.0, 1.0, 2.0, 4.0, 4.0]));
+        assert_eq!(
+            ds[2]["coordinateTransformations"][0]["scale"],
+            json!([1.0, 1.0, 2.0, 4.0, 4.0])
+        );
     }
 }

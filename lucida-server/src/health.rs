@@ -21,9 +21,9 @@
 //! would defeat their entire purpose. See [[subsystems/auth]] for the
 //! public/protected split.
 
+use axum::Router;
 use axum::http::StatusCode;
 use axum::routing::get;
-use axum::Router;
 
 /// Liveness probe handler. Always 200 today; the moment we have an
 /// "I should be killed" condition (e.g. fatal background-task failure)
@@ -52,7 +52,7 @@ pub fn router() -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 

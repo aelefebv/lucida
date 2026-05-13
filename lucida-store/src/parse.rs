@@ -49,11 +49,7 @@ pub(crate) async fn read_zarr_json(
     store: &Arc<dyn ObjectStore>,
     path: &str,
 ) -> Result<serde_json::Value, StoreError> {
-    let bytes = store
-        .get(&Path::from(path))
-        .await?
-        .bytes()
-        .await?;
+    let bytes = store.get(&Path::from(path)).await?.bytes().await?;
     serde_json::from_slice(&bytes).map_err(|e| StoreError::Metadata(e.to_string()))
 }
 
@@ -74,47 +70,56 @@ pub(crate) fn parse_multiscales(
         .pointer("/attributes/ome/multiscales")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            StoreError::Metadata(format!("{error_prefix}no ome.multiscales in root zarr.json"))
+            StoreError::Metadata(format!(
+                "{error_prefix}no ome.multiscales in root zarr.json"
+            ))
         })?;
 
-    let ms = multiscales.first().ok_or_else(|| {
-        StoreError::Metadata(format!("{error_prefix}multiscales array is empty"))
-    })?;
+    let ms = multiscales
+        .first()
+        .ok_or_else(|| StoreError::Metadata(format!("{error_prefix}multiscales array is empty")))?;
 
     let axes_json: Vec<serde_json::Value> = ms
         .get("axes")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.clone())
+        .cloned()
         .unwrap_or_default();
 
     let axes_names: Vec<String> = axes_json
         .iter()
-        .filter_map(|a| a.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+        .filter_map(|a| {
+            a.get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string())
+        })
         .collect();
 
     let datasets_arr = ms
         .get("datasets")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            StoreError::Metadata(format!("{error_prefix}no datasets in multiscales"))
-        })?;
+        .ok_or_else(|| StoreError::Metadata(format!("{error_prefix}no datasets in multiscales")))?;
 
     let mut level_entries: Vec<LevelEntry> = Vec::new();
     for ds in datasets_arr {
         let path = ds
             .get("path")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| StoreError::Metadata(format!("{error_prefix}dataset entry missing path")))?
+            .ok_or_else(|| {
+                StoreError::Metadata(format!("{error_prefix}dataset entry missing path"))
+            })?
             .to_string();
 
         let mut scale = [1.0_f64; 5]; // [T, C, Z, Y, X]
-        if let Some(transforms) = ds.get("coordinateTransformations").and_then(|v| v.as_array()) {
+        if let Some(transforms) = ds
+            .get("coordinateTransformations")
+            .and_then(|v| v.as_array())
+        {
             for ct in transforms {
-                if ct.get("type").and_then(|v| v.as_str()) == Some("scale") {
-                    if let Some(s) = ct.get("scale").and_then(|v| v.as_array()) {
-                        let raw: Vec<f64> = s.iter().filter_map(|v| v.as_f64()).collect();
-                        scale = normalize_f64_to_5d(&raw, &axes_names, 1.0);
-                    }
+                if ct.get("type").and_then(|v| v.as_str()) == Some("scale")
+                    && let Some(s) = ct.get("scale").and_then(|v| v.as_array())
+                {
+                    let raw: Vec<f64> = s.iter().filter_map(|v| v.as_f64()).collect();
+                    scale = normalize_f64_to_5d(&raw, &axes_names, 1.0);
                 }
             }
         }
@@ -232,7 +237,8 @@ mod tests {
 
     #[test]
     fn parse_multiscales_error_prefix() {
-        let root_json = serde_json::json!({"zarr_format": 3, "node_type": "group", "attributes": {}});
+        let root_json =
+            serde_json::json!({"zarr_format": 3, "node_type": "group", "attributes": {}});
         let err = parse_multiscales(&root_json, "A/1/0: ").unwrap_err();
         let msg = err.to_string();
         assert!(

@@ -58,7 +58,7 @@ pub mod session_store_memory;
 pub mod session_store_sqlite;
 pub mod unauth_landing;
 
-pub use cleanup::{spawn as spawn_cleanup, CleanupState};
+pub use cleanup::{CleanupState, spawn as spawn_cleanup};
 pub use config::{AuthConfig, AuthConfigError, AuthMode, GoogleOAuthConfig};
 pub use extractors::AdminRequired;
 pub use google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
@@ -66,8 +66,8 @@ pub use pending_auth::{PendingAuth, PendingAuthStore, PendingAuthStoreError};
 pub use pending_auth_memory::MemoryPendingAuthStore;
 pub use pending_auth_sqlite::SqlitePendingAuthStore;
 pub use principal::{
-    principal_from_claims, principal_or_rejection_from_claims, AuthError,
-    GoogleJwtPrincipalExtractor, PrincipalExtractor, RejectionReason, SessionCookieExtractor,
+    AuthError, GoogleJwtPrincipalExtractor, PrincipalExtractor, RejectionReason,
+    SessionCookieExtractor, principal_from_claims, principal_or_rejection_from_claims,
 };
 pub use session_store::{LoginSession, LoginSessionStore, SessionStoreError};
 pub use session_store_memory::MemorySessionStore;

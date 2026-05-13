@@ -15,7 +15,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use axum::http::{request::Parts, StatusCode};
+use axum::http::{StatusCode, request::Parts};
 use chrono::Utc;
 use tracing::{debug, error};
 
@@ -108,11 +108,7 @@ impl SessionCookieExtractor {
     /// `Active` = still valid. The two failure variants drive distinct
     /// `auth.session.expired.*` event names so ops can tell idle drift
     /// (a quiet user) apart from hard-cap rotations (a 30-day re-auth).
-    fn classify_session(
-        &self,
-        row: &LoginSession,
-        now: chrono::DateTime<Utc>,
-    ) -> SessionStatus {
+    fn classify_session(&self, row: &LoginSession, now: chrono::DateTime<Utc>) -> SessionStatus {
         if row.expires_at <= now {
             return SessionStatus::HardCapExpired;
         }
@@ -124,7 +120,6 @@ impl SessionCookieExtractor {
         }
         SessionStatus::Active
     }
-
 }
 
 /// See [`SessionCookieExtractor::classify_session`] — three-state result
@@ -139,8 +134,8 @@ enum SessionStatus {
 #[async_trait]
 impl PrincipalExtractor for SessionCookieExtractor {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
-        let session_id = read_session_cookie(req, &self.config.cookie_name)
-            .ok_or(AuthError::Unauthenticated)?;
+        let session_id =
+            read_session_cookie(req, &self.config.cookie_name).ok_or(AuthError::Unauthenticated)?;
 
         // Capture request-context fields once for any audit events
         // emitted below. Email is unknown until we look up the row;
@@ -152,14 +147,10 @@ impl PrincipalExtractor for SessionCookieExtractor {
             .unwrap_or("");
         let ip = client_ip(req).unwrap_or_default();
 
-        let row = match self
-            .store
-            .get(&session_id)
-            .await
-            .map_err(|e| {
-                error!(error = %e, "session_store.get.failed");
-                AuthError::Internal(e.to_string())
-            })? {
+        let row = match self.store.get(&session_id).await.map_err(|e| {
+            error!(error = %e, "session_store.get.failed");
+            AuthError::Internal(e.to_string())
+        })? {
             Some(row) => row,
             None => {
                 // Cookie present, no DB row. PRD #455 §"Audit logging":
@@ -416,9 +407,7 @@ pub(crate) mod test_helpers {
     use crate::auth::session_store_memory::MemorySessionStore;
     use chrono::Duration as ChronoDuration;
 
-    pub fn make_extractor_with(
-        store: Arc<MemorySessionStore>,
-    ) -> SessionCookieExtractor {
+    pub fn make_extractor_with(store: Arc<MemorySessionStore>) -> SessionCookieExtractor {
         SessionCookieExtractor::new(
             Arc::new(AuthConfig::for_tests()),
             store as Arc<dyn LoginSessionStore>,
@@ -434,10 +423,7 @@ pub(crate) mod test_helpers {
     ) -> SessionCookieExtractor {
         let mut cfg = AuthConfig::for_tests();
         cfg.admin_emails = admin_emails.iter().map(|s| s.to_string()).collect();
-        SessionCookieExtractor::new(
-            Arc::new(cfg),
-            store as Arc<dyn LoginSessionStore>,
-        )
+        SessionCookieExtractor::new(Arc::new(cfg), store as Arc<dyn LoginSessionStore>)
     }
 
     pub fn fresh_session(id: &str) -> LoginSession {
@@ -475,7 +461,10 @@ mod tests {
         let store = Arc::new(MemorySessionStore::new());
         let ext = make_extractor_with(store);
         let parts = parts_with_cookie(None);
-        assert_eq!(ext.extract(&parts).await.unwrap_err(), AuthError::Unauthenticated);
+        assert_eq!(
+            ext.extract(&parts).await.unwrap_err(),
+            AuthError::Unauthenticated
+        );
     }
 
     #[tokio::test]
@@ -483,7 +472,10 @@ mod tests {
         let store = Arc::new(MemorySessionStore::new());
         let ext = make_extractor_with(store);
         let parts = parts_with_cookie(Some("does-not-exist"));
-        assert_eq!(ext.extract(&parts).await.unwrap_err(), AuthError::Unauthenticated);
+        assert_eq!(
+            ext.extract(&parts).await.unwrap_err(),
+            AuthError::Unauthenticated
+        );
     }
 
     #[tokio::test]
@@ -517,7 +509,10 @@ mod tests {
     #[tokio::test]
     async fn cookie_extractor_marks_non_admin_when_email_not_in_set() {
         let store = Arc::new(MemorySessionStore::new());
-        store.create(fresh_session("nonadmin-cookie")).await.unwrap();
+        store
+            .create(fresh_session("nonadmin-cookie"))
+            .await
+            .unwrap();
 
         let ext = make_extractor_with_admins(Arc::clone(&store), &["someone@else.com"]);
         let parts = parts_with_cookie(Some("nonadmin-cookie"));
@@ -553,7 +548,10 @@ mod tests {
 
         let ext = make_extractor_with(Arc::clone(&store));
         let parts = parts_with_cookie(Some("stale"));
-        assert_eq!(ext.extract(&parts).await.unwrap_err(), AuthError::Unauthenticated);
+        assert_eq!(
+            ext.extract(&parts).await.unwrap_err(),
+            AuthError::Unauthenticated
+        );
     }
 
     #[tokio::test]
@@ -575,7 +573,10 @@ mod tests {
 
         let ext = make_extractor_with(Arc::clone(&store));
         let parts = parts_with_cookie(Some("capped"));
-        assert_eq!(ext.extract(&parts).await.unwrap_err(), AuthError::Unauthenticated);
+        assert_eq!(
+            ext.extract(&parts).await.unwrap_err(),
+            AuthError::Unauthenticated
+        );
     }
 
     #[tokio::test]
@@ -671,8 +672,7 @@ mod tests {
         claims.email_verified = false;
         // Even though hd would pass, unverified must reject first.
         let allowed = allowed_set(&["calicolabs.com"]);
-        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
-            .unwrap_err();
+        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap_err();
         assert_eq!(
             err,
             RejectionReason::Unverified {
@@ -685,8 +685,7 @@ mod tests {
     fn rejection_hd_missing_when_allowlist_nonempty() {
         let claims = verified("alice@gmail.com", None); // personal Gmail
         let allowed = allowed_set(&["calicolabs.com"]);
-        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
-            .unwrap_err();
+        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap_err();
         match err {
             RejectionReason::HdMismatch {
                 attempted_email,
@@ -705,8 +704,7 @@ mod tests {
     fn rejection_hd_not_in_allowlist() {
         let claims = verified("alice@othercorp.com", Some("othercorp.com"));
         let allowed = allowed_set(&["calicolabs.com"]);
-        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
-            .unwrap_err();
+        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap_err();
         match err {
             RejectionReason::HdMismatch {
                 attempted_hd: Some(h),
@@ -720,8 +718,7 @@ mod tests {
     fn accept_when_hd_matches_allowlist() {
         let claims = verified("alice@calicolabs.com", Some("calicolabs.com"));
         let allowed = allowed_set(&["calicolabs.com"]);
-        let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
-            .unwrap();
+        let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap();
         assert_eq!(p.email, "alice@calicolabs.com");
     }
 
@@ -731,8 +728,7 @@ mod tests {
         // whatever Google sent. Match must still succeed.
         let claims = verified("alice@calicolabs.com", Some("CalicoLabs.COM"));
         let allowed = allowed_set(&["calicolabs.com"]);
-        let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
-            .unwrap();
+        let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap();
         assert_eq!(p.email, "alice@calicolabs.com");
     }
 
@@ -742,13 +738,9 @@ mod tests {
         // verified Google email gets through, hd present or not.
         let allowed: HashSet<String> = HashSet::new();
         let with_hd = verified("alice@calicolabs.com", Some("calicolabs.com"));
-        assert!(
-            principal_or_rejection_from_claims(&with_hd, &allowed, &no_admins()).is_ok()
-        );
+        assert!(principal_or_rejection_from_claims(&with_hd, &allowed, &no_admins()).is_ok());
         let without_hd = verified("personal@gmail.com", None);
-        assert!(
-            principal_or_rejection_from_claims(&without_hd, &allowed, &no_admins()).is_ok()
-        );
+        assert!(principal_or_rejection_from_claims(&without_hd, &allowed, &no_admins()).is_ok());
     }
 
     #[test]
@@ -757,13 +749,18 @@ mod tests {
         // Insert in reverse-sort order; the rejection must still come
         // back sorted so the user-facing message is deterministic.
         let allowed = allowed_set(&["zlast.com", "acorp.com", "mid.org"]);
-        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins())
-            .unwrap_err();
+        let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap_err();
         match err {
-            RejectionReason::HdMismatch { allowed_domains, .. } => {
+            RejectionReason::HdMismatch {
+                allowed_domains, ..
+            } => {
                 assert_eq!(
                     allowed_domains,
-                    vec!["acorp.com".to_string(), "mid.org".to_string(), "zlast.com".to_string()],
+                    vec![
+                        "acorp.com".to_string(),
+                        "mid.org".to_string(),
+                        "zlast.com".to_string()
+                    ],
                 );
             }
             _ => panic!("expected HdMismatch"),
@@ -806,6 +803,9 @@ mod tests {
         let claims = verified("AuStin@CalicoLabs.com", None);
         let admins = allowed_set(&["austin@calicolabs.com"]); // already lowercased by parser
         let p = principal_or_rejection_from_claims(&claims, &no_admins(), &admins).unwrap();
-        assert!(p.is_admin, "lowercased lookup must match casing-shifted JWT email");
+        assert!(
+            p.is_admin,
+            "lowercased lookup must match casing-shifted JWT email"
+        );
     }
 }

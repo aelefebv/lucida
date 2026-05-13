@@ -62,7 +62,10 @@ fn round_trips_put_then_get() {
 
     assert_eq!(got.header.dims, asset.header.dims);
     assert_eq!(got.header.dtype, asset.header.dtype);
-    assert_eq!(got.header.source_content_hash, asset.header.source_content_hash);
+    assert_eq!(
+        got.header.source_content_hash,
+        asset.header.source_content_hash
+    );
     assert_eq!(got.voxels, asset.voxels);
 }
 

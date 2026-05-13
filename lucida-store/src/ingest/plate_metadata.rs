@@ -1,9 +1,9 @@
-/// Write OME-Zarr v0.5 plate and well metadata files.
-///
-/// Generates the Zarr v3 group metadata for HCS plate hierarchy:
-/// - Root `zarr.json` with `ome.plate` attributes
-/// - Per-row group `zarr.json`
-/// - Per-well `zarr.json` with `ome.well` attributes
+//! Write OME-Zarr v0.5 plate and well metadata files.
+//!
+//! Generates the Zarr v3 group metadata for HCS plate hierarchy:
+//! - Root `zarr.json` with `ome.plate` attributes
+//! - Per-row group `zarr.json`
+//! - Per-well `zarr.json` with `ome.well` attributes
 
 use std::fs;
 use std::path::Path;
@@ -17,20 +17,12 @@ use super::plate_scanner::{PlateLayout, WellLayout};
 /// Creates the output directory and writes a Zarr v3 group with OME plate
 /// attributes describing rows, columns, wells, and field count.
 pub fn write_plate_metadata(output: &Path, layout: &PlateLayout) -> Result<(), String> {
-    fs::create_dir_all(output)
-        .map_err(|e| format!("failed to create output dir: {e}"))?;
+    fs::create_dir_all(output).map_err(|e| format!("failed to create output dir: {e}"))?;
 
-    let rows: Vec<serde_json::Value> = layout
-        .rows
-        .iter()
-        .map(|r| json!({"name": r}))
-        .collect();
+    let rows: Vec<serde_json::Value> = layout.rows.iter().map(|r| json!({"name": r})).collect();
 
-    let columns: Vec<serde_json::Value> = layout
-        .columns
-        .iter()
-        .map(|c| json!({"name": c}))
-        .collect();
+    let columns: Vec<serde_json::Value> =
+        layout.columns.iter().map(|c| json!({"name": c})).collect();
 
     let wells: Vec<serde_json::Value> = layout
         .wells
@@ -45,12 +37,7 @@ pub fn write_plate_metadata(output: &Path, layout: &PlateLayout) -> Result<(), S
         .collect();
 
     // field_count is the max number of FOVs across all wells.
-    let field_count = layout
-        .wells
-        .iter()
-        .map(|w| w.fovs.len())
-        .max()
-        .unwrap_or(0);
+    let field_count = layout.wells.iter().map(|w| w.fovs.len()).max().unwrap_or(0);
 
     let root_meta = json!({
         "zarr_format": 3,
@@ -73,8 +60,7 @@ pub fn write_plate_metadata(output: &Path, layout: &PlateLayout) -> Result<(), S
     let content = serde_json::to_string_pretty(&root_meta)
         .map_err(|e| format!("failed to serialize plate metadata: {e}"))?;
     let path = output.join("zarr.json");
-    fs::write(&path, content)
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))
+    fs::write(&path, content).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
 /// Write the well-level `zarr.json` metadata files.
@@ -84,8 +70,7 @@ pub fn write_plate_metadata(output: &Path, layout: &PlateLayout) -> Result<(), S
 pub fn write_well_metadata(output: &Path, well: &WellLayout) -> Result<(), String> {
     // Create row directory and write minimal group metadata.
     let row_dir = output.join(&well.row_name);
-    fs::create_dir_all(&row_dir)
-        .map_err(|e| format!("failed to create row dir: {e}"))?;
+    fs::create_dir_all(&row_dir).map_err(|e| format!("failed to create row dir: {e}"))?;
 
     let row_meta = json!({
         "zarr_format": 3,
@@ -99,8 +84,7 @@ pub fn write_well_metadata(output: &Path, well: &WellLayout) -> Result<(), Strin
 
     // Create well directory and write well metadata.
     let well_dir = row_dir.join(&well.col_name);
-    fs::create_dir_all(&well_dir)
-        .map_err(|e| format!("failed to create well dir: {e}"))?;
+    fs::create_dir_all(&well_dir).map_err(|e| format!("failed to create well dir: {e}"))?;
 
     let images: Vec<serde_json::Value> = well
         .fovs
@@ -190,10 +174,7 @@ mod tests {
             "my_plate",
             vec!["A", "B"],
             vec!["1", "3"],
-            vec![
-                make_well("A", "1", 0, 0, 2),
-                make_well("B", "3", 1, 1, 2),
-            ],
+            vec![make_well("A", "1", 0, 0, 2), make_well("B", "3", 1, 1, 2)],
         );
 
         write_plate_metadata(&dir, &layout).unwrap();
@@ -296,10 +277,7 @@ mod tests {
             "sparse_plate",
             vec!["A", "B", "C"],
             vec!["1", "2", "3"],
-            vec![
-                make_well("A", "3", 0, 2, 2),
-                make_well("C", "1", 2, 0, 1),
-            ],
+            vec![make_well("A", "3", 0, 2, 2), make_well("C", "1", 2, 0, 1)],
         );
 
         write_plate_metadata(&dir, &layout).unwrap();
@@ -378,5 +356,4 @@ mod tests {
         )
         .unwrap();
     }
-
 }

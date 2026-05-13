@@ -271,7 +271,6 @@ function handleProxyAssetData(msg: ProxyAssetDataMessage): void {
   // 0. Staleness — drop if older than the current cold-state epoch.
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     proxyStats.dropped++;
-    // eslint-disable-next-line no-console
     console.log(
       "[gpu.worker] proxyAssetData: dropped stale",
       msg.entityId,
@@ -286,7 +285,6 @@ function handleProxyAssetData(msg: ProxyAssetDataMessage): void {
   const [slotZ, slotY, slotX] = slotDims;
   const expectedBytes = slotZ * slotY * slotX * 2;
   if (msg.data.byteLength < expectedBytes) {
-    // eslint-disable-next-line no-console
     console.warn(
       `[gpu.worker] proxyAssetData: short buffer (have ${msg.data.byteLength}, need ${expectedBytes}) for ${msg.entityId} ${msg.kind}`,
     );
@@ -332,7 +330,6 @@ function handleProxyAssetData(msg: ProxyAssetDataMessage): void {
   }
 
   proxyStats.uploaded++;
-  // eslint-disable-next-line no-console
   console.log(
     "[gpu.worker] proxyAssetData uploaded",
     msg.entityId,

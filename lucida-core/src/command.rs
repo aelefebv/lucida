@@ -2,7 +2,9 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use lucida_content::{DatasetId, DatasetKind, DatasetManifest, EntityId, EntityKind, LayoutId, LayoutSpec};
+use lucida_content::{
+    DatasetId, DatasetKind, DatasetManifest, EntityId, EntityKind, LayoutId, LayoutSpec,
+};
 use lucida_protocol::{AssetCatalogDelta, DatasetOpened};
 
 use crate::camera::Camera;
@@ -14,7 +16,9 @@ use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DocumentCommand {
     DatasetOpened(DatasetOpened),
-    RemoveDataset { id: DatasetId },
+    RemoveDataset {
+        id: DatasetId,
+    },
     RegisterLayout {
         dataset_id: DatasetId,
         layout: LayoutSpec,
@@ -44,19 +48,40 @@ pub enum ViewportCommand {
     #[serde(rename = "set_mode_fly")]
     SetModeFly,
     // Viewport
-    SetViewport { width: u32, height: u32 },
+    SetViewport {
+        width: u32,
+        height: u32,
+    },
     // 2D camera
-    Pan { dx: f64, dy: f64 },
-    ZoomBy { factor: f64 },
-    SetCenter { x: f64, y: f64 },
-    SetZoom { value: f64 },
+    Pan {
+        dx: f64,
+        dy: f64,
+    },
+    ZoomBy {
+        factor: f64,
+    },
+    SetCenter {
+        x: f64,
+        y: f64,
+    },
+    SetZoom {
+        value: f64,
+    },
     // 3D camera
     #[serde(rename = "arcball_rotate")]
-    Rotate3D { d_theta: f64, d_phi: f64 },
+    Rotate3D {
+        d_theta: f64,
+        d_phi: f64,
+    },
     #[serde(rename = "arcball_zoom")]
-    Zoom3D { delta: f64 },
+    Zoom3D {
+        delta: f64,
+    },
     #[serde(rename = "arcball_pan")]
-    Pan3D { dx: f64, dy: f64 },
+    Pan3D {
+        dx: f64,
+        dy: f64,
+    },
     // Fly camera
     FlyTick {
         dt: f64,
@@ -68,34 +93,95 @@ pub enum ViewportCommand {
         roll: f64,
     },
     // View state
-    SetZ { z: u32 },
-    SetZRange { start: u32, end: u32 },
-    SetT { t: u32 },
-    SetC { c: u32 },
+    SetZ {
+        z: u32,
+    },
+    SetZRange {
+        start: u32,
+        end: u32,
+    },
+    SetT {
+        t: u32,
+    },
+    SetC {
+        c: u32,
+    },
     // Display
-    SetContrast { min: f64, max: f64 },
-    SetGamma { gamma: f64 },
+    SetContrast {
+        min: f64,
+        max: f64,
+    },
+    SetGamma {
+        gamma: f64,
+    },
     // Per-dataset display
-    SetDatasetOrder { order: Vec<String> },
-    SetDatasetVisible { dataset_id: String, visible: bool },
-    SetDatasetOpacity { dataset_id: String, opacity: f32 },
-    SetDatasetContrast { dataset_id: String, min: f64, max: f64 },
-    SetDatasetGamma { dataset_id: String, gamma: f64 },
-    SetDatasetBlendMode { dataset_id: String, blend_mode: BlendMode },
-    SetDatasetRenderMode { dataset_id: String, render_mode: RenderMode },
+    SetDatasetOrder {
+        order: Vec<String>,
+    },
+    SetDatasetVisible {
+        dataset_id: String,
+        visible: bool,
+    },
+    SetDatasetOpacity {
+        dataset_id: String,
+        opacity: f32,
+    },
+    SetDatasetContrast {
+        dataset_id: String,
+        min: f64,
+        max: f64,
+    },
+    SetDatasetGamma {
+        dataset_id: String,
+        gamma: f64,
+    },
+    SetDatasetBlendMode {
+        dataset_id: String,
+        blend_mode: BlendMode,
+    },
+    SetDatasetRenderMode {
+        dataset_id: String,
+        render_mode: RenderMode,
+    },
     // Multi-channel
-    SetMultiChannel { enabled: bool },
-    SetChannelVisible { dataset_id: String, channel: u32, visible: bool },
-    SetChannelColormap { dataset_id: String, channel: u32, colormap: Colormap },
-    SetChannelContrast { dataset_id: String, channel: u32, min: f64, max: f64 },
-    SetChannelGamma { dataset_id: String, channel: u32, gamma: f64 },
-    SetChannelBlendMode { dataset_id: String, blend_mode: BlendMode },
+    SetMultiChannel {
+        enabled: bool,
+    },
+    SetChannelVisible {
+        dataset_id: String,
+        channel: u32,
+        visible: bool,
+    },
+    SetChannelColormap {
+        dataset_id: String,
+        channel: u32,
+        colormap: Colormap,
+    },
+    SetChannelContrast {
+        dataset_id: String,
+        channel: u32,
+        min: f64,
+        max: f64,
+    },
+    SetChannelGamma {
+        dataset_id: String,
+        channel: u32,
+        gamma: f64,
+    },
+    SetChannelBlendMode {
+        dataset_id: String,
+        blend_mode: BlendMode,
+    },
 }
 
 /// Wrapper enum for serde compatibility. Deserializes from the same
 /// JSON format as before (e.g. `{"type":"pan","dx":10.0,"dy":-5.0}`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+// Command is dispatched per UI interaction (keypress, mouse, presence event);
+// the 280-byte DocumentCommand variant is not on a hot copy path. Boxing
+// would add a heap allocation per command for no measurable benefit.
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     Document(DocumentCommand),
     Viewport(ViewportCommand),
@@ -145,22 +231,25 @@ impl Scene {
                         }
 
                         // Channel count from first image's C dimension
-                        let channel_count = event.manifest.images().first()
+                        let channel_count = event
+                            .manifest
+                            .images()
+                            .first()
                             .and_then(|img| img.multiscale.levels.first())
                             .map(|l| l.shape[1] as usize)
                             .unwrap_or(1);
 
                         // Display settings
-                        self.dataset_settings.entry(dataset_id.clone())
-                            .or_insert_with(|| {
-                                let mut s = crate::scene::DatasetDisplaySettings::default();
-                                s.channel_settings = (0..channel_count)
+                        self.dataset_settings
+                            .entry(dataset_id.clone())
+                            .or_insert_with(|| crate::scene::DatasetDisplaySettings {
+                                channel_settings: (0..channel_count)
                                     .map(|i| crate::scene::ChannelSettings {
                                         colormap: Colormap::default_for_channel(i),
                                         ..Default::default()
                                     })
-                                    .collect();
-                                s
+                                    .collect(),
+                                ..Default::default()
                             });
 
                         // Build derived state
@@ -296,7 +385,15 @@ impl Scene {
                 }
                 self.epochs.view += 1;
             }
-            ViewportCommand::FlyTick { dt, forward, right, up, yaw, pitch, roll } => {
+            ViewportCommand::FlyTick {
+                dt,
+                forward,
+                right,
+                up,
+                yaw,
+                pitch,
+                roll,
+            } => {
                 if let Camera::Fly(ref mut v) = self.camera {
                     v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
                 }
@@ -331,19 +428,29 @@ impl Scene {
                 self.dataset_order = order.into_iter().map(DatasetId).collect();
                 self.epochs.selection += 1;
             }
-            ViewportCommand::SetDatasetVisible { dataset_id, visible } => {
+            ViewportCommand::SetDatasetVisible {
+                dataset_id,
+                visible,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.visible = visible;
                 }
                 self.epochs.selection += 1;
             }
-            ViewportCommand::SetDatasetOpacity { dataset_id, opacity } => {
+            ViewportCommand::SetDatasetOpacity {
+                dataset_id,
+                opacity,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.opacity = opacity;
                 }
                 self.epochs.selection += 1;
             }
-            ViewportCommand::SetDatasetContrast { dataset_id, min, max } => {
+            ViewportCommand::SetDatasetContrast {
+                dataset_id,
+                min,
+                max,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.contrast_min = min;
                     s.contrast_max = max;
@@ -378,19 +485,32 @@ impl Scene {
                 self.view.multi_channel = enabled;
                 self.epochs.selection += 1;
             }
-            ViewportCommand::SetChannelVisible { dataset_id, channel, visible } => {
+            ViewportCommand::SetChannelVisible {
+                dataset_id,
+                channel,
+                visible,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).visible = visible;
                 }
                 self.epochs.selection += 1;
             }
-            ViewportCommand::SetChannelColormap { dataset_id, channel, colormap } => {
+            ViewportCommand::SetChannelColormap {
+                dataset_id,
+                channel,
+                colormap,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).colormap = colormap;
                 }
                 self.epochs.selection += 1;
             }
-            ViewportCommand::SetChannelContrast { dataset_id, channel, min, max } => {
+            ViewportCommand::SetChannelContrast {
+                dataset_id,
+                channel,
+                min,
+                max,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     let ch = s.ensure_channel(channel as usize);
                     ch.contrast_min = min;
@@ -398,13 +518,20 @@ impl Scene {
                 }
                 self.epochs.selection += 1;
             }
-            ViewportCommand::SetChannelGamma { dataset_id, channel, gamma } => {
+            ViewportCommand::SetChannelGamma {
+                dataset_id,
+                channel,
+                gamma,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.ensure_channel(channel as usize).gamma = gamma;
                 }
                 self.epochs.selection += 1;
             }
-            ViewportCommand::SetChannelBlendMode { dataset_id, blend_mode } => {
+            ViewportCommand::SetChannelBlendMode {
+                dataset_id,
+                blend_mode,
+            } => {
                 if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
                     s.channel_blend_mode = blend_mode;
                 }
@@ -435,7 +562,12 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
     let image_owners: HashSet<&EntityId> = manifest.images().iter().map(|i| &i.owner).collect();
 
     let (plate_rows, plate_columns, has_stage_positions) = match &manifest.kind {
-        DatasetKind::Plate { rows, columns, has_stage_positions, .. } => (
+        DatasetKind::Plate {
+            rows,
+            columns,
+            has_stage_positions,
+            ..
+        } => (
             Some(rows.len()),
             Some(columns.len()),
             Some(*has_stage_positions),
@@ -459,10 +591,10 @@ fn analyze_manifest_shape(manifest: &DatasetManifest) -> ManifestShape {
             EntityKind::Well => shape.n_wells += 1,
             EntityKind::Field => {
                 shape.n_fields += 1;
-                if let Some(parent) = &entity.parent {
-                    if !entity_ids.contains(parent) {
-                        shape.n_orphans += 1;
-                    }
+                if let Some(parent) = &entity.parent
+                    && !entity_ids.contains(parent)
+                {
+                    shape.n_orphans += 1;
                 }
                 if !image_owners.contains(&entity.id) {
                     shape.n_fields_without_image += 1;
@@ -545,7 +677,10 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         assert_eq!(json, r#"{"type":"pan","dx":10.0,"dy":-5.0}"#);
         let parsed: Command = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, Command::Viewport(ViewportCommand::Pan { .. })));
+        assert!(matches!(
+            parsed,
+            Command::Viewport(ViewportCommand::Pan { .. })
+        ));
     }
 
     #[test]
@@ -555,7 +690,10 @@ mod tests {
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"dataset_opened\""));
         let parsed: Command = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, Command::Document(DocumentCommand::DatasetOpened(_))));
+        assert!(matches!(
+            parsed,
+            Command::Document(DocumentCommand::DatasetOpened(_))
+        ));
     }
 
     #[test]
@@ -601,7 +739,9 @@ mod tests {
 
     #[test]
     fn remove_dataset_command_round_trips() {
-        let cmd = DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) };
+        let cmd = DocumentCommand::RemoveDataset {
+            id: DatasetId("ds1".into()),
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"remove_dataset\""));
         let _parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
@@ -613,13 +753,20 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         assert_eq!(scene.document.manifests.len(), 1);
-        assert!(scene.document.manifests.contains_key(&DatasetId("ds1".into())));
+        assert!(
+            scene
+                .document
+                .manifests
+                .contains_key(&DatasetId("ds1".into()))
+        );
         assert!(scene.derived.contains_key(&DatasetId("ds1".into())));
     }
 
     #[test]
     fn set_dataset_order_round_trips() {
-        let cmd = ViewportCommand::SetDatasetOrder { order: vec!["a".into(), "b".into()] };
+        let cmd = ViewportCommand::SetDatasetOrder {
+            order: vec!["a".into(), "b".into()],
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"set_dataset_order\""));
         let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
@@ -631,7 +778,10 @@ mod tests {
 
     #[test]
     fn set_dataset_visible_round_trips() {
-        let cmd = ViewportCommand::SetDatasetVisible { dataset_id: "ds1".into(), visible: false };
+        let cmd = ViewportCommand::SetDatasetVisible {
+            dataset_id: "ds1".into(),
+            visible: false,
+        };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"type\":\"set_dataset_visible\""));
         let _parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
@@ -677,7 +827,13 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         assert!(scene.dataset_settings[&DatasetId("ds1".into())].visible);
-        scene.apply(ViewportCommand::SetDatasetVisible { dataset_id: "ds1".into(), visible: false }.into());
+        scene.apply(
+            ViewportCommand::SetDatasetVisible {
+                dataset_id: "ds1".into(),
+                visible: false,
+            }
+            .into(),
+        );
         assert!(!scene.dataset_settings[&DatasetId("ds1".into())].visible);
     }
 
@@ -686,9 +842,21 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        assert_eq!(scene.dataset_settings[&DatasetId("ds1".into())].opacity, 1.0);
-        scene.apply(ViewportCommand::SetDatasetOpacity { dataset_id: "ds1".into(), opacity: 0.5 }.into());
-        assert_eq!(scene.dataset_settings[&DatasetId("ds1".into())].opacity, 0.5);
+        assert_eq!(
+            scene.dataset_settings[&DatasetId("ds1".into())].opacity,
+            1.0
+        );
+        scene.apply(
+            ViewportCommand::SetDatasetOpacity {
+                dataset_id: "ds1".into(),
+                opacity: 0.5,
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&DatasetId("ds1".into())].opacity,
+            0.5
+        );
     }
 
     #[test]
@@ -697,7 +865,12 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         assert_eq!(scene.document.manifests.len(), 1);
-        scene.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) }.into());
+        scene.apply(
+            DocumentCommand::RemoveDataset {
+                id: DatasetId("ds1".into()),
+            }
+            .into(),
+        );
         assert!(scene.document.manifests.is_empty());
     }
 
@@ -716,7 +889,9 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         doc.apply(DocumentCommand::DatasetOpened(reg));
         assert_eq!(doc.manifests.len(), 1);
-        doc.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) });
+        doc.apply(DocumentCommand::RemoveDataset {
+            id: DatasetId("ds1".into()),
+        });
         assert!(doc.manifests.is_empty());
     }
 
@@ -729,10 +904,16 @@ mod tests {
             r#"{"type":"pan","dx":1.0,"dy":2.0}"#,
         ];
         for json in cmds {
-            assert!(serde_json::from_str::<DocumentCommand>(json).is_err(),
-                "should not parse as DocumentCommand: {}", json);
-            assert!(serde_json::from_str::<ViewportCommand>(json).is_ok(),
-                "should parse as ViewportCommand: {}", json);
+            assert!(
+                serde_json::from_str::<DocumentCommand>(json).is_err(),
+                "should not parse as DocumentCommand: {}",
+                json
+            );
+            assert!(
+                serde_json::from_str::<ViewportCommand>(json).is_ok(),
+                "should parse as ViewportCommand: {}",
+                json
+            );
         }
     }
 
@@ -742,10 +923,21 @@ mod tests {
     fn colormap_serde_round_trips() {
         use crate::scene::Colormap;
         let all = vec![
-            Colormap::Gray, Colormap::Magenta, Colormap::Green, Colormap::Cyan,
-            Colormap::Red, Colormap::Blue, Colormap::Yellow, Colormap::Viridis,
-            Colormap::Inferno, Colormap::Plasma, Colormap::Magma, Colormap::Turbo,
-            Colormap::Hot, Colormap::Cool, Colormap::Jet,
+            Colormap::Gray,
+            Colormap::Magenta,
+            Colormap::Green,
+            Colormap::Cyan,
+            Colormap::Red,
+            Colormap::Blue,
+            Colormap::Yellow,
+            Colormap::Viridis,
+            Colormap::Inferno,
+            Colormap::Plasma,
+            Colormap::Magma,
+            Colormap::Turbo,
+            Colormap::Hot,
+            Colormap::Cool,
+            Colormap::Jet,
         ];
         for cm in &all {
             let json = serde_json::to_string(cm).unwrap();
@@ -766,7 +958,7 @@ mod tests {
         };
         let json = serde_json::to_string(&cs).unwrap();
         let parsed: ChannelSettings = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.visible, false);
+        assert!(!parsed.visible);
         assert_eq!(parsed.colormap, Colormap::Viridis);
         assert_eq!(parsed.contrast_min, 100.0);
         assert_eq!(parsed.contrast_max, 50000.0);
@@ -796,7 +988,11 @@ mod tests {
         assert!(json.contains("\"type\":\"set_channel_visible\""));
         let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            ViewportCommand::SetChannelVisible { dataset_id, channel, visible } => {
+            ViewportCommand::SetChannelVisible {
+                dataset_id,
+                channel,
+                visible,
+            } => {
                 assert_eq!(dataset_id, "ds1");
                 assert_eq!(channel, 2);
                 assert!(!visible);
@@ -835,7 +1031,12 @@ mod tests {
         assert!(json.contains("\"type\":\"set_channel_contrast\""));
         let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            ViewportCommand::SetChannelContrast { dataset_id, channel, min, max } => {
+            ViewportCommand::SetChannelContrast {
+                dataset_id,
+                channel,
+                min,
+                max,
+            } => {
                 assert_eq!(dataset_id, "ds1");
                 assert_eq!(channel, 1);
                 assert_eq!(min, 50.0);
@@ -856,7 +1057,11 @@ mod tests {
         assert!(json.contains("\"type\":\"set_channel_gamma\""));
         let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            ViewportCommand::SetChannelGamma { dataset_id, channel, gamma } => {
+            ViewportCommand::SetChannelGamma {
+                dataset_id,
+                channel,
+                gamma,
+            } => {
                 assert_eq!(dataset_id, "ds1");
                 assert_eq!(channel, 0);
                 assert_eq!(gamma, 2.2);
@@ -875,7 +1080,10 @@ mod tests {
         assert!(json.contains("\"additive\""));
         let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            ViewportCommand::SetChannelBlendMode { dataset_id, blend_mode } => {
+            ViewportCommand::SetChannelBlendMode {
+                dataset_id,
+                blend_mode,
+            } => {
                 assert_eq!(dataset_id, "ds1");
                 assert_eq!(blend_mode, crate::scene::BlendMode::Additive);
             }
@@ -902,15 +1110,27 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         // Verify default colormap assignments
         let ds_id = DatasetId("ds1".into());
-        assert_eq!(scene.dataset_settings[&ds_id].channel_settings[0].colormap, Colormap::Magenta);
-        assert_eq!(scene.dataset_settings[&ds_id].channel_settings[1].colormap, Colormap::Green);
+        assert_eq!(
+            scene.dataset_settings[&ds_id].channel_settings[0].colormap,
+            Colormap::Magenta
+        );
+        assert_eq!(
+            scene.dataset_settings[&ds_id].channel_settings[1].colormap,
+            Colormap::Green
+        );
         // Apply SetChannelColormap
-        scene.apply(ViewportCommand::SetChannelColormap {
-            dataset_id: "ds1".into(),
-            channel: 1,
-            colormap: Colormap::Viridis,
-        }.into());
-        assert_eq!(scene.dataset_settings[&ds_id].channel_settings[1].colormap, Colormap::Viridis);
+        scene.apply(
+            ViewportCommand::SetChannelColormap {
+                dataset_id: "ds1".into(),
+                channel: 1,
+                colormap: Colormap::Viridis,
+            }
+            .into(),
+        );
+        assert_eq!(
+            scene.dataset_settings[&ds_id].channel_settings[1].colormap,
+            Colormap::Viridis
+        );
     }
 
     #[test]
@@ -957,7 +1177,12 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        scene.apply(DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) }.into());
+        scene.apply(
+            DocumentCommand::RemoveDataset {
+                id: DatasetId("ds1".into()),
+            }
+            .into(),
+        );
         assert_eq!(scene.epochs.content, 2);
         assert_eq!(scene.epochs.layout, 2);
     }
@@ -1113,7 +1338,10 @@ mod tests {
 
         let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
         assert_eq!(cat.entries.len(), 1);
-        assert_eq!(cat.entries[0].entity_id, lucida_content::EntityId("seed".into()));
+        assert_eq!(
+            cat.entries[0].entity_id,
+            lucida_content::EntityId("seed".into())
+        );
     }
 
     #[test]
@@ -1144,7 +1372,13 @@ mod tests {
     #[test]
     fn scene_epochs_serde_round_trip() {
         use crate::epoch::SceneEpochs;
-        let epochs = SceneEpochs { content: 1, layout: 2, view: 3, selection: 4, asset: 5 };
+        let epochs = SceneEpochs {
+            content: 1,
+            layout: 2,
+            view: 3,
+            selection: 4,
+            asset: 5,
+        };
         let json = serde_json::to_string(&epochs).unwrap();
         let parsed: SceneEpochs = serde_json::from_str(&json).unwrap();
         assert_eq!(epochs, parsed);
@@ -1163,14 +1397,17 @@ mod tests {
         }"#;
         let settings: crate::scene::DatasetDisplaySettings = serde_json::from_str(json).unwrap();
         assert!(settings.channel_settings.is_empty());
-        assert_eq!(settings.channel_blend_mode, crate::scene::BlendMode::Additive);
+        assert_eq!(
+            settings.channel_blend_mode,
+            crate::scene::BlendMode::Additive
+        );
     }
 
     // --- Layout registration and switching tests ---
 
     #[test]
     fn register_layout_command_serde_round_trip() {
-        use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
+        use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let cmd = DocumentCommand::RegisterLayout {
             dataset_id: DatasetId("ds1".into()),
             layout: LayoutSpec {
@@ -1207,7 +1444,10 @@ mod tests {
         assert!(json.contains("\"type\":\"set_active_layout\""));
         let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
         match parsed {
-            DocumentCommand::SetActiveLayout { dataset_id, layout_id } => {
+            DocumentCommand::SetActiveLayout {
+                dataset_id,
+                layout_id,
+            } => {
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(layout_id, LayoutId("layout-2".into()));
             }
@@ -1217,7 +1457,7 @@ mod tests {
 
     #[test]
     fn register_layout_makes_it_available() {
-        use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
+        use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -1230,10 +1470,13 @@ mod tests {
                 position: [100.0, 200.0],
             }],
         };
-        scene.apply(DocumentCommand::RegisterLayout {
-            dataset_id: DatasetId("ds1".into()),
-            layout,
-        }.into());
+        scene.apply(
+            DocumentCommand::RegisterLayout {
+                dataset_id: DatasetId("ds1".into()),
+                layout,
+            }
+            .into(),
+        );
 
         let ds_id = DatasetId("ds1".into());
         assert!(scene.document.registered_layouts.contains_key(&ds_id));
@@ -1245,7 +1488,7 @@ mod tests {
 
     #[test]
     fn register_layout_dedupes_by_id() {
-        use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
+        use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -1260,14 +1503,20 @@ mod tests {
             }],
         };
 
-        scene.apply(DocumentCommand::RegisterLayout {
-            dataset_id: ds_id.clone(),
-            layout: spec.clone(),
-        }.into());
-        scene.apply(DocumentCommand::RegisterLayout {
-            dataset_id: ds_id.clone(),
-            layout: spec.clone(),
-        }.into());
+        scene.apply(
+            DocumentCommand::RegisterLayout {
+                dataset_id: ds_id.clone(),
+                layout: spec.clone(),
+            }
+            .into(),
+        );
+        scene.apply(
+            DocumentCommand::RegisterLayout {
+                dataset_id: ds_id.clone(),
+                layout: spec.clone(),
+            }
+            .into(),
+        );
 
         let layouts = &scene.document.registered_layouts[&ds_id];
         assert_eq!(layouts.len(), 1);
@@ -1276,16 +1525,14 @@ mod tests {
 
     #[test]
     fn set_active_layout_rebuilds_derived_state() {
-        use lucida_content::{LayoutId, LayoutSpec, layout::EntityPlacement, EntityId};
+        use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut scene = Scene::new([800, 600]);
 
         // Register a plate dataset with two members
         let reg = test_helpers::make_plate_dataset_opened(
-            "plate", "plate",
-            vec![
-                ("m1", [0.0, 0.0]),
-                ("m2", [256.0, 0.0]),
-            ],
+            "plate",
+            "plate",
+            vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
@@ -1302,20 +1549,32 @@ mod tests {
             id: LayoutId("alt".into()),
             name: "Alternative".into(),
             placements: vec![
-                EntityPlacement { entity_id: EntityId("m1".into()), position: [500.0, 500.0] },
-                EntityPlacement { entity_id: EntityId("m2".into()), position: [1000.0, 500.0] },
+                EntityPlacement {
+                    entity_id: EntityId("m1".into()),
+                    position: [500.0, 500.0],
+                },
+                EntityPlacement {
+                    entity_id: EntityId("m2".into()),
+                    position: [1000.0, 500.0],
+                },
             ],
         };
-        scene.apply(DocumentCommand::RegisterLayout {
-            dataset_id: ds_id.clone(),
-            layout: alt_layout,
-        }.into());
+        scene.apply(
+            DocumentCommand::RegisterLayout {
+                dataset_id: ds_id.clone(),
+                layout: alt_layout,
+            }
+            .into(),
+        );
 
         // Set the alt layout as active
-        scene.apply(DocumentCommand::SetActiveLayout {
-            dataset_id: ds_id.clone(),
-            layout_id: LayoutId("alt".into()),
-        }.into());
+        scene.apply(
+            DocumentCommand::SetActiveLayout {
+                dataset_id: ds_id.clone(),
+                layout_id: LayoutId("alt".into()),
+            }
+            .into(),
+        );
 
         // Verify positions changed
         let derived = &scene.derived[&ds_id];
@@ -1334,10 +1593,13 @@ mod tests {
         let ds_id = DatasetId("ds1".into());
         assert!(!scene.document.active_layout_ids.contains_key(&ds_id));
 
-        scene.apply(DocumentCommand::SetActiveLayout {
-            dataset_id: ds_id.clone(),
-            layout_id: LayoutId("some-layout".into()),
-        }.into());
+        scene.apply(
+            DocumentCommand::SetActiveLayout {
+                dataset_id: ds_id.clone(),
+                layout_id: LayoutId("some-layout".into()),
+            }
+            .into(),
+        );
 
         assert_eq!(
             scene.document.active_layout_ids[&ds_id],
@@ -1352,11 +1614,9 @@ mod tests {
 
         // Register a plate dataset with a known default layout
         let reg = test_helpers::make_plate_dataset_opened(
-            "plate", "plate",
-            vec![
-                ("m1", [0.0, 0.0]),
-                ("m2", [256.0, 0.0]),
-            ],
+            "plate",
+            "plate",
+            vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
@@ -1364,13 +1624,19 @@ mod tests {
 
         let ds_id = DatasetId("plate".into());
         let positions_before: Vec<[f64; 2]> = scene.derived[&ds_id]
-            .members.iter().map(|m| m.position).collect();
+            .members
+            .iter()
+            .map(|m| m.position)
+            .collect();
 
         // Set an unknown layout ID
-        scene.apply(DocumentCommand::SetActiveLayout {
-            dataset_id: ds_id.clone(),
-            layout_id: LayoutId("nonexistent".into()),
-        }.into());
+        scene.apply(
+            DocumentCommand::SetActiveLayout {
+                dataset_id: ds_id.clone(),
+                layout_id: LayoutId("nonexistent".into()),
+            }
+            .into(),
+        );
 
         // active_layout_ids should be updated
         assert_eq!(
@@ -1379,7 +1645,10 @@ mod tests {
         );
         // But derived state should use fallback (default layout), positions unchanged
         let positions_after: Vec<[f64; 2]> = scene.derived[&ds_id]
-            .members.iter().map(|m| m.position).collect();
+            .members
+            .iter()
+            .map(|m| m.position)
+            .collect();
         assert_eq!(positions_before, positions_after);
     }
 }

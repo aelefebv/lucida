@@ -67,7 +67,10 @@ fn clear_specific_dataset_removes_only_that_subdir() {
 
     let outcome = clear_proxy_cache(&cache_dir, Some(URL_A)).unwrap();
     assert_eq!(outcome.datasets, 1);
-    assert_eq!(outcome.files, 2, "should have counted the two synthetic chunks");
+    assert_eq!(
+        outcome.files, 2,
+        "should have counted the two synthetic chunks"
+    );
 
     assert!(!dir_a.exists(), "URL_A's data should be gone");
     assert!(dir_b.exists(), "URL_B's data should be untouched");

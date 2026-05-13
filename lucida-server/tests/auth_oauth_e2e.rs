@@ -26,7 +26,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use axum::extract::State;
 use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::http::{Request, StatusCode};
@@ -36,7 +36,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
 use chrono::Utc;
-use jsonwebtoken::{encode, EncodingKey, Header};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use lucida_core::auth_principal::AuthPrincipal;
 use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
 use rsa::traits::PublicKeyParts;
@@ -46,13 +46,11 @@ use serde_json::json;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 
-use lucida_server::auth::handlers::{
-    auth_callback, auth_start, whoami, OAuthState,
-};
-use lucida_server::auth::middleware::{auth_middleware, build_extractor, SharedExtractor};
+use lucida_server::auth::handlers::{OAuthState, auth_callback, auth_start, whoami};
+use lucida_server::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
 use lucida_server::auth::{
-    AuthConfig, GoogleOAuthClient, LoginSessionStore, MemoryPendingAuthStore,
-    MemorySessionStore, PendingAuthStore,
+    AuthConfig, GoogleOAuthClient, LoginSessionStore, MemoryPendingAuthStore, MemorySessionStore,
+    PendingAuthStore,
 };
 
 const TEST_CLIENT_ID: &str = "test-client-id";
@@ -175,7 +173,9 @@ fn build_test_keys() -> TestKeyPair {
         .to_string();
     // Verify the public key encodes (we don't actually need the PEM
     // form, but the round-trip sanity-checks the JWK we build below).
-    public.to_pkcs1_pem(rsa::pkcs1::LineEnding::LF).expect("pub pem");
+    public
+        .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+        .expect("pub pem");
 
     let n = base64_url(public.n());
     let e = base64_url(public.e());
@@ -272,10 +272,7 @@ async fn build_lucida_app(mock_base: &str) -> LucidaApp {
 /// Slice 5 entry point: same wiring as `build_lucida_app` but with
 /// `LUCIDA_ALLOWED_HOSTED_DOMAINS` set to the supplied list. Empty
 /// list = OSS-permissive default (any verified email accepted).
-async fn build_lucida_app_with_allowed_domains(
-    mock_base: &str,
-    allowed: &[&str],
-) -> LucidaApp {
+async fn build_lucida_app_with_allowed_domains(mock_base: &str, allowed: &[&str]) -> LucidaApp {
     let mut config = AuthConfig::for_tests_google(TEST_CLIENT_ID, TEST_REDIRECT_URI, mock_base);
     config.allowed_hosted_domains = allowed.iter().map(|s| s.to_string()).collect();
 
@@ -313,12 +310,11 @@ async fn build_lucida_app_with_allowed_domains(
     let public = Router::new()
         .route(
             "/auth/start",
-            post(auth_start).get(auth_start).with_state(oauth_state.clone()),
+            post(auth_start)
+                .get(auth_start)
+                .with_state(oauth_state.clone()),
         )
-        .route(
-            "/auth/callback",
-            get(auth_callback).with_state(oauth_state),
-        )
+        .route("/auth/callback", get(auth_callback).with_state(oauth_state))
         .route(
             "/auth/error",
             get(lucida_server::auth::error_page::auth_error),
@@ -375,10 +371,7 @@ async fn full_oauth_flow_lands_user_at_intended_path_with_hash() {
     *mock_state.queued_id_token.lock().unwrap() = Some(id_token);
 
     let cb_uri = format!("/auth/callback?code=fake-code-abc&state={state_token}");
-    let cb_req = Request::builder()
-        .uri(&cb_uri)
-        .body(Body::empty())
-        .unwrap();
+    let cb_req = Request::builder().uri(&cb_uri).body(Body::empty()).unwrap();
     let cb_res = app.router.clone().oneshot(cb_req).await.unwrap();
     assert_eq!(cb_res.status(), StatusCode::FOUND, "callback must 302");
 
@@ -407,12 +400,7 @@ async fn full_oauth_flow_lands_user_at_intended_path_with_hash() {
         "callback must emit a clearing-marker Set-Cookie",
     );
 
-    let landing = cb_res
-        .headers()
-        .get(LOCATION)
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let landing = cb_res.headers().get(LOCATION).unwrap().to_str().unwrap();
     assert_eq!(landing, "/dataset/foo#view=encoded-blob");
 
     // Pending row was consumed (one-time use)
@@ -474,7 +462,8 @@ async fn callback_replay_of_consumed_state_returns_400() {
         .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
         .unwrap();
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
-    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let state_token =
+        extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
 
     let id_token = mint_id_token(
         &keys.private_pem,
@@ -485,7 +474,7 @@ async fn callback_replay_of_consumed_state_returns_400() {
     );
     *mock_state.queued_id_token.lock().unwrap() = Some(id_token);
     let cb_req = Request::builder()
-        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .uri(format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
         .unwrap();
     let cb_res = app.router.clone().oneshot(cb_req).await.unwrap();
@@ -493,7 +482,7 @@ async fn callback_replay_of_consumed_state_returns_400() {
 
     // Replay the same state token — slice 5: 302 to /auth/error?code=auth_failed.
     let replay = Request::builder()
-        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .uri(format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(replay).await.unwrap();
@@ -520,7 +509,8 @@ async fn callback_with_invalid_jwt_signature_redirects_to_auth_failed() {
         .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
         .unwrap();
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
-    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let state_token =
+        extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
 
     // Sign with a different key — JWKS + signing key disagree, so
     // jsonwebtoken's validate must reject.
@@ -535,7 +525,7 @@ async fn callback_with_invalid_jwt_signature_redirects_to_auth_failed() {
     *mock_state.queued_id_token.lock().unwrap() = Some(bad_token);
 
     let cb_req = Request::builder()
-        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .uri(format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
@@ -655,10 +645,13 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
         .method("POST")
         .uri("/auth/start")
         .header(axum::http::header::CONTENT_TYPE, "application/json")
-        .body(Body::from(json!({"path": "/dataset/x", "hash": ""}).to_string()))
+        .body(Body::from(
+            json!({"path": "/dataset/x", "hash": ""}).to_string(),
+        ))
         .unwrap();
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
-    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let state_token =
+        extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
 
     // Forge JWT with disallowed hd.
     let bad = mint_id_token(
@@ -671,7 +664,7 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
     *mock_state.queued_id_token.lock().unwrap() = Some(bad);
 
     let cb_req = Request::builder()
-        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .uri(format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
         .unwrap();
     let res = app.router.clone().oneshot(cb_req).await.unwrap();
@@ -703,13 +696,19 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
     // Spot-check the rendered error page since the redirect target
     // is server-rendered: GET it and assert the message contains the
     // user-facing copy from the PRD.
-    let err_req = Request::builder().uri(location).body(Body::empty()).unwrap();
+    let err_req = Request::builder()
+        .uri(location)
+        .body(Body::empty())
+        .unwrap();
     let err_res = app.router.oneshot(err_req).await.unwrap();
     assert_eq!(err_res.status(), StatusCode::OK);
     let body_bytes = to_bytes(err_res.into_body(), 64 * 1024).await.unwrap();
     let body = std::str::from_utf8(&body_bytes).unwrap();
     assert!(body.contains("alice@othercorp.com"), "page must echo email");
-    assert!(body.contains("allowedcorp.com"), "page must echo allowed domain");
+    assert!(
+        body.contains("allowedcorp.com"),
+        "page must echo allowed domain"
+    );
     assert!(
         body.contains(r#"href="/auth/start""#),
         "page must offer retry link",
@@ -731,7 +730,8 @@ async fn callback_with_allowed_hd_succeeds_and_mints_session() {
         .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
         .unwrap();
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
-    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let state_token =
+        extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
 
     let good = mint_id_token(
         &keys.private_pem,
@@ -743,12 +743,15 @@ async fn callback_with_allowed_hd_succeeds_and_mints_session() {
     *mock_state.queued_id_token.lock().unwrap() = Some(good);
 
     let cb_req = Request::builder()
-        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .uri(format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FOUND);
-    assert!(res.headers().get(SET_COOKIE).is_some(), "session cookie expected");
+    assert!(
+        res.headers().get(SET_COOKIE).is_some(),
+        "session cookie expected"
+    );
     assert_eq!(app.session_store.len(), 1);
     let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
     assert_eq!(location, "/", "lands at intended path, not /auth/error");
@@ -769,7 +772,8 @@ async fn callback_with_unverified_email_redirects_to_unverified() {
         .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
         .unwrap();
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
-    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let state_token =
+        extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
 
     let token = mint_id_token_full(
         &keys.private_pem,
@@ -782,12 +786,15 @@ async fn callback_with_unverified_email_redirects_to_unverified() {
     *mock_state.queued_id_token.lock().unwrap() = Some(token);
 
     let cb_req = Request::builder()
-        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .uri(format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FOUND);
-    assert!(res.headers().get(SET_COOKIE).is_none(), "no cookie on rejection");
+    assert!(
+        res.headers().get(SET_COOKIE).is_none(),
+        "no cookie on rejection"
+    );
     assert_eq!(app.session_store.len(), 0);
     let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
     assert!(location.contains("code=unverified"), "got {location}");
@@ -812,7 +819,8 @@ async fn empty_allowlist_accepts_any_verified_email() {
         .body(Body::from(json!({"path": "/", "hash": ""}).to_string()))
         .unwrap();
     let start_res = app.router.clone().oneshot(start_req).await.unwrap();
-    let state_token = extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
+    let state_token =
+        extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
 
     // Personal Gmail (no hd): must succeed under the OSS-permissive default.
     let token = mint_id_token(
@@ -825,7 +833,7 @@ async fn empty_allowlist_accepts_any_verified_email() {
     *mock_state.queued_id_token.lock().unwrap() = Some(token);
 
     let cb_req = Request::builder()
-        .uri(&format!("/auth/callback?code=c&state={state_token}"))
+        .uri(format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
         .unwrap();
     let res = app.router.oneshot(cb_req).await.unwrap();

@@ -27,7 +27,10 @@ pub struct VisibleRegion {
     pub frustum_planes: Option<[[f64; 4]; 6]>,
 }
 
-fn serialize_range_as_array<S: serde::Serializer>(range: &Range<u32>, s: S) -> Result<S::Ok, S::Error> {
+fn serialize_range_as_array<S: serde::Serializer>(
+    range: &Range<u32>,
+    s: S,
+) -> Result<S::Ok, S::Error> {
     use serde::ser::SerializeTuple;
     let mut tup = s.serialize_tuple(2)?;
     tup.serialize_element(&range.start)?;
@@ -39,15 +42,11 @@ fn serialize_range_as_array<S: serde::Serializer>(range: &Range<u32>, s: S) -> R
 /// or sphere (radial distance from camera position).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ClipMode {
+    #[default]
     Plane,
     Sphere,
-}
-
-impl Default for ClipMode {
-    fn default() -> Self {
-        ClipMode::Plane
-    }
 }
 
 /// Unified camera: 2D slice viewing, 3D arcball, or free-fly.
@@ -192,12 +191,8 @@ impl Camera {
                 let sy = (world_point[1] - v.center[1]) * v.zoom + v.viewport[1] as f64 / 2.0;
                 Some([sx, sy])
             }
-            Camera::Arcball(v) => {
-                project_3d(world_point, &v.view_proj_f64(), v.viewport)
-            }
-            Camera::Fly(v) => {
-                project_3d(world_point, &v.view_proj_f64(), v.viewport)
-            }
+            Camera::Arcball(v) => project_3d(world_point, &v.view_proj_f64(), v.viewport),
+            Camera::Fly(v) => project_3d(world_point, &v.view_proj_f64(), v.viewport),
         }
     }
 
@@ -205,10 +200,8 @@ impl Camera {
     pub fn unproject_ray(&self, screen_x: f64, screen_y: f64) -> crate::ray::Ray {
         match self {
             Camera::Slice(s) => {
-                let world_x =
-                    (screen_x - s.viewport[0] as f64 / 2.0) / s.zoom + s.center[0];
-                let world_y =
-                    (screen_y - s.viewport[1] as f64 / 2.0) / s.zoom + s.center[1];
+                let world_x = (screen_x - s.viewport[0] as f64 / 2.0) / s.zoom + s.center[0];
+                let world_y = (screen_y - s.viewport[1] as f64 / 2.0) / s.zoom + s.center[1];
                 crate::ray::Ray::new([world_x, world_y, -1000.0], [0.0, 0.0, 1.0])
             }
             Camera::Arcball(a) => {
@@ -242,12 +235,8 @@ impl Camera {
                     frustum_planes: None,
                 }
             }
-            Camera::Arcball(v) => {
-                v.frustum_visible_region(volume_transform, volume_shape)
-            }
-            Camera::Fly(v) => {
-                v.frustum_visible_region(volume_transform, volume_shape)
-            }
+            Camera::Arcball(v) => v.frustum_visible_region(volume_transform, volume_shape),
+            Camera::Fly(v) => v.frustum_visible_region(volume_transform, volume_shape),
         }
     }
 }
@@ -418,10 +407,7 @@ impl Arcball {
         let inv_model: [f64; 16] = match volume_transform {
             Some(t) => t.inv_model.map(|v| v as f64),
             None => [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         };
 
@@ -430,13 +416,13 @@ impl Arcball {
         // world-space AABB then transforming its corners to voxel space.
         let ndc_corners: [[f64; 3]; 8] = [
             [-1.0, -1.0, -1.0],
-            [ 1.0, -1.0, -1.0],
-            [-1.0,  1.0, -1.0],
-            [ 1.0,  1.0, -1.0],
-            [-1.0, -1.0,  1.0],
-            [ 1.0, -1.0,  1.0],
-            [-1.0,  1.0,  1.0],
-            [ 1.0,  1.0,  1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
         ];
 
         let mut voxel_min = [f64::MAX; 3];
@@ -473,10 +459,7 @@ impl Arcball {
         let model_f64: [f64; 16] = match volume_transform {
             Some(t) => t.model.map(|v| v as f64),
             None => [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         };
         let vp_model = mul4(self.view_proj_f64(), model_f64);
@@ -485,23 +468,23 @@ impl Arcball {
         let mut m = vp_model;
         for i in 0..4 {
             let c1 = m[4 + i]; // save col 1 before modification
-            m[i]      /= shape_x;  // col 0 (X voxels)
-            m[4 + i]  /= -shape_y; // col 1 (Y voxels, negated for flip)
-            m[8 + i]  /= shape_z;  // col 2 (Z voxels)
-            m[12 + i] += c1;       // col 3 (translation from Y flip)
+            m[i] /= shape_x; // col 0 (X voxels)
+            m[4 + i] /= -shape_y; // col 1 (Y voxels, negated for flip)
+            m[8 + i] /= shape_z; // col 2 (Z voxels)
+            m[12 + i] += c1; // col 3 (translation from Y flip)
         }
 
         // Extract 6 frustum planes from column-major MVP matrix.
         // Plane [a, b, c, d] where a*vx + b*vy + c*vz + d >= 0 means inside.
         let frustum_planes = [
             // Left:   row3 + row0
-            [m[3] + m[0], m[7] + m[4], m[11] + m[8],  m[15] + m[12]],
+            [m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12]],
             // Right:  row3 - row0
-            [m[3] - m[0], m[7] - m[4], m[11] - m[8],  m[15] - m[12]],
+            [m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]],
             // Bottom: row3 + row1
-            [m[3] + m[1], m[7] + m[5], m[11] + m[9],  m[15] + m[13]],
+            [m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13]],
             // Top:    row3 - row1
-            [m[3] - m[1], m[7] - m[5], m[11] - m[9],  m[15] - m[13]],
+            [m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]],
             // Near:   row3 + row2
             [m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]],
             // Far:    row3 - row2
@@ -600,14 +583,22 @@ pub(crate) fn quat_rotate_vector(q: [f64; 4], v: [f64; 3]) -> [f64; 3] {
 #[allow(dead_code)]
 pub(crate) fn quat_to_rotation_matrix(q: [f64; 4]) -> [[f64; 3]; 3] {
     let [x, y, z, w] = q;
-    let x2 = x + x; let y2 = y + y; let z2 = z + z;
-    let xx = x * x2; let xy = x * y2; let xz = x * z2;
-    let yy = y * y2; let yz = y * z2; let zz = z * z2;
-    let wx = w * x2; let wy = w * y2; let wz = w * z2;
+    let x2 = x + x;
+    let y2 = y + y;
+    let z2 = z + z;
+    let xx = x * x2;
+    let xy = x * y2;
+    let xz = x * z2;
+    let yy = y * y2;
+    let yz = y * z2;
+    let zz = z * z2;
+    let wx = w * x2;
+    let wy = w * y2;
+    let wz = w * z2;
     [
-        [1.0 - (yy + zz), xy - wz,         xz + wy        ],
-        [xy + wz,         1.0 - (xx + zz),  yz - wx        ],
-        [xz - wy,         yz + wx,          1.0 - (xx + yy)],
+        [1.0 - (yy + zz), xy - wz, xz + wy],
+        [xy + wz, 1.0 - (xx + zz), yz - wx],
+        [xz - wy, yz + wx, 1.0 - (xx + yy)],
     ]
 }
 
@@ -634,7 +625,19 @@ impl Fly {
     /// `dt`: seconds since last tick (clamped to 0.1)
     /// `forward/right/up`: movement input (-1, 0, or 1)
     /// `yaw/pitch/roll`: rotation input (radians per second)
-    pub fn fly_tick(&mut self, dt: f64, forward: f64, right: f64, up: f64, yaw: f64, pitch: f64, roll: f64) {
+    // Args mirror raw input axes (3 translation + 3 rotation + dt); bundling
+    // them into a struct would just rename the noise.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fly_tick(
+        &mut self,
+        dt: f64,
+        forward: f64,
+        right: f64,
+        up: f64,
+        yaw: f64,
+        pitch: f64,
+        roll: f64,
+    ) {
         let dt = dt.min(0.1);
 
         // Apply rotation: build axis-angle quaternions for each rotation axis
@@ -756,22 +759,19 @@ impl Fly {
         let inv_model: [f64; 16] = match volume_transform {
             Some(t) => t.inv_model.map(|v| v as f64),
             None => [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         };
 
         let ndc_corners: [[f64; 3]; 8] = [
             [-1.0, -1.0, -1.0],
-            [ 1.0, -1.0, -1.0],
-            [-1.0,  1.0, -1.0],
-            [ 1.0,  1.0, -1.0],
-            [-1.0, -1.0,  1.0],
-            [ 1.0, -1.0,  1.0],
-            [-1.0,  1.0,  1.0],
-            [ 1.0,  1.0,  1.0],
+            [1.0, -1.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0],
+            [-1.0, -1.0, 1.0],
+            [1.0, -1.0, 1.0],
+            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
         ];
 
         let mut voxel_min = [f64::MAX; 3];
@@ -801,27 +801,24 @@ impl Fly {
         let model_f64: [f64; 16] = match volume_transform {
             Some(t) => t.model.map(|v| v as f64),
             None => [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         };
         let vp_model = mul4(self.view_proj_f64(), model_f64);
         let mut m = vp_model;
         for i in 0..4 {
             let c1 = m[4 + i];
-            m[i]      /= shape_x;
-            m[4 + i]  /= -shape_y;
-            m[8 + i]  /= shape_z;
+            m[i] /= shape_x;
+            m[4 + i] /= -shape_y;
+            m[8 + i] /= shape_z;
             m[12 + i] += c1;
         }
 
         let frustum_planes = [
-            [m[3] + m[0], m[7] + m[4], m[11] + m[8],  m[15] + m[12]],
-            [m[3] - m[0], m[7] - m[4], m[11] - m[8],  m[15] - m[12]],
-            [m[3] + m[1], m[7] + m[5], m[11] + m[9],  m[15] + m[13]],
-            [m[3] - m[1], m[7] - m[5], m[11] - m[9],  m[15] - m[13]],
+            [m[3] + m[0], m[7] + m[4], m[11] + m[8], m[15] + m[12]],
+            [m[3] - m[0], m[7] - m[4], m[11] - m[8], m[15] - m[12]],
+            [m[3] + m[1], m[7] + m[5], m[11] + m[9], m[15] + m[13]],
+            [m[3] - m[1], m[7] - m[5], m[11] - m[9], m[15] - m[13]],
             [m[3] + m[2], m[7] + m[6], m[11] + m[10], m[15] + m[14]],
             [m[3] - m[2], m[7] - m[6], m[11] - m[10], m[15] - m[14]],
         ];
@@ -843,10 +840,7 @@ impl Fly {
         let model_f64_for_hit: [f64; 16] = match volume_transform {
             Some(t) => t.model.map(|v| v as f64),
             None => [
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         };
         let hit_world = transform_point(hit_unit, &model_f64_for_hit);
@@ -1021,11 +1015,15 @@ fn rotation_matrix_to_quat(m: [[f64; 3]; 3]) -> [f64; 4] {
 
 /// Project a world-space point to screen-space pixels using a view-projection matrix.
 /// Returns `None` if the point is behind the camera (clip-space w <= 0).
-fn project_3d(world_point: [f64; 3], view_proj: &[f64; 16], viewport: [u32; 2]) -> Option<[f64; 2]> {
+fn project_3d(
+    world_point: [f64; 3],
+    view_proj: &[f64; 16],
+    viewport: [u32; 2],
+) -> Option<[f64; 2]> {
     let [x, y, z] = world_point;
     let vp = view_proj;
-    let clip_x = vp[0] * x + vp[4] * y + vp[8]  * z + vp[12];
-    let clip_y = vp[1] * x + vp[5] * y + vp[9]  * z + vp[13];
+    let clip_x = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+    let clip_y = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
     let clip_w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
 
     if clip_w <= 0.0 {
@@ -1065,11 +1063,7 @@ fn unproject_screen_ray(
 }
 
 /// Closest point on an AABB to a given point (clamped to the box surface).
-fn closest_point_on_aabb(
-    point: [f64; 3],
-    box_min: [f64; 3],
-    box_max: [f64; 3],
-) -> [f64; 3] {
+fn closest_point_on_aabb(point: [f64; 3], box_min: [f64; 3], box_max: [f64; 3]) -> [f64; 3] {
     [
         point[0].clamp(box_min[0], box_max[0]),
         point[1].clamp(box_min[1], box_max[1]),
@@ -1198,7 +1192,11 @@ mod tests {
         // Verify view matrix is still valid at extreme phi values
         let m = cam.inv_view_proj();
         for val in &m {
-            assert!(val.is_finite(), "Matrix contains non-finite value at extreme phi: {}", val);
+            assert!(
+                val.is_finite(),
+                "Matrix contains non-finite value at extreme phi: {}",
+                val
+            );
         }
     }
 
@@ -1279,11 +1277,17 @@ mod tests {
         let q = [0.1, 0.2, 0.3, 0.9];
         let result = quat_multiply(q, identity);
         for i in 0..4 {
-            assert!((result[i] - q[i]).abs() < 1e-12, "q * identity mismatch at {i}");
+            assert!(
+                (result[i] - q[i]).abs() < 1e-12,
+                "q * identity mismatch at {i}"
+            );
         }
         let result2 = quat_multiply(identity, q);
         for i in 0..4 {
-            assert!((result2[i] - q[i]).abs() < 1e-12, "identity * q mismatch at {i}");
+            assert!(
+                (result2[i] - q[i]).abs() < 1e-12,
+                "identity * q mismatch at {i}"
+            );
         }
     }
 
@@ -1294,10 +1298,18 @@ mod tests {
         let q180 = quat_multiply(q90, q90);
         let expected = quat_from_axis_angle([0.0, 1.0, 0.0], std::f64::consts::PI);
         // Quaternions q and -q represent the same rotation
-        let sign = if q180[3] * expected[3] < 0.0 { -1.0 } else { 1.0 };
+        let sign = if q180[3] * expected[3] < 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
         for i in 0..4 {
-            assert!((q180[i] - sign * expected[i]).abs() < 1e-10,
-                "180-degree composition mismatch at {i}: {} vs {}", q180[i], expected[i]);
+            assert!(
+                (q180[i] - sign * expected[i]).abs() < 1e-10,
+                "180-degree composition mismatch at {i}: {} vs {}",
+                q180[i],
+                expected[i]
+            );
         }
     }
 
@@ -1305,7 +1317,10 @@ mod tests {
     fn quat_from_axis_angle_produces_unit() {
         let q = quat_from_axis_angle([0.0, 1.0, 0.0], 1.23);
         let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
-        assert!((len - 1.0).abs() < 1e-12, "quaternion not unit length: {len}");
+        assert!(
+            (len - 1.0).abs() < 1e-12,
+            "quaternion not unit length: {len}"
+        );
     }
 
     #[test]
@@ -1368,8 +1383,12 @@ mod tests {
         cam2.fly_tick(0.1, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         // dt=1.0 should be clamped to 0.1, so both should produce identical results
         for i in 0..3 {
-            assert!((cam1.position[i] - cam2.position[i]).abs() < 1e-12,
-                "position mismatch at {i}: {} vs {}", cam1.position[i], cam2.position[i]);
+            assert!(
+                (cam1.position[i] - cam2.position[i]).abs() < 1e-12,
+                "position mismatch at {i}: {} vs {}",
+                cam1.position[i],
+                cam2.position[i]
+            );
         }
     }
 
@@ -1390,8 +1409,10 @@ mod tests {
             for j in 0..4 {
                 let expected = if i == j { 1.0 } else { 0.0 };
                 let actual = prod[j * 4 + i];
-                assert!((actual - expected).abs() < 1e-3,
-                    "vp*inv_vp [{i},{j}] = {actual}, expected {expected}");
+                assert!(
+                    (actual - expected).abs() < 1e-3,
+                    "vp*inv_vp [{i},{j}] = {actual}, expected {expected}"
+                );
             }
         }
     }
@@ -1409,8 +1430,12 @@ mod tests {
         let arcball_eye = arcball.eye_position();
         let fly_eye = fly.eye_position();
         for i in 0..3 {
-            assert!((arcball_eye[i] - fly_eye[i]).abs() < 1e-6,
-                "eye position mismatch at {i}: {} vs {}", arcball_eye[i], fly_eye[i]);
+            assert!(
+                (arcball_eye[i] - fly_eye[i]).abs() < 1e-6,
+                "eye position mismatch at {i}: {} vs {}",
+                arcball_eye[i],
+                fly_eye[i]
+            );
         }
     }
 
@@ -1421,8 +1446,12 @@ mod tests {
         let arcball_dir = arcball.forward_direction();
         let fly_dir = fly.forward_vector();
         for i in 0..3 {
-            assert!((arcball_dir[i] - fly_dir[i]).abs() < 1e-6,
-                "view direction mismatch at {i}: {} vs {}", arcball_dir[i], fly_dir[i]);
+            assert!(
+                (arcball_dir[i] - fly_dir[i]).abs() < 1e-6,
+                "view direction mismatch at {i}: {} vs {}",
+                arcball_dir[i],
+                fly_dir[i]
+            );
         }
     }
 
@@ -1447,7 +1476,10 @@ mod tests {
     fn fly_camera_serializes_with_mode_tag() {
         let cam = Camera::Fly(Fly::new([800, 600]));
         let json = serde_json::to_string(&cam).unwrap();
-        assert!(json.contains("\"mode\":\"fly\""), "should contain fly mode tag");
+        assert!(
+            json.contains("\"mode\":\"fly\""),
+            "should contain fly mode tag"
+        );
         let parsed: Camera = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, Camera::Fly(_)));
     }
@@ -1493,14 +1525,24 @@ mod tests {
         };
         let arcball = fly.to_arcball();
         // Should have a positive distance
-        assert!(arcball.distance > 0.0, "distance should be positive: {}", arcball.distance);
+        assert!(
+            arcball.distance > 0.0,
+            "distance should be positive: {}",
+            arcball.distance
+        );
         // theta and phi should be finite
         assert!(arcball.theta.is_finite(), "theta should be finite");
         assert!(arcball.phi.is_finite(), "phi should be finite");
         // fov should be preserved
-        assert!((arcball.fov - fly.fov).abs() < 1e-10, "fov should be preserved");
+        assert!(
+            (arcball.fov - fly.fov).abs() < 1e-10,
+            "fov should be preserved"
+        );
         // viewport should be preserved
-        assert_eq!(arcball.viewport, fly.viewport, "viewport should be preserved");
+        assert_eq!(
+            arcball.viewport, fly.viewport,
+            "viewport should be preserved"
+        );
     }
 
     #[test]
@@ -1537,9 +1579,8 @@ mod tests {
 
         // Forward direction should be approximately preserved
         let rt_dir = arcball2.forward_direction();
-        let dot = original_dir[0] * rt_dir[0]
-            + original_dir[1] * rt_dir[1]
-            + original_dir[2] * rt_dir[2];
+        let dot =
+            original_dir[0] * rt_dir[0] + original_dir[1] * rt_dir[1] + original_dir[2] * rt_dir[2];
         assert!(
             dot > 0.99,
             "forward direction should be preserved (dot={})",
@@ -1609,8 +1650,10 @@ mod tests {
         if let Camera::Fly(v) = deserialized {
             assert_eq!(v.position, fly.position);
             for i in 0..4 {
-                assert!((v.orientation[i] - fly.orientation[i]).abs() < 1e-12,
-                    "orientation mismatch at {i}");
+                assert!(
+                    (v.orientation[i] - fly.orientation[i]).abs() < 1e-12,
+                    "orientation mismatch at {i}"
+                );
             }
             assert_eq!(v.fov, fly.fov);
             assert_eq!(v.viewport, fly.viewport);

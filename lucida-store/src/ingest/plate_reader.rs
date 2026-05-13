@@ -1,16 +1,16 @@
-/// Read individual TIFF files for one FOV and assemble into a Volume.
-///
-/// Each file in `FovLayout::files` is a single-page TIFF representing one
-/// (timepoint, channel, z_plane) slot. Files are decoded in parallel using
-/// rayon and copied into the correct position in a pre-allocated TCZYX buffer.
+//! Read individual TIFF files for one FOV and assemble into a Volume.
+//!
+//! Each file in `FovLayout::files` is a single-page TIFF representing one
+//! (timepoint, channel, z_plane) slot. Files are decoded in parallel using
+//! rayon and copied into the correct position in a pre-allocated TCZYX buffer.
 
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rayon::prelude::*;
-use tiff::decoder::{Decoder, DecodingResult};
 use tiff::ColorType;
+use tiff::decoder::{Decoder, DecodingResult};
 
 use super::plate_scanner::FovLayout;
 use super::pyramid::VoxelSize;
@@ -35,10 +35,8 @@ pub fn read_fov_tiffs(
     voxel_size: VoxelSize,
 ) -> Result<Volume, String> {
     let pixels_per_plane = (image_width as usize) * (image_height as usize);
-    let total_pixels = (timepoints as usize)
-        * (channels as usize)
-        * (z_planes as usize)
-        * pixels_per_plane;
+    let total_pixels =
+        (timepoints as usize) * (channels as usize) * (z_planes as usize) * pixels_per_plane;
 
     // Pre-allocate zero-initialized buffer in TCZYX order.
     let mut data: Vec<u16> = vec![0u16; total_pixels];
@@ -119,9 +117,10 @@ pub fn read_fov_tiffs(
             };
 
             // Compute buffer offset: t * (C*Z*H*W) + c * (Z*H*W) + z * (H*W)
-            let offset = (t as usize) * (channels as usize) * (z_planes as usize) * pixels_per_plane
-                + (c as usize) * (z_planes as usize) * pixels_per_plane
-                + (z as usize) * pixels_per_plane;
+            let offset =
+                (t as usize) * (channels as usize) * (z_planes as usize) * pixels_per_plane
+                    + (c as usize) * (z_planes as usize) * pixels_per_plane
+                    + (z as usize) * pixels_per_plane;
 
             match image {
                 DecodingResult::U16(pixels) => {
@@ -157,15 +156,12 @@ pub fn read_fov_tiffs(
                     }
                 }
                 _ => {
-                    return Some(format!(
-                        "{}: unexpected pixel format",
-                        path.display()
-                    ));
+                    return Some(format!("{}: unexpected pixel format", path.display()));
                 }
             }
 
             let count = progress.fetch_add(1, Ordering::Relaxed) + 1;
-            if count % 100 == 0 || count == total_files {
+            if count.is_multiple_of(100) || count == total_files {
                 eprintln!("  FOV files: {count}/{total_files}");
             }
 
@@ -194,14 +190,13 @@ mod tests {
     use std::collections::HashMap;
     use std::io::BufWriter;
     use std::path::PathBuf;
-    use tiff::encoder::colortype::Gray16;
     use tiff::encoder::TiffEncoder;
+    use tiff::encoder::colortype::Gray16;
 
     /// Create a single-page Gray16 TIFF file with the given pixel data.
     fn write_test_tiff(path: &PathBuf, width: u32, height: u32, pixels: &[u16]) {
         let file = File::create(path).expect("create test tiff");
-        let mut encoder =
-            TiffEncoder::new(BufWriter::new(file)).expect("create tiff encoder");
+        let mut encoder = TiffEncoder::new(BufWriter::new(file)).expect("create tiff encoder");
         encoder
             .write_image::<Gray16>(width, height, pixels)
             .expect("write tiff image");

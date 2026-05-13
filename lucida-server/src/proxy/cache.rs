@@ -24,9 +24,7 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lucida_proxy::{
-    ProxyAsset, ProxyDtype, ProxyKind, ProxySpec, read_header, write_header,
-};
+use lucida_proxy::{ProxyAsset, ProxyDtype, ProxyKind, ProxySpec, read_header, write_header};
 
 /// On-disk cache for generated proxies, scoped to a single dataset by
 /// `url_hash`.
@@ -174,16 +172,18 @@ impl ProxyCache {
         }
 
         let path = self.spec_path(spec);
-        let parent = path
-            .parent()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "proxy path has no parent"))?;
+        let parent = path.parent().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "proxy path has no parent")
+        })?;
         fs::create_dir_all(parent)?;
 
         let counter = self.tmp_counter.fetch_add(1, Ordering::Relaxed);
         let rand: u64 = rand::random();
         let file_name = path
             .file_name()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "proxy path has no file name"))?
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "proxy path has no file name")
+            })?
             .to_string_lossy()
             .to_string();
         let tmp_path = parent.join(format!(".{file_name}.tmp.{counter}.{rand:016x}"));

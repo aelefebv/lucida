@@ -17,16 +17,16 @@ use std::time::Duration;
 use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use lucida_content::{
-    Axis, AxisKind, DatasetManifest, DataType, DatasetId, DatasetKind, Entity, EntityId, EntityKind,
-    EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo,
+    Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
+    EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo,
 };
 use lucida_server::binding::ChunkResolver;
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::{ImageBindingSeed, ServerBindingSeed};
 use object_store::path::Path;
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore, PutMultipartOptions,
-    PutOptions, PutPayload, PutResult,
+    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 
 /// `ObjectStore` decorator that counts `get_opts` calls and optionally
@@ -109,17 +109,11 @@ impl ObjectStore for InstrumentedStore {
         self.inner.delete(location).await
     }
 
-    fn list(
-        &self,
-        prefix: Option<&Path>,
-    ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+    fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
         self.inner.list(prefix)
     }
 
-    async fn list_with_delimiter(
-        &self,
-        prefix: Option<&Path>,
-    ) -> object_store::Result<ListResult> {
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> object_store::Result<ListResult> {
         self.inner.list_with_delimiter(prefix).await
     }
 
@@ -185,11 +179,26 @@ pub async fn build_single_field_dataset(
             owner: entity_id.clone(),
             multiscale: MultiscaleInfo {
                 axes: vec![
-                    Axis { name: "t".into(), kind: AxisKind::Time },
-                    Axis { name: "c".into(), kind: AxisKind::Channel },
-                    Axis { name: "z".into(), kind: AxisKind::Space },
-                    Axis { name: "y".into(), kind: AxisKind::Space },
-                    Axis { name: "x".into(), kind: AxisKind::Space },
+                    Axis {
+                        name: "t".into(),
+                        kind: AxisKind::Time,
+                    },
+                    Axis {
+                        name: "c".into(),
+                        kind: AxisKind::Channel,
+                    },
+                    Axis {
+                        name: "z".into(),
+                        kind: AxisKind::Space,
+                    },
+                    Axis {
+                        name: "y".into(),
+                        kind: AxisKind::Space,
+                    },
+                    Axis {
+                        name: "x".into(),
+                        kind: AxisKind::Space,
+                    },
                 ],
                 levels: vec![LevelGeometry {
                     level_index: 0,
@@ -209,13 +218,7 @@ pub async fn build_single_field_dataset(
     let resolver = Arc::new(ChunkResolver::new(&ServerBindingSeed {
         images: vec![ImageBindingSeed {
             image_id: image_id.clone(),
-            axes_names: vec![
-                "t".into(),
-                "c".into(),
-                "z".into(),
-                "y".into(),
-                "x".into(),
-            ],
+            axes_names: vec!["t".into(), "c".into(), "z".into(), "y".into(), "x".into()],
             store_prefix: None,
             // No per-level info → ChunkResolver::level_info returns None for
             // every level lookup; the chunk-fetch path then falls back to
@@ -251,10 +254,7 @@ pub async fn build_single_field_dataset(
     }
 
     let instrumented = Arc::new(InstrumentedStore::new(mem.clone(), delay_ms));
-    let cache = Arc::new(CachedStore::new(
-        instrumented.clone(),
-        16 * 1024 * 1024,
-    ));
+    let cache = Arc::new(CachedStore::new(instrumented.clone(), 16 * 1024 * 1024));
 
     SyntheticDataset {
         manifest: Arc::new(manifest),
@@ -269,11 +269,7 @@ pub async fn build_single_field_dataset(
 /// `(level / chunk_size).ceil()` — used to compute `grid_shape` from
 /// `level_shape` and `chunk_shape` without f64 round-trip.
 fn ceil_div(n: u64, d: u64) -> u64 {
-    if d == 0 {
-        n
-    } else {
-        n.div_ceil(d)
-    }
+    if d == 0 { n } else { n.div_ceil(d) }
 }
 
 fn make_chunk_bytes(voxel_count: usize, t: u64, c: u64, z: u64, y: u64, x: u64) -> Bytes {

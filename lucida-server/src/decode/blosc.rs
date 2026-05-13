@@ -31,7 +31,11 @@ pub enum BloscError {
     #[error("blosc: header compressor code {code} not supported (expected 4 = zstd)")]
     UnsupportedCompressor { code: u8 },
     #[error("blosc: input truncated reading {what} (need {need}, have {have})")]
-    InputTruncated { what: &'static str, need: usize, have: usize },
+    InputTruncated {
+        what: &'static str,
+        need: usize,
+        have: usize,
+    },
     #[error("blosc: zstd decode failed at block {block}: {msg}")]
     ZstdDecode { block: usize, msg: String },
     #[error("blosc: block {block} decoded to {got} bytes, expected {expected}")]
@@ -137,7 +141,7 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
         });
     }
 
-    if typesize as usize != 0 && nbytes % typesize as usize != 0 {
+    if typesize as usize != 0 && !nbytes.is_multiple_of(typesize as usize) {
         return Err(BloscError::NotElementAligned {
             nbytes,
             typesize: typesize as usize,
@@ -157,11 +161,8 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
                 have: input.len(),
             });
         }
-        let compressed_len = u32::from_le_bytes(
-            input[block_offset..block_offset + 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let compressed_len =
+            u32::from_le_bytes(input[block_offset..block_offset + 4].try_into().unwrap()) as usize;
 
         let payload_start = block_offset + 4;
         let payload_end = payload_start + compressed_len;
@@ -174,13 +175,12 @@ pub fn decode_blosc(input: &[u8], config: &BloscConfig) -> Result<Vec<u8>, Blosc
         }
 
         let block_uncompressed_size = blocksize.min(nbytes - decompressed.len());
-        let block_bytes = zstd::stream::decode_all(std::io::Cursor::new(
-            &input[payload_start..payload_end],
-        ))
-        .map_err(|e| BloscError::ZstdDecode {
-            block: b,
-            msg: e.to_string(),
-        })?;
+        let block_bytes =
+            zstd::stream::decode_all(std::io::Cursor::new(&input[payload_start..payload_end]))
+                .map_err(|e| BloscError::ZstdDecode {
+                    block: b,
+                    msg: e.to_string(),
+                })?;
         if block_bytes.len() != block_uncompressed_size {
             return Err(BloscError::BlockSizeMismatch {
                 block: b,
@@ -499,9 +499,6 @@ mod tests {
         // [b0_e0, b0_e1, b0_e2, b0_e3, b1_e0, b1_e1, b1_e2, b1_e3]
         let shuffled = vec![0x10, 0x20, 0x30, 0x40, 0x11, 0x21, 0x31, 0x41];
         let out = byte_unshuffle(&shuffled, 2);
-        assert_eq!(
-            out,
-            vec![0x10, 0x11, 0x20, 0x21, 0x30, 0x31, 0x40, 0x41]
-        );
+        assert_eq!(out, vec![0x10, 0x11, 0x20, 0x21, 0x30, 0x31, 0x40, 0x41]);
     }
 }

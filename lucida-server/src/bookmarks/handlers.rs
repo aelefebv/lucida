@@ -19,11 +19,11 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, RawQuery, State};
-use axum::http::header::LOCATION;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Json, Response};
 use axum::Extension;
+use axum::extract::{Path, RawQuery, State};
+use axum::http::StatusCode;
+use axum::http::header::LOCATION;
+use axum::response::{IntoResponse, Json, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -35,8 +35,8 @@ use lucida_core::saved_view::SavedView;
 
 use super::broadcast::broadcast_bookmark_change;
 use super::store::{Bookmark, BookmarkStore, StoreError};
-use crate::session::Session;
 use crate::UnicastRoutes;
+use crate::session::Session;
 
 /// Hard cap on the human-friendly bookmark name (PRD §"Validation").
 /// Counts UTF-8 chars (`.chars().count()`), not bytes — so 200 emoji
@@ -78,9 +78,7 @@ fn parse_dataset_params(raw: Option<&str>) -> Vec<String> {
             }
             // `+` decodes to space per application/x-www-form-urlencoded;
             // matches what serde_urlencoded would do.
-            let decoded = urlencoding::decode(&v.replace('+', " "))
-                .ok()?
-                .into_owned();
+            let decoded = urlencoding::decode(&v.replace('+', " ")).ok()?.into_owned();
             if decoded.is_empty() {
                 None
             } else {
@@ -366,11 +364,7 @@ fn enforce_owner_or_admin(
         "bookmarks.forbidden",
     );
     Err(Box::new(
-        (
-            StatusCode::FORBIDDEN,
-            Json(json!({ "error": "forbidden" })),
-        )
-            .into_response(),
+        (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))).into_response(),
     ))
 }
 
@@ -407,10 +401,10 @@ mod tests {
     use super::*;
     use crate::bookmarks::routes::router;
     use crate::bookmarks::store::MemoryBookmarkStore;
-    use axum::body::{to_bytes, Body};
-    use axum::http::Request;
-    use axum::middleware::{from_fn, Next};
     use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use axum::middleware::{Next, from_fn};
     use tower::ServiceExt;
 
     /// Build a router that injects `principal` into request extensions
@@ -422,17 +416,20 @@ mod tests {
         principal: Option<AuthPrincipal>,
     ) -> Router {
         let p = principal.map(Arc::new);
-        router(BookmarksState { store, session: None, unicast_routes: None }).layer(from_fn(
-            move |mut req: Request<Body>, next: Next| {
-                let p = p.clone();
-                async move {
-                    if let Some(p) = p {
-                        req.extensions_mut().insert(AuthPrincipal::clone(&p));
-                    }
-                    next.run(req).await
+        router(BookmarksState {
+            store,
+            session: None,
+            unicast_routes: None,
+        })
+        .layer(from_fn(move |mut req: Request<Body>, next: Next| {
+            let p = p.clone();
+            async move {
+                if let Some(p) = p {
+                    req.extensions_mut().insert(AuthPrincipal::clone(&p));
                 }
-            },
-        ))
+                next.run(req).await
+            }
+        }))
     }
 
     fn principal(email: &str, is_admin: bool) -> AuthPrincipal {
@@ -650,7 +647,10 @@ mod tests {
             .create("v", "a@b", "A", vec!["u".into()], sample_view())
             .await
             .unwrap();
-        let app = router_with_principal(store as Arc<dyn BookmarkStore>, Some(principal("a@b", false)));
+        let app = router_with_principal(
+            store as Arc<dyn BookmarkStore>,
+            Some(principal("a@b", false)),
+        );
         let req = Request::builder()
             .uri(format!("/api/bookmarks/{}", b.id))
             .body(Body::empty())
@@ -664,11 +664,22 @@ mod tests {
     #[tokio::test]
     async fn list_no_query_returns_all_visible() {
         let store = Arc::new(MemoryBookmarkStore::new());
-        store.create("a", "a@b", "A", vec!["u1".into()], sample_view()).await.unwrap();
-        store.create("b", "x@y", "X", vec!["u2".into()], sample_view()).await.unwrap();
-        let app =
-            router_with_principal(store as Arc<dyn BookmarkStore>, Some(principal("a@b", false)));
-        let req = Request::builder().uri("/api/bookmarks").body(Body::empty()).unwrap();
+        store
+            .create("a", "a@b", "A", vec!["u1".into()], sample_view())
+            .await
+            .unwrap();
+        store
+            .create("b", "x@y", "X", vec!["u2".into()], sample_view())
+            .await
+            .unwrap();
+        let app = router_with_principal(
+            store as Arc<dyn BookmarkStore>,
+            Some(principal("a@b", false)),
+        );
+        let req = Request::builder()
+            .uri("/api/bookmarks")
+            .body(Body::empty())
+            .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let got: Vec<BookmarkResponse> = parse_body(res).await;
@@ -678,10 +689,18 @@ mod tests {
     #[tokio::test]
     async fn list_with_dataset_filter_overlaps_only() {
         let store = Arc::new(MemoryBookmarkStore::new());
-        store.create("a", "a@b", "A", vec!["u1".into()], sample_view()).await.unwrap();
-        store.create("b", "a@b", "A", vec!["u2".into()], sample_view()).await.unwrap();
-        let app =
-            router_with_principal(store as Arc<dyn BookmarkStore>, Some(principal("a@b", false)));
+        store
+            .create("a", "a@b", "A", vec!["u1".into()], sample_view())
+            .await
+            .unwrap();
+        store
+            .create("b", "a@b", "A", vec!["u2".into()], sample_view())
+            .await
+            .unwrap();
+        let app = router_with_principal(
+            store as Arc<dyn BookmarkStore>,
+            Some(principal("a@b", false)),
+        );
 
         let req = Request::builder()
             .uri("/api/bookmarks?dataset=u2")
@@ -697,11 +716,22 @@ mod tests {
     #[tokio::test]
     async fn list_with_multi_dataset_filter_unions() {
         let store = Arc::new(MemoryBookmarkStore::new());
-        store.create("a", "a@b", "A", vec!["u1".into()], sample_view()).await.unwrap();
-        store.create("b", "a@b", "A", vec!["u2".into()], sample_view()).await.unwrap();
-        store.create("c", "a@b", "A", vec!["u3".into()], sample_view()).await.unwrap();
-        let app =
-            router_with_principal(store as Arc<dyn BookmarkStore>, Some(principal("a@b", false)));
+        store
+            .create("a", "a@b", "A", vec!["u1".into()], sample_view())
+            .await
+            .unwrap();
+        store
+            .create("b", "a@b", "A", vec!["u2".into()], sample_view())
+            .await
+            .unwrap();
+        store
+            .create("c", "a@b", "A", vec!["u3".into()], sample_view())
+            .await
+            .unwrap();
+        let app = router_with_principal(
+            store as Arc<dyn BookmarkStore>,
+            Some(principal("a@b", false)),
+        );
 
         let req = Request::builder()
             .uri("/api/bookmarks?dataset=u1&dataset=u3")
@@ -711,8 +741,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let got: Vec<BookmarkResponse> = parse_body(res).await;
         assert_eq!(got.len(), 2);
-        let names: std::collections::HashSet<&str> =
-            got.iter().map(|b| b.name.as_str()).collect();
+        let names: std::collections::HashSet<&str> = got.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(names, ["a", "c"].into_iter().collect());
     }
 
@@ -733,7 +762,9 @@ mod tests {
             .method("PATCH")
             .uri(format!("/api/bookmarks/{}", b.id))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&json!({"name": "new"})).unwrap()))
+            .body(Body::from(
+                serde_json::to_vec(&json!({"name": "new"})).unwrap(),
+            ))
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -748,13 +779,17 @@ mod tests {
             .create("v", "alice@x", "Alice", vec![], sample_view())
             .await
             .unwrap();
-        let app =
-            router_with_principal(store as Arc<dyn BookmarkStore>, Some(principal("bob@x", false)));
+        let app = router_with_principal(
+            store as Arc<dyn BookmarkStore>,
+            Some(principal("bob@x", false)),
+        );
         let req = Request::builder()
             .method("PATCH")
             .uri(format!("/api/bookmarks/{}", b.id))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&json!({"name": "hacked"})).unwrap()))
+            .body(Body::from(
+                serde_json::to_vec(&json!({"name": "hacked"})).unwrap(),
+            ))
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::FORBIDDEN);
@@ -775,7 +810,9 @@ mod tests {
             .method("PATCH")
             .uri(format!("/api/bookmarks/{}", b.id))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&json!({"name": "renamed"})).unwrap()))
+            .body(Body::from(
+                serde_json::to_vec(&json!({"name": "renamed"})).unwrap(),
+            ))
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -791,7 +828,9 @@ mod tests {
             .method("PATCH")
             .uri("/api/bookmarks/nope")
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_vec(&json!({"name": "x"})).unwrap()))
+            .body(Body::from(
+                serde_json::to_vec(&json!({"name": "x"})).unwrap(),
+            ))
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
@@ -915,7 +954,7 @@ mod tests {
     /// acceptance: "no-auth requests return 401".
     #[tokio::test]
     async fn endpoints_401_without_auth_under_real_middleware() {
-        use crate::auth::middleware::{auth_middleware, build_extractor, SharedExtractor};
+        use crate::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
         use crate::auth::session_store_memory::MemorySessionStore;
         use crate::auth::{AuthConfig, LoginSessionStore};
 
@@ -930,7 +969,10 @@ mod tests {
             session: None,
             unicast_routes: None,
         })
-        .layer(axum::middleware::from_fn_with_state(extractor, auth_middleware));
+        .layer(axum::middleware::from_fn_with_state(
+            extractor,
+            auth_middleware,
+        ));
 
         // GET list
         let res = app

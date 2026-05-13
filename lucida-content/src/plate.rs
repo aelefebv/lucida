@@ -1,7 +1,7 @@
-/// Plate layout construction functions.
-///
-/// Builds [`LayoutSpec`] placements and [`TransformEdge`]s for plate-based
-/// datasets, replacing the old mutate-in-place approach with declarative output.
+//! Plate layout construction functions.
+//!
+//! Builds [`LayoutSpec`] placements and [`TransformEdge`]s for plate-based
+//! datasets, replacing the old mutate-in-place approach with declarative output.
 
 use std::collections::HashMap;
 
@@ -27,9 +27,16 @@ impl std::fmt::Display for PlateLayoutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PlateLayoutError::MissingFieldIndex { entity_id } => {
-                write!(f, "field entity {:?} is missing field_index label", entity_id.0)
+                write!(
+                    f,
+                    "field entity {:?} is missing field_index label",
+                    entity_id.0
+                )
             }
-            PlateLayoutError::DuplicateFieldIndex { well_id, field_index } => {
+            PlateLayoutError::DuplicateFieldIndex {
+                well_id,
+                field_index,
+            } => {
                 write!(
                     f,
                     "duplicate field_index {} in well {:?}",
@@ -128,12 +135,13 @@ pub fn build_grid_field_transforms(
         // Validate: each field must have a field_index.
         let mut indexed: Vec<(u32, &Entity)> = Vec::with_capacity(well_fields.len());
         for field in well_fields {
-            let fi = field
-                .labels
-                .field_index
-                .ok_or_else(|| PlateLayoutError::MissingFieldIndex {
-                    entity_id: field.id.clone(),
-                })?;
+            let fi =
+                field
+                    .labels
+                    .field_index
+                    .ok_or_else(|| PlateLayoutError::MissingFieldIndex {
+                        entity_id: field.id.clone(),
+                    })?;
             indexed.push((fi, field));
         }
 
@@ -218,11 +226,7 @@ mod tests {
             kind: EntityKind::Well,
             parent: None,
             labels: EntityLabels {
-                name: Some(format!(
-                    "{}/{}",
-                    (b'A' + row as u8) as char,
-                    col + 1
-                )),
+                name: Some(format!("{}/{}", (b'A' + row as u8) as char, col + 1)),
                 row_index: Some(row),
                 column_index: Some(col),
                 ..Default::default()
@@ -278,39 +282,62 @@ mod tests {
         let well_cell_h = 1.0 * fov_y * (1.0 + FIELD_GAP_FRACTION) + fov_y * WELL_GAP_FRACTION;
 
         // Well (0,0) at origin.
-        let p00 = layout.placements.iter().find(|p| p.entity_id.0 == "w-00").unwrap();
+        let p00 = layout
+            .placements
+            .iter()
+            .find(|p| p.entity_id.0 == "w-00")
+            .unwrap();
         assert!((p00.position[0]).abs() < 1e-9);
         assert!((p00.position[1]).abs() < 1e-9);
 
         // Well (0,1) at (well_cell_w, 0).
-        let p01 = layout.placements.iter().find(|p| p.entity_id.0 == "w-01").unwrap();
+        let p01 = layout
+            .placements
+            .iter()
+            .find(|p| p.entity_id.0 == "w-01")
+            .unwrap();
         assert!((p01.position[0] - well_cell_w).abs() < 1e-9);
         assert!((p01.position[1]).abs() < 1e-9);
 
         // Well (0,2) at (2*well_cell_w, 0).
-        let p02 = layout.placements.iter().find(|p| p.entity_id.0 == "w-02").unwrap();
+        let p02 = layout
+            .placements
+            .iter()
+            .find(|p| p.entity_id.0 == "w-02")
+            .unwrap();
         assert!((p02.position[0] - 2.0 * well_cell_w).abs() < 1e-9);
         assert!((p02.position[1]).abs() < 1e-9);
 
         // Well (1,0) at (0, well_cell_h).
-        let p10 = layout.placements.iter().find(|p| p.entity_id.0 == "w-10").unwrap();
+        let p10 = layout
+            .placements
+            .iter()
+            .find(|p| p.entity_id.0 == "w-10")
+            .unwrap();
         assert!((p10.position[0]).abs() < 1e-9);
         assert!((p10.position[1] - well_cell_h).abs() < 1e-9);
 
         // Well (1,1) at (well_cell_w, well_cell_h).
-        let p11 = layout.placements.iter().find(|p| p.entity_id.0 == "w-11").unwrap();
+        let p11 = layout
+            .placements
+            .iter()
+            .find(|p| p.entity_id.0 == "w-11")
+            .unwrap();
         assert!((p11.position[0] - well_cell_w).abs() < 1e-9);
         assert!((p11.position[1] - well_cell_h).abs() < 1e-9);
 
         // Well (1,2) at (2*well_cell_w, well_cell_h).
-        let p12 = layout.placements.iter().find(|p| p.entity_id.0 == "w-12").unwrap();
+        let p12 = layout
+            .placements
+            .iter()
+            .find(|p| p.entity_id.0 == "w-12")
+            .unwrap();
         assert!((p12.position[0] - 2.0 * well_cell_w).abs() < 1e-9);
         assert!((p12.position[1] - well_cell_h).abs() < 1e-9);
 
         // Field transforms: single field per well => all at origin.
         let well_ents: Vec<Entity> = wells.clone();
-        let transforms =
-            build_grid_field_transforms(&well_ents, &fields, fov_shape).unwrap();
+        let transforms = build_grid_field_transforms(&well_ents, &fields, fov_shape).unwrap();
         assert_eq!(transforms.len(), 6);
 
         for t in &transforms {
@@ -356,17 +383,24 @@ mod tests {
         let well_cell_w = 2.0 * fov_x * (1.0 + FIELD_GAP_FRACTION) + fov_x * WELL_GAP_FRACTION;
         let well_cell_h = 2.0 * fov_y * (1.0 + FIELD_GAP_FRACTION) + fov_y * WELL_GAP_FRACTION;
 
-        let p01 = layout.placements.iter().find(|p| p.entity_id.0 == "w-01").unwrap();
+        let p01 = layout
+            .placements
+            .iter()
+            .find(|p| p.entity_id.0 == "w-01")
+            .unwrap();
         assert!((p01.position[0] - well_cell_w).abs() < 1e-9);
         assert!((p01.position[1]).abs() < 1e-9);
 
-        let p10 = layout.placements.iter().find(|p| p.entity_id.0 == "w-10").unwrap();
+        let p10 = layout
+            .placements
+            .iter()
+            .find(|p| p.entity_id.0 == "w-10")
+            .unwrap();
         assert!((p10.position[0]).abs() < 1e-9);
         assert!((p10.position[1] - well_cell_h).abs() < 1e-9);
 
         // Field transforms: 2x2 grid per well.
-        let transforms =
-            build_grid_field_transforms(&wells, &fields, fov_shape).unwrap();
+        let transforms = build_grid_field_transforms(&wells, &fields, fov_shape).unwrap();
         assert_eq!(transforms.len(), 16);
 
         let gap_x = FIELD_GAP_FRACTION * fov_x;
@@ -375,9 +409,7 @@ mod tests {
         // Check one well's fields in detail (w-00).
         let mut w00_transforms: Vec<&TransformEdge> =
             transforms.iter().filter(|t| t.to.0 == "w-00").collect();
-        w00_transforms.sort_by(|a, b| {
-            a.from.0.cmp(&b.from.0)
-        });
+        w00_transforms.sort_by(|a, b| a.from.0.cmp(&b.from.0));
         assert_eq!(w00_transforms.len(), 4);
 
         // field 0 at (0, 0)
@@ -419,8 +451,7 @@ mod tests {
         let cols = vec!["1".into(), "2".into(), "3".into()];
 
         let layout = build_plate_layout(&entities, &rows, &cols, fov_shape);
-        let transforms =
-            build_grid_field_transforms(&wells, &fields, fov_shape).unwrap();
+        let transforms = build_grid_field_transforms(&wells, &fields, fov_shape).unwrap();
 
         let extent = plate_extent(&layout, &transforms, fov_shape);
 
@@ -476,7 +507,10 @@ mod tests {
         let result = build_grid_field_transforms(&wells, &fields, [1, 1, 1, 256, 256]);
         assert!(result.is_err());
         match result.unwrap_err() {
-            PlateLayoutError::DuplicateFieldIndex { well_id, field_index } => {
+            PlateLayoutError::DuplicateFieldIndex {
+                well_id,
+                field_index,
+            } => {
                 assert_eq!(well_id.0, "w-00");
                 assert_eq!(field_index, 0);
             }

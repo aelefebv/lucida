@@ -5,10 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use memmap2::Mmap;
 use rayon::prelude::*;
+use tiff::ColorType;
 use tiff::decoder::ifd;
 use tiff::decoder::{Decoder, DecodingResult};
 use tiff::tags::Tag;
-use tiff::ColorType;
 
 /// Dimension ordering for multi-page TIFFs.
 ///
@@ -49,7 +49,6 @@ impl DimensionOrder {
             Self::Xytzc => c * size_z * size_t + z * size_t + t,
         }
     }
-
 }
 
 /// User-provided hints for interpreting TIFF page dimensions.
@@ -103,14 +102,16 @@ pub fn read_tiff(path: &Path, hints: &DimensionHints) -> Result<Volume, String> 
         .map_err(|e| format!("failed to mmap {}: {e}", path.display()))?;
     let data: &[u8] = &mmap;
 
-    let mut decoder = Decoder::new(Cursor::new(data))
-        .map_err(|e| format!("failed to decode TIFF: {e}"))?;
+    let mut decoder =
+        Decoder::new(Cursor::new(data)).map_err(|e| format!("failed to decode TIFF: {e}"))?;
 
     // Try to read OME-XML from ImageDescription tag (before reading pixel data)
     let ome_info = try_read_ome_xml(&mut decoder);
 
     // Read first page to get dimensions
-    let (width, height) = decoder.dimensions().map_err(|e| format!("bad dimensions: {e}"))?;
+    let (width, height) = decoder
+        .dimensions()
+        .map_err(|e| format!("bad dimensions: {e}"))?;
     let pixels_per_page = (width * height) as usize;
 
     // Resolve dimensions early if possible (OME metadata + hints)
@@ -127,13 +128,16 @@ pub fn read_tiff(path: &Path, hints: &DimensionHints) -> Result<Volume, String> 
     let voxel_size = {
         let ome_ref = ome_info.as_ref();
         VoxelSize {
-            x: hints.voxel_size_x
+            x: hints
+                .voxel_size_x
                 .or_else(|| ome_ref.and_then(|i| i.physical_size_x))
                 .unwrap_or(1.0),
-            y: hints.voxel_size_y
+            y: hints
+                .voxel_size_y
                 .or_else(|| ome_ref.and_then(|i| i.physical_size_y))
                 .unwrap_or(1.0),
-            z: hints.voxel_size_z
+            z: hints
+                .voxel_size_z
                 .or_else(|| ome_ref.and_then(|i| i.physical_size_z))
                 .unwrap_or(1.0),
         }
@@ -141,9 +145,7 @@ pub fn read_tiff(path: &Path, hints: &DimensionHints) -> Result<Volume, String> 
 
     if let Some((size_t, size_c, size_z, order)) = early_dims {
         let num_pages = size_t * size_c * size_z;
-        eprintln!(
-            "Reading TIFF pages ({width}x{height}), {num_pages} pages, parallel decoding..."
-        );
+        eprintln!("Reading TIFF pages ({width}x{height}), {num_pages} pages, parallel decoding...");
         // Drop the initial decoder — each thread will create its own
         drop(decoder);
         read_tiff_parallel(
@@ -159,7 +161,14 @@ pub fn read_tiff(path: &Path, hints: &DimensionHints) -> Result<Volume, String> 
         )
     } else {
         eprintln!("Reading TIFF pages ({width}x{height}), unknown page count...");
-        read_tiff_collect(&mut decoder, width, height, pixels_per_page, hints, voxel_size)
+        read_tiff_collect(
+            &mut decoder,
+            width,
+            height,
+            pixels_per_page,
+            hints,
+            voxel_size,
+        )
     }
 }
 
@@ -171,20 +180,30 @@ fn decode_page(
     height: u32,
     pixels_per_page: usize,
 ) -> Result<Vec<u16>, String> {
-    let (w, h) = decoder.dimensions().map_err(|e| format!("bad dimensions: {e}"))?;
+    let (w, h) = decoder
+        .dimensions()
+        .map_err(|e| format!("bad dimensions: {e}"))?;
     if w != width || h != height {
         return Err(format!(
             "page {page_num} has dimensions {w}x{h}, expected {width}x{height}"
         ));
     }
 
-    let color = decoder.colortype().map_err(|e| format!("bad color type: {e}"))?;
+    let color = decoder
+        .colortype()
+        .map_err(|e| format!("bad color type: {e}"))?;
     match color {
         ColorType::Gray(8) | ColorType::Gray(16) => {}
-        _ => return Err(format!("unsupported color type: {color:?} (only Gray8/Gray16)")),
+        _ => {
+            return Err(format!(
+                "unsupported color type: {color:?} (only Gray8/Gray16)"
+            ));
+        }
     }
 
-    let image = decoder.read_image().map_err(|e| format!("failed to read image data: {e}"))?;
+    let image = decoder
+        .read_image()
+        .map_err(|e| format!("failed to read image data: {e}"))?;
     match image {
         DecodingResult::U8(src) => {
             if src.len() != pixels_per_page {
@@ -213,6 +232,8 @@ fn decode_page(
 /// Splits pages across rayon threads. Each thread creates its own decoder over
 /// the shared mmap, walks IFDs to its starting page, then decodes its batch.
 /// Results are written to non-overlapping regions of a pre-allocated buffer.
+// Internal helper; args reflect the raw TIFF dimensions plus dim ordering.
+#[allow(clippy::too_many_arguments)]
 fn read_tiff_parallel(
     mmap_data: &[u8],
     width: u32,
@@ -249,7 +270,7 @@ fn read_tiff_parallel(
 
     // Split pages into chunks for parallel processing
     let n_threads = rayon::current_num_threads();
-    let chunk_size = (num_pages + n_threads - 1) / n_threads;
+    let chunk_size = num_pages.div_ceil(n_threads);
 
     let progress = AtomicUsize::new(0);
 
@@ -280,19 +301,26 @@ fn read_tiff_parallel(
             // Walk IFDs to the starting page (fast — just reads metadata)
             for _ in 0..start {
                 if !decoder.more_images() {
-                    return Some(format!("TIFF has fewer pages than expected (at page {start})"));
+                    return Some(format!(
+                        "TIFF has fewer pages than expected (at page {start})"
+                    ));
                 }
                 if let Err(e) = decoder.next_image() {
                     return Some(format!("failed to seek to page {start}: {e}"));
                 }
             }
 
-            // Decode pages in this chunk
+            // Decode pages in this chunk. `page_num` is used as both the
+            // index into `page_to_dst` AND as the natural page number in
+            // error messages and decoder advance arithmetic — enumerate
+            // would obscure that.
+            #[allow(clippy::needless_range_loop)]
             for page_num in start..end {
-                let pixels = match decode_page(&mut decoder, page_num, width, height, pixels_per_page) {
-                    Ok(p) => p,
-                    Err(e) => return Some(e),
-                };
+                let pixels =
+                    match decode_page(&mut decoder, page_num, width, height, pixels_per_page) {
+                        Ok(p) => p,
+                        Err(e) => return Some(e),
+                    };
 
                 // Write to the correct destination slot
                 let dst_idx = page_to_dst[page_num];
@@ -306,7 +334,7 @@ fn read_tiff_parallel(
                 }
 
                 let count = progress.fetch_add(1, Ordering::Relaxed) + 1;
-                if count % 100 == 0 || count == num_pages {
+                if count.is_multiple_of(100) || count == num_pages {
                     eprintln!("  pages: {count}/{num_pages}");
                 }
 
@@ -332,9 +360,7 @@ fn read_tiff_parallel(
         return Err(err);
     }
 
-    eprintln!(
-        "Resolved dimensions: T={size_t}, C={size_c}, Z={size_z}, order={order:?}"
-    );
+    eprintln!("Resolved dimensions: T={size_t}, C={size_c}, Z={size_z}, order={order:?}");
 
     Ok(Volume {
         data,
@@ -364,12 +390,14 @@ fn read_tiff_collect(
         pages.push(pixels);
 
         let count = pages.len();
-        if count % 100 == 0 {
+        if count.is_multiple_of(100) {
             eprintln!("  pages: {count}");
         }
 
         if decoder.more_images() {
-            decoder.next_image().map_err(|e| format!("failed to advance to next page: {e}"))?;
+            decoder
+                .next_image()
+                .map_err(|e| format!("failed to advance to next page: {e}"))?;
         } else {
             break;
         }
@@ -400,8 +428,7 @@ fn read_tiff_collect(
                 let page_idx = order.page_index(t, c, z, size_t, size_c, size_z) as usize;
                 let dst_idx = (t * size_c * size_z + c * size_z + z) as usize;
                 let dst_start = dst_idx * pixels_per_page;
-                data[dst_start..dst_start + pixels_per_page]
-                    .copy_from_slice(&pages[page_idx]);
+                data[dst_start..dst_start + pixels_per_page].copy_from_slice(&pages[page_idx]);
             }
         }
     }
@@ -417,9 +444,7 @@ fn read_tiff_collect(
     })
 }
 
-fn try_read_ome_xml(
-    decoder: &mut Decoder<Cursor<&[u8]>>,
-) -> Option<OmeInfo> {
+fn try_read_ome_xml(decoder: &mut Decoder<Cursor<&[u8]>>) -> Option<OmeInfo> {
     let value = match decoder.find_tag(Tag::ImageDescription) {
         Ok(Some(v)) => v,
         Ok(None) => {
@@ -469,9 +494,12 @@ fn parse_ome_xml(xml: &str) -> Option<OmeInfo> {
     let size_c: u32 = extract_attr(xml, "SizeC")?.parse().ok()?;
     let size_z: u32 = extract_attr(xml, "SizeZ")?.parse().ok()?;
 
-    let physical_size_x: Option<f64> = extract_attr(xml, "PhysicalSizeX").and_then(|s| s.parse().ok());
-    let physical_size_y: Option<f64> = extract_attr(xml, "PhysicalSizeY").and_then(|s| s.parse().ok());
-    let physical_size_z: Option<f64> = extract_attr(xml, "PhysicalSizeZ").and_then(|s| s.parse().ok());
+    let physical_size_x: Option<f64> =
+        extract_attr(xml, "PhysicalSizeX").and_then(|s| s.parse().ok());
+    let physical_size_y: Option<f64> =
+        extract_attr(xml, "PhysicalSizeY").and_then(|s| s.parse().ok());
+    let physical_size_z: Option<f64> =
+        extract_attr(xml, "PhysicalSizeZ").and_then(|s| s.parse().ok());
 
     Some(OmeInfo {
         size_t,

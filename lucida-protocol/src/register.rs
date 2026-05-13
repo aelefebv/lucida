@@ -1,6 +1,6 @@
-use lucida_content::DatasetManifest;
 use crate::asset::AssetCatalog;
 use crate::fetch::FetchSource;
+use lucida_content::DatasetManifest;
 use serde::{Deserialize, Serialize};
 
 /// Application-level event: a dataset has been opened on the server and
@@ -52,9 +52,18 @@ mod tests {
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
                     axes: vec![
-                        Axis { name: "z".to_string(), kind: AxisKind::Space },
-                        Axis { name: "y".to_string(), kind: AxisKind::Space },
-                        Axis { name: "x".to_string(), kind: AxisKind::Space },
+                        Axis {
+                            name: "z".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".to_string(),
+                            kind: AxisKind::Space,
+                        },
                     ],
                     levels: vec![LevelGeometry {
                         level_index: 0,
@@ -80,7 +89,11 @@ mod tests {
             }],
         });
 
-        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened {
+            manifest,
+            fetch,
+            catalog: AssetCatalog::default(),
+        }
     }
 
     #[test]
@@ -91,7 +104,10 @@ mod tests {
 
         assert_eq!(event.manifest.dataset_id, back.manifest.dataset_id);
         assert_eq!(event.manifest.name, back.manifest.name);
-        assert_eq!(event.manifest.entities().len(), back.manifest.entities().len());
+        assert_eq!(
+            event.manifest.entities().len(),
+            back.manifest.entities().len()
+        );
         assert_eq!(event.manifest.images().len(), back.manifest.images().len());
         assert_eq!(
             event.manifest.images()[0].image_id,
@@ -101,10 +117,7 @@ mod tests {
         match &back.fetch {
             FetchSource::Proxied(p) => {
                 assert_eq!(p.images.len(), 1);
-                assert_eq!(
-                    p.images[0].image_id,
-                    ImageId("multiscale-0".to_string())
-                );
+                assert_eq!(p.images[0].image_id, ImageId("multiscale-0".to_string()));
             }
             _ => panic!("expected Proxied variant"),
         }

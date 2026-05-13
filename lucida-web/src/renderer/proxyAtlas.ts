@@ -108,7 +108,6 @@ export function createProxyAtlas(
   if (slotX > 0 && slotX * cap > limit) {
     const maxCap = Math.max(1, Math.floor(limit / slotX));
     if (maxCap < cap) {
-      // eslint-disable-next-line no-console
       console.warn(
         `[proxyAtlas] capacity ${cap} exceeds 3D texture limit ` +
           `(${slotX} * ${cap} > ${limit}); clamping to ${maxCap}`,

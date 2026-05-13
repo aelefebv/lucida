@@ -38,7 +38,11 @@ pub fn write_zarr(
 ///
 /// Call this once before writing individual levels.
 /// `level_scales` provides per-level cumulative [x, y, z] scale factors.
-pub fn write_root_metadata(output: &Path, levels: &[LevelData], level_scales: &[[f64; 3]]) -> Result<(), String> {
+pub fn write_root_metadata(
+    output: &Path,
+    levels: &[LevelData],
+    level_scales: &[[f64; 3]],
+) -> Result<(), String> {
     fs::create_dir_all(output).map_err(|e| format!("failed to create output dir: {e}"))?;
 
     let ome_attrs = ome_metadata::build_multiscales_attrs(levels, level_scales);
@@ -80,9 +84,9 @@ fn write_chunks(
     let cy = chunk_size[1];
     let cx = chunk_size[2];
 
-    let nx = (level.width + cx - 1) / cx;
-    let ny = (level.height + cy - 1) / cy;
-    let nz = (level.depth + cz - 1) / cz;
+    let nx = level.width.div_ceil(cx);
+    let ny = level.height.div_ceil(cy);
+    let nz = level.depth.div_ceil(cz);
 
     // Collect all chunk indices
     let mut indices = Vec::new();
@@ -122,30 +126,27 @@ fn write_chunks(
     let completed = AtomicUsize::new(0);
 
     // Write chunks in parallel
-    indices
-        .par_iter()
-        .try_for_each(|&(ti, ci, zi, yi, xi)| {
-            let chunk_path = level_dir
-                .join("c")
-                .join(ti.to_string())
-                .join(ci.to_string())
-                .join(zi.to_string())
-                .join(yi.to_string())
-                .join(xi.to_string());
+    indices.par_iter().try_for_each(|&(ti, ci, zi, yi, xi)| {
+        let chunk_path = level_dir
+            .join("c")
+            .join(ti.to_string())
+            .join(ci.to_string())
+            .join(zi.to_string())
+            .join(yi.to_string())
+            .join(xi.to_string());
 
-            let raw = extract_chunk(level, cx, cy, cz, xi, yi, zi, ti, ci);
-            let compressed = lz4_flex::compress_prepend_size(&raw);
+        let raw = extract_chunk(level, cx, cy, cz, xi, yi, zi, ti, ci);
+        let compressed = lz4_flex::compress_prepend_size(&raw);
 
-            fs::write(&chunk_path, &compressed)
-                .map_err(|e| format!("failed to write chunk: {e}"))?;
+        fs::write(&chunk_path, &compressed).map_err(|e| format!("failed to write chunk: {e}"))?;
 
-            let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            if done % 100 == 0 || done == total {
-                eprintln!("  level {level_index}: writing chunks {done}/{total}");
-            }
+        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+        if done.is_multiple_of(100) || done == total {
+            eprintln!("  level {level_index}: writing chunks {done}/{total}");
+        }
 
-            Ok::<(), String>(())
-        })?;
+        Ok::<(), String>(())
+    })?;
 
     Ok(())
 }
@@ -153,6 +154,8 @@ fn write_chunks(
 /// Extract a single chunk as raw little-endian u16 bytes, zero-padded at edges.
 ///
 /// Data is indexed in TCZYX order.
+// Internal helper; args are chunk shape (cx,cy,cz) plus chunk index (xi,yi,zi,ti,ci).
+#[allow(clippy::too_many_arguments)]
 fn extract_chunk(
     level: &LevelData,
     cx: u32,
@@ -171,8 +174,7 @@ fn extract_chunk(
     let z_start = zi * cz;
 
     let plane_size = (level.width * level.height) as usize;
-    let tc_offset =
-        (ti * level.channels * level.depth + ci * level.depth) as usize * plane_size;
+    let tc_offset = (ti * level.channels * level.depth + ci * level.depth) as usize * plane_size;
 
     for lz in 0..cz {
         let gz = z_start + lz;
@@ -186,8 +188,8 @@ fn extract_chunk(
             }
 
             let row_len = cx.min(level.width.saturating_sub(x_start));
-            let src_offset = tc_offset
-                + (gz * level.width * level.height + gy * level.width + x_start) as usize;
+            let src_offset =
+                tc_offset + (gz * level.width * level.height + gy * level.width + x_start) as usize;
             let dst_offset = (lz * cy * cx + ly * cx) as usize * 2;
 
             for lx in 0..row_len {
@@ -204,8 +206,8 @@ fn extract_chunk(
 
 fn write_json(dir: &Path, name: &str, value: &serde_json::Value) -> Result<(), String> {
     let path = dir.join(name);
-    let content =
-        serde_json::to_string_pretty(value).map_err(|e| format!("failed to serialize JSON: {e}"))?;
+    let content = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("failed to serialize JSON: {e}"))?;
     fs::write(&path, content).map_err(|e| format!("failed to write {}: {e}", path.display()))
 }
 
@@ -330,7 +332,7 @@ mod tests {
         let chunk_bytes = fs::read(dir.join("0/c/0/0/0/0/0")).unwrap();
         // Should be LZ4 compressed — decompress and verify
         let decompressed = lz4_flex::decompress_size_prepended(&chunk_bytes).unwrap();
-        assert_eq!(decompressed.len(), 4 * 4 * 1 * 2); // 4x4x1 u16
+        assert_eq!(decompressed.len(), (4 * 4) * 2); // 4x4x1 u16
         assert_eq!(u16::from_le_bytes([decompressed[0], decompressed[1]]), 0);
         assert_eq!(u16::from_le_bytes([decompressed[2], decompressed[3]]), 1);
 

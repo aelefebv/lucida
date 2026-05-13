@@ -14,9 +14,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lucida_content::{
-    DatasetManifest, EntityId, EntityKind, ImageId, ImageSpec, VoxelTransform,
-};
+use lucida_content::{DatasetManifest, EntityId, EntityKind, ImageId, ImageSpec, VoxelTransform};
 use lucida_proxy::{FieldVolume, ProxyKind, ProxySourceData, ProxySpec, SourceError};
 use lucida_store::cache::CachedStore;
 use object_store::path::Path;
@@ -152,8 +150,7 @@ pub async fn build_server_proxy_source(
             } else {
                 let mut imgs: Vec<&ImageSpec> = Vec::new();
                 for child in content.entities().iter().filter(|c| {
-                    matches!(c.kind, EntityKind::Field)
-                        && c.parent.as_ref() == Some(&entity.id)
+                    matches!(c.kind, EntityKind::Field) && c.parent.as_ref() == Some(&entity.id)
                 }) {
                     let img = content
                         .images()
@@ -173,16 +170,9 @@ pub async fn build_server_proxy_source(
     let mut source = ServerProxySource::empty();
     for image in image_ids {
         let level_index = pick_level(image, spec.target_long_axis);
-        let (data, dims, voxel_to_image) = fetch_dense_volume(
-            content,
-            image,
-            spec.t,
-            spec.c,
-            level_index,
-            store,
-            resolver,
-        )
-        .await?;
+        let (data, dims, voxel_to_image) =
+            fetch_dense_volume(content, image, spec.t, spec.c, level_index, store, resolver)
+                .await?;
         source.insert(
             &image.image_id,
             spec.t,
@@ -216,14 +206,7 @@ fn pick_level(image: &ImageSpec, target_long_axis: u32) -> usize {
             chosen = i;
         }
     }
-    if chosen == 0
-        && levels[0].shape[2..5]
-            .iter()
-            .copied()
-            .min()
-            .unwrap_or(0)
-            < threshold
-    {
+    if chosen == 0 && levels[0].shape[2..5].iter().copied().min().unwrap_or(0) < threshold {
         chosen = levels.len() - 1;
     }
     chosen
@@ -241,11 +224,15 @@ async fn fetch_dense_volume(
     store: &Arc<CachedStore>,
     resolver: &ChunkResolver,
 ) -> Result<(Vec<u16>, [u32; 3], VoxelTransform), BuildSourceError> {
-    let level_geom = image
-        .multiscale
-        .levels
-        .get(level)
-        .ok_or_else(|| BuildSourceError::BadLevel { image: image.image_id.clone(), level })?;
+    let level_geom =
+        image
+            .multiscale
+            .levels
+            .get(level)
+            .ok_or_else(|| BuildSourceError::BadLevel {
+                image: image.image_id.clone(),
+                level,
+            })?;
 
     // shape = [T, C, Z, Y, X]
     let level_t = level_geom.shape[0];
@@ -300,9 +287,9 @@ async fn fetch_dense_volume(
             for gx in 0..grid_x {
                 // Canonical 5D chunk key: "{level}/{t}/{c}/{z}/{y}/{x}".
                 let key = format!("{level}/{t}/{c}/{gz}/{gy}/{gx}");
-                let object_path = resolver.resolve(&image.image_id, &key).ok_or_else(|| {
-                    BuildSourceError::UnknownImage(image.image_id.clone())
-                })?;
+                let object_path = resolver
+                    .resolve(&image.image_id, &key)
+                    .ok_or_else(|| BuildSourceError::UnknownImage(image.image_id.clone()))?;
                 let storage_bytes = store
                     .get_bytes(&Path::from(object_path.as_str()))
                     .await
@@ -322,12 +309,8 @@ async fn fetch_dense_volume(
                 // byte range — see [`lucida_store::layout`]. The proxy
                 // generator iterates one (t, c) at a time, so wire t/c are the
                 // values it just wrote into the chunk key.
-                let (offset, size) = level_info
-                    .chunk_byte_layout
-                    .slice_range(t as u64, c as u64);
-                if size > 0
-                    && offset.checked_add(size).map_or(false, |end| end <= raw.len())
-                {
+                let (offset, size) = level_info.chunk_byte_layout.slice_range(t as u64, c as u64);
+                if size > 0 && offset.checked_add(size).is_some_and(|end| end <= raw.len()) {
                     raw = raw[offset..offset + size].to_vec();
                 }
 
@@ -400,16 +383,17 @@ async fn fetch_dense_volume(
     // the aggregator actually needs.
     let level0 = &image.multiscale.levels[0];
     let scale_axis = |full: u64, lvl: u64| -> f64 {
-        if lvl == 0 { 1.0 } else { full as f64 / lvl as f64 }
+        if lvl == 0 {
+            1.0
+        } else {
+            full as f64 / lvl as f64
+        }
     };
     let sx = scale_axis(level0.shape[4], level_x);
     let sy = scale_axis(level0.shape[3], level_y);
     let sz = scale_axis(level0.shape[2], level_z);
     let level_voxel_to_image = VoxelTransform::from_voxel_matrix([
-        sx,  0.0, 0.0, 0.0,
-        0.0, sy,  0.0, 0.0,
-        0.0, 0.0, sz,  0.0,
-        0.0, 0.0, 0.0, 1.0,
+        sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, sz, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]);
 
     // Compose with any explicit owner→owner self-edge if present (none today,
@@ -512,4 +496,3 @@ impl From<BuildSourceError> for SourceError {
         }
     }
 }
-

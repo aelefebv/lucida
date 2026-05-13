@@ -68,11 +68,7 @@ pub trait LoginSessionStore: Send + Sync + 'static {
     /// Bump `last_used_at` to `now`. Race-and-tolerate: two parallel
     /// callers overwriting each other is harmless because the value
     /// only ever monotonically increases under normal use.
-    async fn touch_last_used(
-        &self,
-        id: &str,
-        now: DateTime<Utc>,
-    ) -> Result<(), SessionStoreError>;
+    async fn touch_last_used(&self, id: &str, now: DateTime<Utc>) -> Result<(), SessionStoreError>;
 
     /// Remove a single session by id. Used by the logout flow (slice 3)
     /// and by tests; idempotent (no error if the row is already gone).
