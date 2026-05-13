@@ -7,7 +7,7 @@ use lucida_protocol::AssetCatalogDelta;
 
 use crate::camera::Camera;
 use crate::command::DocumentCommand;
-use crate::scene::{DisplayState, DocumentState, DatasetDisplaySettings};
+use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState};
 use crate::view::ViewState;
 
 pub type ClientId = u64;
@@ -201,7 +201,11 @@ mod tests {
         assert!(json.contains("\"type\":\"chunk_request\""));
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ChunkMessage::ChunkRequest { dataset_id, image_id, key } => {
+            ChunkMessage::ChunkRequest {
+                dataset_id,
+                image_id,
+                key,
+            } => {
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(image_id, ImageId("img1".into()));
                 assert_eq!(key, "0/0/0/0/0/0");
@@ -222,7 +226,12 @@ mod tests {
         assert!(json.contains("\"type\":\"chunk_fetch\""));
         let parsed: ChunkMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ChunkMessage::ChunkFetch { client_id, dataset_id, image_id, key } => {
+            ChunkMessage::ChunkFetch {
+                client_id,
+                dataset_id,
+                image_id,
+                key,
+            } => {
                 assert_eq!(client_id, 42);
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(image_id, ImageId("img1".into()));
@@ -234,8 +243,13 @@ mod tests {
 
     #[test]
     fn command_broadcast_round_trips() {
-        let cmd = DocumentCommand::RemoveDataset { id: DatasetId("ds1".into()) };
-        let msg = ServerMessage::CommandBroadcast { seq: 5, command: cmd };
+        let cmd = DocumentCommand::RemoveDataset {
+            id: DatasetId("ds1".into()),
+        };
+        let msg = ServerMessage::CommandBroadcast {
+            seq: 5,
+            command: cmd,
+        };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
@@ -339,12 +353,15 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"peer_joined\""));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, ServerMessage::PeerJoined { client_id: 3, .. }));
+        assert!(matches!(
+            parsed,
+            ServerMessage::PeerJoined { client_id: 3, .. }
+        ));
     }
 
     #[test]
     fn fly_camera_presence_round_trips() {
-        use crate::camera::{Fly, ClipMode};
+        use crate::camera::{ClipMode, Fly};
         let mut fly = Fly::new([1024, 768]);
         fly.position = [1.5, 2.5, 3.5];
         fly.orientation = [0.1, 0.2, 0.3, 0.9273]; // approximately normalized
@@ -362,7 +379,10 @@ mod tests {
             dataset_settings: HashMap::new(),
         };
         let json = serde_json::to_string(&ps).unwrap();
-        assert!(json.contains("\"mode\":\"fly\""), "JSON should contain fly mode tag");
+        assert!(
+            json.contains("\"mode\":\"fly\""),
+            "JSON should contain fly mode tag"
+        );
         let parsed: PresenceState = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.client_id, 7);
         assert_eq!(parsed.following, Some(3));
@@ -394,7 +414,9 @@ mod tests {
         assert!(json.contains("\"mode\":\"fly\""));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ServerMessage::PresenceUpdate { client_id, camera, .. } => {
+            ServerMessage::PresenceUpdate {
+                client_id, camera, ..
+            } => {
                 assert_eq!(client_id, 5);
                 assert!(matches!(camera, Camera::Fly(_)));
             }
@@ -404,12 +426,16 @@ mod tests {
 
     #[test]
     fn open_remote_dataset_round_trips() {
-        let msg = ClientMessage::OpenRemoteDataset { url: "/mnt/data/experiment.zarr".into() };
+        let msg = ClientMessage::OpenRemoteDataset {
+            url: "/mnt/data/experiment.zarr".into(),
+        };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"open_remote_dataset\""));
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ClientMessage::OpenRemoteDataset { url } => assert_eq!(url, "/mnt/data/experiment.zarr"),
+            ClientMessage::OpenRemoteDataset { url } => {
+                assert_eq!(url, "/mnt/data/experiment.zarr")
+            }
             _ => panic!("expected OpenRemoteDataset"),
         }
     }
@@ -452,7 +478,10 @@ mod tests {
             ServerMessage::AssetCatalogUpdate { dataset_id, delta } => {
                 assert_eq!(dataset_id, DatasetId("ds1".into()));
                 assert_eq!(delta.added.len(), 1);
-                assert_eq!(delta.added[0].entity_id, lucida_content::EntityId("e1".into()));
+                assert_eq!(
+                    delta.added[0].entity_id,
+                    lucida_content::EntityId("e1".into())
+                );
                 assert_eq!(delta.added[0].kinds, vec![ProxyKind::WellProxy3D]);
             }
             _ => panic!("expected AssetCatalogUpdate"),
@@ -502,7 +531,10 @@ mod tests {
                 assert_eq!(action, BookmarkAction::Created);
                 assert_eq!(
                     dataset_urls,
-                    vec!["gs://bucket/a.zarr".to_string(), "gs://bucket/b.zarr".to_string()],
+                    vec![
+                        "gs://bucket/a.zarr".to_string(),
+                        "gs://bucket/b.zarr".to_string()
+                    ],
                 );
             }
             _ => panic!("expected BookmarkChanged"),

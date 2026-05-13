@@ -1,5 +1,5 @@
-/// Volume model transform that maps voxel space to normalized world space,
-/// accounting for anisotropic voxel spacing.
+//! Volume model transform that maps voxel space to normalized world space,
+//! accounting for anisotropic voxel spacing.
 
 use serde::{Deserialize, Serialize};
 
@@ -18,8 +18,8 @@ impl VolumeTransform {
     pub fn world_centroid(&self) -> [f64; 3] {
         let m = &self.model;
         [
-            m[0] as f64 * 0.5 + m[4] as f64 * 0.5 + m[8]  as f64 * 0.5 + m[12] as f64,
-            m[1] as f64 * 0.5 + m[5] as f64 * 0.5 + m[9]  as f64 * 0.5 + m[13] as f64,
+            m[0] as f64 * 0.5 + m[4] as f64 * 0.5 + m[8] as f64 * 0.5 + m[12] as f64,
+            m[1] as f64 * 0.5 + m[5] as f64 * 0.5 + m[9] as f64 * 0.5 + m[13] as f64,
             m[2] as f64 * 0.5 + m[6] as f64 * 0.5 + m[10] as f64 * 0.5 + m[14] as f64,
         ]
     }
@@ -27,14 +27,20 @@ impl VolumeTransform {
     /// Returns the 8 corners of this volume in world space.
     pub fn world_corners(&self) -> [[f64; 3]; 8] {
         let corners_local = [
-            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
         ];
         corners_local.map(|[x, y, z]| {
             let m = &self.model;
             [
-                m[0] as f64 * x + m[4] as f64 * y + m[8]  as f64 * z + m[12] as f64,
-                m[1] as f64 * x + m[5] as f64 * y + m[9]  as f64 * z + m[13] as f64,
+                m[0] as f64 * x + m[4] as f64 * y + m[8] as f64 * z + m[12] as f64,
+                m[1] as f64 * x + m[5] as f64 * y + m[9] as f64 * z + m[13] as f64,
                 m[2] as f64 * x + m[6] as f64 * y + m[10] as f64 * z + m[14] as f64,
             ]
         })
@@ -78,10 +84,7 @@ pub fn compute_volume_transform(shape: [u32; 3], scale: [f64; 3]) -> VolumeTrans
     //   [0   0   sz  0]
     //   [0   0   0   1]
     let model = [
-        sx,  0.0, 0.0, 0.0,
-        0.0, sy,  0.0, 0.0,
-        0.0, 0.0, sz,  0.0,
-        0.0, 0.0, 0.0, 1.0,
+        sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, sz, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
 
     // Inverse: Scale(1/sx, 1/sy, 1/sz), corner at origin
@@ -94,13 +97,14 @@ pub fn compute_volume_transform(shape: [u32; 3], scale: [f64; 3]) -> VolumeTrans
     let isz = if sz.abs() > 1e-12 { 1.0 / sz } else { 0.0 };
 
     let inv_model = [
-        isx, 0.0, 0.0, 0.0,
-        0.0, isy, 0.0, 0.0,
-        0.0, 0.0, isz, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        isx, 0.0, 0.0, 0.0, 0.0, isy, 0.0, 0.0, 0.0, 0.0, isz, 0.0, 0.0, 0.0, 0.0, 1.0,
     ];
 
-    VolumeTransform { model, inv_model, max_physical_extent: max_phys }
+    VolumeTransform {
+        model,
+        inv_model,
+        max_physical_extent: max_phys,
+    }
 }
 
 /// Compute a model matrix like `compute_volume_transform`, but with an XY
@@ -141,10 +145,7 @@ pub fn compute_member_transform(
     //   [0   0   sz  0]
     //   [tx  ty  0   1]
     let model = [
-        sx,  0.0, 0.0, 0.0,
-        0.0, sy,  0.0, 0.0,
-        0.0, 0.0, sz,  0.0,
-        tx,  ty,  0.0, 1.0,
+        sx, 0.0, 0.0, 0.0, 0.0, sy, 0.0, 0.0, 0.0, 0.0, sz, 0.0, tx, ty, 0.0, 1.0,
     ];
 
     let isx = if sx.abs() > 1e-12 { 1.0 / sx } else { 0.0 };
@@ -157,13 +158,29 @@ pub fn compute_member_transform(
     //   [0     0     1/sz  0]
     //   [-tx/sx -ty/sy 0   1]
     let inv_model = [
-        isx, 0.0, 0.0, 0.0,
-        0.0, isy, 0.0, 0.0,
-        0.0, 0.0, isz, 0.0,
-        -tx * isx, -ty * isy, 0.0, 1.0,
+        isx,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        isy,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        isz,
+        0.0,
+        -tx * isx,
+        -ty * isy,
+        0.0,
+        1.0,
     ];
 
-    VolumeTransform { model, inv_model, max_physical_extent: phys[0].max(phys[1]).max(phys[2]) }
+    VolumeTransform {
+        model,
+        inv_model,
+        max_physical_extent: phys[0].max(phys[1]).max(phys[2]),
+    }
 }
 
 #[cfg(test)]

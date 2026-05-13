@@ -217,8 +217,8 @@ describe("epoch caching", () => {
     return {
       scene,
       datasets,
-      client: { coldState: vi.fn(), viewHotState: vi.fn() } as any,
-      canvas: { clientWidth: 800, clientHeight: 600 } as any,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
       cpuCache: createMockCpuCache(),
@@ -425,8 +425,8 @@ describe("multi-dataset planning", () => {
     return {
       scene,
       datasets,
-      client: { coldState: vi.fn(), viewHotState: vi.fn() } as any,
-      canvas: { clientWidth: 800, clientHeight: 600 } as any,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown as TickContext["client"],
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
       cpuCache: createMockCpuCache(),

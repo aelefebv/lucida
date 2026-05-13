@@ -15,7 +15,7 @@ use std::time::Duration;
 use lucida_proxy::{ProxyKind, ProxySpec, source_content_hash};
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 
-use crate::common::{build_single_field_dataset, SyntheticDataset};
+use crate::common::{SyntheticDataset, build_single_field_dataset};
 
 fn proxy_spec_for(ds: &SyntheticDataset) -> ProxySpec {
     ProxySpec {
@@ -46,7 +46,10 @@ async fn cache_hit_short_circuits_generation() {
 
     // First request: generates and writes to cache.
     let _first = generator.request(spec.clone(), 0).await.unwrap();
-    let after_first = ds.instrumented.get_count.load(std::sync::atomic::Ordering::SeqCst);
+    let after_first = ds
+        .instrumented
+        .get_count
+        .load(std::sync::atomic::Ordering::SeqCst);
     assert!(
         after_first > 0,
         "first request should hit the store (got count = {after_first})"
@@ -54,7 +57,10 @@ async fn cache_hit_short_circuits_generation() {
 
     // Second request for the same spec: pre-populated cache → no store reads.
     let _second = generator.request(spec.clone(), 0).await.unwrap();
-    let after_second = ds.instrumented.get_count.load(std::sync::atomic::Ordering::SeqCst);
+    let after_second = ds
+        .instrumented
+        .get_count
+        .load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         after_second, after_first,
         "cache hit must not trigger any new store reads"
@@ -90,7 +96,9 @@ async fn in_flight_dedup_runs_one_generation_for_concurrent_requests() {
     for _ in 0..n_clients {
         let generator = generator.clone();
         let spec = spec.clone();
-        handles.push(tokio::spawn(async move { generator.request(spec, 0).await }));
+        handles.push(tokio::spawn(
+            async move { generator.request(spec, 0).await },
+        ));
     }
 
     let mut results = Vec::new();
@@ -204,9 +212,15 @@ async fn second_call_after_completion_uses_cache() {
     let spec = proxy_spec_for(&ds);
 
     let _ = generator.request(spec.clone(), 0).await.unwrap();
-    let after_first = ds.instrumented.get_count.load(std::sync::atomic::Ordering::SeqCst);
+    let after_first = ds
+        .instrumented
+        .get_count
+        .load(std::sync::atomic::Ordering::SeqCst);
     let _ = generator.request(spec.clone(), 0).await.unwrap();
-    let after_second = ds.instrumented.get_count.load(std::sync::atomic::Ordering::SeqCst);
+    let after_second = ds
+        .instrumented
+        .get_count
+        .load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(after_first, after_second, "cache hit should skip store");
 }
 

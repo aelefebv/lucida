@@ -83,8 +83,7 @@ const COLD_STATE_CHURN_SUSTAIN_MS = 2000;
 const COLD_STATE_CHURN_LOG_RATE_LIMIT_MS = 2000;
 
 /** Per-epoch cause keys we attribute rebuilds to. */
-const COLD_STATE_EPOCH_KEYS = ["content", "layout", "view", "selection", "asset"] as const;
-type ColdStateCauseKey = (typeof COLD_STATE_EPOCH_KEYS)[number];
+type ColdStateCauseKey = "content" | "layout" | "view" | "selection" | "asset";
 
 // ---------------------------------------------------------------------------
 // Upload (CPU → GPU hand-off) telemetry constants
@@ -707,9 +706,22 @@ export class Orchestrator {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
 
-      // 3b. View query — may return null if dataset not yet registered in scene
+      // 3b. View query — may return null if dataset not yet registered in scene.
+      // Wire shape from the wasm `view_query` JSON output (snake_case fields
+      // map to camelCase in EntitySnapshot below).
+      type VisibleEntityRow = {
+        entity_id: string;
+        image_id: string;
+        kind: "Image" | "Well" | "Field";
+        visible: boolean;
+        projected_diagonal_px: number;
+        projected_area_px2: number;
+        centroid_world: [number, number, number];
+        ideal_target_lod: number;
+        importance: number;
+      };
       const vqJson = ctx.scene.view_query(dsId);
-      const vq = JSON.parse(vqJson);
+      const vq = JSON.parse(vqJson) as { visible_entities?: VisibleEntityRow[] } | null;
       if (!vq || !vq.visible_entities) continue;
 
       // 3c. Member positions
@@ -729,7 +741,7 @@ export class Orchestrator {
         parentByEntityId.set(ent.id, ent.parent ?? null);
       }
 
-      const entities: EntitySnapshot[] = vq.visible_entities.map((e: any) => {
+      const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
         const imgSpec = imageSpecById.get(e.image_id);
         const numLevels = imgSpec ? imgSpec.multiscale.levels.length : 1;
         const levels = imgSpec ? imgSpec.multiscale.levels : [];
@@ -737,7 +749,7 @@ export class Orchestrator {
         return {
           entityId: e.entity_id,
           imageId: e.image_id,
-          kind: e.kind as "Image" | "Well" | "Field",
+          kind: e.kind,
           visible: e.visible,
           projectedDiagonalPx: e.projected_diagonal_px,
           projectedAreaPx2: e.projected_area_px2,

@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
+use axum::Extension;
 use axum::extract::{Query, State};
 use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::http::{Request, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse, Json, Response};
-use axum::Extension;
 use base64::Engine;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::Deserialize;
@@ -27,7 +27,7 @@ use super::cookie::{
 };
 use super::google_oauth::{GoogleOAuthClient, OAuthError, Prompt};
 use super::pending_auth::{PendingAuth, PendingAuthStore};
-use super::principal::{principal_or_rejection_from_claims, RejectionReason};
+use super::principal::{RejectionReason, principal_or_rejection_from_claims};
 use super::session_store::{LoginSession, LoginSessionStore};
 
 /// `GET /auth/whoami` — returns the current `AuthPrincipal` JSON when
@@ -62,10 +62,7 @@ pub struct DevLoginState {
 /// `cfg!(debug_assertions)`). The handler itself is unconditional;
 /// production builds simply don't expose the route, so requests hit
 /// axum's default 404.
-pub async fn dev_login<B>(
-    State(state): State<DevLoginState>,
-    req: Request<B>,
-) -> Response {
+pub async fn dev_login<B>(State(state): State<DevLoginState>, req: Request<B>) -> Response {
     let (parts, _body) = req.into_parts();
     let now = Utc::now();
     let id = uuid::Uuid::new_v4().to_string();
@@ -77,8 +74,7 @@ pub async fn dev_login<B>(
         created_at: now,
         last_used_at: now,
         expires_at: now
-            + ChronoDuration::from_std(state.config.hard_cap)
-                .unwrap_or(ChronoDuration::hours(720)),
+            + ChronoDuration::from_std(state.config.hard_cap).unwrap_or(ChronoDuration::hours(720)),
     };
 
     if let Err(e) = state.store.create(session.clone()).await {
@@ -130,10 +126,7 @@ pub struct LogoutState {
 /// Returns 302 to `/`. fetch() in the web client follows redirects by
 /// default but the body of `/` is irrelevant — useAuthState refreshes
 /// via `/auth/whoami` after the call resolves, which then returns 401.
-pub async fn logout<B>(
-    State(state): State<LogoutState>,
-    req: Request<B>,
-) -> Response {
+pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Response {
     let (parts, _body) = req.into_parts();
     let session_id = read_session_cookie(&parts, &state.config.cookie_name);
 
@@ -168,7 +161,10 @@ pub async fn logout<B>(
     // hit but storage hiccuped." Email may be None for cookieless
     // calls or expired/unknown sessions; that's fine — slice 8 will
     // expand the audit shape, this slice just lands the event.
-    info!(email = email.as_deref().unwrap_or("<unknown>"), "auth.logout");
+    info!(
+        email = email.as_deref().unwrap_or("<unknown>"),
+        "auth.logout"
+    );
 
     // Two Set-Cookie headers: clear `lucida_session`, and set the
     // `lucida_signed_out` marker. The marker survives the page refresh
@@ -442,8 +438,7 @@ pub async fn auth_callback(
         created_at: now,
         last_used_at: now,
         expires_at: now
-            + ChronoDuration::from_std(state.config.hard_cap)
-                .unwrap_or(ChronoDuration::hours(720)),
+            + ChronoDuration::from_std(state.config.hard_cap).unwrap_or(ChronoDuration::hours(720)),
     };
     if let Err(e) = state.session_store.create(session).await {
         error!(error = %e, email = %principal.email, "auth.signin.error.session_create");
@@ -538,14 +533,14 @@ fn first_nonempty<'a>(opts: &[Option<&'a str>]) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::middleware::{auth_middleware, SharedExtractor};
+    use crate::auth::middleware::{SharedExtractor, auth_middleware};
     use crate::auth::principal::SessionCookieExtractor;
     use crate::auth::session_store_memory::MemorySessionStore;
-    use axum::body::{to_bytes, Body};
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
     use axum::http::Request;
     use axum::middleware::from_fn_with_state;
     use axum::routing::{get, post};
-    use axum::Router;
     use tower::ServiceExt;
 
     fn dev_state() -> DevLoginState {
@@ -642,11 +637,7 @@ mod tests {
             .unwrap()
             .to_string();
         // Strip attributes; only the name=value pair goes back as Cookie.
-        let cookie_pair = cookie_header
-            .split(';')
-            .next()
-            .unwrap()
-            .to_string();
+        let cookie_pair = cookie_header.split(';').next().unwrap().to_string();
 
         // Step 2: hit /auth/whoami with the cookie
         let whoami_req = Request::builder()
@@ -832,10 +823,7 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
 
         assert_eq!(res.status(), StatusCode::FOUND);
-        assert_eq!(
-            res.headers().get(LOCATION).unwrap().to_str().unwrap(),
-            "/"
-        );
+        assert_eq!(res.headers().get(LOCATION).unwrap().to_str().unwrap(), "/");
         // Even cookieless callers get the clearing cookie + the marker —
         // logout's contract is shape-stable regardless of inbound state.
         let set_cookies: Vec<&str> = res
@@ -844,8 +832,16 @@ mod tests {
             .iter()
             .map(|v| v.to_str().unwrap())
             .collect();
-        assert!(set_cookies.iter().any(|c| c.contains("lucida_session=") && c.contains("Max-Age=0")));
-        assert!(set_cookies.iter().any(|c| c.contains("lucida_signed_out=1")));
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.contains("lucida_session=") && c.contains("Max-Age=0"))
+        );
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.contains("lucida_signed_out=1"))
+        );
         // No rows existed; no rows now.
         assert!(store.is_empty());
     }
@@ -873,8 +869,16 @@ mod tests {
             .iter()
             .map(|v| v.to_str().unwrap())
             .collect();
-        assert!(set_cookies.iter().any(|c| c.contains("lucida_session=") && c.contains("Max-Age=0")));
-        assert!(set_cookies.iter().any(|c| c.contains("lucida_signed_out=1")));
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.contains("lucida_session=") && c.contains("Max-Age=0"))
+        );
+        assert!(
+            set_cookies
+                .iter()
+                .any(|c| c.contains("lucida_signed_out=1"))
+        );
     }
 
     // -- redirect_target + random_state_token (slice 4) -----------------

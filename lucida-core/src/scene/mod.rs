@@ -1,8 +1,8 @@
 mod types;
 
 pub use types::{
-    BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings,
-    DisplayState, DocumentState, MemberChunkPlan, RenderMode,
+    BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
+    MemberChunkPlan, RenderMode,
 };
 
 use std::collections::HashMap;
@@ -79,14 +79,18 @@ impl Scene {
 
     /// Get the volume transform for the first dataset's first image.
     pub fn volume_transform(&self) -> Option<&VolumeTransform> {
-        self.derived.values().next()
+        self.derived
+            .values()
+            .next()
             .and_then(|d| d.members.first())
             .map(|m| &m.volume_transform)
     }
 
     /// Get the volume shape [Z, Y, X] for the first dataset's first image.
     pub fn volume_shape(&self) -> Option<[u32; 3]> {
-        self.derived.values().next()
+        self.derived
+            .values()
+            .next()
             .and_then(|d| d.members.first())
             .and_then(|m| m.levels.first())
             .map(|l| [l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
@@ -148,7 +152,9 @@ impl Scene {
     /// Used to apply a global normalization correction so multi-dataset
     /// scenes preserve relative physical sizes in 3D.
     pub fn global_max_physical_extent(&self) -> f64 {
-        let max = self.derived.values()
+        let max = self
+            .derived
+            .values()
             .flat_map(|d| d.members.iter())
             .map(|m| {
                 let e = m.volume_transform.max_physical_extent;
@@ -161,11 +167,17 @@ impl Scene {
     /// Returns the maximum physical Y extent across all datasets.
     /// Used to top-align datasets in 3D mode.
     pub fn global_max_physical_y(&self) -> f64 {
-        let max = self.derived.values()
+        let max = self
+            .derived
+            .values()
             .flat_map(|d| d.members.iter())
             .map(|m| {
                 let t = &m.volume_transform;
-                let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+                let ds_max = if t.max_physical_extent > 0.0 {
+                    t.max_physical_extent
+                } else {
+                    1.0
+                };
                 t.model[5] as f64 * ds_max
             })
             .fold(0.0_f64, f64::max);
@@ -177,11 +189,21 @@ impl Scene {
     pub fn chunk_plan(&self) -> ChunkRequestPlan {
         let ds_id = match self.document.manifests.keys().next() {
             Some(id) => id.clone(),
-            None => return ChunkRequestPlan { needed: Vec::new(), prefetch: Vec::new() },
+            None => {
+                return ChunkRequestPlan {
+                    needed: Vec::new(),
+                    prefetch: Vec::new(),
+                };
+            }
         };
         let members = match self.chunk_plan_for(&ds_id) {
             Some(m) => m,
-            None => return ChunkRequestPlan { needed: Vec::new(), prefetch: Vec::new() },
+            None => {
+                return ChunkRequestPlan {
+                    needed: Vec::new(),
+                    prefetch: Vec::new(),
+                };
+            }
         };
         // Flatten all members into a single ChunkRequestPlan for backward compat.
         let mut needed = Vec::new();
@@ -209,14 +231,20 @@ impl Scene {
 
         let mut plans = Vec::new();
         for member in &derived.members {
-            if member.levels.is_empty() { continue; }
+            if member.levels.is_empty() {
+                continue;
+            }
 
             let level0 = &member.levels[0];
-            let fov_w = level0.shape[4] as f64;  // X
-            let fov_h = level0.shape[3] as f64;  // Y
+            let fov_w = level0.shape[4] as f64; // X
+            let fov_h = level0.shape[3] as f64; // Y
 
             // Compute visible region using the member's volume transform.
-            let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+            let vol_shape = [
+                level0.shape[2] as u32,
+                level0.shape[3] as u32,
+                level0.shape[4] as u32,
+            ];
             let region = self.camera.visible_region(
                 &self.view.z_range,
                 Some(&member.volume_transform),
@@ -250,21 +278,27 @@ impl Scene {
                 ],
                 z_range: region.z_range.clone(),
                 effective_zoom: region.effective_zoom,
-                sort_center: region.sort_center.map(|[cx, cy, cz]| [cx - pos_x, cy - pos_y, cz]),
-                frustum_planes: region.frustum_planes.map(|planes| {
-                    planes.map(|[a, b, c, d]| [a, b, c, d + a * pos_x + b * pos_y])
-                }),
+                sort_center: region
+                    .sort_center
+                    .map(|[cx, cy, cz]| [cx - pos_x, cy - pos_y, cz]),
+                frustum_planes: region
+                    .frustum_planes
+                    .map(|planes| planes.map(|[a, b, c, d]| [a, b, c, d + a * pos_x + b * pos_y])),
             };
 
             // Select level based on effective zoom
-            let level = chunk::select_level(local_region.effective_zoom, member.levels.len() as u32);
+            let level =
+                chunk::select_level(local_region.effective_zoom, member.levels.len() as u32);
             let level_geo = &member.levels[level as usize];
 
             let t = self.view.t;
             let c = self.view.c;
 
             let (needed, prefetch) = if !is_2d {
-                (chunk::visible_chunks(&local_region, level_geo, t, c, level0), vec![])
+                (
+                    chunk::visible_chunks(&local_region, level_geo, t, c, level0),
+                    vec![],
+                )
             } else {
                 chunk::visible_and_prefetch_chunks(&local_region, level_geo, t, c, level0)
             };
@@ -289,8 +323,14 @@ impl Scene {
             Some(l) => l,
             None => {
                 let id = VolumeTransform {
-                    model: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
-                    inv_model: [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+                    model: [
+                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                        1.0,
+                    ],
+                    inv_model: [
+                        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+                        1.0,
+                    ],
                     max_physical_extent: 1.0,
                 };
                 return (id.clone(), id);
@@ -298,13 +338,33 @@ impl Scene {
         };
 
         let t = &member.volume_transform;
-        let max_phys = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
-        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+        let max_phys = if t.max_physical_extent > 0.0 {
+            t.max_physical_extent
+        } else {
+            1.0
+        };
+        let vol_shape = [
+            level0.shape[2] as u32,
+            level0.shape[3] as u32,
+            level0.shape[4] as u32,
+        ];
 
         // Recover voxel scale from volume transform
-        let scale_x = if vol_shape[2] > 0 { t.model[0] as f64 * max_phys / vol_shape[2] as f64 } else { 1.0 };
-        let scale_y = if vol_shape[1] > 0 { t.model[5] as f64 * max_phys / vol_shape[1] as f64 } else { 1.0 };
-        let scale_z = if vol_shape[0] > 0 { t.model[10] as f64 * max_phys / vol_shape[0] as f64 } else { 1.0 };
+        let scale_x = if vol_shape[2] > 0 {
+            t.model[0] as f64 * max_phys / vol_shape[2] as f64
+        } else {
+            1.0
+        };
+        let scale_y = if vol_shape[1] > 0 {
+            t.model[5] as f64 * max_phys / vol_shape[1] as f64
+        } else {
+            1.0
+        };
+        let scale_z = if vol_shape[0] > 0 {
+            t.model[10] as f64 * max_phys / vol_shape[0] as f64
+        } else {
+            1.0
+        };
 
         // Y-flip for 3D (Y-up convention)
         let flipped_offset = [
@@ -343,8 +403,16 @@ impl Scene {
         inv_model[10] *= inv_correction;
         inv_model[13] -= top_align * inv_model[5];
 
-        let fwd = VolumeTransform { model, inv_model: [0.0; 16], max_physical_extent: max_phys };
-        let inv = VolumeTransform { model: [0.0; 16], inv_model, max_physical_extent: max_phys };
+        let fwd = VolumeTransform {
+            model,
+            inv_model: [0.0; 16],
+            max_physical_extent: max_phys,
+        };
+        let inv = VolumeTransform {
+            model: [0.0; 16],
+            inv_model,
+            max_physical_extent: max_phys,
+        };
         (fwd, inv)
     }
 
@@ -357,7 +425,12 @@ impl Scene {
     /// For 3D modes (Arcball/Fly): uses the rendering transform (which
     /// includes Y-flip, global correction, and top-alignment) so the ray
     /// test matches what the camera actually sees.
-    pub fn ray_pick(&self, dataset_id: &DatasetId, screen_x: f64, screen_y: f64) -> Option<crate::ray::RayHit> {
+    pub fn ray_pick(
+        &self,
+        dataset_id: &DatasetId,
+        screen_x: f64,
+        screen_y: f64,
+    ) -> Option<crate::ray::RayHit> {
         let derived = self.derived.get(dataset_id)?;
         let world_ray = self.camera.unproject_ray(screen_x, screen_y);
         let is_2d = matches!(self.camera, Camera::Slice(_));
@@ -379,9 +452,7 @@ impl Scene {
                 let rx = world_ray.origin[0];
                 let ry = world_ray.origin[1];
 
-                if rx >= pos_x && rx <= pos_x + fov_w
-                    && ry >= pos_y && ry <= pos_y + fov_h
-                {
+                if rx >= pos_x && rx <= pos_x + fov_w && ry >= pos_y && ry <= pos_y + fov_h {
                     Some(([rx, ry, 0.0], 0.0))
                 } else {
                     None
@@ -406,15 +477,15 @@ impl Scene {
                 })
             };
 
-            if let Some((hit_world, distance)) = hit_result {
-                if closest.as_ref().map_or(true, |c| distance < c.distance) {
-                    closest = Some(crate::ray::RayHit {
-                        entity_id: member.entity_id.clone(),
-                        image_id: member.image_id.clone(),
-                        world_position: hit_world,
-                        distance,
-                    });
-                }
+            if let Some((hit_world, distance)) = hit_result
+                && closest.as_ref().is_none_or(|c| distance < c.distance)
+            {
+                closest = Some(crate::ray::RayHit {
+                    entity_id: member.entity_id.clone(),
+                    image_id: member.image_id.clone(),
+                    world_position: hit_world,
+                    distance,
+                });
             }
         }
 
@@ -431,7 +502,8 @@ impl Scene {
                 self.document.registered_layouts.get(id),
                 self.document.active_layout_ids.get(id),
             );
-            self.derived.insert(id.clone(), build_derived_state(manifest, &layout));
+            self.derived
+                .insert(id.clone(), build_derived_state(manifest, &layout));
         }
     }
 
@@ -597,15 +669,17 @@ pub fn resolve_layout(
             return layout.clone();
         }
         // Then registered layouts
-        if let Some(layouts) = registered {
-            if let Some(layout) = layouts.iter().find(|l| &l.id == id) {
-                return layout.clone();
-            }
+        if let Some(layouts) = registered
+            && let Some(layout) = layouts.iter().find(|l| &l.id == id)
+        {
+            return layout.clone();
         }
     }
 
     // Fallback: use default_layout_id from the manifest
-    manifest.default_layout_id.as_ref()
+    manifest
+        .default_layout_id
+        .as_ref()
         .and_then(|id| manifest.source_layouts().iter().find(|l| &l.id == id))
         .or_else(|| manifest.source_layouts().first())
         .cloned()
@@ -635,22 +709,20 @@ pub fn build_derived_state(manifest: &DatasetManifest, layout: &LayoutSpec) -> D
 
         // Compute volume transform from level 0 geometry
         let vt = if let Some(level0) = image.multiscale.levels.first() {
-            let shape_3d = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+            let shape_3d = [
+                level0.shape[2] as u32,
+                level0.shape[3] as u32,
+                level0.shape[4] as u32,
+            ];
             let scale_3d = [level0.scale[2], level0.scale[3], level0.scale[4]];
             transform::compute_volume_transform(shape_3d, scale_3d)
         } else {
             VolumeTransform {
                 model: [
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ],
                 inv_model: [
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ],
                 max_physical_extent: 1.0,
             }
@@ -691,22 +763,28 @@ fn find_entity_position(
 
     // Find parent and compose
     let entity = entities.iter().find(|e| &e.id == entity_id);
-    if let Some(entity) = entity {
-        if let Some(parent_id) = &entity.parent {
-            // Get parent's position from layout
-            let parent_pos = layout.placements.iter()
-                .find(|p| &p.entity_id == parent_id)
-                .map(|p| p.position)
-                .unwrap_or([0.0, 0.0]);
+    if let Some(entity) = entity
+        && let Some(parent_id) = &entity.parent
+    {
+        // Get parent's position from layout
+        let parent_pos = layout
+            .placements
+            .iter()
+            .find(|p| &p.entity_id == parent_id)
+            .map(|p| p.position)
+            .unwrap_or([0.0, 0.0]);
 
-            // Get field->parent transform
-            let transform_offset = transforms.iter()
-                .find(|t| &t.from == entity_id && &t.to == parent_id)
-                .map(|t| [t.transform.matrix()[12], t.transform.matrix()[13]])
-                .unwrap_or([0.0, 0.0]);
+        // Get field->parent transform
+        let transform_offset = transforms
+            .iter()
+            .find(|t| &t.from == entity_id && &t.to == parent_id)
+            .map(|t| [t.transform.matrix()[12], t.transform.matrix()[13]])
+            .unwrap_or([0.0, 0.0]);
 
-            return [parent_pos[0] + transform_offset[0], parent_pos[1] + transform_offset[1]];
-        }
+        return [
+            parent_pos[0] + transform_offset[0],
+            parent_pos[1] + transform_offset[1],
+        ];
     }
 
     [0.0, 0.0]
@@ -742,11 +820,26 @@ pub(crate) mod test_helpers {
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
                     axes: vec![
-                        Axis { name: "t".to_string(), kind: AxisKind::Time },
-                        Axis { name: "c".to_string(), kind: AxisKind::Channel },
-                        Axis { name: "z".to_string(), kind: AxisKind::Space },
-                        Axis { name: "y".to_string(), kind: AxisKind::Space },
-                        Axis { name: "x".to_string(), kind: AxisKind::Space },
+                        Axis {
+                            name: "t".to_string(),
+                            kind: AxisKind::Time,
+                        },
+                        Axis {
+                            name: "c".to_string(),
+                            kind: AxisKind::Channel,
+                        },
+                        Axis {
+                            name: "z".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".to_string(),
+                            kind: AxisKind::Space,
+                        },
                     ],
                     levels: vec![LevelGeometry {
                         level_index: 0,
@@ -772,7 +865,11 @@ pub(crate) mod test_helpers {
             }],
         });
 
-        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened {
+            manifest,
+            fetch,
+            catalog: AssetCatalog::default(),
+        }
     }
 
     /// Create a DatasetOpened with specific shape and multiple levels.
@@ -795,17 +892,17 @@ pub(crate) mod test_helpers {
                 shape: [
                     shape[0],
                     shape[1],
-                    (shape[2] + scale - 1) / scale,
-                    (shape[3] + scale - 1) / scale,
-                    (shape[4] + scale - 1) / scale,
+                    shape[2].div_ceil(scale),
+                    shape[3].div_ceil(scale),
+                    shape[4].div_ceil(scale),
                 ],
                 chunk_shape,
                 grid_shape: [
-                    ((shape[0] + chunk_shape[0] - 1) / chunk_shape[0]),
-                    ((shape[1] + chunk_shape[1] - 1) / chunk_shape[1]),
-                    (((shape[2] + scale - 1) / scale + chunk_shape[2] - 1) / chunk_shape[2]),
-                    (((shape[3] + scale - 1) / scale + chunk_shape[3] - 1) / chunk_shape[3]),
-                    (((shape[4] + scale - 1) / scale + chunk_shape[4] - 1) / chunk_shape[4]),
+                    shape[0].div_ceil(chunk_shape[0]),
+                    shape[1].div_ceil(chunk_shape[1]),
+                    shape[2].div_ceil(scale).div_ceil(chunk_shape[2]),
+                    shape[3].div_ceil(scale).div_ceil(chunk_shape[3]),
+                    shape[4].div_ceil(scale).div_ceil(chunk_shape[4]),
                 ],
                 scale: [1.0, 1.0, 1.0, 1.0, 1.0],
             });
@@ -830,11 +927,26 @@ pub(crate) mod test_helpers {
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
                     axes: vec![
-                        Axis { name: "t".to_string(), kind: AxisKind::Time },
-                        Axis { name: "c".to_string(), kind: AxisKind::Channel },
-                        Axis { name: "z".to_string(), kind: AxisKind::Space },
-                        Axis { name: "y".to_string(), kind: AxisKind::Space },
-                        Axis { name: "x".to_string(), kind: AxisKind::Space },
+                        Axis {
+                            name: "t".to_string(),
+                            kind: AxisKind::Time,
+                        },
+                        Axis {
+                            name: "c".to_string(),
+                            kind: AxisKind::Channel,
+                        },
+                        Axis {
+                            name: "z".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".to_string(),
+                            kind: AxisKind::Space,
+                        },
                     ],
                     levels,
                     data_type: DataType::Uint16,
@@ -854,7 +966,11 @@ pub(crate) mod test_helpers {
             }],
         });
 
-        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened {
+            manifest,
+            fetch,
+            catalog: AssetCatalog::default(),
+        }
     }
 
     /// Create a DatasetOpened for a plate with multiple image members.
@@ -896,22 +1012,37 @@ pub(crate) mod test_helpers {
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
                     axes: vec![
-                        Axis { name: "t".to_string(), kind: AxisKind::Time },
-                        Axis { name: "c".to_string(), kind: AxisKind::Channel },
-                        Axis { name: "z".to_string(), kind: AxisKind::Space },
-                        Axis { name: "y".to_string(), kind: AxisKind::Space },
-                        Axis { name: "x".to_string(), kind: AxisKind::Space },
+                        Axis {
+                            name: "t".to_string(),
+                            kind: AxisKind::Time,
+                        },
+                        Axis {
+                            name: "c".to_string(),
+                            kind: AxisKind::Channel,
+                        },
+                        Axis {
+                            name: "z".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".to_string(),
+                            kind: AxisKind::Space,
+                        },
                     ],
                     levels: vec![LevelGeometry {
                         level_index: 0,
                         shape: image_shape,
                         chunk_shape,
                         grid_shape: [
-                            (image_shape[0] + chunk_shape[0] - 1) / chunk_shape[0],
-                            (image_shape[1] + chunk_shape[1] - 1) / chunk_shape[1],
-                            (image_shape[2] + chunk_shape[2] - 1) / chunk_shape[2],
-                            (image_shape[3] + chunk_shape[3] - 1) / chunk_shape[3],
-                            (image_shape[4] + chunk_shape[4] - 1) / chunk_shape[4],
+                            image_shape[0].div_ceil(chunk_shape[0]),
+                            image_shape[1].div_ceil(chunk_shape[1]),
+                            image_shape[2].div_ceil(chunk_shape[2]),
+                            image_shape[3].div_ceil(chunk_shape[3]),
+                            image_shape[4].div_ceil(chunk_shape[4]),
                         ],
                         scale: [1.0, 1.0, 1.0, 1.0, 1.0],
                     }],
@@ -954,7 +1085,11 @@ pub(crate) mod test_helpers {
             images: fetch_images,
         });
 
-        DatasetOpened { manifest, fetch, catalog: AssetCatalog::default() }
+        DatasetOpened {
+            manifest,
+            fetch,
+            catalog: AssetCatalog::default(),
+        }
     }
 }
 
@@ -974,7 +1109,9 @@ mod tests {
     fn registered_dataset_produces_chunks() {
         let mut scene = Scene::new([512, 512]);
         let reg = test_helpers::make_dataset_opened_with_shape(
-            "ds1", "test", 1,
+            "ds1",
+            "test",
+            1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
@@ -988,7 +1125,9 @@ mod tests {
     fn changing_slice_updates_chunk_coords() {
         let mut scene = Scene::new([512, 512]);
         let reg = test_helpers::make_dataset_opened_with_shape(
-            "ds1", "test", 1,
+            "ds1",
+            "test",
+            1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
@@ -1007,7 +1146,9 @@ mod tests {
     fn z_slab_produces_chunks_across_z() {
         let mut scene = Scene::new([512, 512]);
         let reg = test_helpers::make_dataset_opened_with_shape(
-            "ds1", "test", 1,
+            "ds1",
+            "test",
+            1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
@@ -1053,7 +1194,12 @@ mod tests {
         assert_eq!(parsed.view.t, 2);
         assert_eq!(parsed.view.c, 1);
         assert_eq!(parsed.document.manifests.len(), 1);
-        assert!(parsed.document.manifests.contains_key(&DatasetId("ds1".into())));
+        assert!(
+            parsed
+                .document
+                .manifests
+                .contains_key(&DatasetId("ds1".into()))
+        );
         if let Camera::Slice(v) = &parsed.camera {
             assert_eq!(v.viewport, [800, 600]);
         } else {
@@ -1115,7 +1261,10 @@ mod tests {
         let reg2 = test_helpers::make_dataset_opened("ds1", "updated", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg2).into());
         assert_eq!(scene.document.manifests.len(), 1);
-        assert_eq!(scene.document.manifests[&DatasetId("ds1".into())].name, "updated");
+        assert_eq!(
+            scene.document.manifests[&DatasetId("ds1".into())].name,
+            "updated"
+        );
     }
 
     #[test]
@@ -1128,14 +1277,21 @@ mod tests {
         assert_eq!(scene.document.manifests.len(), 2);
         scene.remove_dataset(&DatasetId("ds1".into()));
         assert_eq!(scene.document.manifests.len(), 1);
-        assert!(scene.document.manifests.contains_key(&DatasetId("ds2".into())));
+        assert!(
+            scene
+                .document
+                .manifests
+                .contains_key(&DatasetId("ds2".into()))
+        );
     }
 
     #[test]
     fn chunk_plan_for_returns_member_plans() {
         let mut scene = Scene::new([512, 512]);
         let reg = test_helpers::make_dataset_opened_with_shape(
-            "ds1", "test", 1,
+            "ds1",
+            "test",
+            1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
@@ -1152,7 +1308,9 @@ mod tests {
     fn chunk_plan_for_single_member_matches_flat_plan() {
         let mut scene = Scene::new([512, 512]);
         let reg = test_helpers::make_dataset_opened_with_shape(
-            "ds1", "test", 1,
+            "ds1",
+            "test",
+            1,
             [1, 1, 256, 4096, 4096],
             [1, 1, 64, 256, 256],
             5,
@@ -1182,11 +1340,9 @@ mod tests {
         // should see member at [0,0] but not the one at [10000, 0].
         let mut scene = Scene::new([512, 512]);
         let reg = test_helpers::make_plate_dataset_opened(
-            "plate", "plate",
-            vec![
-                ("m1", [0.0, 0.0]),
-                ("m2", [10000.0, 0.0]),
-            ],
+            "plate",
+            "plate",
+            vec![("m1", [0.0, 0.0]), ("m2", [10000.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
@@ -1224,7 +1380,11 @@ mod tests {
     #[test]
     fn ray_pick_nonexistent_dataset() {
         let scene = Scene::new([800, 600]);
-        assert!(scene.ray_pick(&DatasetId::from("nope"), 400.0, 300.0).is_none());
+        assert!(
+            scene
+                .ray_pick(&DatasetId::from("nope"), 400.0, 300.0)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1236,11 +1396,9 @@ mod tests {
             v.center = [256.0, 128.0];
         }
         let reg = test_helpers::make_plate_dataset_opened(
-            "plate", "plate",
-            vec![
-                ("m1", [0.0, 0.0]),
-                ("m2", [256.0, 0.0]),
-            ],
+            "plate",
+            "plate",
+            vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
             [1, 1, 1, 256, 256],
             [1, 1, 1, 256, 256],
         );
@@ -1248,7 +1406,13 @@ mod tests {
         let ds_id = DatasetId("plate".into());
         let plans = scene.chunk_plan_for(&ds_id).unwrap();
         let ids: Vec<&ImageId> = plans.iter().map(|p| &p.image_id).collect();
-        assert!(ids.contains(&&ImageId("m1-image".into())), "m1 should be visible");
-        assert!(ids.contains(&&ImageId("m2-image".into())), "m2 should be visible");
+        assert!(
+            ids.contains(&&ImageId("m1-image".into())),
+            "m1 should be visible"
+        );
+        assert!(
+            ids.contains(&&ImageId("m2-image".into())),
+            "m2 should be visible"
+        );
     }
 }

@@ -23,10 +23,7 @@ fn build_two_field_graph() -> lucida_content::DatasetManifest {
                 translation_xy: [100.0, 0.0],
             },
         ],
-        vec![
-            level5(0, [1, 1, 32, 64, 64]),
-            level5(1, [1, 1, 16, 32, 32]),
-        ],
+        vec![level5(0, [1, 1, 32, 64, 64]), level5(1, [1, 1, 16, 32, 32])],
     )
 }
 
@@ -38,7 +35,10 @@ fn hash_stable_under_reconstruction() {
     let entity = EntityId("well-A".into());
     let h1 = source_content_hash(&g1, &entity, 0, 0);
     let h2 = source_content_hash(&g2, &entity, 0, 0);
-    assert_eq!(h1, h2, "hash must be stable across identical reconstruction");
+    assert_eq!(
+        h1, h2,
+        "hash must be stable across identical reconstruction"
+    );
 }
 
 #[test]
@@ -61,10 +61,7 @@ fn hash_changes_when_transform_changes() {
                 translation_xy: [200.0, 0.0], // changed
             },
         ],
-        vec![
-            level5(0, [1, 1, 32, 64, 64]),
-            level5(1, [1, 1, 16, 32, 32]),
-        ],
+        vec![level5(0, [1, 1, 32, 64, 64]), level5(1, [1, 1, 16, 32, 32])],
     );
 
     let entity = EntityId("well-A".into());
@@ -136,10 +133,7 @@ fn hash_invariant_under_transform_field_order() {
                 translation_xy: [0.0, 0.0],
             },
         ],
-        vec![
-            level5(0, [1, 1, 32, 64, 64]),
-            level5(1, [1, 1, 16, 32, 32]),
-        ],
+        vec![level5(0, [1, 1, 32, 64, 64]), level5(1, [1, 1, 16, 32, 32])],
     );
 
     let entity = EntityId("well-A".into());
@@ -167,10 +161,7 @@ fn hash_distinguishes_unrelated_graphs() {
                 translation_xy: [100.0, 0.0],
             },
         ],
-        vec![
-            level5(0, [1, 1, 32, 64, 64]),
-            level5(1, [1, 1, 16, 32, 32]),
-        ],
+        vec![level5(0, [1, 1, 32, 64, 64]), level5(1, [1, 1, 16, 32, 32])],
     );
 
     let h1 = source_content_hash(&g1, &EntityId("well-A".into()), 0, 0);

@@ -121,10 +121,7 @@ mod tests {
                 assert_eq!(d.images[0].levels.len(), 2);
                 assert_eq!(d.images[0].levels[0].level_index, 0);
                 assert_eq!(d.images[0].levels[1].path, "s3://bucket/level1");
-                assert_eq!(
-                    d.images[0].store_prefix,
-                    Some("s3://bucket".to_string())
-                );
+                assert_eq!(d.images[0].store_prefix, Some("s3://bucket".to_string()));
             }
             _ => panic!("expected Direct variant"),
         }

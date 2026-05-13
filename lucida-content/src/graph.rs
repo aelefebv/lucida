@@ -20,6 +20,9 @@ pub struct DatasetManifest {
 }
 
 impl DatasetManifest {
+    // All eight args are required identity fields; the manifest is built once
+    // per dataset, so a builder for a single constructor would only add noise.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         dataset_id: DatasetId,
         name: String,
@@ -64,9 +67,7 @@ mod tests {
     use super::*;
     use crate::entity::{EntityKind, EntityLabels};
     use crate::id::{EntityId, ImageId};
-    use crate::image::{
-        Axis, AxisKind, DataType, LevelGeometry, MultiscaleInfo,
-    };
+    use crate::image::{Axis, AxisKind, DataType, LevelGeometry, MultiscaleInfo};
     use crate::transform::VoxelTransform;
 
     fn make_single_image_graph() -> DatasetManifest {
@@ -96,11 +97,26 @@ mod tests {
                 owner: entity_id,
                 multiscale: MultiscaleInfo {
                     axes: vec![
-                        Axis { name: "t".to_string(), kind: AxisKind::Time },
-                        Axis { name: "c".to_string(), kind: AxisKind::Channel },
-                        Axis { name: "z".to_string(), kind: AxisKind::Space },
-                        Axis { name: "y".to_string(), kind: AxisKind::Space },
-                        Axis { name: "x".to_string(), kind: AxisKind::Space },
+                        Axis {
+                            name: "t".to_string(),
+                            kind: AxisKind::Time,
+                        },
+                        Axis {
+                            name: "c".to_string(),
+                            kind: AxisKind::Channel,
+                        },
+                        Axis {
+                            name: "z".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "y".to_string(),
+                            kind: AxisKind::Space,
+                        },
+                        Axis {
+                            name: "x".to_string(),
+                            kind: AxisKind::Space,
+                        },
                     ],
                     levels: vec![LevelGeometry {
                         level_index: 0,

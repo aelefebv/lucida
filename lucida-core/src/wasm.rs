@@ -2,9 +2,9 @@ use wasm_bindgen::prelude::*;
 
 use lucida_content::{DatasetId, LayoutId, LayoutSpec};
 
-use crate::camera::{Camera, Arcball, ClipMode};
+use crate::camera::{Arcball, Camera, ClipMode};
 use crate::command::Command;
-use crate::scene::{DisplayState, DocumentState, DatasetDisplaySettings, Scene};
+use crate::scene::{DatasetDisplaySettings, DisplayState, DocumentState, Scene};
 use crate::view::ViewState;
 
 #[wasm_bindgen]
@@ -74,12 +74,8 @@ impl WasmScene {
                 .or_insert_with(Default::default);
         }
         // Remove stale entries for datasets no longer in the document.
-        let dataset_ids: std::collections::HashSet<&DatasetId> = self
-            .inner
-            .document
-            .manifests
-            .keys()
-            .collect();
+        let dataset_ids: std::collections::HashSet<&DatasetId> =
+            self.inner.document.manifests.keys().collect();
         self.inner
             .dataset_order
             .retain(|id| dataset_ids.contains(id));
@@ -113,8 +109,7 @@ impl WasmScene {
             view: ViewState,
             display: DisplayState,
         }
-        let p: Presence =
-            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        let p: Presence = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
         // Preserve local viewport size
         let viewport = self.inner.camera.viewport();
         self.inner.camera = p.camera;
@@ -341,7 +336,11 @@ impl WasmScene {
             Some(l) => l,
             None => return vec![0.0, 0.0],
         };
-        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+        let vol_shape = [
+            level0.shape[2] as u32,
+            level0.shape[3] as u32,
+            level0.shape[4] as u32,
+        ];
         let region = self.inner.camera.visible_region(
             &self.inner.view.z_range,
             Some(&member.volume_transform),
@@ -367,7 +366,11 @@ impl WasmScene {
             Some(l) => l,
             None => return "null".to_string(),
         };
-        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+        let vol_shape = [
+            level0.shape[2] as u32,
+            level0.shape[3] as u32,
+            level0.shape[4] as u32,
+        ];
         let region = self.inner.camera.visible_region(
             &self.inner.view.z_range,
             Some(&member.volume_transform),
@@ -394,7 +397,9 @@ impl WasmScene {
     /// Returns the full volume shape [Z, Y, X] for a dataset.
     pub fn dataset_volume_shape(&self, dataset_id: &str) -> Vec<u32> {
         let ds_id = DatasetId(dataset_id.to_string());
-        self.inner.derived.get(&ds_id)
+        self.inner
+            .derived
+            .get(&ds_id)
             .and_then(|d| d.members.first())
             .and_then(|m| m.levels.first())
             .map(|l| vec![l.shape[2] as u32, l.shape[3] as u32, l.shape[4] as u32])
@@ -405,17 +410,18 @@ impl WasmScene {
     /// with the member's position offset baked into the translation.
     pub fn member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
         let identity = vec![
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = match self.inner.derived.get(&ds_id) {
             Some(d) => d,
             None => return identity,
         };
-        let member = match derived.members.iter().find(|m| m.image_id.0 == member_id || m.entity_id.0 == member_id) {
+        let member = match derived
+            .members
+            .iter()
+            .find(|m| m.image_id.0 == member_id || m.entity_id.0 == member_id)
+        {
             Some(m) => m,
             None => return identity,
         };
@@ -425,17 +431,40 @@ impl WasmScene {
         };
 
         let t = &member.volume_transform;
-        let max_phys = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
-        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+        let max_phys = if t.max_physical_extent > 0.0 {
+            t.max_physical_extent
+        } else {
+            1.0
+        };
+        let vol_shape = [
+            level0.shape[2] as u32,
+            level0.shape[3] as u32,
+            level0.shape[4] as u32,
+        ];
         let fov_shape = vol_shape;
 
         // Recover voxel scale from volume transform
-        let scale_x = if fov_shape[2] > 0 { t.model[0] as f64 * max_phys / fov_shape[2] as f64 } else { 1.0 };
-        let scale_y = if fov_shape[1] > 0 { t.model[5] as f64 * max_phys / fov_shape[1] as f64 } else { 1.0 };
-        let scale_z = if fov_shape[0] > 0 { t.model[10] as f64 * max_phys / fov_shape[0] as f64 } else { 1.0 };
+        let scale_x = if fov_shape[2] > 0 {
+            t.model[0] as f64 * max_phys / fov_shape[2] as f64
+        } else {
+            1.0
+        };
+        let scale_y = if fov_shape[1] > 0 {
+            t.model[5] as f64 * max_phys / fov_shape[1] as f64
+        } else {
+            1.0
+        };
+        let scale_z = if fov_shape[0] > 0 {
+            t.model[10] as f64 * max_phys / fov_shape[0] as f64
+        } else {
+            1.0
+        };
 
         // Flip Y offset for 3D (Y-up convention)
-        let flipped_offset = [member.position[0], vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64];
+        let flipped_offset = [
+            member.position[0],
+            vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64,
+        ];
         let mt = crate::transform::compute_member_transform(
             fov_shape,
             [scale_z, scale_y, scale_x],
@@ -462,17 +491,18 @@ impl WasmScene {
     /// Returns the inverse model matrix for a specific member of a dataset.
     pub fn inv_member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
         let identity = vec![
-            1.0, 0.0, 0.0, 0.0,
-            0.0, 1.0, 0.0, 0.0,
-            0.0, 0.0, 1.0, 0.0,
-            0.0, 0.0, 0.0, 1.0,
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ];
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = match self.inner.derived.get(&ds_id) {
             Some(d) => d,
             None => return identity,
         };
-        let member = match derived.members.iter().find(|m| m.image_id.0 == member_id || m.entity_id.0 == member_id) {
+        let member = match derived
+            .members
+            .iter()
+            .find(|m| m.image_id.0 == member_id || m.entity_id.0 == member_id)
+        {
             Some(m) => m,
             None => return identity,
         };
@@ -482,15 +512,38 @@ impl WasmScene {
         };
 
         let t = &member.volume_transform;
-        let max_phys = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
-        let vol_shape = [level0.shape[2] as u32, level0.shape[3] as u32, level0.shape[4] as u32];
+        let max_phys = if t.max_physical_extent > 0.0 {
+            t.max_physical_extent
+        } else {
+            1.0
+        };
+        let vol_shape = [
+            level0.shape[2] as u32,
+            level0.shape[3] as u32,
+            level0.shape[4] as u32,
+        ];
         let fov_shape = vol_shape;
 
-        let scale_x = if fov_shape[2] > 0 { t.model[0] as f64 * max_phys / fov_shape[2] as f64 } else { 1.0 };
-        let scale_y = if fov_shape[1] > 0 { t.model[5] as f64 * max_phys / fov_shape[1] as f64 } else { 1.0 };
-        let scale_z = if fov_shape[0] > 0 { t.model[10] as f64 * max_phys / fov_shape[0] as f64 } else { 1.0 };
+        let scale_x = if fov_shape[2] > 0 {
+            t.model[0] as f64 * max_phys / fov_shape[2] as f64
+        } else {
+            1.0
+        };
+        let scale_y = if fov_shape[1] > 0 {
+            t.model[5] as f64 * max_phys / fov_shape[1] as f64
+        } else {
+            1.0
+        };
+        let scale_z = if fov_shape[0] > 0 {
+            t.model[10] as f64 * max_phys / fov_shape[0] as f64
+        } else {
+            1.0
+        };
 
-        let flipped_offset = [member.position[0], vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64];
+        let flipped_offset = [
+            member.position[0],
+            vol_shape[1] as f64 - member.position[1] - fov_shape[1] as f64,
+        ];
         let mt = crate::transform::compute_member_transform(
             fov_shape,
             [scale_z, scale_y, scale_x],
@@ -536,7 +589,16 @@ impl WasmScene {
 
     // --- Fly camera methods ---
 
-    pub fn fly_tick(&mut self, dt: f64, forward: f64, right: f64, up: f64, yaw: f64, pitch: f64, roll: f64) {
+    pub fn fly_tick(
+        &mut self,
+        dt: f64,
+        forward: f64,
+        right: f64,
+        up: f64,
+        yaw: f64,
+        pitch: f64,
+        roll: f64,
+    ) {
         if let Camera::Fly(ref mut v) = self.inner.camera {
             v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
             self.inner.epochs.view += 1;
@@ -568,14 +630,22 @@ impl WasmScene {
 
     /// Compute the world-space bounding box diagonal of the volume.
     pub fn volume_diagonal(&self) -> f64 {
-        let first_member = self.inner.derived.values().next()
+        let first_member = self
+            .inner
+            .derived
+            .values()
+            .next()
             .and_then(|d| d.members.first());
         let t = match first_member {
             Some(m) => &m.volume_transform,
             None => return 1.0,
         };
         let global_max = self.inner.global_max_physical_extent();
-        let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+        let ds_max = if t.max_physical_extent > 0.0 {
+            t.max_physical_extent
+        } else {
+            1.0
+        };
         let correction = ds_max / global_max;
         let sx = t.model[0] as f64 * correction;
         let sy = t.model[5] as f64 * correction;
@@ -610,8 +680,14 @@ impl WasmScene {
     pub fn set_clip_distance(&mut self, distance: f64) {
         let d = distance.max(0.0);
         match &mut self.inner.camera {
-            Camera::Arcball(v) => { v.clip_distance = d; self.inner.epochs.selection += 1; }
-            Camera::Fly(v) => { v.clip_distance = d; self.inner.epochs.selection += 1; }
+            Camera::Arcball(v) => {
+                v.clip_distance = d;
+                self.inner.epochs.selection += 1;
+            }
+            Camera::Fly(v) => {
+                v.clip_distance = d;
+                self.inner.epochs.selection += 1;
+            }
             Camera::Slice(_) => {}
         }
     }
@@ -622,8 +698,14 @@ impl WasmScene {
             _ => ClipMode::Plane,
         };
         match &mut self.inner.camera {
-            Camera::Arcball(v) => { v.clip_mode = m; self.inner.epochs.selection += 1; }
-            Camera::Fly(v) => { v.clip_mode = m; self.inner.epochs.selection += 1; }
+            Camera::Arcball(v) => {
+                v.clip_mode = m;
+                self.inner.epochs.selection += 1;
+            }
+            Camera::Fly(v) => {
+                v.clip_mode = m;
+                self.inner.epochs.selection += 1;
+            }
             Camera::Slice(_) => {}
         }
     }
@@ -656,10 +738,7 @@ impl WasmScene {
             Camera::Arcball(v) => v.view_proj().to_vec(),
             Camera::Fly(v) => v.view_proj().to_vec(),
             _ => vec![
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         }
     }
@@ -669,10 +748,7 @@ impl WasmScene {
             Camera::Arcball(v) => v.inv_view_proj().to_vec(),
             Camera::Fly(v) => v.inv_view_proj().to_vec(),
             _ => vec![
-                1.0, 0.0, 0.0, 0.0,
-                0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 1.0, 0.0,
-                0.0, 0.0, 0.0, 1.0,
+                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
             ],
         }
     }
@@ -728,7 +804,6 @@ impl WasmScene {
         }
     }
 
-
     // --- Layer display settings ---
 
     pub fn dataset_order(&self) -> String {
@@ -775,13 +850,20 @@ impl WasmScene {
 
     pub fn scene_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
         let ds_id = DatasetId(dataset_id.to_string());
-        let member = self.inner.derived.get(&ds_id)
+        let member = self
+            .inner
+            .derived
+            .get(&ds_id)
             .and_then(|d| d.members.first());
         match member {
             Some(m) => {
                 let t = &m.volume_transform;
                 let global_max = self.inner.global_max_physical_extent();
-                let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+                let ds_max = if t.max_physical_extent > 0.0 {
+                    t.max_physical_extent
+                } else {
+                    1.0
+                };
                 let correction = (ds_max / global_max) as f32;
                 let mut mat = t.model;
                 mat[0] *= correction;
@@ -795,10 +877,7 @@ impl WasmScene {
             }
             None => {
                 vec![
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ]
             }
         }
@@ -806,13 +885,20 @@ impl WasmScene {
 
     pub fn inv_scene_model_matrix_for(&self, dataset_id: &str) -> Vec<f32> {
         let ds_id = DatasetId(dataset_id.to_string());
-        let member = self.inner.derived.get(&ds_id)
+        let member = self
+            .inner
+            .derived
+            .get(&ds_id)
             .and_then(|d| d.members.first());
         match member {
             Some(m) => {
                 let t = &m.volume_transform;
                 let global_max = self.inner.global_max_physical_extent();
-                let ds_max = if t.max_physical_extent > 0.0 { t.max_physical_extent } else { 1.0 };
+                let ds_max = if t.max_physical_extent > 0.0 {
+                    t.max_physical_extent
+                } else {
+                    1.0
+                };
                 let inv_correction = (global_max / ds_max) as f32;
                 let mut mat = t.inv_model;
                 mat[0] *= inv_correction;
@@ -826,10 +912,7 @@ impl WasmScene {
             }
             None => {
                 vec![
-                    1.0, 0.0, 0.0, 0.0,
-                    0.0, 1.0, 0.0, 0.0,
-                    0.0, 0.0, 1.0, 0.0,
-                    0.0, 0.0, 0.0, 1.0,
+                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
                 ]
             }
         }
@@ -858,8 +941,7 @@ impl WasmScene {
             dataset_id: String,
             delta: lucida_protocol::AssetCatalogDelta,
         }
-        let body: Body =
-            serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
+        let body: Body = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
         let cmd = Command::Document(crate::command::DocumentCommand::ApplyAssetCatalogDelta {
             dataset_id: DatasetId(body.dataset_id),
             delta: body.delta,
@@ -881,13 +963,22 @@ impl WasmScene {
     }
 
     pub fn dataset_ids(&self) -> String {
-        let ids: Vec<&str> = self.inner.document.manifests.keys().map(|id| id.0.as_str()).collect();
+        let ids: Vec<&str> = self
+            .inner
+            .document
+            .manifests
+            .keys()
+            .map(|id| id.0.as_str())
+            .collect();
         serde_json::to_string(&ids).unwrap()
     }
 
     pub fn dataset_name(&self, id: &str) -> String {
         let ds_id = DatasetId(id.to_string());
-        self.inner.document.manifests.get(&ds_id)
+        self.inner
+            .document
+            .manifests
+            .get(&ds_id)
             .map(|g| g.name.clone())
             .unwrap_or_else(|| id.to_string())
     }
@@ -954,18 +1045,38 @@ impl WasmScene {
     // --- Minimap camera ---
 
     pub fn camera_theta(&self) -> f64 {
-        if let Camera::Arcball(ref v) = self.inner.camera { v.theta } else { 0.5 }
+        if let Camera::Arcball(ref v) = self.inner.camera {
+            v.theta
+        } else {
+            0.5
+        }
     }
 
     pub fn camera_phi(&self) -> f64 {
-        if let Camera::Arcball(ref v) = self.inner.camera { v.phi } else { 0.8 }
+        if let Camera::Arcball(ref v) = self.inner.camera {
+            v.phi
+        } else {
+            0.8
+        }
     }
 
     /// Compute peer cursor geometry for GPU rendering + screen positions for labels.
-    pub fn compute_peer_cursors(&self, peers_json: &str, my_id: u32, screen_w: f64, screen_h: f64) -> String {
+    pub fn compute_peer_cursors(
+        &self,
+        peers_json: &str,
+        my_id: u32,
+        screen_w: f64,
+        screen_h: f64,
+    ) -> String {
         let peers: Vec<crate::cursor::PeerInput> =
             serde_json::from_str(peers_json).unwrap_or_default();
-        let output = crate::cursor::compute_peer_cursors(&self.inner, &peers, my_id as u64, screen_w, screen_h);
+        let output = crate::cursor::compute_peer_cursors(
+            &self.inner,
+            &peers,
+            my_id as u64,
+            screen_w,
+            screen_h,
+        );
         serde_json::to_string(&output).unwrap()
     }
 

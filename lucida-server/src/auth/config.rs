@@ -44,8 +44,7 @@ pub const DEFAULT_DB_FILENAME: &str = "lucida.db";
 
 /// Production Google authorization endpoint. Overridable via
 /// `LUCIDA_GOOGLE_AUTH_URI` so integration tests can point at a mock.
-pub const DEFAULT_GOOGLE_AUTH_URI: &str =
-    "https://accounts.google.com/o/oauth2/v2/auth";
+pub const DEFAULT_GOOGLE_AUTH_URI: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 
 /// Production Google token endpoint. Overridable via
 /// `LUCIDA_GOOGLE_TOKEN_URI`.
@@ -60,8 +59,7 @@ pub const DEFAULT_GOOGLE_JWKS_URI: &str = "https://www.googleapis.com/oauth2/v3/
 /// are valid per their docs. Overridable as a comma-separated list via
 /// `LUCIDA_GOOGLE_ISSUER` for test harnesses that mint tokens with a
 /// distinct issuer.
-pub const DEFAULT_GOOGLE_ISSUERS: &[&str] =
-    &["https://accounts.google.com", "accounts.google.com"];
+pub const DEFAULT_GOOGLE_ISSUERS: &[&str] = &["https://accounts.google.com", "accounts.google.com"];
 
 /// Default listen address. ADR-0018: loopback-by-default makes the
 /// auto-detect-by-bind safety property hold for the zero-config dev
@@ -173,13 +171,9 @@ pub enum AuthConfigError {
     MissingClientSecret,
     #[error("LUCIDA_AUTH=google requires LUCIDA_OAUTH_REDIRECT_URI")]
     MissingRedirectUri,
-    #[error(
-        "LUCIDA_AUTH={0:?} is not a recognized value (expected `google` or `disabled`)"
-    )]
+    #[error("LUCIDA_AUTH={0:?} is not a recognized value (expected `google` or `disabled`)")]
     UnknownAuthMode(String),
-    #[error(
-        "LUCIDA_BIND={value:?} is not a valid socket address ({reason})"
-    )]
+    #[error("LUCIDA_BIND={value:?} is not a valid socket address ({reason})")]
     InvalidBindAddr { value: String, reason: String },
     /// `LUCIDA_AUTH=disabled` on a non-loopback bind requires
     /// `LUCIDA_INSECURE=1` as an explicit acknowledgment that the
@@ -264,8 +258,7 @@ impl AuthConfig {
         // ---- bind address ---------------------------------------------------
         // Parse first so the auto-detect below can branch on it. The
         // loopback question is the safety hinge for everything else.
-        let bind_raw = nonempty("LUCIDA_BIND")
-            .unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
+        let bind_raw = nonempty("LUCIDA_BIND").unwrap_or_else(|| DEFAULT_BIND_ADDR.to_string());
         let bind_addr: SocketAddr = bind_raw.parse().map_err(|e: std::net::AddrParseError| {
             AuthConfigError::InvalidBindAddr {
                 value: bind_raw.clone(),
@@ -374,12 +367,11 @@ fn google_from_reader<F>(nonempty: &F) -> Result<GoogleOAuthConfig, AuthConfigEr
 where
     F: Fn(&str) -> Option<String>,
 {
-    let client_id = nonempty("LUCIDA_GOOGLE_CLIENT_ID")
-        .ok_or(AuthConfigError::MissingClientId)?;
-    let client_secret = nonempty("LUCIDA_GOOGLE_CLIENT_SECRET")
-        .ok_or(AuthConfigError::MissingClientSecret)?;
-    let redirect_uri = nonempty("LUCIDA_OAUTH_REDIRECT_URI")
-        .ok_or(AuthConfigError::MissingRedirectUri)?;
+    let client_id = nonempty("LUCIDA_GOOGLE_CLIENT_ID").ok_or(AuthConfigError::MissingClientId)?;
+    let client_secret =
+        nonempty("LUCIDA_GOOGLE_CLIENT_SECRET").ok_or(AuthConfigError::MissingClientSecret)?;
+    let redirect_uri =
+        nonempty("LUCIDA_OAUTH_REDIRECT_URI").ok_or(AuthConfigError::MissingRedirectUri)?;
 
     Ok(GoogleOAuthConfig {
         client_id,
@@ -467,7 +459,10 @@ mod tests {
     fn for_tests_uses_documented_defaults() {
         let cfg = AuthConfig::for_tests();
         assert_eq!(cfg.cookie_name, DEFAULT_COOKIE_NAME);
-        assert_eq!(cfg.idle_timeout.as_secs(), DEFAULT_IDLE_TIMEOUT_HOURS * 3600);
+        assert_eq!(
+            cfg.idle_timeout.as_secs(),
+            DEFAULT_IDLE_TIMEOUT_HOURS * 3600
+        );
         assert_eq!(cfg.hard_cap.as_secs(), DEFAULT_HARD_CAP_HOURS * 3600);
         assert_eq!(cfg.mode, AuthMode::Disabled);
         assert!(cfg.google.is_none());
@@ -559,7 +554,10 @@ mod tests {
     fn admin_emails_empty_string_is_empty_set() {
         assert!(parse_admin_emails(Some("")).is_empty());
         assert!(parse_admin_emails(Some("   ")).is_empty());
-        assert!(parse_admin_emails(Some(",,")).is_empty(), "all-empty entries collapse");
+        assert!(
+            parse_admin_emails(Some(",,")).is_empty(),
+            "all-empty entries collapse"
+        );
     }
 
     #[test]
@@ -585,7 +583,10 @@ mod tests {
         let set = parse_admin_emails(Some("AuStin@CalicoLabs.com,Other@x.COM"));
         assert!(set.contains("austin@calicolabs.com"));
         assert!(set.contains("other@x.com"));
-        assert!(!set.contains("AuStin@CalicoLabs.com"), "values are normalized");
+        assert!(
+            !set.contains("AuStin@CalicoLabs.com"),
+            "values are normalized"
+        );
     }
 
     #[test]
@@ -603,8 +604,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn reader(entries: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> =
-            entries.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map: HashMap<String, String> = entries
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         move |name: &str| map.get(name).cloned()
     }
 
@@ -642,8 +645,10 @@ mod tests {
         // No LUCIDA_AUTH set + loopback bind → safe path, no Google
         // creds required, mode = Disabled.
         for bind in ["127.0.0.1:9876", "127.0.0.5:8080", "[::1]:9876"] {
-            let cfg = AuthConfig::from_env_map(reader(&[("LUCIDA_BIND", bind)]))
-                .unwrap_or_else(|e| panic!("loopback bind {bind} should auto-detect Disabled: {e}"));
+            let cfg =
+                AuthConfig::from_env_map(reader(&[("LUCIDA_BIND", bind)])).unwrap_or_else(|e| {
+                    panic!("loopback bind {bind} should auto-detect Disabled: {e}")
+                });
             assert_eq!(cfg.mode, AuthMode::Disabled, "bind={bind}");
             assert!(cfg.google.is_none());
         }
@@ -669,7 +674,10 @@ mod tests {
         // a production deploy that forgot to set credentials.
         let err = AuthConfig::from_env_map(reader(&[("LUCIDA_BIND", "0.0.0.0:9876")]))
             .expect_err("missing google creds should fail");
-        assert!(matches!(err, AuthConfigError::MissingClientId), "got {err:?}");
+        assert!(
+            matches!(err, AuthConfigError::MissingClientId),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -709,7 +717,10 @@ mod tests {
         ]))
         .expect("LUCIDA_INSECURE=1 unlocks the dangerous combination");
         assert_eq!(cfg.mode, AuthMode::Disabled);
-        assert!(cfg.insecure_acknowledged, "audit signal preserved on the config");
+        assert!(
+            cfg.insecure_acknowledged,
+            "audit signal preserved on the config"
+        );
     }
 
     #[test]

@@ -42,8 +42,9 @@ pub fn decode_storage_bytes(
             .map_err(|e| DecodeError::Lz4(e.to_string())),
         StorageCompression::Zstd => zstd::stream::decode_all(std::io::Cursor::new(storage_bytes))
             .map_err(|e| DecodeError::Zstd(e.to_string())),
-        StorageCompression::Blosc(config) => blosc::decode_blosc(storage_bytes, &config)
-            .map_err(DecodeError::Blosc),
+        StorageCompression::Blosc(config) => {
+            blosc::decode_blosc(storage_bytes, &config).map_err(DecodeError::Blosc)
+        }
     }
 }
 

@@ -17,11 +17,11 @@
 //! parent agent picked this for parity with the middleware's
 //! `{"error":"unauthenticated"}` shape).
 
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
 use axum::Json;
+use axum::extract::FromRequestParts;
+use axum::http::StatusCode;
+use axum::http::request::Parts;
+use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use lucida_core::auth_principal::AuthPrincipal;
@@ -59,11 +59,9 @@ where
 
         if !principal.is_admin {
             tracing::warn!(email = %principal.email, "admin_required.forbidden");
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(json!({ "error": "forbidden" })),
-            )
-                .into_response());
+            return Err(
+                (StatusCode::FORBIDDEN, Json(json!({ "error": "forbidden" }))).into_response(),
+            );
         }
 
         Ok(AdminRequired(principal))
@@ -73,10 +71,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
-    use axum::Router;
     use tower::ServiceExt;
 
     /// Handler that simply confirms it ran (and the extractor admitted

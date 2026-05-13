@@ -143,10 +143,8 @@ mod tests {
         let mut v = SavedView::empty([1024, 768]);
         v.datasets.push("gs://bucket/a.zarr".to_string());
         v.datasets.push("/data/b.zarr".to_string());
-        v.active_layouts.insert(
-            DatasetId("ds-aaaa".into()),
-            LayoutId("plate-3x3".into()),
-        );
+        v.active_layouts
+            .insert(DatasetId("ds-aaaa".into()), LayoutId("plate-3x3".into()));
         v.dataset_order.push(DatasetId("ds-aaaa".into()));
         v.view.t = 7;
         v.view.c = 2;
@@ -154,20 +152,22 @@ mod tests {
         v.display.contrast_min = 100.0;
         v.display.contrast_max = 5000.0;
         v.display.gamma = 1.5;
-        let mut s = DatasetDisplaySettings::default();
-        s.opacity = 0.75;
-        s.contrast_min = 50.0;
-        s.contrast_max = 4000.0;
-        s.gamma = 0.9;
-        s.blend_mode = BlendMode::Additive;
-        s.render_mode = RenderMode::MaxIntensity;
-        s.channel_settings = vec![ChannelSettings {
-            visible: true,
-            colormap: Colormap::Viridis,
-            contrast_min: 0.0,
-            contrast_max: 1000.0,
-            gamma: 1.0,
-        }];
+        let s = DatasetDisplaySettings {
+            opacity: 0.75,
+            contrast_min: 50.0,
+            contrast_max: 4000.0,
+            gamma: 0.9,
+            blend_mode: BlendMode::Additive,
+            render_mode: RenderMode::MaxIntensity,
+            channel_settings: vec![ChannelSettings {
+                visible: true,
+                colormap: Colormap::Viridis,
+                contrast_min: 0.0,
+                contrast_max: 1000.0,
+                gamma: 1.0,
+            }],
+            ..Default::default()
+        };
         v.dataset_settings.insert(DatasetId("ds-aaaa".into()), s);
         v
     }
@@ -228,15 +228,24 @@ mod tests {
         assert!(json.contains("\"auto_contrast\""));
         let back: SavedView = serde_json::from_str(&json).unwrap();
         assert_eq!(back.auto_contrast.len(), 2);
-        assert_eq!(back.auto_contrast.get(&DatasetId("ds-aaaa".into())), Some(&false));
-        assert_eq!(back.auto_contrast.get(&DatasetId("ds-bbbb".into())), Some(&true));
+        assert_eq!(
+            back.auto_contrast.get(&DatasetId("ds-aaaa".into())),
+            Some(&false)
+        );
+        assert_eq!(
+            back.auto_contrast.get(&DatasetId("ds-bbbb".into())),
+            Some(&true)
+        );
     }
 
     #[test]
     fn empty_auto_contrast_is_skipped_on_serialize() {
         let v = SavedView::empty([800, 600]);
         let json = serde_json::to_string(&v).unwrap();
-        assert!(!json.contains("auto_contrast"), "empty map should be skipped");
+        assert!(
+            !json.contains("auto_contrast"),
+            "empty map should be skipped"
+        );
     }
 
     #[test]

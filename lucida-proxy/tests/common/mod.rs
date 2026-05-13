@@ -6,8 +6,9 @@
 use std::collections::HashMap;
 
 use lucida_content::{
-    Axis, AxisKind, DatasetManifest, DataType, DatasetId, DatasetKind, Entity, EntityId, EntityKind,
-    EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo, TransformEdge, VoxelTransform,
+    Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
+    EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo, TransformEdge,
+    VoxelTransform,
 };
 use lucida_proxy::{FieldVolume, ProxySourceData, SourceError};
 
@@ -25,6 +26,9 @@ pub struct StoredVolume {
 }
 
 impl MockSource {
+    // Test fixture inserter; bundling the (t, c, level) and (data, dims, transform)
+    // tuples would just push the same noise into the call sites.
+    #[allow(clippy::too_many_arguments)]
     pub fn insert(
         &mut self,
         image_id: &str,
@@ -71,24 +75,33 @@ pub fn level5(level_index: u32, shape: [u64; 5]) -> LevelGeometry {
         level_index,
         shape,
         chunk_shape: [1, 1, 1, 1, 1],
-        grid_shape: [
-            shape[0],
-            shape[1],
-            shape[2],
-            shape[3],
-            shape[4],
-        ],
+        grid_shape: [shape[0], shape[1], shape[2], shape[3], shape[4]],
         scale: [1.0; 5],
     }
 }
 
 pub fn standard_axes() -> Vec<Axis> {
     vec![
-        Axis { name: "t".into(), kind: AxisKind::Time },
-        Axis { name: "c".into(), kind: AxisKind::Channel },
-        Axis { name: "z".into(), kind: AxisKind::Space },
-        Axis { name: "y".into(), kind: AxisKind::Space },
-        Axis { name: "x".into(), kind: AxisKind::Space },
+        Axis {
+            name: "t".into(),
+            kind: AxisKind::Time,
+        },
+        Axis {
+            name: "c".into(),
+            kind: AxisKind::Channel,
+        },
+        Axis {
+            name: "z".into(),
+            kind: AxisKind::Space,
+        },
+        Axis {
+            name: "y".into(),
+            kind: AxisKind::Space,
+        },
+        Axis {
+            name: "x".into(),
+            kind: AxisKind::Space,
+        },
     ]
 }
 
@@ -108,7 +121,10 @@ pub fn single_image_graph(
             id: eid.clone(),
             kind: EntityKind::Image,
             parent: None,
-            labels: EntityLabels { name: Some(entity_id.into()), ..Default::default() },
+            labels: EntityLabels {
+                name: Some(entity_id.into()),
+                ..Default::default()
+            },
         }],
         vec![],
         vec![ImageSpec {
@@ -168,7 +184,10 @@ pub fn well_graph_with_fields(
         transforms.push(TransformEdge {
             from: fid.clone(),
             to: well_eid.clone(),
-            transform: VoxelTransform::from_voxel_translation_2d(f.translation_xy[0], f.translation_xy[1]),
+            transform: VoxelTransform::from_voxel_translation_2d(
+                f.translation_xy[0],
+                f.translation_xy[1],
+            ),
         });
 
         images.push(ImageSpec {

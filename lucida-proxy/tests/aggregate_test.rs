@@ -27,29 +27,45 @@ fn aggregate_2x2_grid_no_gap_no_overlap() {
         "well",
         &[
             FieldSpec {
-                field_id: "f00", image_id: "img-00",
-                field_index: 0, translation_xy: [0.0, 0.0],
+                field_id: "f00",
+                image_id: "img-00",
+                field_index: 0,
+                translation_xy: [0.0, 0.0],
             },
             FieldSpec {
-                field_id: "f01", image_id: "img-01",
-                field_index: 1, translation_xy: [16.0, 0.0],
+                field_id: "f01",
+                image_id: "img-01",
+                field_index: 1,
+                translation_xy: [16.0, 0.0],
             },
             FieldSpec {
-                field_id: "f10", image_id: "img-10",
-                field_index: 2, translation_xy: [0.0, 16.0],
+                field_id: "f10",
+                image_id: "img-10",
+                field_index: 2,
+                translation_xy: [0.0, 16.0],
             },
             FieldSpec {
-                field_id: "f11", image_id: "img-11",
-                field_index: 3, translation_xy: [16.0, 16.0],
+                field_id: "f11",
+                image_id: "img-11",
+                field_index: 3,
+                translation_xy: [16.0, 16.0],
             },
         ],
         levels,
     );
 
     let mut source = MockSource::default();
-    for (img, value) in [("img-00", 10u16), ("img-01", 20), ("img-10", 30), ("img-11", 40)] {
+    for (img, value) in [
+        ("img-00", 10u16),
+        ("img-01", 20),
+        ("img-10", 30),
+        ("img-11", 40),
+    ] {
         source.insert(
-            img, 0, 0, 0,
+            img,
+            0,
+            0,
+            0,
             fill_volume(dims, value),
             dims,
             VoxelTransform::identity(),
@@ -59,7 +75,8 @@ fn aggregate_2x2_grid_no_gap_no_overlap() {
     let spec = ProxySpec {
         entity_id: EntityId("well".into()),
         kind: ProxyKind::WellProxy3D,
-        t: 0, c: 0,
+        t: 0,
+        c: 0,
         target_long_axis: 32,
     };
     let asset = generate_proxy(&spec, &graph, &source).expect("generate ok");
@@ -73,12 +90,7 @@ fn aggregate_2x2_grid_no_gap_no_overlap() {
     // Quadrant BL  (X=0..16,  Y=16..32) → value 30
     // Quadrant BR  (X=16..32, Y=16..32) → value 40
     let z = 2u32; // mid-z
-    for &(qx, qy, expected) in &[
-        (4u32, 4u32, 10u16),
-        (24, 4, 20),
-        (4, 24, 30),
-        (24, 24, 40),
-    ] {
+    for &(qx, qy, expected) in &[(4u32, 4u32, 10u16), (24, 4, 20), (4, 24, 30), (24, 24, 40)] {
         let v = sample(&asset.voxels, asset.header.dims, z, qy, qx);
         assert_eq!(
             v, expected,
@@ -99,20 +111,28 @@ fn aggregate_2x2_grid_with_gap_zero_filled() {
         "well",
         &[
             FieldSpec {
-                field_id: "f00", image_id: "img-00",
-                field_index: 0, translation_xy: [0.0, 0.0],
+                field_id: "f00",
+                image_id: "img-00",
+                field_index: 0,
+                translation_xy: [0.0, 0.0],
             },
             FieldSpec {
-                field_id: "f01", image_id: "img-01",
-                field_index: 1, translation_xy: [32.0, 0.0],
+                field_id: "f01",
+                image_id: "img-01",
+                field_index: 1,
+                translation_xy: [32.0, 0.0],
             },
             FieldSpec {
-                field_id: "f10", image_id: "img-10",
-                field_index: 2, translation_xy: [0.0, 32.0],
+                field_id: "f10",
+                image_id: "img-10",
+                field_index: 2,
+                translation_xy: [0.0, 32.0],
             },
             FieldSpec {
-                field_id: "f11", image_id: "img-11",
-                field_index: 3, translation_xy: [32.0, 32.0],
+                field_id: "f11",
+                image_id: "img-11",
+                field_index: 3,
+                translation_xy: [32.0, 32.0],
             },
         ],
         levels,
@@ -121,7 +141,10 @@ fn aggregate_2x2_grid_with_gap_zero_filled() {
     let mut source = MockSource::default();
     for img in ["img-00", "img-01", "img-10", "img-11"] {
         source.insert(
-            img, 0, 0, 0,
+            img,
+            0,
+            0,
+            0,
             fill_volume(dims, 100),
             dims,
             VoxelTransform::identity(),
@@ -131,7 +154,8 @@ fn aggregate_2x2_grid_with_gap_zero_filled() {
     let spec = ProxySpec {
         entity_id: EntityId("well".into()),
         kind: ProxyKind::WellProxy3D,
-        t: 0, c: 0,
+        t: 0,
+        c: 0,
         target_long_axis: 48,
     };
     let asset = generate_proxy(&spec, &graph, &source).expect("generate ok");
@@ -159,15 +183,20 @@ fn aggregate_single_field_well_works() {
     let graph = well_graph_with_fields(
         "well",
         &[FieldSpec {
-            field_id: "f0", image_id: "img-0",
-            field_index: 0, translation_xy: [0.0, 0.0],
+            field_id: "f0",
+            image_id: "img-0",
+            field_index: 0,
+            translation_xy: [0.0, 0.0],
         }],
         levels,
     );
 
     let mut source = MockSource::default();
     source.insert(
-        "img-0", 0, 0, 0,
+        "img-0",
+        0,
+        0,
+        0,
         fill_volume(dims, 77),
         dims,
         VoxelTransform::identity(),
@@ -176,7 +205,8 @@ fn aggregate_single_field_well_works() {
     let spec = ProxySpec {
         entity_id: EntityId("well".into()),
         kind: ProxyKind::WellProxy3D,
-        t: 0, c: 0,
+        t: 0,
+        c: 0,
         target_long_axis: 16,
     };
     let asset = generate_proxy(&spec, &graph, &source).expect("generate ok");
@@ -201,25 +231,46 @@ fn aggregate_overlapping_fields_average() {
         "well",
         &[
             FieldSpec {
-                field_id: "fL", image_id: "img-L",
-                field_index: 0, translation_xy: [0.0, 0.0],
+                field_id: "fL",
+                image_id: "img-L",
+                field_index: 0,
+                translation_xy: [0.0, 0.0],
             },
             FieldSpec {
-                field_id: "fR", image_id: "img-R",
-                field_index: 1, translation_xy: [8.0, 0.0],
+                field_id: "fR",
+                image_id: "img-R",
+                field_index: 1,
+                translation_xy: [8.0, 0.0],
             },
         ],
         levels,
     );
 
     let mut source = MockSource::default();
-    source.insert("img-L", 0, 0, 0, fill_volume(dims, 100), dims, VoxelTransform::identity());
-    source.insert("img-R", 0, 0, 0, fill_volume(dims, 200), dims, VoxelTransform::identity());
+    source.insert(
+        "img-L",
+        0,
+        0,
+        0,
+        fill_volume(dims, 100),
+        dims,
+        VoxelTransform::identity(),
+    );
+    source.insert(
+        "img-R",
+        0,
+        0,
+        0,
+        fill_volume(dims, 200),
+        dims,
+        VoxelTransform::identity(),
+    );
 
     let spec = ProxySpec {
         entity_id: EntityId("well".into()),
         kind: ProxyKind::WellProxy3D,
-        t: 0, c: 0,
+        t: 0,
+        c: 0,
         target_long_axis: 24,
     };
     let asset = generate_proxy(&spec, &graph, &source).unwrap();
@@ -266,10 +317,30 @@ fn aggregate_downsampled_voxel_to_image_preserves_field_extent() {
     let graph = well_graph_with_fields(
         "well",
         &[
-            FieldSpec { field_id: "f00", image_id: "img-00", field_index: 0, translation_xy: [0.0, 0.0] },
-            FieldSpec { field_id: "f01", image_id: "img-01", field_index: 1, translation_xy: [32.0, 0.0] },
-            FieldSpec { field_id: "f10", image_id: "img-10", field_index: 2, translation_xy: [0.0, 32.0] },
-            FieldSpec { field_id: "f11", image_id: "img-11", field_index: 3, translation_xy: [32.0, 32.0] },
+            FieldSpec {
+                field_id: "f00",
+                image_id: "img-00",
+                field_index: 0,
+                translation_xy: [0.0, 0.0],
+            },
+            FieldSpec {
+                field_id: "f01",
+                image_id: "img-01",
+                field_index: 1,
+                translation_xy: [32.0, 0.0],
+            },
+            FieldSpec {
+                field_id: "f10",
+                image_id: "img-10",
+                field_index: 2,
+                translation_xy: [0.0, 32.0],
+            },
+            FieldSpec {
+                field_id: "f11",
+                image_id: "img-11",
+                field_index: 3,
+                translation_xy: [32.0, 32.0],
+            },
         ],
         levels,
     );
@@ -277,17 +348,27 @@ fn aggregate_downsampled_voxel_to_image_preserves_field_extent() {
     // voxel_to_image as the lucida-server fix would produce it: shape ratio
     // (32/16 = 2.0) along each spatial axis.
     let scale_2x = VoxelTransform::from_voxel_matrix([
-        2.0, 0.0, 0.0, 0.0,
-        0.0, 2.0, 0.0, 0.0,
-        0.0, 0.0, 2.0, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0,
     ]);
 
     // Source returns the downsampled volume at level 1 with the scale transform.
     // (Level 0 isn't inserted — pick_level should pick level 1 below.)
     let mut source = MockSource::default();
-    for (img, value) in [("img-00", 11u16), ("img-01", 22), ("img-10", 33), ("img-11", 44)] {
-        source.insert(img, 0, 0, 1, fill_volume(level_dims, value), level_dims, scale_2x.clone());
+    for (img, value) in [
+        ("img-00", 11u16),
+        ("img-01", 22),
+        ("img-10", 33),
+        ("img-11", 44),
+    ] {
+        source.insert(
+            img,
+            0,
+            0,
+            1,
+            fill_volume(level_dims, value),
+            level_dims,
+            scale_2x.clone(),
+        );
     }
 
     // target_long_axis=8 → threshold=16. Level 0 min spatial=32 ✓, level 1 min=16 ✓
@@ -295,7 +376,8 @@ fn aggregate_downsampled_voxel_to_image_preserves_field_extent() {
     let spec = ProxySpec {
         entity_id: EntityId("well".into()),
         kind: ProxyKind::WellProxy3D,
-        t: 0, c: 0,
+        t: 0,
+        c: 0,
         target_long_axis: 8,
     };
     let asset = generate_proxy(&spec, &graph, &source).expect("generate ok");
@@ -304,7 +386,8 @@ fn aggregate_downsampled_voxel_to_image_preserves_field_extent() {
     // Long axis = 64. Output scale = 8/64 = 0.125.
     // out_dims = [Z=32*0.125=4, Y=64*0.125=8, X=64*0.125=8].
     assert_eq!(
-        asset.header.dims, [4, 8, 8],
+        asset.header.dims,
+        [4, 8, 8],
         "well AABB should be full-res-equivalent (64×64×32), not collapsed to level dims (32×32×16)"
     );
 
@@ -315,12 +398,7 @@ fn aggregate_downsampled_voxel_to_image_preserves_field_extent() {
     //   BL  (X=0..4, Y=4..8) → f10 → 33
     //   BR  (X=4..8, Y=4..8) → f11 → 44
     let z = 2;
-    for &(qx, qy, expected) in &[
-        (1u32, 1u32, 11u16),
-        (5, 1, 22),
-        (1, 5, 33),
-        (5, 5, 44),
-    ] {
+    for &(qx, qy, expected) in &[(1u32, 1u32, 11u16), (5, 1, 22), (1, 5, 33), (5, 5, 44)] {
         let v = sample(&asset.voxels, asset.header.dims, z, qy, qx);
         assert_eq!(v, expected, "quadrant ({qx},{qy}) value mismatch — got {v}");
     }

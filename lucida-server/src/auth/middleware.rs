@@ -25,12 +25,12 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use serde_json::json;
 
 use crate::auth::config::AuthConfig;
@@ -120,8 +120,7 @@ fn unauthenticated_response(err: &AuthError, headers: &HeaderMap) -> Response {
         AuthError::Unauthenticated => None,
         AuthError::Internal(msg) => Some(msg.as_str()),
     };
-    let signed_out =
-        matches!(err, AuthError::Unauthenticated) && read_signed_out_marker(headers);
+    let signed_out = matches!(err, AuthError::Unauthenticated) && read_signed_out_marker(headers);
     (
         status,
         Json(json!({ "error": code, "detail": detail, "signedOut": signed_out })),
@@ -156,12 +155,12 @@ pub fn build_extractor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::body::{to_bytes, Body};
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
     use axum::extract::Request as ExtractRequest;
     use axum::http::{Request, StatusCode};
     use axum::middleware::from_fn_with_state;
     use axum::routing::get;
-    use axum::Router;
     use lucida_core::auth_principal::AuthPrincipal;
     use tower::ServiceExt;
 
@@ -227,10 +226,7 @@ mod tests {
         let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
         let app = router_with_extractor(extractor);
 
-        let req = Request::builder()
-            .uri("/echo")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/echo").body(Body::empty()).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
@@ -276,7 +272,10 @@ mod tests {
 
     #[async_trait]
     impl PrincipalExtractor for AlwaysInternal {
-        async fn extract(&self, _: &axum::http::request::Parts) -> Result<AuthPrincipal, AuthError> {
+        async fn extract(
+            &self,
+            _: &axum::http::request::Parts,
+        ) -> Result<AuthPrincipal, AuthError> {
             Err(AuthError::Internal("simulated".into()))
         }
     }
@@ -285,10 +284,7 @@ mod tests {
     async fn middleware_surfaces_internal_errors_as_500() {
         let extractor: SharedExtractor = Arc::new(AlwaysInternal);
         let app = router_with_extractor(extractor);
-        let req = Request::builder()
-            .uri("/echo")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/echo").body(Body::empty()).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -298,7 +294,9 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::ACCEPT,
-            "text/html,application/xhtml+xml,application/xml;q=0.9".parse().unwrap(),
+            "text/html,application/xhtml+xml,application/xml;q=0.9"
+                .parse()
+                .unwrap(),
         );
         assert!(accepts_html(&headers));
     }
@@ -336,7 +334,10 @@ mod tests {
 
         let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
-        assert!(body.contains("/auth/start"), "shim must point at /auth/start");
+        assert!(
+            body.contains("/auth/start"),
+            "shim must point at /auth/start"
+        );
         assert!(
             body.contains("encodeURIComponent"),
             "shim must url-encode hash + path",

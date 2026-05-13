@@ -43,7 +43,7 @@ interface MockContentSource extends ContentSource {
 function createMockContentSource(): MockContentSource {
   const pendingFetches = new Map<string, { resolve: (r: FetchResult) => void; reject: (e: Error) => void }>();
   let fetchCount = 0;
-  let autoResolveBytes: number | null = null;
+  const autoResolveBytes: number | null = null;
 
   const source: MockContentSource = {
     pendingFetches,

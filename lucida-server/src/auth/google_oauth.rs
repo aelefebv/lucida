@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use jsonwebtoken::jwk::JwkSet;
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -177,11 +177,7 @@ impl GoogleOAuthClient {
             fetched_at: Instant::now(),
         }));
 
-        Ok(Self {
-            config,
-            http,
-            jwks,
-        })
+        Ok(Self { config, http, jwks })
     }
 
     /// Build a Google authorization URL targeting the configured
@@ -221,10 +217,7 @@ impl GoogleOAuthClient {
     /// Exchange a callback `code` for an ID token. POSTs the
     /// `application/x-www-form-urlencoded` body Google's docs require;
     /// returns the verified claims on success.
-    pub async fn exchange_and_validate(
-        &self,
-        code: &str,
-    ) -> Result<VerifiedClaims, OAuthError> {
+    pub async fn exchange_and_validate(&self, code: &str) -> Result<VerifiedClaims, OAuthError> {
         let id_token = self.exchange_code(code).await?;
         self.validate_id_token(&id_token).await
     }
@@ -250,18 +243,14 @@ impl GoogleOAuthClient {
             // Try to surface Google's structured error for the operator
             // log. Fall back to the raw body if it isn't the documented
             // JSON shape.
-            let raw = res
-                .text()
-                .await
-                .unwrap_or_else(|_| "<no body>".to_string());
-            let detail =
-                match serde_json::from_str::<TokenErrorResponse>(&raw) {
-                    Ok(parsed) => match parsed.error_description {
-                        Some(d) => format!("{}: {}", parsed.error, d),
-                        None => parsed.error,
-                    },
-                    Err(_) => raw,
-                };
+            let raw = res.text().await.unwrap_or_else(|_| "<no body>".to_string());
+            let detail = match serde_json::from_str::<TokenErrorResponse>(&raw) {
+                Ok(parsed) => match parsed.error_description {
+                    Some(d) => format!("{}: {}", parsed.error, d),
+                    None => parsed.error,
+                },
+                Err(_) => raw,
+            };
             return Err(OAuthError::CodeExchange(format!(
                 "status {}: {}",
                 status, detail
@@ -277,16 +266,13 @@ impl GoogleOAuthClient {
 
     /// Validate the JWT against Google's JWKS + the configured issuer
     /// + the configured client_id (audience). On unknown-kid, refresh
-    /// the cache and retry exactly once — Google rotated mid-cache.
-    pub async fn validate_id_token(
-        &self,
-        token: &str,
-    ) -> Result<VerifiedClaims, OAuthError> {
+    ///   the cache and retry exactly once — Google rotated mid-cache.
+    pub async fn validate_id_token(&self, token: &str) -> Result<VerifiedClaims, OAuthError> {
         let header = decode_header(token)
             .map_err(|e| OAuthError::JwtInvalid(format!("header decode: {e}")))?;
-        let kid = header.kid.ok_or_else(|| {
-            OAuthError::JwtInvalid("missing kid in JWT header".into())
-        })?;
+        let kid = header
+            .kid
+            .ok_or_else(|| OAuthError::JwtInvalid("missing kid in JWT header".into()))?;
 
         // Time-based refresh: cheap check on the read side; only the
         // refresher takes the write lock.
@@ -296,9 +282,7 @@ impl GoogleOAuthClient {
 
         match self.try_validate(token, &kid).await {
             Ok(claims) => Ok(claims),
-            Err(OAuthError::JwtInvalid(msg))
-                if msg.contains("unknown kid") =>
-            {
+            Err(OAuthError::JwtInvalid(msg)) if msg.contains("unknown kid") => {
                 // Force a refresh and retry once. Mid-cache key rotation
                 // is the canonical reason an otherwise-valid JWT fails
                 // with unknown kid.
@@ -323,15 +307,12 @@ impl GoogleOAuthClient {
         Ok(())
     }
 
-    async fn try_validate(
-        &self,
-        token: &str,
-        kid: &str,
-    ) -> Result<VerifiedClaims, OAuthError> {
+    async fn try_validate(&self, token: &str, kid: &str) -> Result<VerifiedClaims, OAuthError> {
         let guard = self.jwks.read().await;
-        let jwk = guard.keys.find(kid).ok_or_else(|| {
-            OAuthError::JwtInvalid(format!("unknown kid {kid}"))
-        })?;
+        let jwk = guard
+            .keys
+            .find(kid)
+            .ok_or_else(|| OAuthError::JwtInvalid(format!("unknown kid {kid}")))?;
         let key = DecodingKey::from_jwk(jwk)
             .map_err(|e| OAuthError::JwtInvalid(format!("decoding key: {e}")))?;
 
@@ -340,12 +321,7 @@ impl GoogleOAuthClient {
         // to a different alg the JWKS will say so and we'll get a
         // header-decode failure pointing at the signature mismatch.
         let mut validation = Validation::new(Algorithm::RS256);
-        let issuers: Vec<&str> = self
-            .config
-            .issuers
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let issuers: Vec<&str> = self.config.issuers.iter().map(String::as_str).collect();
         validation.set_issuer(&issuers);
         validation.set_audience(&[&self.config.client_id]);
 
@@ -383,20 +359,14 @@ where
     }
 }
 
-async fn fetch_jwks(
-    http: &reqwest::Client,
-    jwks_uri: &str,
-) -> Result<JwkSet, OAuthError> {
+async fn fetch_jwks(http: &reqwest::Client, jwks_uri: &str) -> Result<JwkSet, OAuthError> {
     let res = http
         .get(jwks_uri)
         .send()
         .await
         .map_err(|e| classify_transport_error(e, OAuthError::JwksFetch))?;
     if !res.status().is_success() {
-        return Err(OAuthError::JwksFetch(format!(
-            "status {}",
-            res.status()
-        )));
+        return Err(OAuthError::JwksFetch(format!("status {}", res.status())));
     }
     let set = res
         .json::<JwkSet>()

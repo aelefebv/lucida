@@ -103,7 +103,10 @@ impl ChunkResolver {
 /// Parse the level prefix from a canonical chunk key (`"{level}/t/c/z/y/x"`).
 /// Returns 0 if the key is malformed.
 fn parse_level_from_chunk_key(key: &str) -> u32 {
-    key.split('/').next().and_then(|s| s.parse().ok()).unwrap_or(0)
+    key.split('/')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -221,9 +224,11 @@ mod tests {
             None,
         )]);
         let resolver = ChunkResolver::new(&seed);
-        assert!(resolver
-            .resolve(&ImageId("unknown".into()), "2/0/1/5/3/2")
-            .is_none());
+        assert!(
+            resolver
+                .resolve(&ImageId("unknown".into()), "2/0/1/5/3/2")
+                .is_none()
+        );
     }
 
     #[test]
@@ -236,15 +241,21 @@ mod tests {
         let resolver = ChunkResolver::new(&seed);
 
         // All three should resolve independently
-        assert!(resolver
-            .resolve(&ImageId("img1".into()), "0/0/0/0/0/0")
-            .is_some());
-        assert!(resolver
-            .resolve(&ImageId("img2".into()), "0/0/0/0/0/0")
-            .is_some());
-        assert!(resolver
-            .resolve(&ImageId("img3".into()), "0/0/0/0/0/0")
-            .is_some());
+        assert!(
+            resolver
+                .resolve(&ImageId("img1".into()), "0/0/0/0/0/0")
+                .is_some()
+        );
+        assert!(
+            resolver
+                .resolve(&ImageId("img2".into()), "0/0/0/0/0/0")
+                .is_some()
+        );
+        assert!(
+            resolver
+                .resolve(&ImageId("img3".into()), "0/0/0/0/0/0")
+                .is_some()
+        );
 
         // img2 should have prefix
         let path2 = resolver

@@ -25,7 +25,7 @@
 //! React tree mount?"
 
 use axum::extract::Query;
-use axum::http::{header, StatusCode};
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
@@ -115,7 +115,10 @@ fn render_unverified(attempted_email: &str) -> String {
     let email_phrase = if attempted_email.is_empty() {
         "Your Google account".to_string()
     } else {
-        format!("Your Google account <strong>{}</strong>", html_escape(attempted_email))
+        format!(
+            "Your Google account <strong>{}</strong>",
+            html_escape(attempted_email)
+        )
     };
     format!(
         r#"<h1>Email not verified</h1>
@@ -271,11 +274,7 @@ mod tests {
 
     #[test]
     fn html_escape_blocks_xss_in_domain_param() {
-        let body = render(&q(
-            "hd_mismatch",
-            Some("a@x.com"),
-            Some("<img onerror=x>"),
-        ));
+        let body = render(&q("hd_mismatch", Some("a@x.com"), Some("<img onerror=x>")));
         assert!(!body.contains("<img onerror=x>"));
         assert!(body.contains("&lt;img onerror=x&gt;"));
     }

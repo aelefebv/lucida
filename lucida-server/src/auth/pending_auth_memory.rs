@@ -100,7 +100,10 @@ mod tests {
         let store = MemoryPendingAuthStore::new();
         let now = Utc::now();
         // exactly at the boundary: must NOT be removed
-        store.insert(sample("boundary", "/", "", now)).await.unwrap();
+        store
+            .insert(sample("boundary", "/", "", now))
+            .await
+            .unwrap();
         // strictly older: removed
         store
             .insert(sample("old", "/", "", now - ChronoDuration::seconds(1)))

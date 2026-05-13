@@ -8,8 +8,8 @@ use std::sync::Arc;
 use object_store::ObjectStore;
 use object_store::path::Path;
 
-use lucida_content::*;
 use lucida_content::normalize::{classify_axes, normalize_to_5d};
+use lucida_content::*;
 use lucida_protocol::*;
 
 use crate::backend::StoreError;
@@ -211,9 +211,7 @@ async fn import_plate(
         let images = well_json
             .pointer("/attributes/ome/well/images")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                StoreError::Metadata(format!("{well_path}: no ome.well.images"))
-            })?;
+            .ok_or_else(|| StoreError::Metadata(format!("{well_path}: no ome.well.images")))?;
 
         let mut fovs: Vec<FovParsed> = Vec::new();
         for image_entry in images {
@@ -262,8 +260,8 @@ async fn import_plate(
     }
 
     // Read representative FOV multiscales.
-    let rep_path = representative_fov_path
-        .ok_or_else(|| StoreError::Metadata("plate has no FOVs".into()))?;
+    let rep_path =
+        representative_fov_path.ok_or_else(|| StoreError::Metadata("plate has no FOVs".into()))?;
 
     let rep_json = parse::read_zarr_json(store, &format!("{rep_path}/zarr.json")).await?;
     let rep_parsed = parse::parse_multiscales(&rep_json, &format!("{rep_path}: "))?;
@@ -320,7 +318,8 @@ async fn import_plate(
             .unwrap_or_else(|| format!("{ri}"))
     };
     let find_col_label = |ci: u32| -> String {
-        columns.get(ci as usize)
+        columns
+            .get(ci as usize)
             .cloned()
             .unwrap_or_else(|| format!("{ci}"))
     };
@@ -380,22 +379,23 @@ async fn import_plate(
         let (min_x, min_y) = if has_stage_positions {
             let mut mx = f64::MAX;
             let mut my = f64::MAX;
-            for pos in &stage_positions {
-                if let Some([x, y]) = pos {
-                    mx = mx.min(*x);
-                    my = my.min(*y);
-                }
+            for [x, y] in stage_positions.iter().flatten() {
+                mx = mx.min(*x);
+                my = my.min(*y);
             }
-            if mx == f64::MAX { mx = 0.0; }
-            if my == f64::MAX { my = 0.0; }
+            if mx == f64::MAX {
+                mx = 0.0;
+            }
+            if my == f64::MAX {
+                my = 0.0;
+            }
             (mx, my)
         } else {
             (0.0, 0.0)
         };
 
         for (fi, fov) in well.fovs.iter().enumerate() {
-            let field_entity_id =
-                EntityId(format!("{id}:field:{}", fov.store_prefix));
+            let field_entity_id = EntityId(format!("{id}:field:{}", fov.store_prefix));
             let image_id = ImageId(format!("{id}:image:{}", fov.store_prefix));
 
             entities.push(Entity {
@@ -465,7 +465,10 @@ async fn import_plate(
             .collect();
 
         let grid_transforms = lucida_content::plate::build_grid_field_transforms(
-            &well_entities.iter().map(|e| (*e).clone()).collect::<Vec<_>>(),
+            &well_entities
+                .iter()
+                .map(|e| (*e).clone())
+                .collect::<Vec<_>>(),
             &field_entities,
             full_shape_5d,
         )
@@ -647,12 +650,20 @@ mod tests {
     }
 
     /// Create a minimal OME-Zarr plate fixture.
+    // Test helper; args mirror plate-layout shape parameters.
+    #[allow(clippy::too_many_arguments)]
     fn create_plate_fixture(
         dir: &std::path::Path,
         plate_name: &str,
         rows: &[&str],
         columns: &[&str],
-        wells: &[(/*row*/&str, /*col*/&str, /*row_idx*/u32, /*col_idx*/u32, /*num_fovs*/u32)],
+        wells: &[(
+            /*row*/ &str,
+            /*col*/ &str,
+            /*row_idx*/ u32,
+            /*col_idx*/ u32,
+            /*num_fovs*/ u32,
+        )],
         fov_shape: [u64; 5],
         fov_chunk: [u64; 5],
         num_levels: usize,
@@ -785,8 +796,8 @@ mod tests {
                         fov_shape[0],
                         fov_shape[1],
                         fov_shape[2],
-                        (fov_shape[3] + scale - 1) / scale,
-                        (fov_shape[4] + scale - 1) / scale,
+                        fov_shape[3].div_ceil(scale),
+                        fov_shape[4].div_ceil(scale),
                     ];
                     let arr = serde_json::json!({
                         "zarr_format": 3,
@@ -849,12 +860,10 @@ mod tests {
     #[tokio::test]
     #[ignore = "depends on example_files/yeast_3d_mitochondria.ome.zarr (not in repo)"]
     async fn import_single_image() {
-        let store = crate::backend::open(
-            &format!(
-                "{}/example_files/yeast_3d_mitochondria.ome.zarr",
-                env!("CARGO_MANIFEST_DIR").trim_end_matches("/lucida-store"),
-            ),
-        )
+        let store = crate::backend::open(&format!(
+            "{}/example_files/yeast_3d_mitochondria.ome.zarr",
+            env!("CARGO_MANIFEST_DIR").trim_end_matches("/lucida-store"),
+        ))
         .unwrap();
         let result = import_dataset(&store, "test-id", "Test Dataset")
             .await
@@ -906,7 +915,11 @@ mod tests {
             "test_plate",
             &["A", "B"],
             &["1", "2"],
-            &[("A", "1", 0, 0, 2), ("A", "2", 0, 1, 1), ("B", "1", 1, 0, 1)],
+            &[
+                ("A", "1", 0, 0, 2),
+                ("A", "2", 0, 1, 1),
+                ("B", "1", 1, 0, 1),
+            ],
             [1, 1, 10, 256, 256],
             [1, 1, 1, 128, 128],
             2,
@@ -982,10 +995,7 @@ mod tests {
             assert_eq!(l0.shape, [1, 1, 10, 256, 256]);
             assert_eq!(l0.chunk_shape, [1, 1, 1, 128, 128]);
             for d in 0..5 {
-                assert_eq!(
-                    l0.grid_shape[d],
-                    l0.shape[d].div_ceil(l0.chunk_shape[d]),
-                );
+                assert_eq!(l0.grid_shape[d], l0.shape[d].div_ceil(l0.chunk_shape[d]),);
             }
         }
 
@@ -1158,8 +1168,14 @@ mod tests {
         // min_x=200, min_y=100 => FOV 0 at (0,0), FOV 1 at (400,200).
         let t0 = &result.manifest.transforms()[0];
         let t1 = &result.manifest.transforms()[1];
-        assert!((t0.transform.matrix()[12]).abs() < 1e-9, "FOV 0 tx should be 0");
-        assert!((t0.transform.matrix()[13]).abs() < 1e-9, "FOV 0 ty should be 0");
+        assert!(
+            (t0.transform.matrix()[12]).abs() < 1e-9,
+            "FOV 0 tx should be 0"
+        );
+        assert!(
+            (t0.transform.matrix()[13]).abs() < 1e-9,
+            "FOV 0 ty should be 0"
+        );
         assert!(
             (t1.transform.matrix()[12] - 400.0).abs() < 1e-9,
             "FOV 1 tx should be 400, got {}",
@@ -1375,8 +1391,14 @@ mod tests {
 
         // FOV 0 is the per-well origin.
         let t0 = find_field_transform(&result, "stage-vox", 0);
-        assert!((t0.transform.matrix()[12]).abs() < 1e-9, "FOV 0 tx should be 0");
-        assert!((t0.transform.matrix()[13]).abs() < 1e-9, "FOV 0 ty should be 0");
+        assert!(
+            (t0.transform.matrix()[12]).abs() < 1e-9,
+            "FOV 0 tx should be 0"
+        );
+        assert!(
+            (t0.transform.matrix()[13]).abs() < 1e-9,
+            "FOV 0 ty should be 0"
+        );
 
         // FOV 1: 100 µm / 0.5 = 200 voxels in X, 200 µm / 0.5 = 400 voxels in Y.
         let t1 = find_field_transform(&result, "stage-vox", 1);
@@ -1710,7 +1732,8 @@ mod tests {
         let level_dir = dir.join("0");
         fs::create_dir_all(&level_dir).unwrap();
 
-        let mut codecs = vec![serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}})];
+        let mut codecs =
+            vec![serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}})];
         if let Some(c) = codec_after_bytes {
             codecs.push(c);
         }
@@ -1747,9 +1770,7 @@ mod tests {
         );
 
         let store = crate::backend::open(dir.to_str().unwrap()).unwrap();
-        let result = import_dataset(&store, "lz4-6d", "lz4 6D")
-            .await
-            .unwrap();
+        let result = import_dataset(&store, "lz4-6d", "lz4 6D").await.unwrap();
 
         assert_eq!(result.binding_seed.images[0].levels.len(), 1);
         let level0 = &result.binding_seed.images[0].levels[0];
@@ -1828,7 +1849,10 @@ mod tests {
             .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains('m'), "error should name 'm': {msg}");
-        assert!(msg.contains("non-prefix"), "error should say 'non-prefix': {msg}");
+        assert!(
+            msg.contains("non-prefix"),
+            "error should say 'non-prefix': {msg}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1926,7 +1950,10 @@ mod tests {
         assert!(matches!(err, StoreError::Metadata(_)));
         let msg = err.to_string();
         assert!(msg.contains("gzip"), "error should name 'gzip': {msg}");
-        assert!(msg.contains("level 0"), "error should mention 'level 0': {msg}");
+        assert!(
+            msg.contains("level 0"),
+            "error should mention 'level 0': {msg}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1979,7 +2006,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, StoreError::Metadata(_)));
         let msg = err.to_string();
-        assert!(msg.contains("level 1"), "error should mention 'level 1': {msg}");
+        assert!(
+            msg.contains("level 1"),
+            "error should mention 'level 1': {msg}"
+        );
         assert!(msg.contains("gzip"), "error should name 'gzip': {msg}");
 
         let _ = fs::remove_dir_all(&dir);
@@ -2011,7 +2041,10 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, StoreError::Metadata(_)));
         let msg = err.to_string();
-        assert!(msg.contains("blosclz"), "error should name 'blosclz': {msg}");
+        assert!(
+            msg.contains("blosclz"),
+            "error should name 'blosclz': {msg}"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

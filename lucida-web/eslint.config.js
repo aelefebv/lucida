@@ -19,5 +19,15 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // Honor the established `_` prefix convention for intentionally-unused
+      // names — used across callback signatures (e.g. `(state, _dsId) => ...`)
+      // where a parameter must keep its position but isn't read. See the
+      // wiki gotcha `preexisting-ts-build-errors` for the historical pattern.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrorsIgnorePattern: '^_' },
+      ],
+    },
   },
 ])

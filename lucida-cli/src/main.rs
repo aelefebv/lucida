@@ -134,7 +134,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Sub::Pan { dx, dy } => ViewportCommand::Pan { dx, dy },
                 Sub::Zoom { factor } => match scene.camera {
                     Camera::Slice(_) => ViewportCommand::ZoomBy { factor },
-                    Camera::Arcball(_) | Camera::Fly(_) => ViewportCommand::Zoom3D { delta: 1.0 / factor - 1.0 },
+                    Camera::Arcball(_) | Camera::Fly(_) => ViewportCommand::Zoom3D {
+                        delta: 1.0 / factor - 1.0,
+                    },
                 },
                 Sub::Slice { axis, index } => match axis.as_str() {
                     "z" => ViewportCommand::SetZ { z: index },
@@ -147,15 +149,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Sub::Center { x, y } => ViewportCommand::SetCenter { x, y },
                 Sub::SetZoom { value } => match scene.camera {
                     Camera::Slice(_) => ViewportCommand::SetZoom { value },
-                    Camera::Arcball(_) | Camera::Fly(_) => return Err("set-zoom is only supported in 2D mode".into()),
+                    Camera::Arcball(_) | Camera::Fly(_) => {
+                        return Err("set-zoom is only supported in 2D mode".into());
+                    }
                 },
-                Sub::Rotate { theta, phi, radians } => {
+                Sub::Rotate {
+                    theta,
+                    phi,
+                    radians,
+                } => {
                     let (t, p) = if radians {
                         (theta, phi)
                     } else {
                         (theta.to_radians(), phi.to_radians())
                     };
-                    ViewportCommand::Rotate3D { d_theta: t, d_phi: p }
+                    ViewportCommand::Rotate3D {
+                        d_theta: t,
+                        d_phi: p,
+                    }
                 }
                 Sub::SetMode2d => ViewportCommand::SetMode2D,
                 Sub::SetMode3d => ViewportCommand::SetMode3D,

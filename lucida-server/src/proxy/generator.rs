@@ -28,9 +28,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lucida_content::DatasetManifest;
-use lucida_proxy::{
-    GenerateError, ProxyAsset, ProxySpec, generate_proxy, source_content_hash,
-};
+use lucida_proxy::{GenerateError, ProxyAsset, ProxySpec, generate_proxy, source_content_hash};
 use lucida_store::cache::CachedStore;
 use tokio::sync::{Mutex, Semaphore, broadcast};
 

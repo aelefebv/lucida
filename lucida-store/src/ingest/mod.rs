@@ -28,8 +28,14 @@ pub fn convert_tiff_to_zarr(
     let volume = tiff_reader::read_tiff(input, hints)?;
     eprintln!(
         "Read TIFF: {}x{}x{}, {} channel(s), {} timepoint(s), voxel size: ({}, {}, {})",
-        volume.width, volume.height, volume.depth, volume.channels, volume.timepoints,
-        volume.voxel_size.x, volume.voxel_size.y, volume.voxel_size.z,
+        volume.width,
+        volume.height,
+        volume.depth,
+        volume.channels,
+        volume.timepoints,
+        volume.voxel_size.x,
+        volume.voxel_size.y,
+        volume.voxel_size.z,
     );
 
     let min_size = 256u32;
@@ -73,7 +79,10 @@ pub fn convert_tiff_to_zarr(
                 }
             )
         };
-        eprintln!("  level {i}: {}x{}x{}{ds_info}", spec.width, spec.height, spec.depth);
+        eprintln!(
+            "  level {i}: {}x{}x{}{ds_info}",
+            spec.width, spec.height, spec.depth
+        );
     }
 
     zarr_writer::write_root_metadata(output, &meta_levels, &level_scales)?;
@@ -110,8 +119,12 @@ pub fn convert_tiff_to_zarr(
 
             let write_handle = std::thread::spawn(move || {
                 let t0 = Instant::now();
-                let result =
-                    zarr_writer::write_zarr_level(&write_output, write_idx, &write_ref, &write_chunk);
+                let result = zarr_writer::write_zarr_level(
+                    &write_output,
+                    write_idx,
+                    &write_ref,
+                    &write_chunk,
+                );
                 let elapsed = t0.elapsed().as_millis();
                 (result, elapsed)
             });
@@ -119,7 +132,11 @@ pub fn convert_tiff_to_zarr(
             // Downsample to next level while writing happens.
             let next_spec = &schedule[i + 1];
             let t0 = Instant::now();
-            let next = pyramid::downsample(&write_level, next_spec.downsample_xy, next_spec.downsample_z);
+            let next = pyramid::downsample(
+                &write_level,
+                next_spec.downsample_xy,
+                next_spec.downsample_z,
+            );
             let ds_elapsed = t0.elapsed().as_millis();
             eprintln!("  level {}: downsampled in {}ms", i + 1, ds_elapsed);
 
@@ -165,8 +182,11 @@ pub fn convert_plate_to_zarr(
     );
     eprintln!(
         "  Image: {}x{}, {} channel(s), {} timepoint(s), {} Z plane(s)",
-        layout.image_width, layout.image_height,
-        layout.channels, layout.timepoints, layout.z_planes,
+        layout.image_width,
+        layout.image_height,
+        layout.channels,
+        layout.timepoints,
+        layout.z_planes,
     );
     eprintln!(
         "  Voxel size: ({}, {}, {})",
@@ -182,7 +202,9 @@ pub fn convert_plate_to_zarr(
     for well in &layout.wells {
         eprintln!(
             "Processing well {}/{} ({} FOVs)",
-            well.row_name, well.col_name, well.fovs.len(),
+            well.row_name,
+            well.col_name,
+            well.fovs.len(),
         );
 
         // Write well-level metadata.
@@ -288,15 +310,23 @@ fn write_volume_pyramid(
 
             let write_handle = std::thread::spawn(move || {
                 let t0 = Instant::now();
-                let result =
-                    zarr_writer::write_zarr_level(&write_output, write_idx, &write_ref, &write_chunk);
+                let result = zarr_writer::write_zarr_level(
+                    &write_output,
+                    write_idx,
+                    &write_ref,
+                    &write_chunk,
+                );
                 let elapsed = t0.elapsed().as_millis();
                 (result, elapsed)
             });
 
             let next_spec = &schedule[i + 1];
             let t0 = Instant::now();
-            let next = pyramid::downsample(&write_level, next_spec.downsample_xy, next_spec.downsample_z);
+            let next = pyramid::downsample(
+                &write_level,
+                next_spec.downsample_xy,
+                next_spec.downsample_z,
+            );
             let ds_elapsed = t0.elapsed().as_millis();
             eprintln!("    level {}: downsampled in {}ms", i + 1, ds_elapsed);
 

@@ -53,7 +53,7 @@ pub fn read_session_cookie(parts: &Parts, cookie_name: &str) -> Option<String> {
         .get_all(COOKIE)
         .iter()
         .filter_map(|hv| hv.to_str().ok())
-        .flat_map(|raw| Cookie::split_parse(raw))
+        .flat_map(Cookie::split_parse)
         .filter_map(|res| res.ok())
         .find_map(|c| {
             if c.name() == cookie_name {
@@ -127,7 +127,7 @@ pub fn read_signed_out_marker(headers: &axum::http::HeaderMap) -> bool {
         .get_all(COOKIE)
         .iter()
         .filter_map(|hv| hv.to_str().ok())
-        .flat_map(|raw| Cookie::split_parse(raw))
+        .flat_map(Cookie::split_parse)
         .filter_map(|res| res.ok())
         .any(|c| c.name() == SIGNED_OUT_COOKIE_NAME)
 }

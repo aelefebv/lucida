@@ -16,21 +16,19 @@
 
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::http::header::{LOCATION, SET_COOKIE};
 use axum::http::{Request, StatusCode};
 use axum::middleware::from_fn_with_state;
 use axum::routing::post;
-use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use lucida_server::auth::handlers::{dev_login, DevLoginState};
-use lucida_server::auth::middleware::{auth_middleware, build_extractor, SharedExtractor};
-use lucida_server::auth::{
-    AuthConfig, LoginSession, LoginSessionStore, MemorySessionStore,
-};
+use lucida_server::auth::handlers::{DevLoginState, dev_login};
+use lucida_server::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
+use lucida_server::auth::{AuthConfig, LoginSession, LoginSessionStore, MemorySessionStore};
 use lucida_server::bookmarks::handlers::BookmarksState;
 use lucida_server::bookmarks::routes::router as bookmarks_router;
 use lucida_server::bookmarks::{BookmarkStore, MemoryBookmarkStore};
@@ -67,8 +65,10 @@ async fn build_app() -> Router {
         .unwrap();
 
     let config = Arc::new(AuthConfig::for_tests());
-    let extractor: SharedExtractor =
-        build_extractor(Arc::clone(&config), session_store.clone() as Arc<dyn LoginSessionStore>);
+    let extractor: SharedExtractor = build_extractor(
+        Arc::clone(&config),
+        session_store.clone() as Arc<dyn LoginSessionStore>,
+    );
 
     let bookmark_store: Arc<dyn BookmarkStore> = Arc::new(MemoryBookmarkStore::new());
     let bookmarks_state = BookmarksState {
@@ -90,8 +90,8 @@ async fn build_app() -> Router {
             store: session_store as Arc<dyn LoginSessionStore>,
         }),
     );
-    let protected = bookmarks_router(bookmarks_state)
-        .layer(from_fn_with_state(extractor, auth_middleware));
+    let protected =
+        bookmarks_router(bookmarks_state).layer(from_fn_with_state(extractor, auth_middleware));
     protected.merge(public)
 }
 
@@ -134,7 +134,13 @@ async fn full_crud_happy_path_lifecycle() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
-    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap().to_string();
+    let location = res
+        .headers()
+        .get(LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let created = read_json(res).await;
     let id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["created_by"], "alice@x");
@@ -214,7 +220,9 @@ async fn full_crud_happy_path_lifecycle() {
                 .uri(format!("/api/bookmarks/{id}"))
                 .header("cookie", "lucida_session=bob-cookie")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&json!({"name": "hijacked"})).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&json!({"name": "hijacked"})).unwrap(),
+                ))
                 .unwrap(),
         )
         .await
@@ -230,7 +238,9 @@ async fn full_crud_happy_path_lifecycle() {
                 .uri(format!("/api/bookmarks/{id}"))
                 .header("cookie", "lucida_session=alice-cookie")
                 .header("content-type", "application/json")
-                .body(Body::from(serde_json::to_vec(&json!({"name": "Renamed by owner"})).unwrap()))
+                .body(Body::from(
+                    serde_json::to_vec(&json!({"name": "Renamed by owner"})).unwrap(),
+                ))
                 .unwrap(),
         )
         .await

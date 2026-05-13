@@ -64,7 +64,6 @@ function notifyListeners(): void {
  */
 export function debugLog(category: DebugCategory, event: string, data: Record<string, unknown> = {}): void {
   if (!isDebugEnabled(category)) return;
-  // eslint-disable-next-line no-console
   console.log(`[${category}] ${event}`, data);
 }
 

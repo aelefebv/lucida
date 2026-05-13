@@ -61,8 +61,6 @@ pub trait PendingAuthStore: Send + Sync + 'static {
     /// Returns the number of rows deleted. The actual sweep schedule
     /// lands in slice 8; the trait carries the method now so the
     /// SQLite implementation gets exercised in tests.
-    async fn delete_expired(
-        &self,
-        older_than: DateTime<Utc>,
-    ) -> Result<u64, PendingAuthStoreError>;
+    async fn delete_expired(&self, older_than: DateTime<Utc>)
+    -> Result<u64, PendingAuthStoreError>;
 }

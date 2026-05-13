@@ -88,14 +88,9 @@ pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompress
 
     // First codec must be `bytes` with `endian: "little"`.
     let first = &codecs[0];
-    let first_name = first
-        .get("name")
-        .and_then(|n| n.as_str())
-        .ok_or_else(|| {
-            StoreError::Metadata(
-                "first storage codec missing 'name' field (expected 'bytes')".into(),
-            )
-        })?;
+    let first_name = first.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
+        StoreError::Metadata("first storage codec missing 'name' field (expected 'bytes')".into())
+    })?;
     if first_name != "bytes" {
         return Err(StoreError::Metadata(format!(
             "first storage codec must be 'bytes', got '{first_name}'",
@@ -106,9 +101,10 @@ pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompress
             "bytes codec missing 'configuration' object (need endian: little)".into(),
         )
     })?;
-    let endian = first_config.get("endian").and_then(|e| e.as_str()).ok_or_else(|| {
-        StoreError::Metadata("bytes codec missing 'endian' configuration".into())
-    })?;
+    let endian = first_config
+        .get("endian")
+        .and_then(|e| e.as_str())
+        .ok_or_else(|| StoreError::Metadata("bytes codec missing 'endian' configuration".into()))?;
     if endian != "little" {
         return Err(StoreError::Metadata(format!(
             "bytes codec endian must be 'little', got '{endian}'",
@@ -121,14 +117,11 @@ pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompress
 
     // Second codec is a compressor.
     let second = &codecs[1];
-    let second_name = second
-        .get("name")
-        .and_then(|n| n.as_str())
-        .ok_or_else(|| {
-            StoreError::Metadata(
-                "second storage codec missing 'name' field (expected lz4/zstd/blosc)".into(),
-            )
-        })?;
+    let second_name = second.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
+        StoreError::Metadata(
+            "second storage codec missing 'name' field (expected lz4/zstd/blosc)".into(),
+        )
+    })?;
     match second_name {
         "lz4" | "numcodecs/lz4" => Ok(StorageCompression::Lz4),
         "zstd" | "numcodecs/zstd" => Ok(StorageCompression::Zstd),
@@ -152,15 +145,19 @@ pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompress
 /// subset. Each error message includes the offending value verbatim so the
 /// caller can find it in their OME-Zarr metadata.
 fn parse_blosc_config(cfg: &serde_json::Value) -> Result<BloscConfig, StoreError> {
-    let cname = cfg.get("cname").and_then(|c| c.as_str()).ok_or_else(|| {
-        StoreError::Metadata("blosc configuration missing 'cname' field".into())
-    })?;
+    let cname = cfg
+        .get("cname")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| StoreError::Metadata("blosc configuration missing 'cname' field".into()))?;
     let shuffle_str = cfg.get("shuffle").and_then(|s| s.as_str()).ok_or_else(|| {
         StoreError::Metadata("blosc configuration missing 'shuffle' field".into())
     })?;
-    let typesize_raw = cfg.get("typesize").and_then(|t| t.as_u64()).ok_or_else(|| {
-        StoreError::Metadata("blosc configuration missing 'typesize' field".into())
-    })?;
+    let typesize_raw = cfg
+        .get("typesize")
+        .and_then(|t| t.as_u64())
+        .ok_or_else(|| {
+            StoreError::Metadata("blosc configuration missing 'typesize' field".into())
+        })?;
 
     let cname = match cname {
         "zstd" => BloscCompressor::Zstd,
@@ -405,7 +402,10 @@ mod tests {
         ];
         let err = parse_codec_chain(&chain).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("weirdshuffle"), "expected 'weirdshuffle' in: {msg}");
+        assert!(
+            msg.contains("weirdshuffle"),
+            "expected 'weirdshuffle' in: {msg}"
+        );
     }
 
     #[test]

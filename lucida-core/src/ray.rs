@@ -23,13 +23,16 @@ impl Ray {
         let len = (direction[0] * direction[0]
             + direction[1] * direction[1]
             + direction[2] * direction[2])
-        .sqrt();
+            .sqrt();
         let dir = if len > 1e-12 {
             [direction[0] / len, direction[1] / len, direction[2] / len]
         } else {
             [0.0, 0.0, 1.0]
         };
-        Ray { origin, direction: dir }
+        Ray {
+            origin,
+            direction: dir,
+        }
     }
 
     /// Intersect this ray with the axis-aligned unit cube [0,1]^3.
@@ -103,18 +106,9 @@ pub fn transform_ray(ray: &Ray, matrix: &[f32; 16]) -> Ray {
 pub fn transform_point(point: &[f64; 3], matrix: &[f32; 16]) -> [f64; 3] {
     let m = matrix;
     [
-        m[0] as f64 * point[0]
-            + m[4] as f64 * point[1]
-            + m[8] as f64 * point[2]
-            + m[12] as f64,
-        m[1] as f64 * point[0]
-            + m[5] as f64 * point[1]
-            + m[9] as f64 * point[2]
-            + m[13] as f64,
-        m[2] as f64 * point[0]
-            + m[6] as f64 * point[1]
-            + m[10] as f64 * point[2]
-            + m[14] as f64,
+        m[0] as f64 * point[0] + m[4] as f64 * point[1] + m[8] as f64 * point[2] + m[12] as f64,
+        m[1] as f64 * point[0] + m[5] as f64 * point[1] + m[9] as f64 * point[2] + m[13] as f64,
+        m[2] as f64 * point[0] + m[6] as f64 * point[1] + m[10] as f64 * point[2] + m[14] as f64,
     ]
 }
 
@@ -200,7 +194,7 @@ mod tests {
         let len = (ray.direction[0] * ray.direction[0]
             + ray.direction[1] * ray.direction[1]
             + ray.direction[2] * ray.direction[2])
-        .sqrt();
+            .sqrt();
         assert!((len - 1.0).abs() < 1e-10);
     }
 

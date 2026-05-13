@@ -33,36 +33,34 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
+use axum::Router;
+use axum::body::{Body, to_bytes};
 use axum::extract::ws::Message;
 use axum::http::header::LOCATION;
 use axum::http::{Request, StatusCode};
 use axum::middleware::from_fn_with_state;
-use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
-use serde_json::{json, Value};
-use tokio::sync::{mpsc, Mutex};
+use serde_json::{Value, json};
+use tokio::sync::{Mutex, mpsc};
 use tower::ServiceExt;
 
 use lucida_content::{
-    Axis, AxisKind, DatasetId, DatasetKind, DatasetManifest, DataType, Entity, EntityId,
+    Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
     EntityKind, EntityLabels, ImageId, ImageSpec, LevelGeometry, MultiscaleInfo,
 };
 use lucida_core::protocol::{BookmarkAction, ClientId, ServerMessage};
 use lucida_protocol::{
     AssetCatalog, DatasetOpened, FetchSource, ProxiedFetchDescriptor, ProxiedImageSpec, WireFormat,
 };
-use lucida_server::auth::middleware::{auth_middleware, build_extractor, SharedExtractor};
-use lucida_server::auth::{
-    AuthConfig, LoginSession, LoginSessionStore, MemorySessionStore,
-};
+use lucida_server::UnicastRoutes;
+use lucida_server::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
+use lucida_server::auth::{AuthConfig, LoginSession, LoginSessionStore, MemorySessionStore};
 use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::bookmarks::handlers::BookmarksState;
 use lucida_server::bookmarks::routes::router as bookmarks_router;
 use lucida_server::bookmarks::{BookmarkStore, MemoryBookmarkStore};
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
-use lucida_server::UnicastRoutes;
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::ServerBindingSeed;
 
@@ -118,8 +116,8 @@ async fn build_rig() -> Rig {
         unicast_routes: Some(Arc::clone(&unicast_routes)),
     };
 
-    let app = bookmarks_router(bookmarks_state)
-        .layer(from_fn_with_state(extractor, auth_middleware));
+    let app =
+        bookmarks_router(bookmarks_state).layer(from_fn_with_state(extractor, auth_middleware));
     Rig {
         app,
         session,
@@ -131,8 +129,8 @@ async fn build_rig() -> Rig {
 /// `source_url` so the broadcast helper's overlap check finds the
 /// expected URL. No real storage is involved.
 fn make_binding(url: &str) -> ServerBinding {
-    let store = Arc::new(object_store::memory::InMemory::new())
-        as Arc<dyn object_store::ObjectStore>;
+    let store =
+        Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
     let cached = Arc::new(CachedStore::new(store.clone(), 1024));
     let resolver = Arc::new(ChunkResolver::new(&ServerBindingSeed { images: vec![] }));
     let manifest = DatasetManifest::new(
@@ -151,9 +149,18 @@ fn make_binding(url: &str) -> ServerBinding {
             owner: EntityId("e".into()),
             multiscale: MultiscaleInfo {
                 axes: vec![
-                    Axis { name: "z".into(), kind: AxisKind::Space },
-                    Axis { name: "y".into(), kind: AxisKind::Space },
-                    Axis { name: "x".into(), kind: AxisKind::Space },
+                    Axis {
+                        name: "z".into(),
+                        kind: AxisKind::Space,
+                    },
+                    Axis {
+                        name: "y".into(),
+                        kind: AxisKind::Space,
+                    },
+                    Axis {
+                        name: "x".into(),
+                        kind: AxisKind::Space,
+                    },
                 ],
                 levels: vec![LevelGeometry {
                     level_index: 0,
@@ -174,7 +181,9 @@ fn make_binding(url: &str) -> ServerBinding {
         fetch: FetchSource::Proxied(ProxiedFetchDescriptor {
             images: vec![ProxiedImageSpec {
                 image_id: ImageId("img".into()),
-                wire_format: WireFormat::Raw { data_type: DataType::Uint16 },
+                wire_format: WireFormat::Raw {
+                    data_type: DataType::Uint16,
+                },
             }],
         }),
         catalog: AssetCatalog::default(),
@@ -227,7 +236,11 @@ fn drain_text(rx: &mut mpsc::UnboundedReceiver<Message>) -> Vec<String> {
 fn parse_bookmark_changed(json: &str) -> (String, BookmarkAction, Vec<String>) {
     let parsed: ServerMessage = serde_json::from_str(json).expect("ServerMessage");
     match parsed {
-        ServerMessage::BookmarkChanged { id, action, dataset_urls } => (id, action, dataset_urls),
+        ServerMessage::BookmarkChanged {
+            id,
+            action,
+            dataset_urls,
+        } => (id, action, dataset_urls),
         other => panic!("expected BookmarkChanged, got {other:?}"),
     }
 }
@@ -244,7 +257,10 @@ fn sample_view_json() -> Value {
 async fn read_json(res: axum::response::Response) -> Value {
     let bytes = to_bytes(res.into_body(), 1024 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap_or_else(|e| {
-        panic!("body did not parse: {e}; raw: {}", String::from_utf8_lossy(&bytes))
+        panic!(
+            "body did not parse: {e}; raw: {}",
+            String::from_utf8_lossy(&bytes)
+        )
     })
 }
 
@@ -373,10 +389,7 @@ async fn post_with_multi_dataset_bookmark_reaches_all_overlapping_clients() {
     let (_, _, urls_a) = parse_bookmark_changed(&msgs_a[0]);
     let mut urls_a_sorted = urls_a.clone();
     urls_a_sorted.sort();
-    assert_eq!(
-        urls_a_sorted,
-        vec![URL_A.to_string(), URL_B.to_string()],
-    );
+    assert_eq!(urls_a_sorted, vec![URL_A.to_string(), URL_B.to_string()],);
 }
 
 /// PATCH (rename) emits Updated to every overlapping client.
@@ -406,7 +419,13 @@ async fn patch_broadcasts_updated_action() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
-    let location = res.headers().get(LOCATION).unwrap().to_str().unwrap().to_string();
+    let location = res
+        .headers()
+        .get(LOCATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
     let created = read_json(res).await;
     let id = created["id"].as_str().unwrap().to_string();
     assert!(location.ends_with(&id));

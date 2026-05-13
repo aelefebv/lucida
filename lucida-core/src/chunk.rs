@@ -80,8 +80,16 @@ pub fn visible_chunks(
 
     // Extract Z/Y/X from 5D arrays (indices 2, 3, 4)
     let (level_z, level_y, level_x) = (level_geo.shape[2], level_geo.shape[3], level_geo.shape[4]);
-    let (chunk_z, chunk_y, chunk_x) = (level_geo.chunk_shape[2], level_geo.chunk_shape[3], level_geo.chunk_shape[4]);
-    let (full_z, full_y, full_x) = (full_res_geo.shape[2], full_res_geo.shape[3], full_res_geo.shape[4]);
+    let (chunk_z, chunk_y, chunk_x) = (
+        level_geo.chunk_shape[2],
+        level_geo.chunk_shape[3],
+        level_geo.chunk_shape[4],
+    );
+    let (full_z, full_y, full_x) = (
+        full_res_geo.shape[2],
+        full_res_geo.shape[3],
+        full_res_geo.shape[4],
+    );
 
     // Per-axis scale: how many full-res voxels map to one level voxel
     let scale_x = full_x as f64 / level_x as f64;
@@ -93,9 +101,9 @@ pub fn visible_chunks(
     let chunk_world_z = chunk_z as f64 * scale_z;
 
     // Max chunk index (exclusive) — from precomputed grid_shape
-    let max_col = level_geo.grid_shape[4] as u32;  // X
-    let max_row = level_geo.grid_shape[3] as u32;  // Y
-    let max_z = level_geo.grid_shape[2] as u32;    // Z
+    let max_col = level_geo.grid_shape[4] as u32; // X
+    let max_row = level_geo.grid_shape[3] as u32; // Y
+    let max_z = level_geo.grid_shape[2] as u32; // Z
 
     let col_start = (min_x / chunk_world_x).floor().max(0.0) as u32;
     let col_end = ((max_x / chunk_world_x).ceil().max(0.0) as u32).min(max_col);
@@ -124,7 +132,14 @@ pub fn visible_chunks(
                         continue;
                     }
                 }
-                chunks.push(ChunkCoord { level, x: col, y: row, z, t, c });
+                chunks.push(ChunkCoord {
+                    level,
+                    x: col,
+                    y: row,
+                    z,
+                    t,
+                    c,
+                });
             }
         }
     }
@@ -166,8 +181,16 @@ pub fn visible_and_prefetch_chunks(
     let level = level_geo.level_index;
 
     let (level_z, level_y, level_x) = (level_geo.shape[2], level_geo.shape[3], level_geo.shape[4]);
-    let (chunk_z, chunk_y, chunk_x) = (level_geo.chunk_shape[2], level_geo.chunk_shape[3], level_geo.chunk_shape[4]);
-    let (full_z, full_y, full_x) = (full_res_geo.shape[2], full_res_geo.shape[3], full_res_geo.shape[4]);
+    let (chunk_z, chunk_y, chunk_x) = (
+        level_geo.chunk_shape[2],
+        level_geo.chunk_shape[3],
+        level_geo.chunk_shape[4],
+    );
+    let (full_z, full_y, full_x) = (
+        full_res_geo.shape[2],
+        full_res_geo.shape[3],
+        full_res_geo.shape[4],
+    );
 
     let scale_x = full_x as f64 / level_x as f64;
     let scale_y = full_y as f64 / level_y as f64;
@@ -215,9 +238,16 @@ pub fn visible_and_prefetch_chunks(
                         continue;
                     }
                 }
-                let coord = ChunkCoord { level, x: col, y: row, z, t, c };
-                let in_visible = col >= col_start && col < col_end
-                    && row >= row_start && row < row_end;
+                let coord = ChunkCoord {
+                    level,
+                    x: col,
+                    y: row,
+                    z,
+                    t,
+                    c,
+                };
+                let in_visible =
+                    col >= col_start && col < col_end && row >= row_start && row < row_end;
                 if in_visible {
                     needed.push(coord);
                 } else {
@@ -380,7 +410,9 @@ mod tests {
             assert!(
                 !needed_set.contains(&(c.x, c.y, c.z)),
                 "prefetch chunk ({},{},{}) overlaps with needed",
-                c.x, c.y, c.z,
+                c.x,
+                c.y,
+                c.z,
             );
         }
     }
@@ -400,7 +432,8 @@ mod tests {
             assert!(
                 c.x < min_nx || c.x > max_nx || c.y < min_ny || c.y > max_ny,
                 "prefetch chunk ({},{}) is inside needed XY bounds",
-                c.x, c.y,
+                c.x,
+                c.y,
             );
         }
     }

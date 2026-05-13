@@ -65,12 +65,9 @@ pub fn compute_downsample_schedule(
 
         // An axis is "uniquely coarsest" if it alone equals the max
         // (all other axes are strictly less).
-        let z_uniquely_coarsest =
-            eff_z == max_eff && eff_x < max_eff && eff_y < max_eff;
-        let x_uniquely_coarsest =
-            eff_x == max_eff && eff_y < max_eff && eff_z < max_eff;
-        let y_uniquely_coarsest =
-            eff_y == max_eff && eff_x < max_eff && eff_z < max_eff;
+        let z_uniquely_coarsest = eff_z == max_eff && eff_x < max_eff && eff_y < max_eff;
+        let x_uniquely_coarsest = eff_x == max_eff && eff_y < max_eff && eff_z < max_eff;
+        let y_uniquely_coarsest = eff_y == max_eff && eff_x < max_eff && eff_z < max_eff;
 
         let can_xy = prev.width > min_size || prev.height > min_size;
         let can_z = prev.depth > min_size;
@@ -86,14 +83,38 @@ pub fn compute_downsample_schedule(
             break;
         }
 
-        let new_w = if do_xy { (prev.width + 1) / 2 } else { prev.width };
-        let new_h = if do_xy { (prev.height + 1) / 2 } else { prev.height };
-        let new_d = if do_z { (prev.depth + 1) / 2 } else { prev.depth };
+        let new_w = if do_xy {
+            prev.width.div_ceil(2)
+        } else {
+            prev.width
+        };
+        let new_h = if do_xy {
+            prev.height.div_ceil(2)
+        } else {
+            prev.height
+        };
+        let new_d = if do_z {
+            prev.depth.div_ceil(2)
+        } else {
+            prev.depth
+        };
 
         let new_scale = [
-            if do_xy { prev.scale[0] * 2.0 } else { prev.scale[0] },
-            if do_xy { prev.scale[1] * 2.0 } else { prev.scale[1] },
-            if do_z { prev.scale[2] * 2.0 } else { prev.scale[2] },
+            if do_xy {
+                prev.scale[0] * 2.0
+            } else {
+                prev.scale[0]
+            },
+            if do_xy {
+                prev.scale[1] * 2.0
+            } else {
+                prev.scale[1]
+            },
+            if do_z {
+                prev.scale[2] * 2.0
+            } else {
+                prev.scale[2]
+            },
         ];
 
         specs.push(LevelSpec {
@@ -130,7 +151,11 @@ mod tests {
     #[test]
     fn schedule_5x_anisotropic() {
         // Z is 5x coarser than XY: skip Z until XY catches up
-        let voxel = VoxelSize { x: 0.2, y: 0.2, z: 1.0 };
+        let voxel = VoxelSize {
+            x: 0.2,
+            y: 0.2,
+            z: 1.0,
+        };
         let schedule = compute_downsample_schedule(512, 512, 200, voxel, 16);
         // First few levels should be XY-only (Z uniquely coarsest)
         assert!(schedule[1].downsample_xy);
@@ -149,7 +174,11 @@ mod tests {
     #[test]
     fn schedule_z_fine() {
         // Z is finer than XY (only works when x != y so one is uniquely coarsest)
-        let voxel = VoxelSize { x: 1.0, y: 0.5, z: 0.2 };
+        let voxel = VoxelSize {
+            x: 1.0,
+            y: 0.5,
+            z: 0.2,
+        };
         let schedule = compute_downsample_schedule(64, 64, 512, voxel, 16);
         // X is uniquely coarsest → skip XY, Z-only initially
         assert!(!schedule[1].downsample_xy);
@@ -162,7 +191,11 @@ mod tests {
     #[test]
     fn schedule_symmetric_voxels_all_axes() {
         // When x == y, neither is uniquely coarsest → all axes from the start
-        let voxel = VoxelSize { x: 1.0, y: 1.0, z: 0.2 };
+        let voxel = VoxelSize {
+            x: 1.0,
+            y: 1.0,
+            z: 0.2,
+        };
         let schedule = compute_downsample_schedule(64, 64, 512, voxel, 16);
         // All axes downsample from the start (no single axis is uniquely coarsest)
         assert!(schedule[1].downsample_xy);

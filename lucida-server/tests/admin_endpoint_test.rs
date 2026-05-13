@@ -2,8 +2,8 @@
 //!
 //! Slice 6 (PRD #455): the endpoint is now gated by the auth middleware
 //! + the `AdminRequired` extractor. There's no env-var token check
-//! anymore — admin-ness is derived from the principal's email against
-//! the `LUCIDA_ADMIN_EMAILS`-seeded set on `AuthConfig`.
+//!   anymore — admin-ness is derived from the principal's email against
+//!   the `LUCIDA_ADMIN_EMAILS`-seeded set on `AuthConfig`.
 //!
 //! Cases covered:
 //!   - No session cookie → 401 (auth middleware rejects).
@@ -21,15 +21,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use axum::middleware::from_fn_with_state;
 use axum::routing::post;
-use axum::Router;
 use chrono::{Duration as ChronoDuration, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
 use lucida_server::admin::admin_clear_proxy_cache;
@@ -57,8 +57,10 @@ fn build_router(
     config.admin_emails = admin_emails;
     let config = Arc::new(config);
 
-    let extractor =
-        build_extractor(Arc::clone(&config), Arc::clone(&store) as Arc<dyn LoginSessionStore>);
+    let extractor = build_extractor(
+        Arc::clone(&config),
+        Arc::clone(&store) as Arc<dyn LoginSessionStore>,
+    );
 
     let app_state = AppState {
         session: Arc::new(Mutex::new(Session::new())),

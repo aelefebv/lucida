@@ -97,11 +97,7 @@ pub trait BookmarkStore: Send + Sync + 'static {
     /// Update a bookmark's `name` only. Returns `Ok(None)` when the id
     /// doesn't match. Other fields (creator, datasets, view) are
     /// immutable in v1 — see PRD #454 §"Mutation".
-    async fn patch_name(
-        &self,
-        id: &str,
-        new_name: &str,
-    ) -> Result<Option<Bookmark>, StoreError>;
+    async fn patch_name(&self, id: &str, new_name: &str) -> Result<Option<Bookmark>, StoreError>;
 
     /// Delete a bookmark and return the row that was removed. Returns
     /// `Ok(None)` when the id doesn't match. The `bookmark_datasets`
@@ -282,11 +278,7 @@ impl BookmarkStore for SqliteBookmarkStore {
         Ok(out)
     }
 
-    async fn patch_name(
-        &self,
-        id: &str,
-        new_name: &str,
-    ) -> Result<Option<Bookmark>, StoreError> {
+    async fn patch_name(&self, id: &str, new_name: &str) -> Result<Option<Bookmark>, StoreError> {
         let result = sqlx::query("UPDATE bookmarks SET name = ? WHERE id = ?")
             .bind(new_name)
             .bind(id)
@@ -333,7 +325,10 @@ impl BookmarkStore for SqliteBookmarkStore {
         .fetch_all(&mut *tx)
         .await
         .map_err(map_sql)?;
-        let datasets: Vec<String> = dataset_rows.into_iter().map(|r| r.get("dataset_url")).collect();
+        let datasets: Vec<String> = dataset_rows
+            .into_iter()
+            .map(|r| r.get("dataset_url"))
+            .collect();
         sqlx::query("DELETE FROM bookmark_datasets WHERE bookmark_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -405,7 +400,10 @@ impl MemoryBookmarkStore {
     }
 
     pub fn len(&self) -> usize {
-        self.rows.lock().expect("memory bookmark store mutex poisoned").len()
+        self.rows
+            .lock()
+            .expect("memory bookmark store mutex poisoned")
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -441,13 +439,19 @@ impl BookmarkStore for MemoryBookmarkStore {
             datasets: deduped,
             view,
         };
-        let mut rows = self.rows.lock().expect("memory bookmark store mutex poisoned");
+        let mut rows = self
+            .rows
+            .lock()
+            .expect("memory bookmark store mutex poisoned");
         rows.insert(id, bookmark.clone());
         Ok(bookmark)
     }
 
     async fn get(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
-        let rows = self.rows.lock().expect("memory bookmark store mutex poisoned");
+        let rows = self
+            .rows
+            .lock()
+            .expect("memory bookmark store mutex poisoned");
         Ok(rows.get(id).cloned())
     }
 
@@ -460,7 +464,10 @@ impl BookmarkStore for MemoryBookmarkStore {
         }
         let needle: std::collections::HashSet<&str> =
             dataset_urls.iter().map(String::as_str).collect();
-        let rows = self.rows.lock().expect("memory bookmark store mutex poisoned");
+        let rows = self
+            .rows
+            .lock()
+            .expect("memory bookmark store mutex poisoned");
         let mut out: Vec<Bookmark> = rows
             .values()
             .filter(|b| b.datasets.iter().any(|u| needle.contains(u.as_str())))
@@ -471,25 +478,32 @@ impl BookmarkStore for MemoryBookmarkStore {
     }
 
     async fn list_all(&self) -> Result<Vec<Bookmark>, StoreError> {
-        let rows = self.rows.lock().expect("memory bookmark store mutex poisoned");
+        let rows = self
+            .rows
+            .lock()
+            .expect("memory bookmark store mutex poisoned");
         let mut out: Vec<Bookmark> = rows.values().cloned().collect();
         out.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(out)
     }
 
-    async fn patch_name(
-        &self,
-        id: &str,
-        new_name: &str,
-    ) -> Result<Option<Bookmark>, StoreError> {
-        let mut rows = self.rows.lock().expect("memory bookmark store mutex poisoned");
-        let Some(row) = rows.get_mut(id) else { return Ok(None) };
+    async fn patch_name(&self, id: &str, new_name: &str) -> Result<Option<Bookmark>, StoreError> {
+        let mut rows = self
+            .rows
+            .lock()
+            .expect("memory bookmark store mutex poisoned");
+        let Some(row) = rows.get_mut(id) else {
+            return Ok(None);
+        };
         row.name = new_name.to_string();
         Ok(Some(row.clone()))
     }
 
     async fn delete(&self, id: &str) -> Result<Option<Bookmark>, StoreError> {
-        let mut rows = self.rows.lock().expect("memory bookmark store mutex poisoned");
+        let mut rows = self
+            .rows
+            .lock()
+            .expect("memory bookmark store mutex poisoned");
         Ok(rows.remove(id))
     }
 }
@@ -733,7 +747,11 @@ mod tests {
         let removed = store.delete(&b.id).await.unwrap().expect("row removed");
         assert_eq!(removed.id, b.id);
         assert_eq!(
-            removed.datasets.iter().cloned().collect::<std::collections::HashSet<_>>(),
+            removed
+                .datasets
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
             ["u1".to_string(), "u2".to_string()].into_iter().collect(),
         );
         assert!(store.get(&b.id).await.unwrap().is_none());

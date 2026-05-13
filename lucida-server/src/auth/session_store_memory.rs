@@ -52,11 +52,7 @@ impl LoginSessionStore for MemorySessionStore {
         Ok(rows.get(id).cloned())
     }
 
-    async fn touch_last_used(
-        &self,
-        id: &str,
-        now: DateTime<Utc>,
-    ) -> Result<(), SessionStoreError> {
+    async fn touch_last_used(&self, id: &str, now: DateTime<Utc>) -> Result<(), SessionStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
         if let Some(row) = rows.get_mut(id) {
             row.last_used_at = now;

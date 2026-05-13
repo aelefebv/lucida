@@ -1,7 +1,7 @@
-/// Scan a directory of HCS TIFF files and discover plate structure.
-///
-/// Parses filenames matching `r{row}c{col}f{field}p{plane}-ch{channel}t{timepoint}.tiff`
-/// and builds a `PlateLayout` describing wells, FOVs, channels, timepoints, and Z planes.
+//! Scan a directory of HCS TIFF files and discover plate structure.
+//!
+//! Parses filenames matching `r{row}c{col}f{field}p{plane}-ch{channel}t{timepoint}.tiff`
+//! and builds a `PlateLayout` describing wells, FOVs, channels, timepoints, and Z planes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -226,11 +226,7 @@ pub fn scan_plate_directory(
 }
 
 /// Recursively scan a directory for files matching the HCS pattern.
-fn scan_recursive(
-    dir: &Path,
-    re: &Regex,
-    results: &mut Vec<ParsedFilename>,
-) -> Result<(), String> {
+fn scan_recursive(dir: &Path, re: &Regex, results: &mut Vec<ParsedFilename>) -> Result<(), String> {
     let entries = fs::read_dir(dir)
         .map_err(|e| format!("failed to read directory {}: {e}", dir.display()))?;
 
@@ -240,25 +236,25 @@ fn scan_recursive(
 
         if path.is_dir() {
             scan_recursive(&path, re, results)?;
-        } else if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-            if let Some(caps) = re.captures(filename) {
-                let row: u32 = caps[1].parse().unwrap();
-                let col: u32 = caps[2].parse().unwrap();
-                let field: u32 = caps[3].parse().unwrap();
-                let plane: u32 = caps[4].parse().unwrap();
-                let channel: u32 = caps[5].parse().unwrap();
-                let timepoint: u32 = caps[6].parse().unwrap();
+        } else if let Some(filename) = path.file_name().and_then(|n| n.to_str())
+            && let Some(caps) = re.captures(filename)
+        {
+            let row: u32 = caps[1].parse().unwrap();
+            let col: u32 = caps[2].parse().unwrap();
+            let field: u32 = caps[3].parse().unwrap();
+            let plane: u32 = caps[4].parse().unwrap();
+            let channel: u32 = caps[5].parse().unwrap();
+            let timepoint: u32 = caps[6].parse().unwrap();
 
-                results.push(ParsedFilename {
-                    row,
-                    col,
-                    field,
-                    plane,
-                    channel,
-                    timepoint,
-                    path,
-                });
-            }
+            results.push(ParsedFilename {
+                row,
+                col,
+                field,
+                plane,
+                channel,
+                timepoint,
+                path,
+            });
         }
     }
 
@@ -267,13 +263,14 @@ fn scan_recursive(
 
 /// Read image dimensions and voxel size from a TIFF file.
 fn read_tiff_info(path: &Path) -> Result<(u32, u32, VoxelSize), String> {
-    let file = fs::File::open(path)
-        .map_err(|e| format!("failed to open {}: {e}", path.display()))?;
+    let file =
+        fs::File::open(path).map_err(|e| format!("failed to open {}: {e}", path.display()))?;
     let mut reader = BufReader::new(file);
     let mut decoder = Decoder::new(&mut reader)
         .map_err(|e| format!("failed to decode {}: {e}", path.display()))?;
 
-    let (width, height) = decoder.dimensions()
+    let (width, height) = decoder
+        .dimensions()
         .map_err(|e| format!("failed to read dimensions from {}: {e}", path.display()))?;
 
     // Try to extract resolution for voxel size.
@@ -289,32 +286,32 @@ fn read_tiff_info(path: &Path) -> Result<(u32, u32, VoxelSize), String> {
 
     if res_unit > 1 {
         // Try to read XResolution (rational: numerator/denominator).
-        if let Ok(x_res_val) = decoder.get_tag(Tag::XResolution) {
-            if let Ok(x_res_vec) = x_res_val.into_u32_vec() {
-                if x_res_vec.len() >= 2 && x_res_vec[1] > 0 {
-                    let px_per_unit = x_res_vec[0] as f64 / x_res_vec[1] as f64;
-                    if px_per_unit > 0.0 {
-                        voxel.x = match res_unit {
-                            2 => 25400.0 / px_per_unit, // inch → µm
-                            3 => 10000.0 / px_per_unit, // cm → µm
-                            _ => 1.0,
-                        };
-                    }
-                }
+        if let Ok(x_res_val) = decoder.get_tag(Tag::XResolution)
+            && let Ok(x_res_vec) = x_res_val.into_u32_vec()
+            && x_res_vec.len() >= 2
+            && x_res_vec[1] > 0
+        {
+            let px_per_unit = x_res_vec[0] as f64 / x_res_vec[1] as f64;
+            if px_per_unit > 0.0 {
+                voxel.x = match res_unit {
+                    2 => 25400.0 / px_per_unit, // inch → µm
+                    3 => 10000.0 / px_per_unit, // cm → µm
+                    _ => 1.0,
+                };
             }
         }
-        if let Ok(y_res_val) = decoder.get_tag(Tag::YResolution) {
-            if let Ok(y_res_vec) = y_res_val.into_u32_vec() {
-                if y_res_vec.len() >= 2 && y_res_vec[1] > 0 {
-                    let px_per_unit = y_res_vec[0] as f64 / y_res_vec[1] as f64;
-                    if px_per_unit > 0.0 {
-                        voxel.y = match res_unit {
-                            2 => 25400.0 / px_per_unit,
-                            3 => 10000.0 / px_per_unit,
-                            _ => 1.0,
-                        };
-                    }
-                }
+        if let Ok(y_res_val) = decoder.get_tag(Tag::YResolution)
+            && let Ok(y_res_vec) = y_res_val.into_u32_vec()
+            && y_res_vec.len() >= 2
+            && y_res_vec[1] > 0
+        {
+            let px_per_unit = y_res_vec[0] as f64 / y_res_vec[1] as f64;
+            if px_per_unit > 0.0 {
+                voxel.y = match res_unit {
+                    2 => 25400.0 / px_per_unit,
+                    3 => 10000.0 / px_per_unit,
+                    _ => 1.0,
+                };
             }
         }
     }

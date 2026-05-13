@@ -39,8 +39,8 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::AdminRequired;
 use crate::AppState;
+use crate::auth::AdminRequired;
 use crate::handler::dataset_url_hash16;
 
 /// Outcome of a `clear_proxy_cache` invocation.
@@ -180,12 +180,21 @@ pub async fn admin_clear_proxy_cache(
 ) -> Result<Json<ClearResponse>, (StatusCode, String)> {
     let cache_dir = app.proxy_cache_dir();
     let dataset = q.dataset;
-    let outcome = tokio::task::spawn_blocking(move || {
-        clear_proxy_cache(&cache_dir, dataset.as_deref())
-    })
-    .await
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")))?
-    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("clear failed: {e}")))?;
+    let outcome =
+        tokio::task::spawn_blocking(move || clear_proxy_cache(&cache_dir, dataset.as_deref()))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("join error: {e}"),
+                )
+            })?
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("clear failed: {e}"),
+                )
+            })?;
 
     Ok(Json(ClearResponse {
         cleared: true,

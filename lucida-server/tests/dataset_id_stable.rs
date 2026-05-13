@@ -27,11 +27,11 @@
 use std::sync::Arc;
 
 use lucida_content::{
-    Axis, AxisKind, DatasetManifest, DataType, DatasetId, DatasetKind, Entity, EntityId,
+    Axis, AxisKind, DataType, DatasetId, DatasetKind, DatasetManifest, Entity, EntityId,
     EntityKind, EntityLabels, ImageSpec, LevelGeometry, MultiscaleInfo,
 };
 use lucida_protocol::{
-    FetchSource, ProxiedFetchDescriptor, ProxiedImageSpec, DatasetOpened, WireFormat,
+    DatasetOpened, FetchSource, ProxiedFetchDescriptor, ProxiedImageSpec, WireFormat,
 };
 use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::handler::dataset_id_for_url;
@@ -39,8 +39,8 @@ use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::ServerBindingSeed;
-use object_store::memory::InMemory;
 use object_store::ObjectStore;
+use object_store::memory::InMemory;
 
 const URL_X: &str = "gs://lucida-test/datasets/dataset-x.zarr";
 const URL_Y: &str = "gs://lucida-test/datasets/dataset-y.zarr";
@@ -129,8 +129,7 @@ fn second_open_reuses_existing_binding() {
 
     assert_eq!(recovered.source_url, URL_X);
     assert_eq!(
-        recovered.dataset_opened.manifest.dataset_id,
-        original_register.manifest.dataset_id,
+        recovered.dataset_opened.manifest.dataset_id, original_register.manifest.dataset_id,
         "dataset_opened (replayed to the second-opening client) must be preserved"
     );
     assert!(
@@ -227,9 +226,18 @@ fn sample_register(dataset_id: &DatasetId) -> DatasetOpened {
             owner: entity_id,
             multiscale: MultiscaleInfo {
                 axes: vec![
-                    Axis { name: "z".into(), kind: AxisKind::Space },
-                    Axis { name: "y".into(), kind: AxisKind::Space },
-                    Axis { name: "x".into(), kind: AxisKind::Space },
+                    Axis {
+                        name: "z".into(),
+                        kind: AxisKind::Space,
+                    },
+                    Axis {
+                        name: "y".into(),
+                        kind: AxisKind::Space,
+                    },
+                    Axis {
+                        name: "x".into(),
+                        kind: AxisKind::Space,
+                    },
                 ],
                 levels: vec![LevelGeometry {
                     level_index: 0,

@@ -37,9 +37,12 @@ pub async fn browse_handler(
 
     // Constrain to data_dir if set.
     if let Some(root) = &state.data_dir {
-        let canonical_root = tokio::fs::canonicalize(root)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Invalid data-dir: {e}")))?;
+        let canonical_root = tokio::fs::canonicalize(root).await.map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Invalid data-dir: {e}"),
+            )
+        })?;
         if !canonical.starts_with(&canonical_root) {
             return Err((StatusCode::FORBIDDEN, "Path outside data directory".into()));
         }

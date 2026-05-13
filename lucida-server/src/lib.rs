@@ -18,12 +18,12 @@ pub mod static_serve;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use axum::extract::ws::Message;
 use lucida_core::protocol::ClientId;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use session::Session;
 
@@ -36,33 +36,17 @@ pub enum BroadcastItem {
         ack_json: String,
     },
     /// Presence update from a client (ephemeral).
-    PresenceUpdate {
-        sender: ClientId,
-        json: String,
-    },
+    PresenceUpdate { sender: ClientId, json: String },
     /// Cursor update from a client.
-    CursorUpdate {
-        sender: ClientId,
-        json: String,
-    },
+    CursorUpdate { sender: ClientId, json: String },
     /// Peer joined.
-    PeerJoined {
-        sender: ClientId,
-        json: String,
-    },
+    PeerJoined { sender: ClientId, json: String },
     /// Peer left.
-    PeerLeft {
-        json: String,
-    },
+    PeerLeft { json: String },
     /// Follow changed.
-    FollowChanged {
-        json: String,
-    },
+    FollowChanged { json: String },
     /// Dataset presence update from a client.
-    DatasetPresenceUpdate {
-        sender: ClientId,
-        json: String,
-    },
+    DatasetPresenceUpdate { sender: ClientId, json: String },
 }
 
 /// Per-client targeted message channels for unicast (chunk routing).

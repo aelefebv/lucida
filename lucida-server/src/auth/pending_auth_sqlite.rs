@@ -151,10 +151,7 @@ mod tests {
     async fn duplicate_insert_errors() {
         let (_session, store) = fresh_store().await;
         let now = Utc::now();
-        store
-            .insert(sample("dupe", "/", "", now))
-            .await
-            .unwrap();
+        store.insert(sample("dupe", "/", "", now)).await.unwrap();
         let res = store.insert(sample("dupe", "/x", "", now)).await;
         assert!(res.is_err(), "PRIMARY KEY collision should error");
     }

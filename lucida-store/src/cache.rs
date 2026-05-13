@@ -8,8 +8,8 @@ use std::sync::Mutex;
 
 use bytes::Bytes;
 use lru::LruCache;
-use object_store::path::Path;
 use object_store::ObjectStore;
+use object_store::path::Path;
 
 /// A memory-bounded LRU cache wrapping an ObjectStore.
 pub struct CachedStore {
