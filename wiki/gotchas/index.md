@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-05-13
 ---
 
 # Gotchas
@@ -29,3 +29,4 @@ Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of th
 - [[axum-query-multivalue]] — Axum's default `Query<T>` extractor silently drops repeated keys (`?dataset=A&dataset=B` → only `B` reaches the handler)
 - [[strict-mode-destroyable-classes]] — class instances with a `destroyed` flag set in `destroy()` get permanently disabled in dev (Strict-Mode double-invokes mount effects); `start()` must reset the flag
 - [[saved-view-client-only-state]] — JS-only preferences (e.g. `autoContrastMap`) that mutate WASM state need a dedicated SavedView field or recipients silently override with their defaults
+- [[branching-and-releases]] — trunk-based shape; image tags (not branches) for environment promotion; manual-merge release-please; branch-protection prerequisite

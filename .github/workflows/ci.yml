@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+# Cancel an in-flight CI run when a new commit lands on the same ref
+# (push to main supersedes earlier pushes; new PR commits supersede earlier ones).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust workspace (test + clippy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --workspace --all-features
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-features -- -D warnings
+
+  web:
+    name: Web (wasm-pack + pnpm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build (shared with rust job)
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: latest
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: pnpm
+          cache-dependency-path: lucida-web/pnpm-lock.yaml
+
+      - name: Build lucida-core WASM (consumed by lucida-web)
+        working-directory: lucida-core
+        run: wasm-pack build --target web --out-dir pkg
+
+      - name: Install web deps
+        working-directory: lucida-web
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check (tsc --noEmit -p tsconfig.app.json — see wiki/gotchas/ts-typecheck-trap)
+        working-directory: lucida-web
+        run: pnpm exec tsc --noEmit -p tsconfig.app.json
+
+      - name: Lint
+        working-directory: lucida-web
+        run: pnpm run lint
+
+      - name: Test
+        working-directory: lucida-web
+        run: pnpm test
+
+      - name: Build SPA
+        working-directory: lucida-web
+        run: pnpm run build
