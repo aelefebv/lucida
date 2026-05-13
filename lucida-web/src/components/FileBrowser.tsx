@@ -58,6 +58,10 @@ export function FileBrowser({
   );
 
   useEffect(() => {
+    // Initial-mount fetch — `browse` setStates loading/entries internally.
+    // The fetch IS the side effect we want; running it once on mount is the
+    // intent (currentPath is already the prop value at this point).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     browse(currentPath);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

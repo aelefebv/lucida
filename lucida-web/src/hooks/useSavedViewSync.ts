@@ -86,9 +86,11 @@ export function useSavedViewSync({
   notifyChange: () => void;
 } {
   // Construct everything lazily on first render via useState's initializer
-  // (runs exactly once). Avoids the React-19 "no ref access during render"
-  // lint while still letting captureBuilder + urlSync close over a stable
-  // url-tracking map.
+  // (runs exactly once). The captured `autoContrastMapRef` is read at
+  // call-time inside captureFn (which fires from event handlers), not
+  // during the initializer pass — so the new "passing a ref to a function
+  // may read its value during render" rule is a false positive here.
+  // eslint-disable-next-line react-hooks/refs
   const [bundle] = useState<SyncBundle>(() => {
     const urlByDatasetId = new Map<string, string>();
     const captureFn = (): SavedView | null => {

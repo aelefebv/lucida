@@ -579,10 +579,13 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
 
   // Cold-state header pulse: bright orange while a rebuild was within the
   // last poll interval, dim after that, gray when idle. The 500ms afterglow
-  // ensures fast rebuilds aren't lost between 200ms polls.
+  // ensures fast rebuilds aren't lost between 200ms polls. The parent
+  // already polls at the same cadence, so the performance.now() read here
+  // is just a derived view of state recency, not a fresh signal source.
   const coldStatePulse = (() => {
     const at = snap.orch?.coldState?.lastRebuildAt ?? 0;
     if (at === 0) return { color: "#444", glyph: "○" };
+    // eslint-disable-next-line react-hooks/purity
     const ms = performance.now() - at;
     if (ms < 200) return { color: "#fb4", glyph: "●" };
     if (ms < 500) return { color: "#963", glyph: "◐" };

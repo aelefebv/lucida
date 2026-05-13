@@ -42,14 +42,19 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     onCameraModeChange?.(cameraMode);
   }, [cameraMode, onCameraModeChange]);
 
-  // Key state for clip distance adjustment and fly camera
+  // Mirror props into refs so the RAF tick + fly-camera input hook see
+  // the latest canvas/scene each frame. Mirror updates are render-phase
+  // and idempotent — the canonical workaround for the new react-hooks/refs
+  // strictness.
   const canvasRef = useRef<HTMLCanvasElement>(canvas);
+  // eslint-disable-next-line react-hooks/refs
   canvasRef.current = canvas;
   const boundKeys = useMemo(() => getBoundKeys(), []);
   const pressedKeys = useKeyState(canvasRef, boundKeys);
 
   // Stable refs for callbacks needed by useFlyCameraInput
   const sceneRef = useRef<WasmScene>(scene);
+  // eslint-disable-next-line react-hooks/refs
   sceneRef.current = scene;
 
   const isFlyMode = cameraMode === "fly";
@@ -73,13 +78,19 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     }, []),
     useCallback(() => {
       clearTimeout(scaleTimerRef.current);
+      // scaleTimerRef is captured by useFlyCameraInput's callback chain;
+      // .current writes here are deferred (timer body), not render-phase.
+      // eslint-disable-next-line react-hooks/immutability
       scaleTimerRef.current = window.setTimeout(() => {
         loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
       }, SCALE_RESTORE_DELAY_MS);
     }, []),
   );
 
-  // Create/start render loop
+  // Create/start render loop. Same intentional omission as SliceViewer:
+  // `datasets` is a live mutable Map, onLoopChange is a stable parent
+  // callback, parentLoopRef is a ref — re-creating the loop on those would
+  // tear down GPU state every frame.
   useEffect(() => {
     const loop = new RenderLoop({ session, datasets, client, canvas, mode: "volume" });
     loopRef.current = loop;
@@ -91,7 +102,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       parentLoopRef.current = null;
       onLoopChange(null);
     };
-  }, [session, client, canvas]);
+  }, [session, client, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Mark dirty on remote document updates
   useEffect(() => {
@@ -155,7 +166,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     return () => {
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
-  }, [scene, pressedKeys, emitPresence, breakFollow, canvas]);
+  }, [scene, pressedKeys, emitPresence, breakFollow, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Resolution scaling during interaction
   const scaleTimerRef = useRef<number>(0);
@@ -165,6 +176,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   }, []);
   const scheduleFullRes = useCallback(() => {
     clearTimeout(scaleTimerRef.current);
+    // Same reasoning as the inline callback above: deferred write inside
+    // a debounced callback, not a render-phase mutation.
+    // eslint-disable-next-line react-hooks/immutability
     scaleTimerRef.current = window.setTimeout(() => {
       loopRef.current?.setRenderScale(FULL_RENDER_SCALE);
     }, SCALE_RESTORE_DELAY_MS);
@@ -297,6 +311,10 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     canvas.addEventListener("pointercancel", onPointerUp);
     canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("wheel", onWheel, { passive: false });
+    // Same cursor-mutation pattern as SliceViewer: lightweight DOM mutation
+    // for hover/drag feedback, vs a parent-driven CSS class that would
+    // re-render the whole viewport on every transition.
+    // eslint-disable-next-line react-hooks/immutability
     canvas.style.cursor = isFlyMode ? "crosshair" : (dragging ? "grabbing" : "grab");
     return () => {
       canvas.removeEventListener("pointerdown", onPointerDown);

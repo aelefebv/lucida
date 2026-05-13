@@ -57,5 +57,9 @@ export function useKeyState(
     };
   }, [containerRef, boundKeys]);
 
+  // The hook intentionally returns a stable Set that callers (e.g.
+  // VolumeViewer's RAF-driven fly-camera input loop) read each frame
+  // without triggering a re-render — the JSDoc above is the contract.
+  // eslint-disable-next-line react-hooks/refs
   return pressedRef.current;
 }

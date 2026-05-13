@@ -24,7 +24,13 @@ export function useRenderClient() {
     });
   }, []);
 
+  // `client` is null until the worker init resolves; once it does,
+  // setClientReady(true) re-renders this hook and the ref read picks up
+  // the live RenderClient. The ref is the canonical home (mutation
+  // happens inside the init effect); `client` is the gated read.
+  // eslint-disable-next-line react-hooks/refs
   const client = clientReady ? clientRef.current : null;
 
+  // eslint-disable-next-line react-hooks/refs
   return { canvasRef, clientRef, clientReady, client, loopRef, activeLoop, setActiveLoop, renderError };
 }

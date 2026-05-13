@@ -28,6 +28,9 @@ const SERVER_BASE = "";
 /** Build the redirect URL. Exported so unit tests can verify the shape
  * without driving a navigation. Path always defaults to `/` if empty
  * so the server's intent-row is well-formed. */
+// Co-located with the consumer; splitting to a sibling file would just
+// add ceremony for one helper that exists for testability.
+// eslint-disable-next-line react-refresh/only-export-components
 export function buildSignInUrl(loc: {
   pathname: string;
   search: string;

@@ -151,7 +151,15 @@ function App() {
     setAutoContrastMap: layers.setAutoContrastMap,
   });
 
+  // The three callback-ref population sites below (savedViewHooksRef,
+  // bridgeCallbacksRef, datasetCallbacksRef) implement the "callback refs
+  // populated after all hooks return" pattern documented in
+  // wiki/gotchas/app-tsx-hook-order.md. Hooks defined earlier in the file
+  // depend on these refs to break circular dependencies; populating during
+  // render (before effects fire) is load-bearing — switching to useEffect
+  // would leave the refs unpopulated for the very first effect pass.
   // Populate the bridge ↔ applier hook ref after the applier exists.
+  // eslint-disable-next-line react-hooks/refs
   savedViewHooksRef.current = {
     onDatasetOpened: (id) => savedViewSync.applier.notifyDatasetOpened(id),
     onOpenDatasetFailed: (url, err) => savedViewSync.applier.notifyOpenFailed(url, err),
@@ -189,12 +197,15 @@ function App() {
   }, [bridge, savedViewSync]);
 
   // Populate callback refs — runs during render, before effects fire.
+  // See the comment block above (savedViewHooksRef) for the rationale.
+  // eslint-disable-next-line react-hooks/refs
   bridgeCallbacksRef.current = {
     sendCommand: bridge.sendCommand,
     emitPresence: emitPresenceWithUrl,
     emitDatasetPresence: emitDatasetPresenceWithUrl,
     breakFollow: bridge.breakFollow,
   };
+  // eslint-disable-next-line react-hooks/refs
   datasetCallbacksRef.current = {
     removeDataset: (id: string) => {
       render.loopRef.current?.removeDataset(id);
@@ -278,6 +289,8 @@ function App() {
     }
     if (bridge.peers.size === 0) {
       client.updateCursorData(new Float32Array(0), 0);
+      // Reset on no-peers — the peers Map IS the external state we sync to.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setCursorLabels([]);
       return;
     }
@@ -320,12 +333,20 @@ function App() {
 
     setCursorLabels(result.labels);
     render.loopRef.current?.markInteractiveDirty();
-  }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef]);
+  }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef]);
 
   const handleCameraModeChange = useCallback((mode: string) => {
     setCameraMode(mode);
   }, []);
 
+  // The three useCallbacks below trip react-hooks/preserve-manual-memoization
+  // because the deps array references refs (e.g. scene.wasmSceneRef) while
+  // the body reads .current — React Compiler infers the .current as the real
+  // dep and the ref-shaped manual dep as suspicious. The handlers are
+  // user-event-driven (button click, keypress, debug toggle), so the
+  // memoization-stability win is small; the manual deps are intentional and
+  // satisfy the older react-hooks/exhaustive-deps gating.
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const handleCameraModeToggle = useCallback(() => {
     const ws = scene.wasmSceneRef.current;
     if (!ws) return;
@@ -347,6 +368,7 @@ function App() {
   }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef, render.canvasRef]);
 
   const [urlInput, setUrlInput] = useState("");
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const handleUrlKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       datasets.handleUrlSubmit(urlInput);
@@ -382,6 +404,7 @@ function App() {
     return spec?.name ?? activeId;
   }, [selectedDatasetId, layoutRegistry]);
   const [lastClickScreen, setLastClickScreen] = useState<[number, number] | null>(null);
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const handleDebugToggle = useCallback(() => {
     setShowDebug(prev => {
       debugStats.enabled = !prev;
@@ -400,6 +423,19 @@ function App() {
     datasets.handleUrlSubmit(path);
   }, [datasets]);
 
+  // The JSX block below reads `.current` from refs returned by useRenderClient,
+  // useWasmScene, useBridge, useLayout, etc. — passing them as props to
+  // SliceViewer / VolumeViewer / PeerCursors / Minimap / DebugOverlays /
+  // DebugPanel so those children can read the latest canvas, scene, loop, etc.
+  // each render. This is the canonical "ref-as-current-value-prop" idiom that
+  // partners with the wiki-documented App.tsx hook order
+  // (wiki/gotchas/app-tsx-hook-order.md): callback refs are populated AFTER
+  // all hooks return, then read in the same render via `.current`. The
+  // versioning state (datasetsVersion, remoteDocumentVersion) drives the
+  // re-render that surfaces ref updates downstream. The new
+  // eslint-plugin-react-hooks@7 "rules of react" treat all such reads as
+  // suspicious; they are intentional and load-bearing here.
+  /* eslint-disable react-hooks/refs */
   return (
     <div className="app">
       {/* ProfileMenu floats over the bottom-left corner of the app
@@ -669,6 +705,7 @@ function App() {
       />
     </div>
   );
+  /* eslint-enable react-hooks/refs */
 }
 
 export default App;

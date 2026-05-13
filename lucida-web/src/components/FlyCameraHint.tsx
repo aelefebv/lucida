@@ -26,8 +26,11 @@ export function FlyCameraHint({ visible, onDismiss }: Props) {
 
   // When visible becomes true, show the hint and start the auto-dismiss timer.
   // When visible becomes false (mode switched away), hide immediately.
+  // The `visible` prop IS the external state we synchronize to — the
+  // setState calls here implement the transition, they aren't a cascade.
   useEffect(() => {
     if (visible) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setShow(true);
       setFading(false);
       clearTimeout(timerRef.current);

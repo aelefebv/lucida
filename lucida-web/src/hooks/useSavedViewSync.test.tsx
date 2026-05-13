@@ -10,7 +10,7 @@
 // without a wasm init (mirrors applier.test.ts's injected fakeIdForUrl).
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { act, render } from "@testing-library/react";
 
 // Mock lucida-core BEFORE importing the hook so the import-time
@@ -93,28 +93,35 @@ function emptyView(): SavedView {
 }
 
 interface Captured {
-  current: ReturnType<typeof useSavedViewSync> | null;
-  z: number;
-  c: number;
-  t: number;
-  viewMode: "2d" | "3d";
+  current: {
+    handle: ReturnType<typeof useSavedViewSync>;
+    z: number;
+    c: number;
+    t: number;
+    viewMode: "2d" | "3d";
+  } | null;
 }
 
 interface HarnessProps {
   scene: MockScene;
-  out: Captured;
+  outRef: Captured;
   loopRef: React.RefObject<RenderLoop | null>;
   initial?: { z?: number; c?: number; t?: number; viewMode?: "2d" | "3d" };
 }
 
-function HookHarness({ scene, out, loopRef, initial }: HarnessProps) {
+function HookHarness({ scene, outRef, loopRef, initial }: HarnessProps) {
   const [z, setZ] = useState(initial?.z ?? 0);
   const [c, setC] = useState(initial?.c ?? 0);
   const [t, setT] = useState(initial?.t ?? 0);
   const [viewMode, setViewMode] = useState<"2d" | "3d">(initial?.viewMode ?? "2d");
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
+  // Mirror the latest map into a ref via useLayoutEffect — the hook reads
+  // .current from event handlers and follow-on effects, all of which fire
+  // after this layout effect has updated it.
   const autoContrastMapRef = useRef(autoContrastMap);
-  autoContrastMapRef.current = autoContrastMap;
+  useLayoutEffect(() => {
+    autoContrastMapRef.current = autoContrastMap;
+  }, [autoContrastMap]);
   const handle = useSavedViewSync({
     getScene: () => scene as unknown as Parameters<typeof useSavedViewSync>[0]["getScene"] extends () => infer R ? R : never,
     sendOpenRemoteDataset: () => {},
@@ -130,11 +137,7 @@ function HookHarness({ scene, out, loopRef, initial }: HarnessProps) {
     setAutoContrastMap,
   });
   useEffect(() => {
-    out.current = handle;
-    out.z = z;
-    out.c = c;
-    out.t = t;
-    out.viewMode = viewMode;
+    outRef.current = { handle, z, c, t, viewMode };
   });
   return null;
 }
@@ -158,11 +161,11 @@ function makeMockLoop(): {
 
 describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
   let scene: MockScene;
-  let out: Captured;
+  let outRef: Captured;
 
   beforeEach(() => {
     scene = makeMockScene();
-    out = { current: null, z: 0, c: 0, t: 0, viewMode: "2d" };
+    outRef = { current: null };
     // Reset the location hash so each test mounts with no pre-existing
     // bootstrap payload (otherwise a prior test's URL write triggers
     // an applier.apply on mount that races our explicit apply).
@@ -171,12 +174,12 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
 
   it("returns a stable notifyChange callback", async () => {
     const loop = makeMockLoop();
-    const { rerender } = render(<HookHarness scene={scene} out={out} loopRef={loop.ref} />);
+    const { rerender } = render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
     await act(async () => { /* flush mount */ });
-    const first = out.current?.notifyChange;
-    rerender(<HookHarness scene={scene} out={out} loopRef={loop.ref} />);
+    const first = outRef.current?.handle.notifyChange;
+    rerender(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
     await act(async () => { /* flush rerender */ });
-    expect(out.current?.notifyChange).toBe(first);
+    expect(outRef.current?.handle.notifyChange).toBe(first);
   });
 
   it("notifyChange schedules a debounced URL write", async () => {
@@ -190,10 +193,10 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
 
     try {
       await act(async () => {
-        render(<HookHarness scene={scene} out={out} loopRef={loop.ref} />);
+        render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
       });
       await act(async () => {
-        out.current?.notifyChange();
+        outRef.current?.handle.notifyChange();
       });
       // Past debounce + encode latency.
       await act(async () => {
@@ -208,24 +211,24 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
 
 describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
   let scene: MockScene;
-  let out: Captured;
+  let outRef: Captured;
 
   beforeEach(() => {
     scene = makeMockScene();
-    out = { current: null, z: 0, c: 0, t: 0, viewMode: "2d" };
+    outRef = { current: null };
     window.history.replaceState(null, "", "/");
   });
 
   it("marks loop interactive + residency dirty after apply (Bug #2)", async () => {
     const loop = makeMockLoop();
     await act(async () => {
-      render(<HookHarness scene={scene} out={out} loopRef={loop.ref} />);
+      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
     });
     expect(loop.interactiveCalls).toEqual([]);
     expect(loop.residencyCalls).toEqual([]);
 
     await act(async () => {
-      await out.current!.applier.apply(emptyView());
+      await outRef.current!.handle.applier.apply(emptyView());
     });
 
     expect(loop.interactiveCalls).toContain("savedview_apply");
@@ -235,16 +238,16 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
   it("pushes post-apply C/T/Z back to React state (Bug #3)", async () => {
     const loop = makeMockLoop();
     await act(async () => {
-      render(<HookHarness scene={scene} out={out} loopRef={loop.ref} />);
+      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
     });
-    expect(out.c).toBe(0);
+    expect(outRef.current?.c).toBe(0);
 
     const v = emptyView();
     v.view.c = 2;
     v.view.t = 5;
     v.view.z_range = { start: 7, end: 8 };
     await act(async () => {
-      await out.current!.applier.apply(v);
+      await outRef.current!.handle.applier.apply(v);
     });
     // Drain a render so the harness's tracking useEffect picks up
     // the new state values pushed by the apply-complete listener.
@@ -255,24 +258,24 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     expect(scene.tVal).toBe(5);
     expect(scene.zVal).toBe(7);
     // Then assert React mirrors caught up.
-    expect(out.c).toBe(2);
-    expect(out.t).toBe(5);
-    expect(out.z).toBe(7);
+    expect(outRef.current?.c).toBe(2);
+    expect(outRef.current?.t).toBe(5);
+    expect(outRef.current?.z).toBe(7);
   });
 
   it("syncs viewMode from post-apply scene state", async () => {
     const loop = makeMockLoop();
     await act(async () => {
-      render(<HookHarness scene={scene} out={out} loopRef={loop.ref} />);
+      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
     });
-    expect(out.viewMode).toBe("2d");
+    expect(outRef.current?.viewMode).toBe("2d");
 
     // Flip the mock's camera_mode to non-slice to simulate a 3D camera apply.
     scene.cameraModeVal = "arcball";
     await act(async () => {
-      await out.current!.applier.apply(emptyView());
+      await outRef.current!.handle.applier.apply(emptyView());
     });
     await act(async () => { /* flush pending effects */ });
-    expect(out.viewMode).toBe("3d");
+    expect(outRef.current?.viewMode).toBe("3d");
   });
 });

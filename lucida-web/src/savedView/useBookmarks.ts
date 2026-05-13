@@ -135,13 +135,14 @@ export function useBookmarks({
   // Re-fetch on dataset-set change. We deliberately depend on the joined
   // key (not the array reference) so fresh arrays with the same contents
   // don't churn.
+  // refresh closes over loadedDatasets, but the list it builds depends
+  // only on the joined key — refreshing more often than necessary is
+  // wrong (drops in-flight optimistic creates). The setState calls inside
+  // refresh ARE the intended effect: dataset set changed → re-fetch.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
-    // refresh closes over loadedDatasets, but the list it builds depends
-    // only on the joined key — refreshing more often than necessary is
-    // wrong (drops in-flight optimistic creates).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [datasetsKey]);
+  }, [datasetsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Slice 4: subscribe to cross-peer broadcasts. Created/Updated → fetch
   // by id and merge; Deleted → drop from local state. Self-broadcasts

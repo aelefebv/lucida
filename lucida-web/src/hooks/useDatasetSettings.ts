@@ -52,7 +52,11 @@ export function useDatasetSettings({
   const [dataRangeMap, setDataRangeMap] = useState<Map<string, { min: number; max: number }>>(new Map());
   const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null);
   const [layerSettingsVersion, setLayerSettingsVersion] = useState(0);
+  // Mirror the autoContrast map into a ref so the buildLayerInfos closure
+  // (called during render and from event handlers) reads the latest map
+  // without depending on it identity-wise.
   const autoContrastMapRef = useRef<Map<string, boolean>>(new Map());
+  // eslint-disable-next-line react-hooks/refs
   autoContrastMapRef.current = autoContrastMap;
 
   const bumpLayerSettingsVersion = useCallback(() => {
@@ -360,6 +364,11 @@ export function useDatasetSettings({
     });
   };
 
+  // buildLayerInfos closes over autoContrastMapRef + datasetsRef; both
+  // are mirrored from state via the version counters above (datasetsVersion,
+  // remoteDocumentVersion, layerSettingsVersion) so re-renders pick up
+  // the latest values. Calling during render is intentional.
+  // eslint-disable-next-line react-hooks/refs
   const layerInfos = buildLayerInfos();
   void datasetsVersion;
   void remoteDocumentVersion;
