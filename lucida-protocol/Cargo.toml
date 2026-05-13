@@ -2,6 +2,7 @@
 name = "lucida-protocol"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
 
 [dependencies]
 lucida-content = { path = "../lucida-content" }

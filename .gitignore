@@ -210,3 +210,21 @@ wiki/.obsidian
 /lucida.db
 /lucida.db-shm
 /lucida.db-wal
+
+# Credentials and key material — defensive patterns so a downloaded
+# OAuth client JSON or stray private key never sneaks into a commit.
+# See wiki/gotchas/oss-config-defaults for the env-var-based contract
+# these files would otherwise feed.
+*client_secret*.json
+*.oauth.json
+google-oauth.json
+*.pem
+*.key
+id_rsa
+id_rsa.*
+id_dsa
+id_dsa.*
+id_ecdsa
+id_ecdsa.*
+id_ed25519
+id_ed25519.*
