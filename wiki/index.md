@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-13
 ---
 
 # Lucida Wiki — Index
@@ -36,6 +36,7 @@ Curated cross-cuts that aggregate articles by architectural concern. See [[topic
 - "Why was X done that way?" → [[decisions/index|Decisions]]
 - "I just hit a weird build/runtime issue" → [[gotchas/index|Gotchas]]
 - "Where's the deep dive on the chunk pipeline?" → [[chunk-pipeline]] points at the canonical `CHUNK_PIPELINE.md`
+- "How does lucida actually deploy?" → [[deployment]] is the conceptual reference; `extras/deploy/RUNBOOK.md` is the procedural walkthrough
 
 ## Source material and artifacts
 
