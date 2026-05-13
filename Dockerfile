@@ -20,8 +20,10 @@
 # Stage 1: rust + wasm-pack
 # =============================================================================
 # The workspace is on edition = "2024" (every member's Cargo.toml). 2024
-# requires Rust >= 1.85; 1.87 is current stable at slice 5 authoring time.
-FROM rust:1.87-slim AS rust-builder
+# requires Rust >= 1.85; transitive deps (time@0.3.47, ...) need 1.88+;
+# CI uses dtolnay/rust-toolchain@stable which currently resolves to 1.95.
+# Pinning here matches CI exactly. Bump when CI's stable advances.
+FROM rust:1.95-slim AS rust-builder
 
 # Build deps. We deliberately do NOT install libssl-dev: lucida-server's
 # reqwest is configured `default-features = false, features =
