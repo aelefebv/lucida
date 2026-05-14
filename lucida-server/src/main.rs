@@ -36,6 +36,7 @@ use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse,
 
 #[derive(Parser, Debug)]
 #[command(name = "lucida-server", about = "Lucida collaborative imaging server")]
+#[command(version)] // pulls from Cargo.toml's [package].version at build time
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
