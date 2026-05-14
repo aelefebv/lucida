@@ -3,34 +3,39 @@ created: 2026-05-14
 modified: 2026-05-14
 ---
 
-# `object_store::gcp` credential discovery is incomplete vs. Google's full ADC contract
+# Use `GoogleCloudStorageBuilder::from_env()`, not `new()`, for GCS credentials
 
 A user trying to open a `gs://` dataset from `docker run` (or any non-laptop, non-GKE environment) will set `GOOGLE_APPLICATION_CREDENTIALS=/gcp/adc.json` — Google's standard ADC env var, used by every Google SDK and tutorial — and reasonably expect that to "just work." It almost did, and didn't, for a long time. This page captures why, and what lucida does about it.
 
 ## The footgun
 
-`object_store::gcp::GoogleCloudStorageBuilder::from_env()` is the natural-looking constructor for "read GCS credentials from the environment." It mirrors the S3 line's `AmazonS3Builder::from_env()`. But its env-var coverage is **deliberately narrow**: it reads object_store's own `GOOGLE_SERVICE_ACCOUNT` / `GOOGLE_SERVICE_ACCOUNT_PATH` / `GOOGLE_SERVICE_ACCOUNT_KEY` (and `GOOGLE_BUCKET*`), but its handling of `GOOGLE_APPLICATION_CREDENTIALS` has historically been unreliable enough that lucida cannot rely on it.
+`GoogleCloudStorageBuilder::new()` does no env-var reading at construction time. At `build()` time the only env-driven path is `ApplicationDefaultCredentials::read(None)`, which checks the well-known file at `$HOME/.config/gcloud/application_default_credentials.json` and **does not honor `GOOGLE_APPLICATION_CREDENTIALS`** before falling through to the GCE metadata server at `169.254.169.254`. So if you construct via `new()`, every `GOOGLE_*` env var the user set sits unread.
 
-When neither object_store-native env var is set, the builder falls through to:
+`GoogleCloudStorageBuilder::from_env()` is the discovery seam. It iterates `std::env::vars_os()`, lowercases each `GOOGLE_*` key, parses it as `GoogleConfigKey`, and routes via `with_config(...)`. That covers `GOOGLE_SERVICE_ACCOUNT`, `GOOGLE_SERVICE_ACCOUNT_PATH`, `GOOGLE_SERVICE_ACCOUNT_KEY`, `GOOGLE_BUCKET*`, **and** `GOOGLE_APPLICATION_CREDENTIALS` (which routes to `application_credentials_path` — the same field `with_application_credentials(...)` would set). The name `from_env` is literal; pick it.
 
-1. The well-known ADC file at `$HOME/.config/gcloud/application_default_credentials.json`.
-2. The GCE metadata server at `169.254.169.254`.
+What lucida used to do (broken):
 
-The metadata-server fallback is intentional — it's how Workload Identity on GKE provisions credentials. But off-cluster (most laptops, any non-GKE deploy), the metadata server is unreachable, and object_store retries it ~10 times over ~13 seconds before surfacing a confusing error:
+`GoogleCloudStorageBuilder::new().with_bucket_name(bucket).build()` — no env discovery; only the well-known ADC file or the metadata server were ever consulted. The user's `GOOGLE_APPLICATION_CREDENTIALS=/gcp/adc.json` was silently ignored.
+
+What lucida does now:
+
+`GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket).build()` — mirrors the S3 line. Every `GOOGLE_*` env var, including `GOOGLE_APPLICATION_CREDENTIALS`, is plumbed into the builder before `build()` runs.
+
+## The ~13s metadata-server hang
+
+When neither a `GOOGLE_*` env var nor the well-known ADC file resolves credentials, object_store falls through to the GCE metadata server. The metadata-server fallback is intentional — it's how Workload Identity on GKE provisions credentials. But off-cluster (most laptops, any non-GKE deploy), the metadata server is unreachable, and object_store retries it ~10 times over ~13 seconds before surfacing a confusing error:
 
 > `storage error: Generic GCS error: Error performing token request to 169.254.169.254 ... in 13.3s, after 10 retries, max_retries: 10, retry_timeout: 180s`
 
-The user's bind-mounted ADC JSON sits unused. They give up, mount the file at the obscure container `$HOME` path (`/root/.config/gcloud/application_default_credentials.json`), and it works — but only after burning 13 seconds per attempt learning it.
+Pre-fix, the user's bind-mounted ADC JSON sat unused because `new()` never asked the env. They'd give up, mount the file at the obscure container `$HOME` path (`/root/.config/gcloud/application_default_credentials.json`), and it would work — but only after burning 13 seconds per attempt learning it.
 
-## What lucida does
+## Effective discovery order
 
-The `gs://` arm of `lucida-store::backend::open` (see [[lucida-store]]) constructs the GCS client as: `GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket)`, then explicitly forwards a non-empty `GOOGLE_APPLICATION_CREDENTIALS` via `.with_application_credentials(...)`. The explicit forward is a belt-and-suspenders guarantee that Google's standard ADC env always reaches the builder — independent of object_store version drift.
-
-Effective credential discovery order after the lucida wrapper:
+Post-fix, the `gs://` arm of `lucida-store::backend::open` (see [[lucida-store]]) constructs `GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket)`. The discovery order:
 
 1. **`GOOGLE_SERVICE_ACCOUNT*`** — object_store-native (read by `from_env`). Use this if you already export these for other tools in your stack.
-2. **`GOOGLE_APPLICATION_CREDENTIALS`** — Google's standard ADC env. Lucida forwards it explicitly. Accepts both service-account JSON keys and user-credentials JSON (the file `gcloud auth application-default login` writes).
-3. **Well-known ADC file** at `$HOME/.config/gcloud/application_default_credentials.json` — read by object_store when no explicit credentials are provided.
+2. **`GOOGLE_APPLICATION_CREDENTIALS`** — Google's standard ADC env. Read by `from_env` (lowercased to `google_application_credentials`, parsed via `GoogleConfigKey::FromStr`, routed to `application_credentials_path`). Accepts both service-account JSON keys and user-credentials JSON (the file `gcloud auth application-default login` writes).
+3. **Well-known ADC file** at `$HOME/.config/gcloud/application_default_credentials.json` — read by `ApplicationDefaultCredentials::read(None)` when no explicit credentials are provided.
 4. **GCE metadata server** — for Workload Identity on GKE and GCE instance default service accounts. Hangs ~13s before erroring off-cluster (unchanged — this is the intentional WI path).
 
 ## Remediation one-liners
@@ -54,7 +59,7 @@ Effective credential discovery order after the lucida wrapper:
 
 ## Why not surface the failure faster?
 
-A probe at `open()` time (e.g. `HEAD` against `metadata.google.internal` with a short timeout) would let lucida fail-fast off-cluster instead of hanging 13s. Considered and rejected in PRD #541: false positives during transient GCE conditions (in-cluster but metadata briefly unreachable) would be worse than the hang, and the natural-env-var support plus the README "Reading from `gs://`" block address the same UX pain at the source.
+A probe at `open()` time (e.g. `HEAD` against `metadata.google.internal` with a short timeout) would let lucida fail-fast off-cluster instead of hanging 13s. Considered and rejected in PRD #541: false positives during transient GCE conditions (in-cluster but metadata briefly unreachable) would be worse than the hang, and switching to `from_env()` plus the README "Reading from `gs://`" block address the same UX pain at the source.
 
 ## Why no `LUCIDA_GCS_*` env vars?
 

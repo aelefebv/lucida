@@ -23,7 +23,7 @@ The split exists because mixing them led to either over-broadcasting (server-onl
 ## Module map
 
 - `lib.rs` — `chunk_key_to_store_path(key, axes, chunk_shape)` (the canonical 5D-key → on-disk path mapper, axes-aware and chunk-shape-aware) and the `ALL_DIMS` constant `["t", "c", "z", "y", "x"]`. Wire `t/c` are voxel coords (one per timepoint/channel) and `z/y/x` are chunk-grid coords; for `t/c` the function divides by `chunk_shape[axis]` to yield disk-grid coords. See [[gotchas/wire-chunk-key-conventions]].
-- `backend.rs` — `open(url)` → `Arc<dyn ObjectStore>`. URL scheme routing: `/path` (local), `gs://`, `s3://`, `http(s)://`. Both cloud arms call `from_env()` to inherit each vendor's native env vars (`AWS_*` for S3; `GOOGLE_SERVICE_ACCOUNT*` for GCS), and the GCS arm additionally forwards `GOOGLE_APPLICATION_CREDENTIALS` explicitly because object_store's GCS `from_env()` does not honor Google's standard ADC env. See [[gcs-credentials]].
+- `backend.rs` — `open(url)` → `Arc<dyn ObjectStore>`. URL scheme routing: `/path` (local), `gs://`, `s3://`, `http(s)://`. Both cloud arms call `from_env()` to inherit each vendor's native env vars (`AWS_*` for S3; `GOOGLE_*` for GCS, including `GOOGLE_SERVICE_ACCOUNT*` and Google's standard `GOOGLE_APPLICATION_CREDENTIALS`). Picking `from_env()` over `new()` is the load-bearing choice — `new()` skips env discovery entirely. See [[gcs-credentials]].
 - `cache.rs` — `CachedStore`: byte-level LRU wrapping any `ObjectStore`
 - `import.rs` — `import_dataset`: detects plate vs single-image from OME metadata, builds `ImportResult`
 - `import_types.rs` — `ImportResult`, `ServerBindingSeed`, `ImageBindingSeed`, `LevelBindingInfo`
