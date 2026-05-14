@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-13
+modified: 2026-05-14
 ---
 
 # Decisions
@@ -33,3 +33,9 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0020-single-image-with-servedir]] — `lucida-server` serves the SPA via `tower-http::ServeDir`; production deploy unit is a single container image bundling API + SPA (PRD #486; 2026-05-13, proposed)
 - [[decisions/0021-deployment-artifacts-as-reference-templates]] — `extras/deploy/` ships raw YAML with `<PLACEHOLDER>` values; no Helm chart, no Kustomize overlay, no provider-specific resources upstream (PRD #486; 2026-05-13, proposed)
 - [[decisions/0022-manual-merge-release-please-on-main]] — trunk-based releases via `release-please` on `main` with manual-merge of the release PR; tag push triggers multi-arch image build to ghcr.io (PRD #486; 2026-05-13, proposed)
+
+## Deferred — considered but not built yet
+
+Design ideas we explored and decided to hold for later live in
+[[deferred]]. Each entry inline-sketches the idea and links to the
+ADR that establishes the relevant context.

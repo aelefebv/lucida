@@ -1,6 +1,6 @@
 ---
 created: 2026-05-08
-modified: 2026-05-13
+modified: 2026-05-14
 ---
 
 # Authentication
@@ -13,10 +13,11 @@ Two viable OAuth shapes for a SPA + backend application were considered. Backend
 
 ## The seam: `PrincipalExtractor`
 
-The trait `PrincipalExtractor::extract(req) -> Result<AuthPrincipal, AuthError>` is the single boundary auth-using code consumes. Two implementations live in `auth/principal.rs`:
+The trait `PrincipalExtractor::extract(req) -> Result<AuthPrincipal, AuthError>` is the single boundary auth-using code consumes. Three implementations live in `auth/principal.rs`:
 
-- `SessionCookieExtractor` — production path. Reads the cookie, looks up the session row, enforces idle/hard timeouts, recomputes `is_admin` from `LUCIDA_ADMIN_EMAILS`, fires off a fire-and-forget `last_used_at` bump.
-- `GoogleJwtPrincipalExtractor` — Bearer-JWT path, wired but not the default request-time extractor. Reserved for future CLI/server-to-server flows; the OAuth callback uses it transitively via `principal_or_rejection_from_claims`.
+- `StubPrincipalExtractor` — disabled-mode default. Ignores every header (cookie included) and unconditionally yields `dev@local` / `Local Dev` / `is_admin: true`. Bypasses the cookie/session/sweep machinery entirely: no DB hit, no idle-timeout enforcement, no `LUCIDA_ADMIN_EMAILS` lookup — admin is always true in disabled mode. Wired in by `build_extractor` when `AuthMode::Disabled` per [[decisions/0018-auth-mode-auto-detect-by-bind-address]].
+- `SessionCookieExtractor` — production cookie path. Reads the cookie, looks up the session row, enforces idle/hard timeouts, recomputes `is_admin` from `LUCIDA_ADMIN_EMAILS`, fires off a fire-and-forget `last_used_at` bump.
+- `GoogleJwtPrincipalExtractor` — Bearer-JWT validator, wired but not the default request-time extractor. Reserved for future CLI/server-to-server flows; the OAuth callback uses it transitively via `principal_or_rejection_from_claims`.
 
 Saved-views (PRD #454) and any future feature consume `AuthPrincipal` without knowing about Google. Adding a new auth provider (Microsoft/Azure AD, Okta, generic OIDC) is a single-PR contribution per provider — see [[decisions/0017-configurable-from-day-one-for-oss-release]].
 

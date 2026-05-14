@@ -8,7 +8,17 @@ Collaborative volumetric microscopy viewer. Multiple peers open the same OME-Zar
 
 ## Quick start
 
-### Try it with Docker
+### Run it locally (just you)
+
+```bash
+docker run --rm -p 127.0.0.1:9876:9876 \
+  -e LUCIDA_AUTH=disabled -e LUCIDA_INSECURE=1 \
+  ghcr.io/aelefebv/lucida:latest
+```
+
+Visit <http://localhost:9876>. The `127.0.0.1:` prefix on `-p` keeps the host's port forward bound to loopback so only your machine can reach it; the container itself still binds `0.0.0.0` internally (the Dockerfile defaults it that way), and `LUCIDA_INSECURE=1` acknowledges that auth is off (see [ADR-0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md)).
+
+### Share with your LAN
 
 ```bash
 docker run --rm -p 9876:9876 \
@@ -16,11 +26,11 @@ docker run --rm -p 9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-Visit <http://localhost:9876>. Auth is disabled for the local-only path; `LUCIDA_INSECURE=1` acknowledges the loopback-only assumption (see [ADR-0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md)). Open an OME-Zarr dataset by URL: `gs://`, `s3://`, `http(s)://`, or a local `file://` path mounted into the container.
+Drops the `127.0.0.1:` prefix so the host port-forward listens on every interface — anyone on the same LAN can reach <http://your-machine:9876>. Be aware of the multi-user posture: every browser resolves to the same `dev@local` identity, bookmarks land in one shared namespace, and admin endpoints (`/admin/clear-proxy-cache`) are unprotected. If you want per-user identity, use the auth-enabled scenario below.
 
-### Deploy to production (Kubernetes)
+### Run with sign-in (Google OAuth)
 
-Reference manifests live in [`extras/deploy/k8s/`](extras/deploy/k8s/) with `<PLACEHOLDER>` values. Follow [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) for the step-by-step: provision an OAuth client, create a Kubernetes Secret, edit the placeholders, `kubectl apply`. The conceptual model (env-var contract, persistence layout, OAuth provider extensibility, per-cloud identity wiring) lives in [`wiki/systems/subsystems/deployment.md`](wiki/systems/subsystems/deployment.md).
+For any production-shape deployment — multi-user identity, proper admin gating, internet-reachable hostname — sign-in is required. The click-by-click Google Cloud Console setup (provision an OAuth client, configure the redirect URI, supply the credentials to the container) lives in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §2 alongside the Kubernetes manifests in [`extras/deploy/k8s/`](extras/deploy/k8s/) and the single-host docker-compose alternative in [`extras/deploy/docker-compose.yml`](extras/deploy/docker-compose.yml). The conceptual model (env-var contract, persistence layout, OAuth provider extensibility, per-cloud identity wiring) lives in [`wiki/systems/subsystems/deployment.md`](wiki/systems/subsystems/deployment.md).
 
 ### Develop on it
 
@@ -43,6 +53,23 @@ cd lucida-web && pnpm run dev
 ```
 
 Visit <http://localhost:5173>.
+
+### Useful options
+
+Add to any of the `docker run` recipes above.
+
+**Mount a local data directory** so `/api/browse` can list OME-Zarr files on your filesystem (otherwise browsing is restricted to `gs://` / `s3://` / `http(s)://` URLs):
+
+```bash
+-v /path/on/host:/var/lib/lucida/data \
+  -e LUCIDA_DATA_DIR=/var/lib/lucida/data
+```
+
+**Persist bookmarks/sessions across restarts** with a named volume covering the whole `/var/lib/lucida` tree (`lucida.db` + proxy cache). Without this, `docker rm` wipes everything; matters most for the LAN-shared case where multiple people accumulate state:
+
+```bash
+-v lucida-data:/var/lib/lucida
+```
 
 ## Working with the codebase
 

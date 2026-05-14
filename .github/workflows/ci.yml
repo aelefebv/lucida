@@ -62,6 +62,23 @@ jobs:
         with:
           version: latest
 
+      # Override the ancient `wasm-opt` that ships with wasm-pack's
+      # bundled binaryen — it's an MVP-only parser that chokes on the
+      # multi-table WASM current Rust stable emits ("Only 1 table
+      # definition allowed in MVP"). Prepending a recent binaryen to
+      # PATH lets wasm-pack's optimization step succeed and keeps the
+      # size win on lucida-core's WASM payload (it's on the SPA load
+      # path). Same fix is mirrored in the Dockerfile's rust-builder
+      # stage so the docker smoke + release builds don't regress.
+      - name: Install recent binaryen (for wasm-opt)
+        env:
+          BINARYEN_VERSION: version_129
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            | tar -xz -C /opt
+          echo "/opt/binaryen-${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -105,18 +122,76 @@ jobs:
     name: Docker smoke build (no push)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # paths-filter needs read access to PR refs to diff against base.
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
 
+      # Skip the build entirely on PRs that don't touch the Docker
+      # build context. The rust + web jobs already prove the code
+      # compiles; this job's unique value is "Dockerfile + .dockerignore
+      # + crate copy list still works." Wiki/doc/k8s-only PRs get a
+      # near-instant pass through. Push events (merges to main) and
+      # release-please PRs always build (see gate step below).
+      - name: Detect build-context changes
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            build:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'Cargo.toml'
+              - '**/Cargo.toml'
+              - 'lucida-cli/src/**'
+              - 'lucida-content/src/**'
+              - 'lucida-core/src/**'
+              - 'lucida-protocol/src/**'
+              - 'lucida-proxy/src/**'
+              - 'lucida-server/src/**'
+              - 'lucida-store/src/**'
+              - 'lucida-web/src/**'
+              - 'lucida-web/public/**'
+              - 'lucida-web/index.html'
+              - 'lucida-web/package.json'
+              - 'lucida-web/pnpm-lock.yaml'
+              - 'lucida-web/tsconfig*.json'
+              - 'lucida-web/vite.config.ts'
+
+      # Single condition reused by every subsequent step: build on push
+      # events, on release-please PRs (which also get the true smoke
+      # below), and on PRs whose changes touch the build context.
+      - name: Decide whether to build
+        id: gate
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]] \
+             || [[ "${{ github.head_ref }}" == "release-please--branches--main" ]] \
+             || [[ "${{ steps.filter.outputs.build }}" == "true" ]]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "No build-context changes; skipping docker build."
+          fi
+
       - name: Set up Docker Buildx
+        if: steps.gate.outputs.build == 'true'
         uses: docker/setup-buildx-action@v3
 
       # Single-arch (amd64) for speed. Multi-arch is the release
       # workflow's job (PRD #486 slice 7); for PR signal all we need is
       # "the Dockerfile still builds end-to-end". `load: true` makes the
-      # built image available to the runner for any later inspection
-      # steps without needing a registry round-trip.
+      # image available for the run-and-probe step on release-please
+      # PRs (and for any later local inspection).
+      #
+      # GHA buildx cache (mode=max) exports every intermediate stage so
+      # subsequent CI runs reuse the cargo + pnpm build layers when the
+      # COPY inputs haven't changed. First-build-on-branch is still
+      # cold; pushed fixup commits and rebases see warm caches.
       - name: Build image (single-arch, no push)
+        if: steps.gate.outputs.build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -124,6 +199,48 @@ jobs:
           push: false
           load: true
           tags: lucida:ci-smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # True smoke (release-please PRs only): start the image and prove
+      # the binary actually serves /healthz, /readyz, /version. This is
+      # the last gate before merging the release PR fires release.yml;
+      # on every other PR the cargo + pnpm build artifacts inside the
+      # image are already exercised by the rust + web jobs, so the
+      # build alone is sufficient Dockerfile signal.
+      #
+      # LUCIDA_AUTH=disabled bypasses ADR-0018 bind-address auto-detect
+      # (which would otherwise demand OAuth on the wildcard bind the
+      # Dockerfile sets) — the smoke is verifying process startup +
+      # health endpoints, not the auth path.
+      - name: True smoke (run + probe)
+        if: github.head_ref == 'release-please--branches--main'
+        run: |
+          set -euo pipefail
+          docker run -d --name lucida-smoke -p 9876:9876 \
+            -e LUCIDA_AUTH=disabled \
+            lucida:ci-smoke
+          # Poll until /healthz answers or 30s elapses. The binary
+          # starts in well under a second; the deadline tolerates
+          # runner cold-start jitter without masking real hangs.
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:9876/healthz > /dev/null; then
+              echo "healthz up after ${i}s"
+              break
+            fi
+            sleep 1
+            if [[ "$i" == "30" ]]; then
+              echo "::error::healthz never responded within 30s"
+              exit 1
+            fi
+          done
+          echo "--- /healthz ---"; curl -fsS http://localhost:9876/healthz; echo
+          echo "--- /readyz ---";  curl -fsS http://localhost:9876/readyz;  echo
+          echo "--- /version ---"; curl -fsS http://localhost:9876/version; echo
+
+      - name: Container logs on smoke failure
+        if: failure() && github.head_ref == 'release-please--branches--main'
+        run: docker logs lucida-smoke || true
 
   manifests:
     name: K8s manifest dry-run (extras/deploy/k8s)

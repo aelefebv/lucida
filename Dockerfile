@@ -46,6 +46,26 @@ RUN rustup target add wasm32-unknown-unknown
 # `cargo install`).
 RUN curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
+# Override wasm-pack's bundled wasm-opt with a recent binaryen.
+# wasm-pack ships an MVP-only `wasm-opt` that fails to parse the multi-
+# table WASM current Rust stable emits ("Only 1 table definition allowed
+# in MVP"). Symlinking a newer wasm-opt into /usr/local/bin shadows the
+# bundled one (wasm-pack invokes by PATH lookup). Same fix is mirrored
+# in .github/workflows/ci.yml's web job. TARGETARCH is set automatically
+# by buildkit when building under --platform; mapped to binaryen's
+# release-asset arch naming.
+ARG BINARYEN_VERSION=version_129
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) BINARYEN_ARCH=x86_64-linux ;; \
+      arm64) BINARYEN_ARCH=aarch64-linux ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${BINARYEN_ARCH}.tar.gz" \
+      | tar -xz -C /opt; \
+    ln -s "/opt/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
+
 WORKDIR /workspace
 
 # Copy the workspace. .dockerignore keeps target/, node_modules/,
@@ -127,11 +147,16 @@ COPY --from=web-builder  /web/lucida-web/dist                    /usr/share/luci
 # the right place when an adopter doesn't override.
 WORKDIR /var/lib/lucida
 
-# The dist path is image-internal (not adopter-tunable) so it's the
-# only LUCIDA_* var we bake in. Everything else flows from runtime
-# (`docker run -e ...` or k8s `env:`) per ADR-0017's OSS env-var
-# contract.
+# The dist path is image-internal (not adopter-tunable) so we bake it
+# in. Everything else flows from runtime (`docker run -e ...` or k8s
+# `env:`) per ADR-0017's OSS env-var contract.
 ENV LUCIDA_WEB_DIST=/usr/share/lucida/web
+
+# Bind 0.0.0.0 by default. ADR-0018's loopback default is for the
+# binary running outside a container; the deploy unit's intent is "I'm
+# exposed via a port forward," so the wildcard bind is the useful
+# default here. Adopters who want a different bind override at runtime.
+ENV LUCIDA_BIND=0.0.0.0:9876
 
 # Informational; does not actually publish the port.
 EXPOSE 9876
