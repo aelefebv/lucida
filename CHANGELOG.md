@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/aelefebv/lucida/compare/v0.3.0...v0.3.1) (2026-05-14)
+
+
+### Bug Fixes
+
+* **auth:** restore StubPrincipalExtractor for disabled mode ([#533](https://github.com/aelefebv/lucida/issues/533)) ([c41e7ca](https://github.com/aelefebv/lucida/commit/c41e7cade2777a6fc6fe3071e200307e4d80f9a5))
+
 ## [0.3.0](https://github.com/aelefebv/lucida/compare/v0.2.0...v0.3.0) (2026-05-14)
 
 
