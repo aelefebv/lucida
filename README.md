@@ -71,6 +71,28 @@ Add to any of the `docker run` recipes above.
 -v lucida-data:/var/lib/lucida
 ```
 
+### Reading from `gs://`
+
+Lucida discovers Google Cloud credentials, in order: object_store-native `GOOGLE_SERVICE_ACCOUNT*` env vars, then `GOOGLE_APPLICATION_CREDENTIALS` (forwarded explicitly), then the well-known ADC file at `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE metadata server. See [`wiki/gotchas/gcs-credentials.md`](wiki/gotchas/gcs-credentials.md) for the full story (and how to avoid the off-cluster ~13s metadata-server hang).
+
+**Bare binary on a dev laptop** with `gcloud auth application-default login` already done — zero env config; the well-known ADC file at `$HOME/.config/gcloud/application_default_credentials.json` is read automatically:
+
+```bash
+cargo run -p lucida-server
+```
+
+**`docker run`** with the host's ADC file (or any service-account JSON) bind-mounted in:
+
+```bash
+docker run --rm -p 127.0.0.1:9876:9876 \
+  -e LUCIDA_AUTH=disabled -e LUCIDA_INSECURE=1 \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/gcp/adc.json \
+  -v "$HOME/.config/gcloud/application_default_credentials.json:/gcp/adc.json:ro" \
+  ghcr.io/aelefebv/lucida:latest
+```
+
+**GKE with Workload Identity** — annotate the KSA with the GSA email and lucida picks credentials up via the metadata server with no env config. Full walkthrough in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §5.
+
 ## Working with the codebase
 
 - **Rust changes in any `lucida-*` crate** → rerun `(cd lucida-web && pnpm run build:wasm)` so the SPA picks up the new WASM

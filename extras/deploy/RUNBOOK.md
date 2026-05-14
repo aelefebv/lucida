@@ -186,6 +186,17 @@ etc.). Pick the snippet matching your cluster and apply it in your fork
          annotations:
            iam.gke.io/gcp-service-account: <GSA-EMAIL>
 
+#### Non-GKE: service-account JSON key
+
+For deploys outside GKE (single-host docker, on-prem k8s without WI, EKS/AKS
+clusters reading from GCS), Workload Identity isn't an option. Mount a
+Google service-account JSON key as a secret/volume inside the pod (or bind
+it in via `docker run -v`) and set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json`
+in the deployment env. Lucida forwards that env var to the GCS client
+explicitly; see [wiki/gotchas/gcs-credentials.md](../../wiki/gotchas/gcs-credentials.md)
+for credential discovery order. WI on GKE remains the recommended path
+when available.
+
 ### EKS IRSA (IAM Roles for Service Accounts)
 
 1. Create an IAM role with a trust policy that allows the EKS OIDC provider

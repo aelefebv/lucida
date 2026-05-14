@@ -2,7 +2,13 @@
 //!
 //! URL scheme routing:
 //! - `/path/...` → local filesystem
-//! - `gs://bucket/...` → Google Cloud Storage (Application Default Credentials)
+//! - `gs://bucket/...` → Google Cloud Storage. Credential discovery order:
+//!   object_store-native `GOOGLE_SERVICE_ACCOUNT*` env vars (read by
+//!   `GoogleCloudStorageBuilder::from_env`), then `GOOGLE_APPLICATION_CREDENTIALS`
+//!   (Google's standard ADC env, forwarded explicitly here because
+//!   `from_env` does not consult it despite the name), then the well-known ADC
+//!   file at `$HOME/.config/gcloud/application_default_credentials.json`, then
+//!   the GCE metadata server (Workload Identity / GCE instance default).
 //! - `s3://bucket/...` → Amazon S3 (environment/instance credentials)
 //! - `http://...` / `https://...` → HTTP static file server
 
@@ -92,8 +98,13 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 /// Open a storage backend from a URL.
 ///
 /// - Paths starting with `/` are treated as local filesystem paths.
-/// - `gs://bucket/path` URLs use Google Cloud Storage with Application Default
-///   Credentials.
+/// - `gs://bucket/path` URLs use Google Cloud Storage. Credentials are
+///   discovered, in order: object_store-native `GOOGLE_SERVICE_ACCOUNT*` env
+///   vars (via `GoogleCloudStorageBuilder::from_env`), then
+///   `GOOGLE_APPLICATION_CREDENTIALS` (forwarded explicitly here because
+///   `from_env` does not honor it), then the well-known ADC file at
+///   `$HOME/.config/gcloud/application_default_credentials.json`, then the
+///   GCE metadata server (Workload Identity / GCE instance default).
 /// - `s3://bucket/path` URLs use Amazon S3 with environment/instance credentials.
 /// - `http://` and `https://` URLs use an HTTP static file server.
 pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
@@ -105,9 +116,21 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
         Ok(Arc::new(store))
     } else if url.starts_with("gs://") {
         let (bucket, prefix) = parse_gs_url(url)?;
-        let store = GoogleCloudStorageBuilder::new()
-            .with_bucket_name(bucket)
-            .build()?;
+        // `GoogleCloudStorageBuilder::from_env` mirrors the S3 line below and
+        // honors object_store's native `GOOGLE_SERVICE_ACCOUNT*` env vars.
+        // We then forward `GOOGLE_APPLICATION_CREDENTIALS` explicitly because
+        // `from_env` does NOT consult it despite Google's standard ADC contract
+        // using that env var (every Google SDK and tutorial sets it). Without
+        // this forward, the natural docker / non-GKE deploy workflow (mount the
+        // ADC JSON, set the env var) falls through to the GCE metadata server
+        // and hangs ~13s before erroring off-cluster.
+        let mut builder = GoogleCloudStorageBuilder::from_env().with_bucket_name(bucket);
+        if let Ok(creds) = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+            && !creds.is_empty()
+        {
+            builder = builder.with_application_credentials(creds);
+        }
+        let store = builder.build()?;
         match prefix {
             Some(p) => Ok(Arc::new(PrefixStore::new(store, p))),
             None => Ok(Arc::new(store)),
