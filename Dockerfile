@@ -127,11 +127,16 @@ COPY --from=web-builder  /web/lucida-web/dist                    /usr/share/luci
 # the right place when an adopter doesn't override.
 WORKDIR /var/lib/lucida
 
-# The dist path is image-internal (not adopter-tunable) so it's the
-# only LUCIDA_* var we bake in. Everything else flows from runtime
-# (`docker run -e ...` or k8s `env:`) per ADR-0017's OSS env-var
-# contract.
+# The dist path is image-internal (not adopter-tunable) so we bake it
+# in. Everything else flows from runtime (`docker run -e ...` or k8s
+# `env:`) per ADR-0017's OSS env-var contract.
 ENV LUCIDA_WEB_DIST=/usr/share/lucida/web
+
+# Bind 0.0.0.0 by default. ADR-0018's loopback default is for the
+# binary running outside a container; the deploy unit's intent is "I'm
+# exposed via a port forward," so the wildcard bind is the useful
+# default here. Adopters who want a different bind override at runtime.
+ENV LUCIDA_BIND=0.0.0.0:9876
 
 # Informational; does not actually publish the port.
 EXPOSE 9876
