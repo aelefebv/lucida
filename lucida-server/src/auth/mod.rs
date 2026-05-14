@@ -17,15 +17,18 @@
 //!   one-shot OAuth-intent rows: state token → intended path/hash.
 //! - `google_oauth` — Google integration: authorization URL, code
 //!   exchange, JWKS cache + refresh, JWT validation. The deepest piece.
-//! - `principal` — `PrincipalExtractor` trait, the production
-//!   `SessionCookieExtractor` (slice 2), the slice-4
-//!   `GoogleJwtPrincipalExtractor`, and the
-//!   `principal_from_claims` adapter the callback handler uses.
+//! - `principal` — `PrincipalExtractor` trait plus the three
+//!   implementations: `SessionCookieExtractor` (Google-mode cookie
+//!   path), `GoogleJwtPrincipalExtractor` (Bearer-token validator),
+//!   and `StubPrincipalExtractor` (disabled-mode canned principal).
+//!   Also `principal_from_claims`, the adapter the callback uses.
 //! - `middleware` — axum middleware that runs the extractor and
 //!   attaches the resulting principal to request extensions.
+//!   `build_extractor` picks between the three implementations based
+//!   on `AuthMode`.
 //! - `handlers` — `/auth/whoami`, `/auth/logout` (slice 3),
 //!   `/auth/start` and `/auth/callback` (slice 4), `/auth/error`
-//!   (slice 5), and the dev-only `/auth/dev/login`.
+//!   (slice 5).
 //! - `unauth_landing` — small inline HTML the middleware serves on an
 //!   unauth HTML navigation; carries the JS shim that captures
 //!   `location.hash` before redirecting to `/auth/start`.
@@ -67,22 +70,9 @@ pub use pending_auth_memory::MemoryPendingAuthStore;
 pub use pending_auth_sqlite::SqlitePendingAuthStore;
 pub use principal::{
     AuthError, GoogleJwtPrincipalExtractor, PrincipalExtractor, RejectionReason,
-    SessionCookieExtractor, principal_from_claims, principal_or_rejection_from_claims,
+    SessionCookieExtractor, StubPrincipalExtractor, principal_from_claims,
+    principal_or_rejection_from_claims,
 };
 pub use session_store::{LoginSession, LoginSessionStore, SessionStoreError};
 pub use session_store_memory::MemorySessionStore;
 pub use session_store_sqlite::{SqliteSessionStore, StoreOpenError};
-
-/// Returns true if this binary should expose the dev-only auth surface
-/// (currently `POST /auth/dev/login`).
-///
-/// Slice 2 gated on `cfg!(debug_assertions)` because `AuthMode::Disabled`
-/// hadn't been validated yet. Slice 8 (per slice 7's hand-off note now
-/// that mode is first-class) gates on `mode == AuthMode::Disabled`
-/// instead: the dev-login route only lands when auth is intentionally
-/// off (loopback default + auto-detect, or explicit `LUCIDA_AUTH=disabled`).
-/// A release build running with auth disabled still gets the dev shortcut;
-/// a debug build configured for Google OAuth doesn't expose it.
-pub fn is_dev_mode(config: &config::AuthConfig) -> bool {
-    matches!(config.mode, config::AuthMode::Disabled)
-}

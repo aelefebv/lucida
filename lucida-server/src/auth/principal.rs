@@ -1,4 +1,4 @@
-//! `PrincipalExtractor` trait + the production `SessionCookieExtractor`.
+//! `PrincipalExtractor` trait + its three production implementations.
 //!
 //! The trait is the OSS extension point (per ADR 0017): a self-hoster
 //! adding a new auth provider implements this trait once and wires it
@@ -6,11 +6,13 @@
 //! per-user feature consume the resulting `AuthPrincipal` and never
 //! see provider-specific details.
 //!
-//! Slice 2 (PRD #455) retires the slice-1 `StubPrincipalExtractor` and
-//! lands the real cookie+session lookup. The stub is gone from the
-//! crate surface; tests that need an authenticated principal mint a
-//! row in a `MemorySessionStore` and exercise the same extractor that
-//! production uses.
+//! Three implementations live here: [`SessionCookieExtractor`] (the
+//! production cookie+session lookup), [`GoogleJwtPrincipalExtractor`]
+//! (Bearer-token validator for non-cookie call sites), and
+//! [`StubPrincipalExtractor`] (the disabled-mode extractor that yields
+//! a fixed `dev@local` principal without touching headers, the cookie,
+//! or any store). `build_extractor` in [`crate::auth::middleware`] picks
+//! between them based on `AuthMode`.
 
 use std::sync::Arc;
 
@@ -393,6 +395,37 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
                 Err(AuthError::Internal(other.to_string()))
             }
         }
+    }
+}
+
+/// Disabled-mode extractor: yields a fixed `dev@local` principal for
+/// every request. Touches no headers, no cookie, no store.
+///
+/// Wired in by [`crate::auth::middleware::build_extractor`] when
+/// `AuthMode::Disabled`. ADR-0018 promises that loopback default (and
+/// `LUCIDA_AUTH=disabled` more generally) bypasses sign-in entirely;
+/// this is the implementation that delivers on that promise. Without
+/// it, the cookie extractor would 401 every request and the SPA's
+/// `UnauthLanding` would bounce into a `/auth/start` that isn't
+/// registered → infinite redirect loop (the regression PRD #527 fixes).
+///
+/// `is_admin: true` is intentional: "no auth" means no gating at all,
+/// so admin-only endpoints have to resolve as admin too. The multi-user
+/// trade-off (every browser is the same `dev@local` identity, sharing
+/// one bookmark namespace and unprotected admin endpoints) is the
+/// honest semantic of "no auth" — see PRD #527 §"Solution" item 1 and
+/// the deferred per-browser-anon sketch in `wiki/decisions/deferred.md`.
+pub struct StubPrincipalExtractor;
+
+#[async_trait]
+impl PrincipalExtractor for StubPrincipalExtractor {
+    async fn extract(&self, _req: &Parts) -> Result<AuthPrincipal, AuthError> {
+        Ok(AuthPrincipal {
+            email: "dev@local".to_string(),
+            display_name: "Local Dev".to_string(),
+            picture_url: None,
+            is_admin: true,
+        })
     }
 }
 
@@ -807,5 +840,35 @@ mod tests {
             p.is_admin,
             "lowercased lookup must match casing-shifted JWT email"
         );
+    }
+
+    // -- StubPrincipalExtractor ------------------------------------------
+
+    #[tokio::test]
+    async fn stub_extractor_returns_canned_principal_with_no_cookie() {
+        let p = StubPrincipalExtractor
+            .extract(&parts_with_cookie(None))
+            .await
+            .unwrap();
+        assert_eq!(p.email, "dev@local");
+        assert_eq!(p.display_name, "Local Dev");
+        assert!(p.picture_url.is_none());
+        assert!(p.is_admin);
+    }
+
+    #[tokio::test]
+    async fn stub_extractor_returns_canned_principal_with_arbitrary_cookie() {
+        // The whole point of the stub is that whatever cookie shows up
+        // (including a bogus value that the cookie extractor would
+        // reject) is ignored — disabled mode never touches the session
+        // store.
+        let p = StubPrincipalExtractor
+            .extract(&parts_with_cookie(Some("garbage-no-row-exists")))
+            .await
+            .unwrap();
+        assert_eq!(p.email, "dev@local");
+        assert_eq!(p.display_name, "Local Dev");
+        assert!(p.picture_url.is_none());
+        assert!(p.is_admin);
     }
 }

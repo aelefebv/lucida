@@ -33,7 +33,8 @@ use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
 use lucida_server::admin::admin_clear_proxy_cache;
-use lucida_server::auth::middleware::{auth_middleware, build_extractor};
+use lucida_server::auth::middleware::auth_middleware;
+use lucida_server::auth::principal::SessionCookieExtractor;
 use lucida_server::auth::session_store::{LoginSession, LoginSessionStore};
 use lucida_server::auth::{AuthConfig, MemorySessionStore};
 use lucida_server::handler::dataset_url_hash16;
@@ -57,10 +58,15 @@ fn build_router(
     config.admin_emails = admin_emails;
     let config = Arc::new(config);
 
-    let extractor = build_extractor(
-        Arc::clone(&config),
-        Arc::clone(&store) as Arc<dyn LoginSessionStore>,
-    );
+    // Cookie extractor explicitly: PRD #527 made `build_extractor`
+    // pick the stub for `Disabled` mode, but this test exercises the
+    // cookie path's per-request `is_admin` derivation off the
+    // `admin_emails` set, so we wire the cookie extractor directly.
+    let extractor: Arc<dyn lucida_server::auth::PrincipalExtractor> =
+        Arc::new(SessionCookieExtractor::new(
+            Arc::clone(&config),
+            Arc::clone(&store) as Arc<dyn LoginSessionStore>,
+        ));
 
     let app_state = AppState {
         session: Arc::new(Mutex::new(Session::new())),

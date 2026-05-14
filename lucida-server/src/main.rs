@@ -300,10 +300,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let extractor =
         auth::middleware::build_extractor(Arc::clone(&auth_config), Arc::clone(&session_store_dyn));
 
-    let dev_login_state = auth::handlers::DevLoginState {
-        config: Arc::clone(&auth_config),
-        store: Arc::clone(&session_store_dyn),
-    };
     let logout_state = auth::handlers::LogoutState {
         config: Arc::clone(&auth_config),
         store: Arc::clone(&session_store_dyn),
@@ -313,11 +309,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     //   * `authed_router` — `/auth/whoami` and `/auth/logout`. These
     //     read the principal/cookie, so they MUST run through the auth
     //     middleware (whoami specifically returns 401 when missing).
-    //   * `public_router` — `/auth/start`, `/auth/callback`, and the
-    //     dev-only `/auth/dev/login`. These mint sessions and must NOT
-    //     be wrapped — otherwise an unauthed user hitting `/auth/start`
-    //     would be 401'd into the unauth landing, which then redirects
-    //     back to `/auth/start` (infinite loop).
+    //   * `public_router` — `/auth/start` and `/auth/callback`. These
+    //     mint sessions and must NOT be wrapped — otherwise an unauthed
+    //     user hitting `/auth/start` would be 401'd into the unauth
+    //     landing, which then redirects back to `/auth/start` (infinite
+    //     loop).
     let authed_auth_router: Router<()> = Router::new()
         .route("/auth/whoami", get(auth::handlers::whoami))
         .route(
@@ -376,18 +372,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
                 get(auth::handlers::auth_callback).with_state(oauth_state),
             );
     }
-    if auth::is_dev_mode(&auth_config) {
-        // Slice 8: gate on the validated `AuthMode::Disabled` rather
-        // than `cfg!(debug_assertions)`. A release build deployed with
-        // `LUCIDA_AUTH=disabled` (or auto-detect on a loopback bind)
-        // gets the dev shortcut; a debug build wired to Google does not.
-        tracing::info!("auth.dev_login.exposed");
-        public_auth_router = public_auth_router.route(
-            "/auth/dev/login",
-            post(auth::handlers::dev_login).with_state(dev_login_state),
-        );
-    }
-
     // PRD #486 slice 4: liveness/readiness probes. Mounted on the
     // public router half so the kubelet (which presents no session
     // cookie) can hit them without being 401'd. Always-200 today; the

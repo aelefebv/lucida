@@ -53,7 +53,8 @@ use lucida_protocol::{
     AssetCatalog, DatasetOpened, FetchSource, ProxiedFetchDescriptor, ProxiedImageSpec, WireFormat,
 };
 use lucida_server::UnicastRoutes;
-use lucida_server::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
+use lucida_server::auth::middleware::{SharedExtractor, auth_middleware};
+use lucida_server::auth::principal::SessionCookieExtractor;
 use lucida_server::auth::{AuthConfig, LoginSession, LoginSessionStore, MemorySessionStore};
 use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::bookmarks::handlers::BookmarksState;
@@ -102,10 +103,14 @@ async fn build_rig() -> Rig {
         .unwrap();
 
     let config = Arc::new(AuthConfig::for_tests());
-    let extractor: SharedExtractor = build_extractor(
+    // Cookie extractor explicitly: PRD #527 made `build_extractor`
+    // pick the stub for `Disabled` mode, but this test relies on
+    // per-cookie identities (`alice@x` vs `bob@x`) to drive the
+    // bookmark-broadcast assertions.
+    let extractor: SharedExtractor = Arc::new(SessionCookieExtractor::new(
         Arc::clone(&config),
         auth_session_store as Arc<dyn LoginSessionStore>,
-    );
+    ));
 
     let session = Arc::new(Mutex::new(Session::new()));
     let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));

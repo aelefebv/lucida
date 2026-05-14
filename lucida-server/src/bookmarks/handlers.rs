@@ -952,17 +952,25 @@ mod tests {
     /// Mount the actual auth middleware (no cookie ⇒ 401) over the
     /// bookmarks router and assert every endpoint is gated. Slice 2's
     /// acceptance: "no-auth requests return 401".
+    ///
+    /// PRD #527 made `build_extractor` AuthMode-aware (Disabled →
+    /// stub, Google → cookie); this test wants the cookie extractor's
+    /// 401 behaviour, so it constructs `SessionCookieExtractor`
+    /// directly rather than going through the picker.
     #[tokio::test]
     async fn endpoints_401_without_auth_under_real_middleware() {
-        use crate::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
+        use crate::auth::middleware::{SharedExtractor, auth_middleware};
+        use crate::auth::principal::SessionCookieExtractor;
         use crate::auth::session_store_memory::MemorySessionStore;
         use crate::auth::{AuthConfig, LoginSessionStore};
 
         let store: Arc<dyn BookmarkStore> = Arc::new(MemoryBookmarkStore::new());
         let session_store: Arc<dyn LoginSessionStore> = Arc::new(MemorySessionStore::new());
         let config = Arc::new(AuthConfig::for_tests());
-        let extractor: SharedExtractor =
-            build_extractor(Arc::clone(&config), Arc::clone(&session_store));
+        let extractor: SharedExtractor = Arc::new(SessionCookieExtractor::new(
+            Arc::clone(&config),
+            Arc::clone(&session_store),
+        ));
 
         let app = router(BookmarksState {
             store,

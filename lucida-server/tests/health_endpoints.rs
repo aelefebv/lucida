@@ -18,7 +18,8 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::get;
 use tower::ServiceExt;
 
-use lucida_server::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
+use lucida_server::auth::middleware::{SharedExtractor, auth_middleware};
+use lucida_server::auth::principal::SessionCookieExtractor;
 use lucida_server::auth::{AuthConfig, LoginSessionStore, MemorySessionStore};
 use lucida_server::health;
 
@@ -27,11 +28,19 @@ use lucida_server::health;
 /// protected route exists only so the test exercises the same wrapping
 /// pattern (auth middleware around the protected half, then merge with
 /// the public half) used in production.
+///
+/// We use the cookie extractor explicitly (not `build_extractor`,
+/// which after PRD #527 picks the stub for the test config's
+/// `Disabled` mode) so the protected stub route would actually 401 if
+/// somebody accidentally merged the health router into the protected
+/// half.
 async fn build_app() -> Router {
     let session_store: Arc<dyn LoginSessionStore> = Arc::new(MemorySessionStore::new());
     let config = Arc::new(AuthConfig::for_tests());
-    let extractor: SharedExtractor =
-        build_extractor(Arc::clone(&config), Arc::clone(&session_store));
+    let extractor: SharedExtractor = Arc::new(SessionCookieExtractor::new(
+        Arc::clone(&config),
+        Arc::clone(&session_store),
+    ));
 
     // Stub protected route so the auth middleware actually has
     // something to wrap; we don't hit this in the assertions, but its
