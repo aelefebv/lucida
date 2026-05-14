@@ -62,6 +62,23 @@ jobs:
         with:
           version: latest
 
+      # Override the ancient `wasm-opt` that ships with wasm-pack's
+      # bundled binaryen — it's an MVP-only parser that chokes on the
+      # multi-table WASM current Rust stable emits ("Only 1 table
+      # definition allowed in MVP"). Prepending a recent binaryen to
+      # PATH lets wasm-pack's optimization step succeed and keeps the
+      # size win on lucida-core's WASM payload (it's on the SPA load
+      # path). Same fix is mirrored in the Dockerfile's rust-builder
+      # stage so the docker smoke + release builds don't regress.
+      - name: Install recent binaryen (for wasm-opt)
+        env:
+          BINARYEN_VERSION: version_129
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-x86_64-linux.tar.gz" \
+            | tar -xz -C /opt
+          echo "/opt/binaryen-${BINARYEN_VERSION}/bin" >> "$GITHUB_PATH"
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
