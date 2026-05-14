@@ -1,12 +1,21 @@
 ---
 created: 2026-05-08
-modified: 2026-05-08
+modified: 2026-05-14
 ---
 
 
 # Auth Mode Auto-Detect by Bind Address
 
-> Status: Proposed (in design — feature not yet implemented; PRD #455).
+> Status: Accepted.
+
+**Implementation note (2026-05-14):** Slice 2 of PRD #455 retired the
+slice-1 `StubPrincipalExtractor` without replacement, so disabled mode
+silently regressed into requiring a session cookie that nothing minted
+— `LUCIDA_AUTH=disabled` looped the SPA between `/auth/whoami` and an
+unregistered `/auth/start` until the URL hit HTTP 414. PRD #527
+restored the extractor (so this ADR's loopback-default promise actually
+holds) and removed the now-dead `/auth/dev/login` machinery. See
+[[auth]] for the post-restoration extractor lineup.
 
 ## Decision
 
