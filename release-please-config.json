@@ -26,5 +26,21 @@
     "lucida-protocol": { "release-type": "rust" },
     "lucida-proxy": { "release-type": "rust" },
     "lucida-web": { "release-type": "node" }
-  }
+  },
+  "plugins": [
+    {
+      "type": "linked-versions",
+      "groupName": "lucida",
+      "components": [
+        "lucida-server",
+        "lucida-core",
+        "lucida-store",
+        "lucida-cli",
+        "lucida-content",
+        "lucida-protocol",
+        "lucida-proxy",
+        "lucida-web"
+      ]
+    }
+  ]
 }
