@@ -46,6 +46,26 @@ RUN rustup target add wasm32-unknown-unknown
 # `cargo install`).
 RUN curl -fsSL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
+# Override wasm-pack's bundled wasm-opt with a recent binaryen.
+# wasm-pack ships an MVP-only `wasm-opt` that fails to parse the multi-
+# table WASM current Rust stable emits ("Only 1 table definition allowed
+# in MVP"). Symlinking a newer wasm-opt into /usr/local/bin shadows the
+# bundled one (wasm-pack invokes by PATH lookup). Same fix is mirrored
+# in .github/workflows/ci.yml's web job. TARGETARCH is set automatically
+# by buildkit when building under --platform; mapped to binaryen's
+# release-asset arch naming.
+ARG BINARYEN_VERSION=version_129
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH}" in \
+      amd64) BINARYEN_ARCH=x86_64-linux ;; \
+      arm64) BINARYEN_ARCH=aarch64-linux ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/${BINARYEN_VERSION}/binaryen-${BINARYEN_VERSION}-${BINARYEN_ARCH}.tar.gz" \
+      | tar -xz -C /opt; \
+    ln -s "/opt/binaryen-${BINARYEN_VERSION}/bin/wasm-opt" /usr/local/bin/wasm-opt
+
 WORKDIR /workspace
 
 # Copy the workspace. .dockerignore keeps target/, node_modules/,
