@@ -212,13 +212,18 @@ jobs:
       # LUCIDA_AUTH=disabled bypasses ADR-0018 bind-address auto-detect
       # (which would otherwise demand OAuth on the wildcard bind the
       # Dockerfile sets) — the smoke is verifying process startup +
-      # health endpoints, not the auth path.
+      # health endpoints, not the auth path. LUCIDA_INSECURE=1 is the
+      # documented opt-in that PR #527 added to make sure you can't
+      # accidentally ship `disabled` on a non-loopback bind without
+      # acknowledging it; the ephemeral CI runner is the textbook
+      # legitimate-insecure case.
       - name: True smoke (run + probe)
         if: github.head_ref == 'release-please--branches--main'
         run: |
           set -euo pipefail
           docker run -d --name lucida-smoke -p 9876:9876 \
             -e LUCIDA_AUTH=disabled \
+            -e LUCIDA_INSECURE=1 \
             lucida:ci-smoke
           # Poll until /healthz answers or 30s elapses. The binary
           # starts in well under a second; the deadline tolerates
