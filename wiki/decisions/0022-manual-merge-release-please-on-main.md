@@ -1,6 +1,6 @@
 ---
 created: 2026-05-13
-modified: 2026-05-13
+modified: 2026-05-14
 ---
 
 # Trunk-Based Releases via Manual-Merge `release-please` on `main`
@@ -52,13 +52,14 @@ The release process is part of lucida's public OSS contract: adopters pinning to
 - **GitHub Actions workflow-trigger gotcha.** A tag pushed by `release-please-action` using the default `GITHUB_TOKEN` does not trigger downstream workflows. The release workflow uses a GitHub App token (preferred for org repos) or a PAT with `workflow` scope (acceptable for personal/private repos). Documented in `RUNBOOK.md`.
 - **Pre-1.0 honesty.** `Cargo.toml` says `0.1.0`; release-please bootstraps from there. Pre-1.0 means "API may break between minor versions" — appropriate while the env-var contract and on-wire protocol continue to stabilize. Bumping to `1.0.0` is itself a deliberate decision (commits to backwards-compat guarantees) and is out of scope for this PRD.
 - **Adopter image-tag pinning is the promotion mechanism.** Manifests pin `<YOUR-IMAGE-TAG>` to a specific version (`v0.5.3`); promoting to a new release is a manifest edit, not a `git merge`. Documented in `RUNBOOK.md` and the deployment article.
+- **Single-root config over per-crate linked-versions.** First iteration was workspace-aware: one entry per crate in `packages` plus the `linked-versions` plugin to keep them aligned. It silently failed at v0.3.0 — the plugin requires explicit `component:` fields per package, without which the group is empty and only the path-matched crate bumps. Switched to single-root (`release-type: simple`, `packages: { ".": {} }`) instead: ~10 lines of config, no per-crate `Cargo.toml` churn per release, no plugin to misconfigure. The trade-off is per-crate `Cargo.toml` versions are now decorative — fine for a single-image-deploy project where the only adopter-facing artifact is the image tag. If individual crates ever get published to crates.io, revisit and reintroduce per-crate awareness.
 
 ## How this decision shows up in code
 
 - `.github/workflows/ci.yml` — runs on PR + main push; gates merge.
 - `.github/workflows/release-please.yml` — runs on main push after CI; opens/updates the release PR. Auto-merge OFF.
 - `.github/workflows/release.yml` — runs on git-tag push (`v*`); builds multi-arch + SBOM + trivy + push to ghcr.io.
-- `release-please-config.json` + `.release-please-manifest.json` — workspace-aware config; single shared version across rust crates + the web package.
+- `release-please-config.json` + `.release-please-manifest.json` — single-root `release-type: simple` config (`packages: { ".": {} }`); one tag stream, one root `CHANGELOG.md`. Per-crate `Cargo.toml` versions are decorative and not bumped on release; the git tag is the only version that means anything externally. See "Single-root config over per-crate linked-versions" in Consequences.
 - `wiki/gotchas/branching-and-releases.md` (new) — operational guide: trunk-based shape, image-tag promotion, branch-protection prerequisite.
 - *Documented prerequisite (not code)*: branch protection on `main` enabled via repo Settings.
 

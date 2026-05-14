@@ -1,5 +1,6 @@
 {
-  "release-type": "rust",
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "simple",
   "bootstrap-sha": "4b6037555ed8f1c0f8b6d9f422708589d73b4ebd",
   "include-component-in-tag": false,
   "include-v-in-tag": true,
@@ -18,29 +19,6 @@
     { "type": "refactor", "section": "Refactors", "hidden": true }
   ],
   "packages": {
-    "lucida-server": { "release-type": "rust" },
-    "lucida-core": { "release-type": "rust" },
-    "lucida-store": { "release-type": "rust" },
-    "lucida-cli": { "release-type": "rust" },
-    "lucida-content": { "release-type": "rust" },
-    "lucida-protocol": { "release-type": "rust" },
-    "lucida-proxy": { "release-type": "rust" },
-    "lucida-web": { "release-type": "node" }
-  },
-  "plugins": [
-    {
-      "type": "linked-versions",
-      "groupName": "lucida",
-      "components": [
-        "lucida-server",
-        "lucida-core",
-        "lucida-store",
-        "lucida-cli",
-        "lucida-content",
-        "lucida-protocol",
-        "lucida-proxy",
-        "lucida-web"
-      ]
-    }
-  ]
+    ".": {}
+  }
 }
