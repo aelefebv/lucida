@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-13
+modified: 2026-05-14
 ---
 
 # Now — Lucida Current State
@@ -19,6 +19,7 @@ Snapshot of what's active. Refresh via the `/repo-wiki` now pass after significa
 
 ## Recently shipped (since 2026-04-18)
 
+- **Disabled-auth restoration (PRD #527):** Restored `StubPrincipalExtractor` so `LUCIDA_AUTH=disabled` actually disables auth (matches what [[decisions/0018-auth-mode-auto-detect-by-bind-address|ADR-0018]] promised but slice-2 of PRD #455 silently retired). Removed the dead `/auth/dev/login` machinery, baked `LUCIDA_BIND=0.0.0.0:9876` as a Dockerfile default, and restructured the README Quick Start into four explicit scenarios (local-only / LAN-shared / with sign-in / develop). Per-browser anon identity in disabled mode captured as deferred work in [[decisions/deferred]].
 - **Saved views (PRD #454):** URL-as-app-state (`#view=…`) + server-stored named bookmarks (`#b=<id>`) with live cross-peer sidebar updates. Four slices (PRs #478–#481): Slice 1 web-side encoder/applier/urlSync + Copy URL toolbar + loading banner; Slice 2 SQLite `BookmarkStore` + REST API under `/api/bookmarks`; Slice 3 `BookmarkSidebar` + `#b=<id>` open-by-id + `selectedDatasetId` auto-select wrinkle resolved (option c); Slice 4 `ServerMessage::BookmarkChanged` broadcast (first unsequenced ServerMessage variant). Bookmarks are the second persistent state in [[lucida-server]] (after auth's `login_sessions` and `pending_auth`). See [[saved-views]] subsystem article, [[flows/saved-view-recipient-apply]] flow trace, [[gotchas/saved-view-credentials-in-urls]] / [[gotchas/axum-query-multivalue]], ADRs [[decisions/0013-url-as-app-state-for-saved-views]] / [[decisions/0014-local-file-datasets-personal-only-in-saved-views]] / [[decisions/0015-server-stored-bookmarks-and-auth-seam]].
 - **Authentication (PRD #455):** Google OAuth via backend-mediated Authorization Code flow, httpOnly session cookies, SQLite-stored sessions, OSS-configurable env-var contract, bind-address auto-detect. Eight slices (PRs #464–#471) plus a Vite-proxy dev workflow fix (PR #472). First persistent state in [[lucida-server]]. Unblocks PRD #454. See [[auth]] subsystem article, [[flows/auth-signin]] flow trace, [[gotchas/oss-config-defaults]] for env-var pitfalls, ADRs [[decisions/0016-backend-mediated-oauth-with-session-cookies]] / [[decisions/0017-configurable-from-day-one-for-oss-release]] / [[decisions/0018-auth-mode-auto-detect-by-bind-address]].
 - **OME-Zarr stack:** Blosc decoder + pinned-axis prefix slice for CZI 6D (`90a3dbc`); `lucida-store::codec` extraction with structured per-level binding seed and strict import validation (`b995ae6`); canonical-indexed `t`/`c` `chunk_shape>1` support (`c4be26c`); non-canonical axis handling (`185c429`); 1c manifest shape facts + anomaly check (`ef01e16`).
