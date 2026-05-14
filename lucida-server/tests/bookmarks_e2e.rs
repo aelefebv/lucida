@@ -18,24 +18,38 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::http::header::{LOCATION, SET_COOKIE};
+use axum::http::header::LOCATION;
 use axum::http::{Request, StatusCode};
 use axum::middleware::from_fn_with_state;
-use axum::routing::post;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use lucida_server::auth::handlers::{DevLoginState, dev_login};
-use lucida_server::auth::middleware::{SharedExtractor, auth_middleware, build_extractor};
+use lucida_server::auth::middleware::{SharedExtractor, auth_middleware};
+use lucida_server::auth::principal::SessionCookieExtractor;
 use lucida_server::auth::{AuthConfig, LoginSession, LoginSessionStore, MemorySessionStore};
 use lucida_server::bookmarks::handlers::BookmarksState;
 use lucida_server::bookmarks::routes::router as bookmarks_router;
 use lucida_server::bookmarks::{BookmarkStore, MemoryBookmarkStore};
 
-/// Build the test app. Two prebaked sessions: `alice@x` and `bob@x`,
-/// keyed by the cookies `alice-cookie` / `bob-cookie` so tests can
-/// switch identities by sending the right Cookie header.
+/// Pre-seeded cookie value for the dev session — matches the canned
+/// principal `StubPrincipalExtractor` would yield in disabled mode, so
+/// the bookmarks lifecycle test that used to walk through `/auth/dev/login`
+/// still exercises the same `dev@local` identity.
+const DEV_COOKIE: &str = "dev-cookie";
+
+/// Build the test app. Three prebaked sessions: `alice@x`, `bob@x`,
+/// and `dev@local`, keyed by the cookies `alice-cookie` / `bob-cookie`
+/// / `dev-cookie` so tests can switch identities by sending the right
+/// Cookie header.
+///
+/// Bookmarks tests stay on the cookie path even after PRD #527 retires
+/// the dev-login endpoint, because bookmarks need per-user identity to
+/// exercise the cross-user permission boundary — the disabled-mode
+/// stub extractor's single shared `dev@local` principal can't drive
+/// the alice-vs-bob assertion. So this harness keeps the cookie
+/// extractor explicitly rather than going through the AuthMode-aware
+/// `build_extractor` picker.
 async fn build_app() -> Router {
     let session_store = Arc::new(MemorySessionStore::new());
     let now = Utc::now();
@@ -63,12 +77,24 @@ async fn build_app() -> Router {
         })
         .await
         .unwrap();
+    session_store
+        .create(LoginSession {
+            id: DEV_COOKIE.into(),
+            email: "dev@local".into(),
+            display_name: "Local Dev".into(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: now,
+            expires_at: now + ChronoDuration::hours(24),
+        })
+        .await
+        .unwrap();
 
     let config = Arc::new(AuthConfig::for_tests());
-    let extractor: SharedExtractor = build_extractor(
+    let extractor: SharedExtractor = Arc::new(SessionCookieExtractor::new(
         Arc::clone(&config),
         session_store.clone() as Arc<dyn LoginSessionStore>,
-    );
+    ));
 
     let bookmark_store: Arc<dyn BookmarkStore> = Arc::new(MemoryBookmarkStore::new());
     let bookmarks_state = BookmarksState {
@@ -80,19 +106,7 @@ async fn build_app() -> Router {
         unicast_routes: None,
     };
 
-    // Mirror main.rs router shape: bookmarks live on the protected
-    // (post-middleware) half; /auth/dev/login lives on the unprotected
-    // public half so unauthed users can mint a session.
-    let public = Router::new().route(
-        "/auth/dev/login",
-        post(dev_login).with_state(DevLoginState {
-            config: Arc::clone(&config),
-            store: session_store as Arc<dyn LoginSessionStore>,
-        }),
-    );
-    let protected =
-        bookmarks_router(bookmarks_state).layer(from_fn_with_state(extractor, auth_middleware));
-    protected.merge(public)
+    bookmarks_router(bookmarks_state).layer(from_fn_with_state(extractor, auth_middleware))
 }
 
 async fn read_json(res: axum::response::Response) -> Value {
@@ -294,36 +308,17 @@ async fn full_crud_happy_path_lifecycle() {
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
-/// dev_login flow: hit `/auth/dev/login`, capture the cookie, walk
-/// through CRUD as the dev principal. Mirrors what the curl smoke test
-/// would do against `lucida-dev backend` running with `LUCIDA_AUTH=disabled`.
+/// Walk through CRUD as the `dev@local` principal. Mirrors what the
+/// curl smoke test would see against a server running in disabled
+/// mode — every request resolves to `dev@local` via the stub
+/// extractor. PRD #527 retired `/auth/dev/login`; this harness uses
+/// the cookie path with a pre-seeded dev session so the bookmarks
+/// permission boundary tests above can stay on the same wiring.
 #[tokio::test]
-async fn lifecycle_via_dev_login_cookie() {
+async fn lifecycle_as_dev_principal() {
     let app = build_app().await;
 
-    // Mint a dev session
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/auth/dev/login")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let cookie = res
-        .headers()
-        .get(SET_COOKIE)
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .split(';')
-        .next()
-        .unwrap()
-        .to_string();
+    let cookie = format!("lucida_session={DEV_COOKIE}");
 
     // POST a bookmark
     let body = json!({

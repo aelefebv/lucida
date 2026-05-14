@@ -16,12 +16,12 @@
 //!
 //! ## Avoiding redirect loops
 //!
-//! `/auth/start`, `/auth/callback`, `/auth/whoami`, `/auth/logout`,
-//! and the dev-only `/auth/dev/login` MUST NOT serve the unauth
-//! landing themselves — doing so would either bounce the user back to
-//! `/auth/start` from `/auth/start` (infinite loop) or hide the
-//! callback's session-mint from the browser. Slice 4 keeps these
-//! routes on a separate router that the auth middleware never wraps.
+//! `/auth/start`, `/auth/callback`, `/auth/whoami`, and `/auth/logout`
+//! MUST NOT serve the unauth landing themselves — doing so would either
+//! bounce the user back to `/auth/start` from `/auth/start` (infinite
+//! loop) or hide the callback's session-mint from the browser. Slice 4
+//! keeps these routes on a separate router that the auth middleware
+//! never wraps.
 
 use std::sync::Arc;
 
@@ -33,9 +33,11 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
-use crate::auth::config::AuthConfig;
+use crate::auth::config::{AuthConfig, AuthMode};
 use crate::auth::cookie::read_signed_out_marker;
-use crate::auth::principal::{AuthError, PrincipalExtractor, SessionCookieExtractor};
+use crate::auth::principal::{
+    AuthError, PrincipalExtractor, SessionCookieExtractor, StubPrincipalExtractor,
+};
 use crate::auth::session_store::LoginSessionStore;
 use crate::auth::unauth_landing::{SIGNED_OUT_LANDING_HTML, UNAUTH_LANDING_HTML};
 
@@ -140,16 +142,31 @@ pub fn accepts_html(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Build the production extractor from a config + a session store. Used
-/// by `main.rs` so the binding lives next to the rest of the auth
-/// module's wiring decisions. Slice 7 will replace the body of this
-/// helper with `LUCIDA_AUTH`-driven selection between the cookie
-/// extractor and a future Google-flow variant.
+/// Pick the active extractor for the configured `AuthMode`.
+///
+/// `Disabled` → [`StubPrincipalExtractor`]: every request resolves to
+/// the canned `dev@local` principal without touching the cookie or the
+/// store. ADR-0018's loopback-default safety promise relies on this
+/// branch existing — without it the cookie extractor would 401 every
+/// request and the SPA would loop into a `/auth/start` that isn't
+/// registered (the regression PRD #527 fixes).
+///
+/// `Google` → [`SessionCookieExtractor`]: read the `lucida_session`
+/// cookie, look up the row, enforce idle + hard-cap, derive `is_admin`
+/// from the configured allowlist. The OAuth callback handler mints
+/// rows into the same store this extractor reads from.
+///
+/// The match is exhaustive so adding a new `AuthMode` variant later
+/// will fail-compile here rather than silently falling through to the
+/// wrong extractor.
 pub fn build_extractor(
     config: Arc<AuthConfig>,
     store: Arc<dyn LoginSessionStore>,
 ) -> SharedExtractor {
-    Arc::new(SessionCookieExtractor::new(config, store))
+    match config.mode {
+        AuthMode::Disabled => Arc::new(StubPrincipalExtractor),
+        AuthMode::Google => Arc::new(SessionCookieExtractor::new(config, store)),
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +202,17 @@ mod tests {
             .layer(from_fn_with_state(extractor, auth_middleware))
     }
 
+    /// Cookie-extractor wiring for the cookie-mode middleware tests.
+    /// `build_extractor` with the test config now picks the stub (mode
+    /// is `Disabled`), so cookie-path tests construct the cookie
+    /// extractor directly to keep covering the cookie path.
+    fn cookie_extractor(store: Arc<dyn LoginSessionStore>) -> SharedExtractor {
+        Arc::new(SessionCookieExtractor::new(
+            Arc::new(AuthConfig::for_tests()),
+            store,
+        ))
+    }
+
     #[tokio::test]
     async fn middleware_attaches_principal_via_session_cookie() {
         let store = Arc::new(MemorySessionStore::new());
@@ -202,8 +230,7 @@ mod tests {
             .await
             .unwrap();
 
-        let config = Arc::new(AuthConfig::for_tests());
-        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let extractor = cookie_extractor(store as Arc<dyn LoginSessionStore>);
         let app = router_with_extractor(extractor);
 
         let req = Request::builder()
@@ -222,8 +249,7 @@ mod tests {
     #[tokio::test]
     async fn middleware_returns_401_when_no_cookie() {
         let store = Arc::new(MemorySessionStore::new());
-        let config = Arc::new(AuthConfig::for_tests());
-        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let extractor = cookie_extractor(store as Arc<dyn LoginSessionStore>);
         let app = router_with_extractor(extractor);
 
         let req = Request::builder().uri("/echo").body(Body::empty()).unwrap();
@@ -247,8 +273,7 @@ mod tests {
     #[tokio::test]
     async fn middleware_returns_401_with_signed_out_true_when_marker_cookie_present() {
         let store = Arc::new(MemorySessionStore::new());
-        let config = Arc::new(AuthConfig::for_tests());
-        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let extractor = cookie_extractor(store as Arc<dyn LoginSessionStore>);
         let app = router_with_extractor(extractor);
 
         let req = Request::builder()
@@ -289,6 +314,30 @@ mod tests {
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// Disabled-mode wiring: `build_extractor` returns the stub, and
+    /// the middleware attaches `dev@local` even with no cookie. This
+    /// pins the regression PRD #527 fixed: pre-fix, this same setup
+    /// would 401 because `build_extractor` always returned the cookie
+    /// extractor regardless of `AuthMode`.
+    #[tokio::test]
+    async fn build_extractor_disabled_mode_attaches_dev_principal_with_no_cookie() {
+        let store = Arc::new(MemorySessionStore::new());
+        // for_tests() = AuthMode::Disabled.
+        let config = Arc::new(AuthConfig::for_tests());
+        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let app = router_with_extractor(extractor);
+
+        let req = Request::builder().uri("/echo").body(Body::empty()).unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let p: AuthPrincipal = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(p.email, "dev@local");
+        assert_eq!(p.display_name, "Local Dev");
+        assert!(p.is_admin);
+    }
+
     #[test]
     fn accepts_html_classifies_browser_navigation() {
         let mut headers = HeaderMap::new();
@@ -313,8 +362,7 @@ mod tests {
     #[tokio::test]
     async fn middleware_returns_unauth_landing_html_to_browsers() {
         let store = Arc::new(MemorySessionStore::new());
-        let config = Arc::new(AuthConfig::for_tests());
-        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let extractor = cookie_extractor(store as Arc<dyn LoginSessionStore>);
         let app = router_with_extractor(extractor);
 
         let req = Request::builder()
@@ -356,8 +404,7 @@ mod tests {
     #[tokio::test]
     async fn middleware_returns_signed_out_landing_when_marker_cookie_present() {
         let store = Arc::new(MemorySessionStore::new());
-        let config = Arc::new(AuthConfig::for_tests());
-        let extractor = build_extractor(config, store as Arc<dyn LoginSessionStore>);
+        let extractor = cookie_extractor(store as Arc<dyn LoginSessionStore>);
         let app = router_with_extractor(extractor);
 
         let req = Request::builder()
