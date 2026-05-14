@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/aelefebv/lucida/compare/v0.2.0...v0.3.0) (2026-05-14)
+
+
+### Features
+
+* **release:** add linked-versions plugin so all packages bump together ([#521](https://github.com/aelefebv/lucida/issues/521)) ([bc9c438](https://github.com/aelefebv/lucida/commit/bc9c438b5cbc6b127e1645acb68507f1ed47fa62))
+* **server:** add GET /version endpoint ([#522](https://github.com/aelefebv/lucida/issues/522)) ([0edd588](https://github.com/aelefebv/lucida/commit/0edd588b29b49b689acea943f53f5eb2eacc54c4))
+
+
+### Bug Fixes
+
+* **docs:** rewrite README to remove stale references + add quick-start paths ([#518](https://github.com/aelefebv/lucida/issues/518)) ([8a94c15](https://github.com/aelefebv/lucida/commit/8a94c152ec7553359456beb66a241f1e8da64656))
+
 ## [0.2.0](https://github.com/aelefebv/lucida/compare/v0.1.0...v0.2.0) (2026-05-14)
 
 
