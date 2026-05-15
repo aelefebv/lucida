@@ -8,6 +8,7 @@ import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { Orchestrator } from "./pipeline/orchestrator.ts";
+import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/cpuCache.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
@@ -55,6 +56,7 @@ export class RenderLoop {
   private minimapState: MinimapState = createMinimapState();
   private orchestrator = new Orchestrator();
   private cpuCacheUnsub: () => void;
+  private configStoreUnsub: () => void;
 
   private _renderScale = 1.0;
 
@@ -77,6 +79,13 @@ export class RenderLoop {
     this.mode = opts.mode;
     this.cpuCacheUnsub = this.session.cpuCache.subscribe(() => {
       this.setDirty("residency", "cache_subscribe");
+    });
+    // Bridge planning-config tweaks (Config tab in DebugPanel) into the
+    // render loop. The orchestrator separately invalidates its own
+    // epoch cache from a configStore subscription; this listener just
+    // ensures a frame happens promptly so the user sees the change.
+    this.configStoreUnsub = configStore.subscribe(() => {
+      this.setDirty("interactive", "planning_config_changed");
     });
   }
 
@@ -110,6 +119,7 @@ export class RenderLoop {
     this.client.onChunksEvicted = null;
     this.client.onWantedSetDelta = null;
     this.cpuCacheUnsub();
+    this.configStoreUnsub();
     for (const unsub of this.unsubs.values()) {
       unsub();
     }

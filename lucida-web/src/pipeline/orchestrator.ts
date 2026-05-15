@@ -23,7 +23,7 @@ import {
   compositeKey,
 } from "../tickCommon.ts";
 import { plan, emptyPlanStats, groupByWell } from "./planning/index.ts";
-import { DEFAULT_PLANNING_CONFIG } from "./planning/config.ts";
+import { configStore } from "./planning/configStore.ts";
 import { buildPlanningSnapshot } from "./planning/snapshot.ts";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import type {
@@ -467,6 +467,36 @@ export class Orchestrator {
     drainWasteLastLogAt: 0,
   };
 
+  /**
+   * Unsubscribe from the planning configStore. Called from {@link dispose}
+   * so the orchestrator doesn't leak subscriptions in tests that
+   * construct it standalone. The render loop singleton lives for the app
+   * lifetime so `dispose` is rarely needed in production.
+   */
+  private configStoreUnsub: () => void;
+
+  constructor() {
+    // Subscribe to live planning-config changes. A config tweak doesn't
+    // bump any WASM epoch, so without this hook the orchestrator's
+    // epoch fast-path would keep returning the cached plan and the
+    // user's slider would have no visible effect until something else
+    // (camera motion, selection change) invalidated the cache.
+    //
+    // The render loop separately calls `markInteractiveDirty()` from
+    // its own configStore subscription (so a frame is requested
+    // promptly); here we just clear the cache so that frame produces a
+    // fresh plan from the new config values.
+    this.configStoreUnsub = configStore.subscribe(() => {
+      this.lastEpochs = null;
+      this.cachedResult = null;
+    });
+  }
+
+  /** Tear down subscriptions held by this orchestrator. */
+  dispose(): void {
+    this.configStoreUnsub();
+  }
+
   planAndFetch(
     ctx: TickContext,
     minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
@@ -538,6 +568,12 @@ export class Orchestrator {
     const settings = getSceneSettings(ctx.scene);
     const multiChannel = ctx.scene.multi_channel();
 
+    // Read the live config once per tick. Holding a single reference keeps
+    // every dataset in this rebuild in sync even if a UI knob fires between
+    // dataset iterations (the subscriber-side cache invalidation will
+    // re-rebuild on the next tick from the new value).
+    const planningConfig = configStore.get();
+
     // Step 3 — Per-dataset loop
     const memberRoster = new Map<string, MemberRosterEntry[]>();
     const entityIndexByDataset = new Map<string, Map<string, number>>();
@@ -566,7 +602,7 @@ export class Orchestrator {
         multiChannel,
         currentEpochs,
         requestEpoch: this.requestEpoch,
-        config: DEFAULT_PLANNING_CONFIG,
+        config: planningConfig,
       });
       if (!built) continue;
       const { snapshot, entities, visibleRegion, selection } = built;
@@ -581,7 +617,7 @@ export class Orchestrator {
       }
 
       // 3d. Plan
-      const result = plan(snapshot, DEFAULT_PLANNING_CONFIG);
+      const result = plan(snapshot, planningConfig);
       this.previousActiveSet.set(dsId, result.activeSet);
       this.requestEpoch = result.epochs.request;
       this._lastRequests = result.requests;
@@ -600,7 +636,7 @@ export class Orchestrator {
       if (debugStats.enabled) {
         debugStats.planning.byDataset[dsId] = buildPlanningDatasetDebug(
           dsId, result, entities, entityById, visibleRegion, ctx.cpuCache,
-          DEFAULT_PLANNING_CONFIG,
+          planningConfig,
         );
       }
 
