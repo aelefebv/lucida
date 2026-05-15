@@ -28,14 +28,14 @@ import { buildPlanningSnapshot } from "./planning/snapshot.ts";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import type {
   ActiveSetEntry,
-  PlanningEpochs,
   EntitySnapshot,
   MinimapChunkCoord,
-  VisibleRegion,
   SelectionState,
   ChunkRequest,
   RequestPlan,
 } from "./planning/index.ts";
+import type { SceneEpochs } from "./epochs.ts";
+import type { VisibleRegion } from "./viewport.ts";
 
 // Re-export so existing call sites that imported `MinimapChunkCoord`
 // from the orchestrator (e.g. `slicePath.ts`, `volumePath.ts`,
@@ -165,7 +165,7 @@ export interface OrchestratorResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
   settings: SceneSettings;
   multiChannel: boolean;
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   /**
    * M1 (DOMAINS step 8a): per-dataset memberId → entity index map. Both
    * the worker (when building the descriptor buffer) and the render
@@ -285,7 +285,7 @@ function synthesizeWellRosterEntry(
 
 export class Orchestrator {
   private previousActiveSet = new Map<string, ActiveSetEntry[]>();
-  private lastEpochs: PlanningEpochs | null = null;
+  private lastEpochs: SceneEpochs | null = null;
   private cachedResult: OrchestratorResult | null = null;
   /**
    * Snapshot of debug member stats produced during the most recent
@@ -505,7 +505,7 @@ export class Orchestrator {
 
     // Step 1 — Epoch check
     const rawEpochs = JSON.parse(ctx.scene.epochs());
-    const currentEpochs: PlanningEpochs = {
+    const currentEpochs: SceneEpochs = {
       content: rawEpochs.content,
       layout: rawEpochs.layout,
       view: rawEpochs.view,
@@ -1603,7 +1603,7 @@ export class Orchestrator {
     delivery: ReadyChunkDelivery,
     multiChannel: boolean,
     sliceZ: number | null,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ): number {
     const viewMode = ctx.mode;
     const workerMemberId = multiChannel ? `${delivery.imageId}:ch${delivery.c}` : delivery.imageId;
@@ -1688,7 +1688,7 @@ export class Orchestrator {
   private sendProxyDeliveryToWorker(
     ctx: TickContext,
     delivery: ReadyProxyDelivery,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ): number {
     ctx.client.proxyAssetData(
       delivery.datasetId,
@@ -1764,7 +1764,7 @@ export class Orchestrator {
       c,
       priority: 0,
     };
-    const epochs: PlanningEpochs = this.lastEpochs ?? {
+    const epochs: SceneEpochs = this.lastEpochs ?? {
       content: 0,
       layout: 0,
       view: 0,
@@ -1789,7 +1789,7 @@ export class Orchestrator {
     entities: EntitySnapshot[],
     selection: SelectionState,
     visibleRegion: VisibleRegion,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
     ctx: TickContext,
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>,
     dsSettings: DatasetSettings | undefined,
@@ -1904,7 +1904,7 @@ export class Orchestrator {
     dsId: string,
     cold: ColdStateMessage,
     ctx: TickContext,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ): void {
     const hit = Array.from(ctx.scene.ray_hit_local_image(dsId)) as [number, number, number];
     const rayHitsByEntity: Array<[string, [number, number, number]]> = [];

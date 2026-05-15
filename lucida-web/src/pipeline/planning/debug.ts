@@ -19,8 +19,8 @@ import type { PlanningDatasetDebug } from "../../debug/debugStats.ts";
 import type {
   EntitySnapshot,
   RequestPlan,
-  VisibleRegion,
 } from "./index.ts";
+import type { VisibleRegion } from "../viewport.ts";
 import type { PlanningConfig } from "./config.ts";
 
 /**

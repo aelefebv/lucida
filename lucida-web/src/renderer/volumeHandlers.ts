@@ -7,7 +7,7 @@ import type {
 import { VOLUME_ATLAS_BUDGET } from "./workerProtocol.ts";
 import { writeVolumeChunk } from "./gpuContext.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
-import type { PlanningEpochs } from "../pipeline/planning/index.ts";
+import type { SceneEpochs } from "../pipeline/epochs.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16 } from "./dataTypeUtil.ts";
 
@@ -339,7 +339,7 @@ export function resizeIndirection(ctx: WorkerCtx, atlas: AtlasState, totalEntrie
 export function handleVolumeChunkData(
   ctx: WorkerCtx,
   msg: VolumeChunkDataMessage,
-  currentEpochs: PlanningEpochs | null,
+  currentEpochs: SceneEpochs | null,
   poolKey: string,
   memberId: string,
 ): void {

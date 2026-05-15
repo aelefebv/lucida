@@ -13,6 +13,8 @@
 import type { LevelGeometry } from "../../manifestTypes.ts";
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import { snapshotHasProxy } from "../assetCatalog.ts";
+import type { SceneEpochs } from "../epochs.ts";
+import type { VisibleRegion } from "../viewport.ts";
 import {
   DEFAULT_PLANNING_CONFIG,
   FAR_THRESHOLD_PX,
@@ -47,41 +49,6 @@ export {
  * still means "below this we use the proxy/coarse representation".
  */
 export const PROMOTE_THRESHOLD_PX = FAR_THRESHOLD_PX;
-
-// ---------------------------------------------------------------------------
-// Epochs
-// ---------------------------------------------------------------------------
-
-export interface PlanningEpochs {
-  content: number;
-  layout: number;
-  view: number;
-  selection: number;
-  /**
-   * Bumped by `apply_asset_catalog_delta` (catalog membership change).
-   * The orchestrator reads it from `wasmScene.asset_epoch()` each tick.
-   * Stays 0 until S5 starts publishing real proxy availability.
-   */
-  asset: number;
-  /** Bumped when Planning produces a new request plan. */
-  request: number;
-}
-
-// ---------------------------------------------------------------------------
-// VisibleRegion
-// ---------------------------------------------------------------------------
-
-export interface VisibleRegion {
-  /** [minX, minY, maxX, maxY] in voxel coordinates. */
-  xyBounds: [number, number, number, number];
-  /** [start, end) voxel Z range. */
-  zRange: [number, number];
-  /** Screen pixels per voxel. */
-  effectiveZoom: number;
-  sortCenter: [number, number, number] | null;
-  /** Six frustum half-planes, or null for 2-D views. */
-  frustumPlanes: [number, number, number, number][] | null;
-}
 
 // ---------------------------------------------------------------------------
 // EntitySnapshot
@@ -186,7 +153,7 @@ export interface PlanningSnapshot {
    * previously back-filled it. Required as of PRD #563 / Slice 1.
    */
   datasetId: string;
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
   selection: SelectionState;
@@ -234,7 +201,7 @@ export interface RequestPlan {
    * and proxy availability flags consumed by orchestrator delivery.
    */
   activeSet: ActiveSetEntry[];
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   /**
    * Proxy assets to fetch alongside chunks. Populated by S6 promotion.
    * Always defined — empty array when no entries use a proxy mode.
@@ -1485,7 +1452,7 @@ export function plan(
   proxyRequests.sort((a, b) => a.priority - b.priority);
 
   // Step 8: Epoch propagation.
-  const epochs: PlanningEpochs = {
+  const epochs: SceneEpochs = {
     ...snapshot.epochs,
     request: snapshot.epochs.request + 1,
   };

@@ -2,7 +2,7 @@
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
-import type { PlanningEpochs } from "./pipeline/planning/index.ts";
+import type { SceneEpochs } from "./pipeline/epochs.ts";
 import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
@@ -178,7 +178,7 @@ export class RenderLoop {
     if (this.datasets.size === 0) {
       const w = this.canvas.clientWidth;
       const h = this.canvas.clientHeight;
-      const zeroEpochs: PlanningEpochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+      const zeroEpochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
       this.client.resize(w, h);
       if (this.mode === "slice") {
         this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs);

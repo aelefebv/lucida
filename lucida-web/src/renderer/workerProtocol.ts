@@ -1,6 +1,7 @@
 /** Discriminated-union message types for main <-> render worker communication. */
 
-import type { PlanningEpochs, VisibleRegion } from "../pipeline/planning/index.ts";
+import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type { VisibleRegion } from "../pipeline/viewport.ts";
 
 /** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
 export const VOLUME_ATLAS_BUDGET = 512 * 1024 * 1024; // 512 MB
@@ -32,7 +33,7 @@ export interface SliceChunk {
 
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   datasetId: string;
   chunks: SliceChunk[];
   level: number;
@@ -60,7 +61,7 @@ export interface VolumeChunk {
 
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   datasetId: string;
   chunks: VolumeChunk[];
   level: number;
@@ -84,7 +85,7 @@ export interface VolumeChunkDataMessage {
  */
 export interface ProxyAssetDataMessage {
   type: "proxyAssetData";
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   datasetId: string;
   entityId: string;
   imageId: string;
@@ -122,7 +123,7 @@ export interface VolumeLayerParams {
 
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   layers: VolumeLayerParams[];
   invViewProj: Float32Array;
   eye: Float32Array;
@@ -154,7 +155,7 @@ export interface SliceLayerParams {
 
 export interface SliceRenderMultiPassMessage {
   type: "sliceRenderMultiPass";
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   layers: SliceLayerParams[];
   zoom: number;
   cx: number;
@@ -316,7 +317,7 @@ export interface ColdStateDisplayState {
 
 export interface ColdStateMessage {
   type: "coldState";
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   datasetId: string;
   currentT: number;
   currentZ: number;
@@ -336,7 +337,7 @@ export interface ColdStateMessage {
  */
 export interface ViewHotStateMessage {
   type: "viewHotState";
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   datasetId: string;
   /** Per-entity ray-pick local coords for chunk eviction prioritization. */
   rayHitsByEntity: Array<[entityId: string, hit: [number, number, number]]>;
@@ -414,7 +415,7 @@ export type MissingProxy = {
 
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   /**
    * S7: discriminated union over chunks and proxies. Existing chunk
    * consumers should match on `kind === "chunk"` to extract `chunkKey`;

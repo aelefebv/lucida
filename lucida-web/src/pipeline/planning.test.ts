@@ -31,13 +31,13 @@ import type {
   ActiveSetEntry,
   EntitySnapshot,
   MinimapChunkCoord,
-  VisibleRegion,
   SelectionState,
   PlanningSnapshot,
   EntityMode,
   AssetCatalogSnapshot,
   ProxyKind,
 } from "./planning/index.ts";
+import type { VisibleRegion } from "./viewport.ts";
 import type { LevelGeometry } from "../manifestTypes.ts";
 
 // ---------------------------------------------------------------------------
