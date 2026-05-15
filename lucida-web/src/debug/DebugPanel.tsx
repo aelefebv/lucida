@@ -22,6 +22,7 @@ import type { WasmScene } from "lucida-core";
 import type { DatasetState } from "../types.ts";
 import type { CacheTelemetry } from "../pipeline/cpuCache.ts";
 import type { Session } from "../session.ts";
+import { ConfigTab } from "./ConfigTab.tsx";
 import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
@@ -54,7 +55,7 @@ function modeColor(mode: string): string {
   }
 }
 
-type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch" | "catalog" | "logging";
+type TabId = "render" | "scene" | "pick" | "planning" | "cache" | "orch" | "catalog" | "config" | "logging";
 
 const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   bridge: "WebSocket send/receive and dataset-open lifecycle",
@@ -567,6 +568,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
     { id: "cache", label: "Cache" },
     { id: "orch", label: "Orch" },
     { id: "catalog", label: "Catalog" },
+    { id: "config", label: "Config" },
     { id: "logging", label: "Logging" },
   ];
 
@@ -1477,6 +1479,8 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
             )}
           </>
         )}
+
+        {activeTab === "config" && <ConfigTab />}
 
         {activeTab === "logging" && (
           <>
