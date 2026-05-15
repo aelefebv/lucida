@@ -35,7 +35,7 @@ import type {
   PlanningState,
   SelectionState,
   PlanningSnapshot,
-  EntityMode,
+  ResolvedMode,
   AssetCatalogSnapshot,
   ProxyKind,
 } from "./planning/index.ts";
@@ -62,9 +62,10 @@ function makeCatalog(
 // ---------------------------------------------------------------------------
 
 /**
- * Build a singleton active-set entry for an Image-kind entity in the
- * given mode. Used by the migrated legacy tests so synthetic snapshots
- * still produce one entry per entity.
+ * Build a singleton field-mode active-set entry for an Image-kind
+ * entity. Used by the migrated legacy tests so synthetic snapshots
+ * still produce one entry per entity. PRD #563 / Slice 4: returns the
+ * discriminated `FieldEntry` variant explicitly.
  */
 function makeFieldDetailEntry(
   entityId: string,
@@ -73,6 +74,7 @@ function makeFieldDetailEntry(
   coarsestDetailLod: number,
 ): ActiveSetEntry {
   return {
+    kind: "field",
     entityId,
     imageId,
     mode: "fields-with-detail",
@@ -83,6 +85,37 @@ function makeFieldDetailEntry(
     proxyAvailable: false,
     wellProxyAvailable: false,
   };
+}
+
+// PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; tests
+// that read field-mode-only fields (`mode`, `targetLod`, etc.) need to
+// narrow first. These helpers fail the test with a descriptive message
+// if the entry is a different variant.
+function asField(entry: ActiveSetEntry) {
+  if (entry.kind !== "field") {
+    throw new Error(
+      `expected FieldEntry but got kind="${entry.kind}" (entityId=${entry.entityId})`,
+    );
+  }
+  return entry;
+}
+
+function asWellAsProxy(entry: ActiveSetEntry) {
+  if (entry.kind !== "well-as-proxy") {
+    throw new Error(
+      `expected WellAsProxyEntry but got kind="${entry.kind}" (entityId=${entry.entityId})`,
+    );
+  }
+  return entry;
+}
+
+function asInvisible(entry: ActiveSetEntry) {
+  if (entry.kind !== "invisible") {
+    throw new Error(
+      `expected InvisibleEntry but got kind="${entry.kind}" (entityId=${entry.entityId})`,
+    );
+  }
+  return entry;
 }
 
 // ---------------------------------------------------------------------------
@@ -104,7 +137,7 @@ describe("assignModes — three-tier (no catalog)", () => {
     expect(entity.projectedDiagonalPx).toBeGreaterThan(DETAIL_THRESHOLD_PX);
 
     const [result] = assignModes([entity], []);
-    expect(result.mode).toBe("fields-with-detail");
+    expect(asField(result).mode).toBe("fields-with-detail");
   });
 
   it("entity below FAR threshold degrades to fields-with-detail when no catalog", () => {
@@ -117,7 +150,7 @@ describe("assignModes — three-tier (no catalog)", () => {
     expect(entity.projectedDiagonalPx).toBeLessThan(FAR_THRESHOLD_PX);
 
     const [result] = assignModes([entity], []);
-    expect(result.mode).toBe("fields-with-detail");
+    expect(asField(result).mode).toBe("fields-with-detail");
   });
 
   it("entity in mid range degrades to fields-with-detail when no catalog", () => {
@@ -126,10 +159,13 @@ describe("assignModes — three-tier (no catalog)", () => {
       projectedDiagonalPx: 100,
     });
     const [result] = assignModes([entity], []);
-    expect(result.mode).toBe("fields-with-detail");
+    expect(asField(result).mode).toBe("fields-with-detail");
   });
 
-  it("invisible entity emits a fields-with-detail entry at coarsest LOD", () => {
+  it("invisible entity emits an InvisibleEntry at coarsest LOD", () => {
+    // PRD #563 / Slice 4: invisibles are now their own variant (no
+    // longer conflated with `fields-with-detail`). They carry only
+    // `coarsestLod`, no LOD range / mode / proxy fields.
     const entity = createSyntheticEntity({
       visible: false,
       projectedDiagonalPx: 200,
@@ -137,9 +173,8 @@ describe("assignModes — three-tier (no catalog)", () => {
     });
 
     const [result] = assignModes([entity], []);
-    expect(result.mode).toBe("fields-with-detail");
-    expect(result.targetLod).toBe(4);
-    expect(result.detailOwnedLodRange).toEqual([4, 4]);
+    const inv = asInvisible(result);
+    expect(inv.coarsestLod).toBe(4);
   });
 });
 
@@ -157,10 +192,11 @@ describe("LOD range", () => {
     });
 
     const [result] = assignModes([entity], []);
-    expect(result.mode).toBe("fields-with-detail");
-    expect(result.targetLod).toBe(0);
-    expect(result.coarsestDetailLod).toBe(0);
-    expect(result.detailOwnedLodRange).toEqual([0, 0]);
+    const f = asField(result);
+    expect(f.mode).toBe("fields-with-detail");
+    expect(f.targetLod).toBe(0);
+    expect(f.coarsestDetailLod).toBe(0);
+    expect(f.detailOwnedLodRange).toEqual([0, 0]);
   });
 
   it("coarsestDetailLod tracks targetLod even at the top of the pyramid", () => {
@@ -172,10 +208,11 @@ describe("LOD range", () => {
     });
 
     const [result] = assignModes([entity], []);
-    expect(result.mode).toBe("fields-with-detail");
-    expect(result.targetLod).toBe(3);
-    expect(result.coarsestDetailLod).toBe(3);
-    expect(result.detailOwnedLodRange).toEqual([3, 3]);
+    const f = asField(result);
+    expect(f.mode).toBe("fields-with-detail");
+    expect(f.targetLod).toBe(3);
+    expect(f.coarsestDetailLod).toBe(3);
+    expect(f.detailOwnedLodRange).toEqual([3, 3]);
   });
 
   it("handles single-level images", () => {
@@ -187,13 +224,16 @@ describe("LOD range", () => {
     });
 
     const [result] = assignModes([entity], []);
-    expect(result.mode).toBe("fields-with-detail");
-    expect(result.targetLod).toBe(0);
-    expect(result.coarsestDetailLod).toBe(0);
-    expect(result.detailOwnedLodRange).toEqual([0, 0]);
+    const f = asField(result);
+    expect(f.mode).toBe("fields-with-detail");
+    expect(f.targetLod).toBe(0);
+    expect(f.coarsestDetailLod).toBe(0);
+    expect(f.detailOwnedLodRange).toEqual([0, 0]);
   });
 
-  it("invisible entity LODs are coarsest level", () => {
+  it("invisible entity coarsestLod is the coarsest level", () => {
+    // PRD #563 / Slice 4: InvisibleEntry only carries `coarsestLod`;
+    // no `targetLod`/`coarsestDetailLod`/`detailOwnedLodRange` fields.
     const entity = createSyntheticEntity({
       kind: "Image",
       visible: false,
@@ -202,10 +242,7 @@ describe("LOD range", () => {
     });
 
     const [result] = assignModes([entity], []);
-    expect(result.mode).toBe("fields-with-detail");
-    expect(result.targetLod).toBe(4);
-    expect(result.coarsestDetailLod).toBe(4);
-    expect(result.detailOwnedLodRange).toEqual([4, 4]);
+    expect(asInvisible(result).coarsestLod).toBe(4);
   });
 });
 
@@ -225,7 +262,7 @@ describe("chooseEntityMode", () => {
   });
 
   it("hysteresis at FAR threshold: keeps well-as-proxy across 75–84", () => {
-    let prev: EntityMode | null = "well-as-proxy";
+    let prev: ResolvedMode | null = "well-as-proxy";
     for (const px of [80, 78, 82, 84, 75, 79]) {
       const next = chooseEntityMode(prev, px);
       expect(next).toBe("well-as-proxy");
@@ -238,7 +275,7 @@ describe("chooseEntityMode", () => {
   });
 
   it("hysteresis at FAR threshold: keeps proxy-fallback across 76–85", () => {
-    let prev: EntityMode | null = "fields-with-proxy-fallback";
+    let prev: ResolvedMode | null = "fields-with-proxy-fallback";
     for (const px of [80, 81, 82, 84, 85]) {
       const next = chooseEntityMode(prev, px);
       expect(next).toBe("fields-with-proxy-fallback");
@@ -251,7 +288,7 @@ describe("chooseEntityMode", () => {
   });
 
   it("hysteresis at MEDIUM threshold: keeps fields-with-detail across 146-155", () => {
-    let prev: EntityMode | null = "fields-with-detail";
+    let prev: ResolvedMode | null = "fields-with-detail";
     for (const px of [150, 148, 152, 155, 146]) {
       const next = chooseEntityMode(prev, px);
       expect(next).toBe("fields-with-detail");
@@ -264,7 +301,7 @@ describe("chooseEntityMode", () => {
   });
 
   it("hysteresis at MEDIUM threshold: keeps proxy-fallback across 145-154", () => {
-    let prev: EntityMode | null = "fields-with-proxy-fallback";
+    let prev: ResolvedMode | null = "fields-with-proxy-fallback";
     for (const px of [150, 151, 154, 145, 148]) {
       const next = chooseEntityMode(prev, px);
       expect(next).toBe("fields-with-proxy-fallback");
@@ -327,11 +364,11 @@ describe("assignModes — three-tier with catalog", () => {
     const result = assignModes(entities, [], catalog);
 
     expect(result).toHaveLength(1);
-    expect(result[0].mode).toBe("well-as-proxy");
-    expect(result[0].entityId).toBe("wellA");
-    expect(result[0].imageId).toBe("");
-    expect(result[0].proxyKind).toBe("WellProxy3D");
-    expect(result[0].proxyAvailable).toBe(true);
+    const wp = asWellAsProxy(result[0]);
+    expect(wp.entityId).toBe("wellA");
+    // PRD #563 / Slice 4: WellAsProxyEntry has no imageId / proxyKind /
+    // proxyAvailable fields — those invariants are now compile-time
+    // enforced rather than asserted at runtime.
   });
 
   it("mid well (100px) with catalog → one fields-with-proxy-fallback per field", () => {
@@ -348,10 +385,11 @@ describe("assignModes — three-tier with catalog", () => {
     const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(2);
     for (const entry of result) {
-      expect(entry.mode).toBe("fields-with-proxy-fallback");
-      expect(entry.proxyKind).toBe("FieldProxy3D");
-      expect(entry.proxyAvailable).toBe(true);
-      expect(entry.wellProxyAvailable).toBe(true);
+      const f = asField(entry);
+      expect(f.mode).toBe("fields-with-proxy-fallback");
+      expect(f.proxyKind).toBe("FieldProxy3D");
+      expect(f.proxyAvailable).toBe(true);
+      expect(f.wellProxyAvailable).toBe(true);
     }
   });
 
@@ -369,10 +407,11 @@ describe("assignModes — three-tier with catalog", () => {
     const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(2);
     for (const entry of result) {
-      expect(entry.mode).toBe("fields-with-detail");
-      expect(entry.proxyKind).toBe("FieldProxy3D");
-      expect(entry.proxyAvailable).toBe(true);
-      expect(entry.wellProxyAvailable).toBe(true);
+      const f = asField(entry);
+      expect(f.mode).toBe("fields-with-detail");
+      expect(f.proxyKind).toBe("FieldProxy3D");
+      expect(f.proxyAvailable).toBe(true);
+      expect(f.wellProxyAvailable).toBe(true);
     }
   });
 
@@ -396,9 +435,9 @@ describe("assignModes — three-tier with catalog", () => {
       (e) => e.entityId === "wellB" || e.entityId === "fB1",
     );
     expect(wellAEntries).toHaveLength(1);
-    expect(wellAEntries[0].mode).toBe("well-as-proxy");
+    expect(wellAEntries[0].kind).toBe("well-as-proxy");
     expect(wellBEntries).toHaveLength(1);
-    expect(wellBEntries[0].mode).toBe("fields-with-detail");
+    expect(asField(wellBEntries[0]).mode).toBe("fields-with-detail");
   });
 
   it("catalog miss for WellProxy3D → far well degrades to fields-with-proxy-fallback", () => {
@@ -412,9 +451,10 @@ describe("assignModes — three-tier with catalog", () => {
 
     const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(1);
-    expect(result[0].mode).toBe("fields-with-proxy-fallback");
-    expect(result[0].proxyAvailable).toBe(true);
-    expect(result[0].wellProxyAvailable).toBe(false);
+    const f = asField(result[0]);
+    expect(f.mode).toBe("fields-with-proxy-fallback");
+    expect(f.proxyAvailable).toBe(true);
+    expect(f.wellProxyAvailable).toBe(false);
   });
 
   it("catalog miss for both proxies → far well degrades all the way to fields-with-detail", () => {
@@ -425,9 +465,10 @@ describe("assignModes — three-tier with catalog", () => {
 
     const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(1);
-    expect(result[0].mode).toBe("fields-with-detail");
-    expect(result[0].proxyAvailable).toBe(false);
-    expect(result[0].wellProxyAvailable).toBe(false);
+    const f = asField(result[0]);
+    expect(f.mode).toBe("fields-with-detail");
+    expect(f.proxyAvailable).toBe(false);
+    expect(f.wellProxyAvailable).toBe(false);
   });
 
   it("catalog miss in mid range: no FieldProxy3D for any field but well has WellProxy3D → keeps proxy-fallback", () => {
@@ -438,10 +479,11 @@ describe("assignModes — three-tier with catalog", () => {
 
     const result = assignModes(entities, [], catalog);
     expect(result).toHaveLength(1);
+    const f = asField(result[0]);
     // Stays in proxy-fallback because well-proxy can stand in.
-    expect(result[0].mode).toBe("fields-with-proxy-fallback");
-    expect(result[0].proxyAvailable).toBe(false); // field proxy missing
-    expect(result[0].wellProxyAvailable).toBe(true);
+    expect(f.mode).toBe("fields-with-proxy-fallback");
+    expect(f.proxyAvailable).toBe(false); // field proxy missing
+    expect(f.wellProxyAvailable).toBe(true);
   });
 
   it("hysteresis: previous well-as-proxy holds at 84px when catalog still supports it", () => {
@@ -452,23 +494,15 @@ describe("assignModes — three-tier with catalog", () => {
       ["wellG", ["WellProxy3D"]],
       ["fG1", ["FieldProxy3D"]],
     ]);
+    // PRD #563 / Slice 4: WellAsProxyEntry now carries only `kind`
+    // and `entityId`; LOD/proxy bookkeeping is implicit.
     const prev: ActiveSetEntry[] = [
-      {
-        entityId: "wellG",
-        imageId: "",
-        mode: "well-as-proxy",
-        targetLod: 0,
-        coarsestDetailLod: 0,
-        detailOwnedLodRange: [0, 0],
-        proxyKind: "WellProxy3D",
-        proxyAvailable: true,
-        wellProxyAvailable: true,
-      },
+      { kind: "well-as-proxy", entityId: "wellG" },
     ];
 
     const result = assignModes(entities, prev, catalog);
     expect(result).toHaveLength(1);
-    expect(result[0].mode).toBe("well-as-proxy");
+    expect(result[0].kind).toBe("well-as-proxy");
   });
 
   it("hysteresis flip: 50→100→50 returns to well-as-proxy", () => {
@@ -479,15 +513,15 @@ describe("assignModes — three-tier with catalog", () => {
     ]);
 
     const r1 = assignModes(makePlateEntities("wellH", fields), [], catalog);
-    expect(r1[0].mode).toBe("well-as-proxy");
+    expect(r1[0].kind).toBe("well-as-proxy");
 
     fields[0].px = 100;
     const r2 = assignModes(makePlateEntities("wellH", fields), r1, catalog);
-    expect(r2[0].mode).toBe("fields-with-proxy-fallback");
+    expect(asField(r2[0]).mode).toBe("fields-with-proxy-fallback");
 
     fields[0].px = 50;
     const r3 = assignModes(makePlateEntities("wellH", fields), r2, catalog);
-    expect(r3[0].mode).toBe("well-as-proxy");
+    expect(r3[0].kind).toBe("well-as-proxy");
   });
 });
 
@@ -624,16 +658,32 @@ describe("iterateChunks", () => {
       levels: [level0],
       position: [0, 0],
     });
+    // PRD #563 / Slice 4: WellAsProxyEntry carries only `kind` +
+    // `entityId`; the chunk-iteration short-circuit reads `kind`, not
+    // `mode`.
+    const entry: ActiveSetEntry = { kind: "well-as-proxy", entityId: "wellX" };
+
+    const result = iterateChunks(entity, entry, makeVisibleRegion(), makeSelection());
+    expect(result).toHaveLength(0);
+  });
+
+  it("invisible entry produces no chunk requests", () => {
+    // PRD #563 / Slice 4: InvisibleEntry is a distinct variant —
+    // iterateChunks short-circuits on `kind !== "field"`.
+    const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "invX",
+      imageId: "imgInv",
+      kind: "Image",
+      visible: false,
+      levels: [level0],
+      position: [0, 0],
+    });
     const entry: ActiveSetEntry = {
-      entityId: "wellX",
-      imageId: "",
-      mode: "well-as-proxy",
-      targetLod: 0,
-      coarsestDetailLod: 0,
-      detailOwnedLodRange: [0, 0],
-      proxyKind: "WellProxy3D",
-      proxyAvailable: true,
-      wellProxyAvailable: true,
+      kind: "invisible",
+      entityId: "invX",
+      imageId: "imgInv",
+      coarsestLod: 0,
     };
 
     const result = iterateChunks(entity, entry, makeVisibleRegion(), makeSelection());
@@ -1142,7 +1192,7 @@ describe("plan()", () => {
     // Active set: 2 entries, both in fields-with-detail (no catalog → degrade).
     expect(result.activeSet).toHaveLength(2);
     for (const entry of result.activeSet) {
-      expect(entry.mode).toBe("fields-with-detail");
+      expect(asField(entry).mode).toBe("fields-with-detail");
     }
 
     // Detail lane: both entities at L0 with 2x2 grid each = 8 chunks.
@@ -1257,7 +1307,7 @@ describe("plan() — proxy request emission", () => {
     // Active set = 1 well-as-proxy entry, plus invisible-entry pass for the well/fields would be 0
     // since they're all visible.
     expect(result.activeSet).toHaveLength(1);
-    expect(result.activeSet[0].mode).toBe("well-as-proxy");
+    expect(result.activeSet[0].kind).toBe("well-as-proxy");
 
     // Proxy requests: exactly 1 well proxy.
     expect(result.proxyRequests).toHaveLength(1);
@@ -1293,7 +1343,7 @@ describe("plan() — proxy request emission", () => {
 
     expect(result.activeSet).toHaveLength(2);
     for (const entry of result.activeSet) {
-      expect(entry.mode).toBe("fields-with-proxy-fallback");
+      expect(asField(entry).mode).toBe("fields-with-proxy-fallback");
     }
 
     // Field detail chunks emitted (2 fields × 1 chunk).
@@ -1330,7 +1380,7 @@ describe("plan() — proxy request emission", () => {
 
     const result = plan(snap, createSyntheticState());
     expect(result.activeSet).toHaveLength(1);
-    expect(result.activeSet[0].mode).toBe("fields-with-detail");
+    expect(asField(result.activeSet[0]).mode).toBe("fields-with-detail");
 
     // Detail chunks emitted.
     const detailReqs = result.requests.filter((r) => r.lane === "detail");
@@ -1408,7 +1458,7 @@ describe("plan() — proxy request emission", () => {
       catalog,
     });
     let result = plan(snap, createSyntheticState());
-    expect(result.activeSet[0].mode).toBe("well-as-proxy");
+    expect(result.activeSet[0].kind).toBe("well-as-proxy");
 
     // Now bounce 75/82/78/84 — should stay well-as-proxy. Each tick
     // threads the previous tick's `nextState` back as this tick's
@@ -1420,7 +1470,7 @@ describe("plan() — proxy request emission", () => {
         catalog,
       });
       result = plan(snap, result.nextState);
-      expect(result.activeSet[0].mode).toBe("well-as-proxy");
+      expect(result.activeSet[0].kind).toBe("well-as-proxy");
     }
 
     // Cross 85 → flip to proxy-fallback.
@@ -1430,7 +1480,7 @@ describe("plan() — proxy request emission", () => {
       catalog,
     });
     result = plan(snap, result.nextState);
-    expect(result.activeSet[0].mode).toBe("fields-with-proxy-fallback");
+    expect(asField(result.activeSet[0]).mode).toBe("fields-with-proxy-fallback");
   });
 
   it("hysteresis: bouncing 145-155px doesn't flip mode after settling on fields-with-detail", () => {
@@ -1446,7 +1496,7 @@ describe("plan() — proxy request emission", () => {
       catalog,
     });
     let result = plan(snap, createSyntheticState());
-    expect(result.activeSet[0].mode).toBe("fields-with-detail");
+    expect(asField(result.activeSet[0]).mode).toBe("fields-with-detail");
 
     for (const px of [148, 152, 146, 154, 150]) {
       snap = makePlateSnapshot({
@@ -1455,7 +1505,7 @@ describe("plan() — proxy request emission", () => {
         catalog,
       });
       result = plan(snap, result.nextState);
-      expect(result.activeSet[0].mode).toBe("fields-with-detail");
+      expect(asField(result.activeSet[0]).mode).toBe("fields-with-detail");
     }
 
     // Cross 145 → flip down.
@@ -1465,7 +1515,7 @@ describe("plan() — proxy request emission", () => {
       catalog,
     });
     result = plan(snap, result.nextState);
-    expect(result.activeSet[0].mode).toBe("fields-with-proxy-fallback");
+    expect(asField(result.activeSet[0]).mode).toBe("fields-with-proxy-fallback");
   });
 
   it("PlanningState round-trip: feeding result.nextState back is equivalent to threading previousActiveSet manually", () => {
@@ -1486,7 +1536,7 @@ describe("plan() — proxy request emission", () => {
       catalog,
     });
     const tick1 = plan(tick1Snap, createSyntheticState());
-    expect(tick1.activeSet[0].mode).toBe("well-as-proxy");
+    expect(tick1.activeSet[0].kind).toBe("well-as-proxy");
 
     // Tick 2: same snapshot at 82px (inside the FAR hysteresis band).
     // Two state constructions that should produce identical plans:
@@ -1514,7 +1564,7 @@ describe("plan() — proxy request emission", () => {
     expect(viaNextState.nextState).toEqual(viaHandConstructed.nextState);
     // Hysteresis preserved: 82px stays well-as-proxy because prev
     // already was.
-    expect(viaNextState.activeSet[0].mode).toBe("well-as-proxy");
+    expect(viaNextState.activeSet[0].kind).toBe("well-as-proxy");
   });
 
   it("constants check: thresholds 80/150 with hysteresis 5", () => {
@@ -1743,8 +1793,9 @@ describe("plan() edge cases", () => {
     const result = plan(snap, createSyntheticState());
 
     expect(result.activeSet).toHaveLength(2);
+    // PRD #563 / Slice 4: invisibles now ride their own variant.
     for (const entry of result.activeSet) {
-      expect(entry.mode).toBe("fields-with-detail");
+      expect(entry.kind).toBe("invisible");
     }
     const detail = result.requests.filter((r) => r.lane === "detail");
     const prefetch = result.requests.filter((r) => r.lane === "prefetch");
@@ -1850,7 +1901,7 @@ describe("groupByWell edge cases (via assignModes)", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].entityId).toBe("orphan-field");
-    expect(result[0].mode).toBe("fields-with-detail");
+    expect(asField(result[0]).mode).toBe("fields-with-detail");
   });
 });
 
@@ -1860,19 +1911,13 @@ describe("assignModes edge cases", () => {
     // entries pointing to ids that don't exist anymore. assignModes
     // should not throw and the empty entities list should produce an
     // empty result.
+    //
+    // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; the
+    // stale prev shape uses the new variant constructors directly.
     const stalePrev: ActiveSetEntry[] = [
+      { kind: "well-as-proxy", entityId: "ghost-well" },
       {
-        entityId: "ghost-well",
-        imageId: "",
-        mode: "well-as-proxy",
-        targetLod: 0,
-        coarsestDetailLod: 0,
-        detailOwnedLodRange: [0, 0],
-        proxyKind: "WellProxy3D",
-        proxyAvailable: true,
-        wellProxyAvailable: true,
-      },
-      {
+        kind: "field",
         entityId: "ghost-field",
         imageId: "ghost-img",
         mode: "fields-with-detail",
@@ -2111,7 +2156,7 @@ describe("plan() honors config tunables", () => {
 
     // Default thresholds: 100px → fields-with-proxy-fallback.
     const defaultResult = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
-    expect(defaultResult.activeSet[0].mode).toBe("fields-with-proxy-fallback");
+    expect(asField(defaultResult.activeSet[0]).mode).toBe("fields-with-proxy-fallback");
 
     // Raise the far threshold past 100 → promotes to well-as-proxy.
     const result = plan(
@@ -2120,14 +2165,14 @@ describe("plan() honors config tunables", () => {
       mergeConfig({ farThresholdPx: 200, detailThresholdPx: 250 }),
     );
     expect(result.activeSet).toHaveLength(1);
-    expect(result.activeSet[0].mode).toBe("well-as-proxy");
+    expect(result.activeSet[0].kind).toBe("well-as-proxy");
   });
 
   it("detailThresholdPx: lowering to 50 demotes a 100px entity to fields-with-detail", () => {
     const snap = makeTunablePlate({ px: 100 });
 
     const defaultResult = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
-    expect(defaultResult.activeSet[0].mode).toBe("fields-with-proxy-fallback");
+    expect(asField(defaultResult.activeSet[0]).mode).toBe("fields-with-proxy-fallback");
 
     // Lower the detail threshold past 100 → fields-with-detail.
     const result = plan(
@@ -2135,7 +2180,7 @@ describe("plan() honors config tunables", () => {
       createSyntheticState(),
       mergeConfig({ farThresholdPx: 30, detailThresholdPx: 50 }),
     );
-    expect(result.activeSet[0].mode).toBe("fields-with-detail");
+    expect(asField(result.activeSet[0]).mode).toBe("fields-with-detail");
   });
 
   it("hysteresisPx: a wider band lets the previous mode win in a wider range", () => {
@@ -2145,7 +2190,7 @@ describe("plan() honors config tunables", () => {
       createSyntheticState(),
       DEFAULT_PLANNING_CONFIG,
     );
-    expect(settle.activeSet[0].mode).toBe("well-as-proxy");
+    expect(settle.activeSet[0].kind).toBe("well-as-proxy");
 
     const followup = makeTunablePlate({ px: 100 });
     // PRD #563 / Slice 3: prev active set carries via PlanningState now.
@@ -2154,12 +2199,12 @@ describe("plan() honors config tunables", () => {
     // Default hysteresis (5px): 100 is way past farUpper (85), so it
     // flips out of well-as-proxy.
     const defaultResult = plan(followup, followupState, DEFAULT_PLANNING_CONFIG);
-    expect(defaultResult.activeSet[0].mode).not.toBe("well-as-proxy");
+    expect(defaultResult.activeSet[0].kind).not.toBe("well-as-proxy");
 
     // Wider hysteresis (50px): 100 falls inside the [80-50, 80+50] = [30, 130]
     // band, so the prev well-as-proxy mode is preserved.
     const result = plan(followup, followupState, mergeConfig({ hysteresisPx: 50 }));
-    expect(result.activeSet[0].mode).toBe("well-as-proxy");
+    expect(result.activeSet[0].kind).toBe("well-as-proxy");
   });
 
   it("prefetchDepth: 0 emits no prefetch chunks; 4 emits T+1..T+4", () => {
@@ -2636,5 +2681,162 @@ describe("plan() — minimap lane (Slice 5)", () => {
     const afterMinimap = after.requests.filter((r) => r.lane === "minimap");
     expect(afterMinimap.length).toBeGreaterThan(0);
     for (const req of afterMinimap) expect(req.priority).toBe(250);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Discriminated ActiveSetEntry — PRD #563 / Slice 4
+// ---------------------------------------------------------------------------
+//
+// These tests pin the variant shapes produced by `assignModes` (and
+// hence by the `make*Entry` constructors it calls) so a future shape
+// drift trips a test, not a debugging session.
+//
+// Type-narrowing assertions show up as `if (entry.kind === "...")
+// { /* read variant-specific fields */ }` blocks inside the test body
+// — TypeScript's narrowing within those blocks is the actual
+// compile-time invariant being tested.
+
+describe("ActiveSetEntry variants", () => {
+  it("well-as-proxy variant: only `kind` + `entityId`, no LOD/imageId/proxy fields", () => {
+    // 50px well + advertised WellProxy3D → assignModes returns one
+    // WellAsProxyEntry. Keys() pin the surface.
+    const entities = makePlateEntities("wellWP", [
+      { id: "fWP", image: "imgWP", px: 50 },
+    ]);
+    const catalog = makeCatalog([
+      ["wellWP", ["WellProxy3D"]],
+      ["fWP", ["FieldProxy3D"]],
+    ]);
+
+    const result = assignModes(entities, [], catalog);
+    expect(result).toHaveLength(1);
+    const entry = result[0];
+
+    // Kind discrimination first; only inside the narrowed block do
+    // variant-specific reads typecheck.
+    expect(entry.kind).toBe("well-as-proxy");
+    if (entry.kind === "well-as-proxy") {
+      expect(entry.entityId).toBe("wellWP");
+      // Surface check: exactly two own keys (no imageId, mode,
+      // targetLod, coarsestDetailLod, detailOwnedLodRange, proxyKind,
+      // proxyAvailable, or wellProxyAvailable).
+      expect(Object.keys(entry).sort()).toEqual(["entityId", "kind"]);
+    }
+  });
+
+  it("field variant: `kind: \"field\"` + LOD bookkeeping + proxy availability flags", () => {
+    const entities = makePlateEntities("wellF", [
+      { id: "fF", image: "imgF", px: 200 },
+    ]);
+    const catalog = makeCatalog([
+      ["wellF", ["WellProxy3D"]],
+      ["fF", ["FieldProxy3D"]],
+    ]);
+
+    const result = assignModes(entities, [], catalog);
+    expect(result).toHaveLength(1);
+    const entry = result[0];
+
+    expect(entry.kind).toBe("field");
+    if (entry.kind === "field") {
+      expect(entry.entityId).toBe("fF");
+      expect(entry.imageId).toBe("imgF");
+      expect(entry.mode).toBe("fields-with-detail");
+      expect(entry.targetLod).toBe(0);
+      expect(entry.coarsestDetailLod).toBe(0);
+      expect(entry.detailOwnedLodRange).toEqual([0, 0]);
+      expect(entry.proxyKind).toBe("FieldProxy3D");
+      expect(entry.proxyAvailable).toBe(true);
+      expect(entry.wellProxyAvailable).toBe(true);
+    }
+  });
+
+  it("invisible variant: `kind: \"invisible\"` + entityId/imageId/coarsestLod, no LOD range or proxy fields", () => {
+    const entity = createSyntheticEntity({
+      entityId: "invE",
+      imageId: "imgInv",
+      kind: "Image",
+      visible: false,
+      levels: makeStubLevels(4),
+    });
+
+    const result = assignModes([entity], []);
+    expect(result).toHaveLength(1);
+    const entry = result[0];
+
+    expect(entry.kind).toBe("invisible");
+    if (entry.kind === "invisible") {
+      expect(entry.entityId).toBe("invE");
+      expect(entry.imageId).toBe("imgInv");
+      expect(entry.coarsestLod).toBe(3);
+      // Surface check: exactly four own keys (no mode, targetLod,
+      // coarsestDetailLod, detailOwnedLodRange, proxyKind,
+      // proxyAvailable, or wellProxyAvailable).
+      expect(Object.keys(entry).sort()).toEqual([
+        "coarsestLod", "entityId", "imageId", "kind",
+      ]);
+    }
+  });
+
+  it("end-to-end: a mixed snapshot produces all three variants and consumer narrowing works", () => {
+    // One well in well-as-proxy mode, one well's fields in
+    // fields-with-detail mode, plus an invisible image. The plan
+    // must contain entries of all three kinds; iterating with kind
+    // discrimination pulls per-variant fields out cleanly.
+    const wellWP = makePlateEntities("wellWP", [
+      { id: "fWP", image: "imgWP", px: 50 },
+    ]);
+    const wellFD = makePlateEntities("wellFD", [
+      { id: "fFD", image: "imgFD", px: 200 },
+    ]);
+    const invisible = createSyntheticEntity({
+      entityId: "invE",
+      imageId: "imgInv",
+      kind: "Image",
+      visible: false,
+      levels: makeStubLevels(3),
+    });
+    const catalog = makeCatalog([
+      ["wellWP", ["WellProxy3D"]],
+      ["fWP", ["FieldProxy3D"]],
+      ["wellFD", ["WellProxy3D"]],
+      ["fFD", ["FieldProxy3D"]],
+    ]);
+
+    const snap = createSyntheticSnapshot({
+      entities: [...wellWP, ...wellFD, invisible],
+      assetCatalog: catalog,
+      visibleRegion: {
+        xyBounds: [0, 0, 256, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: null,
+        frustumPlanes: null,
+      },
+    });
+    const result = plan(snap, createSyntheticState());
+
+    // One well-as-proxy + one field + one invisible.
+    const byKind = { wellAsProxy: 0, field: 0, invisible: 0 };
+    let observedField: { mode: string; targetLod: number } | null = null;
+    let observedInvisible: { coarsestLod: number } | null = null;
+    let observedWellAsProxy: { entityId: string } | null = null;
+    for (const entry of result.activeSet) {
+      if (entry.kind === "well-as-proxy") {
+        byKind.wellAsProxy++;
+        observedWellAsProxy = { entityId: entry.entityId };
+      } else if (entry.kind === "field") {
+        byKind.field++;
+        observedField = { mode: entry.mode, targetLod: entry.targetLod };
+      } else {
+        byKind.invisible++;
+        observedInvisible = { coarsestLod: entry.coarsestLod };
+      }
+    }
+    expect(byKind).toEqual({ wellAsProxy: 1, field: 1, invisible: 1 });
+    expect(observedWellAsProxy).toEqual({ entityId: "wellWP" });
+    expect(observedField).toEqual({ mode: "fields-with-detail", targetLod: 0 });
+    expect(observedInvisible).toEqual({ coarsestLod: 2 });
   });
 });

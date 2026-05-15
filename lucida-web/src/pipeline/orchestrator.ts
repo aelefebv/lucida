@@ -710,7 +710,7 @@ export class Orchestrator {
       }
       const rosterEntries: MemberRosterEntry[] = [];
       for (const entry of result.activeSet) {
-        if (entry.mode === "well-as-proxy") {
+        if (entry.kind === "well-as-proxy") {
           // Synthetic well member. Compute AABB from constituent fields.
           const childFields = fieldsByWell.get(entry.entityId) ?? [];
           if (childFields.length === 0) continue; // no geometry to render
@@ -718,6 +718,9 @@ export class Orchestrator {
           if (synth) rosterEntries.push(synth);
           continue;
         }
+        // Invisible entries don't render — skip them in the roster.
+        if (entry.kind === "invisible") continue;
+        // Narrowed: entry is FieldEntry below.
         const entity = entityById.get(entry.entityId);
         if (entity) {
           rosterEntries.push({
@@ -804,7 +807,16 @@ export class Orchestrator {
           const activeEntry = result.activeSet.find(
             (a) => a.entityId === entity.entityId,
           );
-          const tl = activeEntry?.targetLod ?? -1;
+          // PRD #563 / Slice 4: only field entries carry `targetLod`;
+          // well-as-proxy has no LOD bookkeeping, invisibles report
+          // their coarsest LOD instead. Surface -1 for non-field
+          // entries to mirror the legacy "no level selected" sentinel.
+          const tl =
+            activeEntry?.kind === "field"
+              ? activeEntry.targetLod
+              : activeEntry?.kind === "invisible"
+                ? activeEntry.coarsestLod
+                : -1;
           const memberKey = multiChannel
             ? compositeKey(entity.imageId, selection.c)
             : entity.imageId;
@@ -862,15 +874,43 @@ export class Orchestrator {
       // Re-run is wasteful, so we read the planner's carry-forward
       // state — its `previousActiveSet` field is exactly the active
       // set produced by the most recent `plan()` call for that dataset.
+      //
+      // PRD #563 / Slice 4: ActiveSetEntry is now a discriminated
+      // union, so per-variant fields are derived from `kind`:
+      //   - well-as-proxy → mode column reads "well-as-proxy",
+      //     LOD columns are zero (no LOD bookkeeping for this variant);
+      //   - field        → mode column reads the field's promotion mode,
+      //     LOD columns come from the field entry;
+      //   - invisible    → mode column reads "invisible", LOD columns
+      //     report the entity's coarsest LOD (the only level it owns).
       for (const [, state] of this.planningState) {
         for (const entry of state.previousActiveSet) {
-          orchDebug.activeSet.push({
-            entityId: entry.entityId,
-            mode: entry.mode,
-            targetLod: entry.targetLod,
-            coarsestDetailLod: entry.coarsestDetailLod,
-            detailOwnedLodRange: entry.detailOwnedLodRange,
-          });
+          if (entry.kind === "well-as-proxy") {
+            orchDebug.activeSet.push({
+              entityId: entry.entityId,
+              mode: "well-as-proxy",
+              targetLod: 0,
+              coarsestDetailLod: 0,
+              detailOwnedLodRange: [0, 0],
+            });
+          } else if (entry.kind === "field") {
+            orchDebug.activeSet.push({
+              entityId: entry.entityId,
+              mode: entry.mode,
+              targetLod: entry.targetLod,
+              coarsestDetailLod: entry.coarsestDetailLod,
+              detailOwnedLodRange: entry.detailOwnedLodRange,
+            });
+          } else {
+            // invisible
+            orchDebug.activeSet.push({
+              entityId: entry.entityId,
+              mode: "invisible",
+              targetLod: entry.coarsestLod,
+              coarsestDetailLod: entry.coarsestLod,
+              detailOwnedLodRange: [entry.coarsestLod, entry.coarsestLod],
+            });
+          }
         }
       }
 
@@ -1848,6 +1888,13 @@ export class Orchestrator {
       };
     }
 
+    // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; the
+    // worker's `ColdStateActiveEntry` stays flat (it talks to the
+    // worker over a separate seam). Each variant maps onto the cold
+    // shape with explicit per-variant defaults — `well-as-proxy` has
+    // no LOD bookkeeping and an empty imageId, `invisible` collapses
+    // to its coarsest LOD with no proxy availability, and `field`
+    // forwards its fields verbatim.
     const coldActiveSet: ColdStateActiveEntry[] = activeSet.map(entry => {
       const entity = entityById.get(entry.entityId);
       const levels = (entity?.levels ?? []).map((lvl: LevelGeometry, idx: number) => {
@@ -1882,6 +1929,45 @@ export class Orchestrator {
       const modelMatrix = matrices?.model ?? identityMatrix();
       const invModelMatrix = matrices?.inv ?? identityMatrix();
 
+      if (entry.kind === "well-as-proxy") {
+        return {
+          entityId: entry.entityId,
+          imageId: "",
+          targetLod: 0,
+          detailOwnedLodRange: [0, 0],
+          levels,
+          mode: "well-as-proxy",
+          proxyKind: "WellProxy3D",
+          proxyAvailable: true,
+          wellProxyAvailable: true,
+          parentWellId,
+          modelMatrix,
+          invModelMatrix,
+          displayStateByChannel,
+        };
+      }
+      if (entry.kind === "invisible") {
+        return {
+          entityId: entry.entityId,
+          imageId: entry.imageId,
+          targetLod: entry.coarsestLod,
+          detailOwnedLodRange: [entry.coarsestLod, entry.coarsestLod],
+          levels,
+          // Invisibles are mode-less in the planner — surface them to
+          // the worker as `fields-with-detail` (the legacy encoding)
+          // so the wanted-set rules don't ask for proxies for an
+          // entity that won't render this tick.
+          mode: "fields-with-detail",
+          proxyKind: undefined,
+          proxyAvailable: false,
+          wellProxyAvailable: false,
+          parentWellId,
+          modelMatrix,
+          invModelMatrix,
+          displayStateByChannel,
+        };
+      }
+      // Narrowed: entry is FieldEntry.
       return {
         entityId: entry.entityId,
         imageId: entry.imageId,
