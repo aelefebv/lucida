@@ -25,7 +25,7 @@ For each well group, planning chooses one of three modes from the well's project
 | **fields-with-proxy-fallback** | 80–150 px | Detail chunks + per-field proxy + per-well proxy |
 | **fields-with-detail** | > 150 px | Detail chunks. Field proxy only if catalog advertises it. |
 
-Hysteresis bands of ±5 px around each threshold prevent flapping. Thresholds and the band live in `planning.ts:23-36`.
+Hysteresis bands of ±5 px around each threshold prevent flapping. Thresholds, the band, and every other tunable live in `planning/config.ts` as exported constants and as fields of `PlanningConfig`. The orchestrator reads the live `PlanningConfig` from `planning/configStore.ts` once per tick — so values can be tweaked at runtime via the [Config tab in DebugPanel](https://github.com/aelefebv/lucida/blob/main/lucida-web/src/debug/ConfigTab.tsx) without rebuilding (PRD #545 / Slice 6).
 
 ## LOD range
 
@@ -63,14 +63,17 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
   - `scene.view_query(dsId)` → per-entity `projected_diagonal_px`, `projected_area_px2`, `centroid_world`, `ideal_target_lod`, `importance`
   - `scene.member_positions(dsId)` → per-entity 2D position for slice placement
   - `scene.visible_region(dsId)` → `xyBounds`, `zRange`, `effectiveZoom`, `frustumPlanes`
-- **Inputs from JS state**: the dataset's `AssetCatalog` (for catalog-aware degradation), the active layout, the per-channel visibility settings.
+- **Inputs from JS state**: the dataset's `AssetCatalog` (for catalog-aware degradation), the active layout, the per-channel visibility settings, the per-image `minimapPending` map, and the live `PlanningConfig` (from `planning/configStore.ts`).
 - **Outputs**: a `RequestPlan` per dataset — list of `ChunkRequest` with priorities, plus per-well mode metadata so the orchestrator can build the worker's cold state correctly.
 - **Consumers**: [[cpu-cache]] (`submit(plan)`), [[gpu-residency|gpu.worker.ts]] (via the cold-state message — see [[worker-protocol]]).
+- **Snapshot assembly**: `planning/snapshot.ts` exports `buildPlanningSnapshot(args)` — a pure WASM→snapshot translator the orchestrator calls each tick. Lets planning be tested with stub WASM scenes.
+- **Debug panel data**: `planning/debug.ts` exports `buildPlanningDatasetDebug` and `modeReason` — pure derivations from the plan + entity list, consumed by the DebugPanel "Planning" tab. `modeReason` reads thresholds from `PlanningConfig` so it can't drift from `chooseEntityMode`.
+- **Live tuning**: `planning/configStore.ts` is a singleton with `get`/`set`/`reset`/`subscribe`, persisted to `localStorage["lucida.planning.config"]` with a schemaVersion envelope. The orchestrator subscribes to clear its planning cache on config change; the render loop subscribes to fire an interactive-dirty frame.
 
 ## Invariants
 
 - **Wells are the planning unit for plates.** All field-level decisions cascade from the well's mode. A well in `well-as-proxy` mode does not enumerate field chunks regardless of any field's individual visibility.
-- **Singles are treated as a singleton "well group" with one field.** `planning.ts:437-443` — same code path as plates, simpler shape.
+- **Singles are treated as a singleton "well group" with one field.** `planning/index.ts::groupByWell` synthesizes an `__image__${entityId}` group key for `kind === "Image"` entities — same code path as plates, simpler shape.
 - **Catalog degradation is one tier at a time.** If well-as-proxy isn't available, drop to fields-with-proxy-fallback; if that's not available, drop to fields-with-detail. Never skip a tier.
 - **The plan is fresh every tick.** No caching across ticks; the [[scene-state-and-epochs|epoch fast-path]] in the orchestrator decides whether to re-run planning at all.
 
