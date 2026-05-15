@@ -30,6 +30,7 @@ import type {
   ActiveSetEntry,
   EntitySnapshot,
   MinimapChunkCoord,
+  PlanningState,
   SelectionState,
   ChunkRequest,
   RequestPlan,
@@ -284,7 +285,18 @@ function synthesizeWellRosterEntry(
 }
 
 export class Orchestrator {
-  private previousActiveSet = new Map<string, ActiveSetEntry[]>();
+  /**
+   * Per-dataset opaque planner carry-forward state. The orchestrator
+   * stores `result.nextState` after each `plan()` call and threads the
+   * matching entry back as the `state` argument on the next tick.
+   *
+   * PRD #563 / Slice 3 renamed this from `previousActiveSet:
+   * Map<string, ActiveSetEntry[]>` so the seam between the planner and
+   * its caller is the {@link PlanningState} container. Future planner
+   * state (per-well stickiness, anticipation hints) extends
+   * {@link PlanningState} without touching the orchestrator.
+   */
+  private planningState = new Map<string, PlanningState>();
   private lastEpochs: SceneEpochs | null = null;
   private cachedResult: OrchestratorResult | null = null;
   /**
@@ -595,7 +607,6 @@ export class Orchestrator {
         datasetId: dsId,
         dataset: ds,
         dsSettings,
-        prevActiveSet: this.previousActiveSet.get(dsId) ?? [],
         assetCatalog: ctx.assetCatalog.snapshot(),
         minimapPending: minimapPendingFetch,
         mode: ctx.mode as "slice" | "volume",
@@ -616,9 +627,13 @@ export class Orchestrator {
         this._lastCachedKeyCounts.set(entity.entityId, cachedKeys?.size ?? 0);
       }
 
-      // 3d. Plan
-      const result = plan(snapshot, planningConfig);
-      this.previousActiveSet.set(dsId, result.activeSet);
+      // 3d. Plan. PRD #563 / Slice 3: pass the opaque carry-forward
+      // state separately from the snapshot, and store the planner-
+      // returned `nextState` for the next tick.
+      const planningStateForDataset = this.planningState.get(dsId)
+        ?? { previousActiveSet: [] };
+      const result = plan(snapshot, planningStateForDataset, planningConfig);
+      this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
       this._lastRequests = result.requests;
       this._lastVisibleRegion = visibleRegion;
@@ -776,6 +791,9 @@ export class Orchestrator {
         proxyRequests: result.proxyRequests,
         epochs: currentEpochs,
         stats: result.stats,
+        // `nextState` is required on RequestPlan but unused by submit();
+        // forward the planner's pointer so the shape stays honest.
+        nextState: result.nextState,
       });
 
       // Debug stats
@@ -841,9 +859,11 @@ export class Orchestrator {
       }
 
       // Aggregate from all per-dataset plan results
-      // Re-run is wasteful, so store last result. For now just use previousActiveSet.
-      for (const [, activeSet] of this.previousActiveSet) {
-        for (const entry of activeSet) {
+      // Re-run is wasteful, so we read the planner's carry-forward
+      // state — its `previousActiveSet` field is exactly the active
+      // set produced by the most recent `plan()` call for that dataset.
+      for (const [, state] of this.planningState) {
+        for (const entry of state.previousActiveSet) {
           orchDebug.activeSet.push({
             entityId: entry.entityId,
             mode: entry.mode,
@@ -1778,6 +1798,9 @@ export class Orchestrator {
       proxyRequests: [proxyRequest],
       epochs,
       stats: emptyPlanStats(),
+      // submit() doesn't read nextState; placeholder so the literal
+      // satisfies RequestPlan's contract. (PRD #563 / Slice 3.)
+      nextState: { previousActiveSet: [] },
     });
   }
 

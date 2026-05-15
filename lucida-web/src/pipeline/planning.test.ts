@@ -5,6 +5,7 @@ import {
   chunkKey,
   createSyntheticEntity,
   createSyntheticSnapshot,
+  createSyntheticState,
   PROMOTE_THRESHOLD_PX,
   FAR_THRESHOLD_PX,
   DETAIL_THRESHOLD_PX,
@@ -31,6 +32,7 @@ import type {
   ActiveSetEntry,
   EntitySnapshot,
   MinimapChunkCoord,
+  PlanningState,
   SelectionState,
   PlanningSnapshot,
   EntityMode,
@@ -843,7 +845,7 @@ describe("request scheduling", () => {
 
   it("detail requests have lower priority than prefetch", () => {
     const snapshot = makeSchedulingSnapshot();
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
 
     const detailReqs = result.requests.filter((r) => r.lane === "detail");
     const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
@@ -858,7 +860,7 @@ describe("request scheduling", () => {
 
   it("prefetch requests have lower priority than overview", () => {
     const snapshot = makeSchedulingSnapshot();
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
 
     const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
     const overviewReqs = result.requests.filter((r) => r.lane === "overview");
@@ -914,7 +916,7 @@ describe("request scheduling", () => {
       },
     });
 
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
 
     const highDetailReqs = result.requests.filter(
       (r) => r.lane === "detail" && r.entityId === "high",
@@ -935,7 +937,7 @@ describe("request scheduling", () => {
 
   it("temporal prefetch generates T+1 and T+2", () => {
     const snapshot = makeSchedulingSnapshot();
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
 
     const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
     expect(prefetchReqs.length).toBeGreaterThan(0);
@@ -947,7 +949,7 @@ describe("request scheduling", () => {
 
   it("prefetch T+1 before T+2", () => {
     const snapshot = makeSchedulingSnapshot();
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
 
     const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
     const t11Reqs = prefetchReqs.filter((r) => r.t === 11);
@@ -1001,7 +1003,7 @@ describe("plan()", () => {
       },
     });
 
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
     const detailReqs = result.requests.filter((r) => r.lane === "detail");
     expect(detailReqs.length).toBe(4);
 
@@ -1046,7 +1048,7 @@ describe("plan()", () => {
       },
     });
 
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
     const detailReqs = result.requests.filter((r) => r.lane === "detail");
     expect(detailReqs.length).toBe(2);
 
@@ -1076,7 +1078,7 @@ describe("plan()", () => {
       },
     });
 
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
 
     expect(result.epochs.request).toBe(8);
     expect(result.epochs.content).toBe(3);
@@ -1135,7 +1137,7 @@ describe("plan()", () => {
       },
     });
 
-    const result = plan(snapshot);
+    const result = plan(snapshot, createSyntheticState());
 
     // Active set: 2 entries, both in fields-with-detail (no catalog → degrade).
     expect(result.activeSet).toHaveLength(2);
@@ -1182,6 +1184,12 @@ describe("plan() — proxy request emission", () => {
   /**
    * Build a minimal plate snapshot with one well + N fields. All fields
    * share the same image-level geometry (single LOD, 256x256, 1 chunk).
+   *
+   * PRD #563 / Slice 3: prev-active-set carry-over is no longer
+   * carried on the snapshot. Tests that need to seed prev state should
+   * construct a {@link PlanningState} (or thread `result.nextState`
+   * from the previous tick) and pass it as the second argument to
+   * `plan()`.
    */
   function makePlateSnapshot(opts: {
     wellId: string;
@@ -1189,7 +1197,6 @@ describe("plan() — proxy request emission", () => {
     catalog: AssetCatalogSnapshot | null;
     visibleChannels?: number[];
     t?: number;
-    previousActiveSet?: ActiveSetEntry[];
   }): PlanningSnapshot {
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const entities: EntitySnapshot[] = [
@@ -1231,7 +1238,6 @@ describe("plan() — proxy request emission", () => {
         interactionState: "idle",
       },
       assetCatalog: opts.catalog,
-      previousActiveSet: opts.previousActiveSet ?? [],
     });
   }
 
@@ -1246,7 +1252,7 @@ describe("plan() — proxy request emission", () => {
       catalog,
     });
 
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
 
     // Active set = 1 well-as-proxy entry, plus invisible-entry pass for the well/fields would be 0
     // since they're all visible.
@@ -1283,7 +1289,7 @@ describe("plan() — proxy request emission", () => {
       catalog,
     });
 
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
 
     expect(result.activeSet).toHaveLength(2);
     for (const entry of result.activeSet) {
@@ -1322,7 +1328,7 @@ describe("plan() — proxy request emission", () => {
       catalog,
     });
 
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     expect(result.activeSet).toHaveLength(1);
     expect(result.activeSet[0].mode).toBe("fields-with-detail");
 
@@ -1345,7 +1351,7 @@ describe("plan() — proxy request emission", () => {
       visibleChannels: [0, 1, 3],
     });
 
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     expect(result.proxyRequests).toHaveLength(3);
     const cs = result.proxyRequests.map((p) => p.c).sort();
     expect(cs).toEqual([0, 1, 3]);
@@ -1375,7 +1381,7 @@ describe("plan() — proxy request emission", () => {
       fields: [{ id: "fL1", image: "imgL1", px: 100 }],
       catalog,
     });
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
 
     const detail = result.requests.filter((r) => r.lane === "detail");
     const overview = result.requests.filter((r) => r.lane === "overview");
@@ -1401,18 +1407,19 @@ describe("plan() — proxy request emission", () => {
       fields: [{ id: "fH1", image: "imgH1", px: 50 }],
       catalog,
     });
-    let result = plan(snap);
+    let result = plan(snap, createSyntheticState());
     expect(result.activeSet[0].mode).toBe("well-as-proxy");
 
-    // Now bounce 75/82/78/84 — should stay well-as-proxy.
+    // Now bounce 75/82/78/84 — should stay well-as-proxy. Each tick
+    // threads the previous tick's `nextState` back as this tick's
+    // state, exercising the PlanningState round-trip.
     for (const px of [75, 82, 78, 84, 80]) {
       snap = makePlateSnapshot({
         wellId: "wellH",
         fields: [{ id: "fH1", image: "imgH1", px }],
         catalog,
-        previousActiveSet: result.activeSet,
       });
-      result = plan(snap);
+      result = plan(snap, result.nextState);
       expect(result.activeSet[0].mode).toBe("well-as-proxy");
     }
 
@@ -1421,9 +1428,8 @@ describe("plan() — proxy request emission", () => {
       wellId: "wellH",
       fields: [{ id: "fH1", image: "imgH1", px: 86 }],
       catalog,
-      previousActiveSet: result.activeSet,
     });
-    result = plan(snap);
+    result = plan(snap, result.nextState);
     expect(result.activeSet[0].mode).toBe("fields-with-proxy-fallback");
   });
 
@@ -1439,7 +1445,7 @@ describe("plan() — proxy request emission", () => {
       fields: [{ id: "fJ1", image: "imgJ1", px: 200 }],
       catalog,
     });
-    let result = plan(snap);
+    let result = plan(snap, createSyntheticState());
     expect(result.activeSet[0].mode).toBe("fields-with-detail");
 
     for (const px of [148, 152, 146, 154, 150]) {
@@ -1447,9 +1453,8 @@ describe("plan() — proxy request emission", () => {
         wellId: "wellJ",
         fields: [{ id: "fJ1", image: "imgJ1", px }],
         catalog,
-        previousActiveSet: result.activeSet,
       });
-      result = plan(snap);
+      result = plan(snap, result.nextState);
       expect(result.activeSet[0].mode).toBe("fields-with-detail");
     }
 
@@ -1458,10 +1463,58 @@ describe("plan() — proxy request emission", () => {
       wellId: "wellJ",
       fields: [{ id: "fJ1", image: "imgJ1", px: 144 }],
       catalog,
-      previousActiveSet: result.activeSet,
     });
-    result = plan(snap);
+    result = plan(snap, result.nextState);
     expect(result.activeSet[0].mode).toBe("fields-with-proxy-fallback");
+  });
+
+  it("PlanningState round-trip: feeding result.nextState back is equivalent to threading previousActiveSet manually", () => {
+    // PRD #563 / Slice 3: the planner returns an opaque `nextState`
+    // pointer; the caller is supposed to hand it back unchanged on the
+    // next tick. This test pins that "hand back" path to the same
+    // outcome a hand-derived `{ previousActiveSet: result.activeSet }`
+    // state produces — proving the round-trip is lossless.
+    const catalog = makeCatalog([
+      ["wellR", ["WellProxy3D"]],
+      ["fR1", ["FieldProxy3D"]],
+    ]);
+
+    // Tick 1: settle on well-as-proxy at 50px.
+    const tick1Snap = makePlateSnapshot({
+      wellId: "wellR",
+      fields: [{ id: "fR1", image: "imgR1", px: 50 }],
+      catalog,
+    });
+    const tick1 = plan(tick1Snap, createSyntheticState());
+    expect(tick1.activeSet[0].mode).toBe("well-as-proxy");
+
+    // Tick 2: same snapshot at 82px (inside the FAR hysteresis band).
+    // Two state constructions that should produce identical plans:
+    //   (a) feeding the planner-returned `nextState` back unchanged,
+    //   (b) hand-constructing `{ previousActiveSet: tick1.activeSet }`.
+    const tick2Snap = makePlateSnapshot({
+      wellId: "wellR",
+      fields: [{ id: "fR1", image: "imgR1", px: 82 }],
+      catalog,
+    });
+
+    const viaNextState = plan(tick2Snap, tick1.nextState);
+    const viaHandConstructed = plan(tick2Snap, {
+      previousActiveSet: tick1.activeSet,
+    } satisfies PlanningState);
+
+    // Active set, request lanes, proxy requests, and stats agree.
+    expect(viaNextState.activeSet).toEqual(viaHandConstructed.activeSet);
+    expect(viaNextState.requests).toEqual(viaHandConstructed.requests);
+    expect(viaNextState.proxyRequests).toEqual(viaHandConstructed.proxyRequests);
+    expect(viaNextState.stats).toEqual(viaHandConstructed.stats);
+    // And the next-state pointer the caller would store is also the
+    // same shape (the planner derives it from `activeSet` — a
+    // round-trip of a round-trip).
+    expect(viaNextState.nextState).toEqual(viaHandConstructed.nextState);
+    // Hysteresis preserved: 82px stays well-as-proxy because prev
+    // already was.
+    expect(viaNextState.activeSet[0].mode).toBe("well-as-proxy");
   });
 
   it("constants check: thresholds 80/150 with hysteresis 5", () => {
@@ -1658,7 +1711,7 @@ describe("iterateGridCells stats accumulation", () => {
 describe("plan() edge cases", () => {
   it("empty entities → empty plan, no errors", () => {
     const snap = createSyntheticSnapshot({ entities: [] });
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
 
     expect(result.activeSet).toHaveLength(0);
     expect(result.requests).toHaveLength(0);
@@ -1687,7 +1740,7 @@ describe("plan() edge cases", () => {
       levels: [],
     });
     const snap = createSyntheticSnapshot({ entities: [entityA, entityB] });
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
 
     expect(result.activeSet).toHaveLength(2);
     for (const entry of result.activeSet) {
@@ -1727,7 +1780,7 @@ describe("plan() edge cases", () => {
       },
     });
 
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     const prefetch = result.requests.filter((r) => r.lane === "prefetch");
     expect(prefetch).toHaveLength(0);
   });
@@ -1761,7 +1814,7 @@ describe("plan() edge cases", () => {
       },
     });
 
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     const prefetch = result.requests.filter((r) => r.lane === "prefetch");
     expect(prefetch).toHaveLength(0);
   });
@@ -2057,12 +2110,13 @@ describe("plan() honors config tunables", () => {
     const snap = makeTunablePlate({ px: 100 });
 
     // Default thresholds: 100px → fields-with-proxy-fallback.
-    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const defaultResult = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     expect(defaultResult.activeSet[0].mode).toBe("fields-with-proxy-fallback");
 
     // Raise the far threshold past 100 → promotes to well-as-proxy.
     const result = plan(
       snap,
+      createSyntheticState(),
       mergeConfig({ farThresholdPx: 200, detailThresholdPx: 250 }),
     );
     expect(result.activeSet).toHaveLength(1);
@@ -2072,12 +2126,13 @@ describe("plan() honors config tunables", () => {
   it("detailThresholdPx: lowering to 50 demotes a 100px entity to fields-with-detail", () => {
     const snap = makeTunablePlate({ px: 100 });
 
-    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const defaultResult = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     expect(defaultResult.activeSet[0].mode).toBe("fields-with-proxy-fallback");
 
     // Lower the detail threshold past 100 → fields-with-detail.
     const result = plan(
       snap,
+      createSyntheticState(),
       mergeConfig({ farThresholdPx: 30, detailThresholdPx: 50 }),
     );
     expect(result.activeSet[0].mode).toBe("fields-with-detail");
@@ -2085,20 +2140,25 @@ describe("plan() honors config tunables", () => {
 
   it("hysteresisPx: a wider band lets the previous mode win in a wider range", () => {
     // Settle at 50px in well-as-proxy, then read 100px.
-    const settle = plan(makeTunablePlate({ px: 50 }), DEFAULT_PLANNING_CONFIG);
+    const settle = plan(
+      makeTunablePlate({ px: 50 }),
+      createSyntheticState(),
+      DEFAULT_PLANNING_CONFIG,
+    );
     expect(settle.activeSet[0].mode).toBe("well-as-proxy");
 
     const followup = makeTunablePlate({ px: 100 });
-    followup.previousActiveSet = settle.activeSet;
+    // PRD #563 / Slice 3: prev active set carries via PlanningState now.
+    const followupState = settle.nextState;
 
     // Default hysteresis (5px): 100 is way past farUpper (85), so it
     // flips out of well-as-proxy.
-    const defaultResult = plan(followup, DEFAULT_PLANNING_CONFIG);
+    const defaultResult = plan(followup, followupState, DEFAULT_PLANNING_CONFIG);
     expect(defaultResult.activeSet[0].mode).not.toBe("well-as-proxy");
 
     // Wider hysteresis (50px): 100 falls inside the [80-50, 80+50] = [30, 130]
     // band, so the prev well-as-proxy mode is preserved.
-    const result = plan(followup, mergeConfig({ hysteresisPx: 50 }));
+    const result = plan(followup, followupState, mergeConfig({ hysteresisPx: 50 }));
     expect(result.activeSet[0].mode).toBe("well-as-proxy");
   });
 
@@ -2130,10 +2190,10 @@ describe("plan() honors config tunables", () => {
       },
     });
 
-    const zero = plan(snap, mergeConfig({ prefetchDepth: 0 }));
+    const zero = plan(snap, createSyntheticState(), mergeConfig({ prefetchDepth: 0 }));
     expect(zero.requests.filter((r) => r.lane === "prefetch")).toHaveLength(0);
 
-    const four = plan(snap, mergeConfig({ prefetchDepth: 4 }));
+    const four = plan(snap, createSyntheticState(), mergeConfig({ prefetchDepth: 4 }));
     const ts = new Set(
       four.requests.filter((r) => r.lane === "prefetch").map((r) => r.t),
     );
@@ -2180,7 +2240,7 @@ describe("plan() honors config tunables", () => {
     });
 
     // Default: importance weight is non-zero → priorities differ.
-    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const defaultResult = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     const defaultDetail = defaultResult.requests.filter(
       (r) => r.lane === "detail",
     );
@@ -2189,7 +2249,7 @@ describe("plan() honors config tunables", () => {
     expect(defaultHigh.priority).not.toBe(defaultLow.priority);
 
     // With importanceWeight = 0, same-distance chunks have equal priority.
-    const result = plan(snap, mergeConfig({ importanceWeight: 0 }));
+    const result = plan(snap, createSyntheticState(), mergeConfig({ importanceWeight: 0 }));
     const detail = result.requests.filter((r) => r.lane === "detail");
     const hi = detail.find((r) => r.entityId === "high")!;
     const lo = detail.find((r) => r.entityId === "low")!;
@@ -2227,7 +2287,7 @@ describe("plan() honors config tunables", () => {
     });
 
     // Default: distance-based priority differs across columns.
-    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const defaultResult = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     const defaultDetail = defaultResult.requests.filter(
       (r) => r.lane === "detail",
     );
@@ -2237,7 +2297,7 @@ describe("plan() honors config tunables", () => {
     // distanceWeight = 0 → all detail chunks for one entity share the
     // same priority because importance is identical and distance no
     // longer contributes.
-    const result = plan(snap, mergeConfig({ distanceWeight: 0 }));
+    const result = plan(snap, createSyntheticState(), mergeConfig({ distanceWeight: 0 }));
     const detail = result.requests.filter((r) => r.lane === "detail");
     expect(detail.length).toBe(4);
     const priorities = new Set(detail.map((r) => r.priority));
@@ -2247,7 +2307,7 @@ describe("plan() honors config tunables", () => {
   it("wellProxyPriorityBump: changing it shifts the parent-well proxy priority", () => {
     const snap = makeTunablePlate({ px: 100 });
 
-    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const defaultResult = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     const defaultWellProxy = defaultResult.proxyRequests.find(
       (p) => p.kind === "WellProxy3D",
     )!;
@@ -2256,7 +2316,7 @@ describe("plan() honors config tunables", () => {
         DEFAULT_PLANNING_CONFIG.wellProxyPriorityBump,
     );
 
-    const result = plan(snap, mergeConfig({ wellProxyPriorityBump: 50 }));
+    const result = plan(snap, createSyntheticState(), mergeConfig({ wellProxyPriorityBump: 50 }));
     const wellProxy = result.proxyRequests.find(
       (p) => p.kind === "WellProxy3D",
     )!;
@@ -2294,7 +2354,7 @@ describe("plan() honors config tunables", () => {
       },
     });
 
-    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const before = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     const beforeDetail = before.requests.filter((r) => r.lane === "detail");
     expect(beforeDetail.length).toBe(1);
     const beforePri = beforeDetail[0].priority;
@@ -2304,7 +2364,7 @@ describe("plan() honors config tunables", () => {
     // DETAIL_LANE_OFFSET from 0 → 500; the override must be
     // computed off the live default rather than hard-coded.
     const newOffset = DEFAULT_PLANNING_CONFIG.detailLaneOffset + 250;
-    const after = plan(snap, mergeConfig({ detailLaneOffset: newOffset }));
+    const after = plan(snap, createSyntheticState(), mergeConfig({ detailLaneOffset: newOffset }));
     const afterDetail = after.requests.filter((r) => r.lane === "detail");
     expect(afterDetail.length).toBe(1);
     // Only the lane offset changed → priority shifts by exactly +250.
@@ -2314,7 +2374,7 @@ describe("plan() honors config tunables", () => {
   it("proxyLaneOffset: changing it shifts every proxy-request priority", () => {
     const snap = makeTunablePlate({ px: 50 }); // → well-as-proxy
 
-    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const before = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     const beforeWellProxy = before.proxyRequests.find(
       (p) => p.kind === "WellProxy3D",
     )!;
@@ -2322,7 +2382,7 @@ describe("plan() honors config tunables", () => {
       DEFAULT_PLANNING_CONFIG.proxyLaneOffset,
     );
 
-    const after = plan(snap, mergeConfig({ proxyLaneOffset: 750 }));
+    const after = plan(snap, createSyntheticState(), mergeConfig({ proxyLaneOffset: 750 }));
     const afterWellProxy = after.proxyRequests.find(
       (p) => p.kind === "WellProxy3D",
     )!;
@@ -2358,7 +2418,7 @@ describe("plan() honors config tunables", () => {
       },
     });
 
-    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const before = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     const beforePrefetch = before.requests.filter(
       (r) => r.lane === "prefetch" && r.t === 1,
     );
@@ -2368,7 +2428,7 @@ describe("plan() honors config tunables", () => {
     // Override is `default + 500` so the delta is +500 regardless of
     // the renumbered default (Slice 5 shifted prefetch 1000 → 1500).
     const newOffset = DEFAULT_PLANNING_CONFIG.prefetchLaneOffset + 500;
-    const after = plan(snap, mergeConfig({ prefetchLaneOffset: newOffset }));
+    const after = plan(snap, createSyntheticState(), mergeConfig({ prefetchLaneOffset: newOffset }));
     const afterPrefetch = after.requests.filter(
       (r) => r.lane === "prefetch" && r.t === 1,
     );
@@ -2406,7 +2466,7 @@ describe("plan() honors config tunables", () => {
       },
     });
 
-    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const before = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     const beforeOverview = before.requests.filter((r) => r.lane === "overview");
     expect(beforeOverview.length).toBe(1);
     const beforePri = beforeOverview[0].priority;
@@ -2414,7 +2474,7 @@ describe("plan() honors config tunables", () => {
     // Override is `default + 1000` so the delta is +1000 regardless
     // of the renumbered default (Slice 5 shifted overview 2000 → 2500).
     const newOffset = DEFAULT_PLANNING_CONFIG.overviewLaneOffset + 1000;
-    const after = plan(snap, mergeConfig({ overviewLaneOffset: newOffset }));
+    const after = plan(snap, createSyntheticState(), mergeConfig({ overviewLaneOffset: newOffset }));
     const afterOverview = after.requests.filter((r) => r.lane === "overview");
     expect(afterOverview.length).toBe(1);
     // Lane offset shift is +1000.
@@ -2469,7 +2529,7 @@ describe("plan() — minimap lane (Slice 5)", () => {
 
   it("enumerates one ChunkRequest per coord per matching entity.imageId", () => {
     const snap = makeMinimapSnapshot();
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     const minimap = result.requests.filter((r) => r.lane === "minimap");
     expect(minimap).toHaveLength(2);
     expect(new Set(minimap.map((r) => r.chunkKey))).toEqual(
@@ -2484,7 +2544,7 @@ describe("plan() — minimap lane (Slice 5)", () => {
 
   it("emits at priority MINIMAP_LANE_OFFSET (= 0 by default)", () => {
     const snap = makeMinimapSnapshot();
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     const minimap = result.requests.filter((r) => r.lane === "minimap");
     for (const req of minimap) {
       expect(req.priority).toBe(MINIMAP_LANE_OFFSET);
@@ -2496,8 +2556,8 @@ describe("plan() — minimap lane (Slice 5)", () => {
     // Two snapshots, identical minimapPending, different entity.importance.
     const snapHigh = makeMinimapSnapshot({ importance: 1.0 });
     const snapLow = makeMinimapSnapshot({ importance: 0.0 });
-    const high = plan(snapHigh).requests.filter((r) => r.lane === "minimap");
-    const low = plan(snapLow).requests.filter((r) => r.lane === "minimap");
+    const high = plan(snapHigh, createSyntheticState()).requests.filter((r) => r.lane === "minimap");
+    const low = plan(snapLow, createSyntheticState()).requests.filter((r) => r.lane === "minimap");
     expect(high.length).toBeGreaterThan(0);
     expect(low.length).toBeGreaterThan(0);
     // Importance is not factored into minimap priority.
@@ -2519,7 +2579,7 @@ describe("plan() — minimap lane (Slice 5)", () => {
         ],
       ]),
     });
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     const priorities = new Set(
       result.requests.filter((r) => r.lane === "minimap").map((r) => r.priority),
     );
@@ -2529,7 +2589,7 @@ describe("plan() — minimap lane (Slice 5)", () => {
 
   it("emits no minimap requests when minimapPending is empty", () => {
     const snap = makeMinimapSnapshot({ minimapPending: new Map() });
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     expect(result.requests.some((r) => r.lane === "minimap")).toBe(false);
   });
 
@@ -2542,13 +2602,13 @@ describe("plan() — minimap lane (Slice 5)", () => {
         ],
       ]),
     });
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     expect(result.requests.some((r) => r.lane === "minimap")).toBe(false);
   });
 
   it("sorts before every other lane after the priority sort (smallest priority first)", () => {
     const snap = makeMinimapSnapshot();
-    const result = plan(snap);
+    const result = plan(snap, createSyntheticState());
     expect(result.requests.length).toBeGreaterThan(0);
     // Slice 5 invariant: minimap chunks are at priority 0, every
     // other lane is >= DETAIL_LANE_OFFSET (= 500). plan()'s ascending
@@ -2567,12 +2627,12 @@ describe("plan() — minimap lane (Slice 5)", () => {
 
   it("respects config.minimapLaneOffset — shifting it shifts every minimap priority", () => {
     const snap = makeMinimapSnapshot();
-    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const before = plan(snap, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     const beforeMinimap = before.requests.filter((r) => r.lane === "minimap");
     expect(beforeMinimap.length).toBeGreaterThan(0);
     expect(beforeMinimap[0].priority).toBe(MINIMAP_LANE_OFFSET);
 
-    const after = plan(snap, mergeConfig({ minimapLaneOffset: 250 }));
+    const after = plan(snap, createSyntheticState(), mergeConfig({ minimapLaneOffset: 250 }));
     const afterMinimap = after.requests.filter((r) => r.lane === "minimap");
     expect(afterMinimap.length).toBeGreaterThan(0);
     for (const req of afterMinimap) expect(req.priority).toBe(250);

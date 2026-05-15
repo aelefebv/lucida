@@ -459,12 +459,36 @@ describe("multi-dataset planning", () => {
     expect(result).not.toBeNull();
   });
 
-  it("tracks previousActiveSet independently per dataset", () => {
+  it("tracks per-dataset PlanningState independently across ticks", () => {
+    // PRD #563 / Slice 3: the orchestrator's per-dataset state map is
+    // typed `Map<datasetId, PlanningState>`. Each `plan()` call now
+    // receives `(snapshot, state, config)` — this test verifies:
+    //   - state arrives as the second positional argument,
+    //   - both datasets see an empty initial state on tick 1,
+    //   - tick 2's per-dataset state's `previousActiveSet` matches the
+    //     active set the tick-1 `plan()` call returned for that dataset
+    //     (and not the other dataset's),
+    //   - the planner-returned `nextState` pointer is what's stored
+    //     and threaded back, not a re-derived `activeSet`.
     const scene = makeMultiDatasetScene();
     const datasets = makeTwoDatasetEntries();
     const orch = new Orchestrator();
 
+    // Tick 1 — capture the planner-returned results per dataset so we
+    // can compare them to tick-2's incoming state.
+    planSpy.mockClear();
     orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
+    expect(planSpy).toHaveBeenCalledTimes(2);
+    const tick1Ds1State = planSpy.mock.calls[0][1];
+    const tick1Ds2State = planSpy.mock.calls[1][1];
+    expect(tick1Ds1State).toEqual({ previousActiveSet: [] });
+    expect(tick1Ds2State).toEqual({ previousActiveSet: [] });
+    const tick1Ds1Result = planSpy.mock.results[0].value as ReturnType<
+      typeof import("./planning/index.ts").plan
+    >;
+    const tick1Ds2Result = planSpy.mock.results[1].value as ReturnType<
+      typeof import("./planning/index.ts").plan
+    >;
 
     planSpy.mockClear();
     const scene2 = createMockScene({
@@ -494,17 +518,18 @@ describe("multi-dataset planning", () => {
       },
     });
 
+    // Tick 2 — each dataset's `state.previousActiveSet` should be
+    // exactly the active set tick-1 produced for THAT dataset, and the
+    // state object is the planner-returned `nextState` pointer (not a
+    // re-derived value).
     orch.planAndFetch(makeCtx(scene2, datasets), emptyMinimap);
-
     expect(planSpy).toHaveBeenCalledTimes(2);
-
-    const call1Snapshot = planSpy.mock.calls[0][0];
-    const call2Snapshot = planSpy.mock.calls[1][0];
-
-    expect(call1Snapshot.previousActiveSet).toBeDefined();
-    expect(call2Snapshot.previousActiveSet).toBeDefined();
-    expect(Array.isArray(call1Snapshot.previousActiveSet)).toBe(true);
-    expect(Array.isArray(call2Snapshot.previousActiveSet)).toBe(true);
+    const tick2Ds1State = planSpy.mock.calls[0][1];
+    const tick2Ds2State = planSpy.mock.calls[1][1];
+    expect(tick2Ds1State.previousActiveSet).toEqual(tick1Ds1Result.activeSet);
+    expect(tick2Ds2State.previousActiveSet).toEqual(tick1Ds2Result.activeSet);
+    expect(tick2Ds1State).toBe(tick1Ds1Result.nextState);
+    expect(tick2Ds2State).toBe(tick1Ds2Result.nextState);
   });
 });
 

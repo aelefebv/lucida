@@ -24,7 +24,6 @@ import type { ImageSpec, DatasetManifest } from "../../manifestTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
 import { getActiveChannels } from "../../tickCommon.ts";
 import type {
-  ActiveSetEntry,
   AssetCatalogSnapshot,
   EntitySnapshot,
   MinimapChunkCoord,
@@ -111,8 +110,6 @@ export interface BuildPlanningSnapshotArgs {
   dataset: SnapshotDatasetEntry;
   /** Per-dataset settings — drives multi-channel selection assembly. */
   dsSettings: DatasetSettings | undefined;
-  /** Previous tick's active set for this dataset (for hysteresis carry-over). */
-  prevActiveSet: ActiveSetEntry[];
   /** Current asset catalog snapshot threaded through into the result. */
   assetCatalog: AssetCatalogSnapshot;
   /**
@@ -177,7 +174,6 @@ export function buildPlanningSnapshot(
     datasetId,
     dataset,
     dsSettings,
-    prevActiveSet,
     assetCatalog,
     minimapPending,
     mode,
@@ -283,14 +279,15 @@ export function buildPlanningSnapshot(
   //    it via `emitMinimapLane` to build minimap-lane requests at
   //    {@link MINIMAP_LANE_OFFSET}. `datasetId` is plumbed onto the
   //    snapshot so the planner stamps it onto every emitted request
-  //    (PRD #563 / Slice 1).
+  //    (PRD #563 / Slice 1). PRD #563 / Slice 3: `previousActiveSet`
+  //    no longer lives on the snapshot — it moved to {@link PlanningState}
+  //    which the orchestrator passes separately to `plan()`.
   const snapshot: PlanningSnapshot = {
     datasetId,
     epochs: currentEpochs,
     entities,
     visibleRegion,
     selection,
-    previousActiveSet: prevActiveSet,
     assetCatalog,
     minimapPending,
   };

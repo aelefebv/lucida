@@ -154,19 +154,20 @@ function makePlan(
   activeSet?: ActiveSetEntry[],
   epochs?: Partial<SceneEpochs>,
 ): RequestPlan {
+  const resolvedActiveSet = activeSet ?? [{
+    entityId: "entity-1",
+    imageId: "image-1",
+    mode: "fields-with-detail" as const,
+    targetLod: 0,
+    coarsestDetailLod: 2,
+    detailOwnedLodRange: [0, 2] as [number, number],
+    proxyKind: undefined,
+    proxyAvailable: false,
+    wellProxyAvailable: false,
+  }];
   return {
     requests,
-    activeSet: activeSet ?? [{
-      entityId: "entity-1",
-      imageId: "image-1",
-      mode: "fields-with-detail",
-      targetLod: 0,
-      coarsestDetailLod: 2,
-      detailOwnedLodRange: [0, 2],
-      proxyKind: undefined,
-      proxyAvailable: false,
-      wellProxyAvailable: false,
-    }],
+    activeSet: resolvedActiveSet,
     proxyRequests: [],
     epochs: {
       content: 1,
@@ -178,6 +179,9 @@ function makePlan(
       ...epochs,
     },
     stats: emptyPlanStats(),
+    // PRD #563 / Slice 3: nextState mirrors what plan() returns —
+    // `previousActiveSet: activeSet` for the v1 single-field state.
+    nextState: { previousActiveSet: resolvedActiveSet },
   };
 }
 
@@ -402,6 +406,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
+        nextState: { previousActiveSet: [] },
       });
       expect(cache.telemetry().inFlightProxyCount).toBe(1);
 
@@ -445,6 +450,7 @@ describe("CpuCache", () => {
           ...epochs,
         },
         stats: emptyPlanStats(),
+        nextState: { previousActiveSet: [] },
       };
     }
 
@@ -509,6 +515,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
+        nextState: { previousActiveSet: [] },
       });
 
       // At least one request should be queued.
@@ -640,6 +647,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyA],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
+        nextState: { previousActiveSet: [] },
       });
       await flush();
 
@@ -655,6 +663,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyB],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
+        nextState: { previousActiveSet: [] },
       });
       await flush();
 
@@ -1236,6 +1245,7 @@ describe("CpuCache", () => {
           ...epochs,
         },
         stats: emptyPlanStats(),
+        nextState: { previousActiveSet: [] },
       };
     }
 
