@@ -1150,14 +1150,6 @@ const DEFAULT_DATASET_ID = "";
  * directly (no importance / distance terms — minimap chunks are
  * per-dataset, not per-entity-importance).
  *
- * **Cache key uses imageId, not entityId.** `tickMinimapOverview` in
- * `minimapPath.ts` looks chunks up via `cpuCache.getCachedChunk(imageId, key)`
- * because the minimap is a per-image (per-member) view, not a per-entity
- * one. For singletons `entityId === imageId` so this is a no-op; for
- * plate fields the two differ and emitting under `entityId` would store
- * the chunk where the minimap path can never find it. Using `imageId`
- * here is the only place planning treats imageId as the cache key.
- *
  * Cited in ADR 0023. Mutates `out`.
  */
 function emitMinimapLane(
@@ -1175,7 +1167,7 @@ function emitMinimapLane(
         // datasetId is stamped by the orchestrator post-`plan()`,
         // mirroring the per-lane mutation pattern used for the
         // other ChunkRequests.
-        entityId: entity.imageId,
+        entityId: entity.entityId,
         imageId: entity.imageId,
         level: coord.level,
         t: coord.t,

@@ -1575,17 +1575,6 @@ export class Orchestrator {
     sliceZ: number | null,
     epochs: PlanningEpochs,
   ): number {
-    // Minimap chunks ride a separate upload path. `tickMinimapOverview`
-    // (in `minimapPath.ts`) polls the cache via `getCachedChunk(imageId, key)`
-    // and uploads via `client.minimapUploadOverviewChunksForLayer(...)`,
-    // which targets the minimap's own GPU canvas. Routing them through
-    // the slice/volume atlas upload would also try to land them in the
-    // active-LOD slice/volume pool, which is sized for the active LOD
-    // and rejects coarsest-LOD minimap chunks with a `chunkDims mismatch`
-    // warning. They reach the minimap canvas either way; skipping the
-    // slice/volume route just suppresses the spurious warnings.
-    if (delivery.lane === "minimap") return 0;
-
     const viewMode = ctx.mode;
     const workerMemberId = multiChannel ? `${delivery.imageId}:ch${delivery.c}` : delivery.imageId;
 
