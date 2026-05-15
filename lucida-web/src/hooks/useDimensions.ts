@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { WasmScene } from "lucida-core";
+import { Axis } from "../axes.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -40,9 +41,9 @@ export function useDimensions({
   // eslint-disable-next-line react-hooks/refs
   for (const ds of datasetsRef.current.values()) {
     const shape = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
-    dimZ = Math.max(dimZ, shape[2]);
-    dimC = Math.max(dimC, shape[1]);
-    dimT = Math.max(dimT, shape[0]);
+    dimZ = Math.max(dimZ, shape[Axis.Z]);
+    dimC = Math.max(dimC, shape[Axis.C]);
+    dimT = Math.max(dimT, shape[Axis.T]);
   }
 
   // Clamp slider values when union dimensions shrink, and sync to WASM scene.
@@ -87,8 +88,8 @@ export function useDimensions({
       if (next === "2d" && selectedDatasetId) {
         const dsManifest = datasetsRef.current.get(selectedDatasetId)?.manifest;
         if (dsManifest) {
-          const shapeX = dsManifest.images[0].multiscale.levels[0].shape[4];
-          const shapeY = dsManifest.images[0].multiscale.levels[0].shape[3];
+          const shapeX = dsManifest.images[0].multiscale.levels[0].shape[Axis.X];
+          const shapeY = dsManifest.images[0].multiscale.levels[0].shape[Axis.Y];
           applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
         }
       }

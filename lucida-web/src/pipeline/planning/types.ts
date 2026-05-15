@@ -40,8 +40,14 @@ export interface BaseEntitySnapshot {
   centroidWorld: [number, number, number];
   idealTargetLod: number;
   importance: number;
-  /** Layout placement position. */
-  position: [number, number];
+  /**
+   * Layout placement position, in voxel coordinates. Distinct from
+   * {@link centroidWorld}: `layoutPositionVox` is grid placement
+   * (voxel-space, set by the layout); `centroidWorld` is the entity's
+   * intrinsic spatial center (world-space). They're different things in
+   * different frames.
+   */
+  layoutPositionVox: [number, number];
   levels: LevelGeometry[];
 }
 

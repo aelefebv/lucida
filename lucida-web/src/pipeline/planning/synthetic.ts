@@ -64,7 +64,7 @@ export function createSyntheticEntity(
     centroidWorld: overrides?.centroidWorld ?? [0, 0, 0],
     idealTargetLod: overrides?.idealTargetLod ?? 0,
     importance: overrides?.importance ?? 1,
-    position: overrides?.position ?? [0, 0],
+    layoutPositionVox: overrides?.layoutPositionVox ?? [0, 0],
     levels: overrides?.levels ?? [],
   };
   if (kind === "Field") {
@@ -106,10 +106,10 @@ export function createSyntheticSnapshot(
     },
     entities: [],
     visibleRegion: {
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 1],
+      xyBoundsVox: [0, 0, 1024, 1024],
+      zRangeVox: [0, 1],
       effectiveZoom: 1,
-      sortCenter: null,
+      sortCenterVox: null,
       frustumPlanes: null,
     },
     selection: {

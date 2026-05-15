@@ -1,4 +1,5 @@
 /** Minimap render path: overview seeding + render + overlay callback. */
+import { Axis } from "./axes.ts";
 import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
@@ -265,7 +266,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
         }
       }
       if (shape) {
-        datasetDims.set(layer.datasetId, { width: shape[4], height: shape[3], depth: shape[2] });
+        datasetDims.set(layer.datasetId, { width: shape[Axis.X], height: shape[Axis.Y], depth: shape[Axis.Z] });
       }
     }
 

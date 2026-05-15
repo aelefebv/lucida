@@ -208,7 +208,7 @@ describe("buildPlanningSnapshot — typical case", () => {
     expect(entities[0].imageId).toBe("img-0");
     expect(entities[0].kind).toBe("Field");
     expect(entities[0].levels).toHaveLength(2);
-    expect(entities[0].position).toEqual([256, 512]);
+    expect(entities[0].layoutPositionVox).toEqual([256, 512]);
     // Snapshot embeds the same entities as a freshly-built array.
     expect(snapshot.entities).toBe(entities);
   });
@@ -337,10 +337,10 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
     const scene = makeStubScene({ visibleRegion: null });
     const built = buildPlanningSnapshot(makeArgs({ scene }));
     expect(built!.visibleRegion).toEqual({
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 1],
+      xyBoundsVox: [0, 0, 1024, 1024],
+      zRangeVox: [0, 1],
       effectiveZoom: 1,
-      sortCenter: null,
+      sortCenterVox: null,
       frustumPlanes: null,
     });
   });
@@ -360,10 +360,10 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
     });
     const built = buildPlanningSnapshot(makeArgs({ scene }));
     expect(built!.visibleRegion).toEqual({
-      xyBounds: [10, 20, 30, 40],
-      zRange: [5, 6],
+      xyBoundsVox: [10, 20, 30, 40],
+      zRangeVox: [5, 6],
       effectiveZoom: 2.5,
-      sortCenter: [1, 2, 3],
+      sortCenterVox: [1, 2, 3],
       frustumPlanes: [
         [1, 0, 0, 0],
         [0, 1, 0, 0],

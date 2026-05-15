@@ -135,10 +135,10 @@ function makeCold(activeSet: ColdStateActiveEntry[], visibleChannels: number[] =
     currentZ: 0,
     visibleChannels,
     visibleRegion: {
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 1],
+      xyBoundsVox: [0, 0, 1024, 1024],
+      zRangeVox: [0, 1],
       effectiveZoom: 1,
-      sortCenter: null,
+      sortCenterVox: null,
       frustumPlanes: null,
     },
     activeSet,

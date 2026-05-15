@@ -237,7 +237,7 @@ export function computeWantedSet(
         const [gridZ, gridY, gridX] = levelMeta.gridShape;
 
         const [minVoxX, minVoxY, maxVoxX, maxVoxY] =
-          coldState.visibleRegion.xyBounds;
+          coldState.visibleRegion.xyBoundsVox;
 
         const colStart = Math.max(0, Math.floor(minVoxX / chunkX));
         const colEnd = Math.min(gridX, Math.ceil(maxVoxX / chunkX));
@@ -253,8 +253,8 @@ export function computeWantedSet(
           zStart = Math.max(0, chunkIdx);
           zEnd = Math.min(gridZ, chunkIdx + 1);
         } else {
-          zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRange[0] / chunkZ));
-          zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRange[1] / chunkZ));
+          zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRangeVox[0] / chunkZ));
+          zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRangeVox[1] / chunkZ));
         }
 
         for (let iz = zStart; iz < zEnd; iz++) {

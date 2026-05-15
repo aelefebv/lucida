@@ -10,6 +10,7 @@
  * of `./index.ts` into this dedicated file.
  */
 
+import { Axis } from "../../axes.ts";
 import type { LevelGeometry } from "../../manifestTypes.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import type {
@@ -73,20 +74,20 @@ export function chunkOutsideFrustum(
  * (`iterateGridCells`) and distance scoring (`chunkDistanceFromCenter`)
  * so they agree on the same conversion.
  *
- * Indexing follows the 5-D layout: `[T, C, Z, Y, X]` → indices 4 (X),
- * 3 (Y), 2 (Z).
+ * Indexing follows the 5-D layout: `[T, C, Z, Y, X]` — see
+ * `lucida-web/src/axes.ts` for the named-axis constants.
  */
 export function chunkWorldDims(
   geo: LevelGeometry,
   level0: LevelGeometry,
 ): [number, number, number] {
-  const scaleX = level0.shape[4] / geo.shape[4];
-  const scaleY = level0.shape[3] / geo.shape[3];
-  const scaleZ = level0.shape[2] / geo.shape[2];
+  const scaleX = level0.shape[Axis.X] / geo.shape[Axis.X];
+  const scaleY = level0.shape[Axis.Y] / geo.shape[Axis.Y];
+  const scaleZ = level0.shape[Axis.Z] / geo.shape[Axis.Z];
   return [
-    geo.chunk_shape[4] * scaleX,
-    geo.chunk_shape[3] * scaleY,
-    geo.chunk_shape[2] * scaleZ,
+    geo.chunk_shape[Axis.X] * scaleX,
+    geo.chunk_shape[Axis.Y] * scaleY,
+    geo.chunk_shape[Axis.Z] * scaleZ,
   ];
 }
 
@@ -286,14 +287,14 @@ function clipGridCellsToRegion(
   chunkWorldZ: number,
   stats: PlanStats | null,
 ): ClippedGridRange | null {
-  // 5D indices: [T=0, C=1, Z=2, Y=3, X=4]
-  const fullX = level0.shape[4];
-  const fullY = level0.shape[3];
+  // 5D indices: [T=0, C=1, Z=2, Y=3, X=4] — see `axes.ts` (Axis namespace).
+  const fullX = level0.shape[Axis.X];
+  const fullY = level0.shape[Axis.Y];
 
   // Max grid index (exclusive).
-  const maxCol = levelGeo.grid_shape[4];
-  const maxRow = levelGeo.grid_shape[3];
-  const maxZ = levelGeo.grid_shape[2];
+  const maxCol = levelGeo.grid_shape[Axis.X];
+  const maxRow = levelGeo.grid_shape[Axis.Y];
+  const maxZ = levelGeo.grid_shape[Axis.Z];
 
   // Whole-grid count is "considered" — every cell at this (level, channel)
   // that could have been emitted before culling.
@@ -301,10 +302,10 @@ function clipGridCellsToRegion(
   if (stats) stats.culling.considered += totalCells;
 
   // Offset visible region by entity position to get local coords.
-  const localMinX = region.xyBounds[0] - entity.position[0];
-  const localMinY = region.xyBounds[1] - entity.position[1];
-  const localMaxX = region.xyBounds[2] - entity.position[0];
-  const localMaxY = region.xyBounds[3] - entity.position[1];
+  const localMinX = region.xyBoundsVox[0] - entity.layoutPositionVox[0];
+  const localMinY = region.xyBoundsVox[1] - entity.layoutPositionVox[1];
+  const localMaxX = region.xyBoundsVox[2] - entity.layoutPositionVox[0];
+  const localMaxY = region.xyBoundsVox[3] - entity.layoutPositionVox[1];
 
   // Early-out: no overlap at all.
   if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) {
@@ -316,8 +317,8 @@ function clipGridCellsToRegion(
   const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
   const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
 
-  const zStart = Math.max(0, Math.floor(region.zRange[0] / chunkWorldZ));
-  const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(region.zRange[1] / chunkWorldZ)));
+  const zStart = Math.max(0, Math.floor(region.zRangeVox[0] / chunkWorldZ));
+  const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(region.zRangeVox[1] / chunkWorldZ)));
 
   if (stats) {
     const colsKept = Math.max(0, colEnd - colStart);
@@ -348,13 +349,13 @@ function cellSurvivesFrustum(
 ): boolean {
   if (region.frustumPlanes === null) return true;
   const cmin: [number, number, number] = [
-    col * chunkWorldX + entity.position[0],
-    row * chunkWorldY + entity.position[1],
+    col * chunkWorldX + entity.layoutPositionVox[0],
+    row * chunkWorldY + entity.layoutPositionVox[1],
     iz * chunkWorldZ,
   ];
   const cmax: [number, number, number] = [
-    (col + 1) * chunkWorldX + entity.position[0],
-    (row + 1) * chunkWorldY + entity.position[1],
+    (col + 1) * chunkWorldX + entity.layoutPositionVox[0],
+    (row + 1) * chunkWorldY + entity.layoutPositionVox[1],
     (iz + 1) * chunkWorldZ,
   ];
   return !chunkOutsideFrustum(cmin, cmax, region.frustumPlanes);

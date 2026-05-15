@@ -22,6 +22,7 @@
  */
 import { useEffect, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
+import { Axis } from "../axes.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { CpuCache } from "../pipeline/cpuCache.ts";
@@ -297,7 +298,7 @@ export function DebugOverlays({
         }
         return {
           pos: [0, 0], // overwritten below
-          fullVoxel: [lvl0Shape[4], lvl0Shape[3], lvl0Shape[2]],
+          fullVoxel: [lvl0Shape[Axis.X], lvl0Shape[Axis.Y], lvl0Shape[Axis.Z]],
           model,
         };
       };
@@ -551,15 +552,15 @@ export function DebugOverlays({
             const frame = getFrame(dsId, entry.imageId, lvl0.shape);
             frame.pos = pos;
 
-            const fullX = lvl0.shape[4];
-            const fullY = lvl0.shape[3];
-            const fullZ = lvl0.shape[2];
-            const lvlX = lvl.shape[4];
-            const lvlY = lvl.shape[3];
-            const lvlZ = lvl.shape[2];
-            const chunkPxX = lvl.chunk_shape[4];
-            const chunkPxY = lvl.chunk_shape[3];
-            const chunkPxZ = lvl.chunk_shape[2];
+            const fullX = lvl0.shape[Axis.X];
+            const fullY = lvl0.shape[Axis.Y];
+            const fullZ = lvl0.shape[Axis.Z];
+            const lvlX = lvl.shape[Axis.X];
+            const lvlY = lvl.shape[Axis.Y];
+            const lvlZ = lvl.shape[Axis.Z];
+            const chunkPxX = lvl.chunk_shape[Axis.X];
+            const chunkPxY = lvl.chunk_shape[Axis.Y];
+            const chunkPxZ = lvl.chunk_shape[Axis.Z];
             const scaleX = fullX / lvlX;
             const scaleY = fullY / lvlY;
             const scaleZ = fullZ / lvlZ;
