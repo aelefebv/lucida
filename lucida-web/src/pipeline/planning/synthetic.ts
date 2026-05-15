@@ -8,36 +8,79 @@
 
 import type {
   EntitySnapshot,
+  FieldSnapshot,
+  ImageSnapshot,
   MinimapChunkCoord,
   PlanningSnapshot,
   PlanningState,
+  WellSnapshot,
 } from "./index.ts";
+
+/**
+ * Overrides accepted by {@link createSyntheticEntity}. The `kind`
+ * discriminator selects which {@link EntitySnapshot} variant is
+ * returned; for `kind: "Field"` callers MAY supply `parentId` (it
+ * defaults to `"synthetic-well"` so simple test cases keep working
+ * unchanged).
+ *
+ * Modelled as a single options bag rather than overloads so callers can
+ * still spread an existing entity and tweak a field without ceremony.
+ * The variant-specific fields are optional here; the function constructs
+ * the correct variant based on `kind` and supplies sensible defaults.
+ */
+export interface CreateSyntheticEntityOverrides
+  extends Partial<Omit<FieldSnapshot, "kind" | "parentId">> {
+  kind?: "Image" | "Well" | "Field";
+  /**
+   * Required (or defaulted) when `kind === "Field"`. Ignored for
+   * `kind: "Image"` and `kind: "Well"` (those variants have no
+   * `parentId` field).
+   */
+  parentId?: string;
+}
 
 /**
  * Create a valid {@link EntitySnapshot} with sensible defaults, merged
  * with overrides. PRD #563 / Slice 1 dropped the `numLevels` field —
- * the level count is always derived from `levels.length`. `parentId`
- * defaults to `null`; supply a parent well id to model a Field on a
- * plate.
+ * the level count is always derived from `levels.length`.
+ *
+ * PRD #563 / Slice 5: {@link EntitySnapshot} is a discriminated union.
+ * The `kind` override selects which variant is returned (default
+ * `"Image"` to keep simple test cases unchanged). For `kind: "Field"`
+ * callers MAY supply a `parentId`; the helper defaults it to
+ * `"synthetic-well"` so existing callers don't have to thread a parent
+ * through every fixture.
  */
 export function createSyntheticEntity(
-  overrides?: Partial<EntitySnapshot>,
+  overrides?: CreateSyntheticEntityOverrides,
 ): EntitySnapshot {
-  return {
-    entityId: "entity-0",
-    imageId: "image-0",
-    kind: "Image",
-    visible: true,
-    projectedDiagonalPx: 100,
-    projectedAreaPx2: 10000,
-    centroidWorld: [0, 0, 0],
-    idealTargetLod: 0,
-    importance: 1,
-    levels: [],
-    position: [0, 0],
-    parentId: null,
-    ...overrides,
+  const kind = overrides?.kind ?? "Image";
+  const base = {
+    entityId: overrides?.entityId ?? "entity-0",
+    imageId: overrides?.imageId ?? "image-0",
+    visible: overrides?.visible ?? true,
+    projectedDiagonalPx: overrides?.projectedDiagonalPx ?? 100,
+    projectedAreaPx2: overrides?.projectedAreaPx2 ?? 10000,
+    centroidWorld: overrides?.centroidWorld ?? [0, 0, 0],
+    idealTargetLod: overrides?.idealTargetLod ?? 0,
+    importance: overrides?.importance ?? 1,
+    position: overrides?.position ?? [0, 0],
+    levels: overrides?.levels ?? [],
   };
+  if (kind === "Field") {
+    const field: FieldSnapshot = {
+      kind: "Field",
+      parentId: overrides?.parentId ?? "synthetic-well",
+      ...base,
+    };
+    return field;
+  }
+  if (kind === "Well") {
+    const well: WellSnapshot = { kind: "Well", ...base };
+    return well;
+  }
+  const image: ImageSnapshot = { kind: "Image", ...base };
+  return image;
 }
 
 /**

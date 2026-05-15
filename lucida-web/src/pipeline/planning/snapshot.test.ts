@@ -132,7 +132,14 @@ function makeDataset(
     dataset_id: "ds1",
     name: "test",
     kind: "Single",
-    entities: [],
+    // PRD #563 / Slice 5: the default stub scene returns `field-0` as a
+    // Field, so the default manifest must carry the matching parent edge
+    // or `buildPlanningSnapshot` throws. Tests that exercise the
+    // missing-edge throw branch override `entities` with `[]`.
+    entities: [
+      { id: "well-0", kind: "Well", parent: null, labels: {} },
+      { id: "field-0", kind: "Field", parent: "well-0", labels: {} },
+    ],
     transforms: [],
     images: [makeImageSpec("img-0")],
     source_layouts: [],
@@ -277,12 +284,51 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
       ],
     });
     const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
-    expect(built!.entities[0].parentId).toBe("well-1");
+    const ent = built!.entities[0];
+    // PRD #563 / Slice 5: narrow on `kind === "Field"` to read parentId.
+    expect(ent.kind).toBe("Field");
+    if (ent.kind === "Field") {
+      expect(ent.parentId).toBe("well-1");
+    }
   });
 
-  it("sets parentId to null when no manifest parent edge exists", () => {
-    const built = buildPlanningSnapshot(makeArgs());
-    expect(built!.entities[0].parentId).toBeNull();
+  it("throws when a Field-kind entity has no manifest parent edge", () => {
+    // PRD #563 / Slice 5: a Field without a parent is an invariant
+    // violation. The builder surfaces it explicitly rather than
+    // silently coercing to null. Override the dataset to drop the
+    // parent edge for the default `field-0` scene entity.
+    const dataset = makeDataset({ entities: [] });
+    expect(() =>
+      buildPlanningSnapshot(makeArgs({ dataset })),
+    ).toThrow(/FieldSnapshot\.parentId is required/);
+  });
+
+  it("Image and Well variants do not declare a parentId field", () => {
+    // Sanity check: the snake_case→camelCase translator branches on
+    // `kind` and the resulting object is the matching variant.
+    const scene = makeStubScene({
+      visibleEntities: [
+        {
+          entity_id: "img-7",
+          image_id: "img-7",
+          kind: "Image",
+          visible: true,
+          projected_diagonal_px: 100,
+          projected_area_px2: 10000,
+          centroid_world: [0, 0, 0],
+          ideal_target_lod: 0,
+          importance: 1,
+        },
+      ],
+      positions: { "img-7": [0, 0] },
+    });
+    const dataset = makeDataset({ images: [makeImageSpec("img-7")] });
+    const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
+    const ent = built!.entities[0];
+    expect(ent.kind).toBe("Image");
+    // No `parentId` key on Image / Well variants — confirm absence
+    // structurally so future regressions surface here.
+    expect(Object.prototype.hasOwnProperty.call(ent, "parentId")).toBe(false);
   });
 });
 

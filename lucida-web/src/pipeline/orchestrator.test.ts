@@ -149,7 +149,13 @@ function createMockContent(): DatasetManifest {
     dataset_id: "ds1",
     name: "test",
     kind: "Single",
-    entities: [],
+    // PRD #563 / Slice 5: FieldSnapshot.parentId is required (non-null).
+    // The mock scene reports `field-0` as a Field, so the manifest must
+    // carry the matching parent edge or `buildPlanningSnapshot` throws.
+    entities: [
+      { id: "well-0", kind: "Well", parent: null, labels: {} },
+      { id: "field-0", kind: "Field", parent: "well-0", labels: {} },
+    ],
     transforms: [],
     images: [
       {

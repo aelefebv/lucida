@@ -2,10 +2,12 @@ import { describe, it, expect } from "vitest";
 
 import {
   assignModes,
+  buildPrevModeByWell,
   chunkKey,
   createSyntheticEntity,
   createSyntheticSnapshot,
   createSyntheticState,
+  groupByWell,
   PROMOTE_THRESHOLD_PX,
   FAR_THRESHOLD_PX,
   DETAIL_THRESHOLD_PX,
@@ -330,7 +332,6 @@ function makePlateEntities(
       kind: "Well",
       projectedDiagonalPx: Math.max(...fields.map((f) => f.px), 0),
       levels: [],
-      parentId: null,
     }),
   );
   for (const f of fields) {
@@ -1256,7 +1257,6 @@ describe("plan() — proxy request emission", () => {
         kind: "Well",
         projectedDiagonalPx: Math.max(...opts.fields.map((f) => f.px), 0),
         levels: [],
-        parentId: null,
       }),
       ...opts.fields.map((f) =>
         createSyntheticEntity({
@@ -1883,27 +1883,14 @@ describe("iterateChunks edge cases", () => {
   });
 });
 
-describe("groupByWell edge cases (via assignModes)", () => {
-  it("field whose parentId === null gets a synthetic-key group", () => {
-    // A field-kind entity with no parent should still be grouped (as a
-    // singleton) and emit one active-set entry. Without a catalog the
-    // mode collapses to fields-with-detail.
-    const orphan = createSyntheticEntity({
-      entityId: "orphan-field",
-      imageId: "img-orphan",
-      kind: "Field",
-      projectedDiagonalPx: 200,
-      levels: makeStubLevels(3),
-      idealTargetLod: 0,
-      parentId: null,
-    });
-    const result = assignModes([orphan], []);
-
-    expect(result).toHaveLength(1);
-    expect(result[0].entityId).toBe("orphan-field");
-    expect(asField(result[0]).mode).toBe("fields-with-detail");
-  });
-});
+// PRD #563 / Slice 5: the orphan-field test ("field whose parentId ===
+// null gets a synthetic-key group") was removed. {@link FieldSnapshot}
+// now requires a non-null `parentId` at the type level — an orphan
+// field is a producer invariant violation, not a code path. The
+// snapshot builder throws on a missing manifest parent edge for a
+// Field, and the per-variant defaults in {@link createSyntheticEntity}
+// supply a synthetic parent id so test fixtures don't have to thread
+// one through every call.
 
 describe("assignModes edge cases", () => {
   it("stale previousActiveSet entries (entities no longer present) are silently ignored", () => {
@@ -2119,7 +2106,6 @@ describe("plan() honors config tunables", () => {
           kind: "Well",
           projectedDiagonalPx: opts.px,
           levels: [],
-          parentId: null,
         }),
         createSyntheticEntity({
           entityId: fieldId,
@@ -2838,5 +2824,222 @@ describe("ActiveSetEntry variants", () => {
     expect(observedWellAsProxy).toEqual({ entityId: "wellWP" });
     expect(observedField).toEqual({ mode: "fields-with-detail", targetLod: 0 });
     expect(observedInvisible).toEqual({ coarsestLod: 2 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Discriminated EntitySnapshot — PRD #563 / Slice 5
+// ---------------------------------------------------------------------------
+//
+// These tests pin the variant shapes produced by `createSyntheticEntity`
+// and the round-trip behaviour of `groupByWell` / `buildPrevModeByWell`
+// after the discrimination. The pre-slice flat shape carried `parentId:
+// string | null` on every entity; after the slice `parentId: string`
+// lives only on `FieldSnapshot`.
+
+describe("createSyntheticEntity — discriminated variants (PRD #563 / Slice 5)", () => {
+  it("kind: \"Image\" returns an ImageSnapshot with no parentId field", () => {
+    const e = createSyntheticEntity({ kind: "Image" });
+    expect(e.kind).toBe("Image");
+    expect(Object.prototype.hasOwnProperty.call(e, "parentId")).toBe(false);
+  });
+
+  it("kind: \"Well\" returns a WellSnapshot with no parentId field", () => {
+    const e = createSyntheticEntity({ kind: "Well" });
+    expect(e.kind).toBe("Well");
+    expect(Object.prototype.hasOwnProperty.call(e, "parentId")).toBe(false);
+  });
+
+  it("kind: \"Field\" returns a FieldSnapshot with a non-null parentId default", () => {
+    const e = createSyntheticEntity({ kind: "Field" });
+    expect(e.kind).toBe("Field");
+    if (e.kind === "Field") {
+      // Default parentId — supplied so callers don't have to thread one
+      // through every fixture. Non-empty / non-null.
+      expect(typeof e.parentId).toBe("string");
+      expect(e.parentId.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("kind: \"Field\" preserves a caller-supplied parentId override", () => {
+    const e = createSyntheticEntity({ kind: "Field", parentId: "custom-well" });
+    expect(e.kind).toBe("Field");
+    if (e.kind === "Field") {
+      expect(e.parentId).toBe("custom-well");
+    }
+  });
+
+  it("default (no kind override) returns an ImageSnapshot", () => {
+    const e = createSyntheticEntity();
+    expect(e.kind).toBe("Image");
+    expect(Object.prototype.hasOwnProperty.call(e, "parentId")).toBe(false);
+  });
+});
+
+describe("groupByWell — round-trip with discriminated entities (PRD #563 / Slice 5)", () => {
+  it("groups a mixed entity list identically to the pre-slice expected output", () => {
+    // Build a snapshot of mixed entity kinds and assert the grouping
+    // matches the structure the pre-slice flat-shape version produced
+    // for the same inputs.
+    const entities: EntitySnapshot[] = [
+      createSyntheticEntity({
+        entityId: "well-A",
+        kind: "Well",
+        projectedDiagonalPx: 200,
+      }),
+      createSyntheticEntity({
+        entityId: "field-A1",
+        kind: "Field",
+        parentId: "well-A",
+        projectedDiagonalPx: 150,
+      }),
+      createSyntheticEntity({
+        entityId: "field-A2",
+        kind: "Field",
+        parentId: "well-A",
+        projectedDiagonalPx: 250,
+      }),
+      createSyntheticEntity({
+        entityId: "well-B",
+        kind: "Well",
+        projectedDiagonalPx: 100,
+      }),
+      createSyntheticEntity({
+        entityId: "field-B1",
+        kind: "Field",
+        parentId: "well-B",
+        projectedDiagonalPx: 80,
+      }),
+      createSyntheticEntity({
+        entityId: "image-X",
+        kind: "Image",
+        projectedDiagonalPx: 300,
+      }),
+    ];
+
+    const groups = groupByWell(entities);
+
+    // Three groups: well-A (with two fields), well-B (one field), image-X.
+    expect(groups).toHaveLength(3);
+
+    const wellA = groups.find((g) => g.wellId === "well-A");
+    expect(wellA).toBeDefined();
+    expect(wellA?.wellEntity?.entityId).toBe("well-A");
+    expect(wellA?.fields.map((f) => f.entityId).sort()).toEqual([
+      "field-A1",
+      "field-A2",
+    ]);
+    // projectedDiagonalPx is the max of well + fields.
+    expect(wellA?.projectedDiagonalPx).toBe(250);
+
+    const wellB = groups.find((g) => g.wellId === "well-B");
+    expect(wellB).toBeDefined();
+    expect(wellB?.wellEntity?.entityId).toBe("well-B");
+    expect(wellB?.fields.map((f) => f.entityId)).toEqual(["field-B1"]);
+    expect(wellB?.projectedDiagonalPx).toBe(100);
+
+    // Image entries become singleton groups keyed `__image__${id}`.
+    const imageX = groups.find((g) => g.wellId === "__image__image-X");
+    expect(imageX).toBeDefined();
+    expect(imageX?.wellEntity).toBeNull();
+    expect(imageX?.fields.map((f) => f.entityId)).toEqual(["image-X"]);
+    expect(imageX?.projectedDiagonalPx).toBe(300);
+  });
+
+  it("skips invisible entities (round-trip behaviour preserved)", () => {
+    const entities: EntitySnapshot[] = [
+      createSyntheticEntity({
+        entityId: "well-V",
+        kind: "Well",
+        visible: false,
+        projectedDiagonalPx: 200,
+      }),
+      createSyntheticEntity({
+        entityId: "field-V",
+        kind: "Field",
+        parentId: "well-V",
+        visible: false,
+        projectedDiagonalPx: 100,
+      }),
+    ];
+    expect(groupByWell(entities)).toEqual([]);
+  });
+});
+
+describe("buildPrevModeByWell — round-trip with discriminated entities (PRD #563 / Slice 5)", () => {
+  it("indexes prev field-mode entries back to their parent well", () => {
+    // Mixed kinds in the new entity list; previousActiveSet has both a
+    // well-as-proxy entry (entityId === wellId) and a field entry that
+    // resolves back to its well via the entity list's parentId.
+    const entities: EntitySnapshot[] = [
+      createSyntheticEntity({ entityId: "well-A", kind: "Well" }),
+      createSyntheticEntity({
+        entityId: "field-A1",
+        kind: "Field",
+        parentId: "well-A",
+      }),
+      createSyntheticEntity({ entityId: "well-B", kind: "Well" }),
+      createSyntheticEntity({
+        entityId: "field-B1",
+        kind: "Field",
+        parentId: "well-B",
+      }),
+      createSyntheticEntity({ entityId: "image-X", kind: "Image" }),
+    ];
+
+    const prev: ActiveSetEntry[] = [
+      // Well-as-proxy entry; entityId IS the wellId.
+      { kind: "well-as-proxy", entityId: "well-A" },
+      // Field entry; resolves back to well-B via parentId on field-B1.
+      {
+        kind: "field",
+        entityId: "field-B1",
+        imageId: "img-B1",
+        mode: "fields-with-proxy-fallback",
+        targetLod: 0,
+        coarsestDetailLod: 0,
+        detailOwnedLodRange: [0, 0],
+        proxyKind: "FieldProxy3D",
+        proxyAvailable: true,
+        wellProxyAvailable: true,
+      },
+      // Invisible — skipped (no promotion decision to remember).
+      {
+        kind: "invisible",
+        entityId: "image-X",
+        imageId: "img-X",
+        coarsestLod: 0,
+      },
+    ];
+
+    const map = buildPrevModeByWell(prev, entities);
+
+    expect(map.get("well-A")).toBe("well-as-proxy");
+    expect(map.get("well-B")).toBe("fields-with-proxy-fallback");
+    // image-X is invisible in prev, so it has no entry; well-B already
+    // covered above; nothing else in the map.
+    expect(map.size).toBe(2);
+  });
+
+  it("empty prev or empty entities → empty map", () => {
+    expect(buildPrevModeByWell([], [])).toEqual(new Map());
+
+    const entities = [
+      createSyntheticEntity({
+        entityId: "field-1",
+        kind: "Field",
+        parentId: "well-1",
+      }),
+    ];
+    expect(buildPrevModeByWell([], entities)).toEqual(new Map());
+
+    const prev: ActiveSetEntry[] = [
+      { kind: "well-as-proxy", entityId: "well-ghost" },
+    ];
+    // Stale entry — wellId still gets added (well-as-proxy maps directly
+    // by entityId; entities list is only consulted for field entries).
+    const map = buildPrevModeByWell(prev, []);
+    expect(map.get("well-ghost")).toBe("well-as-proxy");
+    expect(map.size).toBe(1);
   });
 });

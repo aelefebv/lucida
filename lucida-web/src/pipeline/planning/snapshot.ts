@@ -217,24 +217,44 @@ export function buildPlanningSnapshot(
   //    `parentId` (neither of which are part of `view_query`). PRD #563
   //    / Slice 1 dropped the redundant `numLevels` field — consumers
   //    derive it from `levels.length`.
+  //
+  //    PRD #563 / Slice 5: {@link EntitySnapshot} is a discriminated
+  //    union. Branch on the WASM-reported `kind` and construct the
+  //    matching variant. Field entities require a non-null parent edge
+  //    in the manifest — we throw on the missing-edge case rather than
+  //    silently coercing, so producer bugs surface during snapshot
+  //    assembly rather than later in `groupByWell`.
   const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
     const imgSpec = imageSpecById.get(e.image_id);
     const levels = imgSpec ? imgSpec.multiscale.levels : [];
     const position = positions[e.entity_id] ?? ([0, 0] as [number, number]);
-    return {
+    const base = {
       entityId: e.entity_id,
       imageId: e.image_id,
-      kind: e.kind,
       visible: e.visible,
       projectedDiagonalPx: e.projected_diagonal_px,
       projectedAreaPx2: e.projected_area_px2,
       centroidWorld: e.centroid_world,
       idealTargetLod: e.ideal_target_lod,
       importance: e.importance,
-      levels,
       position,
-      parentId: parentByEntityId.get(e.entity_id) ?? null,
-    } satisfies EntitySnapshot;
+      levels,
+    };
+    if (e.kind === "Field") {
+      const parentId = parentByEntityId.get(e.entity_id);
+      if (parentId === undefined || parentId === null) {
+        throw new Error(
+          `[planning] Field entity "${e.entity_id}" has no parent edge ` +
+            `in the manifest — FieldSnapshot.parentId is required (non-null) ` +
+            `as of PRD #563 / Slice 5.`,
+        );
+      }
+      return { kind: "Field", parentId, ...base } satisfies EntitySnapshot;
+    }
+    if (e.kind === "Well") {
+      return { kind: "Well", ...base } satisfies EntitySnapshot;
+    }
+    return { kind: "Image", ...base } satisfies EntitySnapshot;
   });
 
   // 5. visible_region — null when WASM has nothing yet for this dataset.
