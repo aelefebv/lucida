@@ -16,13 +16,11 @@ import {
   createSyntheticState,
 } from "./synthetic.ts";
 import type {
-  AssetCatalogSnapshot,
   MinimapChunkCoord,
   PlanningSnapshot,
   PlanningState,
 } from "./types.ts";
 import {
-  checkAssetCatalogRefs,
   checkFieldParentRefs,
   checkLevelShapeArity,
   checkMinimapKeys,
@@ -250,39 +248,14 @@ describe("checkVisibleRegionBounds", () => {
 });
 
 // ===========================================================================
-// Check 6 — checkAssetCatalogRefs
+// Check 6 — withdrawn (assetCatalog refs)
 // ===========================================================================
-
-describe("checkAssetCatalogRefs", () => {
-  it("passes when assetCatalog is null (opt-out)", () => {
-    const snap = makeValidSnapshot();
-    snap.assetCatalog = null;
-    expect(() => checkAssetCatalogRefs(snap)).not.toThrow();
-  });
-
-  it("passes when every catalog entry references a known entity", () => {
-    const snap = makeValidSnapshot();
-    const catalog: AssetCatalogSnapshot = {
-      byEntity: new Map([
-        ["well-A", { kinds: new Set(["WellProxy3D"]) }],
-        ["field-A1", { kinds: new Set(["FieldProxy3D"]) }],
-      ]),
-    };
-    snap.assetCatalog = catalog;
-    expect(() => checkAssetCatalogRefs(snap)).not.toThrow();
-  });
-
-  it("throws when the catalog references an unknown entityId", () => {
-    const snap = makeValidSnapshot();
-    const catalog: AssetCatalogSnapshot = {
-      byEntity: new Map([["ghost-entity", { kinds: new Set(["WellProxy3D"]) }]]),
-    };
-    snap.assetCatalog = catalog;
-    expect(() => checkAssetCatalogRefs(snap)).toThrow(
-      /assetCatalog references unknown entityId ghost-entity/,
-    );
-  });
-});
+//
+// The original "every assetCatalog key must be a known entityId" check
+// was withdrawn after PRD #578 / Slice 3 shipped. The catalog is
+// flattened across all datasets the catalog has ever seen; the snapshot
+// is for one dataset's current tick. They legitimately diverge. See
+// validate.ts for the full rationale.
 
 // ===========================================================================
 // Check 7 — checkMinimapKeys

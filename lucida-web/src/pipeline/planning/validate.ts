@@ -171,37 +171,18 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
 }
 
 // ---------------------------------------------------------------------------
-// Check 6 — assetCatalog references resolve to known entities
+// Check 6 — withdrawn (see comment below)
 // ---------------------------------------------------------------------------
 
-/**
- * Every `entityId` keyed in `snapshot.assetCatalog.byEntity` must
- * correspond to an entity present in `snapshot.entities`. Skipped when
- * `assetCatalog` is `null` (an explicitly accepted opt-out for tests
- * and the synthetic-snapshot helper).
- *
- * Dangling proxy references would cause `degradeForCatalog` to make
- * the wrong tier choice (treating a stale advertisement as live).
- *
- * Note on naming: the issue describes these as "proxy references";
- * the catalog snapshot is keyed by `entityId` (each entry carries the
- * set of proxy `kinds` that entity advertises). The check therefore
- * walks the keys and asserts each is a known `entityId`. See
- * `pipeline/assetCatalog.ts` for the snapshot shape.
- */
-export function checkAssetCatalogRefs(snapshot: PlanningSnapshot): void {
-  const catalog = snapshot.assetCatalog;
-  if (catalog === null) return;
-  const known = new Set<string>();
-  for (const e of snapshot.entities) known.add(e.entityId);
-  for (const entityId of catalog.byEntity.keys()) {
-    if (!known.has(entityId)) {
-      throw new Error(
-        `validatePlanningInputs: assetCatalog references unknown entityId ${entityId}`,
-      );
-    }
-  }
-}
+// The original "every assetCatalog key must be a known entityId" check
+// was withdrawn after PRD #578 / Slice 3 shipped. `assetCatalog.byEntity`
+// is flattened across ALL datasets the catalog has ever seen
+// (`pipeline/assetCatalog.ts::snapshot()` walks every dataset map);
+// `snapshot.entities` is for ONE dataset's current tick. They legitimately
+// diverge — the catalog is a cross-dataset registry, not a snapshot-coupled
+// view. Production lookups go snapshot-entity → catalog (per-id `get()`),
+// so dangling catalog entries are harmless: they're never iterated. Kept
+// as a comment so the check number stays stable in cross-references.
 
 // ---------------------------------------------------------------------------
 // Check 7 — minimapPending keys are valid imageIds
@@ -307,15 +288,18 @@ function expectedEntityKindFor(entry: ActiveSetEntry): EntitySnapshot["kind"] | 
 // ---------------------------------------------------------------------------
 
 /**
- * Run all nine semantic-invariant checks on `plan()`'s inputs. Throws
+ * Run the eight semantic-invariant checks on `plan()`'s inputs. Throws
  * on first failure; the message names the violated invariant and the
  * offending id where applicable. Called from {@link plan} only when
  * `import.meta.env.DEV` is true.
  *
- * Order of checks is fixed (matches ADR 0031). Earlier checks build the
- * referential context later checks rely on (e.g. uniqueness before
- * reference-resolution), so a violation in an earlier check fires before
- * a downstream check could be misled.
+ * Originally nine checks per ADR 0031; check 6 (assetCatalog refs) was
+ * withdrawn post-ship — see the comment above the empty Check 6 block.
+ *
+ * Order is fixed (matches ADR 0031). Earlier checks build the referential
+ * context later checks rely on (e.g. uniqueness before reference-resolution),
+ * so a violation in an earlier check fires before a downstream check could
+ * be misled.
  */
 export function validatePlanningInputs(
   snapshot: PlanningSnapshot,
@@ -326,7 +310,7 @@ export function validatePlanningInputs(
   checkUniqueImageIds(snapshot);
   checkLevelShapeArity(snapshot);
   checkVisibleRegionBounds(snapshot);
-  checkAssetCatalogRefs(snapshot);
+  // Check 6 withdrawn — see comment above the block.
   checkMinimapKeys(snapshot);
   checkPrevActiveSetUnique(state);
   checkPrevActiveSetKindAgreement(snapshot, state);
