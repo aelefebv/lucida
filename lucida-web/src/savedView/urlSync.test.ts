@@ -104,21 +104,19 @@ describe("UrlSync", () => {
 
   it("debounces writes", async () => {
     // Real timers — the encoder uses CompressionStream which doesn't
-    // round-trip cleanly under vi.useFakeTimers. The debounce-timing
-    // assertion still holds because we use a tiny delay.
+    // round-trip cleanly under vi.useFakeTimers. We assert the debounce
+    // contract directly (N calls collapse into 1 replaceState) via a
+    // spy + vi.waitFor, so the test is robust to CI scheduling jitter.
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       debounceMs: 30,
       window: win,
     });
+    const spy = vi.spyOn(win.history, "replaceState");
     sync.notifyChange();
     sync.notifyChange();
     sync.notifyChange();
-    expect(win.location.hash).toBe("");
-    // Wait less than the debounce window — should still be empty.
-    await new Promise((r) => setTimeout(r, 5));
-    expect(win.location.hash).toBe("");
-    // Wait past the debounce + encode time.
-    await new Promise((r) => setTimeout(r, 80));
+    expect(spy).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
     expect(win.location.hash.startsWith("#view=")).toBe(true);
     sync.destroy();
   });
