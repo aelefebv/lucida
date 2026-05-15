@@ -11,7 +11,7 @@ import type {
   MissingChunk,
   MissingProxy,
 } from "./workerProtocol.ts";
-import type { PlanningEpochs } from "../pipeline/planning.ts";
+import type { PlanningEpochs } from "../pipeline/planning/index.ts";
 
 export class RenderClient {
   private worker: Worker;

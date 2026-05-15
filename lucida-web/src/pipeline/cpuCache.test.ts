@@ -15,8 +15,8 @@ import type {
   PlanningEpochs,
   ProxyRequest,
   RequestPlan,
-} from "./planning.ts";
-import { emptyPlanStats } from "./planning.ts";
+} from "./planning/index.ts";
+import { emptyPlanStats } from "./planning/index.ts";
 
 // ---------------------------------------------------------------------------
 // Test Factories

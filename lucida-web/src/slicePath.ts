@@ -4,7 +4,7 @@ import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
-import type { PlanningEpochs } from "./pipeline/planning.ts";
+import type { PlanningEpochs } from "./pipeline/planning/index.ts";
 import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
 import { debugStats } from "./debug/debugStats.ts";
 

@@ -7,7 +7,7 @@ import type {
 import { VOLUME_ATLAS_BUDGET } from "./workerProtocol.ts";
 import { writeVolumeChunk } from "./gpuContext.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
-import type { PlanningEpochs } from "../pipeline/planning.ts";
+import type { PlanningEpochs } from "../pipeline/planning/index.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16 } from "./dataTypeUtil.ts";
 

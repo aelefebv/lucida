@@ -6,7 +6,7 @@ import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
 import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
-import type { PlanningEpochs } from "./pipeline/planning.ts";
+import type { PlanningEpochs } from "./pipeline/planning/index.ts";
 
 /**
  * Project a well's [0,1]³ unit-cube AABB to screen space and return a scissor rect.

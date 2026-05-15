@@ -2,7 +2,7 @@
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
-import type { PlanningEpochs } from "./pipeline/planning.ts";
+import type { PlanningEpochs } from "./pipeline/planning/index.ts";
 import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";

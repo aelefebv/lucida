@@ -1,4 +1,4 @@
-import type { PlanningEpochs } from "../pipeline/planning.ts";
+import type { PlanningEpochs } from "../pipeline/planning/index.ts";
 
 /**
  * Returns true if the delivery is stale relative to the worker's current epoch state.

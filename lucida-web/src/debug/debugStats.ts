@@ -101,7 +101,7 @@ export interface OrchDebug {
   /** Active set entries from plan() */
   activeSet: Array<{
     entityId: string;
-    /** Tier mode — see {@link import("../pipeline/planning.ts").EntityMode}. */
+    /** Tier mode — see {@link import("../pipeline/planning/index.ts").EntityMode}. */
     mode: string;
     targetLod: number;
     coarsestDetailLod: number;

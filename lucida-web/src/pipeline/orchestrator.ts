@@ -23,7 +23,7 @@ import {
   getActiveChannels,
   compositeKey,
 } from "../tickCommon.ts";
-import { plan, emptyPlanStats } from "./planning.ts";
+import { plan, emptyPlanStats, groupByWell } from "./planning/index.ts";
 import type {
   PlanningSnapshot,
   ActiveSetEntry,
@@ -33,13 +33,13 @@ import type {
   SelectionState,
   ChunkRequest,
   RequestPlan,
-} from "./planning.ts";
+} from "./planning/index.ts";
 import type {
   CpuCache,
   ReadyChunkDelivery,
   ReadyProxyDelivery,
 } from "./cpuCache.ts";
-import type { ProxyRequest } from "./planning.ts";
+import type { ProxyRequest } from "./planning/index.ts";
 import {
   debugStats,
   emptyColdStateDebug,
@@ -853,25 +853,18 @@ export class Orchestrator {
       }
       this._lastProxyRequests = result.proxyRequests;
 
-      // 3i. Filter to single level per entity for atlas config (M4 adds multi-level).
-      // Skip `well-as-proxy` entries — they don't contribute chunks.
-      const targetLevelByEntity = new Map<string, number>();
-      for (const entry of result.activeSet) {
-        if (entry.mode === "well-as-proxy") continue;
-        targetLevelByEntity.set(entry.entityId, entry.targetLod);
-      }
-      const filteredRequests = result.requests.filter(r => {
-        const target = targetLevelByEntity.get(r.entityId);
-        return target !== undefined && r.level === target;
-      });
-
-      this._lastFilteredRequests = filteredRequests;
+      // 3i. Track this dataset's requests for re-send / wid-mapping.
+      // PRD #545 dropped the LOD-filter step that previously gated the
+      // request stream to `entry.targetLod`: planning now emits exactly
+      // one level per entity, so the filter is a no-op. `_lastFilteredRequests`
+      // keeps its name for compatibility with the re-send loop below.
+      this._lastFilteredRequests = result.requests;
       // Build wid → entityId for this dataset so handleChunksEvicted
       // can resolve `cpuCache.markRejected(entityId, ...)` from the
       // worker's report (which carries workerMemberId, not entityId).
       // Multi-dataset case: rebuilt cumulatively across the loop since
       // we clear once at the top of the rebuild path.
-      for (const req of filteredRequests) {
+      for (const req of result.requests) {
         const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
         this.widToEntityId.set(wid, req.entityId);
       }
@@ -884,7 +877,7 @@ export class Orchestrator {
       // tracking, triggering re-delivery on the next tick.
 
       // Annotate requests with the real dataset ID (entityId may differ for plates)
-      for (const req of filteredRequests) {
+      for (const req of result.requests) {
         req.datasetId = dsId;
       }
 
@@ -900,15 +893,16 @@ export class Orchestrator {
       // building a precomputed model matrix that maps the unit cube
       // [0,1]^3 onto that AABB, and stashing the well's entityId for
       // proxy descriptor lookup in the worker.
+      // Use the planning module's canonical well-grouping (ADR 0025) so
+      // the orchestrator agrees with `assignModes` on which fields make
+      // up each well group. `groupByWell` filters to visible entities;
+      // `well-as-proxy` entries only exist for groups with at least one
+      // visible field, so the AABB built from this map matches what
+      // planning saw when it picked the mode.
       const fieldsByWell = new Map<string, EntitySnapshot[]>();
-      for (const entity of entities) {
-        if (entity.kind === "Field" && entity.parentId) {
-          let arr = fieldsByWell.get(entity.parentId);
-          if (!arr) {
-            arr = [];
-            fieldsByWell.set(entity.parentId, arr);
-          }
-          arr.push(entity);
+      for (const group of groupByWell(entities)) {
+        if (group.fields.length > 0) {
+          fieldsByWell.set(group.wellId, group.fields);
         }
       }
       const rosterEntries: MemberRosterEntry[] = [];
@@ -1004,7 +998,7 @@ export class Orchestrator {
       // queue inside CpuCache but share the cancellation contract: if
       // the next plan omits a request, its in-flight fetch is aborted.
       ctx.cpuCache.submit({
-        requests: [...filteredRequests, ...minimapRequests],
+        requests: [...result.requests, ...minimapRequests],
         activeSet: result.activeSet,
         proxyRequests: result.proxyRequests,
         epochs: currentEpochs,

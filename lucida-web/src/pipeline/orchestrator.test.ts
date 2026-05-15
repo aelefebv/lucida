@@ -8,7 +8,7 @@ import type {
 } from "./cpuCache.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
-import type { ProxyRequest } from "./planning.ts";
+import type { ProxyRequest } from "./planning/index.ts";
 import type { ColdStateMessage, MissingProxy } from "../renderer/workerProtocol.ts";
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
@@ -197,12 +197,12 @@ describe("epoch caching", () => {
     // Reset modules so we can spy on plan() freshly.
     vi.resetModules();
 
-    const planningModule = await import("./planning.ts");
+    const planningModule = await import("./planning/index.ts");
     planSpy = vi.fn(planningModule.plan);
 
     // Mock the planning module's plan function.
-    vi.doMock("./planning.ts", async () => {
-      const actual = await import("./planning.ts");
+    vi.doMock("./planning/index.ts", async () => {
+      const actual = await import("./planning/index.ts");
       return { ...actual, plan: planSpy };
     });
 
@@ -331,11 +331,11 @@ describe("multi-dataset planning", () => {
   beforeEach(async () => {
     vi.resetModules();
 
-    const planningModule = await import("./planning.ts");
+    const planningModule = await import("./planning/index.ts");
     planSpy = vi.fn(planningModule.plan);
 
-    vi.doMock("./planning.ts", async () => {
-      const actual = await import("./planning.ts");
+    vi.doMock("./planning/index.ts", async () => {
+      const actual = await import("./planning/index.ts");
       return { ...actual, plan: planSpy };
     });
 
