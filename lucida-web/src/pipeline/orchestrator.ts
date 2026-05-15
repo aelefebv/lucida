@@ -28,14 +28,15 @@ import { buildPlanningSnapshot } from "./planning/snapshot.ts";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import type {
   ActiveSetEntry,
-  PlanningEpochs,
   EntitySnapshot,
   MinimapChunkCoord,
-  VisibleRegion,
+  PlanningState,
   SelectionState,
   ChunkRequest,
   RequestPlan,
 } from "./planning/index.ts";
+import type { SceneEpochs } from "./epochs.ts";
+import type { VisibleRegion } from "./viewport.ts";
 
 // Re-export so existing call sites that imported `MinimapChunkCoord`
 // from the orchestrator (e.g. `slicePath.ts`, `volumePath.ts`,
@@ -165,7 +166,7 @@ export interface OrchestratorResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
   settings: SceneSettings;
   multiChannel: boolean;
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   /**
    * M1 (DOMAINS step 8a): per-dataset memberId → entity index map. Both
    * the worker (when building the descriptor buffer) and the render
@@ -284,8 +285,19 @@ function synthesizeWellRosterEntry(
 }
 
 export class Orchestrator {
-  private previousActiveSet = new Map<string, ActiveSetEntry[]>();
-  private lastEpochs: PlanningEpochs | null = null;
+  /**
+   * Per-dataset opaque planner carry-forward state. The orchestrator
+   * stores `result.nextState` after each `plan()` call and threads the
+   * matching entry back as the `state` argument on the next tick.
+   *
+   * PRD #563 / Slice 3 renamed this from `previousActiveSet:
+   * Map<string, ActiveSetEntry[]>` so the seam between the planner and
+   * its caller is the {@link PlanningState} container. Future planner
+   * state (per-well stickiness, anticipation hints) extends
+   * {@link PlanningState} without touching the orchestrator.
+   */
+  private planningState = new Map<string, PlanningState>();
+  private lastEpochs: SceneEpochs | null = null;
   private cachedResult: OrchestratorResult | null = null;
   /**
    * Snapshot of debug member stats produced during the most recent
@@ -505,7 +517,7 @@ export class Orchestrator {
 
     // Step 1 — Epoch check
     const rawEpochs = JSON.parse(ctx.scene.epochs());
-    const currentEpochs: PlanningEpochs = {
+    const currentEpochs: SceneEpochs = {
       content: rawEpochs.content,
       layout: rawEpochs.layout,
       view: rawEpochs.view,
@@ -595,7 +607,6 @@ export class Orchestrator {
         datasetId: dsId,
         dataset: ds,
         dsSettings,
-        prevActiveSet: this.previousActiveSet.get(dsId) ?? [],
         assetCatalog: ctx.assetCatalog.snapshot(),
         minimapPending: minimapPendingFetch,
         mode: ctx.mode as "slice" | "volume",
@@ -616,9 +627,13 @@ export class Orchestrator {
         this._lastCachedKeyCounts.set(entity.entityId, cachedKeys?.size ?? 0);
       }
 
-      // 3d. Plan
-      const result = plan(snapshot, planningConfig);
-      this.previousActiveSet.set(dsId, result.activeSet);
+      // 3d. Plan. PRD #563 / Slice 3: pass the opaque carry-forward
+      // state separately from the snapshot, and store the planner-
+      // returned `nextState` for the next tick.
+      const planningStateForDataset = this.planningState.get(dsId)
+        ?? { previousActiveSet: [] };
+      const result = plan(snapshot, planningStateForDataset, planningConfig);
+      this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
       this._lastRequests = result.requests;
       this._lastVisibleRegion = visibleRegion;
@@ -695,7 +710,7 @@ export class Orchestrator {
       }
       const rosterEntries: MemberRosterEntry[] = [];
       for (const entry of result.activeSet) {
-        if (entry.mode === "well-as-proxy") {
+        if (entry.kind === "well-as-proxy") {
           // Synthetic well member. Compute AABB from constituent fields.
           const childFields = fieldsByWell.get(entry.entityId) ?? [];
           if (childFields.length === 0) continue; // no geometry to render
@@ -703,6 +718,9 @@ export class Orchestrator {
           if (synth) rosterEntries.push(synth);
           continue;
         }
+        // Invisible entries don't render — skip them in the roster.
+        if (entry.kind === "invisible") continue;
+        // Narrowed: entry is FieldEntry below.
         const entity = entityById.get(entry.entityId);
         if (entity) {
           rosterEntries.push({
@@ -776,6 +794,9 @@ export class Orchestrator {
         proxyRequests: result.proxyRequests,
         epochs: currentEpochs,
         stats: result.stats,
+        // `nextState` is required on RequestPlan but unused by submit();
+        // forward the planner's pointer so the shape stays honest.
+        nextState: result.nextState,
       });
 
       // Debug stats
@@ -786,7 +807,16 @@ export class Orchestrator {
           const activeEntry = result.activeSet.find(
             (a) => a.entityId === entity.entityId,
           );
-          const tl = activeEntry?.targetLod ?? -1;
+          // PRD #563 / Slice 4: only field entries carry `targetLod`;
+          // well-as-proxy has no LOD bookkeeping, invisibles report
+          // their coarsest LOD instead. Surface -1 for non-field
+          // entries to mirror the legacy "no level selected" sentinel.
+          const tl =
+            activeEntry?.kind === "field"
+              ? activeEntry.targetLod
+              : activeEntry?.kind === "invisible"
+                ? activeEntry.coarsestLod
+                : -1;
           const memberKey = multiChannel
             ? compositeKey(entity.imageId, selection.c)
             : entity.imageId;
@@ -841,16 +871,46 @@ export class Orchestrator {
       }
 
       // Aggregate from all per-dataset plan results
-      // Re-run is wasteful, so store last result. For now just use previousActiveSet.
-      for (const [, activeSet] of this.previousActiveSet) {
-        for (const entry of activeSet) {
-          orchDebug.activeSet.push({
-            entityId: entry.entityId,
-            mode: entry.mode,
-            targetLod: entry.targetLod,
-            coarsestDetailLod: entry.coarsestDetailLod,
-            detailOwnedLodRange: entry.detailOwnedLodRange,
-          });
+      // Re-run is wasteful, so we read the planner's carry-forward
+      // state — its `previousActiveSet` field is exactly the active
+      // set produced by the most recent `plan()` call for that dataset.
+      //
+      // PRD #563 / Slice 4: ActiveSetEntry is now a discriminated
+      // union, so per-variant fields are derived from `kind`:
+      //   - well-as-proxy → mode column reads "well-as-proxy",
+      //     LOD columns are zero (no LOD bookkeeping for this variant);
+      //   - field        → mode column reads the field's promotion mode,
+      //     LOD columns come from the field entry;
+      //   - invisible    → mode column reads "invisible", LOD columns
+      //     report the entity's coarsest LOD (the only level it owns).
+      for (const [, state] of this.planningState) {
+        for (const entry of state.previousActiveSet) {
+          if (entry.kind === "well-as-proxy") {
+            orchDebug.activeSet.push({
+              entityId: entry.entityId,
+              mode: "well-as-proxy",
+              targetLod: 0,
+              coarsestDetailLod: 0,
+              detailOwnedLodRange: [0, 0],
+            });
+          } else if (entry.kind === "field") {
+            orchDebug.activeSet.push({
+              entityId: entry.entityId,
+              mode: entry.mode,
+              targetLod: entry.targetLod,
+              coarsestDetailLod: entry.coarsestDetailLod,
+              detailOwnedLodRange: entry.detailOwnedLodRange,
+            });
+          } else {
+            // invisible
+            orchDebug.activeSet.push({
+              entityId: entry.entityId,
+              mode: "invisible",
+              targetLod: entry.coarsestLod,
+              coarsestDetailLod: entry.coarsestLod,
+              detailOwnedLodRange: [entry.coarsestLod, entry.coarsestLod],
+            });
+          }
         }
       }
 
@@ -1603,7 +1663,7 @@ export class Orchestrator {
     delivery: ReadyChunkDelivery,
     multiChannel: boolean,
     sliceZ: number | null,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ): number {
     const viewMode = ctx.mode;
     const workerMemberId = multiChannel ? `${delivery.imageId}:ch${delivery.c}` : delivery.imageId;
@@ -1688,7 +1748,7 @@ export class Orchestrator {
   private sendProxyDeliveryToWorker(
     ctx: TickContext,
     delivery: ReadyProxyDelivery,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ): number {
     ctx.client.proxyAssetData(
       delivery.datasetId,
@@ -1764,7 +1824,7 @@ export class Orchestrator {
       c,
       priority: 0,
     };
-    const epochs: PlanningEpochs = this.lastEpochs ?? {
+    const epochs: SceneEpochs = this.lastEpochs ?? {
       content: 0,
       layout: 0,
       view: 0,
@@ -1778,6 +1838,9 @@ export class Orchestrator {
       proxyRequests: [proxyRequest],
       epochs,
       stats: emptyPlanStats(),
+      // submit() doesn't read nextState; placeholder so the literal
+      // satisfies RequestPlan's contract. (PRD #563 / Slice 3.)
+      nextState: { previousActiveSet: [] },
     });
   }
 
@@ -1789,7 +1852,7 @@ export class Orchestrator {
     entities: EntitySnapshot[],
     selection: SelectionState,
     visibleRegion: VisibleRegion,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
     ctx: TickContext,
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>,
     dsSettings: DatasetSettings | undefined,
@@ -1825,6 +1888,13 @@ export class Orchestrator {
       };
     }
 
+    // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; the
+    // worker's `ColdStateActiveEntry` stays flat (it talks to the
+    // worker over a separate seam). Each variant maps onto the cold
+    // shape with explicit per-variant defaults — `well-as-proxy` has
+    // no LOD bookkeeping and an empty imageId, `invisible` collapses
+    // to its coarsest LOD with no proxy availability, and `field`
+    // forwards its fields verbatim.
     const coldActiveSet: ColdStateActiveEntry[] = activeSet.map(entry => {
       const entity = entityById.get(entry.entityId);
       const levels = (entity?.levels ?? []).map((lvl: LevelGeometry, idx: number) => {
@@ -1846,8 +1916,12 @@ export class Orchestrator {
       // the worker's wanted-set knows whether to ask for proxies.
       // `parentWellId` lets the worker fan out a well-proxy upload to
       // its child fields' descriptors.
+      //
+      // PRD #563 / Slice 5: `EntitySnapshot` is a discriminated union;
+      // narrowing on `kind === "Field"` gives us a `FieldSnapshot` whose
+      // `parentId` is non-null by construction (no `?? null` fallback).
       const parentWellId =
-        entity?.kind === "Field" ? (entity.parentId ?? null) : null;
+        entity?.kind === "Field" ? entity.parentId : null;
 
       // M1: precomputed model matrices. For field entries, sourced from
       // `scene.member_model_matrix`; for `well-as-proxy` entries, from
@@ -1859,6 +1933,45 @@ export class Orchestrator {
       const modelMatrix = matrices?.model ?? identityMatrix();
       const invModelMatrix = matrices?.inv ?? identityMatrix();
 
+      if (entry.kind === "well-as-proxy") {
+        return {
+          entityId: entry.entityId,
+          imageId: "",
+          targetLod: 0,
+          detailOwnedLodRange: [0, 0],
+          levels,
+          mode: "well-as-proxy",
+          proxyKind: "WellProxy3D",
+          proxyAvailable: true,
+          wellProxyAvailable: true,
+          parentWellId,
+          modelMatrix,
+          invModelMatrix,
+          displayStateByChannel,
+        };
+      }
+      if (entry.kind === "invisible") {
+        return {
+          entityId: entry.entityId,
+          imageId: entry.imageId,
+          targetLod: entry.coarsestLod,
+          detailOwnedLodRange: [entry.coarsestLod, entry.coarsestLod],
+          levels,
+          // Invisibles are mode-less in the planner — surface them to
+          // the worker as `fields-with-detail` (the legacy encoding)
+          // so the wanted-set rules don't ask for proxies for an
+          // entity that won't render this tick.
+          mode: "fields-with-detail",
+          proxyKind: undefined,
+          proxyAvailable: false,
+          wellProxyAvailable: false,
+          parentWellId,
+          modelMatrix,
+          invModelMatrix,
+          displayStateByChannel,
+        };
+      }
+      // Narrowed: entry is FieldEntry.
       return {
         entityId: entry.entityId,
         imageId: entry.imageId,
@@ -1904,7 +2017,7 @@ export class Orchestrator {
     dsId: string,
     cold: ColdStateMessage,
     ctx: TickContext,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ): void {
     const hit = Array.from(ctx.scene.ray_hit_local_image(dsId)) as [number, number, number];
     const rayHitsByEntity: Array<[string, [number, number, number]]> = [];

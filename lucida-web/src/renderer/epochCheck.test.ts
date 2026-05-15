@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { isStaleDelivery } from "./epochCheck.ts";
-import type { PlanningEpochs } from "../pipeline/planning/index.ts";
+import type { SceneEpochs } from "../pipeline/epochs.ts";
 
-function makeEpochs(overrides?: Partial<PlanningEpochs>): PlanningEpochs {
+function makeEpochs(overrides?: Partial<SceneEpochs>): SceneEpochs {
   return { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0, ...overrides };
 }
 

@@ -10,7 +10,8 @@ import type {
   MissingChunk,
   MissingProxy,
 } from "./workerProtocol.ts";
-import type { PlanningEpochs, VisibleRegion } from "../pipeline/planning/index.ts";
+import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type { VisibleRegion } from "../pipeline/viewport.ts";
 
 /** Type-narrowing helper: only chunk-kind entries from a wanted-set. */
 function chunks(missing: Array<MissingChunk | MissingProxy>): MissingChunk[] {
@@ -26,7 +27,7 @@ function proxies(missing: Array<MissingChunk | MissingProxy>): MissingProxy[] {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeEpochs(): PlanningEpochs {
+function makeEpochs(): SceneEpochs {
   return {
     content: 1,
     layout: 1,

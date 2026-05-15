@@ -2,11 +2,8 @@ import { describe, it, expect } from "vitest";
 import type { WasmScene } from "lucida-core";
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../../manifestTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
-import type {
-  ActiveSetEntry,
-  AssetCatalogSnapshot,
-  PlanningEpochs,
-} from "./index.ts";
+import type { AssetCatalogSnapshot } from "./index.ts";
+import type { SceneEpochs } from "../epochs.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
   buildPlanningSnapshot,
@@ -135,7 +132,14 @@ function makeDataset(
     dataset_id: "ds1",
     name: "test",
     kind: "Single",
-    entities: [],
+    // PRD #563 / Slice 5: the default stub scene returns `field-0` as a
+    // Field, so the default manifest must carry the matching parent edge
+    // or `buildPlanningSnapshot` throws. Tests that exercise the
+    // missing-edge throw branch override `entities` with `[]`.
+    entities: [
+      { id: "well-0", kind: "Well", parent: null, labels: {} },
+      { id: "field-0", kind: "Field", parent: "well-0", labels: {} },
+    ],
     transforms: [],
     images: [makeImageSpec("img-0")],
     source_layouts: [],
@@ -159,7 +163,7 @@ function makeDsSettings(overrides?: Partial<DatasetSettings>): DatasetSettings {
   };
 }
 
-function makeEpochs(): PlanningEpochs {
+function makeEpochs(): SceneEpochs {
   return { content: 1, layout: 1, view: 1, selection: 1, asset: 1, request: 0 };
 }
 
@@ -168,7 +172,6 @@ interface MakeArgsOverrides {
   dataset?: SnapshotDatasetEntry;
   dsSettings?: DatasetSettings | undefined;
   multiChannel?: boolean;
-  prevActiveSet?: ActiveSetEntry[];
   assetCatalog?: AssetCatalogSnapshot;
   mode?: "slice" | "volume";
 }
@@ -179,7 +182,6 @@ function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
     datasetId: "ds1",
     dataset: overrides?.dataset ?? makeDataset(),
     dsSettings: overrides?.dsSettings ?? makeDsSettings(),
-    prevActiveSet: overrides?.prevActiveSet ?? [],
     assetCatalog:
       overrides?.assetCatalog ??
       ({ byEntity: new Map() } as AssetCatalogSnapshot),
@@ -282,12 +284,51 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
       ],
     });
     const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
-    expect(built!.entities[0].parentId).toBe("well-1");
+    const ent = built!.entities[0];
+    // PRD #563 / Slice 5: narrow on `kind === "Field"` to read parentId.
+    expect(ent.kind).toBe("Field");
+    if (ent.kind === "Field") {
+      expect(ent.parentId).toBe("well-1");
+    }
   });
 
-  it("sets parentId to null when no manifest parent edge exists", () => {
-    const built = buildPlanningSnapshot(makeArgs());
-    expect(built!.entities[0].parentId).toBeNull();
+  it("throws when a Field-kind entity has no manifest parent edge", () => {
+    // PRD #563 / Slice 5: a Field without a parent is an invariant
+    // violation. The builder surfaces it explicitly rather than
+    // silently coercing to null. Override the dataset to drop the
+    // parent edge for the default `field-0` scene entity.
+    const dataset = makeDataset({ entities: [] });
+    expect(() =>
+      buildPlanningSnapshot(makeArgs({ dataset })),
+    ).toThrow(/FieldSnapshot\.parentId is required/);
+  });
+
+  it("Image and Well variants do not declare a parentId field", () => {
+    // Sanity check: the snake_case→camelCase translator branches on
+    // `kind` and the resulting object is the matching variant.
+    const scene = makeStubScene({
+      visibleEntities: [
+        {
+          entity_id: "img-7",
+          image_id: "img-7",
+          kind: "Image",
+          visible: true,
+          projected_diagonal_px: 100,
+          projected_area_px2: 10000,
+          centroid_world: [0, 0, 0],
+          ideal_target_lod: 0,
+          importance: 1,
+        },
+      ],
+      positions: { "img-7": [0, 0] },
+    });
+    const dataset = makeDataset({ images: [makeImageSpec("img-7")] });
+    const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
+    const ent = built!.entities[0];
+    expect(ent.kind).toBe("Image");
+    // No `parentId` key on Image / Well variants — confirm absence
+    // structurally so future regressions surface here.
+    expect(Object.prototype.hasOwnProperty.call(ent, "parentId")).toBe(false);
   });
 });
 
@@ -388,23 +429,10 @@ describe("buildPlanningSnapshot — pass-through fields", () => {
     expect(built!.snapshot.assetCatalog).toBe(catalog);
   });
 
-  it("threads the previous active set through into the snapshot", () => {
-    const prev = [
-      {
-        entityId: "field-0",
-        imageId: "img-0",
-        mode: "fields-with-detail" as const,
-        targetLod: 1,
-        coarsestDetailLod: 1,
-        detailOwnedLodRange: [1, 1] as [number, number],
-        proxyKind: undefined,
-        proxyAvailable: false,
-        wellProxyAvailable: false,
-      },
-    ];
-    const built = buildPlanningSnapshot(makeArgs({ prevActiveSet: prev }));
-    expect(built!.snapshot.previousActiveSet).toBe(prev);
-  });
+  // Removed: PRD #563 / Slice 3 — previousActiveSet no longer lives on
+  // the planning snapshot. The orchestrator now passes a separate
+  // PlanningState argument to plan(), and buildPlanningSnapshot has no
+  // knowledge of carry-forward state.
 
   it("threads the epoch counters through into the snapshot", () => {
     const built = buildPlanningSnapshot(makeArgs());
@@ -450,24 +478,11 @@ describe("buildPlanningSnapshot — minimapPending field (Slice 5)", () => {
 });
 
 describe("buildPlanningSnapshot — purity", () => {
-  it("does not mutate the previous active set", () => {
-    const prev = [
-      {
-        entityId: "field-0",
-        imageId: "img-0",
-        mode: "fields-with-detail" as const,
-        targetLod: 1,
-        coarsestDetailLod: 1,
-        detailOwnedLodRange: [1, 1] as [number, number],
-        proxyKind: undefined,
-        proxyAvailable: false,
-        wellProxyAvailable: false,
-      },
-    ];
-    const before = JSON.stringify(prev);
-    buildPlanningSnapshot(makeArgs({ prevActiveSet: prev }));
-    expect(JSON.stringify(prev)).toBe(before);
-  });
+  // The "does not mutate prevActiveSet" assertion was removed as part
+  // of PRD #563 / Slice 3: prev-active-set is no longer carried on the
+  // snapshot, so the snapshot builder no longer accepts it. The
+  // PlanningState round-trip lives entirely in plan() and the
+  // orchestrator now.
 
   it("produces identical output across two calls with identical inputs", () => {
     const args = makeArgs();

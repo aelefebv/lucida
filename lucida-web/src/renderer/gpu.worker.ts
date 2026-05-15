@@ -23,7 +23,7 @@ import {
 import { isStaleDelivery } from "./epochCheck.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 import { getColormapData } from "../colormaps.ts";
-import type { PlanningEpochs } from "../pipeline/planning/index.ts";
+import type { SceneEpochs } from "../pipeline/epochs.ts";
 import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,
@@ -39,7 +39,7 @@ let volumeRenderer: VolumeRenderer | null = null;
 let compositor: LayerCompositor | null = null;
 let cursorRenderer: CursorRenderer | null = null;
 
-let currentEpochs: PlanningEpochs | null = null;
+let currentEpochs: SceneEpochs | null = null;
 let currentColdState: ColdStateMessage | null = null;
 
 /** Map from worker member ID (imageId or imageId:chN) to the dataset ID it belongs to. */

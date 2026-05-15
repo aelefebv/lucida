@@ -350,18 +350,23 @@ export function DebugOverlays({
           };
 
           for (const entry of plan.activeSet) {
-            if (entry.mode === "well-as-proxy") {
+            if (entry.kind === "well-as-proxy") {
               for (const ent of ds.manifest.entities) {
                 if (ent.parent === entry.entityId && ent.kind === "Field") {
                   const img = ds.manifest.images.find(i => i.image_id === ent.id)
                     ?? ds.manifest.images[0];
-                  if (img) addField(entry.entityId, ent.id, img.image_id, entry.mode, entry.targetLod);
+                  // PRD #563 / Slice 4: well-as-proxy entries have no
+                  // LOD bookkeeping — surface `null` so the badge skips
+                  // the LOD label.
+                  if (img) addField(entry.entityId, ent.id, img.image_id, "well-as-proxy", null);
                 }
               }
-            } else {
+            } else if (entry.kind === "field") {
               const wellId = parentByEntity.get(entry.entityId) ?? entry.entityId;
               addField(wellId, entry.entityId, entry.imageId, entry.mode, entry.targetLod);
             }
+            // entry.kind === "invisible" — skipped (not rendered as a
+            // well badge; invisibles never had a promotion mode).
           }
 
           for (const [wellId, agg] of wells) {
@@ -457,11 +462,17 @@ export function DebugOverlays({
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
 
+            // Invisible entries don't contribute chunks or proxies —
+            // skip them entirely. PRD #563 / Slice 4 split them into
+            // their own variant; reading mode/imageId/targetLod here
+            // would otherwise be a type error.
+            if (entry.kind === "invisible") continue;
+
             // Well-as-proxy: there's no chunk grid because the well is
             // served by a single proxy asset. Render one rect per well
             // colored by proxy status, so plates at WP zoom still
             // surface load progress.
-            if (entry.mode === "well-as-proxy") {
+            if (entry.kind === "well-as-proxy") {
               const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "WellProxy3D", t, c);
               const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "WellProxy3D", t, c);
               let status: ChunkRect["status"] = "planned";

@@ -24,15 +24,14 @@ import type { ImageSpec, DatasetManifest } from "../../manifestTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
 import { getActiveChannels } from "../../tickCommon.ts";
 import type {
-  ActiveSetEntry,
   AssetCatalogSnapshot,
   EntitySnapshot,
   MinimapChunkCoord,
-  PlanningEpochs,
   PlanningSnapshot,
   SelectionState,
-  VisibleRegion,
 } from "./index.ts";
+import type { SceneEpochs } from "../epochs.ts";
+import type { VisibleRegion } from "../viewport.ts";
 import type { PlanningConfig } from "./config.ts";
 
 // Re-export {@link MinimapChunkCoord} so existing snapshot.ts callers
@@ -111,8 +110,6 @@ export interface BuildPlanningSnapshotArgs {
   dataset: SnapshotDatasetEntry;
   /** Per-dataset settings — drives multi-channel selection assembly. */
   dsSettings: DatasetSettings | undefined;
-  /** Previous tick's active set for this dataset (for hysteresis carry-over). */
-  prevActiveSet: ActiveSetEntry[];
   /** Current asset catalog snapshot threaded through into the result. */
   assetCatalog: AssetCatalogSnapshot;
   /**
@@ -132,7 +129,7 @@ export interface BuildPlanningSnapshotArgs {
   /** True when the dataset is being viewed in multi-channel mode. */
   multiChannel: boolean;
   /** Epoch counters parsed by the orchestrator — passed through verbatim. */
-  currentEpochs: PlanningEpochs;
+  currentEpochs: SceneEpochs;
   /** The orchestrator's request epoch — copied into the snapshot's epochs. */
   requestEpoch: number;
   /** Per-tick planning tunables — threaded through into downstream callers. */
@@ -177,7 +174,6 @@ export function buildPlanningSnapshot(
     datasetId,
     dataset,
     dsSettings,
-    prevActiveSet,
     assetCatalog,
     minimapPending,
     mode,
@@ -221,24 +217,44 @@ export function buildPlanningSnapshot(
   //    `parentId` (neither of which are part of `view_query`). PRD #563
   //    / Slice 1 dropped the redundant `numLevels` field — consumers
   //    derive it from `levels.length`.
+  //
+  //    PRD #563 / Slice 5: {@link EntitySnapshot} is a discriminated
+  //    union. Branch on the WASM-reported `kind` and construct the
+  //    matching variant. Field entities require a non-null parent edge
+  //    in the manifest — we throw on the missing-edge case rather than
+  //    silently coercing, so producer bugs surface during snapshot
+  //    assembly rather than later in `groupByWell`.
   const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
     const imgSpec = imageSpecById.get(e.image_id);
     const levels = imgSpec ? imgSpec.multiscale.levels : [];
     const position = positions[e.entity_id] ?? ([0, 0] as [number, number]);
-    return {
+    const base = {
       entityId: e.entity_id,
       imageId: e.image_id,
-      kind: e.kind,
       visible: e.visible,
       projectedDiagonalPx: e.projected_diagonal_px,
       projectedAreaPx2: e.projected_area_px2,
       centroidWorld: e.centroid_world,
       idealTargetLod: e.ideal_target_lod,
       importance: e.importance,
-      levels,
       position,
-      parentId: parentByEntityId.get(e.entity_id) ?? null,
-    } satisfies EntitySnapshot;
+      levels,
+    };
+    if (e.kind === "Field") {
+      const parentId = parentByEntityId.get(e.entity_id);
+      if (parentId === undefined || parentId === null) {
+        throw new Error(
+          `[planning] Field entity "${e.entity_id}" has no parent edge ` +
+            `in the manifest — FieldSnapshot.parentId is required (non-null) ` +
+            `as of PRD #563 / Slice 5.`,
+        );
+      }
+      return { kind: "Field", parentId, ...base } satisfies EntitySnapshot;
+    }
+    if (e.kind === "Well") {
+      return { kind: "Well", ...base } satisfies EntitySnapshot;
+    }
+    return { kind: "Image", ...base } satisfies EntitySnapshot;
   });
 
   // 5. visible_region — null when WASM has nothing yet for this dataset.
@@ -283,14 +299,15 @@ export function buildPlanningSnapshot(
   //    it via `emitMinimapLane` to build minimap-lane requests at
   //    {@link MINIMAP_LANE_OFFSET}. `datasetId` is plumbed onto the
   //    snapshot so the planner stamps it onto every emitted request
-  //    (PRD #563 / Slice 1).
+  //    (PRD #563 / Slice 1). PRD #563 / Slice 3: `previousActiveSet`
+  //    no longer lives on the snapshot — it moved to {@link PlanningState}
+  //    which the orchestrator passes separately to `plan()`.
   const snapshot: PlanningSnapshot = {
     datasetId,
     epochs: currentEpochs,
     entities,
     visibleRegion,
     selection,
-    previousActiveSet: prevActiveSet,
     assetCatalog,
     minimapPending,
   };
