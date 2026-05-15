@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-13
+modified: 2026-05-14
 ---
 
 # Lucida Wiki — Index
@@ -15,6 +15,7 @@ Welcome to the Lucida repo wiki. Start with [[CLAUDE]] if you're an agent or new
 ## Categories
 
 - [[systems/index|Systems]] — split into `crates/` (Cargo workspace members: `lucida-core`, `lucida-server`, `lucida-store`, etc.) and `subsystems/` (web-internal modules and cross-cutting concepts: chunk pipeline, planning, CPU cache, GPU residency, worker protocol, scene state and epochs, presence and follow, layouts, multichannel and colormaps)
+- [[principles/index|Principles]] — stable claims about what each subsystem optimizes for; the framework ADRs live within
 - [[decisions/index|Decisions]] — numbered ADRs (`0001-…` onward) recording architectural choices
 - [[flows/index|Flows]] — end-to-end traces: dataset opening, chunk lifecycle, presence propagation, follow chain resolution, document command application, proxy generation
 - [[gotchas/index|Gotchas]] — tribal knowledge, footguns, build-system quirks
@@ -33,7 +34,8 @@ Curated cross-cuts that aggregate articles by architectural concern. See [[topic
 - "I'm new — where do I start?" → [[CLAUDE]] then [[now]] then [[systems/index|Systems]]
 - "How does X work end-to-end?" → [[flows/index|Flows]]
 - "Show me everything about rendering / storage" → [[topics/index|Topics]]
-- "Why was X done that way?" → [[decisions/index|Decisions]]
+- "What is this subsystem trying to optimize for?" → [[principles/index|Principles]]
+- "Why was X done that way?" → [[decisions/index|Decisions]] (and the principles they cite)
 - "I just hit a weird build/runtime issue" → [[gotchas/index|Gotchas]]
 - "Where's the deep dive on the chunk pipeline?" → [[chunk-pipeline]] points at the canonical `CHUNK_PIPELINE.md`
 - "How does lucida actually deploy?" → [[deployment]] is the conceptual reference; `extras/deploy/RUNBOOK.md` is the procedural walkthrough

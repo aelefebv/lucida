@@ -3,6 +3,8 @@ created: 2026-04-18
 modified: 2026-05-14
 ---
 
+ADRs cite [[principles/index|principles]] as their justification when applicable. Principles never cite back — they remain agnostic to which decisions exist today.
+
 # Decisions
 
 ADR-style records of architectural choices. Numbered sequentially in the order they were captured. Each ADR records *that* a decision was made and *why* — not a fully-templated breakdown. Optional `Status` / `Considered Options` / `Consequences` sections appear only when they add genuine value.
@@ -33,6 +35,9 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0020-single-image-with-servedir]] — `lucida-server` serves the SPA via `tower-http::ServeDir`; production deploy unit is a single container image bundling API + SPA (PRD #486; 2026-05-13, proposed)
 - [[decisions/0021-deployment-artifacts-as-reference-templates]] — `extras/deploy/` ships raw YAML with `<PLACEHOLDER>` values; no Helm chart, no Kustomize overlay, no provider-specific resources upstream (PRD #486; 2026-05-13, proposed)
 - [[decisions/0022-manual-merge-release-please-on-main]] — trunk-based releases via `release-please` on `main` with manual-merge of the release PR; tag push triggers multi-arch image build to ghcr.io (PRD #486; 2026-05-13, proposed)
+- [[decisions/0023-minimap-lane-with-highest-priority]] — minimap is its own lane at offset 0 (highest priority); other lanes renumbered upward; minimap fetches first and evicts last (PRD #545; 2026-05-14)
+- [[decisions/0024-catalog-degrade-one-tier-at-a-time]] — catalog-aware mode degradation steps exactly one tier; tier-skipping forbidden; ratification of an existing invariant (PRD #545; 2026-05-14)
+- [[decisions/0025-wells-as-planning-unit]] — on plates, all fields of one well agree on a single mode; per-field divergence within a well is out of scope; ratification of an existing invariant (PRD #545; 2026-05-14)
 
 ## Deferred — considered but not built yet
 
