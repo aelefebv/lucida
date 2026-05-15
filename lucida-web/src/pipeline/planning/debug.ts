@@ -119,7 +119,11 @@ export function buildPlanningDatasetDebug(
   // counts represent *wells* in each mode, not active-set entries.
   // Image-only datasets fall through with each image as its own "well"
   // (parentId is null → wellId == entityId), so a single dataset shows
-  // up as one count without special-casing.
+  // up as one count without special-casing. Invisible entries are
+  // excluded — they have no promotion mode.
+  //
+  // PRD #563 / Slice 4: ActiveSetEntry is now a discriminated union;
+  // narrow on `kind` before classifying.
   const wellsByMode = {
     wellAsProxy: 0,
     fieldsWithProxyFallback: 0,
@@ -127,10 +131,12 @@ export function buildPlanningDatasetDebug(
   };
   const wellsSeen = new Set<string>();
   for (const e of result.activeSet) {
-    if (e.mode === "well-as-proxy") {
+    if (e.kind === "well-as-proxy") {
       wellsByMode.wellAsProxy++;
       continue;
     }
+    if (e.kind === "invisible") continue;
+    // Narrowed: e is FieldEntry.
     const ent = entityById.get(e.entityId);
     const wellId = ent?.parentId ?? e.entityId;
     if (wellsSeen.has(wellId)) continue;
@@ -167,6 +173,25 @@ export function buildPlanningDatasetDebug(
       chunkCount++;
       if (topPriority === null || r.priority < topPriority) topPriority = r.priority;
     }
+    // PRD #563 / Slice 4: derive `mode` and `detailOwnedRange` per
+    // variant — only field entries carry a real LOD range, well-as-proxy
+    // and invisibles synthesise a defensible placeholder so the panel
+    // doesn't render `unknown`.
+    let displayMode: string;
+    let detailOwnedRange: [number, number];
+    if (entry === undefined) {
+      displayMode = "unknown";
+      detailOwnedRange = [0, 0];
+    } else if (entry.kind === "well-as-proxy") {
+      displayMode = "well-as-proxy";
+      detailOwnedRange = [0, 0];
+    } else if (entry.kind === "invisible") {
+      displayMode = "invisible";
+      detailOwnedRange = [entry.coarsestLod, entry.coarsestLod];
+    } else {
+      displayMode = entry.mode;
+      detailOwnedRange = entry.detailOwnedLodRange;
+    }
     focalEntity = {
       entityId: focal.entityId,
       parentWellId: focal.parentId ?? null,
@@ -175,8 +200,8 @@ export function buildPlanningDatasetDebug(
       projectedAreaPx2: focal.projectedAreaPx2,
       importance: focal.importance,
       idealTargetLod: focal.idealTargetLod,
-      detailOwnedRange: entry?.detailOwnedLodRange ?? [0, 0],
-      mode: entry?.mode ?? "unknown",
+      detailOwnedRange,
+      mode: displayMode,
       modeReason: modeReason(focal.projectedDiagonalPx, config),
       topPriority,
       chunkCount,

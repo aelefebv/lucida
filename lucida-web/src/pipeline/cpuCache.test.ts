@@ -154,13 +154,16 @@ function makePlan(
   activeSet?: ActiveSetEntry[],
   epochs?: Partial<SceneEpochs>,
 ): RequestPlan {
-  const resolvedActiveSet = activeSet ?? [{
+  // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; the
+  // default fixture builds a single FieldEntry.
+  const resolvedActiveSet: ActiveSetEntry[] = activeSet ?? [{
+    kind: "field",
     entityId: "entity-1",
     imageId: "image-1",
-    mode: "fields-with-detail" as const,
+    mode: "fields-with-detail",
     targetLod: 0,
     coarsestDetailLod: 2,
-    detailOwnedLodRange: [0, 2] as [number, number],
+    detailOwnedLodRange: [0, 2],
     proxyKind: undefined,
     proxyAvailable: false,
     wellProxyAvailable: false,
@@ -187,6 +190,7 @@ function makePlan(
 
 function makeActiveEntry(entityId: string, imageId?: string): ActiveSetEntry {
   return {
+    kind: "field",
     entityId,
     imageId: imageId ?? entityId.replace("entity", "image"),
     mode: "fields-with-detail",

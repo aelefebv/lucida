@@ -270,18 +270,48 @@ function PlanningTabBody({
     }
     const plans = orch.getLastPlans();
     console.group("[DebugPanel] last active sets");
+    // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union;
+    // each variant exposes a different field shape. Render the table
+    // with per-variant defaults so the columns line up across rows.
     for (const [dsId, plan] of plans) {
       console.groupCollapsed(`${dsId}: ${plan.activeSet.length} entries`);
       console.table(
-        plan.activeSet.map(e => ({
-          entityId: e.entityId,
-          mode: e.mode,
-          targetLod: e.targetLod,
-          range: `${e.detailOwnedLodRange[0]}-${e.detailOwnedLodRange[1]}`,
-          proxyKind: e.proxyKind ?? "",
-          proxyAvailable: e.proxyAvailable,
-          wellProxyAvailable: e.wellProxyAvailable,
-        })),
+        plan.activeSet.map(e => {
+          if (e.kind === "well-as-proxy") {
+            return {
+              entityId: e.entityId,
+              kind: e.kind,
+              mode: "well-as-proxy",
+              targetLod: "",
+              range: "",
+              proxyKind: "WellProxy3D",
+              proxyAvailable: true,
+              wellProxyAvailable: true,
+            };
+          }
+          if (e.kind === "invisible") {
+            return {
+              entityId: e.entityId,
+              kind: e.kind,
+              mode: "",
+              targetLod: e.coarsestLod,
+              range: `${e.coarsestLod}-${e.coarsestLod}`,
+              proxyKind: "",
+              proxyAvailable: false,
+              wellProxyAvailable: false,
+            };
+          }
+          return {
+            entityId: e.entityId,
+            kind: e.kind,
+            mode: e.mode,
+            targetLod: e.targetLod,
+            range: `${e.detailOwnedLodRange[0]}-${e.detailOwnedLodRange[1]}`,
+            proxyKind: e.proxyKind ?? "",
+            proxyAvailable: e.proxyAvailable,
+            wellProxyAvailable: e.wellProxyAvailable,
+          };
+        }),
       );
       console.groupEnd();
     }
