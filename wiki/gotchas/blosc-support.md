@@ -18,7 +18,7 @@ The motivation: silently falling back to "no compression" when an unknown codec 
 | Shuffle | `noshuffle`, `shuffle` (byte), `bitshuffle` | All three implemented in-tree. |
 | Typesize | 1, 2, 4 | 8 and others rejected at import. |
 
-Anything outside the table — `blosclz`, `lz4`, `lz4hc`, `zlib`, `snappy` cnames; typesize 8; Blosc2 — is rejected at import with a message naming the offending property and the level it was detected on. (Pre-Slice 2 the rejection was a silent fallback to `None`; Slice 2 turns it into a hard import-time error.)
+Anything outside the table — `blosclz`, `lz4`, `lz4hc`, `zlib`, `snappy` cnames; typesize 8; Blosc2 — is rejected at import with a message naming the offending property and the level it was detected on.
 
 ## Where it lives
 

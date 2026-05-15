@@ -7,9 +7,9 @@ modified: 2026-05-13
 
 ## Current state
 
-`pnpm run build` in `lucida-web/` exits 0. `tsc -b` (and `tsc --noEmit -p tsconfig.app.json`) is clean. The three issues described below were resolved as a prerequisite for the deployment Dockerfile build (see [[decisions/0020-single-image-with-servedir]] and PRD #486). Treat this article as a historical record — there is no live footgun to work around.
+`pnpm run build` in `lucida-web/` exits 0. `tsc -b` (and `tsc --noEmit -p tsconfig.app.json`) is clean. The three issues described below were resolved as a prerequisite for the deployment Dockerfile build (see [[decisions/0020-single-image-with-servedir]]). Treat this article as a historical record — there is no live footgun to work around.
 
-The bulk of the cleanup landed earlier in commit `593eb8d` ("chore: clear 27 pre-existing TypeScript errors in lucida-web", closing issues #438-#443) on April 20, 2026. This article was finally rewritten to reflect that resolution as Slice 1 of PRD #486 (issue #487), so the deployment SPA build stage can rely on a clean TypeScript build.
+The bulk of the cleanup landed in commit `593eb8d` ("chore: clear 27 pre-existing TypeScript errors in lucida-web", closing issues #438-#443) on April 20, 2026.
 
 ## Historical note
 

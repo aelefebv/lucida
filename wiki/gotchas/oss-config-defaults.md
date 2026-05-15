@@ -21,11 +21,7 @@ The full set is documented in PRD #455 §"Configuration surface". Common ones:
 - `LUCIDA_INSECURE` — explicit acknowledgment for `disabled + non-loopback`.
 - `LUCIDA_DB_PATH` — SQLite file path. Default `./lucida.db` (CWD-relative).
 - `LUCIDA_COOKIE_{NAME,SECURE}` — cookie configuration overrides.
-- `LUCIDA_DATA_DIR` — root for `/api/browse`. Mirrors `--data-dir`; CLI flag wins. (PRD #486 slice 4)
-- `LUCIDA_PROXY_CACHE_DIR` — proxy on-disk cache root. Mirrors `--proxy-cache-dir`; CLI flag wins. (PRD #486 slice 4)
-- `LUCIDA_PROXY_CONCURRENCY` — per-generator concurrency cap. Mirrors `--proxy-concurrency`; CLI flag wins. (PRD #486 slice 4)
-- `LUCIDA_LOG_FORMAT` — `text` (default) or `json`. Switches the tracing subscriber between the dev-friendly pretty formatter and the production JSON formatter that log aggregators consume natively. Unknown values fall back to `text` (mirrors `SecureCookieMode::parse`). (PRD #486 slice 4)
-
+- `LUCIDA_DATA_DIR` — root for `/api/browse`. Mirrors `--data-dir`; CLI flag wins.- `LUCIDA_PROXY_CACHE_DIR` — proxy on-disk cache root. Mirrors `--proxy-cache-dir`; CLI flag wins.- `LUCIDA_PROXY_CONCURRENCY` — per-generator concurrency cap. Mirrors `--proxy-concurrency`; CLI flag wins.- `LUCIDA_LOG_FORMAT` — `text` (default) or `json`. Switches the tracing subscriber between the dev-friendly pretty formatter and the production JSON formatter that log aggregators consume natively. Unknown values fall back to `text` (mirrors `SecureCookieMode::parse`).
 ## Common misconfigurations
 
 ### "Auth disabled but I bound to 0.0.0.0"
@@ -50,7 +46,7 @@ We deliberately do NOT trust `X-Forwarded-Proto` (forgeable; documented inline i
 
 ### "Microsoft auth value doesn't work"
 
-`LUCIDA_AUTH=microsoft` (or any unknown value) fails at startup with `UnknownAuthMode`. Slice 7 deliberately tightened parsing to fail loud rather than silently fall through to `Disabled`. Adding a new auth provider requires implementing the `PrincipalExtractor` trait — the value isn't recognized until a provider implementation registers it. See [[decisions/0017-configurable-from-day-one-for-oss-release]] for the OSS extension model.
+`LUCIDA_AUTH=microsoft` (or any unknown value) fails at startup with `UnknownAuthMode`. Parsing is deliberately strict — it fails loud rather than silently falling through to `Disabled`. Adding a new auth provider requires implementing the `PrincipalExtractor` trait — the value isn't recognized until a provider implementation registers it. See [[decisions/0017-configurable-from-day-one-for-oss-release]] for the OSS extension model.
 
 ### "Email format issues with hosted domain check"
 
@@ -68,7 +64,7 @@ You can't, today. `LUCIDA_ADMIN_EMAILS` is read once at startup. Promotion = con
 
 ### "I set LUCIDA_DATA_DIR but my browse handler still serves arbitrary paths"
 
-PRD #486 slice 4 added `env = "LUCIDA_..."` to the existing `--data-dir` (and `--proxy-cache-dir`, `--proxy-concurrency`) clap-derive args. **CLI flags override env vars** — clap's default behavior. So a systemd unit with both `Environment=LUCIDA_DATA_DIR=/var/lib/lucida/data` and `ExecStart=lucida-server --data-dir /tmp` will use `/tmp`, not `/var/lib/lucida/data`. Drop the CLI flag (or remove the env var) when you want the other to win. Verified by the in-tree CLI tests in `lucida-server/src/main.rs`.
+`--data-dir`, `--proxy-cache-dir`, and `--proxy-concurrency` accept env-var fallbacks via `LUCIDA_DATA_DIR` / `LUCIDA_PROXY_CACHE_DIR` / `LUCIDA_PROXY_CONCURRENCY`. **CLI flags override env vars** — clap's default behavior. So a systemd unit with both `Environment=LUCIDA_DATA_DIR=/var/lib/lucida/data` and `ExecStart=lucida-server --data-dir /tmp` will use `/tmp`, not `/var/lib/lucida/data`. Drop the CLI flag (or remove the env var) when you want the other to win. Verified by the in-tree CLI tests in `lucida-server/src/main.rs`.
 
 ## Database location
 
