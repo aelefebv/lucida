@@ -1777,12 +1777,14 @@ describe("plan() edge cases", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const entityA = createSyntheticEntity({
       entityId: "a",
+      imageId: "img-a",
       visible: false,
       levels: [level0],
       layoutPositionVox: [10000, 10000],
     });
     const entityB = createSyntheticEntity({
       entityId: "b",
+      imageId: "img-b",
       visible: false,
       levels: [],
     });
@@ -2621,18 +2623,13 @@ describe("plan() — minimap lane (Slice 5)", () => {
     expect(result.requests.some((r) => r.lane === "minimap")).toBe(false);
   });
 
-  it("skips coords for an imageId that no visible entity matches", () => {
-    const snap = makeMinimapSnapshot({
-      minimapPending: new Map([
-        [
-          "imgUnknown",
-          [{ level: 3, x: 0, y: 0, z: 0, t: 0, c: 0, key: "3/0/0/0/0/0" }],
-        ],
-      ]),
-    });
-    const result = plan(snap, createSyntheticState());
-    expect(result.requests.some((r) => r.lane === "minimap")).toBe(false);
-  });
+  // The previous "skips coords for an imageId that no visible entity
+  // matches" test asserted graceful no-op for a dangling minimap key.
+  // PRD #578 / Slice 3 (ADR 0031) replaces that with a dev-mode boundary
+  // throw — `validatePlanningInputs` (called at the top of `plan()` in
+  // dev mode) flags an unknown `minimapPending` key at the producer
+  // boundary instead of letting the planner silently ignore it. The
+  // throw behaviour is covered by `validate.test.ts > checkMinimapKeys`.
 
   it("sorts before every other lane after the priority sort (smallest priority first)", () => {
     const snap = makeMinimapSnapshot();
