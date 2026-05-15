@@ -5,7 +5,10 @@ modified: 2026-05-15
 
 # `validatePlanningInputs` as the Dev-Mode Boundary Check
 
-> **Post-ship update (2026-05-15, PR #587):** Check 6 (asset-catalog reference resolution) was withdrawn after a real-app trace surfaced a false positive. The catalog is flattened across all datasets the catalog has ever seen; the snapshot is for one dataset's current tick — they legitimately diverge. See "Check 6 — withdrawn" below. The remaining eight checks are unchanged.
+> **Post-ship updates (2026-05-15):**
+> - **PR #587** withdrew check 6 (asset-catalog reference resolution) after a real-app trace surfaced a false positive. The catalog is flattened across all datasets the catalog has ever seen; the snapshot is for one dataset's current tick — they legitimately diverge. See "Check 6 — withdrawn" below.
+> - **PR #588** loosened check 9's `FieldEntry` mapping to accept `kind: "Field"` OR `kind: "Image"`. The planner's `groupByWell` synthesizes `__image__${entityId}` groups for `Image` entities (singletons, non-plate datasets), routing them through the same field-mode code path; the active-set entry it produces is therefore a `FieldEntry` even though the entity is an `ImageSnapshot`. Strict `FieldEntry ⇒ Field-only` was a misreading of the planner's actual semantics.
+> - The remaining seven invariant-shaped checks are unchanged in spirit; only check 6 was removed and check 9's mapping was widened.
 
 ## Decision
 
@@ -33,7 +36,7 @@ Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
 | ~~6~~ | ~~Every `assetCatalog` proxy reference points to a known `entityId`.~~ Withdrawn post-ship — see below. |
 | 7 | Every `minimapPending` map key is a valid `imageId` from `snapshot.entities`. |
 | 8 | `state.previousActiveSet` has no duplicates by `entityId`. |
-| 9 | For each `state.previousActiveSet` entry whose `entityId` is present in `snapshot.entities`, the `kind` matches. |
+| 9 | For each `state.previousActiveSet` entry whose `entityId` is present in `snapshot.entities`, the `kind` matches (`well-as-proxy` ⇒ `Well`; `field` ⇒ `Field` or `Image`; `invisible` ⇒ permissive). The `field` ⇒ `Image` allowance reflects that singletons go through the field code path via `groupByWell`. |
 
 Cost: O(N) in entities + O(L) in total levels for check 4. Cheap enough for dev-mode invocation on every `plan()` call.
 
