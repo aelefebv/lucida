@@ -41,6 +41,9 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0026-discriminated-active-set-and-entity-types]] — `ActiveSetEntry` and `EntitySnapshot` become discriminated unions with top-level `kind`; per-variant invariants compile-time enforced (PRD #563; 2026-05-15)
 - [[decisions/0027-planning-state-as-the-carry-forward-seam]] — `PlanningState` separates across-tick state from per-tick snapshot; planner returns `nextState` opaquely (PRD #563; 2026-05-15)
 - [[decisions/0028-scene-epochs-rename-and-relocation]] — `PlanningEpochs` → `SceneEpochs` in `pipeline/epochs.ts`; `VisibleRegion` → `pipeline/viewport.ts`; no compat shim (PRD #563; 2026-05-15)
+- [[decisions/0029-planning-index-split-into-per-concern-files]] — `pipeline/planning/index.ts` (1695 lines) splits into `types.ts` / `modes.ts` / `chunks.ts` / `emit.ts` / `plan.ts`; `index.ts` becomes a barrel; 5 files (not 6 — constants already in `config.ts`); `emit.ts` (not `priority.ts`) since the bulk is the four lane emitters (PRD #578; 2026-05-15)
+- [[decisions/0030-coordinate-frame-naming-discipline]] — trailing-suffix discipline (`Vox` / `World` / `Px`) on planning contract fields + `Axis.{T,C,Z,Y,X}` namespace constants for the TCZYX 5D layout; JS-side at the snapshot boundary only (PRD #578; 2026-05-15)
+- [[decisions/0031-validate-planning-inputs-dev-mode-boundary-check]] — `validatePlanningInputs(snapshot, state)` runs nine semantic-invariant checks at `plan()` entry; gated by `import.meta.env.DEV`; throws on violation (no degrade) (PRD #578; 2026-05-15)
 
 ## Deferred — considered but not built yet
 
