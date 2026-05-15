@@ -131,7 +131,7 @@ describe("assignModes — three-tier (no catalog)", () => {
     const entity = createSyntheticEntity({
       visible: false,
       projectedDiagonalPx: 200,
-      numLevels: 5,
+      levels: makeStubLevels(5),
     });
 
     const [result] = assignModes([entity], []);
@@ -151,7 +151,7 @@ describe("LOD range", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 5,
+      levels: makeStubLevels(5),
     });
 
     const [result] = assignModes([entity], []);
@@ -166,7 +166,7 @@ describe("LOD range", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 3,
-      numLevels: 4,
+      levels: makeStubLevels(4),
     });
 
     const [result] = assignModes([entity], []);
@@ -181,7 +181,7 @@ describe("LOD range", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
+      levels: makeStubLevels(1),
     });
 
     const [result] = assignModes([entity], []);
@@ -196,7 +196,7 @@ describe("LOD range", () => {
       kind: "Image",
       visible: false,
       projectedDiagonalPx: 30,
-      numLevels: 5,
+      levels: makeStubLevels(5),
     });
 
     const [result] = assignModes([entity], []);
@@ -290,7 +290,6 @@ function makePlateEntities(
       imageId: "",
       kind: "Well",
       projectedDiagonalPx: Math.max(...fields.map((f) => f.px), 0),
-      numLevels: 1,
       levels: [],
       parentId: null,
     }),
@@ -302,7 +301,7 @@ function makePlateEntities(
         imageId: f.image,
         kind: "Field",
         projectedDiagonalPx: f.px,
-        numLevels: 5,
+        levels: makeStubLevels(5),
         idealTargetLod: 0,
         parentId: wellId,
       }),
@@ -516,6 +515,21 @@ function makeLevelGeo(
   };
 }
 
+/**
+ * Build a stub `levels` array of length `n` for tests that only care
+ * about the entity's level count (e.g. invisible-entry coarsest-LOD
+ * tests) rather than per-level geometry. PRD #563 / Slice 1 dropped
+ * `EntitySnapshot.numLevels`, so callers that previously wrote
+ * `numLevels: 5` now provide `levels: makeStubLevels(5)` instead.
+ */
+function makeStubLevels(n: number): LevelGeometry[] {
+  const levels: LevelGeometry[] = [];
+  for (let i = 0; i < n; i++) {
+    levels.push(makeLevelGeo(i, [1, 1, 1, 1, 1], [1, 1, 1, 1, 1]));
+  }
+  return levels;
+}
+
 /** Default visible region covering [0,0]-[1024,1024], z=[0,1). */
 function makeVisibleRegion(overrides?: Partial<VisibleRegion>): VisibleRegion {
   return {
@@ -579,7 +593,6 @@ describe("iterateChunks", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
-      numLevels: 1,
       levels: [level0],
       position: [0, 0],
     });
@@ -606,7 +619,6 @@ describe("iterateChunks", () => {
       entityId: "wellX",
       imageId: "",
       kind: "Well",
-      numLevels: 1,
       levels: [level0],
       position: [0, 0],
     });
@@ -632,7 +644,6 @@ describe("iterateChunks", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
-      numLevels: 1,
       levels: [level0],
       position: [0, 0],
     });
@@ -675,7 +686,6 @@ describe("iterateChunks", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
-      numLevels: 1,
       levels: [level0],
       position: [0, 0],
     });
@@ -694,7 +704,6 @@ describe("iterateChunks", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
-      numLevels: 1,
       levels: [level0],
       position: [0, 0],
     });
@@ -716,7 +725,6 @@ describe("iterateChunks", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
-      numLevels: 1,
       levels: [level0],
       position: [0, 0],
     });
@@ -744,7 +752,6 @@ describe("iterateChunks", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
-      numLevels: 1,
       levels: [level0],
       position: [500, 500],
     });
@@ -773,7 +780,6 @@ describe("iterateChunks", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
-      numLevels: 3,
       levels: [level0, level1, level2],
       position: [0, 0],
     });
@@ -811,7 +817,6 @@ describe("request scheduling", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
       position: [0, 0],
@@ -876,7 +881,6 @@ describe("request scheduling", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
       position: [0, 0],
@@ -887,7 +891,6 @@ describe("request scheduling", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 0.2,
       position: [0, 0],
@@ -973,7 +976,6 @@ describe("plan()", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
       position: [0, 0],
@@ -1019,7 +1021,6 @@ describe("plan()", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
       position: [500, 0],
@@ -1060,7 +1061,6 @@ describe("plan()", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
       kind: "Image",
-      numLevels: 1,
       levels: [level0],
       projectedDiagonalPx: 200,
     });
@@ -1095,7 +1095,6 @@ describe("plan()", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0A],
       importance: 0.8,
       position: [0, 0],
@@ -1112,7 +1111,6 @@ describe("plan()", () => {
       kind: "Image",
       projectedDiagonalPx: 20,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0B],
       importance: 0.5,
       position: [0, 0],
@@ -1200,7 +1198,6 @@ describe("plan() — proxy request emission", () => {
         imageId: "",
         kind: "Well",
         projectedDiagonalPx: Math.max(...opts.fields.map((f) => f.px), 0),
-        numLevels: 0,
         levels: [],
         parentId: null,
       }),
@@ -1210,7 +1207,6 @@ describe("plan() — proxy request emission", () => {
           imageId: f.image,
           kind: "Field",
           projectedDiagonalPx: f.px,
-          numLevels: 1,
           levels: [level0],
           idealTargetLod: 0,
           parentId: opts.wellId,
@@ -1498,7 +1494,6 @@ describe("iterateGridCells stats accumulation", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
       imageId: "img0",
-      numLevels: 1,
       levels: [level0],
       position: [0, 0],
     });
@@ -1672,17 +1667,23 @@ describe("plan() edge cases", () => {
   });
 
   it("all entities invisible → invisible-only active set, empty requests", () => {
+    // Entity A: positioned wholly outside the visible region so spatial
+    // culling clips every chunk away. Entity B: no levels, so the
+    // iterator early-outs.
+    //
+    // Together this tests the planner's invariant: invisible entities
+    // make it into the active set as `fields-with-detail` pass-throughs,
+    // but contribute no chunk requests when there's nothing to fetch.
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const entityA = createSyntheticEntity({
       entityId: "a",
       visible: false,
-      numLevels: 3,
       levels: [level0],
+      position: [10000, 10000],
     });
     const entityB = createSyntheticEntity({
       entityId: "b",
       visible: false,
-      numLevels: 2,
       levels: [],
     });
     const snap = createSyntheticSnapshot({ entities: [entityA, entityB] });
@@ -1692,13 +1693,6 @@ describe("plan() edge cases", () => {
     for (const entry of result.activeSet) {
       expect(entry.mode).toBe("fields-with-detail");
     }
-    // No detail / prefetch requests for invisible entities. Overview
-    // pass would emit if levels were non-empty AND visible region
-    // overlapped, but invisible entities don't get an active-set entry
-    // at the projected LOD; only the overview pass might run them.
-    // For "b" (no levels) and "a" (visible region won't intersect at
-    // coarsest LOD here) we just assert the requests collection sums
-    // sanely — no detail/prefetch chunks.
     const detail = result.requests.filter((r) => r.lane === "detail");
     const prefetch = result.requests.filter((r) => r.lane === "prefetch");
     expect(detail).toHaveLength(0);
@@ -1712,7 +1706,6 @@ describe("plan() edge cases", () => {
       entityId: "e0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      numLevels: 1,
       levels: [level0],
     });
     const snap = createSyntheticSnapshot({
@@ -1747,7 +1740,6 @@ describe("plan() edge cases", () => {
       entityId: "e0",
       kind: "Image",
       projectedDiagonalPx: 200,
-      numLevels: 1,
       levels: [level0],
     });
     const snap = createSyntheticSnapshot({
@@ -1779,7 +1771,6 @@ describe("iterateChunks edge cases", () => {
   it("field-mode entry with empty levels → empty result", () => {
     const entity = createSyntheticEntity({
       entityId: "e0",
-      numLevels: 0,
       levels: [],
     });
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
@@ -1798,7 +1789,7 @@ describe("groupByWell edge cases (via assignModes)", () => {
       imageId: "img-orphan",
       kind: "Field",
       projectedDiagonalPx: 200,
-      numLevels: 3,
+      levels: makeStubLevels(3),
       idealTargetLod: 0,
       parentId: null,
     });
@@ -2029,7 +2020,6 @@ describe("plan() honors config tunables", () => {
           imageId: "",
           kind: "Well",
           projectedDiagonalPx: opts.px,
-          numLevels: 0,
           levels: [],
           parentId: null,
         }),
@@ -2039,7 +2029,6 @@ describe("plan() honors config tunables", () => {
           kind: "Field",
           projectedDiagonalPx: opts.px,
           idealTargetLod: 0,
-          numLevels: 1,
           levels: [level0],
           importance: opts.importance ?? 1.0,
           parentId: wellId,
@@ -2120,7 +2109,6 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
     });
     const snap = createSyntheticSnapshot({
@@ -2160,7 +2148,6 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
     });
@@ -2170,7 +2157,6 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 0.0,
     });
@@ -2218,7 +2204,6 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
     });
@@ -2287,7 +2272,6 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
     });
@@ -2352,7 +2336,6 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
     });
@@ -2401,7 +2384,6 @@ describe("plan() honors config tunables", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: 1.0,
     });
@@ -2464,7 +2446,6 @@ describe("plan() — minimap lane (Slice 5)", () => {
       kind: "Image",
       projectedDiagonalPx: 200,
       idealTargetLod: 0,
-      numLevels: 1,
       levels: [level0],
       importance: opts?.importance ?? 1.0,
     });

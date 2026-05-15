@@ -1089,7 +1089,7 @@ export class CpuCache {
     let result: FetchResult;
     try {
       result = await this.source.fetch(
-        { datasetId: req.datasetId ?? req.entityId, imageId: req.imageId, chunkKey: req.chunkKey },
+        { datasetId: req.datasetId, imageId: req.imageId, chunkKey: req.chunkKey },
         controller.signal,
       );
     } catch (err: unknown) {

@@ -218,10 +218,11 @@ export function buildPlanningSnapshot(
 
   // 4. Snake-case → camelCase translation for every visible entity.
   //    Joins the WASM payload with the manifest to pick up `levels` and
-  //    `parentId` (neither of which are part of `view_query`).
+  //    `parentId` (neither of which are part of `view_query`). PRD #563
+  //    / Slice 1 dropped the redundant `numLevels` field — consumers
+  //    derive it from `levels.length`.
   const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
     const imgSpec = imageSpecById.get(e.image_id);
-    const numLevels = imgSpec ? imgSpec.multiscale.levels.length : 1;
     const levels = imgSpec ? imgSpec.multiscale.levels : [];
     const position = positions[e.entity_id] ?? ([0, 0] as [number, number]);
     return {
@@ -234,7 +235,6 @@ export function buildPlanningSnapshot(
       centroidWorld: e.centroid_world,
       idealTargetLod: e.ideal_target_lod,
       importance: e.importance,
-      numLevels,
       levels,
       position,
       parentId: parentByEntityId.get(e.entity_id) ?? null,
@@ -281,8 +281,11 @@ export function buildPlanningSnapshot(
   //    the orchestrator's `requestEpoch` (folded in by the caller).
   //    `minimapPending` is forwarded verbatim — the planner consumes
   //    it via `emitMinimapLane` to build minimap-lane requests at
-  //    {@link MINIMAP_LANE_OFFSET}.
+  //    {@link MINIMAP_LANE_OFFSET}. `datasetId` is plumbed onto the
+  //    snapshot so the planner stamps it onto every emitted request
+  //    (PRD #563 / Slice 1).
   const snapshot: PlanningSnapshot = {
+    datasetId,
     epochs: currentEpochs,
     entities,
     visibleRegion,

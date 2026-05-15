@@ -133,6 +133,7 @@ function createSyncDecode(): DecodePool {
 
 function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
   return {
+    datasetId: "entity-1",
     entityId: "entity-1",
     imageId: "image-1",
     level: 0,
