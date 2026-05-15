@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { WasmScene } from "lucida-core";
+import { Axis } from "../axes.ts";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { VolumeData } from "../types.ts";
@@ -61,8 +62,8 @@ export function usePreUpload({
         const ds = datasetsRef.current.get(id);
         const scene = wasmSceneRef.current;
         if (ds && scene) {
-          const fullResWidth = ds.manifest.images[0].multiscale.levels[0].shape[4];
-          const fullResHeight = ds.manifest.images[0].multiscale.levels[0].shape[3];
+          const fullResWidth = ds.manifest.images[0].multiscale.levels[0].shape[Axis.X];
+          const fullResHeight = ds.manifest.images[0].multiscale.levels[0].shape[Axis.Y];
           applyViewportCommand(scene, { type: "set_center", x: fullResWidth / 2, y: fullResHeight / 2 });
           applyViewportCommand(scene, { type: "set_zoom", value: 1.0 });
           emitPresence();

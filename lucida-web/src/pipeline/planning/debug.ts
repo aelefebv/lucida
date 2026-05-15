@@ -153,8 +153,8 @@ export function buildPlanningDatasetDebug(
   // Focal entity: visible entity with centroid nearest viewport-center
   // (xy midpoint of the visible region — z ignored since the focal
   // inspector is mostly used for slice-mode navigation).
-  const cx = (visibleRegion.xyBounds[0] + visibleRegion.xyBounds[2]) / 2;
-  const cy = (visibleRegion.xyBounds[1] + visibleRegion.xyBounds[3]) / 2;
+  const cx = (visibleRegion.xyBoundsVox[0] + visibleRegion.xyBoundsVox[2]) / 2;
+  const cy = (visibleRegion.xyBoundsVox[1] + visibleRegion.xyBoundsVox[3]) / 2;
   let focal: EntitySnapshot | null = null;
   let bestDist = Infinity;
   for (const e of entities) {

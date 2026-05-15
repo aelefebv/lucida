@@ -11,6 +11,7 @@
  * out of `./index.ts` into this dedicated file.
  */
 
+import { Axis } from "../../axes.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import { chunkWorldDims, iterateChunks, iterateChunksAtLodRange } from "./chunks.ts";
 import type { PlanningConfig } from "./config.ts";
@@ -235,7 +236,7 @@ export function emitPrefetchLane(
     if (entity === undefined) continue;
     if (entity.levels.length === 0) continue;
 
-    const maxT = entity.levels[0]?.grid_shape[0] ?? 0;
+    const maxT = entity.levels[0]?.grid_shape[Axis.T] ?? 0;
     for (let dt = 1; dt <= config.prefetchDepth; dt++) {
       const nextT = snapshot.selection.t + dt;
       if (nextT >= maxT) break;
@@ -332,16 +333,18 @@ function chunkDistanceFromCenter(
   let centerY: number;
   let centerZ: number;
 
-  if (region.sortCenter !== null) {
-    centerX = region.sortCenter[0] - entity.position[0];
-    centerY = region.sortCenter[1] - entity.position[1];
-    centerZ = region.sortCenter[2];
+  if (region.sortCenterVox !== null) {
+    centerX = region.sortCenterVox[0] - entity.layoutPositionVox[0];
+    centerY = region.sortCenterVox[1] - entity.layoutPositionVox[1];
+    centerZ = region.sortCenterVox[2];
   } else {
     centerX =
-      (region.xyBounds[0] + region.xyBounds[2]) / 2 - entity.position[0];
+      (region.xyBoundsVox[0] + region.xyBoundsVox[2]) / 2 -
+      entity.layoutPositionVox[0];
     centerY =
-      (region.xyBounds[1] + region.xyBounds[3]) / 2 - entity.position[1];
-    centerZ = (region.zRange[0] + region.zRange[1]) / 2;
+      (region.xyBoundsVox[1] + region.xyBoundsVox[3]) / 2 -
+      entity.layoutPositionVox[1];
+    centerZ = (region.zRangeVox[0] + region.zRangeVox[1]) / 2;
   }
 
   // Compute chunk world size at this level via the shared helper.

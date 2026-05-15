@@ -15,6 +15,7 @@
  * filters those out so callers can iterate without null checks.
  */
 
+import { Axis } from "../axes.ts";
 import type { DatasetManifest, LayoutSpec } from "../manifestTypes.ts";
 
 /** Find the placements from the source default layout, if any. */
@@ -43,7 +44,7 @@ function entityFootprintYX(manifest: DatasetManifest, entityId: string): [number
   if (directImg) {
     const lvl0 = directImg.multiscale.levels[0];
     if (!lvl0) return [1, 1];
-    return [lvl0.shape[3] ?? 1, lvl0.shape[4] ?? 1];
+    return [lvl0.shape[Axis.Y] ?? 1, lvl0.shape[Axis.X] ?? 1];
   }
 
   const children = manifest.entities.filter((e) => e.parent === entityId);
@@ -58,8 +59,8 @@ function entityFootprintYX(manifest: DatasetManifest, entityId: string): [number
     if (!childImg) continue;
     const lvl0 = childImg.multiscale.levels[0];
     if (!lvl0) continue;
-    const fovY = lvl0.shape[3] ?? 1;
-    const fovX = lvl0.shape[4] ?? 1;
+    const fovY = lvl0.shape[Axis.Y] ?? 1;
+    const fovX = lvl0.shape[Axis.X] ?? 1;
     const t = manifest.transforms.find((t) => t.from === child.id && t.to === entityId);
     const tx = t?.transform.matrix[12] ?? 0;
     const ty = t?.transform.matrix[13] ?? 0;
@@ -101,8 +102,8 @@ function maxImageFovYX(manifest: DatasetManifest): [number, number] {
   for (const img of manifest.images) {
     const lvl0 = img.multiscale.levels[0];
     if (!lvl0) continue;
-    const y = lvl0.shape[3] ?? 0;
-    const x = lvl0.shape[4] ?? 0;
+    const y = lvl0.shape[Axis.Y] ?? 0;
+    const x = lvl0.shape[Axis.X] ?? 0;
     if (y > maxY) maxY = y;
     if (x > maxX) maxX = x;
   }

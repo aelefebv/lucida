@@ -79,10 +79,10 @@ interface VisibleRegionJson {
  * 1024×1024 bounds match the historical orchestrator fallback.
  */
 const DEFAULT_VISIBLE_REGION: VisibleRegion = {
-  xyBounds: [0, 0, 1024, 1024],
-  zRange: [0, 1],
+  xyBoundsVox: [0, 0, 1024, 1024],
+  zRangeVox: [0, 1],
   effectiveZoom: 1,
-  sortCenter: null,
+  sortCenterVox: null,
   frustumPlanes: null,
 };
 
@@ -227,7 +227,8 @@ export function buildPlanningSnapshot(
   const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
     const imgSpec = imageSpecById.get(e.image_id);
     const levels = imgSpec ? imgSpec.multiscale.levels : [];
-    const position = positions[e.entity_id] ?? ([0, 0] as [number, number]);
+    const layoutPositionVox =
+      positions[e.entity_id] ?? ([0, 0] as [number, number]);
     const base = {
       entityId: e.entity_id,
       imageId: e.image_id,
@@ -237,7 +238,7 @@ export function buildPlanningSnapshot(
       centroidWorld: e.centroid_world,
       idealTargetLod: e.ideal_target_lod,
       importance: e.importance,
-      position,
+      layoutPositionVox,
       levels,
     };
     if (e.kind === "Field") {
@@ -266,10 +267,10 @@ export function buildPlanningSnapshot(
     : null;
   const visibleRegion: VisibleRegion = vr
     ? {
-        xyBounds: vr.xy_bounds,
-        zRange: vr.z_range,
+        xyBoundsVox: vr.xy_bounds,
+        zRangeVox: vr.z_range,
         effectiveZoom: vr.effective_zoom,
-        sortCenter: vr.sort_center,
+        sortCenterVox: vr.sort_center,
         frustumPlanes: vr.frustum_planes,
       }
     : DEFAULT_VISIBLE_REGION;

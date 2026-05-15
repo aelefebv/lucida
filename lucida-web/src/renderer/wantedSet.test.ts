@@ -42,10 +42,10 @@ function makeVisibleRegion(
   overrides?: Partial<VisibleRegion>,
 ): VisibleRegion {
   return {
-    xyBounds: [0, 0, 256, 256],
-    zRange: [0, 64],
+    xyBoundsVox: [0, 0, 256, 256],
+    zRangeVox: [0, 64],
     effectiveZoom: 1,
-    sortCenter: null,
+    sortCenterVox: null,
     frustumPlanes: null,
     ...overrides,
   };
@@ -145,11 +145,11 @@ function buildMemberToPool(volumeAtlases: Map<string, AtlasSnapshot>): Map<strin
 
 describe("computeWantedSet", () => {
   it("empty atlas -> all visible chunks missing", () => {
-    // Visible region covers [0,0,64,64] -> 2x2 in XY, zRange [0,32] -> 1 in Z
+    // Visible region covers [0,0,64,64] -> 2x2 in XY, zRangeVox [0,32] -> 1 in Z
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 64, 64],
-        zRange: [0, 32],
+        xyBoundsVox: [0, 0, 64, 64],
+        zRangeVox: [0, 32],
       }),
     });
     // Shared pool keyed by datasetId, with "img" as the only entity
@@ -171,8 +171,8 @@ describe("computeWantedSet", () => {
   it("full atlas -> empty wanted-set", () => {
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 64, 64],
-        zRange: [0, 32],
+        xyBoundsVox: [0, 0, 64, 64],
+        zRangeVox: [0, 32],
       }),
     });
     // Pre-populate shared pool with all expected chunks (composite keys)
@@ -194,8 +194,8 @@ describe("computeWantedSet", () => {
   it("partial atlas -> only missing chunks reported", () => {
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 64, 64],
-        zRange: [0, 32],
+        xyBoundsVox: [0, 0, 64, 64],
+        zRangeVox: [0, 32],
       }),
     });
     // 2 of 4 chunks present
@@ -218,8 +218,8 @@ describe("computeWantedSet", () => {
     // Grid is 4x4, but visible region only covers first 2x2
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 64, 64], // 64/32=2 chunks in each axis
-        zRange: [0, 32],
+        xyBoundsVox: [0, 0, 64, 64], // 64/32=2 chunks in each axis
+        zRangeVox: [0, 32],
       }),
     });
     const atlas = makeVolumePool("img", [
@@ -245,8 +245,8 @@ describe("computeWantedSet", () => {
     const coldState = makeColdState({
       visibleChannels: [0, 2],
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 32, 32], // 1x1 in XY
-        zRange: [0, 32], // 1 in Z
+        xyBoundsVox: [0, 0, 32, 32], // 1x1 in XY
+        zRangeVox: [0, 32], // 1 in Z
       }),
     });
     // Separate shared pools for each channel: poolKey = "ds-0:chN"
@@ -275,8 +275,8 @@ describe("computeWantedSet", () => {
     const coldState = makeColdState({
       viewMode: "slice",
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 64, 64],
-        zRange: [0, 64], // full Z range in visible region (ignored for slice)
+        xyBoundsVox: [0, 0, 64, 64],
+        zRangeVox: [0, 64], // full Z range in visible region (ignored for slice)
       }),
     });
     // Slice now uses shared pools too. Pool keyed by datasetId+chunkdims, with "img" as the only entity.
@@ -323,8 +323,8 @@ describe("computeWantedSet", () => {
     // Visible region covers 1x1 in XY, 1 in Z at each LOD
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 32, 32],
-        zRange: [0, 32],
+        xyBoundsVox: [0, 0, 32, 32],
+        zRangeVox: [0, 32],
       }),
       activeSet: [
         makeActiveEntry({
@@ -361,8 +361,8 @@ describe("computeWantedSet", () => {
   it("single-LOD fallback: only target LOD in wanted-set", () => {
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 32, 32],
-        zRange: [0, 32],
+        xyBoundsVox: [0, 0, 32, 32],
+        zRangeVox: [0, 32],
       }),
       activeSet: [
         makeActiveEntry({
@@ -394,8 +394,8 @@ describe("computeWantedSet", () => {
     // Large visible region to cover full grids
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 32],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 32],
       }),
       activeSet: [
         makeActiveEntry({
@@ -490,8 +490,8 @@ describe("computeWantedSet", () => {
     it("fields-with-detail + present field-proxy -> no proxy ask, chunk wanted-set unchanged", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
-          xyBounds: [0, 0, 32, 32],
-          zRange: [0, 32],
+          xyBoundsVox: [0, 0, 32, 32],
+          zRangeVox: [0, 32],
         }),
         activeSet: [
           makeActiveEntry({
@@ -526,8 +526,8 @@ describe("computeWantedSet", () => {
     it("fields-with-detail + missing advertised field-proxy -> emits MissingProxy { FieldProxy3D }", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
-          xyBounds: [0, 0, 32, 32],
-          zRange: [0, 32],
+          xyBoundsVox: [0, 0, 32, 32],
+          zRangeVox: [0, 32],
         }),
         activeSet: [
           makeActiveEntry({
@@ -559,8 +559,8 @@ describe("computeWantedSet", () => {
     it("fields-with-detail + proxyAvailable=false -> no MissingProxy", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
-          xyBounds: [0, 0, 32, 32],
-          zRange: [0, 32],
+          xyBoundsVox: [0, 0, 32, 32],
+          zRangeVox: [0, 32],
         }),
         activeSet: [
           makeActiveEntry({
@@ -590,8 +590,8 @@ describe("computeWantedSet", () => {
     it("fields-with-proxy-fallback emits both field-proxy and parent-well-proxy (deduped per well)", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
-          xyBounds: [0, 0, 32, 32],
-          zRange: [0, 32],
+          xyBoundsVox: [0, 0, 32, 32],
+          zRangeVox: [0, 32],
         }),
         activeSet: [
           makeActiveEntry({
@@ -627,8 +627,8 @@ describe("computeWantedSet", () => {
     it("mixed modes: well-as-proxy + fields-with-detail -> both reported correctly", () => {
       const coldState = makeColdState({
         visibleRegion: makeVisibleRegion({
-          xyBounds: [0, 0, 32, 32],
-          zRange: [0, 32],
+          xyBoundsVox: [0, 0, 32, 32],
+          zRangeVox: [0, 32],
         }),
         activeSet: [
           makeActiveEntry({

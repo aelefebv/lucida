@@ -3,6 +3,7 @@ import type { WasmScene } from "lucida-core";
 import { Bridge, bridgeLog, type BridgeHandlers, type ClientId, type PresenceState } from "../bridge.ts";
 export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
+import { Axis } from "../axes.ts";
 import type { DatasetManifest, FetchSource } from "../manifestTypes.ts";
 import { DecodePool } from "../pipeline/decodePool.ts";
 import { ProxiedContentSource } from "../pipeline/contentSource.ts";
@@ -436,7 +437,7 @@ export function useBridge({
   function setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource) {
     const datasetId = manifest.dataset_id;
     const firstImage = manifest.images[0];
-    const channelCount = firstImage?.multiscale.levels[0]?.shape[1] ?? 1; // [T, C, Z, Y, X]
+    const channelCount = firstImage?.multiscale.levels[0]?.shape[Axis.C] ?? 1; // [T, C, Z, Y, X]
     const fetchVariant = Object.keys(fetchDesc as object)[0] ?? "unknown";
 
     // Shape summary — mirrors the WASM-side `analyze_manifest_shape`

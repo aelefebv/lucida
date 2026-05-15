@@ -1,4 +1,5 @@
 /** Slice render path: upload chunks + render multi-pass. */
+import { Axis } from "./axes.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
@@ -71,8 +72,8 @@ function uploadAndRenderSlice(
     if (!dsSettings || !dsSettings.visible) continue;
 
     const dsShapeL = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
-    const fullResWidth = dsShapeL[4];
-    const fullResHeight = dsShapeL[3];
+    const fullResWidth = dsShapeL[Axis.X];
+    const fullResHeight = dsShapeL[Axis.Y];
 
     const members = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
@@ -84,7 +85,7 @@ function uploadAndRenderSlice(
       const channelBlend = dsSettings.channel_blend_mode as "alpha" | "additive" | "max" || "additive";
 
       for (const ch of activeChannels) {
-        if (z >= dsShapeL[2] || ch >= dsShapeL[1] || t >= dsShapeL[0]) continue;
+        if (z >= dsShapeL[Axis.Z] || ch >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
 
         for (const m of members) {
           // S8 fix: synthesized well-as-proxy entries carry their own
@@ -109,7 +110,7 @@ function uploadAndRenderSlice(
       }
     } else {
       // Single-channel
-      if (z >= dsShapeL[2] || c >= dsShapeL[1] || t >= dsShapeL[0]) continue;
+      if (z >= dsShapeL[Axis.Z] || c >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
 
       for (const m of members) {
         // S8 fix: synthesized well-as-proxy entries carry their own

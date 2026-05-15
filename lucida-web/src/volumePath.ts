@@ -1,4 +1,5 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
+import { Axis } from "./axes.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
@@ -135,7 +136,7 @@ function uploadAndRenderVolume(
       const channelBlend = dsSettings.channel_blend_mode as "alpha" | "additive" | "max" || "additive";
 
       for (const ch of activeChannels) {
-        if (ch >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
+        if (ch >= dsShapeV[Axis.C] || viewT >= dsShapeV[Axis.T]) continue;
 
         for (const m of members) {
           const compKey = compositeKey(m.imageId, ch);
@@ -163,7 +164,7 @@ function uploadAndRenderVolume(
       }
     } else {
       // Single-channel
-      if (viewC >= dsShapeV[1] || viewT >= dsShapeV[0]) continue;
+      if (viewC >= dsShapeV[Axis.C] || viewT >= dsShapeV[Axis.T]) continue;
 
       for (const m of members) {
         const model = m.modelMatrix

@@ -6,6 +6,7 @@
 
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { SceneSettings } from "../tickCommon.ts";
+import { Axis } from "../axes.ts";
 import type { DatasetManifest, LevelGeometry } from "../manifestTypes.ts";
 import type {
   ColdStateActiveEntry,
@@ -211,14 +212,14 @@ function synthesizeWellRosterEntry(
   let valid2DCount = 0;
   for (const field of childFields) {
     // 2D voxel-space AABB from the field's own position + level0 shape.
-    // EntitySnapshot.position is already in voxel coords (from
+    // EntitySnapshot.layoutPositionVox is already in voxel coords (from
     // `scene.member_positions`).
-    const fx = field.position[0];
-    const fy = field.position[1];
+    const fx = field.layoutPositionVox[0];
+    const fy = field.layoutPositionVox[1];
     const lvl0 = field.levels[0];
     if (lvl0) {
-      const fw = lvl0.shape[4]; // X
-      const fh = lvl0.shape[3]; // Y
+      const fw = lvl0.shape[Axis.X];
+      const fh = lvl0.shape[Axis.Y];
       min2DX = Math.min(min2DX, fx);
       min2DY = Math.min(min2DY, fy);
       max2DX = Math.max(max2DX, fx + fw);
@@ -725,7 +726,7 @@ export class Orchestrator {
         if (entity) {
           rosterEntries.push({
             imageId: entity.imageId,
-            position: entity.position,
+            position: entity.layoutPositionVox,
             entityId: entry.entityId,
             mode: entry.mode,
           });
@@ -935,16 +936,16 @@ export class Orchestrator {
       // Coordinate diagnostic
       orchDebug.visibleRegion = this._lastVisibleRegion
         ? {
-            xyBounds: this._lastVisibleRegion.xyBounds,
-            zRange: this._lastVisibleRegion.zRange,
+            xyBounds: this._lastVisibleRegion.xyBoundsVox,
+            zRange: this._lastVisibleRegion.zRangeVox,
             effectiveZoom: this._lastVisibleRegion.effectiveZoom,
           }
         : null;
       orchDebug.entityDiag = this._lastEntities.slice(0, 5).map(e => ({
         entityId: e.entityId,
-        position: e.position,
+        position: e.layoutPositionVox,
         fullShape: e.levels.length > 0
-          ? [e.levels[0].shape[4], e.levels[0].shape[3]] as [number, number]
+          ? [e.levels[0].shape[Axis.X], e.levels[0].shape[Axis.Y]] as [number, number]
           : null,
         cachedKeys: this._lastCachedKeyCounts.get(e.entityId) ?? 0,
       }));
@@ -1715,7 +1716,7 @@ export class Orchestrator {
     };
 
     if (viewMode === "slice") {
-      const fullResDepth = imageSpec.multiscale.levels[0].shape[2];
+      const fullResDepth = imageSpec.multiscale.levels[0].shape[Axis.Z];
       ctx.client.sliceChunkData(
         workerMemberId, [chunkData],
         delivery.level, sliceZ!, delivery.t, delivery.c,
@@ -1899,15 +1900,15 @@ export class Orchestrator {
       const entity = entityById.get(entry.entityId);
       const levels = (entity?.levels ?? []).map((lvl: LevelGeometry, idx: number) => {
         const chunkShape: [number, number, number] = [
-          lvl.chunk_shape[2], lvl.chunk_shape[3], lvl.chunk_shape[4],
+          lvl.chunk_shape[Axis.Z], lvl.chunk_shape[Axis.Y], lvl.chunk_shape[Axis.X],
         ];
         const gridShape: [number, number, number] = [
-          Math.ceil(lvl.shape[2] / lvl.chunk_shape[2]),
-          Math.ceil(lvl.shape[3] / lvl.chunk_shape[3]),
-          Math.ceil(lvl.shape[4] / lvl.chunk_shape[4]),
+          Math.ceil(lvl.shape[Axis.Z] / lvl.chunk_shape[Axis.Z]),
+          Math.ceil(lvl.shape[Axis.Y] / lvl.chunk_shape[Axis.Y]),
+          Math.ceil(lvl.shape[Axis.X] / lvl.chunk_shape[Axis.X]),
         ];
         const levelDims: [number, number, number] = [
-          lvl.shape[2], lvl.shape[3], lvl.shape[4],
+          lvl.shape[Axis.Z], lvl.shape[Axis.Y], lvl.shape[Axis.X],
         ];
         return { level: idx, chunkShape, gridShape, levelDims };
       });

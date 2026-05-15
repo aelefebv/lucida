@@ -569,10 +569,10 @@ function makeStubLevels(n: number): LevelGeometry[] {
 /** Default visible region covering [0,0]-[1024,1024], z=[0,1). */
 function makeVisibleRegion(overrides?: Partial<VisibleRegion>): VisibleRegion {
   return {
-    xyBounds: [0, 0, 1024, 1024],
-    zRange: [0, 1],
+    xyBoundsVox: [0, 0, 1024, 1024],
+    zRangeVox: [0, 1],
     effectiveZoom: 1,
-    sortCenter: null,
+    sortCenterVox: null,
     frustumPlanes: null,
     ...overrides,
   };
@@ -630,12 +630,12 @@ describe("iterateChunks", () => {
       entityId: "e0",
       imageId: "img0",
       levels: [level0],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
 
     // Visible region covers only top-left quarter: [0,0]-[512,512]
-    const region = makeVisibleRegion({ xyBounds: [0, 0, 512, 512] });
+    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 512] });
     const selection = makeSelection();
 
     const result = iterateChunks(entity, entry, region, selection);
@@ -656,7 +656,7 @@ describe("iterateChunks", () => {
       imageId: "",
       kind: "Well",
       levels: [level0],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     // PRD #563 / Slice 4: WellAsProxyEntry carries only `kind` +
     // `entityId`; the chunk-iteration short-circuit reads `kind`, not
@@ -677,7 +677,7 @@ describe("iterateChunks", () => {
       kind: "Image",
       visible: false,
       levels: [level0],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const entry: ActiveSetEntry = {
       kind: "invisible",
@@ -697,7 +697,7 @@ describe("iterateChunks", () => {
       entityId: "e0",
       imageId: "img0",
       levels: [level0],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
 
@@ -706,8 +706,8 @@ describe("iterateChunks", () => {
     // Plane [-1, 0, 0, 256]: test = (-1)*cmin_x + 256 < 0 → cmin_x > 256
     // col 0 (cmin_x=0): kept, col 1 (cmin_x=256): kept, col 2+: culled.
     const region = makeVisibleRegion({
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 4],
+      xyBoundsVox: [0, 0, 1024, 1024],
+      zRangeVox: [0, 4],
       frustumPlanes: [[-1, 0, 0, 256]],
     });
     const selection = makeSelection();
@@ -715,7 +715,7 @@ describe("iterateChunks", () => {
     const all = iterateChunks(
       entity,
       entry,
-      makeVisibleRegion({ xyBounds: [0, 0, 1024, 1024], zRange: [0, 4] }),
+      makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024], zRangeVox: [0, 4] }),
       selection,
     );
     const culled = iterateChunks(entity, entry, region, selection);
@@ -739,10 +739,10 @@ describe("iterateChunks", () => {
       entityId: "e0",
       imageId: "img0",
       levels: [level0],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
-    const region = makeVisibleRegion({ xyBounds: [0, 0, 512, 512] });
+    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 512] });
     const selection = makeSelection();
 
     const result = iterateChunks(entity, entry, region, selection);
@@ -757,10 +757,10 @@ describe("iterateChunks", () => {
       entityId: "e0",
       imageId: "img0",
       levels: [level0],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
-    const region = makeVisibleRegion({ xyBounds: [0, 0, 256, 256] });
+    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 256, 256] });
     const selection = makeSelection({ visibleChannels: [0, 2, 3] });
 
     const result = iterateChunks(entity, entry, region, selection);
@@ -778,13 +778,13 @@ describe("iterateChunks", () => {
       entityId: "e0",
       imageId: "img0",
       levels: [level0],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
 
     const region = makeVisibleRegion({
-      xyBounds: [0, 0, 1024, 256],
-      sortCenter: [960, 128, 0],
+      xyBoundsVox: [0, 0, 1024, 256],
+      sortCenterVox: [960, 128, 0],
     });
     const selection = makeSelection();
 
@@ -805,10 +805,10 @@ describe("iterateChunks", () => {
       entityId: "e0",
       imageId: "img0",
       levels: [level0],
-      position: [500, 500],
+      layoutPositionVox: [500, 500],
     });
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
-    const region = makeVisibleRegion({ xyBounds: [400, 400, 600, 600] });
+    const region = makeVisibleRegion({ xyBoundsVox: [400, 400, 600, 600] });
     const selection = makeSelection();
 
     const result = iterateChunks(entity, entry, region, selection);
@@ -833,11 +833,11 @@ describe("iterateChunks", () => {
       entityId: "e0",
       imageId: "img0",
       levels: [level0, level1, level2],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     // Detail entry owning levels 0..2 inclusive.
     const entry = makeFieldDetailEntry("e0", "img0", 0, 2);
-    const region = makeVisibleRegion({ xyBounds: [0, 0, 1024, 1024] });
+    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] });
     const selection = makeSelection();
 
     const result = iterateChunks(entity, entry, region, selection);
@@ -871,15 +871,15 @@ describe("request scheduling", () => {
       idealTargetLod: 0,
       levels: [level0],
       importance: 1.0,
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     return createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 512, 512],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 512, 512],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -935,7 +935,7 @@ describe("request scheduling", () => {
       idealTargetLod: 0,
       levels: [level0],
       importance: 1.0,
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const lowImportance = createSyntheticEntity({
       entityId: "low",
@@ -945,15 +945,15 @@ describe("request scheduling", () => {
       idealTargetLod: 0,
       levels: [level0],
       importance: 0.2,
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const snapshot = createSyntheticSnapshot({
       entities: [highImportance, lowImportance],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -1030,17 +1030,17 @@ describe("plan()", () => {
       idealTargetLod: 0,
       levels: [level0],
       importance: 1.0,
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
 
-    // sortCenter at x=960 (near chunk col 3).
+    // sortCenterVox at x=960 (near chunk col 3).
     const snapshot = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 1024, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 1024, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: [960, 128, 0],
+        sortCenterVox: [960, 128, 0],
         frustumPlanes: null,
       },
       selection: {
@@ -1058,9 +1058,9 @@ describe("plan()", () => {
     expect(detailReqs.length).toBe(4);
 
     // Detail requests should be sorted by priority (ascending).
-    // The chunk closest to sortCenter (col 3) should be first.
+    // The chunk closest to sortCenterVox (col 3) should be first.
     expect(detailReqs[0].x).toBe(3);
-    // The chunk farthest from sortCenter (col 0) should be last.
+    // The chunk farthest from sortCenterVox (col 0) should be last.
     expect(detailReqs[3].x).toBe(0);
   });
 
@@ -1075,17 +1075,17 @@ describe("plan()", () => {
       idealTargetLod: 0,
       levels: [level0],
       importance: 1.0,
-      position: [500, 0],
+      layoutPositionVox: [500, 0],
     });
 
     // View center at x=900 → local x=400 → closer to col 1 (chunk center 384).
     const snapshot = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [400, 0, 1100, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [400, 0, 1100, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null, // midpoint = [750, 128] → local x = 250
+        sortCenterVox: null, // midpoint = [750, 128] → local x = 250
         frustumPlanes: null,
       },
       selection: {
@@ -1149,7 +1149,7 @@ describe("plan()", () => {
       idealTargetLod: 0,
       levels: [level0A],
       importance: 0.8,
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
 
     // Entity 2: small projected diagonal — without a catalog this still
@@ -1165,16 +1165,16 @@ describe("plan()", () => {
       idealTargetLod: 0,
       levels: [level0B],
       importance: 0.5,
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
 
     const snapshot = createSyntheticSnapshot({
       entities: [entityDetail, entityOverview],
       visibleRegion: {
-        xyBounds: [0, 0, 512, 512],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 512, 512],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -1272,10 +1272,10 @@ describe("plan() — proxy request emission", () => {
     return createSyntheticSnapshot({
       entities,
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -1595,7 +1595,7 @@ describe("iterateGridCells stats accumulation", () => {
       entityId: "e0",
       imageId: "img0",
       levels: [level0],
-      position: [0, 0],
+      layoutPositionVox: [0, 0],
     });
     const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
     return { entity, entry };
@@ -1604,8 +1604,8 @@ describe("iterateGridCells stats accumulation", () => {
   it("considered increments by maxCol * maxRow * maxZ per call", () => {
     const { entity, entry } = makeStatsFixture();
     const region = makeVisibleRegion({
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 4],
+      xyBoundsVox: [0, 0, 1024, 1024],
+      zRangeVox: [0, 4],
     });
     const stats = emptyPlanStats();
 
@@ -1619,8 +1619,8 @@ describe("iterateGridCells stats accumulation", () => {
     const { entity, entry } = makeStatsFixture();
     // Clip to top-left quadrant: 2x2 columns kept, all 4 z slices.
     const region = makeVisibleRegion({
-      xyBounds: [0, 0, 512, 512],
-      zRange: [0, 4],
+      xyBoundsVox: [0, 0, 512, 512],
+      zRangeVox: [0, 4],
     });
     const stats = emptyPlanStats();
 
@@ -1635,8 +1635,8 @@ describe("iterateGridCells stats accumulation", () => {
     const { entity, entry } = makeStatsFixture();
     // Full XY but only z=0..1 (one z slice kept).
     const region = makeVisibleRegion({
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 1],
+      xyBoundsVox: [0, 0, 1024, 1024],
+      zRangeVox: [0, 1],
     });
     const stats = emptyPlanStats();
 
@@ -1652,8 +1652,8 @@ describe("iterateGridCells stats accumulation", () => {
     const { entity, entry } = makeStatsFixture();
     // Tight frustum: keep only x-cols where cmin_x < 256, i.e. col 0.
     const region = makeVisibleRegion({
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 4],
+      xyBoundsVox: [0, 0, 1024, 1024],
+      zRangeVox: [0, 4],
       // Plane (-1, 0, 0, 0): outside iff -1*cmin_x + 0 < 0 → cmin_x > 0.
       // p-vertex picks cmax_x for negative-x normal (here normal[0] = -1 < 0,
       // so px = cmin_x). Plane = [-1, 0, 0, 256] keeps cmin_x <= 256.
@@ -1675,14 +1675,14 @@ describe("iterateGridCells stats accumulation", () => {
     iterateChunks(
       entity,
       entry,
-      makeVisibleRegion({ xyBounds: [0, 0, 1024, 1024], zRange: [0, 4] }),
+      makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024], zRangeVox: [0, 4] }),
       makeSelection(),
       stats,
     );
     iterateChunks(
       entity,
       entry,
-      makeVisibleRegion({ xyBounds: [0, 0, 512, 512], zRange: [0, 4] }),
+      makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 4] }),
       makeSelection(),
       stats,
     );
@@ -1690,8 +1690,8 @@ describe("iterateGridCells stats accumulation", () => {
       entity,
       entry,
       makeVisibleRegion({
-        xyBounds: [0, 0, 1024, 1024],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 1024, 1024],
+        zRangeVox: [0, 1],
         frustumPlanes: [[-1, 0, 0, 256]],
       }),
       makeSelection(),
@@ -1715,8 +1715,8 @@ describe("iterateGridCells stats accumulation", () => {
     // origin with a 1024-wide level-0 shape). Local maxX <= 0 triggers
     // the early-out before any axis indices are computed.
     const region = makeVisibleRegion({
-      xyBounds: [-2000, -2000, -1000, -1000],
-      zRange: [0, 4],
+      xyBoundsVox: [-2000, -2000, -1000, -1000],
+      zRangeVox: [0, 4],
     });
     const stats = emptyPlanStats();
 
@@ -1734,8 +1734,8 @@ describe("iterateGridCells stats accumulation", () => {
     // XY-bounds and Z keep everything, but the frustum plane rejects
     // every chunk (plane forces cmin_x > entity extent).
     const region = makeVisibleRegion({
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 1],
+      xyBoundsVox: [0, 0, 1024, 1024],
+      zRangeVox: [0, 1],
       frustumPlanes: [[-1, 0, 0, -2000]],
     });
     const stats = emptyPlanStats();
@@ -1779,7 +1779,7 @@ describe("plan() edge cases", () => {
       entityId: "a",
       visible: false,
       levels: [level0],
-      position: [10000, 10000],
+      layoutPositionVox: [10000, 10000],
     });
     const entityB = createSyntheticEntity({
       entityId: "b",
@@ -1812,10 +1812,10 @@ describe("plan() edge cases", () => {
     const snap = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -1846,10 +1846,10 @@ describe("plan() edge cases", () => {
     const snap = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -2116,10 +2116,10 @@ describe("plan() honors config tunables", () => {
         }),
       ],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -2202,10 +2202,10 @@ describe("plan() honors config tunables", () => {
     const snap = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -2251,10 +2251,10 @@ describe("plan() honors config tunables", () => {
     const snap = createSyntheticSnapshot({
       entities: [high, low],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -2285,7 +2285,7 @@ describe("plan() honors config tunables", () => {
   });
 
   it("distanceWeight: 0 removes distance from priority within a lane", () => {
-    // Two chunks at different distances from sortCenter, same importance.
+    // Two chunks at different distances from sortCenterVox, same importance.
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 1024], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
       entityId: "e0",
@@ -2298,10 +2298,10 @@ describe("plan() honors config tunables", () => {
     const snap = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 1024, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 1024, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: [960, 128, 0],
+        sortCenterVox: [960, 128, 0],
         frustumPlanes: null,
       },
       selection: {
@@ -2366,10 +2366,10 @@ describe("plan() honors config tunables", () => {
     const snap = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -2430,10 +2430,10 @@ describe("plan() honors config tunables", () => {
     const snap = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -2478,10 +2478,10 @@ describe("plan() honors config tunables", () => {
     const snap = createSyntheticSnapshot({
       entities: [entity],
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
       selection: {
@@ -2539,7 +2539,7 @@ describe("plan() — minimap lane (Slice 5)", () => {
     });
     return createSyntheticSnapshot({
       entities: [entity],
-      visibleRegion: makeVisibleRegion({ xyBounds: [0, 0, 256, 256] }),
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 256, 256] }),
       selection: makeSelection(),
       minimapPending:
         opts?.minimapPending ??
@@ -2791,10 +2791,10 @@ describe("ActiveSetEntry variants", () => {
       entities: [...wellWP, ...wellFD, invisible],
       assetCatalog: catalog,
       visibleRegion: {
-        xyBounds: [0, 0, 256, 256],
-        zRange: [0, 1],
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
         effectiveZoom: 1,
-        sortCenter: null,
+        sortCenterVox: null,
         frustumPlanes: null,
       },
     });
