@@ -30,11 +30,20 @@ import type {
   ActiveSetEntry,
   PlanningEpochs,
   EntitySnapshot,
+  MinimapChunkCoord,
   VisibleRegion,
   SelectionState,
   ChunkRequest,
   RequestPlan,
 } from "./planning/index.ts";
+
+// Re-export so existing call sites that imported `MinimapChunkCoord`
+// from the orchestrator (e.g. `slicePath.ts`, `volumePath.ts`,
+// `renderLoop.ts`, `minimapPath.ts`) keep working unchanged. Slice 5
+// of PRD #545 consolidated the canonical declaration into
+// `pipeline/planning/index.ts` since the type is now part of the
+// planning snapshot's public shape.
+export type { MinimapChunkCoord } from "./planning/index.ts";
 import type {
   CpuCache,
   ReadyChunkDelivery,
@@ -165,17 +174,6 @@ export interface OrchestratorResult {
    * iteration the worker uses, so indices agree by construction.
    */
   entityIndexByDataset: Map<string, Map<string, number>>;
-}
-
-/** Lightweight chunk coordinate for minimap pending fetches. */
-export interface MinimapChunkCoord {
-  level: number;
-  x: number;
-  y: number;
-  z: number;
-  t: number;
-  c: number;
-  key: string;
 }
 
 /**
@@ -553,9 +551,9 @@ export class Orchestrator {
       // null when `view_query` produces no visible entities (dataset
       // not yet registered, etc.) — skip the dataset in that case.
       // Slice 4 (PRD #545) extracted the WASM → snapshot translation
-      // into `planning/snapshot.ts`. Slice 5 will start wiring
-      // `minimapPendingFetch` into the snapshot via the same call;
-      // until then we pass an empty Map for the slot.
+      // into `planning/snapshot.ts`. Slice 5 wires `minimapPendingFetch`
+      // through the same call site so the planner emits minimap-lane
+      // requests at the highest priority (ADR 0023).
       const built = buildPlanningSnapshot({
         scene: ctx.scene,
         datasetId: dsId,
@@ -563,7 +561,7 @@ export class Orchestrator {
         dsSettings,
         prevActiveSet: this.previousActiveSet.get(dsId) ?? [],
         assetCatalog: ctx.assetCatalog.snapshot(),
-        minimapPending: new Map(),
+        minimapPending: minimapPendingFetch,
         mode: ctx.mode as "slice" | "volume",
         multiChannel,
         currentEpochs,
@@ -729,36 +727,21 @@ export class Orchestrator {
       // chunks must be re-uploaded to fill the rebuilt atlases.
       this.deliverySentToWorker.clear();
 
-      // 3k. Collect minimap pending fetches as overview-lane requests
-      const minimapRequests: ChunkRequest[] = [];
-      for (const entity of entities) {
-        const pending = minimapPendingFetch.get(entity.imageId);
-        if (pending) {
-          for (const coord of pending) {
-            minimapRequests.push({
-              entityId: entity.entityId,
-              imageId: entity.imageId,
-              level: coord.level,
-              t: coord.t,
-              c: coord.c,
-              z: coord.z,
-              y: coord.y,
-              x: coord.x,
-              lane: "overview",
-              priority: 2000,
-              chunkKey: coord.key,
-              datasetId: dsId,
-            });
-          }
-        }
-      }
-
-      // Submit detail + minimap (chunks) and proxy requests in a single
-      // call so they don't cancel each other. Proxies sit in their own
-      // queue inside CpuCache but share the cancellation contract: if
-      // the next plan omits a request, its in-flight fetch is aborted.
+      // Submit chunk + proxy requests in a single call so they don't
+      // cancel each other. Proxies sit in their own queue inside
+      // CpuCache but share the cancellation contract: if the next
+      // plan omits a request, its in-flight fetch is aborted.
+      //
+      // Slice 5 of PRD #545 deleted the inline minimap-injection
+      // block that previously appended overview-lane requests at
+      // priority 2000. Minimap requests now arrive through
+      // `result.requests` with `lane: "minimap"` and
+      // `priority: MINIMAP_LANE_OFFSET` (= 0, highest priority).
+      // The orchestrator's `req.datasetId = dsId` mutation above
+      // covers minimap requests for free since they're emitted into
+      // the same array.
       ctx.cpuCache.submit({
-        requests: [...result.requests, ...minimapRequests],
+        requests: result.requests,
         activeSet: result.activeSet,
         proxyRequests: result.proxyRequests,
         epochs: currentEpochs,

@@ -884,6 +884,103 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
+  // Minimap lane routing (Slice 5 / ADR 0023)
+  // =========================================================================
+  //
+  // Minimap chunks land in the overview cache (most-protected eviction
+  // tier) so they survive memory pressure that would clear the main
+  // cache. Combined with the planner emitting minimap at priority 0
+  // (highest), the effect is "fetched first, evicted last."
+
+  describe("minimap lane routing (Slice 5)", () => {
+    it("routes lane: \"minimap\" chunks to the overview cache", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 100;
+
+      const minimapReq = makeRequest({
+        entityId: "entity-mini",
+        lane: "minimap",
+        chunkKey: "3/0/0/0/0/0",
+      });
+      cache.submit(makePlan([minimapReq]));
+      await flush();
+
+      // Bytes accounted to the overview cache, not main.
+      expect(cache.telemetry().overviewBytes).toBe(100);
+      expect(cache.telemetry().mainBytes).toBe(0);
+    });
+
+    it("survives main-cache eviction pressure that would clear detail chunks", async () => {
+      // Set the main cache budget very small so detail must evict, but
+      // leave the overview cache with its default 64 MB budget — way
+      // more than this test will produce — so a minimap chunk has no
+      // reason to drop.
+      const { cache, source } = createTestCache({ mainBudgetBytes: 256 });
+      source.autoResolveBytes = 200;
+
+      // Insert a detail chunk that nearly fills the main cache (200/256).
+      const detail = makeRequest({
+        entityId: "entity-d",
+        lane: "detail",
+        chunkKey: "0/0/0/0/0/0",
+      });
+      // Insert a minimap chunk too (lands in overview cache, separate budget).
+      const minimap = makeRequest({
+        entityId: "entity-mini",
+        lane: "minimap",
+        chunkKey: "3/0/0/0/0/0",
+      });
+      cache.submit(makePlan([detail, minimap]));
+      await flush();
+      expect(cache.telemetry().overviewBytes).toBe(200);
+      expect(cache.telemetry().mainBytes).toBe(200);
+
+      // Force pressure on the main cache with two more detail chunks
+      // (200 + 200 + 200 = 600 > 256 budget). Even with the most
+      // aggressive eviction pattern, the minimap chunk lives in the
+      // overview cache and is untouchable from this side.
+      const detail2 = makeRequest({
+        entityId: "entity-d",
+        lane: "detail",
+        chunkKey: "0/0/0/0/0/1",
+      });
+      const detail3 = makeRequest({
+        entityId: "entity-d",
+        lane: "detail",
+        chunkKey: "0/0/0/0/0/2",
+      });
+      cache.submit(makePlan([detail, detail2, detail3, minimap]));
+      await flush();
+
+      // Main cache evicted things to fit the new detail chunks.
+      expect(cache.telemetry().mainBytes).toBeLessThanOrEqual(256);
+      // Minimap is intact — overview cache wasn't touched.
+      const snap = cache.snapshot();
+      expect(snap.cached.get("entity-mini")?.has("3/0/0/0/0/0")).toBe(true);
+      expect(cache.telemetry().overviewBytes).toBe(200);
+    });
+
+    it("dedups against the overview cache on cache-hit lookups", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+
+      const req = makeRequest({
+        entityId: "entity-mini",
+        lane: "minimap",
+        chunkKey: "3/0/0/0/0/0",
+      });
+      cache.submit(makePlan([req]));
+      await flush();
+      expect(source.fetchCount).toBe(1);
+
+      // Re-submit the same minimap request — should be a cache hit
+      // (lookup must check the overview cache, not just mainCache).
+      cache.submit(makePlan([req]));
+      expect(source.fetchCount).toBe(1);
+    });
+  });
+
+  // =========================================================================
   // Error handling
   // =========================================================================
 

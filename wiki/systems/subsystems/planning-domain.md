@@ -1,11 +1,11 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-15
 ---
 
 # Planning Domain
 
-`lucida-web/src/pipeline/planning.ts` — decides which chunks the renderer wants this tick. Inputs are pulled from WASM (view query + member positions + visible region); output is a `RequestPlan` consumed by [[cpu-cache]] and the [[gpu-residency|GPU worker]].
+`lucida-web/src/pipeline/planning/` — decides which chunks the renderer wants this tick. Inputs are pulled from WASM (view query + member positions + visible region) and from the orchestrator (asset catalog, minimap pending coords); output is a `RequestPlan` consumed by [[cpu-cache]] and the [[gpu-residency|GPU worker]]. PRD #545 split the previously-monolithic `planning.ts` into a small directory: `index.ts` (types + pure planner), `config.ts` (tunables + defaults), `snapshot.ts` (WASM → snapshot translation), `debug.ts` (debug-panel snapshot), `synthetic.ts` (test fixtures).
 
 ## Why a separate domain
 
@@ -31,11 +31,11 @@ Hysteresis bands of ±5 px around each threshold prevent flapping. Thresholds an
 
 ```
 targetLod         = entity.idealTargetLod                 # from WASM view_query
-coarsestDetailLod     = min(targetLod + 2, maxLevel)
-detailOwnedRange  = [targetLod, coarsestDetailLod]
+coarsestDetailLod = targetLod
+detailOwnedRange  = [targetLod, targetLod]
 ```
 
-The two-LOD buffer absorbs zoom transitions smoothly — by the time the user zooms in past the next threshold, the finer LOD's detail chunks are already CPU-resident.
+Slice 2 of PRD #545 dropped the legacy `+2` LOD buffer: planning now hands the caller exactly one level. The orchestrator no longer filters the request stream by `entry.targetLod` either, so a buffered range would have queued chunks the cache could never use. Cross-LOD smoothing during zoom transitions is the shader fallback chain's responsibility — see [[gpu-residency#semantic-fallback-chain]].
 
 ## Priority formula
 
@@ -49,12 +49,13 @@ Lane offsets:
 
 | Lane | Offset | What |
 |---|---|---|
-| DETAIL | 0 | Visible chunks |
-| PROXY | 500 | Well/field proxy fallbacks |
-| PREFETCH | 1000 | Next-timepoint prefetch |
-| OVERVIEW | 2000 | Minimap |
+| MINIMAP | 0 | Whole-sample low-res context, fetched first on dataset open |
+| DETAIL | 500 | Visible chunks |
+| PROXY | 1000 | Well/field proxy fallbacks |
+| PREFETCH | 1500 | Next-timepoint prefetch |
+| OVERVIEW | 2500 | Per-entity coarsest pass for shader fallback chain |
 
-Centered, important detail wins (~0); a far prefetch chunk loses (~1500+). The constants are tuned, not arbitrary — changing them noticeably affects perceived snappiness on plates.
+Minimap wins outright on dataset open (~0); centered, important detail follows (~500); a far prefetch chunk loses (~1500+); the per-entity OVERVIEW backstop loses to everything (~2500+). The MINIMAP lane was promoted by PRD #545 / [[decisions/0023-minimap-lane-with-highest-priority]] to surface spatial context within ~1 second of dataset open. Minimap chunks emit at exactly `MINIMAP_LANE_OFFSET` — they bypass the importance and distance terms because they're per-dataset, not per-entity. The constants are tuned, not arbitrary — changing them noticeably affects perceived snappiness on plates.
 
 ## Interactions
 

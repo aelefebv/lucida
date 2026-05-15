@@ -13,7 +13,11 @@
 import type { LevelGeometry } from "../../manifestTypes.ts";
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import { snapshotHasProxy } from "../assetCatalog.ts";
-import { DEFAULT_PLANNING_CONFIG, FAR_THRESHOLD_PX, type PlanningConfig } from "./config.ts";
+import {
+  DEFAULT_PLANNING_CONFIG,
+  FAR_THRESHOLD_PX,
+  type PlanningConfig,
+} from "./config.ts";
 
 // Re-export so callers can `import { PlanningConfig, ... } from "./planning/index.ts"`.
 // The default-value constants live in `./config.ts` (the leaf module) so
@@ -26,6 +30,7 @@ export {
   FAR_THRESHOLD_PX,
   DETAIL_THRESHOLD_PX,
   HYSTERESIS_PX,
+  MINIMAP_LANE_OFFSET,
   OVERVIEW_LANE_OFFSET,
   PREFETCH_LANE_OFFSET,
   PROXY_LANE_OFFSET,
@@ -142,6 +147,34 @@ export interface CacheStateSnapshot {
 export type { AssetCatalogSnapshot, ProxyKind } from "../assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
+// MinimapChunkCoord  (canonical home — Slice 5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Lightweight chunk coordinate carried inside {@link PlanningSnapshot.minimapPending}.
+ *
+ * Slice 5 of PRD #545 promoted minimap to its own dedicated lane and
+ * consolidated this type here (it was previously duplicated between
+ * `pipeline/orchestrator.ts` and `pipeline/planning/snapshot.ts`).
+ * Both producers now import this single definition.
+ *
+ * The orchestrator (and the minimap path that fills its
+ * `pendingFetch` map) populates one of these per missing minimap
+ * chunk; {@link emitMinimapLane} translates them into
+ * {@link ChunkRequest}s at {@link MINIMAP_LANE_OFFSET}.
+ */
+export interface MinimapChunkCoord {
+  level: number;
+  x: number;
+  y: number;
+  z: number;
+  t: number;
+  c: number;
+  /** Canonical chunk key, equivalent to {@link chunkKey}'s output. */
+  key: string;
+}
+
+// ---------------------------------------------------------------------------
 // PlanningSnapshot  (full input)
 // ---------------------------------------------------------------------------
 
@@ -162,6 +195,18 @@ export interface PlanningSnapshot {
    * no proxies available → all wells degrade to `fields-with-detail`.
    */
   assetCatalog: AssetCatalogSnapshot | null;
+  /**
+   * Per-image minimap chunks the renderer needs. Keyed by
+   * `EntitySnapshot.imageId`; each value is the list of pending
+   * coords the minimap path produced this tick (chunks not yet on
+   * the GPU's minimap atlas).
+   *
+   * Slice 5 of PRD #545 wires this through the planning snapshot so
+   * {@link emitMinimapLane} can emit them at {@link MINIMAP_LANE_OFFSET},
+   * the highest priority in the system. Empty map ⇒ no minimap work
+   * this tick (planning emits no minimap requests).
+   */
+  minimapPending: Map<string, MinimapChunkCoord[]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +285,13 @@ export interface ChunkRequest {
   z: number;
   y: number;
   x: number;
-  lane: "overview" | "detail" | "prefetch";
+  /**
+   * Which planning lane produced this request. Slice 5 of PRD #545
+   * added the `"minimap"` lane (highest priority — fetched first).
+   * The CPU cache and GPU upload paths route per-lane (see
+   * [[cpu-cache]] for the eviction-tier mapping).
+   */
+  lane: "minimap" | "detail" | "proxy" | "prefetch" | "overview";
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;
@@ -1092,6 +1143,47 @@ function computePriority(
 const DEFAULT_DATASET_ID = "";
 
 /**
+ * Minimap lane — promoted to its own dedicated highest-priority lane
+ * by Slice 5 of PRD #545. For every {@link EntitySnapshot} in
+ * `entities`, look up `minimapPending.get(entity.imageId)` and emit
+ * one {@link ChunkRequest} per coord with `priority = config.minimapLaneOffset`
+ * directly (no importance / distance terms — minimap chunks are
+ * per-dataset, not per-entity-importance).
+ *
+ * Cited in ADR 0023. Mutates `out`.
+ */
+function emitMinimapLane(
+  minimapPending: Map<string, MinimapChunkCoord[]>,
+  entities: EntitySnapshot[],
+  config: PlanningConfig,
+  out: ChunkRequest[],
+): void {
+  if (minimapPending.size === 0) return;
+  for (const entity of entities) {
+    const pending = minimapPending.get(entity.imageId);
+    if (!pending) continue;
+    for (const coord of pending) {
+      out.push({
+        // datasetId is stamped by the orchestrator post-`plan()`,
+        // mirroring the per-lane mutation pattern used for the
+        // other ChunkRequests.
+        entityId: entity.entityId,
+        imageId: entity.imageId,
+        level: coord.level,
+        t: coord.t,
+        c: coord.c,
+        z: coord.z,
+        y: coord.y,
+        x: coord.x,
+        lane: "minimap",
+        priority: config.minimapLaneOffset,
+        chunkKey: coord.key,
+      });
+    }
+  }
+}
+
+/**
  * Detail lane — for each active entry, push detail chunks (field modes)
  * or a single proxy request per visible channel (`well-as-proxy`).
  *
@@ -1332,7 +1424,13 @@ export function plan(
   // the same well don't each push a duplicate parent-well request.
   const wellProxyEmitted = new Set<string>();
 
-  // Step 3: Detail / proxy lane (per active entry).
+  // Step 3: Minimap lane — promoted to highest priority by Slice 5
+  // (PRD #545 / ADR 0023). Emitted before detail so the minimap
+  // appears within ~1s of dataset open instead of after detail
+  // finishes.
+  emitMinimapLane(snapshot.minimapPending, snapshot.entities, config, allRequests);
+
+  // Step 4: Detail / proxy lane (per active entry).
   emitDetailLane(
     activeSet,
     snapshot,
@@ -1344,23 +1442,23 @@ export function plan(
     config,
   );
 
-  // Step 4: Prefetch lane — for field-mode entries only.
+  // Step 5: Prefetch lane — for field-mode entries only.
   emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
-  // Step 5: Overview lane.
+  // Step 6: Overview lane.
   emitOverviewLane(snapshot.entities, snapshot, stats, allRequests, config);
 
-  // Step 6: Merge and sort by priority (ascending — lower = more urgent).
+  // Step 7: Merge and sort by priority (ascending — lower = more urgent).
   allRequests.sort((a, b) => a.priority - b.priority);
   proxyRequests.sort((a, b) => a.priority - b.priority);
 
-  // Step 7: Epoch propagation.
+  // Step 8: Epoch propagation.
   const epochs: PlanningEpochs = {
     ...snapshot.epochs,
     request: snapshot.epochs.request + 1,
   };
 
-  // Step 8: Return.
+  // Step 9: Return.
   return { requests: allRequests, activeSet, epochs, proxyRequests, stats };
 }
 

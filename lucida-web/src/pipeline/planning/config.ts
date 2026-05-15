@@ -42,17 +42,31 @@ export const DETAIL_THRESHOLD_PX = 150;
 /** Hysteresis band (px) on either side of each threshold. */
 export const HYSTERESIS_PX = 5;
 
-/** Priority lane offset for overview requests (lowest urgency). */
-export const OVERVIEW_LANE_OFFSET = 2000;
+/**
+ * Priority lane offset for the minimap lane (highest urgency in the
+ * system). Slice 5 of PRD #545 promoted minimap from the OVERVIEW
+ * lane (2000) to its own dedicated lane at offset `0` so the
+ * whole-sample spatial context appears within ~1 second of dataset
+ * open instead of after every other lane drains. See ADR 0023.
+ */
+export const MINIMAP_LANE_OFFSET = 0;
+
+/** Priority lane offset for detail requests (visible chunks). */
+export const DETAIL_LANE_OFFSET = 500;
+
+/** Priority lane offset for proxy requests (well/field proxy fallbacks). */
+export const PROXY_LANE_OFFSET = 1000;
 
 /** Priority lane offset for prefetch (next-timepoint) requests. */
-export const PREFETCH_LANE_OFFSET = 1000;
+export const PREFETCH_LANE_OFFSET = 1500;
 
-/** Priority lane offset for proxy requests (between detail and overview). */
-export const PROXY_LANE_OFFSET = 500;
-
-/** Priority lane offset for detail requests (highest urgency). */
-export const DETAIL_LANE_OFFSET = 0;
+/**
+ * Priority lane offset for overview requests — the per-entity
+ * coarsest pass that backstops the shader's fallback chain. Distinct
+ * from {@link MINIMAP_LANE_OFFSET}; this lane is per-entity and
+ * lowest urgency in the system.
+ */
+export const OVERVIEW_LANE_OFFSET = 2500;
 
 /** Number of future timepoints to prefetch (length of the prefetch lane). */
 export const PREFETCH_DEPTH = 2;
@@ -110,9 +124,14 @@ export interface PlanningConfig {
   wellProxyPriorityBump: number;
 
   // -- lane offsets ---------------------------------------------------
-  /** Priority lane offset for detail requests (highest urgency). */
+  /**
+   * Priority lane offset for the minimap lane (highest urgency).
+   * See {@link MINIMAP_LANE_OFFSET}.
+   */
+  minimapLaneOffset: number;
+  /** Priority lane offset for detail requests (visible chunks). */
   detailLaneOffset: number;
-  /** Priority lane offset for proxy requests (between detail and overview). */
+  /** Priority lane offset for proxy requests (well/field proxy fallbacks). */
   proxyLaneOffset: number;
   /** Priority lane offset for prefetch (next-timepoint) requests. */
   prefetchLaneOffset: number;
@@ -133,6 +152,7 @@ export const DEFAULT_PLANNING_CONFIG: PlanningConfig = {
   importanceWeight: IMPORTANCE_WEIGHT,
   distanceWeight: DISTANCE_WEIGHT,
   wellProxyPriorityBump: WELL_PROXY_PRIORITY_BUMP,
+  minimapLaneOffset: MINIMAP_LANE_OFFSET,
   detailLaneOffset: DETAIL_LANE_OFFSET,
   proxyLaneOffset: PROXY_LANE_OFFSET,
   prefetchLaneOffset: PREFETCH_LANE_OFFSET,

@@ -27,6 +27,7 @@ import type {
   ActiveSetEntry,
   AssetCatalogSnapshot,
   EntitySnapshot,
+  MinimapChunkCoord,
   PlanningEpochs,
   PlanningSnapshot,
   SelectionState,
@@ -34,22 +35,12 @@ import type {
 } from "./index.ts";
 import type { PlanningConfig } from "./config.ts";
 
-/**
- * Lightweight chunk coordinate used to thread minimap pending fetches
- * into the snapshot builder. Locally redeclared (mirrors the
- * orchestrator's `MinimapChunkCoord`) so this module has no inbound
- * dependency on orchestrator.ts — that would create a cycle since the
- * orchestrator imports {@link buildPlanningSnapshot}.
- */
-export interface MinimapChunkCoord {
-  level: number;
-  x: number;
-  y: number;
-  z: number;
-  t: number;
-  c: number;
-  key: string;
-}
+// Re-export {@link MinimapChunkCoord} so existing snapshot.ts callers
+// keep working unchanged. Slice 5 of PRD #545 consolidated the
+// duplicated declarations (this module + orchestrator.ts) into the
+// single canonical definition in `./index.ts` since the type is now
+// part of the planning snapshot's public shape.
+export type { MinimapChunkCoord } from "./index.ts";
 
 /**
  * Wire shape of one row in the `view_query` JSON output. Mirrors the
@@ -125,10 +116,15 @@ export interface BuildPlanningSnapshotArgs {
   /** Current asset catalog snapshot threaded through into the result. */
   assetCatalog: AssetCatalogSnapshot;
   /**
-   * Slice 5 slot: per-image pending minimap fetches the orchestrator
-   * has accumulated. Accepted today so the signature is forwards-
-   * compatible; Slice 5 starts wiring it into {@link PlanningSnapshot}.
-   * Pass `new Map()` if the caller has nothing to forward.
+   * Per-image pending minimap fetches the orchestrator has
+   * accumulated this tick. Slice 5 of PRD #545 wires this through
+   * into {@link PlanningSnapshot.minimapPending}; the planner emits
+   * one minimap-lane request per coord at
+   * {@link MINIMAP_LANE_OFFSET} (highest priority).
+   *
+   * Pass `new Map()` if the caller has nothing to forward — that
+   * value is forwarded verbatim to the snapshot, so the planner
+   * emits no minimap requests.
    */
   minimapPending: Map<string, MinimapChunkCoord[]>;
   /** Render mode of the current tick (`slice` vs `volume`). */
@@ -169,8 +165,9 @@ export interface BuildPlanningSnapshotResult {
  * The body mirrors the historical orchestrator inline assembly step
  * for step (`view_query` → `member_positions` → `visible_region` →
  * stitch in `imageSpec` + `parentId` → assemble `EntitySnapshot[]` →
- * compute selection). The {@link MinimapChunkCoord} parameter is a
- * Slice 5 placeholder; this slice ignores its contents.
+ * compute selection). Slice 5 of PRD #545 wires `minimapPending`
+ * through into {@link PlanningSnapshot.minimapPending} so the
+ * planner can emit minimap-lane requests at the highest priority.
  */
 export function buildPlanningSnapshot(
   args: BuildPlanningSnapshotArgs,
@@ -182,17 +179,16 @@ export function buildPlanningSnapshot(
     dsSettings,
     prevActiveSet,
     assetCatalog,
+    minimapPending,
     mode,
     multiChannel,
     currentEpochs,
   } = args;
-  // `minimapPending`, `requestEpoch`, and `config` are accepted in the
-  // arg shape so the orchestrator's call site is forwards-compatible
-  // with Slices 5 + 6, but Slice 4 itself doesn't read them — the
-  // caller already folded `requestEpoch` into `currentEpochs`, the
-  // config is consumed by `plan()` (not the snapshot), and the
-  // minimap slot doesn't yet flow into `PlanningSnapshot`.
-  void args.minimapPending;
+  // `requestEpoch` and `config` are accepted in the arg shape so the
+  // orchestrator's call site is forwards-compatible with Slice 6,
+  // but Slice 4/5 don't read them here — the caller already folded
+  // `requestEpoch` into `currentEpochs`, and the config is consumed
+  // by `plan()` (not the snapshot).
   void args.requestEpoch;
   void args.config;
 
@@ -283,6 +279,9 @@ export function buildPlanningSnapshot(
 
   // 7. Assemble the final snapshot. `currentEpochs` already carries
   //    the orchestrator's `requestEpoch` (folded in by the caller).
+  //    `minimapPending` is forwarded verbatim — the planner consumes
+  //    it via `emitMinimapLane` to build minimap-lane requests at
+  //    {@link MINIMAP_LANE_OFFSET}.
   const snapshot: PlanningSnapshot = {
     epochs: currentEpochs,
     entities,
@@ -290,6 +289,7 @@ export function buildPlanningSnapshot(
     selection,
     previousActiveSet: prevActiveSet,
     assetCatalog,
+    minimapPending,
   };
 
   return { snapshot, entities, visibleRegion, selection };

@@ -6,7 +6,11 @@
  * already import them through the main entry point.
  */
 
-import type { EntitySnapshot, PlanningSnapshot } from "./index.ts";
+import type {
+  EntitySnapshot,
+  MinimapChunkCoord,
+  PlanningSnapshot,
+} from "./index.ts";
 
 /**
  * Create a valid {@link EntitySnapshot} with sensible defaults, merged
@@ -76,6 +80,7 @@ export function createSyntheticSnapshot(
     },
     previousActiveSet: [],
     assetCatalog: null,
+    minimapPending: new Map<string, MinimapChunkCoord[]>(),
     ...overrides,
   };
 }

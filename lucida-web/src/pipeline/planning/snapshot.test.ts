@@ -418,8 +418,8 @@ describe("buildPlanningSnapshot — pass-through fields", () => {
   });
 });
 
-describe("buildPlanningSnapshot — minimapPending slot", () => {
-  it("accepts a non-empty pending map without affecting the snapshot (Slice 4)", () => {
+describe("buildPlanningSnapshot — minimapPending field (Slice 5)", () => {
+  it("threads a non-empty minimapPending through into the snapshot unchanged", () => {
     const minimapPending = new Map([
       [
         "img-0",
@@ -431,9 +431,22 @@ describe("buildPlanningSnapshot — minimapPending slot", () => {
       minimapPending,
     });
     expect(built).not.toBeNull();
-    // Slice 4 deliberately doesn't expose the slot on the snapshot;
-    // Slice 5 will. The call must still succeed.
-    expect(built!.snapshot.entities).toHaveLength(1);
+    // Slice 5 (PRD #545 / ADR 0023) exposes the slot on the snapshot
+    // so `plan()`'s `emitMinimapLane` can consume it.
+    expect(built!.snapshot.minimapPending).toBe(minimapPending);
+    expect(built!.snapshot.minimapPending.get("img-0")).toEqual([
+      { level: 0, x: 0, y: 0, z: 0, t: 0, c: 0, key: "0/0/0/0/0/0" },
+    ]);
+  });
+
+  it("empty minimapPending is forwarded as an empty map", () => {
+    const empty = new Map();
+    const built = buildPlanningSnapshot({
+      ...makeArgs(),
+      minimapPending: empty,
+    });
+    expect(built!.snapshot.minimapPending).toBe(empty);
+    expect(built!.snapshot.minimapPending.size).toBe(0);
   });
 });
 

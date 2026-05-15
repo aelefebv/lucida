@@ -9,6 +9,7 @@ import {
   FAR_THRESHOLD_PX,
   DETAIL_THRESHOLD_PX,
   HYSTERESIS_PX,
+  MINIMAP_LANE_OFFSET,
   PROXY_LANE_OFFSET,
   DETAIL_LANE_OFFSET,
   OVERVIEW_LANE_OFFSET,
@@ -29,6 +30,7 @@ import type { PlanningConfig } from "./planning/index.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
+  MinimapChunkCoord,
   VisibleRegion,
   SelectionState,
   PlanningSnapshot,
@@ -1353,12 +1355,19 @@ describe("plan() — proxy request emission", () => {
     expect(cs).toEqual([0, 1, 3]);
   });
 
-  it("lane priority order: detail (0) < proxy (500) < overview (2000)", () => {
-    expect(DETAIL_LANE_OFFSET).toBe(0);
-    expect(PROXY_LANE_OFFSET).toBe(500);
-    expect(OVERVIEW_LANE_OFFSET).toBe(2000);
+  it("lane priority order: minimap (0) < detail (500) < proxy (1000) < prefetch (1500) < overview (2500)", () => {
+    // Slice 5 of PRD #545 promoted minimap to its own lane and renumbered
+    // every other lane offset upward. The renumbering is part of the
+    // public contract — downstream priority comparisons depend on it.
+    expect(MINIMAP_LANE_OFFSET).toBe(0);
+    expect(DETAIL_LANE_OFFSET).toBe(500);
+    expect(PROXY_LANE_OFFSET).toBe(1000);
+    expect(PREFETCH_LANE_OFFSET).toBe(1500);
+    expect(OVERVIEW_LANE_OFFSET).toBe(2500);
+    expect(MINIMAP_LANE_OFFSET).toBeLessThan(DETAIL_LANE_OFFSET);
     expect(DETAIL_LANE_OFFSET).toBeLessThan(PROXY_LANE_OFFSET);
-    expect(PROXY_LANE_OFFSET).toBeLessThan(OVERVIEW_LANE_OFFSET);
+    expect(PROXY_LANE_OFFSET).toBeLessThan(PREFETCH_LANE_OFFSET);
+    expect(PREFETCH_LANE_OFFSET).toBeLessThan(OVERVIEW_LANE_OFFSET);
 
     // And in plan() output: smallest detail < smallest proxy < smallest overview.
     const catalog = makeCatalog([
@@ -1924,6 +1933,7 @@ describe("PlanningConfig", () => {
     expect(DEFAULT_PLANNING_CONFIG.wellProxyPriorityBump).toBe(
       WELL_PROXY_PRIORITY_BUMP,
     );
+    expect(DEFAULT_PLANNING_CONFIG.minimapLaneOffset).toBe(MINIMAP_LANE_OFFSET);
     expect(DEFAULT_PLANNING_CONFIG.detailLaneOffset).toBe(DETAIL_LANE_OFFSET);
     expect(DEFAULT_PLANNING_CONFIG.proxyLaneOffset).toBe(PROXY_LANE_OFFSET);
     expect(DEFAULT_PLANNING_CONFIG.prefetchLaneOffset).toBe(
@@ -1932,6 +1942,15 @@ describe("PlanningConfig", () => {
     expect(DEFAULT_PLANNING_CONFIG.overviewLaneOffset).toBe(
       OVERVIEW_LANE_OFFSET,
     );
+  });
+
+  it("renumbered lane offsets — Slice 5: 0 / 500 / 1000 / 1500 / 2500", () => {
+    // Hard-pinned values so a future re-number is loud.
+    expect(MINIMAP_LANE_OFFSET).toBe(0);
+    expect(DETAIL_LANE_OFFSET).toBe(500);
+    expect(PROXY_LANE_OFFSET).toBe(1000);
+    expect(PREFETCH_LANE_OFFSET).toBe(1500);
+    expect(OVERVIEW_LANE_OFFSET).toBe(2500);
   });
 
   it("mergeConfig({}) returns a config equal to DEFAULT_PLANNING_CONFIG", () => {
@@ -1952,6 +1971,7 @@ describe("PlanningConfig", () => {
     expect(merged.wellProxyPriorityBump).toBe(
       DEFAULT_PLANNING_CONFIG.wellProxyPriorityBump,
     );
+    expect(merged.minimapLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.minimapLaneOffset);
     expect(merged.detailLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.detailLaneOffset);
     expect(merged.proxyLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.proxyLaneOffset);
     expect(merged.prefetchLaneOffset).toBe(
@@ -2295,7 +2315,12 @@ describe("plan() honors config tunables", () => {
     expect(beforeDetail.length).toBe(1);
     const beforePri = beforeDetail[0].priority;
 
-    const after = plan(snap, mergeConfig({ detailLaneOffset: 250 }));
+    // Override offset is `default + 250` so the delta is +250
+    // regardless of the renumbered default. Slice 5 changed
+    // DETAIL_LANE_OFFSET from 0 → 500; the override must be
+    // computed off the live default rather than hard-coded.
+    const newOffset = DEFAULT_PLANNING_CONFIG.detailLaneOffset + 250;
+    const after = plan(snap, mergeConfig({ detailLaneOffset: newOffset }));
     const afterDetail = after.requests.filter((r) => r.lane === "detail");
     expect(afterDetail.length).toBe(1);
     // Only the lane offset changed → priority shifts by exactly +250.
@@ -2357,7 +2382,10 @@ describe("plan() honors config tunables", () => {
     expect(beforePrefetch.length).toBe(1);
     const beforePri = beforePrefetch[0].priority;
 
-    const after = plan(snap, mergeConfig({ prefetchLaneOffset: 1500 }));
+    // Override is `default + 500` so the delta is +500 regardless of
+    // the renumbered default (Slice 5 shifted prefetch 1000 → 1500).
+    const newOffset = DEFAULT_PLANNING_CONFIG.prefetchLaneOffset + 500;
+    const after = plan(snap, mergeConfig({ prefetchLaneOffset: newOffset }));
     const afterPrefetch = after.requests.filter(
       (r) => r.lane === "prefetch" && r.t === 1,
     );
@@ -2401,10 +2429,171 @@ describe("plan() honors config tunables", () => {
     expect(beforeOverview.length).toBe(1);
     const beforePri = beforeOverview[0].priority;
 
-    const after = plan(snap, mergeConfig({ overviewLaneOffset: 3000 }));
+    // Override is `default + 1000` so the delta is +1000 regardless
+    // of the renumbered default (Slice 5 shifted overview 2000 → 2500).
+    const newOffset = DEFAULT_PLANNING_CONFIG.overviewLaneOffset + 1000;
+    const after = plan(snap, mergeConfig({ overviewLaneOffset: newOffset }));
     const afterOverview = after.requests.filter((r) => r.lane === "overview");
     expect(afterOverview.length).toBe(1);
     // Lane offset shift is +1000.
     expect(afterOverview[0].priority).toBeCloseTo(beforePri + 1000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// emitMinimapLane — Slice 5 (PRD #545 / ADR 0023)
+// ---------------------------------------------------------------------------
+//
+// The minimap lane is a Slice 5 promotion: minimap chunks now ride
+// their own dedicated highest-priority lane instead of being shoved
+// onto OVERVIEW at priority 2000 by the orchestrator. The planner
+// pulls them from `snapshot.minimapPending` and emits them with
+// `priority = MINIMAP_LANE_OFFSET` directly (no importance / distance
+// terms — minimap is per-dataset, not per-entity).
+
+describe("plan() — minimap lane (Slice 5)", () => {
+  /** Build a minimal snapshot with one visible Image entity and a non-empty minimapPending. */
+  function makeMinimapSnapshot(opts?: {
+    minimapPending?: Map<string, MinimapChunkCoord[]>;
+    importance?: number;
+  }): PlanningSnapshot {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      imageId: "imgM",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: opts?.importance ?? 1.0,
+    });
+    return createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: makeVisibleRegion({ xyBounds: [0, 0, 256, 256] }),
+      selection: makeSelection(),
+      minimapPending:
+        opts?.minimapPending ??
+        new Map([
+          [
+            "imgM",
+            [
+              { level: 3, x: 0, y: 0, z: 0, t: 0, c: 0, key: "3/0/0/0/0/0" },
+              { level: 3, x: 1, y: 0, z: 0, t: 0, c: 0, key: "3/0/0/0/0/1" },
+            ],
+          ],
+        ]),
+    });
+  }
+
+  it("enumerates one ChunkRequest per coord per matching entity.imageId", () => {
+    const snap = makeMinimapSnapshot();
+    const result = plan(snap);
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    expect(minimap).toHaveLength(2);
+    expect(new Set(minimap.map((r) => r.chunkKey))).toEqual(
+      new Set(["3/0/0/0/0/0", "3/0/0/0/0/1"]),
+    );
+    for (const req of minimap) {
+      expect(req.entityId).toBe("e0");
+      expect(req.imageId).toBe("imgM");
+      expect(req.level).toBe(3);
+    }
+  });
+
+  it("emits at priority MINIMAP_LANE_OFFSET (= 0 by default)", () => {
+    const snap = makeMinimapSnapshot();
+    const result = plan(snap);
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    for (const req of minimap) {
+      expect(req.priority).toBe(MINIMAP_LANE_OFFSET);
+      expect(req.priority).toBe(0);
+    }
+  });
+
+  it("ignores importance — priority is exactly the lane offset regardless", () => {
+    // Two snapshots, identical minimapPending, different entity.importance.
+    const snapHigh = makeMinimapSnapshot({ importance: 1.0 });
+    const snapLow = makeMinimapSnapshot({ importance: 0.0 });
+    const high = plan(snapHigh).requests.filter((r) => r.lane === "minimap");
+    const low = plan(snapLow).requests.filter((r) => r.lane === "minimap");
+    expect(high.length).toBeGreaterThan(0);
+    expect(low.length).toBeGreaterThan(0);
+    // Importance is not factored into minimap priority.
+    expect(high[0].priority).toBe(MINIMAP_LANE_OFFSET);
+    expect(low[0].priority).toBe(MINIMAP_LANE_OFFSET);
+    expect(high[0].priority).toBe(low[0].priority);
+  });
+
+  it("ignores distance from view center — every coord is at MINIMAP_LANE_OFFSET", () => {
+    const snap = makeMinimapSnapshot({
+      minimapPending: new Map([
+        [
+          "imgM",
+          [
+            { level: 3, x: 0, y: 0, z: 0, t: 0, c: 0, key: "3/0/0/0/0/0" },
+            { level: 3, x: 99, y: 99, z: 0, t: 0, c: 0, key: "3/0/0/0/99/99" },
+            { level: 3, x: 5, y: 5, z: 0, t: 0, c: 0, key: "3/0/0/0/5/5" },
+          ],
+        ],
+      ]),
+    });
+    const result = plan(snap);
+    const priorities = new Set(
+      result.requests.filter((r) => r.lane === "minimap").map((r) => r.priority),
+    );
+    expect(priorities.size).toBe(1);
+    expect(priorities.has(MINIMAP_LANE_OFFSET)).toBe(true);
+  });
+
+  it("emits no minimap requests when minimapPending is empty", () => {
+    const snap = makeMinimapSnapshot({ minimapPending: new Map() });
+    const result = plan(snap);
+    expect(result.requests.some((r) => r.lane === "minimap")).toBe(false);
+  });
+
+  it("skips coords for an imageId that no visible entity matches", () => {
+    const snap = makeMinimapSnapshot({
+      minimapPending: new Map([
+        [
+          "imgUnknown",
+          [{ level: 3, x: 0, y: 0, z: 0, t: 0, c: 0, key: "3/0/0/0/0/0" }],
+        ],
+      ]),
+    });
+    const result = plan(snap);
+    expect(result.requests.some((r) => r.lane === "minimap")).toBe(false);
+  });
+
+  it("sorts before every other lane after the priority sort (smallest priority first)", () => {
+    const snap = makeMinimapSnapshot();
+    const result = plan(snap);
+    expect(result.requests.length).toBeGreaterThan(0);
+    // Slice 5 invariant: minimap chunks are at priority 0, every
+    // other lane is >= DETAIL_LANE_OFFSET (= 500). plan()'s ascending
+    // priority sort therefore guarantees the first non-minimap entry
+    // comes after every minimap entry.
+    let lastMinimapIdx = -1;
+    let firstNonMinimapIdx = -1;
+    for (let i = 0; i < result.requests.length; i++) {
+      if (result.requests[i].lane === "minimap") lastMinimapIdx = i;
+      else if (firstNonMinimapIdx === -1) firstNonMinimapIdx = i;
+    }
+    expect(lastMinimapIdx).toBeGreaterThanOrEqual(0);
+    expect(firstNonMinimapIdx).toBeGreaterThanOrEqual(0);
+    expect(lastMinimapIdx).toBeLessThan(firstNonMinimapIdx);
+  });
+
+  it("respects config.minimapLaneOffset — shifting it shifts every minimap priority", () => {
+    const snap = makeMinimapSnapshot();
+    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const beforeMinimap = before.requests.filter((r) => r.lane === "minimap");
+    expect(beforeMinimap.length).toBeGreaterThan(0);
+    expect(beforeMinimap[0].priority).toBe(MINIMAP_LANE_OFFSET);
+
+    const after = plan(snap, mergeConfig({ minimapLaneOffset: 250 }));
+    const afterMinimap = after.requests.filter((r) => r.lane === "minimap");
+    expect(afterMinimap.length).toBeGreaterThan(0);
+    for (const req of afterMinimap) expect(req.priority).toBe(250);
   });
 });

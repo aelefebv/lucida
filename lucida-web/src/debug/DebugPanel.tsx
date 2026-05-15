@@ -225,15 +225,17 @@ function PlanningTabBody({
     console.group("[DebugPanel] last plans");
     for (const [dsId, plan] of plans) {
       const lanes: Record<string, typeof plan.requests> = {
+        minimap: [],
         detail: [],
+        proxy: [],
         prefetch: [],
         overview: [],
       };
       for (const r of plan.requests) lanes[r.lane].push(r);
       console.group(
-        `${dsId}: ${plan.requests.length} chunks (${lanes.detail.length} D / ${lanes.prefetch.length} P / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
+        `${dsId}: ${plan.requests.length} chunks (${lanes.minimap.length} M / ${lanes.detail.length} D / ${lanes.prefetch.length} P / ${lanes.overview.length} O), ${plan.proxyRequests.length} proxies`,
       );
-      for (const lane of ["detail", "prefetch", "overview"] as const) {
+      for (const lane of ["minimap", "detail", "proxy", "prefetch", "overview"] as const) {
         if (lanes[lane].length === 0) continue;
         console.groupCollapsed(`${lane}: ${lanes[lane].length}`);
         console.table(
@@ -330,6 +332,7 @@ function PlanningDatasetSection({
           {name}
         </div>
         <div>
+          <span style={{ color: "#fa4" }}>M:{p.lanes.minimap}</span>{" "}
           <span style={{ color: "#4f4" }}>D:{p.lanes.detail}</span>{" "}
           <span style={{ color: "#ff4" }}>P:{p.lanes.prefetch}</span>{" "}
           <span style={{ color: "#88f" }}>O:{p.lanes.overview}</span>{" "}

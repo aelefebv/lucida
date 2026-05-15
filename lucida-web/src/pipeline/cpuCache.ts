@@ -57,7 +57,7 @@ export interface CpuCacheConfig {
 // Types
 // ---------------------------------------------------------------------------
 
-type Lane = "detail" | "prefetch" | "overview";
+type Lane = "minimap" | "detail" | "proxy" | "prefetch" | "overview";
 type InteractionMode = "panning" | "scrubbing" | "idle";
 export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
@@ -1188,7 +1188,13 @@ export class CpuCache {
       lastSeenTick: this.submitTick,
     };
 
-    if (lane === "overview") {
+    // Slice 5 of PRD #545 (ADR 0023) routes `lane: "minimap"` to
+    // the existing overview cache so minimap chunks share the
+    // most-protected eviction tier. Combined with the planner
+    // emitting minimap at priority 0, the effect is "fetched first,
+    // evicted last" — minimap survives memory pressure that clears
+    // detail chunks.
+    if (lane === "overview" || lane === "minimap") {
       this.evictIfNeeded(this.overviewCache, this.config.overviewBudgetBytes, decoded.byteLength, "overview");
       this.insertEntry(this.overviewCache, cacheEntry);
       this.overviewBytes += decoded.byteLength;
@@ -1421,7 +1427,11 @@ export class CpuCache {
   }
 
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
-    const cache = req.lane === "overview" ? this.overviewCache : this.mainCache;
+    // `minimap` shares the overview cache (Slice 5 / ADR 0023) so
+    // we look in the same map. Other lanes (detail / prefetch /
+    // proxy chunks) live in mainCache.
+    const usesOverviewCache = req.lane === "overview" || req.lane === "minimap";
+    const cache = usesOverviewCache ? this.overviewCache : this.mainCache;
     return cache.get(req.entityId)?.get(req.chunkKey);
   }
 
@@ -1437,7 +1447,12 @@ export class CpuCache {
 
   private laneToTier(lane: Lane): EvictionTier {
     if (lane === "prefetch") return "prefetch";
-    if (lane === "overview") return "prefetch"; // overview has simple LRU, tier doesn't matter
+    // overview + minimap share the overview cache (simple LRU, tier
+    // doesn't matter — see Slice 5 / ADR 0023). The "prefetch" tier
+    // value here is purely a no-op label for entries that live in
+    // overviewCache; the active-detail / demoted-detail / prefetch
+    // distinctions only matter for mainCache entries.
+    if (lane === "overview" || lane === "minimap") return "prefetch";
     return "active-detail";
   }
 
