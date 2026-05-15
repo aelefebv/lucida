@@ -1916,8 +1916,12 @@ export class Orchestrator {
       // the worker's wanted-set knows whether to ask for proxies.
       // `parentWellId` lets the worker fan out a well-proxy upload to
       // its child fields' descriptors.
+      //
+      // PRD #563 / Slice 5: `EntitySnapshot` is a discriminated union;
+      // narrowing on `kind === "Field"` gives us a `FieldSnapshot` whose
+      // `parentId` is non-null by construction (no `?? null` fallback).
       const parentWellId =
-        entity?.kind === "Field" ? (entity.parentId ?? null) : null;
+        entity?.kind === "Field" ? entity.parentId : null;
 
       // M1: precomputed model matrices. For field entries, sourced from
       // `scene.member_model_matrix`; for `well-as-proxy` entries, from

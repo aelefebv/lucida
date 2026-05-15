@@ -51,33 +51,82 @@ export {
 export const PROMOTE_THRESHOLD_PX = FAR_THRESHOLD_PX;
 
 // ---------------------------------------------------------------------------
-// EntitySnapshot
+// EntitySnapshot — discriminated union (PRD #563 / Slice 5)
 // ---------------------------------------------------------------------------
 
-export interface EntitySnapshot {
+/**
+ * Shared shape across every {@link EntitySnapshot} variant. Holds the
+ * fields that don't depend on the entity's `kind`. The variants
+ * specialise the discriminator and add `parentId` for {@link FieldSnapshot}.
+ *
+ * Conservative form: `levels` lives on the base because all three
+ * variants still carry it (even {@link WellSnapshot}, despite
+ * `well-as-proxy` never iterating well chunks). The aggressive form
+ * stripping `levels` from {@link WellSnapshot} is deferred indefinitely;
+ * see ADR `0026-discriminated-active-set-and-entity-types.md`.
+ */
+export interface BaseEntitySnapshot {
   entityId: string;
   imageId: string;
-  kind: "Image" | "Well" | "Field";
   visible: boolean;
   projectedDiagonalPx: number;
   projectedAreaPx2: number;
   centroidWorld: [number, number, number];
   idealTargetLod: number;
   importance: number;
-  levels: LevelGeometry[];
   /** Layout placement position. */
   position: [number, number];
-  /**
-   * Parent entity id (`Field.parent === wellId`), or `null` for top-level
-   * entities (`Image`, `Well`). Used by S6 promotion to group fields by
-   * their parent well so all fields of a well agree on a single
-   * {@link EntityMode}.
-   *
-   * Required as of PRD #563 / Slice 1: producers must be explicit about
-   * the absence of a parent. Synthetic helpers default to `null`.
-   */
-  parentId: string | null;
+  levels: LevelGeometry[];
 }
+
+/**
+ * A standalone image entity (non-plate datasets). Treated as its own
+ * one-entry "well" by {@link groupByWell} so the rest of the planner is
+ * uniform. No `parentId` field — top-level entity by construction.
+ */
+export interface ImageSnapshot extends BaseEntitySnapshot {
+  kind: "Image";
+}
+
+/**
+ * A well entity on a plate. Top-level — no `parentId`. {@link groupByWell}
+ * pairs it with its constituent {@link FieldSnapshot}s by id; promotion
+ * may downgrade the well to `well-as-proxy` (rendered as one synthetic
+ * cube) or leave it at field-mode (each field rendered separately).
+ */
+export interface WellSnapshot extends BaseEntitySnapshot {
+  kind: "Well";
+}
+
+/**
+ * A field entity belonging to a well on a plate. `parentId` is required
+ * and non-null by contract: a field without a parent is a producer
+ * invariant violation worth surfacing rather than silently coercing.
+ *
+ * PRD #563 / Slice 5: `parentId: string` is enforced at the type level.
+ * Consumers that read it narrow on `kind === "Field"` first; the post-
+ * narrow access has no `?? null` fallback.
+ */
+export interface FieldSnapshot extends BaseEntitySnapshot {
+  kind: "Field";
+  /**
+   * Parent well's entity id. Required and non-null for {@link FieldSnapshot}
+   * — `groupByWell` keys field grouping off this id. PRD #563 / Slice 5:
+   * the previous `parentId: string | null` on the flat type is now
+   * per-variant; only fields carry one.
+   */
+  parentId: string;
+}
+
+/**
+ * Discriminated union of the three entity kinds. The previous flat
+ * `EntitySnapshot` interface (with `parentId: string | null`) is
+ * replaced; consumers narrow on `kind` before reading variant-specific
+ * fields. Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
+ * extended from "carry-forward state is explicit" to "per-variant
+ * invariants are compile-time enforced."
+ */
+export type EntitySnapshot = ImageSnapshot | WellSnapshot | FieldSnapshot;
 
 // ---------------------------------------------------------------------------
 // SelectionState
@@ -567,20 +616,11 @@ export function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
     }
 
     if (entity.kind === "Field") {
-      const wellId = entity.parentId ?? null;
-      if (wellId === null) {
-        // Field with no parent — fall back to a singleton group keyed on
-        // the field id so it gets a sensible mode.
-        const k = `__no-parent__${entity.entityId}`;
-        groups.set(k, {
-          wellId: entity.entityId,
-          wellEntity: null,
-          fields: [entity],
-          projectedDiagonalPx: entity.projectedDiagonalPx,
-        });
-        continue;
-      }
-
+      // PRD #563 / Slice 5: `FieldSnapshot.parentId` is `string`
+      // (non-null by construction). The previous orphan-field branch
+      // (`parentId === null`) is removed — a field without a parent
+      // is now a producer invariant violation.
+      const wellId = entity.parentId;
       let group = groups.get(wellId);
       if (!group) {
         group = {
@@ -642,7 +682,10 @@ export function buildPrevModeByWell(
   // entityId IS the wellId.
   const fieldEntityToWell = new Map<string, string>();
   for (const entity of entities) {
-    if (entity.kind === "Field" && entity.parentId) {
+    // PRD #563 / Slice 5: narrowing on `kind === "Field"` gives us a
+    // {@link FieldSnapshot} with `parentId: string` (non-null). The
+    // previous `&& entity.parentId` guard is unnecessary.
+    if (entity.kind === "Field") {
       fieldEntityToWell.set(entity.entityId, entity.parentId);
     }
   }
@@ -1367,10 +1410,17 @@ function emitDetailLane(
     // Parent-well proxy (only for proxy-fallback mode, deduped per
     // (wellId, t, c)). At `fields-with-detail` zoom the chunk path is
     // expected to keep up — no extra parent fetch.
+    //
+    // PRD #563 / Slice 5: only `FieldSnapshot` carries a `parentId`.
+    // Narrow on `kind === "Field"` before reading it; the post-narrow
+    // access is non-null. Field-mode active entries map to Field
+    // entities (image-mode datasets have no parent well to fall back
+    // to), so a non-Field here is a producer invariant violation we
+    // skip silently.
     if (
       entry.mode === "fields-with-proxy-fallback" &&
       entry.wellProxyAvailable &&
-      entity.parentId
+      entity.kind === "Field"
     ) {
       const wellId = entity.parentId;
       for (const c of snapshot.selection.visibleChannels) {
