@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/aelefebv/lucida/compare/v0.3.1...v0.3.2) (2026-05-15)
+
+
+### Bug Fixes
+
+* **store:** honor GOOGLE_APPLICATION_CREDENTIALS for gs:// ([#543](https://github.com/aelefebv/lucida/issues/543)) ([01d0289](https://github.com/aelefebv/lucida/commit/01d02899652225786505b8126e2b469669bac447))
+
 ## [0.3.1](https://github.com/aelefebv/lucida/compare/v0.3.0...v0.3.1) (2026-05-14)
 
 
