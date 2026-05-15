@@ -28,6 +28,7 @@ import {
   type ProxyRequest,
   type RequestPlan,
 } from "./types.ts";
+import { validatePlanningInputs } from "./validate.ts";
 
 /**
  * Top-level pure planning function. Composes promotion, chunk
@@ -58,6 +59,11 @@ export function plan(
   state: PlanningState,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): RequestPlan {
+  // Dev-mode boundary check (PRD #578 / Slice 3, ADR 0031). Vite
+  // dead-code-eliminates this branch in production builds; the
+  // validator's source is absent from the shipped bundle.
+  if (import.meta.env.DEV) validatePlanningInputs(snapshot, state);
+
   const stats = emptyPlanStats();
 
   // Step 1: Promote (three-tier, S6).
