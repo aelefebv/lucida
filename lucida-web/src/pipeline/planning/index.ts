@@ -97,7 +97,6 @@ export interface EntitySnapshot {
   centroidWorld: [number, number, number];
   idealTargetLod: number;
   importance: number;
-  numLevels: number;
   levels: LevelGeometry[];
   /** Layout placement position. */
   position: [number, number];
@@ -107,10 +106,10 @@ export interface EntitySnapshot {
    * their parent well so all fields of a well agree on a single
    * {@link EntityMode}.
    *
-   * Optional in the type for backward compat with synthetic test
-   * snapshots that don't model plates; treat `undefined` as `null`.
+   * Required as of PRD #563 / Slice 1: producers must be explicit about
+   * the absence of a parent. Synthetic helpers default to `null`.
    */
-  parentId?: string | null;
+  parentId: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +178,14 @@ export interface MinimapChunkCoord {
 // ---------------------------------------------------------------------------
 
 export interface PlanningSnapshot {
+  /**
+   * Dataset identifier this snapshot pertains to. Carried on the
+   * snapshot so the planner can stamp it onto every emitted
+   * {@link ChunkRequest} and {@link ProxyRequest} at emit time —
+   * removing the orchestrator's post-`plan()` mutation loops that
+   * previously back-filled it. Required as of PRD #563 / Slice 1.
+   */
+  datasetId: string;
   epochs: PlanningEpochs;
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
@@ -275,8 +282,13 @@ export function emptyPlanStats(): PlanStats {
 }
 
 export interface ChunkRequest {
-  /** Actual dataset ID (set by orchestrator; falls back to entityId if unset). */
-  datasetId?: string;
+  /**
+   * Dataset id this request belongs to. Required as of PRD #563 /
+   * Slice 1: the planner stamps this at emit time from
+   * {@link PlanningSnapshot.datasetId} so the orchestrator no longer
+   * needs to back-fill it via post-`plan()` mutation loops.
+   */
+  datasetId: string;
   entityId: string;
   imageId: string;
   level: number;
@@ -721,7 +733,7 @@ function makeFieldEntry(
 }
 
 function makeInvisibleEntry(entity: EntitySnapshot): ActiveSetEntry {
-  const coarsest = Math.max(entity.numLevels - 1, 0);
+  const coarsest = Math.max(entity.levels.length - 1, 0);
   return {
     entityId: entity.entityId,
     imageId: entity.imageId,
@@ -829,8 +841,10 @@ export function chunkWorldDims(
  * served by a single proxy asset, not by chunk requests.
  *
  * Returned `ChunkRequest`s are placeholders: `priority` is `0`, `lane`
- * is `"detail"`, and `datasetId` is unset. The caller (`plan()`)
- * finalises these per lane before they leave the planner.
+ * is `"detail"`, and `datasetId` is stamped from the caller-supplied
+ * arg (defaults to the empty string for synthetic test snapshots that
+ * don't model dataset ownership). The caller (`plan()`) finalises
+ * `priority`/`lane` per lane before they leave the planner.
  *
  * Thin wrapper around {@link iterateChunksAtLodRange}: short-circuits
  * for `well-as-proxy` entries and reads the LOD range from the
@@ -842,6 +856,7 @@ export function iterateChunks(
   visibleRegion: VisibleRegion,
   selection: SelectionState,
   stats: PlanStats | null = null,
+  datasetId = "",
 ): ChunkRequest[] {
   if (entry.mode === "well-as-proxy") return [];
   return iterateChunksAtLodRange(
@@ -850,6 +865,7 @@ export function iterateChunks(
     visibleRegion,
     selection,
     stats,
+    datasetId,
   );
 }
 
@@ -869,6 +885,7 @@ export function iterateChunksAtLodRange(
   visibleRegion: VisibleRegion,
   selection: SelectionState,
   stats: PlanStats | null = null,
+  datasetId = "",
 ): ChunkRequest[] {
   const requests: ChunkRequest[] = [];
 
@@ -897,6 +914,7 @@ export function iterateChunksAtLodRange(
         c,
         requests,
         stats,
+        datasetId,
       );
     }
   }
@@ -925,6 +943,7 @@ function iterateGridCells(
   c: number,
   out: ChunkRequest[],
   stats: PlanStats | null = null,
+  datasetId = "",
 ): void {
   const [chunkWorldX, chunkWorldY, chunkWorldZ] = chunkWorldDims(
     levelGeo,
@@ -964,7 +983,9 @@ function iterateGridCells(
         }
         if (stats) stats.culling.afterFrustum++;
 
-        out.push(makeChunkRequest(entity, level, selection.t, c, iz, row, col));
+        out.push(
+          makeChunkRequest(entity, datasetId, level, selection.t, c, iz, row, col),
+        );
       }
     }
   }
@@ -1074,8 +1095,10 @@ function cellSurvivesFrustum(
 
 /**
  * Build a placeholder {@link ChunkRequest} for a surviving (level,
- * channel, z, y, x) cell. `priority`/`lane`/`datasetId` are stamped by
- * the caller per lane.
+ * channel, z, y, x) cell. `priority`/`lane` are stamped by the caller
+ * per lane; `datasetId` is plumbed through from
+ * {@link PlanningSnapshot.datasetId} so every emitted request leaves
+ * the planner fully addressed.
  *
  * NOTE: cached chunks are NOT filtered here. They flow through
  * `submit()` so the cache can refresh their priority and
@@ -1085,6 +1108,7 @@ function cellSurvivesFrustum(
  */
 function makeChunkRequest(
   entity: EntitySnapshot,
+  datasetId: string,
   level: number,
   t: number,
   c: number,
@@ -1093,6 +1117,7 @@ function makeChunkRequest(
   x: number,
 ): ChunkRequest {
   return {
+    datasetId,
     entityId: entity.entityId,
     imageId: entity.imageId,
     level,
@@ -1136,12 +1161,6 @@ function computePriority(
 // Lane emission helpers
 // ---------------------------------------------------------------------------
 
-/** Default datasetId for proxy requests. The orchestrator overrides
- * both chunk and proxy requests with the real dataset id after
- * `plan()` returns; we leave the empty string here so synthetic test
- * snapshots still produce well-formed values. */
-const DEFAULT_DATASET_ID = "";
-
 /**
  * Minimap lane — promoted to its own dedicated highest-priority lane
  * by Slice 5 of PRD #545. For every {@link EntitySnapshot} in
@@ -1155,6 +1174,7 @@ const DEFAULT_DATASET_ID = "";
 function emitMinimapLane(
   minimapPending: Map<string, MinimapChunkCoord[]>,
   entities: EntitySnapshot[],
+  datasetId: string,
   config: PlanningConfig,
   out: ChunkRequest[],
 ): void {
@@ -1164,9 +1184,7 @@ function emitMinimapLane(
     if (!pending) continue;
     for (const coord of pending) {
       out.push({
-        // datasetId is stamped by the orchestrator post-`plan()`,
-        // mirroring the per-lane mutation pattern used for the
-        // other ChunkRequests.
+        datasetId,
         entityId: entity.entityId,
         imageId: entity.imageId,
         level: coord.level,
@@ -1204,12 +1222,13 @@ function emitDetailLane(
   wellProxyEmitted: Set<string>,
   config: PlanningConfig,
 ): void {
+  const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
     if (entry.mode === "well-as-proxy") {
       // Single proxy request per visible channel; no chunks.
       for (const c of snapshot.selection.visibleChannels) {
         proxyRequests.push({
-          datasetId: DEFAULT_DATASET_ID,
+          datasetId,
           entityId: entry.entityId,
           imageId: entry.imageId,
           kind: "WellProxy3D",
@@ -1231,6 +1250,7 @@ function emitDetailLane(
       snapshot.visibleRegion,
       snapshot.selection,
       stats,
+      datasetId,
     );
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
@@ -1248,7 +1268,7 @@ function emitDetailLane(
     if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
       for (const c of snapshot.selection.visibleChannels) {
         proxyRequests.push({
-          datasetId: DEFAULT_DATASET_ID,
+          datasetId,
           entityId: entry.entityId,
           imageId: entry.imageId,
           kind: "FieldProxy3D",
@@ -1273,7 +1293,7 @@ function emitDetailLane(
         if (wellProxyEmitted.has(dedupKey)) continue;
         wellProxyEmitted.add(dedupKey);
         proxyRequests.push({
-          datasetId: DEFAULT_DATASET_ID,
+          datasetId,
           entityId: wellId,
           imageId: "",
           kind: "WellProxy3D",
@@ -1300,6 +1320,7 @@ function emitPrefetchLane(
   allRequests: ChunkRequest[],
   config: PlanningConfig,
 ): void {
+  const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
     if (entry.mode === "well-as-proxy") continue;
     const entity = entityById.get(entry.entityId);
@@ -1321,6 +1342,7 @@ function emitPrefetchLane(
         snapshot.visibleRegion,
         prefetchSelection,
         stats,
+        datasetId,
       );
       for (const req of chunks) {
         const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
@@ -1353,16 +1375,18 @@ function emitOverviewLane(
   allRequests: ChunkRequest[],
   config: PlanningConfig,
 ): void {
+  const datasetId = snapshot.datasetId;
   for (const entity of entities) {
     if (entity.levels.length === 0) continue;
 
-    const coarsest = Math.max(entity.numLevels - 1, 0);
+    const coarsest = Math.max(entity.levels.length - 1, 0);
     const chunks = iterateChunksAtLodRange(
       entity,
       [coarsest, coarsest],
       snapshot.visibleRegion,
       snapshot.selection,
       stats,
+      datasetId,
     );
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
@@ -1390,7 +1414,9 @@ function emitOverviewLane(
  *   - `requests` and `proxyRequests` are sorted ascending by `priority`
  *     (lower value = more urgent).
  *   - All output objects are freshly allocated; the caller may mutate
- *     them (the orchestrator stamps `datasetId` post-hoc).
+ *     them. Every request carries `datasetId` from
+ *     {@link PlanningSnapshot.datasetId} (PRD #563 / Slice 1: planner
+ *     stamps at emit time, no orchestrator post-`plan()` mutation).
  *   - `epochs.request` is the input epoch + 1; other epoch fields are
  *     forwarded unchanged so consumers can detect plan freshness.
  *   - `stats` reflects work done in this call only — no carry-forward.
@@ -1428,7 +1454,13 @@ export function plan(
   // (PRD #545 / ADR 0023). Emitted before detail so the minimap
   // appears within ~1s of dataset open instead of after detail
   // finishes.
-  emitMinimapLane(snapshot.minimapPending, snapshot.entities, config, allRequests);
+  emitMinimapLane(
+    snapshot.minimapPending,
+    snapshot.entities,
+    snapshot.datasetId,
+    config,
+    allRequests,
+  );
 
   // Step 4: Detail / proxy lane (per active entry).
   emitDetailLane(

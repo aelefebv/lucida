@@ -205,7 +205,6 @@ describe("buildPlanningSnapshot — typical case", () => {
     expect(entities[0].entityId).toBe("field-0");
     expect(entities[0].imageId).toBe("img-0");
     expect(entities[0].kind).toBe("Field");
-    expect(entities[0].numLevels).toBe(2);
     expect(entities[0].levels).toHaveLength(2);
     expect(entities[0].position).toEqual([256, 512]);
     // Snapshot embeds the same entities as a freshly-built array.

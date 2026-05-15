@@ -14,21 +14,14 @@ import type {
 
 /**
  * Create a valid {@link EntitySnapshot} with sensible defaults, merged
- * with overrides.
- *
- * If neither `numLevels` nor `levels` is overridden, both default to a
- * single-level (`numLevels === 1`, `levels === [<L0>]`) entity. If only
- * `levels` is overridden, `numLevels` is derived from `levels.length`
- * unless explicitly provided. This avoids the foot-gun where a default
- * `numLevels: 5` paired with `levels: []` produces an entity that
- * `iterateChunks` can't traverse.
+ * with overrides. PRD #563 / Slice 1 dropped the `numLevels` field —
+ * the level count is always derived from `levels.length`. `parentId`
+ * defaults to `null`; supply a parent well id to model a Field on a
+ * plate.
  */
 export function createSyntheticEntity(
   overrides?: Partial<EntitySnapshot>,
 ): EntitySnapshot {
-  const levels = overrides?.levels ?? [];
-  const numLevels =
-    overrides?.numLevels ?? (levels.length > 0 ? levels.length : 1);
   return {
     entityId: "entity-0",
     imageId: "image-0",
@@ -39,13 +32,10 @@ export function createSyntheticEntity(
     centroidWorld: [0, 0, 0],
     idealTargetLod: 0,
     importance: 1,
-    numLevels,
-    levels,
+    levels: [],
     position: [0, 0],
     parentId: null,
     ...overrides,
-    // Re-apply derived numLevels in case overrides only provided levels.
-    ...(overrides?.numLevels === undefined ? { numLevels } : {}),
   };
 }
 
@@ -54,6 +44,7 @@ export function createSyntheticSnapshot(
   overrides?: Partial<PlanningSnapshot>,
 ): PlanningSnapshot {
   return {
+    datasetId: "synthetic-ds",
     epochs: {
       content: 0,
       layout: 0,

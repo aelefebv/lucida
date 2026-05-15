@@ -640,11 +640,10 @@ export class Orchestrator {
         );
       }
 
-      // Annotate proxy requests with the real dataset id (Planning emits
-      // an empty default since it has no per-dataset context).
-      for (const pr of result.proxyRequests) {
-        pr.datasetId = dsId;
-      }
+      // PRD #563 / Slice 1: planner stamps `datasetId` onto every
+      // ChunkRequest and ProxyRequest at emit time (using
+      // `snapshot.datasetId`), so the orchestrator no longer needs a
+      // post-`plan()` mutation pass to back-fill it.
       this._lastProxyRequests = result.proxyRequests;
 
       // 3i. Track this dataset's requests for re-send / wid-mapping.
@@ -669,11 +668,6 @@ export class Orchestrator {
       // scroll). When the worker actually evicts a proxy, its wantedSetDelta
       // reports it as missing and handleWantedSetDelta clears the per-entry
       // tracking, triggering re-delivery on the next tick.
-
-      // Annotate requests with the real dataset ID (entityId may differ for plates)
-      for (const req of result.requests) {
-        req.datasetId = dsId;
-      }
 
       // 3j. Build member roster from active set for render layer construction.
       // S8: forward the planning entry's entityId + mode so the render
@@ -773,9 +767,9 @@ export class Orchestrator {
       // priority 2000. Minimap requests now arrive through
       // `result.requests` with `lane: "minimap"` and
       // `priority: MINIMAP_LANE_OFFSET` (= 0, highest priority).
-      // The orchestrator's `req.datasetId = dsId` mutation above
-      // covers minimap requests for free since they're emitted into
-      // the same array.
+      // PRD #563 / Slice 1 makes the planner stamp `datasetId` on
+      // every emitted request directly, so minimap requests carry
+      // it without any orchestrator-side mutation.
       ctx.cpuCache.submit({
         requests: result.requests,
         activeSet: result.activeSet,
@@ -799,7 +793,7 @@ export class Orchestrator {
           debugStats.memberStats.push({
             id: memberKey,
             level: tl,
-            numLevels: entity.numLevels,
+            numLevels: entity.levels.length,
             chunksNeeded: result.requests.filter(
               (r) => r.entityId === entity.entityId && r.lane !== "prefetch",
             ).length,
@@ -807,7 +801,7 @@ export class Orchestrator {
           });
           if (tl >= 0) {
             debugStats.selectedLevel = tl;
-            debugStats.numLevels = entity.numLevels;
+            debugStats.numLevels = entity.levels.length;
           }
         }
       }
