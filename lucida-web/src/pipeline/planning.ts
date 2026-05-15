@@ -11,6 +11,7 @@
 
 import type { LevelGeometry } from "../manifestTypes.ts";
 import type { AssetCatalogSnapshot } from "./assetCatalog.ts";
+import { snapshotHasProxy } from "./assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -35,14 +36,6 @@ export const HYSTERESIS_PX = 5;
  */
 export const PROMOTE_THRESHOLD_PX = FAR_THRESHOLD_PX;
 
-/**
- * Backwards-compat alias for the legacy demote threshold. Kept as an
- * export but no longer participates in promotion logic — three-tier
- * promotion uses {@link FAR_THRESHOLD_PX} / {@link DETAIL_THRESHOLD_PX}
- * with {@link HYSTERESIS_PX}-band hysteresis instead.
- */
-export const DEMOTE_THRESHOLD_PX = 40;
-
 /** Priority lane offset for overview requests (lowest urgency). */
 export const OVERVIEW_LANE_OFFSET = 2000;
 
@@ -57,6 +50,35 @@ export const DETAIL_LANE_OFFSET = 0;
 
 /** Number of future timepoints to prefetch (length of the prefetch lane). */
 export const PREFETCH_DEPTH = 2;
+
+/**
+ * Coefficient applied to `(1 - importance)` in the priority formula.
+ * Tuned so a one-importance-step gap roughly equals a 50-voxel distance
+ * gap — high enough that a focused entity beats a far-but-uniform one.
+ */
+export const IMPORTANCE_WEIGHT = 500;
+
+/**
+ * Coefficient applied to chunk distance from the view center in the
+ * priority formula. Lower than {@link IMPORTANCE_WEIGHT} so importance
+ * dominates within a lane until distances become large.
+ */
+export const DISTANCE_WEIGHT = 10;
+
+/**
+ * Number of LODs above the ideal target that are also kept resident, so
+ * a zoom-out reveals the next-coarser LOD without a fetch round trip.
+ * `coarsestDetailLod = min(targetLod + LOD_BUFFER, numLevels - 1)`.
+ */
+export const LOD_BUFFER = 2;
+
+/**
+ * Priority bump applied to the parent-well `WellProxy3D` request emitted
+ * inside `fields-with-proxy-fallback`. Pushes it below per-field proxy
+ * requests so detail + per-field proxy load first; the well proxy is
+ * only a coarse fallback while those are in flight.
+ */
+export const WELL_PROXY_PRIORITY_BUMP = 100;
 
 // ---------------------------------------------------------------------------
 // Epochs
@@ -147,11 +169,6 @@ export interface CacheStateSnapshot {
   inFlight: Map<string, Set<string>>;
 }
 
-export interface WorkerWantedSetSnapshot {
-  /** entityId -> set of chunk keys the GPU worker reports as missing. */
-  missing: Map<string, Set<string>>;
-}
-
 // ---------------------------------------------------------------------------
 // AssetCatalogSnapshot
 // ---------------------------------------------------------------------------
@@ -170,7 +187,6 @@ export interface PlanningSnapshot {
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
   selection: SelectionState;
-  workerWantedSet: WorkerWantedSetSnapshot;
   previousActiveSet: ActiveSetEntry[];
   /**
    * Asset catalog snapshot for promotion. The orchestrator passes
@@ -190,18 +206,30 @@ export interface PlanningSnapshot {
 // ---------------------------------------------------------------------------
 
 export interface RequestPlan {
+  /**
+   * All chunk requests across detail/prefetch/overview lanes, sorted
+   * ascending by `priority` (lower = more urgent). Fresh array per
+   * `plan()` call; safely mutable by the caller.
+   */
   requests: ChunkRequest[];
+  /**
+   * Promotion decisions: one entry per visible well (`well-as-proxy`)
+   * or per visible field (field modes), plus invisible-entity
+   * pass-throughs. Carries the resolved {@link EntityMode}, LOD range,
+   * and proxy availability flags consumed by orchestrator delivery.
+   */
   activeSet: ActiveSetEntry[];
   epochs: PlanningEpochs;
   /**
    * Proxy assets to fetch alongside chunks. Populated by S6 promotion.
    * Always defined — empty array when no entries use a proxy mode.
-   * CpuCache routes these to `ContentSource.fetchProxy`.
+   * Sorted ascending by `priority`. CpuCache routes these to
+   * `ContentSource.fetchProxy`.
    */
   proxyRequests: ProxyRequest[];
   /**
-   * Counters accumulated during this plan run. Always present; cost is
-   * negligible (a few integer adds per grid cell). Consumers (DebugPanel,
+   * Counters accumulated during this plan run. Always present (zeroed
+   * if no work happened); cost is negligible. Consumers (DebugPanel,
    * tests) read it post-hoc to surface decision rationale (catalog
    * degradations) and culling effectiveness.
    */
@@ -357,10 +385,10 @@ export function chooseEntityMode(
   prevMode: EntityMode | null,
   projectedDiagonalPx: number,
 ): EntityMode {
-  const farUpper = FAR_THRESHOLD_PX + HYSTERESIS_PX; // 85
-  const farLower = FAR_THRESHOLD_PX - HYSTERESIS_PX; // 75
-  const medUpper = DETAIL_THRESHOLD_PX + HYSTERESIS_PX; // 155
-  const medLower = DETAIL_THRESHOLD_PX - HYSTERESIS_PX; // 145
+  const farUpper = FAR_THRESHOLD_PX + HYSTERESIS_PX;
+  const farLower = FAR_THRESHOLD_PX - HYSTERESIS_PX;
+  const medUpper = DETAIL_THRESHOLD_PX + HYSTERESIS_PX;
+  const medLower = DETAIL_THRESHOLD_PX - HYSTERESIS_PX;
 
   // Clearly past the thresholds: natural choice wins.
   if (projectedDiagonalPx < farLower) return "well-as-proxy";
@@ -538,10 +566,10 @@ export function assignModes(
     // and the constituent fields' entries; both are needed to know which
     // modes are reachable.
     const wellHasProxy =
-      catalog !== null && catalogHas(catalog, group.wellId, "WellProxy3D");
+      catalog !== null && snapshotHasProxy(catalog, group.wellId, "WellProxy3D");
     const anyFieldHasProxy =
       catalog !== null &&
-      group.fields.some((f) => catalogHas(catalog, f.entityId, "FieldProxy3D"));
+      group.fields.some((f) => snapshotHasProxy(catalog, f.entityId, "FieldProxy3D"));
 
     if (desired === "well-as-proxy" && !wellHasProxy) {
       desired = "fields-with-proxy-fallback";
@@ -583,14 +611,6 @@ export function assignModes(
   return out;
 }
 
-function catalogHas(
-  catalog: AssetCatalogSnapshot,
-  entityId: string,
-  kind: "WellProxy3D" | "FieldProxy3D",
-): boolean {
-  return catalog.byEntity.get(entityId)?.kinds.has(kind) ?? false;
-}
-
 function makeWellAsProxyEntry(group: WellGroup): ActiveSetEntry {
   return {
     entityId: group.wellId,
@@ -615,9 +635,9 @@ function makeFieldEntry(
 ): ActiveSetEntry {
   // Geometric: same logic the legacy `makeDetailEntry` used.
   const targetLod = entity.idealTargetLod;
-  const coarsestDetailLod = Math.min(targetLod + 2, entity.numLevels - 1);
+  const coarsestDetailLod = Math.min(targetLod + LOD_BUFFER, entity.numLevels - 1);
   const fieldProxyAvailable =
-    catalog !== null && catalogHas(catalog, entity.entityId, "FieldProxy3D");
+    catalog !== null && snapshotHasProxy(catalog, entity.entityId, "FieldProxy3D");
 
   return {
     entityId: entity.entityId,
@@ -651,10 +671,23 @@ function makeInvisibleEntry(entity: EntitySnapshot): ActiveSetEntry {
 // Synthetic test helpers
 // ---------------------------------------------------------------------------
 
-/** Create a valid {@link EntitySnapshot} with sensible defaults, merged with overrides. */
+/**
+ * Create a valid {@link EntitySnapshot} with sensible defaults, merged
+ * with overrides.
+ *
+ * If neither `numLevels` nor `levels` is overridden, both default to a
+ * single-level (`numLevels === 1`, `levels === [<L0>]`) entity. If only
+ * `levels` is overridden, `numLevels` is derived from `levels.length`
+ * unless explicitly provided. This avoids the foot-gun where a default
+ * `numLevels: 5` paired with `levels: []` produces an entity that
+ * `iterateChunks` can't traverse.
+ */
 export function createSyntheticEntity(
   overrides?: Partial<EntitySnapshot>,
 ): EntitySnapshot {
+  const levels = overrides?.levels ?? [];
+  const numLevels =
+    overrides?.numLevels ?? (levels.length > 0 ? levels.length : 1);
   return {
     entityId: "entity-0",
     imageId: "image-0",
@@ -665,11 +698,13 @@ export function createSyntheticEntity(
     centroidWorld: [0, 0, 0],
     idealTargetLod: 0,
     importance: 1,
-    numLevels: 5,
-    levels: [],
+    numLevels,
+    levels,
     position: [0, 0],
     parentId: null,
     ...overrides,
+    // Re-apply derived numLevels in case overrides only provided levels.
+    ...(overrides?.numLevels === undefined ? { numLevels } : {}),
   };
 }
 
@@ -702,7 +737,6 @@ export function createSyntheticSnapshot(
       renderMode: "slice",
       interactionState: "idle",
     },
-    workerWantedSet: { missing: new Map() },
     previousActiveSet: [],
     assetCatalog: null,
     ...overrides,
@@ -766,6 +800,10 @@ export function chunkOutsideFrustum(
  *
  * For `well-as-proxy` entries this returns an empty list — the well is
  * served by a single proxy asset, not by chunk requests.
+ *
+ * Returned `ChunkRequest`s are placeholders: `priority` is `0`, `lane`
+ * is `"detail"`, and `datasetId` is unset. The caller (`plan()`)
+ * finalises these per lane before they leave the planner.
  */
 export function iterateChunks(
   entity: EntitySnapshot,
@@ -947,7 +985,11 @@ function computePriority(
   importance: number,
   distanceFromCenter: number,
 ): number {
-  return laneOffset + (1.0 - importance) * 500 + distanceFromCenter * 10;
+  return (
+    laneOffset +
+    (1.0 - importance) * IMPORTANCE_WEIGHT +
+    distanceFromCenter * DISTANCE_WEIGHT
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -955,10 +997,17 @@ function computePriority(
 // ---------------------------------------------------------------------------
 
 /**
- * Top-level pure planning function.
+ * Top-level pure planning function. Composes promotion, chunk
+ * iteration, and three-lane scheduling into a single {@link RequestPlan}.
  *
- * Composes promotion, chunk iteration, and three-lane scheduling into a
- * single {@link RequestPlan}.
+ * Postconditions:
+ *   - `requests` and `proxyRequests` are sorted ascending by `priority`
+ *     (lower value = more urgent).
+ *   - All output objects are freshly allocated; the caller may mutate
+ *     them (the orchestrator stamps `datasetId` post-hoc).
+ *   - `epochs.request` is the input epoch + 1; other epoch fields are
+ *     forwarded unchanged so consumers can detect plan freshness.
+ *   - `stats` reflects work done in this call only — no carry-forward.
  */
 export function plan(snapshot: PlanningSnapshot): RequestPlan {
   const stats = emptyPlanStats();
@@ -1062,7 +1111,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
           kind: "WellProxy3D",
           t: snapshot.selection.t,
           c,
-          priority: PROXY_LANE_OFFSET + 100,
+          priority: PROXY_LANE_OFFSET + WELL_PROXY_PRIORITY_BUMP,
         });
       }
     }

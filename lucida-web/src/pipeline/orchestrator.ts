@@ -817,7 +817,6 @@ export class Orchestrator {
         entities,
         visibleRegion,
         selection,
-        workerWantedSet: { missing: new Map() },
         previousActiveSet: this.previousActiveSet.get(dsId) ?? [],
         // S3: real (but empty) snapshot. Planning falls through to
         // existing two-tier assignModes() since `byEntity.size === 0`.

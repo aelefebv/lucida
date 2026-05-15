@@ -139,3 +139,19 @@ export class AssetCatalog {
     return false;
   }
 }
+
+/**
+ * Free-function predicate over an {@link AssetCatalogSnapshot}: true if
+ * the snapshot advertises `kind` for `entityId`.
+ *
+ * Mirrors {@link AssetCatalog.hasProxy} but operates on the flat
+ * snapshot shape so callers (notably `planning.ts`) don't need to keep a
+ * reference to the live `AssetCatalog` instance.
+ */
+export function snapshotHasProxy(
+  snapshot: AssetCatalogSnapshot,
+  entityId: string,
+  kind: ProxyKind,
+): boolean {
+  return snapshot.byEntity.get(entityId)?.kinds.has(kind) ?? false;
+}
