@@ -20,9 +20,8 @@ import {
   PREFETCH_DEPTH,
   IMPORTANCE_WEIGHT,
   DISTANCE_WEIGHT,
-  LOD_BUFFER,
   WELL_PROXY_PRIORITY_BUMP,
-} from "./planning.ts";
+} from "./planning/index.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -32,7 +31,7 @@ import type {
   EntityMode,
   AssetCatalogSnapshot,
   ProxyKind,
-} from "./planning.ts";
+} from "./planning/index.ts";
 import type { LevelGeometry } from "../manifestTypes.ts";
 
 // ---------------------------------------------------------------------------
@@ -141,7 +140,7 @@ describe("assignModes — three-tier (no catalog)", () => {
 // ---------------------------------------------------------------------------
 
 describe("LOD range", () => {
-  it("sets coarsestDetailLod = targetLod + 2 for a field-mode entity", () => {
+  it("sets coarsestDetailLod = targetLod for a field-mode entity (no +2 buffer post-PRD-545)", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
@@ -152,11 +151,11 @@ describe("LOD range", () => {
     const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
     expect(result.targetLod).toBe(0);
-    expect(result.coarsestDetailLod).toBe(2);
-    expect(result.detailOwnedLodRange).toEqual([0, 2]);
+    expect(result.coarsestDetailLod).toBe(0);
+    expect(result.detailOwnedLodRange).toEqual([0, 0]);
   });
 
-  it("clamps coarsestDetailLod to numLevels - 1", () => {
+  it("coarsestDetailLod tracks targetLod even at the top of the pyramid", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
@@ -167,7 +166,7 @@ describe("LOD range", () => {
     const [result] = assignModes([entity], []);
     expect(result.mode).toBe("fields-with-detail");
     expect(result.targetLod).toBe(3);
-    expect(result.coarsestDetailLod).toBe(3); // clamped: min(3+2, 3) = 3
+    expect(result.coarsestDetailLod).toBe(3);
     expect(result.detailOwnedLodRange).toEqual([3, 3]);
   });
 
@@ -1467,7 +1466,6 @@ describe("plan() — proxy request emission", () => {
   it("named magic numbers have their documented values", () => {
     expect(IMPORTANCE_WEIGHT).toBe(500);
     expect(DISTANCE_WEIGHT).toBe(10);
-    expect(LOD_BUFFER).toBe(2);
     expect(WELL_PROXY_PRIORITY_BUMP).toBe(100);
   });
 });

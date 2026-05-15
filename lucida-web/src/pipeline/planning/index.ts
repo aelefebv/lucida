@@ -6,12 +6,13 @@
  *
  * Currently implements:
  *   - assignModes()  — three-tier per-well mode assignment + LOD range
- *   - createSyntheticSnapshot() / createSyntheticEntity() — test helpers
+ *   - createSyntheticSnapshot() / createSyntheticEntity() — re-exported from
+ *     `./synthetic.ts` for backward compat with existing test imports.
  */
 
-import type { LevelGeometry } from "../manifestTypes.ts";
-import type { AssetCatalogSnapshot } from "./assetCatalog.ts";
-import { snapshotHasProxy } from "./assetCatalog.ts";
+import type { LevelGeometry } from "../../manifestTypes.ts";
+import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
+import { snapshotHasProxy } from "../assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -64,13 +65,6 @@ export const IMPORTANCE_WEIGHT = 500;
  * dominates within a lane until distances become large.
  */
 export const DISTANCE_WEIGHT = 10;
-
-/**
- * Number of LODs above the ideal target that are also kept resident, so
- * a zoom-out reveals the next-coarser LOD without a fetch round trip.
- * `coarsestDetailLod = min(targetLod + LOD_BUFFER, numLevels - 1)`.
- */
-export const LOD_BUFFER = 2;
 
 /**
  * Priority bump applied to the parent-well `WellProxy3D` request emitted
@@ -176,7 +170,7 @@ export interface CacheStateSnapshot {
 // Re-exported from `./assetCatalog.ts` so consumers of the planning
 // snapshot don't need a separate import. S3 wires the snapshot through
 // the orchestrator with `byEntity` empty; S6 makes Planning consume it.
-export type { AssetCatalogSnapshot, ProxyKind } from "./assetCatalog.ts";
+export type { AssetCatalogSnapshot, ProxyKind } from "../assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
 // PlanningSnapshot  (full input)
@@ -411,7 +405,7 @@ export function chooseEntityMode(
   return prevMode ?? "fields-with-proxy-fallback";
 }
 
-interface WellGroup {
+export interface WellGroup {
   /** The well's entity id. May be derived from `parentId` of fields. */
   wellId: string;
   /**
@@ -434,8 +428,11 @@ interface WellGroup {
  * `kind === "Well"` entries are grouped with their fields; if a well is
  * visible but has no visible fields, it still appears as a group with
  * `fields: []`.
+ *
+ * Exported so the orchestrator can reuse the same well-grouping rule
+ * when building the render-layer roster (see ADR 0025).
  */
-function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
+export function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
   const groups = new Map<string, WellGroup>();
 
   for (const entity of entities) {
@@ -511,6 +508,88 @@ function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
 }
 
 /**
+ * Build the prev-mode lookup keyed by well id.
+ *
+ * Indexes the previous active set by well id (for `well-as-proxy`) or
+ * by parent well id (for field-mode entries) so both lookups land on
+ * the same `prevMode`. Returns a fresh `Map`.
+ *
+ * Pure helper — extracted from `assignModes` so the per-tick
+ * mode-decision flow reads as `prev = buildPrevModeByWell(...);
+ * desired = chooseEntityMode(prev, ...)`.
+ */
+export function buildPrevModeByWell(
+  prev: ActiveSetEntry[],
+  entities: EntitySnapshot[],
+): Map<string, EntityMode> {
+  const prevModeByWell = new Map<string, EntityMode>();
+  // Build a map from (entityId → wellId) so we can resolve where a
+  // field-mode entry's mode "belongs". For `well-as-proxy` entries
+  // entityId IS the wellId.
+  const fieldEntityToWell = new Map<string, string>();
+  for (const entity of entities) {
+    if (entity.kind === "Field" && entity.parentId) {
+      fieldEntityToWell.set(entity.entityId, entity.parentId);
+    }
+  }
+  for (const p of prev) {
+    if (p.mode === "well-as-proxy") {
+      prevModeByWell.set(p.entityId, p.mode);
+    } else {
+      const wellId = fieldEntityToWell.get(p.entityId);
+      if (wellId !== undefined) {
+        // Same-well field-mode entries always agree on mode, so
+        // first-write-wins is fine.
+        if (!prevModeByWell.has(wellId)) {
+          prevModeByWell.set(wellId, p.mode);
+        }
+      }
+    }
+  }
+  return prevModeByWell;
+}
+
+/**
+ * Catalog-aware tier degrade.
+ *
+ * Steps the desired mode down by exactly one tier when the chosen mode
+ * requires a proxy that the catalog does not advertise. Tier order is
+ * `well-as-proxy → fields-with-proxy-fallback → fields-with-detail`;
+ * tier-skipping is forbidden (see ADR 0024 for the rationale).
+ *
+ * Each step increments `stats.catalogDegradations` by 1 if `stats` is
+ * non-null. A well that degrades twice (e.g. all the way from
+ * `well-as-proxy` to `fields-with-detail`) increments by 2.
+ */
+export function degradeForCatalog(
+  desired: EntityMode,
+  group: WellGroup,
+  catalog: AssetCatalogSnapshot | null,
+  stats: PlanStats | null,
+): EntityMode {
+  const wellHasProxy =
+    catalog !== null && snapshotHasProxy(catalog, group.wellId, "WellProxy3D");
+  const anyFieldHasProxy =
+    catalog !== null &&
+    group.fields.some((f) => snapshotHasProxy(catalog, f.entityId, "FieldProxy3D"));
+
+  let mode = desired;
+  if (mode === "well-as-proxy" && !wellHasProxy) {
+    mode = "fields-with-proxy-fallback";
+    if (stats) stats.catalogDegradations++;
+  }
+  if (
+    mode === "fields-with-proxy-fallback" &&
+    !anyFieldHasProxy &&
+    !wellHasProxy
+  ) {
+    mode = "fields-with-detail";
+    if (stats) stats.catalogDegradations++;
+  }
+  return mode;
+}
+
+/**
  * Decide each entity's promotion mode and compute its LOD range.
  *
  * Three-tier per-well decision (S6):
@@ -528,63 +607,23 @@ export function assignModes(
   catalog: AssetCatalogSnapshot | null = null,
   stats: PlanStats | null = null,
 ): ActiveSetEntry[] {
-  // Index previous active set by well id (for `well-as-proxy`) or by
-  // parent well id (for field-mode entries) so both lookups land on the
-  // same `prevMode`.
-  const prevModeByWell = new Map<string, EntityMode>();
-  // Build a map from (entityId → wellId) so we can resolve where a
-  // field-mode entry's mode "belongs". For `well-as-proxy` entries
-  // entityId IS the wellId.
-  const fieldEntityToWell = new Map<string, string>();
-  for (const entity of entities) {
-    if (entity.kind === "Field" && entity.parentId) {
-      fieldEntityToWell.set(entity.entityId, entity.parentId);
-    }
-  }
-  for (const prev of previousActiveSet) {
-    if (prev.mode === "well-as-proxy") {
-      prevModeByWell.set(prev.entityId, prev.mode);
-    } else {
-      const wellId = fieldEntityToWell.get(prev.entityId);
-      if (wellId !== undefined) {
-        // Same-well field-mode entries always agree on mode, so
-        // first-write-wins is fine.
-        if (!prevModeByWell.has(wellId)) {
-          prevModeByWell.set(wellId, prev.mode);
-        }
-      }
-    }
-  }
+  const prevModeByWell = buildPrevModeByWell(previousActiveSet, entities);
 
   const out: ActiveSetEntry[] = [];
 
   for (const group of groupByWell(entities)) {
     const prev = prevModeByWell.get(group.wellId) ?? null;
-    let desired = chooseEntityMode(prev, group.projectedDiagonalPx);
+    const desired = chooseEntityMode(prev, group.projectedDiagonalPx);
+    const mode = degradeForCatalog(desired, group, catalog, stats);
 
-    // Catalog-aware degrade. We always inspect the well's catalog entry
-    // and the constituent fields' entries; both are needed to know which
-    // modes are reachable.
+    // We need wellHasProxy as the `wellProxyAvailable` flag on field
+    // entries. `degradeForCatalog` recomputes it internally; we
+    // recompute here too because we need the value, not just the
+    // post-degrade mode. Cheap to recheck.
     const wellHasProxy =
       catalog !== null && snapshotHasProxy(catalog, group.wellId, "WellProxy3D");
-    const anyFieldHasProxy =
-      catalog !== null &&
-      group.fields.some((f) => snapshotHasProxy(catalog, f.entityId, "FieldProxy3D"));
 
-    if (desired === "well-as-proxy" && !wellHasProxy) {
-      desired = "fields-with-proxy-fallback";
-      if (stats) stats.catalogDegradations++;
-    }
-    if (
-      desired === "fields-with-proxy-fallback" &&
-      !anyFieldHasProxy &&
-      !wellHasProxy
-    ) {
-      desired = "fields-with-detail";
-      if (stats) stats.catalogDegradations++;
-    }
-
-    if (desired === "well-as-proxy") {
+    if (mode === "well-as-proxy") {
       out.push(makeWellAsProxyEntry(group));
       continue;
     }
@@ -593,7 +632,7 @@ export function assignModes(
     // field. `wellEntity` (if visible) is intentionally NOT emitted as
     // its own entry: the well's geometry is represented by its fields.
     for (const field of group.fields) {
-      out.push(makeFieldEntry(field, desired, wellHasProxy, catalog));
+      out.push(makeFieldEntry(field, mode, wellHasProxy, catalog));
     }
   }
 
@@ -633,9 +672,12 @@ function makeFieldEntry(
   wellProxyAvailable: boolean,
   catalog: AssetCatalogSnapshot | null,
 ): ActiveSetEntry {
-  // Geometric: same logic the legacy `makeDetailEntry` used.
+  // PRD #545 dropped the legacy `+2` LOD buffer: planning now hands
+  // the caller exactly one level. The orchestrator no longer filters
+  // the request stream to the target level either, so a buffered range
+  // would have queued chunks the cache could never use.
   const targetLod = entity.idealTargetLod;
-  const coarsestDetailLod = Math.min(targetLod + LOD_BUFFER, entity.numLevels - 1);
+  const coarsestDetailLod = targetLod;
   const fieldProxyAvailable =
     catalog !== null && snapshotHasProxy(catalog, entity.entityId, "FieldProxy3D");
 
@@ -671,77 +713,9 @@ function makeInvisibleEntry(entity: EntitySnapshot): ActiveSetEntry {
 // Synthetic test helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Create a valid {@link EntitySnapshot} with sensible defaults, merged
- * with overrides.
- *
- * If neither `numLevels` nor `levels` is overridden, both default to a
- * single-level (`numLevels === 1`, `levels === [<L0>]`) entity. If only
- * `levels` is overridden, `numLevels` is derived from `levels.length`
- * unless explicitly provided. This avoids the foot-gun where a default
- * `numLevels: 5` paired with `levels: []` produces an entity that
- * `iterateChunks` can't traverse.
- */
-export function createSyntheticEntity(
-  overrides?: Partial<EntitySnapshot>,
-): EntitySnapshot {
-  const levels = overrides?.levels ?? [];
-  const numLevels =
-    overrides?.numLevels ?? (levels.length > 0 ? levels.length : 1);
-  return {
-    entityId: "entity-0",
-    imageId: "image-0",
-    kind: "Image",
-    visible: true,
-    projectedDiagonalPx: 100,
-    projectedAreaPx2: 10000,
-    centroidWorld: [0, 0, 0],
-    idealTargetLod: 0,
-    importance: 1,
-    numLevels,
-    levels,
-    position: [0, 0],
-    parentId: null,
-    ...overrides,
-    // Re-apply derived numLevels in case overrides only provided levels.
-    ...(overrides?.numLevels === undefined ? { numLevels } : {}),
-  };
-}
-
-/** Create a valid {@link PlanningSnapshot} with sensible defaults, merged with overrides. */
-export function createSyntheticSnapshot(
-  overrides?: Partial<PlanningSnapshot>,
-): PlanningSnapshot {
-  return {
-    epochs: {
-      content: 0,
-      layout: 0,
-      view: 0,
-      selection: 0,
-      asset: 0,
-      request: 0,
-    },
-    entities: [],
-    visibleRegion: {
-      xyBounds: [0, 0, 1024, 1024],
-      zRange: [0, 1],
-      effectiveZoom: 1,
-      sortCenter: null,
-      frustumPlanes: null,
-    },
-    selection: {
-      t: 0,
-      c: 0,
-      z: 0,
-      visibleChannels: [0],
-      renderMode: "slice",
-      interactionState: "idle",
-    },
-    previousActiveSet: [],
-    assetCatalog: null,
-    ...overrides,
-  };
-}
+// Re-exported from `./synthetic.ts` so callers that still import from
+// the planning entry point keep working without churn.
+export { createSyntheticEntity, createSyntheticSnapshot } from "./synthetic.ts";
 
 // ---------------------------------------------------------------------------
 // chunkKey()
@@ -787,7 +761,34 @@ export function chunkOutsideFrustum(
 }
 
 // ---------------------------------------------------------------------------
-// iterateChunks()
+// chunkWorldDims()
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-axis world size of a chunk at a given LOD, expressed in level-0
+ * voxel units. Returns `[x, y, z]`. Used by both spatial enumeration
+ * (`iterateGridCells`) and distance scoring (`chunkDistanceFromCenter`)
+ * so they agree on the same conversion.
+ *
+ * Indexing follows the 5-D layout: `[T, C, Z, Y, X]` → indices 4 (X),
+ * 3 (Y), 2 (Z).
+ */
+export function chunkWorldDims(
+  geo: LevelGeometry,
+  level0: LevelGeometry,
+): [number, number, number] {
+  const scaleX = level0.shape[4] / geo.shape[4];
+  const scaleY = level0.shape[3] / geo.shape[3];
+  const scaleZ = level0.shape[2] / geo.shape[2];
+  return [
+    geo.chunk_shape[4] * scaleX,
+    geo.chunk_shape[3] * scaleY,
+    geo.chunk_shape[2] * scaleZ,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// iterateChunks() / iterateChunksAtLodRange()
 // ---------------------------------------------------------------------------
 
 /**
@@ -804,6 +805,10 @@ export function chunkOutsideFrustum(
  * Returned `ChunkRequest`s are placeholders: `priority` is `0`, `lane`
  * is `"detail"`, and `datasetId` is unset. The caller (`plan()`)
  * finalises these per lane before they leave the planner.
+ *
+ * Thin wrapper around {@link iterateChunksAtLodRange}: short-circuits
+ * for `well-as-proxy` entries and reads the LOD range from the
+ * active-set entry.
  */
 export function iterateChunks(
   entity: EntitySnapshot,
@@ -812,14 +817,40 @@ export function iterateChunks(
   selection: SelectionState,
   stats: PlanStats | null = null,
 ): ChunkRequest[] {
+  if (entry.mode === "well-as-proxy") return [];
+  return iterateChunksAtLodRange(
+    entity,
+    entry.detailOwnedLodRange,
+    visibleRegion,
+    selection,
+    stats,
+  );
+}
+
+/**
+ * Spatial enumeration primitive. Iterates the LOD range from coarsest
+ * down to finest, all visible channels, and pushes one
+ * {@link ChunkRequest} per surviving grid cell.
+ *
+ * This is the form used directly by the overview lane (which doesn't
+ * need an `ActiveSetEntry` to supply the range — it always wants the
+ * coarsest level). The detail/prefetch lanes call {@link iterateChunks}
+ * which forwards the range from the active-set entry.
+ */
+export function iterateChunksAtLodRange(
+  entity: EntitySnapshot,
+  lodRange: [number, number],
+  visibleRegion: VisibleRegion,
+  selection: SelectionState,
+  stats: PlanStats | null = null,
+): ChunkRequest[] {
   const requests: ChunkRequest[] = [];
 
-  if (entry.mode === "well-as-proxy") return requests;
   if (entity.levels.length === 0) {
     return requests;
   }
 
-  const [finest, coarsest] = entry.detailOwnedLodRange;
+  const [finest, coarsest] = lodRange;
 
   // Iterate from coarsest (seed) down to finest (target).
   for (let level = coarsest; level >= finest; level--) {
@@ -850,6 +881,13 @@ export function iterateChunks(
 /**
  * Iterate the spatial grid cells for one (level, channel) pair, pushing
  * matching ChunkRequests into `out`.
+ *
+ * Decomposes into named primitives:
+ *   - {@link clipGridCellsToRegion}: reduces the full grid to the
+ *     index range that overlaps the visible region; mutates `stats`
+ *     for `considered`/`afterXyBounds`/`afterZRange`.
+ *   - {@link cellSurvivesFrustum}: per-cell frustum test.
+ *   - {@link makeChunkRequest}: emit a placeholder ChunkRequest.
  */
 function iterateGridCells(
   entity: EntitySnapshot,
@@ -862,27 +900,81 @@ function iterateGridCells(
   out: ChunkRequest[],
   stats: PlanStats | null = null,
 ): void {
+  const [chunkWorldX, chunkWorldY, chunkWorldZ] = chunkWorldDims(
+    levelGeo,
+    level0,
+  );
+
+  const clip = clipGridCellsToRegion(
+    entity,
+    region,
+    levelGeo,
+    level0,
+    chunkWorldX,
+    chunkWorldY,
+    chunkWorldZ,
+    stats,
+  );
+  if (clip === null) return;
+
+  const { colStart, colEnd, rowStart, rowEnd, zStart, zEnd } = clip;
+
+  for (let iz = zStart; iz < zEnd; iz++) {
+    for (let row = rowStart; row < rowEnd; row++) {
+      for (let col = colStart; col < colEnd; col++) {
+        if (
+          !cellSurvivesFrustum(
+            entity,
+            region,
+            col,
+            row,
+            iz,
+            chunkWorldX,
+            chunkWorldY,
+            chunkWorldZ,
+          )
+        ) {
+          continue;
+        }
+        if (stats) stats.culling.afterFrustum++;
+
+        out.push(makeChunkRequest(entity, level, selection.t, c, iz, row, col));
+      }
+    }
+  }
+}
+
+interface ClippedGridRange {
+  colStart: number;
+  colEnd: number;
+  rowStart: number;
+  rowEnd: number;
+  zStart: number;
+  zEnd: number;
+}
+
+/**
+ * Clip the level's full chunk grid to the visible region, returning the
+ * index-space range to iterate, or `null` if there is no overlap.
+ *
+ * Side effect: increments `stats.culling.considered`,
+ * `stats.culling.afterXyBounds`, and `stats.culling.afterZRange`. The
+ * mutation pattern is preserved exactly so the Slice 1 characterization
+ * tests still pass.
+ */
+function clipGridCellsToRegion(
+  entity: EntitySnapshot,
+  region: VisibleRegion,
+  levelGeo: LevelGeometry,
+  level0: LevelGeometry,
+  chunkWorldX: number,
+  chunkWorldY: number,
+  chunkWorldZ: number,
+  stats: PlanStats | null,
+): ClippedGridRange | null {
   // 5D indices: [T=0, C=1, Z=2, Y=3, X=4]
-  const levelX = levelGeo.shape[4];
-  const levelY = levelGeo.shape[3];
-  const levelZ = levelGeo.shape[2];
-
-  const chunkX = levelGeo.chunk_shape[4];
-  const chunkY = levelGeo.chunk_shape[3];
-  const chunkZ = levelGeo.chunk_shape[2];
-
   const fullX = level0.shape[4];
   const fullY = level0.shape[3];
-  const fullZ = level0.shape[2];
-
-  // Per-axis scale: how many full-res voxels per level voxel.
-  const scaleX = fullX / levelX;
-  const scaleY = fullY / levelY;
-  const scaleZ = fullZ / levelZ;
-
-  const chunkWorldX = chunkX * scaleX;
-  const chunkWorldY = chunkY * scaleY;
-  const chunkWorldZ = chunkZ * scaleZ;
 
   // Max grid index (exclusive).
   const maxCol = levelGeo.grid_shape[4];
@@ -902,7 +994,7 @@ function iterateGridCells(
 
   // Early-out: no overlap at all.
   if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) {
-    return;
+    return null;
   }
 
   const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
@@ -921,52 +1013,72 @@ function iterateGridCells(
     stats.culling.afterZRange += colsKept * rowsKept * zsKept;
   }
 
-  for (let iz = zStart; iz < zEnd; iz++) {
-    for (let row = rowStart; row < rowEnd; row++) {
-      for (let col = colStart; col < colEnd; col++) {
-        // Frustum culling in global voxel space.
-        // Frustum planes are in the first member's coordinate system, so
-        // we must offset chunk coords by entity position before testing.
-        if (region.frustumPlanes !== null) {
-          const cmin: [number, number, number] = [
-            col * chunkWorldX + entity.position[0],
-            row * chunkWorldY + entity.position[1],
-            iz * chunkWorldZ,
-          ];
-          const cmax: [number, number, number] = [
-            (col + 1) * chunkWorldX + entity.position[0],
-            (row + 1) * chunkWorldY + entity.position[1],
-            (iz + 1) * chunkWorldZ,
-          ];
-          if (chunkOutsideFrustum(cmin, cmax, region.frustumPlanes)) {
-            continue;
-          }
-        }
-        if (stats) stats.culling.afterFrustum++;
+  return { colStart, colEnd, rowStart, rowEnd, zStart, zEnd };
+}
 
-        const key = chunkKey(level, selection.t, c, iz, row, col);
+/**
+ * Per-cell frustum test. Returns `true` if the cell should be emitted.
+ *
+ * Frustum planes are in the first member's coordinate system, so we
+ * offset chunk coords by entity position before testing.
+ */
+function cellSurvivesFrustum(
+  entity: EntitySnapshot,
+  region: VisibleRegion,
+  col: number,
+  row: number,
+  iz: number,
+  chunkWorldX: number,
+  chunkWorldY: number,
+  chunkWorldZ: number,
+): boolean {
+  if (region.frustumPlanes === null) return true;
+  const cmin: [number, number, number] = [
+    col * chunkWorldX + entity.position[0],
+    row * chunkWorldY + entity.position[1],
+    iz * chunkWorldZ,
+  ];
+  const cmax: [number, number, number] = [
+    (col + 1) * chunkWorldX + entity.position[0],
+    (row + 1) * chunkWorldY + entity.position[1],
+    (iz + 1) * chunkWorldZ,
+  ];
+  return !chunkOutsideFrustum(cmin, cmax, region.frustumPlanes);
+}
 
-        // NOTE: cached chunks are NOT filtered here. They flow through
-        // `submit()` so the cache can refresh their priority and
-        // lastSeenTick — eviction relies on those signals to spare
-        // still-wanted chunks. Dedup against the cache happens in
-        // `CpuCache.submit`.
-        out.push({
-          entityId: entity.entityId,
-          imageId: entity.imageId,
-          level,
-          t: selection.t,
-          c,
-          z: iz,
-          y: row,
-          x: col,
-          lane: "detail",
-          priority: 0,
-          chunkKey: key,
-        });
-      }
-    }
-  }
+/**
+ * Build a placeholder {@link ChunkRequest} for a surviving (level,
+ * channel, z, y, x) cell. `priority`/`lane`/`datasetId` are stamped by
+ * the caller per lane.
+ *
+ * NOTE: cached chunks are NOT filtered here. They flow through
+ * `submit()` so the cache can refresh their priority and
+ * lastSeenTick — eviction relies on those signals to spare
+ * still-wanted chunks. Dedup against the cache happens in
+ * `CpuCache.submit`.
+ */
+function makeChunkRequest(
+  entity: EntitySnapshot,
+  level: number,
+  t: number,
+  c: number,
+  z: number,
+  y: number,
+  x: number,
+): ChunkRequest {
+  return {
+    entityId: entity.entityId,
+    imageId: entity.imageId,
+    level,
+    t,
+    c,
+    z,
+    y,
+    x,
+    lane: "detail",
+    priority: 0,
+    chunkKey: chunkKey(level, t, c, z, y, x),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -990,6 +1102,197 @@ function computePriority(
     (1.0 - importance) * IMPORTANCE_WEIGHT +
     distanceFromCenter * DISTANCE_WEIGHT
   );
+}
+
+// ---------------------------------------------------------------------------
+// Lane emission helpers
+// ---------------------------------------------------------------------------
+
+/** Default datasetId for proxy requests. The orchestrator overrides
+ * both chunk and proxy requests with the real dataset id after
+ * `plan()` returns; we leave the empty string here so synthetic test
+ * snapshots still produce well-formed values. */
+const DEFAULT_DATASET_ID = "";
+
+/**
+ * Detail lane — for each active entry, push detail chunks (field modes)
+ * or a single proxy request per visible channel (`well-as-proxy`).
+ *
+ * Also emits the per-field FieldProxy3D fallback for field-mode entries
+ * whose proxy is advertised, and a parent `WellProxy3D` (deduped per
+ * `(wellId, t, c)`) when the entry is in `fields-with-proxy-fallback`
+ * and the parent well's proxy is advertised.
+ *
+ * Mutates `allRequests`, `proxyRequests`, and `wellProxyEmitted`.
+ */
+function emitDetailLane(
+  activeSet: ActiveSetEntry[],
+  snapshot: PlanningSnapshot,
+  entityById: Map<string, EntitySnapshot>,
+  stats: PlanStats,
+  allRequests: ChunkRequest[],
+  proxyRequests: ProxyRequest[],
+  wellProxyEmitted: Set<string>,
+): void {
+  for (const entry of activeSet) {
+    if (entry.mode === "well-as-proxy") {
+      // Single proxy request per visible channel; no chunks.
+      for (const c of snapshot.selection.visibleChannels) {
+        proxyRequests.push({
+          datasetId: DEFAULT_DATASET_ID,
+          entityId: entry.entityId,
+          imageId: entry.imageId,
+          kind: "WellProxy3D",
+          t: snapshot.selection.t,
+          c,
+          priority: PROXY_LANE_OFFSET + 0,
+        });
+      }
+      continue;
+    }
+
+    const entity = entityById.get(entry.entityId);
+    if (entity === undefined) continue;
+
+    // Field-mode entries: emit chunk requests at detail priority.
+    const chunks = iterateChunks(
+      entity,
+      entry,
+      snapshot.visibleRegion,
+      snapshot.selection,
+      stats,
+    );
+    for (const req of chunks) {
+      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+      req.lane = "detail";
+      req.priority = computePriority(DETAIL_LANE_OFFSET, entity.importance, dist);
+      allRequests.push(req);
+    }
+
+    // Field proxy fallback (per visible channel).
+    if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
+      for (const c of snapshot.selection.visibleChannels) {
+        proxyRequests.push({
+          datasetId: DEFAULT_DATASET_ID,
+          entityId: entry.entityId,
+          imageId: entry.imageId,
+          kind: "FieldProxy3D",
+          t: snapshot.selection.t,
+          c,
+          priority: PROXY_LANE_OFFSET + 1,
+        });
+      }
+    }
+
+    // Parent-well proxy (only for proxy-fallback mode, deduped per
+    // (wellId, t, c)). At `fields-with-detail` zoom the chunk path is
+    // expected to keep up — no extra parent fetch.
+    if (
+      entry.mode === "fields-with-proxy-fallback" &&
+      entry.wellProxyAvailable &&
+      entity.parentId
+    ) {
+      const wellId = entity.parentId;
+      for (const c of snapshot.selection.visibleChannels) {
+        const dedupKey = `${wellId}|${snapshot.selection.t}|${c}`;
+        if (wellProxyEmitted.has(dedupKey)) continue;
+        wellProxyEmitted.add(dedupKey);
+        proxyRequests.push({
+          datasetId: DEFAULT_DATASET_ID,
+          entityId: wellId,
+          imageId: "",
+          kind: "WellProxy3D",
+          t: snapshot.selection.t,
+          c,
+          priority: PROXY_LANE_OFFSET + WELL_PROXY_PRIORITY_BUMP,
+        });
+      }
+    }
+  }
+}
+
+/**
+ * Prefetch lane — for each field-mode active entry, emit chunks for the
+ * next {@link PREFETCH_DEPTH} timepoints (bounded by the entity's max T).
+ *
+ * Mutates `allRequests`.
+ */
+function emitPrefetchLane(
+  activeSet: ActiveSetEntry[],
+  snapshot: PlanningSnapshot,
+  entityById: Map<string, EntitySnapshot>,
+  stats: PlanStats,
+  allRequests: ChunkRequest[],
+): void {
+  for (const entry of activeSet) {
+    if (entry.mode === "well-as-proxy") continue;
+    const entity = entityById.get(entry.entityId);
+    if (entity === undefined) continue;
+    if (entity.levels.length === 0) continue;
+
+    const maxT = entity.levels[0]?.grid_shape[0] ?? 0;
+    for (let dt = 1; dt <= PREFETCH_DEPTH; dt++) {
+      const nextT = snapshot.selection.t + dt;
+      if (nextT >= maxT) break;
+      const prefetchSelection: SelectionState = {
+        ...snapshot.selection,
+        t: nextT,
+      };
+
+      const chunks = iterateChunks(
+        entity,
+        entry,
+        snapshot.visibleRegion,
+        prefetchSelection,
+        stats,
+      );
+      for (const req of chunks) {
+        const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+        req.lane = "prefetch";
+        req.priority = computePriority(
+          PREFETCH_LANE_OFFSET + dt * 100,
+          entity.importance,
+          dist,
+        );
+        allRequests.push(req);
+      }
+    }
+  }
+}
+
+/**
+ * Overview lane — for every entity in the snapshot (visible or not),
+ * iterate the coarsest LOD's chunks via {@link iterateChunksAtLodRange}.
+ * No active-set entry needed; the overview range is always
+ * `[coarsest, coarsest]`. Removes the previous synthetic-entry
+ * workaround that was in step 5 of `plan()`.
+ *
+ * Mutates `allRequests`.
+ */
+function emitOverviewLane(
+  entities: EntitySnapshot[],
+  snapshot: PlanningSnapshot,
+  stats: PlanStats,
+  allRequests: ChunkRequest[],
+): void {
+  for (const entity of entities) {
+    if (entity.levels.length === 0) continue;
+
+    const coarsest = Math.max(entity.numLevels - 1, 0);
+    const chunks = iterateChunksAtLodRange(
+      entity,
+      [coarsest, coarsest],
+      snapshot.visibleRegion,
+      snapshot.selection,
+      stats,
+    );
+    for (const req of chunks) {
+      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
+      req.lane = "overview";
+      req.priority = computePriority(OVERVIEW_LANE_OFFSET, entity.importance, dist);
+      allRequests.push(req);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,156 +1337,22 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
   // the same well don't each push a duplicate parent-well request.
   const wellProxyEmitted = new Set<string>();
 
-  // Default datasetId for proxy requests. The orchestrator overrides
-  // both chunk and proxy requests with the real dataset id after
-  // `plan()` returns; we leave the empty string here so synthetic test
-  // snapshots still produce well-formed values.
-  const defaultDatasetId = "";
-
   // Step 3: Detail / proxy lane (per active entry).
-  for (const entry of activeSet) {
-    if (entry.mode === "well-as-proxy") {
-      // Single proxy request per visible channel; no chunks.
-      for (const c of snapshot.selection.visibleChannels) {
-        proxyRequests.push({
-          datasetId: defaultDatasetId,
-          entityId: entry.entityId,
-          imageId: entry.imageId,
-          kind: "WellProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: PROXY_LANE_OFFSET + 0,
-        });
-      }
-      continue;
-    }
-
-    const entity = entityById.get(entry.entityId);
-    if (entity === undefined) continue;
-
-    // Field-mode entries: emit chunk requests at detail priority.
-    const chunks = iterateChunks(
-      entity,
-      entry,
-      snapshot.visibleRegion,
-      snapshot.selection,
-      stats,
-    );
-    for (const req of chunks) {
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
-      req.lane = "detail";
-      req.priority = computePriority(DETAIL_LANE_OFFSET, entity.importance, dist);
-      allRequests.push(req);
-    }
-
-    // Field proxy fallback (per visible channel).
-    if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
-      for (const c of snapshot.selection.visibleChannels) {
-        proxyRequests.push({
-          datasetId: defaultDatasetId,
-          entityId: entry.entityId,
-          imageId: entry.imageId,
-          kind: "FieldProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: PROXY_LANE_OFFSET + 1,
-        });
-      }
-    }
-
-    // Parent-well proxy (only for proxy-fallback mode, deduped per
-    // (wellId, t, c)). At `fields-with-detail` zoom the chunk path is
-    // expected to keep up — no extra parent fetch.
-    if (
-      entry.mode === "fields-with-proxy-fallback" &&
-      entry.wellProxyAvailable &&
-      entity.parentId
-    ) {
-      const wellId = entity.parentId;
-      for (const c of snapshot.selection.visibleChannels) {
-        const dedupKey = `${wellId}|${snapshot.selection.t}|${c}`;
-        if (wellProxyEmitted.has(dedupKey)) continue;
-        wellProxyEmitted.add(dedupKey);
-        proxyRequests.push({
-          datasetId: defaultDatasetId,
-          entityId: wellId,
-          imageId: "",
-          kind: "WellProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: PROXY_LANE_OFFSET + WELL_PROXY_PRIORITY_BUMP,
-        });
-      }
-    }
-  }
+  emitDetailLane(
+    activeSet,
+    snapshot,
+    entityById,
+    stats,
+    allRequests,
+    proxyRequests,
+    wellProxyEmitted,
+  );
 
   // Step 4: Prefetch lane — for field-mode entries only.
-  for (const entry of activeSet) {
-    if (entry.mode === "well-as-proxy") continue;
-    const entity = entityById.get(entry.entityId);
-    if (entity === undefined) continue;
-    if (entity.levels.length === 0) continue;
-
-    const maxT = entity.levels[0]?.grid_shape[0] ?? 0;
-    for (let dt = 1; dt <= PREFETCH_DEPTH; dt++) {
-      const nextT = snapshot.selection.t + dt;
-      if (nextT >= maxT) break;
-      const prefetchSelection: SelectionState = {
-        ...snapshot.selection,
-        t: nextT,
-      };
-
-      const chunks = iterateChunks(
-        entity,
-        entry,
-        snapshot.visibleRegion,
-        prefetchSelection,
-        stats,
-      );
-      for (const req of chunks) {
-        const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
-        req.lane = "prefetch";
-        req.priority = computePriority(
-          PREFETCH_LANE_OFFSET + dt * 100,
-          entity.importance,
-          dist,
-        );
-        allRequests.push(req);
-      }
-    }
-  }
+  emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests);
 
   // Step 5: Overview lane.
-  for (const entity of snapshot.entities) {
-    if (entity.levels.length === 0) continue;
-
-    const coarsest = Math.max(entity.numLevels - 1, 0);
-    const overviewEntry: ActiveSetEntry = {
-      entityId: entity.entityId,
-      imageId: entity.imageId,
-      mode: "fields-with-detail",
-      targetLod: coarsest,
-      coarsestDetailLod: coarsest,
-      detailOwnedLodRange: [coarsest, coarsest],
-      proxyKind: undefined,
-      proxyAvailable: false,
-      wellProxyAvailable: false,
-    };
-
-    const chunks = iterateChunks(
-      entity,
-      overviewEntry,
-      snapshot.visibleRegion,
-      snapshot.selection,
-      stats,
-    );
-    for (const req of chunks) {
-      const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
-      req.lane = "overview";
-      req.priority = computePriority(OVERVIEW_LANE_OFFSET, entity.importance, dist);
-      allRequests.push(req);
-    }
-  }
+  emitOverviewLane(snapshot.entities, snapshot, stats, allRequests);
 
   // Step 6: Merge and sort by priority (ascending — lower = more urgent).
   allRequests.sort((a, b) => a.priority - b.priority);
@@ -1233,16 +1402,14 @@ function chunkDistanceFromCenter(
     centerZ = (region.zRange[0] + region.zRange[1]) / 2;
   }
 
-  // Compute chunk world size at this level.
+  // Compute chunk world size at this level via the shared helper.
   const level0 = entity.levels[0];
   const geo = entity.levels[req.level];
   let cwX = 1;
   let cwY = 1;
   let cwZ = 1;
   if (geo !== undefined && level0 !== undefined) {
-    cwX = geo.chunk_shape[4] * (level0.shape[4] / geo.shape[4]);
-    cwY = geo.chunk_shape[3] * (level0.shape[3] / geo.shape[3]);
-    cwZ = geo.chunk_shape[2] * (level0.shape[2] / geo.shape[2]);
+    [cwX, cwY, cwZ] = chunkWorldDims(geo, level0);
   }
 
   const dx = (req.x + 0.5) * cwX - centerX;

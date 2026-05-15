@@ -23,7 +23,7 @@ import {
 import { isStaleDelivery } from "./epochCheck.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 import { getColormapData } from "../colormaps.ts";
-import type { PlanningEpochs } from "../pipeline/planning.ts";
+import type { PlanningEpochs } from "../pipeline/planning/index.ts";
 import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,

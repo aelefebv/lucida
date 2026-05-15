@@ -20,7 +20,7 @@ import type {
   PlanningEpochs,
   CacheStateSnapshot,
   ProxyRequest,
-} from "./planning.ts";
+} from "./planning/index.ts";
 import { debugLog } from "../debug/logging.ts";
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 /** Discriminated-union message types for main <-> render worker communication. */
 
-import type { PlanningEpochs, VisibleRegion } from "../pipeline/planning.ts";
+import type { PlanningEpochs, VisibleRegion } from "../pipeline/planning/index.ts";
 
 /** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
 export const VOLUME_ATLAS_BUDGET = 512 * 1024 * 1024; // 512 MB

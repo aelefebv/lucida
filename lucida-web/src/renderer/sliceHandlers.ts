@@ -7,7 +7,7 @@ import { SLICE_ATLAS_BUDGET } from "./workerProtocol.ts";
 import { createSliceTexture, writeSliceRegion } from "./gpuContext.ts";
 import type { CompositeLayer } from "./layerCompositor.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
-import type { PlanningEpochs } from "../pipeline/planning.ts";
+import type { PlanningEpochs } from "../pipeline/planning/index.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16Slice } from "./dataTypeUtil.ts";
 import { parseChunkKey, parseCompositeKey, makeCompositeKey, type LodIndirectionMeta } from "./volumeHandlers.ts";
