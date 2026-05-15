@@ -12,10 +12,10 @@ import type { DecodePool } from "./decodePool.ts";
 import type {
   ChunkRequest,
   ActiveSetEntry,
-  PlanningEpochs,
   ProxyRequest,
   RequestPlan,
 } from "./planning/index.ts";
+import type { SceneEpochs } from "./epochs.ts";
 import { emptyPlanStats } from "./planning/index.ts";
 
 // ---------------------------------------------------------------------------
@@ -152,7 +152,7 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
 function makePlan(
   requests: ChunkRequest[],
   activeSet?: ActiveSetEntry[],
-  epochs?: Partial<PlanningEpochs>,
+  epochs?: Partial<SceneEpochs>,
 ): RequestPlan {
   return {
     requests,
@@ -434,7 +434,7 @@ describe("CpuCache", () => {
 
     function makeProxyPlan(
       proxyRequests: ProxyRequest[],
-      epochs?: Partial<PlanningEpochs>,
+      epochs?: Partial<SceneEpochs>,
     ): RequestPlan {
       return {
         requests: [],
@@ -1220,7 +1220,7 @@ describe("CpuCache", () => {
 
     function makeProxyPlan(
       proxyRequests: ProxyRequest[],
-      epochs?: Partial<PlanningEpochs>,
+      epochs?: Partial<SceneEpochs>,
     ): RequestPlan {
       return {
         requests: [],

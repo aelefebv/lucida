@@ -11,7 +11,7 @@ import type {
   MissingChunk,
   MissingProxy,
 } from "./workerProtocol.ts";
-import type { PlanningEpochs } from "../pipeline/planning/index.ts";
+import type { SceneEpochs } from "../pipeline/epochs.ts";
 
 export class RenderClient {
   private worker: Worker;
@@ -23,7 +23,7 @@ export class RenderClient {
    * S7: missing entries are now a discriminated union over chunks and
    * proxies. Existing consumers should match on `kind === "chunk"`.
    */
-  onWantedSetDelta: ((epochs: PlanningEpochs, missing: Array<MissingChunk | MissingProxy>) => void) | null = null;
+  onWantedSetDelta: ((epochs: SceneEpochs, missing: Array<MissingChunk | MissingProxy>) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -82,7 +82,7 @@ export class RenderClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: VolumeChunk[] = chunks.map(chunk => {
@@ -119,7 +119,7 @@ export class RenderClient {
     fullResDepth: number,
     levelDepth: number,
     fullResZ: number,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: SliceChunk[] = chunks.map(chunk => {
@@ -169,7 +169,7 @@ export class RenderClient {
     c: number,
     dims: [number, number, number],
     data: ArrayBuffer,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ) {
     // Take ownership of the buffer for transfer.
     const buf = data.slice(0);
@@ -199,7 +199,7 @@ export class RenderClient {
     canvasH: number,
     fullW: number,
     fullH: number,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
     viewProj?: Float32Array,
     camForward?: Float32Array,
     clipDistance?: number,
@@ -221,7 +221,7 @@ export class RenderClient {
     cy: number,
     canvasW: number,
     canvasH: number,
-    epochs: PlanningEpochs,
+    epochs: SceneEpochs,
   ) {
     this.worker.postMessage({
       type: "sliceRenderMultiPass",

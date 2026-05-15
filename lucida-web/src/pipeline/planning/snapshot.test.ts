@@ -5,8 +5,8 @@ import type { DatasetSettings } from "../../tickCommon.ts";
 import type {
   ActiveSetEntry,
   AssetCatalogSnapshot,
-  PlanningEpochs,
 } from "./index.ts";
+import type { SceneEpochs } from "../epochs.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
   buildPlanningSnapshot,
@@ -159,7 +159,7 @@ function makeDsSettings(overrides?: Partial<DatasetSettings>): DatasetSettings {
   };
 }
 
-function makeEpochs(): PlanningEpochs {
+function makeEpochs(): SceneEpochs {
   return { content: 1, layout: 1, view: 1, selection: 1, asset: 1, request: 0 };
 }
 

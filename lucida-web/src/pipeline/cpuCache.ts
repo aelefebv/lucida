@@ -17,10 +17,10 @@ import type { DecodePool } from "./decodePool.ts";
 import type {
   RequestPlan,
   ChunkRequest,
-  PlanningEpochs,
   CacheStateSnapshot,
   ProxyRequest,
 } from "./planning/index.ts";
+import type { SceneEpochs } from "./epochs.ts";
 import { debugLog } from "../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ export interface ReadyChunkDelivery {
   chunkKey: string;
   data: ArrayBuffer;
   dataType: string;
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   lane: Lane;
 }
 
@@ -106,7 +106,7 @@ export interface ReadyProxyDelivery {
   c: number;
   header: ProxyHeaderJs;
   data: ArrayBuffer;
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
 }
 
 export interface CacheTelemetry {
@@ -182,7 +182,7 @@ interface CacheEntry {
   x: number;
   chunkKey: string;
   insertedAt: number;
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
   dataType: string;
   /**
    * Priority recorded the last time this chunk appeared in a plan
@@ -224,7 +224,7 @@ interface ProxyCacheEntry {
   t: number;
   c: number;
   insertedAt: number;
-  epochs: PlanningEpochs;
+  epochs: SceneEpochs;
 }
 
 interface InFlightProxyEntry {
@@ -297,7 +297,7 @@ export class CpuCache {
   private activeEntityIds = new Set<string>();
 
   // Epoch velocity tracking
-  private epochHistory: PlanningEpochs[] = [];
+  private epochHistory: SceneEpochs[] = [];
 
   // Failure tracking
   private failures = new Map<string, FailedEntry>(); // inFlightKey → failure
@@ -370,7 +370,7 @@ export class CpuCache {
   };
 
   // Current epochs (for failure clearing)
-  private currentEpochs: PlanningEpochs = {
+  private currentEpochs: SceneEpochs = {
     content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
   };
 

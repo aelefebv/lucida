@@ -1,12 +1,12 @@
-import type { PlanningEpochs } from "../pipeline/planning/index.ts";
+import type { SceneEpochs } from "../pipeline/epochs.ts";
 
 /**
  * Returns true if the delivery is stale relative to the worker's current epoch state.
  * Only selectionEpoch and contentEpoch indicate data staleness.
  */
 export function isStaleDelivery(
-  deliveryEpochs: PlanningEpochs,
-  currentEpochs: PlanningEpochs | null,
+  deliveryEpochs: SceneEpochs,
+  currentEpochs: SceneEpochs | null,
 ): boolean {
   if (!currentEpochs) return false;
   return (

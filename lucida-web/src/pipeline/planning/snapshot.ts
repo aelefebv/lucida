@@ -28,11 +28,11 @@ import type {
   AssetCatalogSnapshot,
   EntitySnapshot,
   MinimapChunkCoord,
-  PlanningEpochs,
   PlanningSnapshot,
   SelectionState,
-  VisibleRegion,
 } from "./index.ts";
+import type { SceneEpochs } from "../epochs.ts";
+import type { VisibleRegion } from "../viewport.ts";
 import type { PlanningConfig } from "./config.ts";
 
 // Re-export {@link MinimapChunkCoord} so existing snapshot.ts callers
@@ -132,7 +132,7 @@ export interface BuildPlanningSnapshotArgs {
   /** True when the dataset is being viewed in multi-channel mode. */
   multiChannel: boolean;
   /** Epoch counters parsed by the orchestrator — passed through verbatim. */
-  currentEpochs: PlanningEpochs;
+  currentEpochs: SceneEpochs;
   /** The orchestrator's request epoch — copied into the snapshot's epochs. */
   requestEpoch: number;
   /** Per-tick planning tunables — threaded through into downstream callers. */
