@@ -5,7 +5,7 @@ modified: 2026-05-15
 
 # Planning Domain
 
-`lucida-web/src/pipeline/planning/` — decides which chunks the renderer wants this tick. Inputs are pulled from WASM (view query + member positions + visible region) and from the orchestrator (asset catalog, minimap pending coords); output is a `RequestPlan` consumed by [[cpu-cache]] and the [[gpu-residency|GPU worker]]. PRD #545 split the previously-monolithic `planning.ts` into a small directory: `index.ts` (types + pure planner), `config.ts` (tunables + defaults), `snapshot.ts` (WASM → snapshot translation), `debug.ts` (debug-panel snapshot), `synthetic.ts` (test fixtures).
+`lucida-web/src/pipeline/planning/` — decides which chunks the renderer wants this tick. Inputs are pulled from WASM (view query + member positions + visible region) and from the orchestrator (asset catalog, minimap pending coords, carry-forward state); output is a `RequestPlan` consumed by [[cpu-cache]] and the [[gpu-residency|GPU worker]]. PRD #545 split the previously-monolithic `planning.ts` into a small directory: `index.ts` (types + pure planner), `config.ts` (tunables + defaults), `snapshot.ts` (WASM → snapshot translation), `debug.ts` (debug-panel snapshot), `synthetic.ts` (test fixtures). PRD #563 followed up with the contract refactor: discriminated `ActiveSetEntry` and `EntitySnapshot` unions, an explicit `PlanningState` container for carry-forward state, `datasetId` carried through the snapshot (no orchestrator post-stamp), and `SceneEpochs` / `VisibleRegion` relocated to `pipeline/epochs.ts` and `pipeline/viewport.ts` (they're scene/viewport concepts, not planning concepts).
 
 ## Why a separate domain
 
@@ -63,12 +63,14 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
   - `scene.view_query(dsId)` → per-entity `projected_diagonal_px`, `projected_area_px2`, `centroid_world`, `ideal_target_lod`, `importance`
   - `scene.member_positions(dsId)` → per-entity 2D position for slice placement
   - `scene.visible_region(dsId)` → `xyBounds`, `zRange`, `effectiveZoom`, `frustumPlanes`
-- **Inputs from JS state**: the dataset's `AssetCatalog` (for catalog-aware degradation), the active layout, the per-channel visibility settings, the per-image `minimapPending` map, and the live `PlanningConfig` (from `planning/configStore.ts`).
-- **Outputs**: a `RequestPlan` per dataset — list of `ChunkRequest` with priorities, plus per-well mode metadata so the orchestrator can build the worker's cold state correctly.
+- **Inputs from JS state**: the dataset's `AssetCatalog` (for catalog-aware degradation), the active layout, the per-channel visibility settings, the per-image `minimapPending` map, the live `PlanningConfig` (from `planning/configStore.ts`), and the per-dataset `PlanningState` carry-forward (introduced by PRD #563).
+- **Plan signature**: `plan(snapshot, state, config?)` — three-way decomposition (PRD #563). `snapshot` is the world this tick; `state: PlanningState` is what crossed from last tick (v1: `{ previousActiveSet }`); `config: PlanningConfig` is the tunables. The planner returns `RequestPlan & { nextState: PlanningState }`; callers store the opaque pointer.
+- **Outputs**: a `RequestPlan` per dataset — list of `ChunkRequest` with priorities (each carrying its own `datasetId`, no post-stamp), per-well mode metadata for cold-state assembly, plus the opaque `nextState` for the next tick.
 - **Consumers**: [[cpu-cache]] (`submit(plan)`), [[gpu-residency|gpu.worker.ts]] (via the cold-state message — see [[worker-protocol]]).
-- **Snapshot assembly**: `planning/snapshot.ts` exports `buildPlanningSnapshot(args)` — a pure WASM→snapshot translator the orchestrator calls each tick. Lets planning be tested with stub WASM scenes.
+- **Snapshot assembly**: `planning/snapshot.ts` exports `buildPlanningSnapshot(args)` — a pure WASM→snapshot translator the orchestrator calls each tick. Lets planning be tested with stub WASM scenes. Snapshot carries `datasetId` (PRD #563) and constructs the matching discriminated `EntitySnapshot` variant (`ImageSnapshot | WellSnapshot | FieldSnapshot`) per WASM `kind()`.
 - **Debug panel data**: `planning/debug.ts` exports `buildPlanningDatasetDebug` and `modeReason` — pure derivations from the plan + entity list, consumed by the DebugPanel "Planning" tab. `modeReason` reads thresholds from `PlanningConfig` so it can't drift from `chooseEntityMode`.
 - **Live tuning**: `planning/configStore.ts` is a singleton with `get`/`set`/`reset`/`subscribe`, persisted to `localStorage["lucida.planning.config"]` with a schemaVersion envelope. The orchestrator subscribes to clear its planning cache on config change; the render loop subscribes to fire an interactive-dirty frame.
+- **Cross-subsystem types**: `SceneEpochs` lives in `pipeline/epochs.ts` (relocated from planning by PRD #563 — only the `request` field is planning-owned; the others are scene-state change counters consumed by render and worker pipelines too). `VisibleRegion` lives in `pipeline/viewport.ts` (also relocated — viewport concept, not planning concept).
 
 ## Invariants
 
@@ -76,6 +78,9 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
 - **Singles are treated as a singleton "well group" with one field.** `planning/index.ts::groupByWell` synthesizes an `__image__${entityId}` group key for `kind === "Image"` entities — same code path as plates, simpler shape.
 - **Catalog degradation is one tier at a time.** If well-as-proxy isn't available, drop to fields-with-proxy-fallback; if that's not available, drop to fields-with-detail. Never skip a tier.
 - **The plan is fresh every tick.** No caching across ticks; the [[scene-state-and-epochs|epoch fast-path]] in the orchestrator decides whether to re-run planning at all.
+- **Per-variant invariants are compile-time enforced** (PRD #563). `WellAsProxyEntry` carries no `imageId` / LOD fields / proxy fields — the well IS the proxy. `InvisibleEntry` is its own kind, never confused with `mode: "fields-with-detail"` for visible fields. `FieldSnapshot` always has a `parentId: string`; `ImageSnapshot` and `WellSnapshot` don't have the field at all. Reads must narrow on `kind` first.
+- **Carry-forward state is explicit.** The planner consumes `state: PlanningState` (today: `{ previousActiveSet }`) and returns `nextState: PlanningState`. No globals, no module state, no implicit caches — see [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]].
+- **`datasetId` is stamped at emit time, not post-hoc** (PRD #563). The snapshot carries `datasetId`; the planner stamps it on every `ChunkRequest` and `ProxyRequest` as it emits. The orchestrator no longer mutates the result.
 
 ## Gotchas
 
