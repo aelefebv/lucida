@@ -13,22 +13,28 @@
 import type { LevelGeometry } from "../../manifestTypes.ts";
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import { snapshotHasProxy } from "../assetCatalog.ts";
+import { DEFAULT_PLANNING_CONFIG, FAR_THRESHOLD_PX, type PlanningConfig } from "./config.ts";
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/**
- * Far threshold (px). Below this, a well promotes to `well-as-proxy`.
- * Replaces the legacy two-tier `PROMOTE_THRESHOLD_PX = 80`; same value.
- */
-export const FAR_THRESHOLD_PX = 80;
-
-/** Medium/Detail threshold (px). Above this, fields use real detail chunks. */
-export const DETAIL_THRESHOLD_PX = 150;
-
-/** Hysteresis band (px) on either side of each threshold. */
-export const HYSTERESIS_PX = 5;
+// Re-export so callers can `import { PlanningConfig, ... } from "./planning/index.ts"`.
+// The default-value constants live in `./config.ts` (the leaf module) so
+// `DEFAULT_PLANNING_CONFIG` can read them without a circular import; we
+// re-export them here under their historical public names.
+export {
+  DEFAULT_PLANNING_CONFIG,
+  mergeConfig,
+  type PlanningConfig,
+  FAR_THRESHOLD_PX,
+  DETAIL_THRESHOLD_PX,
+  HYSTERESIS_PX,
+  OVERVIEW_LANE_OFFSET,
+  PREFETCH_LANE_OFFSET,
+  PROXY_LANE_OFFSET,
+  DETAIL_LANE_OFFSET,
+  PREFETCH_DEPTH,
+  IMPORTANCE_WEIGHT,
+  DISTANCE_WEIGHT,
+  WELL_PROXY_PRIORITY_BUMP,
+} from "./config.ts";
 
 /**
  * Backwards-compat alias for the legacy constant. Many tests still import
@@ -36,43 +42,6 @@ export const HYSTERESIS_PX = 5;
  * still means "below this we use the proxy/coarse representation".
  */
 export const PROMOTE_THRESHOLD_PX = FAR_THRESHOLD_PX;
-
-/** Priority lane offset for overview requests (lowest urgency). */
-export const OVERVIEW_LANE_OFFSET = 2000;
-
-/** Priority lane offset for prefetch (next-timepoint) requests. */
-export const PREFETCH_LANE_OFFSET = 1000;
-
-/** Priority lane offset for proxy requests (between detail and overview). */
-export const PROXY_LANE_OFFSET = 500;
-
-/** Priority lane offset for detail requests (highest urgency). */
-export const DETAIL_LANE_OFFSET = 0;
-
-/** Number of future timepoints to prefetch (length of the prefetch lane). */
-export const PREFETCH_DEPTH = 2;
-
-/**
- * Coefficient applied to `(1 - importance)` in the priority formula.
- * Tuned so a one-importance-step gap roughly equals a 50-voxel distance
- * gap — high enough that a focused entity beats a far-but-uniform one.
- */
-export const IMPORTANCE_WEIGHT = 500;
-
-/**
- * Coefficient applied to chunk distance from the view center in the
- * priority formula. Lower than {@link IMPORTANCE_WEIGHT} so importance
- * dominates within a lane until distances become large.
- */
-export const DISTANCE_WEIGHT = 10;
-
-/**
- * Priority bump applied to the parent-well `WellProxy3D` request emitted
- * inside `fields-with-proxy-fallback`. Pushes it below per-field proxy
- * requests so detail + per-field proxy load first; the well proxy is
- * only a coarse fallback while those are in flight.
- */
-export const WELL_PROXY_PRIORITY_BUMP = 100;
 
 // ---------------------------------------------------------------------------
 // Epochs
@@ -369,20 +338,25 @@ export interface ActiveSetEntry {
 
 /**
  * Decide a {@link EntityMode} for the given projected diagonal, applying
- * symmetric ±{@link HYSTERESIS_PX} hysteresis around both the far and
+ * symmetric ±`config.hysteresisPx` hysteresis around both the far and
  * medium thresholds.
  *
  * Outside the bands the natural mode is forced. Inside a band the
  * previous mode wins as long as it's adjacent to the natural choice.
+ *
+ * The `config` parameter defaults to {@link DEFAULT_PLANNING_CONFIG} so
+ * call sites that don't care about live tunables (most tests) keep
+ * working unchanged.
  */
 export function chooseEntityMode(
   prevMode: EntityMode | null,
   projectedDiagonalPx: number,
+  config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): EntityMode {
-  const farUpper = FAR_THRESHOLD_PX + HYSTERESIS_PX;
-  const farLower = FAR_THRESHOLD_PX - HYSTERESIS_PX;
-  const medUpper = DETAIL_THRESHOLD_PX + HYSTERESIS_PX;
-  const medLower = DETAIL_THRESHOLD_PX - HYSTERESIS_PX;
+  const farUpper = config.farThresholdPx + config.hysteresisPx;
+  const farLower = config.farThresholdPx - config.hysteresisPx;
+  const medUpper = config.detailThresholdPx + config.hysteresisPx;
+  const medLower = config.detailThresholdPx - config.hysteresisPx;
 
   // Clearly past the thresholds: natural choice wins.
   if (projectedDiagonalPx < farLower) return "well-as-proxy";
@@ -606,6 +580,7 @@ export function assignModes(
   previousActiveSet: ActiveSetEntry[],
   catalog: AssetCatalogSnapshot | null = null,
   stats: PlanStats | null = null,
+  config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): ActiveSetEntry[] {
   const prevModeByWell = buildPrevModeByWell(previousActiveSet, entities);
 
@@ -613,7 +588,7 @@ export function assignModes(
 
   for (const group of groupByWell(entities)) {
     const prev = prevModeByWell.get(group.wellId) ?? null;
-    const desired = chooseEntityMode(prev, group.projectedDiagonalPx);
+    const desired = chooseEntityMode(prev, group.projectedDiagonalPx, config);
     const mode = degradeForCatalog(desired, group, catalog, stats);
 
     // We need wellHasProxy as the `wellProxyAvailable` flag on field
@@ -1090,17 +1065,19 @@ function makeChunkRequest(
  *
  * Lower values = more urgent.  The lane offset separates the lanes
  * (detail < proxy < prefetch < overview), while importance and distance
- * provide intra-lane ordering.
+ * provide intra-lane ordering. Both coefficients live on
+ * {@link PlanningConfig} so they can be twisted live.
  */
 function computePriority(
   laneOffset: number,
   importance: number,
   distanceFromCenter: number,
+  config: PlanningConfig,
 ): number {
   return (
     laneOffset +
-    (1.0 - importance) * IMPORTANCE_WEIGHT +
-    distanceFromCenter * DISTANCE_WEIGHT
+    (1.0 - importance) * config.importanceWeight +
+    distanceFromCenter * config.distanceWeight
   );
 }
 
@@ -1133,6 +1110,7 @@ function emitDetailLane(
   allRequests: ChunkRequest[],
   proxyRequests: ProxyRequest[],
   wellProxyEmitted: Set<string>,
+  config: PlanningConfig,
 ): void {
   for (const entry of activeSet) {
     if (entry.mode === "well-as-proxy") {
@@ -1145,7 +1123,7 @@ function emitDetailLane(
           kind: "WellProxy3D",
           t: snapshot.selection.t,
           c,
-          priority: PROXY_LANE_OFFSET + 0,
+          priority: config.proxyLaneOffset + 0,
         });
       }
       continue;
@@ -1165,7 +1143,12 @@ function emitDetailLane(
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
       req.lane = "detail";
-      req.priority = computePriority(DETAIL_LANE_OFFSET, entity.importance, dist);
+      req.priority = computePriority(
+        config.detailLaneOffset,
+        entity.importance,
+        dist,
+        config,
+      );
       allRequests.push(req);
     }
 
@@ -1179,7 +1162,7 @@ function emitDetailLane(
           kind: "FieldProxy3D",
           t: snapshot.selection.t,
           c,
-          priority: PROXY_LANE_OFFSET + 1,
+          priority: config.proxyLaneOffset + 1,
         });
       }
     }
@@ -1204,7 +1187,7 @@ function emitDetailLane(
           kind: "WellProxy3D",
           t: snapshot.selection.t,
           c,
-          priority: PROXY_LANE_OFFSET + WELL_PROXY_PRIORITY_BUMP,
+          priority: config.proxyLaneOffset + config.wellProxyPriorityBump,
         });
       }
     }
@@ -1213,7 +1196,7 @@ function emitDetailLane(
 
 /**
  * Prefetch lane — for each field-mode active entry, emit chunks for the
- * next {@link PREFETCH_DEPTH} timepoints (bounded by the entity's max T).
+ * next `config.prefetchDepth` timepoints (bounded by the entity's max T).
  *
  * Mutates `allRequests`.
  */
@@ -1223,6 +1206,7 @@ function emitPrefetchLane(
   entityById: Map<string, EntitySnapshot>,
   stats: PlanStats,
   allRequests: ChunkRequest[],
+  config: PlanningConfig,
 ): void {
   for (const entry of activeSet) {
     if (entry.mode === "well-as-proxy") continue;
@@ -1231,7 +1215,7 @@ function emitPrefetchLane(
     if (entity.levels.length === 0) continue;
 
     const maxT = entity.levels[0]?.grid_shape[0] ?? 0;
-    for (let dt = 1; dt <= PREFETCH_DEPTH; dt++) {
+    for (let dt = 1; dt <= config.prefetchDepth; dt++) {
       const nextT = snapshot.selection.t + dt;
       if (nextT >= maxT) break;
       const prefetchSelection: SelectionState = {
@@ -1250,9 +1234,10 @@ function emitPrefetchLane(
         const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
         req.lane = "prefetch";
         req.priority = computePriority(
-          PREFETCH_LANE_OFFSET + dt * 100,
+          config.prefetchLaneOffset + dt * 100,
           entity.importance,
           dist,
+          config,
         );
         allRequests.push(req);
       }
@@ -1274,6 +1259,7 @@ function emitOverviewLane(
   snapshot: PlanningSnapshot,
   stats: PlanStats,
   allRequests: ChunkRequest[],
+  config: PlanningConfig,
 ): void {
   for (const entity of entities) {
     if (entity.levels.length === 0) continue;
@@ -1289,7 +1275,12 @@ function emitOverviewLane(
     for (const req of chunks) {
       const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity);
       req.lane = "overview";
-      req.priority = computePriority(OVERVIEW_LANE_OFFSET, entity.importance, dist);
+      req.priority = computePriority(
+        config.overviewLaneOffset,
+        entity.importance,
+        dist,
+        config,
+      );
       allRequests.push(req);
     }
   }
@@ -1312,7 +1303,10 @@ function emitOverviewLane(
  *     forwarded unchanged so consumers can detect plan freshness.
  *   - `stats` reflects work done in this call only — no carry-forward.
  */
-export function plan(snapshot: PlanningSnapshot): RequestPlan {
+export function plan(
+  snapshot: PlanningSnapshot,
+  config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
+): RequestPlan {
   const stats = emptyPlanStats();
 
   // Step 1: Promote (three-tier, S6).
@@ -1321,6 +1315,7 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
     snapshot.previousActiveSet,
     snapshot.assetCatalog,
     stats,
+    config,
   );
 
   // Step 2: Build entity lookup.
@@ -1346,13 +1341,14 @@ export function plan(snapshot: PlanningSnapshot): RequestPlan {
     allRequests,
     proxyRequests,
     wellProxyEmitted,
+    config,
   );
 
   // Step 4: Prefetch lane — for field-mode entries only.
-  emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests);
+  emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
   // Step 5: Overview lane.
-  emitOverviewLane(snapshot.entities, snapshot, stats, allRequests);
+  emitOverviewLane(snapshot.entities, snapshot, stats, allRequests, config);
 
   // Step 6: Merge and sort by priority (ascending — lower = more urgent).
   allRequests.sort((a, b) => a.priority - b.priority);
