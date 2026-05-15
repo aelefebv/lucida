@@ -8,7 +8,6 @@ import {
   createSyntheticSnapshot,
   createSyntheticState,
   groupByWell,
-  PROMOTE_THRESHOLD_PX,
   FAR_THRESHOLD_PX,
   DETAIL_THRESHOLD_PX,
   HYSTERESIS_PX,
@@ -126,7 +125,7 @@ function asInvisible(entry: ActiveSetEntry) {
 //
 // Without an asset catalog the only reachable mode is `fields-with-detail`,
 // since both proxy modes degrade away when proxies aren't advertised.
-// The legacy boundary at PROMOTE_THRESHOLD_PX still distinguishes the
+// The legacy boundary at FAR_THRESHOLD_PX still distinguishes the
 // well-as-proxy desired-mode region from fields-with-detail; `<` flips
 // to fields-with-detail post-degrade. We test the mode after degrade.
 
@@ -1571,8 +1570,6 @@ describe("plan() — proxy request emission", () => {
     expect(FAR_THRESHOLD_PX).toBe(80);
     expect(DETAIL_THRESHOLD_PX).toBe(150);
     expect(HYSTERESIS_PX).toBe(5);
-    // Backwards-compat: PROMOTE_THRESHOLD_PX maps onto FAR_THRESHOLD_PX.
-    expect(PROMOTE_THRESHOLD_PX).toBe(FAR_THRESHOLD_PX);
   });
 
   it("named magic numbers have their documented values", () => {
