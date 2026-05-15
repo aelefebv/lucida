@@ -16,14 +16,12 @@ import {
   createSyntheticState,
 } from "./synthetic.ts";
 import type {
-  MinimapChunkCoord,
   PlanningSnapshot,
   PlanningState,
 } from "./types.ts";
 import {
   checkFieldParentRefs,
   checkLevelShapeArity,
-  checkMinimapKeys,
   checkPrevActiveSetKindAgreement,
   checkPrevActiveSetUnique,
   checkUniqueEntityIds,
@@ -258,34 +256,16 @@ describe("checkVisibleRegionBounds", () => {
 // validate.ts for the full rationale.
 
 // ===========================================================================
-// Check 7 — checkMinimapKeys
+// Check 7 — withdrawn (minimapPending keys)
 // ===========================================================================
-
-describe("checkMinimapKeys", () => {
-  it("passes when minimapPending is empty", () => {
-    expect(() => checkMinimapKeys(makeValidSnapshot())).not.toThrow();
-  });
-
-  it("passes when every key matches a known imageId", () => {
-    const snap = makeValidSnapshot();
-    const coord: MinimapChunkCoord = {
-      level: 0, x: 0, y: 0, z: 0, t: 0, c: 0, key: "0/0/0/0/0/0",
-    };
-    snap.minimapPending = new Map([["img-field-A1", [coord]]]);
-    expect(() => checkMinimapKeys(snap)).not.toThrow();
-  });
-
-  it("throws when a minimapPending key is not a known imageId", () => {
-    const snap = makeValidSnapshot();
-    const coord: MinimapChunkCoord = {
-      level: 0, x: 0, y: 0, z: 0, t: 0, c: 0, key: "0/0/0/0/0/0",
-    };
-    snap.minimapPending = new Map([["img-ghost", [coord]]]);
-    expect(() => checkMinimapKeys(snap)).toThrow(
-      /minimapPending key img-ghost is not a known imageId/,
-    );
-  });
-});
+//
+// The original "every minimapPending key must be a known imageId" check
+// was withdrawn during the post-ship audit. minimapPath populates
+// pendingFetch by iterating ALL dataset_images() (every image whose
+// minimap chunks haven't been fully uploaded), keyed by image_id.
+// snapshot.entities is view_query (only currently-visible entities).
+// The two routinely diverge — minimap pending coords for off-screen
+// images are legitimate. See validate.ts for the full rationale.
 
 // ===========================================================================
 // Check 8 — checkPrevActiveSetUnique

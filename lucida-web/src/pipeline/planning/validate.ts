@@ -185,25 +185,21 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
 // as a comment so the check number stays stable in cross-references.
 
 // ---------------------------------------------------------------------------
-// Check 7 — minimapPending keys are valid imageIds
+// Check 7 — withdrawn (see comment below)
 // ---------------------------------------------------------------------------
 
-/**
- * Every key in `snapshot.minimapPending` must match the `imageId` of
- * some entity in `snapshot.entities`. Dangling keys surface as no-op
- * emits but mask a producer bug in the minimap path.
- */
-export function checkMinimapKeys(snapshot: PlanningSnapshot): void {
-  const knownImageIds = new Set<string>();
-  for (const e of snapshot.entities) knownImageIds.add(e.imageId);
-  for (const imageId of snapshot.minimapPending.keys()) {
-    if (!knownImageIds.has(imageId)) {
-      throw new Error(
-        `validatePlanningInputs: minimapPending key ${imageId} is not a known imageId in snapshot.entities`,
-      );
-    }
-  }
-}
+// The original "every minimapPending key must be a known imageId in
+// snapshot.entities" check was withdrawn during the post-ship audit
+// (PR #589). Same root issue as withdrawn check 6: producer scope
+// doesn't match snapshot scope. minimapPath populates pendingFetch by
+// iterating ALL `dataset_images()` (every image in the dataset whose
+// minimap chunks haven't been fully uploaded yet), keyed by `image_id`.
+// snapshot.entities is the result of `view_query` (only currently-
+// visible entities). The two routinely diverge — minimap pending coords
+// for off-screen images are legitimate, and the planner gracefully
+// no-ops on them (its `emitMinimapLane` only walks images present in
+// the active set). Kept as a comment so the surviving check numbers
+// stay stable in cross-references.
 
 // ---------------------------------------------------------------------------
 // Check 8 — previousActiveSet has no duplicate entityIds
@@ -300,13 +296,17 @@ function allowedEntityKindsFor(
 // ---------------------------------------------------------------------------
 
 /**
- * Run the eight semantic-invariant checks on `plan()`'s inputs. Throws
+ * Run the seven semantic-invariant checks on `plan()`'s inputs. Throws
  * on first failure; the message names the violated invariant and the
  * offending id where applicable. Called from {@link plan} only when
  * `import.meta.env.DEV` is true.
  *
- * Originally nine checks per ADR 0031; check 6 (assetCatalog refs) was
- * withdrawn post-ship — see the comment above the empty Check 6 block.
+ * Originally nine checks per ADR 0031; checks 6 (assetCatalog refs)
+ * and 7 (minimapPending keys) were withdrawn post-ship — both shared
+ * the same root issue: producer scope (cross-dataset registry / all
+ * dataset images) didn't match snapshot scope (one dataset's currently
+ * visible entities). Check 9's mapping was also widened. See the
+ * comments above the withdrawn-check blocks for details.
  *
  * Order is fixed (matches ADR 0031). Earlier checks build the referential
  * context later checks rely on (e.g. uniqueness before reference-resolution),
@@ -323,7 +323,7 @@ export function validatePlanningInputs(
   checkLevelShapeArity(snapshot);
   checkVisibleRegionBounds(snapshot);
   // Check 6 withdrawn — see comment above the block.
-  checkMinimapKeys(snapshot);
+  // Check 7 withdrawn — see comment above the block.
   checkPrevActiveSetUnique(state);
   checkPrevActiveSetKindAgreement(snapshot, state);
 }
