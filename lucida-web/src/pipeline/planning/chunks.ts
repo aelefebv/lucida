@@ -1,0 +1,400 @@
+/**
+ * Planning domain — chunk enumeration and frustum culling primitives.
+ *
+ * Spatial enumeration of LOD chunks for an entity, with culling against
+ * the visible region's xy-bounds, z-range, and optional frustum
+ * half-planes. Pure helpers — no side effects beyond mutating the
+ * caller-supplied `stats` accumulator.
+ *
+ * PRD #578 / Slice 1 (ADR 0029): chunk-iteration helpers extracted out
+ * of `./index.ts` into this dedicated file.
+ */
+
+import type { LevelGeometry } from "../../manifestTypes.ts";
+import type { VisibleRegion } from "../viewport.ts";
+import type {
+  ActiveSetEntry,
+  ChunkRequest,
+  EntitySnapshot,
+  PlanStats,
+  SelectionState,
+} from "./types.ts";
+
+// ---------------------------------------------------------------------------
+// chunkKey()
+// ---------------------------------------------------------------------------
+
+/** Canonical chunk key: "level/t/c/z/y/x". */
+export function chunkKey(
+  level: number,
+  t: number,
+  c: number,
+  z: number,
+  y: number,
+  x: number,
+): string {
+  return `${level}/${t}/${c}/${z}/${y}/${x}`;
+}
+
+// ---------------------------------------------------------------------------
+// chunkOutsideFrustum()
+// ---------------------------------------------------------------------------
+
+/**
+ * Test whether a chunk AABB is fully outside any frustum half-plane.
+ *
+ * Uses the p-vertex method: for each plane [a, b, c, d], test the AABB corner
+ * most aligned with the plane normal.  If that corner is on the negative side,
+ * the entire chunk is outside.
+ */
+export function chunkOutsideFrustum(
+  cmin: [number, number, number],
+  cmax: [number, number, number],
+  planes: [number, number, number, number][],
+): boolean {
+  for (const plane of planes) {
+    const px = plane[0] >= 0 ? cmax[0] : cmin[0];
+    const py = plane[1] >= 0 ? cmax[1] : cmin[1];
+    const pz = plane[2] >= 0 ? cmax[2] : cmin[2];
+    if (plane[0] * px + plane[1] * py + plane[2] * pz + plane[3] < 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// chunkWorldDims()
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-axis world size of a chunk at a given LOD, expressed in level-0
+ * voxel units. Returns `[x, y, z]`. Used by both spatial enumeration
+ * (`iterateGridCells`) and distance scoring (`chunkDistanceFromCenter`)
+ * so they agree on the same conversion.
+ *
+ * Indexing follows the 5-D layout: `[T, C, Z, Y, X]` → indices 4 (X),
+ * 3 (Y), 2 (Z).
+ */
+export function chunkWorldDims(
+  geo: LevelGeometry,
+  level0: LevelGeometry,
+): [number, number, number] {
+  const scaleX = level0.shape[4] / geo.shape[4];
+  const scaleY = level0.shape[3] / geo.shape[3];
+  const scaleZ = level0.shape[2] / geo.shape[2];
+  return [
+    geo.chunk_shape[4] * scaleX,
+    geo.chunk_shape[3] * scaleY,
+    geo.chunk_shape[2] * scaleZ,
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// iterateChunks() / iterateChunksAtLodRange()
+// ---------------------------------------------------------------------------
+
+/**
+ * Enumerate chunk grid cells for a promoted entity, applying spatial culling
+ * and cache filtering.  Iterates all LOD levels in the entry's owned range,
+ * all visible channels, and the spatial grid cells that overlap the visible
+ * region.
+ *
+ * Ported from Rust `visible_chunks()` in lucida-core/src/chunk.rs.
+ *
+ * Accepts the full {@link ActiveSetEntry} union so callers don't have to
+ * pre-narrow. Short-circuits to an empty list for non-field entries:
+ *   - `well-as-proxy` — the well is served by a single proxy asset,
+ *     not by chunk requests.
+ *   - `invisible` — pass-through entry; no chunk requests apply.
+ *
+ * Returned `ChunkRequest`s are placeholders: `priority` is `0`, `lane`
+ * is `"detail"`, and `datasetId` is stamped from the caller-supplied
+ * arg (defaults to the empty string for synthetic test snapshots that
+ * don't model dataset ownership). The caller (`plan()`) finalises
+ * `priority`/`lane` per lane before they leave the planner.
+ *
+ * Thin wrapper around {@link iterateChunksAtLodRange}: short-circuits
+ * for non-field entries and reads the LOD range from the field entry.
+ */
+export function iterateChunks(
+  entity: EntitySnapshot,
+  entry: ActiveSetEntry,
+  visibleRegion: VisibleRegion,
+  selection: SelectionState,
+  stats: PlanStats | null = null,
+  datasetId = "",
+): ChunkRequest[] {
+  if (entry.kind !== "field") return [];
+  return iterateChunksAtLodRange(
+    entity,
+    entry.detailOwnedLodRange,
+    visibleRegion,
+    selection,
+    stats,
+    datasetId,
+  );
+}
+
+/**
+ * Spatial enumeration primitive. Iterates the LOD range from coarsest
+ * down to finest, all visible channels, and pushes one
+ * {@link ChunkRequest} per surviving grid cell.
+ *
+ * This is the form used directly by the overview lane (which doesn't
+ * need an `ActiveSetEntry` to supply the range — it always wants the
+ * coarsest level). The detail/prefetch lanes call {@link iterateChunks}
+ * which forwards the range from the active-set entry.
+ */
+export function iterateChunksAtLodRange(
+  entity: EntitySnapshot,
+  lodRange: [number, number],
+  visibleRegion: VisibleRegion,
+  selection: SelectionState,
+  stats: PlanStats | null = null,
+  datasetId = "",
+): ChunkRequest[] {
+  const requests: ChunkRequest[] = [];
+
+  if (entity.levels.length === 0) {
+    return requests;
+  }
+
+  const [finest, coarsest] = lodRange;
+
+  // Iterate from coarsest (seed) down to finest (target).
+  for (let level = coarsest; level >= finest; level--) {
+    const levelGeo = entity.levels[level];
+    if (levelGeo === undefined) continue;
+
+    const level0 = entity.levels[0];
+    if (level0 === undefined) continue;
+
+    for (const c of selection.visibleChannels) {
+      iterateGridCells(
+        entity,
+        visibleRegion,
+        selection,
+        levelGeo,
+        level0,
+        level,
+        c,
+        requests,
+        stats,
+        datasetId,
+      );
+    }
+  }
+
+  return requests;
+}
+
+/**
+ * Iterate the spatial grid cells for one (level, channel) pair, pushing
+ * matching ChunkRequests into `out`.
+ *
+ * Decomposes into named primitives:
+ *   - {@link clipGridCellsToRegion}: reduces the full grid to the
+ *     index range that overlaps the visible region; mutates `stats`
+ *     for `considered`/`afterXyBounds`/`afterZRange`.
+ *   - {@link cellSurvivesFrustum}: per-cell frustum test.
+ *   - {@link makeChunkRequest}: emit a placeholder ChunkRequest.
+ */
+function iterateGridCells(
+  entity: EntitySnapshot,
+  region: VisibleRegion,
+  selection: SelectionState,
+  levelGeo: LevelGeometry,
+  level0: LevelGeometry,
+  level: number,
+  c: number,
+  out: ChunkRequest[],
+  stats: PlanStats | null = null,
+  datasetId = "",
+): void {
+  const [chunkWorldX, chunkWorldY, chunkWorldZ] = chunkWorldDims(
+    levelGeo,
+    level0,
+  );
+
+  const clip = clipGridCellsToRegion(
+    entity,
+    region,
+    levelGeo,
+    level0,
+    chunkWorldX,
+    chunkWorldY,
+    chunkWorldZ,
+    stats,
+  );
+  if (clip === null) return;
+
+  const { colStart, colEnd, rowStart, rowEnd, zStart, zEnd } = clip;
+
+  for (let iz = zStart; iz < zEnd; iz++) {
+    for (let row = rowStart; row < rowEnd; row++) {
+      for (let col = colStart; col < colEnd; col++) {
+        if (
+          !cellSurvivesFrustum(
+            entity,
+            region,
+            col,
+            row,
+            iz,
+            chunkWorldX,
+            chunkWorldY,
+            chunkWorldZ,
+          )
+        ) {
+          continue;
+        }
+        if (stats) stats.culling.afterFrustum++;
+
+        out.push(
+          makeChunkRequest(entity, datasetId, level, selection.t, c, iz, row, col),
+        );
+      }
+    }
+  }
+}
+
+interface ClippedGridRange {
+  colStart: number;
+  colEnd: number;
+  rowStart: number;
+  rowEnd: number;
+  zStart: number;
+  zEnd: number;
+}
+
+/**
+ * Clip the level's full chunk grid to the visible region, returning the
+ * index-space range to iterate, or `null` if there is no overlap.
+ *
+ * Side effect: increments `stats.culling.considered`,
+ * `stats.culling.afterXyBounds`, and `stats.culling.afterZRange`. The
+ * mutation pattern is preserved exactly so the Slice 1 characterization
+ * tests still pass.
+ */
+function clipGridCellsToRegion(
+  entity: EntitySnapshot,
+  region: VisibleRegion,
+  levelGeo: LevelGeometry,
+  level0: LevelGeometry,
+  chunkWorldX: number,
+  chunkWorldY: number,
+  chunkWorldZ: number,
+  stats: PlanStats | null,
+): ClippedGridRange | null {
+  // 5D indices: [T=0, C=1, Z=2, Y=3, X=4]
+  const fullX = level0.shape[4];
+  const fullY = level0.shape[3];
+
+  // Max grid index (exclusive).
+  const maxCol = levelGeo.grid_shape[4];
+  const maxRow = levelGeo.grid_shape[3];
+  const maxZ = levelGeo.grid_shape[2];
+
+  // Whole-grid count is "considered" — every cell at this (level, channel)
+  // that could have been emitted before culling.
+  const totalCells = maxCol * maxRow * maxZ;
+  if (stats) stats.culling.considered += totalCells;
+
+  // Offset visible region by entity position to get local coords.
+  const localMinX = region.xyBounds[0] - entity.position[0];
+  const localMinY = region.xyBounds[1] - entity.position[1];
+  const localMaxX = region.xyBounds[2] - entity.position[0];
+  const localMaxY = region.xyBounds[3] - entity.position[1];
+
+  // Early-out: no overlap at all.
+  if (localMaxX <= 0 || localMaxY <= 0 || localMinX >= fullX || localMinY >= fullY) {
+    return null;
+  }
+
+  const colStart = Math.max(0, Math.floor(localMinX / chunkWorldX));
+  const colEnd = Math.min(maxCol, Math.max(0, Math.ceil(localMaxX / chunkWorldX)));
+  const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
+  const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
+
+  const zStart = Math.max(0, Math.floor(region.zRange[0] / chunkWorldZ));
+  const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(region.zRange[1] / chunkWorldZ)));
+
+  if (stats) {
+    const colsKept = Math.max(0, colEnd - colStart);
+    const rowsKept = Math.max(0, rowEnd - rowStart);
+    const zsKept = Math.max(0, zEnd - zStart);
+    stats.culling.afterXyBounds += colsKept * rowsKept * maxZ;
+    stats.culling.afterZRange += colsKept * rowsKept * zsKept;
+  }
+
+  return { colStart, colEnd, rowStart, rowEnd, zStart, zEnd };
+}
+
+/**
+ * Per-cell frustum test. Returns `true` if the cell should be emitted.
+ *
+ * Frustum planes are in the first member's coordinate system, so we
+ * offset chunk coords by entity position before testing.
+ */
+function cellSurvivesFrustum(
+  entity: EntitySnapshot,
+  region: VisibleRegion,
+  col: number,
+  row: number,
+  iz: number,
+  chunkWorldX: number,
+  chunkWorldY: number,
+  chunkWorldZ: number,
+): boolean {
+  if (region.frustumPlanes === null) return true;
+  const cmin: [number, number, number] = [
+    col * chunkWorldX + entity.position[0],
+    row * chunkWorldY + entity.position[1],
+    iz * chunkWorldZ,
+  ];
+  const cmax: [number, number, number] = [
+    (col + 1) * chunkWorldX + entity.position[0],
+    (row + 1) * chunkWorldY + entity.position[1],
+    (iz + 1) * chunkWorldZ,
+  ];
+  return !chunkOutsideFrustum(cmin, cmax, region.frustumPlanes);
+}
+
+/**
+ * Build a placeholder {@link ChunkRequest} for a surviving (level,
+ * channel, z, y, x) cell. `priority`/`lane` are stamped by the caller
+ * per lane; `datasetId` is plumbed through from
+ * `PlanningSnapshot.datasetId` so every emitted request leaves
+ * the planner fully addressed.
+ *
+ * NOTE: cached chunks are NOT filtered here. They flow through
+ * `submit()` so the cache can refresh their priority and
+ * lastSeenTick — eviction relies on those signals to spare
+ * still-wanted chunks. Dedup against the cache happens in
+ * `CpuCache.submit`.
+ */
+function makeChunkRequest(
+  entity: EntitySnapshot,
+  datasetId: string,
+  level: number,
+  t: number,
+  c: number,
+  z: number,
+  y: number,
+  x: number,
+): ChunkRequest {
+  return {
+    datasetId,
+    entityId: entity.entityId,
+    imageId: entity.imageId,
+    level,
+    t,
+    c,
+    z,
+    y,
+    x,
+    lane: "detail",
+    priority: 0,
+    chunkKey: chunkKey(level, t, c, z, y, x),
+  };
+}
