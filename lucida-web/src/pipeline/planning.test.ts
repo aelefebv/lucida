@@ -2495,10 +2495,44 @@ describe("plan() — minimap lane (Slice 5)", () => {
       new Set(["3/0/0/0/0/0", "3/0/0/0/0/1"]),
     );
     for (const req of minimap) {
-      expect(req.entityId).toBe("e0");
+      // entityId is set to imageId so the cache key matches what
+      // tickMinimapOverview's getCachedChunk(imageId, key) lookup uses.
+      expect(req.entityId).toBe("imgM");
       expect(req.imageId).toBe("imgM");
       expect(req.level).toBe(3);
     }
+  });
+
+  it("uses imageId (not entityId) as cache key — critical for plates where they differ", () => {
+    // Plate fields have distinct entityId (e.g., "fA1") and imageId (e.g., "imgA1").
+    // tickMinimapOverview in minimapPath.ts looks chunks up via
+    // cpuCache.getCachedChunk(imageId, key); planning must therefore store
+    // them under imageId so the lookup hits. Emitting under entityId would
+    // make the minimap silently never populate on plates.
+    const fieldEntity = createSyntheticEntity({
+      entityId: "fA1",
+      imageId: "imgA1",
+      kind: "Field",
+      parentId: "wellA",
+      numLevels: 4,
+      levels: [makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256])],
+    });
+    const snap = createSyntheticSnapshot({
+      entities: [fieldEntity],
+      minimapPending: new Map([
+        [
+          "imgA1",
+          [{ level: 3, x: 0, y: 0, z: 0, t: 0, c: 0, key: "3/0/0/0/0/0" }],
+        ],
+      ]),
+    });
+    const result = plan(snap);
+    const minimap = result.requests.filter((r) => r.lane === "minimap");
+    expect(minimap).toHaveLength(1);
+    expect(minimap[0].entityId).toBe("imgA1"); // imageId, not entityId
+    expect(minimap[0].imageId).toBe("imgA1");
+    // The field's actual entityId is NOT used as the cache key.
+    expect(minimap[0].entityId).not.toBe("fA1");
   });
 
   it("emits at priority MINIMAP_LANE_OFFSET (= 0 by default)", () => {
