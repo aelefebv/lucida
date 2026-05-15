@@ -2,7 +2,12 @@
 //!
 //! URL scheme routing:
 //! - `/path/...` → local filesystem
-//! - `gs://bucket/...` → Google Cloud Storage (Application Default Credentials)
+//! - `gs://bucket/...` → Google Cloud Storage. Credential discovery order:
+//!   `GOOGLE_*` env vars (incl. `GOOGLE_SERVICE_ACCOUNT*` and Google's standard
+//!   `GOOGLE_APPLICATION_CREDENTIALS`) read by `GoogleCloudStorageBuilder::from_env`,
+//!   then the well-known ADC file at
+//!   `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE
+//!   metadata server (Workload Identity / GCE instance default).
 //! - `s3://bucket/...` → Amazon S3 (environment/instance credentials)
 //! - `http://...` / `https://...` → HTTP static file server
 
@@ -92,8 +97,12 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 /// Open a storage backend from a URL.
 ///
 /// - Paths starting with `/` are treated as local filesystem paths.
-/// - `gs://bucket/path` URLs use Google Cloud Storage with Application Default
-///   Credentials.
+/// - `gs://bucket/path` URLs use Google Cloud Storage. Credentials are
+///   discovered, in order: `GOOGLE_*` env vars (incl. `GOOGLE_SERVICE_ACCOUNT*`
+///   and Google's standard `GOOGLE_APPLICATION_CREDENTIALS`) via
+///   `GoogleCloudStorageBuilder::from_env`, then the well-known ADC file at
+///   `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE
+///   metadata server (Workload Identity / GCE instance default).
 /// - `s3://bucket/path` URLs use Amazon S3 with environment/instance credentials.
 /// - `http://` and `https://` URLs use an HTTP static file server.
 pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
@@ -105,7 +114,12 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
         Ok(Arc::new(store))
     } else if url.starts_with("gs://") {
         let (bucket, prefix) = parse_gs_url(url)?;
-        let store = GoogleCloudStorageBuilder::new()
+        // `from_env()` iterates `GOOGLE_*` env vars (incl.
+        // `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SERVICE_ACCOUNT*`) — mirrors
+        // the S3 line below. If none are set, falls back to
+        // `$HOME/.config/gcloud/application_default_credentials.json` and then
+        // the GCE metadata server (Workload Identity).
+        let store = GoogleCloudStorageBuilder::from_env()
             .with_bucket_name(bucket)
             .build()?;
         match prefix {
