@@ -5,11 +5,11 @@
  * input + per-field reset arrow per row, plus a "Reset all to defaults"
  * button at the top.
  *
- * Slice 6 of the planning refactor (PRD #545). The store is the source
- * of truth — every render reads from `configStore.get()` and every edit
- * goes through `configStore.set` / `configStore.reset`. The orchestrator
- * subscribes to the same store and clears its epoch cache on each
- * change so the next frame replans from the new values.
+ * The store is the source of truth — every render reads from
+ * `configStore.get()` and every edit goes through `configStore.set` /
+ * `configStore.reset`. The orchestrator subscribes to the same store
+ * and clears its epoch cache on each change so the next frame
+ * replans from the new values.
  *
  * Cross-constraint warnings (warn but allow):
  *   - `detailThresholdPx <= farThresholdPx + 2*hysteresisPx`: the

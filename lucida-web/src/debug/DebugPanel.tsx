@@ -270,9 +270,9 @@ function PlanningTabBody({
     }
     const plans = orch.getLastPlans();
     console.group("[DebugPanel] last active sets");
-    // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union;
-    // each variant exposes a different field shape. Render the table
-    // with per-variant defaults so the columns line up across rows.
+    // ActiveSetEntry is a discriminated union; each variant exposes a
+    // different field shape. Render the table with per-variant
+    // defaults so the columns line up across rows.
     for (const [dsId, plan] of plans) {
       console.groupCollapsed(`${dsId}: ${plan.activeSet.length} entries`);
       console.table(

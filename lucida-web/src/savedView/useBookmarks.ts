@@ -1,23 +1,22 @@
-// React hook wrapping the slice-2 REST API plus local list/filter state.
+// React hook wrapping the bookmarks REST API plus local list/filter state.
 //
-// Slice 3 acceptance: the sidebar lists bookmarks scoped to currently-loaded
-// datasets, with a substring search across name + creator name + creator
-// email and a "Mine only" toggle.
+// The sidebar lists bookmarks scoped to currently-loaded datasets,
+// with a substring search across name + creator name + creator email
+// and a "Mine only" toggle.
 //
-// Slice 4 (PRD #454 issue #477) layers a live WebSocket subscription on
-// top: when any peer mutates a bookmark whose dataset URLs overlap a
-// loaded dataset in this session, the server broadcasts
-// `ServerMessage::BookmarkChanged`. The hook subscribes via
-// `bridge.subscribeBookmarkChanged` and reconciles local state without
-// requiring a manual refresh:
+// A live WebSocket subscription layers on top: when any peer mutates
+// a bookmark whose dataset URLs overlap a loaded dataset in this
+// session, the server broadcasts `ServerMessage::BookmarkChanged`.
+// The hook subscribes via `bridge.subscribeBookmarkChanged` and
+// reconciles local state without requiring a manual refresh:
 //   - Created/Updated: refetch by id and merge (insert if missing,
 //     replace if present). Cheaper + more accurate than embedding the
 //     full payload in the broadcast.
 //   - Deleted: remove the entry from local state.
 // Self-broadcasts (the originating client also receives the message)
-// are not filtered — the optimistic local updates from this slice
-// reconcile cleanly because the broadcast-driven refetch returns the
-// same canonical state.
+// are not filtered — optimistic local updates reconcile cleanly
+// because the broadcast-driven refetch returns the same canonical
+// state.
 //
 // CRUD wrappers are optimistic: create inserts immediately and reconciles
 // with the server response; rename patches in-place; delete removes
@@ -144,8 +143,8 @@ export function useBookmarks({
     void refresh();
   }, [datasetsKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Slice 4: subscribe to cross-peer broadcasts. Created/Updated → fetch
-  // by id and merge; Deleted → drop from local state. Self-broadcasts
+  // Subscribe to cross-peer broadcasts. Created/Updated → fetch by id
+  // and merge; Deleted → drop from local state. Self-broadcasts
   // arrive too — they reconcile cleanly because the optimistic state
   // we already inserted matches what the GET returns.
   //

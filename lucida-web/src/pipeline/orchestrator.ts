@@ -41,10 +41,9 @@ import type { VisibleRegion } from "./viewport.ts";
 
 // Re-export so existing call sites that imported `MinimapChunkCoord`
 // from the orchestrator (e.g. `slicePath.ts`, `volumePath.ts`,
-// `renderLoop.ts`, `minimapPath.ts`) keep working unchanged. Slice 5
-// of PRD #545 consolidated the canonical declaration into
-// `pipeline/planning/index.ts` since the type is now part of the
-// planning snapshot's public shape.
+// `renderLoop.ts`, `minimapPath.ts`) keep working unchanged. The
+// canonical declaration lives in `pipeline/planning/index.ts` since
+// the type is part of the planning snapshot's public shape.
 export type { MinimapChunkCoord } from "./planning/index.ts";
 import type {
   CpuCache,
@@ -291,11 +290,10 @@ export class Orchestrator {
    * stores `result.nextState` after each `plan()` call and threads the
    * matching entry back as the `state` argument on the next tick.
    *
-   * PRD #563 / Slice 3 renamed this from `previousActiveSet:
-   * Map<string, ActiveSetEntry[]>` so the seam between the planner and
-   * its caller is the {@link PlanningState} container. Future planner
-   * state (per-well stickiness, anticipation hints) extends
-   * {@link PlanningState} without touching the orchestrator.
+   * The seam between the planner and its caller is the
+   * {@link PlanningState} container; future planner state (per-well
+   * stickiness, anticipation hints) extends {@link PlanningState}
+   * without touching the orchestrator.
    */
   private planningState = new Map<string, PlanningState>();
   private lastEpochs: SceneEpochs | null = null;
@@ -599,10 +597,9 @@ export class Orchestrator {
       // 3b. Build the planning snapshot from live WASM state. Returns
       // null when `view_query` produces no visible entities (dataset
       // not yet registered, etc.) — skip the dataset in that case.
-      // Slice 4 (PRD #545) extracted the WASM → snapshot translation
-      // into `planning/snapshot.ts`. Slice 5 wires `minimapPendingFetch`
-      // through the same call site so the planner emits minimap-lane
-      // requests at the highest priority (ADR 0023).
+      // `minimapPendingFetch` flows through into the snapshot so the
+      // planner emits minimap-lane requests at the highest priority
+      // (see ADR 0023).
       const built = buildPlanningSnapshot({
         scene: ctx.scene,
         datasetId: dsId,
@@ -628,9 +625,9 @@ export class Orchestrator {
         this._lastCachedKeyCounts.set(entity.entityId, cachedKeys?.size ?? 0);
       }
 
-      // 3d. Plan. PRD #563 / Slice 3: pass the opaque carry-forward
-      // state separately from the snapshot, and store the planner-
-      // returned `nextState` for the next tick.
+      // 3d. Plan. The opaque carry-forward state travels separately
+      // from the snapshot via {@link PlanningState}; we store the
+      // planner-returned `nextState` for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
         ?? { previousActiveSet: [] };
       const result = plan(snapshot, planningStateForDataset, planningConfig);
@@ -656,17 +653,16 @@ export class Orchestrator {
         );
       }
 
-      // PRD #563 / Slice 1: planner stamps `datasetId` onto every
-      // ChunkRequest and ProxyRequest at emit time (using
-      // `snapshot.datasetId`), so the orchestrator no longer needs a
-      // post-`plan()` mutation pass to back-fill it.
+      // The planner stamps `datasetId` onto every ChunkRequest and
+      // ProxyRequest at emit time (from `snapshot.datasetId`); no
+      // post-`plan()` mutation pass is needed here.
       this._lastProxyRequests = result.proxyRequests;
 
       // 3i. Track this dataset's requests for re-send / wid-mapping.
-      // PRD #545 dropped the LOD-filter step that previously gated the
-      // request stream to `entry.targetLod`: planning now emits exactly
-      // one level per entity, so the filter is a no-op. `_lastFilteredRequests`
-      // keeps its name for compatibility with the re-send loop below.
+      // No LOD-filter step gates the request stream: planning emits
+      // exactly one level per entity. `_lastFilteredRequests` keeps
+      // its historical name for compatibility with the re-send loop
+      // below.
       this._lastFilteredRequests = result.requests;
       // Build wid → entityId for this dataset so handleChunksEvicted
       // can resolve `cpuCache.markRejected(entityId, ...)` from the
@@ -781,14 +777,11 @@ export class Orchestrator {
       // CpuCache but share the cancellation contract: if the next
       // plan omits a request, its in-flight fetch is aborted.
       //
-      // Slice 5 of PRD #545 deleted the inline minimap-injection
-      // block that previously appended overview-lane requests at
-      // priority 2000. Minimap requests now arrive through
-      // `result.requests` with `lane: "minimap"` and
-      // `priority: MINIMAP_LANE_OFFSET` (= 0, highest priority).
-      // PRD #563 / Slice 1 makes the planner stamp `datasetId` on
-      // every emitted request directly, so minimap requests carry
-      // it without any orchestrator-side mutation.
+      // Minimap requests arrive through `result.requests` with
+      // `lane: "minimap"` and `priority: MINIMAP_LANE_OFFSET` (= 0,
+      // highest priority); the planner stamps `datasetId` on every
+      // emitted request directly, so no orchestrator-side mutation
+      // is needed.
       ctx.cpuCache.submit({
         requests: result.requests,
         activeSet: result.activeSet,
@@ -808,10 +801,10 @@ export class Orchestrator {
           const activeEntry = result.activeSet.find(
             (a) => a.entityId === entity.entityId,
           );
-          // PRD #563 / Slice 4: only field entries carry `targetLod`;
-          // well-as-proxy has no LOD bookkeeping, invisibles report
-          // their coarsest LOD instead. Surface -1 for non-field
-          // entries to mirror the legacy "no level selected" sentinel.
+          // Only field entries carry `targetLod`; well-as-proxy has
+          // no LOD bookkeeping, invisibles report their coarsest LOD
+          // instead. Surface -1 for non-field entries to mirror the
+          // historical "no level selected" sentinel.
           const tl =
             activeEntry?.kind === "field"
               ? activeEntry.targetLod
@@ -876,8 +869,8 @@ export class Orchestrator {
       // state — its `previousActiveSet` field is exactly the active
       // set produced by the most recent `plan()` call for that dataset.
       //
-      // PRD #563 / Slice 4: ActiveSetEntry is now a discriminated
-      // union, so per-variant fields are derived from `kind`:
+      // ActiveSetEntry is a discriminated union; per-variant fields
+      // are derived from `kind`:
       //   - well-as-proxy → mode column reads "well-as-proxy",
       //     LOD columns are zero (no LOD bookkeeping for this variant);
       //   - field        → mode column reads the field's promotion mode,
@@ -1580,14 +1573,14 @@ export class Orchestrator {
   /**
    * Process a wanted-set delta from the GPU worker.
    *
-   * S7: accepts a discriminated union over chunks and proxies.
+   * Accepts a discriminated union over chunks and proxies:
    *  - chunk: land in `workerWantedSet` (existing chunk-resend logic).
    *  - proxy: clear the entry from `proxyDeliveredToWorker` so the
    *    next tick's resend pass picks it up via `getCachedProxy`.
    *
-   * (S7's earlier note about not tracking proxy resends is now
-   * obsolete — see PRD #409 / S2: the cache-hit short-circuit means
-   * we can't rely on `submit()` re-emission.)
+   * Proxy resends must be tracked (not just chunk resends): the
+   * cache-hit short-circuit means we can't rely on `submit()`
+   * re-emission to recover from a worker-side eviction.
    */
   handleWantedSetDelta(
     missing: Array<MissingChunkLite | MissingProxyLite>,
@@ -1840,7 +1833,7 @@ export class Orchestrator {
       epochs,
       stats: emptyPlanStats(),
       // submit() doesn't read nextState; placeholder so the literal
-      // satisfies RequestPlan's contract. (PRD #563 / Slice 3.)
+      // satisfies RequestPlan's contract.
       nextState: { previousActiveSet: [] },
     });
   }
@@ -1889,13 +1882,13 @@ export class Orchestrator {
       };
     }
 
-    // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; the
-    // worker's `ColdStateActiveEntry` stays flat (it talks to the
-    // worker over a separate seam). Each variant maps onto the cold
-    // shape with explicit per-variant defaults — `well-as-proxy` has
-    // no LOD bookkeeping and an empty imageId, `invisible` collapses
-    // to its coarsest LOD with no proxy availability, and `field`
-    // forwards its fields verbatim.
+    // ActiveSetEntry is a discriminated union, but the worker's
+    // `ColdStateActiveEntry` stays flat (it talks to the worker over
+    // a separate seam). Each variant maps onto the cold shape with
+    // explicit per-variant defaults — `well-as-proxy` has no LOD
+    // bookkeeping and an empty imageId, `invisible` collapses to its
+    // coarsest LOD with no proxy availability, and `field` forwards
+    // its fields verbatim.
     const coldActiveSet: ColdStateActiveEntry[] = activeSet.map(entry => {
       const entity = entityById.get(entry.entityId);
       const levels = (entity?.levels ?? []).map((lvl: LevelGeometry, idx: number) => {
@@ -1916,11 +1909,9 @@ export class Orchestrator {
       // S7: forward Planning's promotion mode + proxy availability so
       // the worker's wanted-set knows whether to ask for proxies.
       // `parentWellId` lets the worker fan out a well-proxy upload to
-      // its child fields' descriptors.
-      //
-      // PRD #563 / Slice 5: `EntitySnapshot` is a discriminated union;
-      // narrowing on `kind === "Field"` gives us a `FieldSnapshot` whose
-      // `parentId` is non-null by construction (no `?? null` fallback).
+      // its child fields' descriptors. Narrowing on `kind === "Field"`
+      // gives a `FieldSnapshot` whose `parentId` is non-null by
+      // construction.
       const parentWellId =
         entity?.kind === "Field" ? entity.parentId : null;
 

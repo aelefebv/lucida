@@ -2,13 +2,11 @@
  * Debug builder — derives per-dataset planning telemetry from a fully-
  * computed {@link RequestPlan}.
  *
- * Slice 4 of the planning refactor (PRD #545) extracted this from the
- * orchestrator. It feeds the DebugPanel "Planning" tab unchanged: same
- * {@link PlanningDatasetDebug} shape, same focal-entity selection rule,
- * same lane / LOD / wells-by-mode aggregation. The only behavioural
- * change is that {@link modeReason} now consumes its threshold values
- * from {@link PlanningConfig} so they cannot drift from
- * {@link chooseEntityMode}'s thresholds.
+ * Feeds the DebugPanel "Planning" tab: {@link PlanningDatasetDebug}
+ * shape, focal-entity selection by viewport-center proximity, lane /
+ * LOD / wells-by-mode aggregation. {@link modeReason} consumes its
+ * threshold values from {@link PlanningConfig} (the same struct
+ * {@link chooseEntityMode} reads) so the two cannot drift.
  *
  * Pure: no module state, no parameter mutation. Cheap enough that the
  * orchestrator calls it on every cold-state rebuild.
@@ -122,12 +120,11 @@ export function buildPlanningDatasetDebug(
   // up as one count without special-casing. Invisible entries are
   // excluded — they have no promotion mode.
   //
-  // PRD #563 / Slice 4: ActiveSetEntry is now a discriminated union;
-  // narrow on `kind` before classifying.
-  // PRD #563 / Slice 5: EntitySnapshot is also a discriminated union;
-  // only `FieldSnapshot` carries a `parentId`. Narrow on `ent.kind ===
-  // "Field"` before reading it; otherwise fall back to the entry's own
-  // entityId as the wellId (matches the previous Image-only behaviour).
+  // ActiveSetEntry and EntitySnapshot are both discriminated unions:
+  // narrow on `kind` before classifying entries, and on
+  // `ent.kind === "Field"` before reading `parentId` (Image and Well
+  // entities have no parent and fall back to their own entityId as
+  // the wellId).
   const wellsByMode = {
     wellAsProxy: 0,
     fieldsWithProxyFallback: 0,
@@ -178,10 +175,10 @@ export function buildPlanningDatasetDebug(
       chunkCount++;
       if (topPriority === null || r.priority < topPriority) topPriority = r.priority;
     }
-    // PRD #563 / Slice 4: derive `mode` and `detailOwnedRange` per
-    // variant — only field entries carry a real LOD range, well-as-proxy
-    // and invisibles synthesise a defensible placeholder so the panel
-    // doesn't render `unknown`.
+    // Derive `mode` and `detailOwnedRange` per variant: only field
+    // entries carry a real LOD range. Well-as-proxy and invisibles
+    // synthesise a defensible placeholder so the panel doesn't render
+    // `unknown`.
     let displayMode: string;
     let detailOwnedRange: [number, number];
     if (entry === undefined) {
@@ -197,9 +194,9 @@ export function buildPlanningDatasetDebug(
       displayMode = entry.mode;
       detailOwnedRange = entry.detailOwnedLodRange;
     }
-    // PRD #563 / Slice 5: only `FieldSnapshot` carries a `parentId`.
-    // Narrow before reading; `Image` and `Well` focal entities surface
-    // as having no parent well.
+    // Only `FieldSnapshot` carries a `parentId`; narrow before
+    // reading. `Image` and `Well` focal entities surface as having no
+    // parent well.
     const parentWellId = focal.kind === "Field" ? focal.parentId : null;
     focalEntity = {
       entityId: focal.entityId,

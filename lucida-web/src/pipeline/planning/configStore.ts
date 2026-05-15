@@ -4,12 +4,11 @@
  * versioned envelope, with a subscribe API so the orchestrator can
  * invalidate its epoch cache when the user twists a knob.
  *
- * Slice 6 of the planning refactor (PRD #545). Honours principle §4 of
- * `wiki/principles/planning.md`: planning is pure and any state that
- * survives across ticks (or any policy knob the user might twist live)
- * is an explicit input. The configStore is the explicit-state container
- * for those knobs — `plan()` itself stays a function of
- * `(snapshot, config)`.
+ * Honours principle §4 of `wiki/principles/planning.md`: planning is
+ * pure and any state that survives across ticks (or any policy knob
+ * the user might twist live) is an explicit input. The configStore is
+ * the explicit-state container for those knobs — `plan()` itself
+ * stays a function of `(snapshot, config)`.
  *
  * Persistence schema (`localStorage["lucida.planning.config"]`):
  *

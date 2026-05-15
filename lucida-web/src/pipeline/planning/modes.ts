@@ -10,8 +10,7 @@
  *   - Emit one {@link ActiveSetEntry} per well (`well-as-proxy`) or one
  *     per visible field (field modes).
  *
- * PRD #578 / Slice 1 (ADR 0029): mode-decision functions extracted out
- * of `./index.ts` into this dedicated file.
+ * See ADR 0029.
  */
 
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
@@ -40,9 +39,8 @@ import type {
  * Returns the broader {@link ResolvedMode} (which still includes
  * `"well-as-proxy"`) — the per-well decision step works on this set
  * before {@link assignModes} translates each result into the matching
- * {@link ActiveSetEntry} variant. PRD #563 / Slice 4: {@link EntityMode}
- * narrows to the two field-mode values, so `chooseEntityMode` returns
- * the wider union.
+ * {@link ActiveSetEntry} variant. {@link EntityMode} narrows to the two
+ * field-mode values, so `chooseEntityMode` returns the wider union.
  *
  * The `config` parameter defaults to {@link DEFAULT_PLANNING_CONFIG} so
  * call sites that don't care about live tunables (most tests) keep
@@ -120,10 +118,9 @@ export function groupByWell(entities: EntitySnapshot[]): WellGroup[] {
     }
 
     if (entity.kind === "Field") {
-      // PRD #563 / Slice 5: `FieldSnapshot.parentId` is `string`
-      // (non-null by construction). The previous orphan-field branch
-      // (`parentId === null`) is removed — a field without a parent
-      // is now a producer invariant violation.
+      // `FieldSnapshot.parentId` is non-null by construction. A field
+      // without a parent is a producer invariant violation, not an
+      // orphan to coerce — so there's no `parentId === null` branch.
       const wellId = entity.parentId;
       let group = groups.get(wellId);
       if (!group) {
@@ -186,9 +183,8 @@ export function buildPrevModeByWell(
   // entityId IS the wellId.
   const fieldEntityToWell = new Map<string, string>();
   for (const entity of entities) {
-    // PRD #563 / Slice 5: narrowing on `kind === "Field"` gives us a
-    // {@link FieldSnapshot} with `parentId: string` (non-null). The
-    // previous `&& entity.parentId` guard is unnecessary.
+    // Narrowing on `kind === "Field"` gives a {@link FieldSnapshot}
+    // with non-null `parentId`, so no extra guard is needed.
     if (entity.kind === "Field") {
       fieldEntityToWell.set(entity.entityId, entity.parentId);
     }
@@ -309,10 +305,9 @@ export function assignModes(
 
   // Pass-through: invisible entities still need to appear so that
   // downstream consumers (CpuCache eviction tier, debug panels, etc.)
-  // can see them. PRD #563 / Slice 4: invisibles are now their own
-  // dedicated `InvisibleEntry` variant — no longer conflated with
-  // `mode: "fields-with-detail"` field entries. They contribute no
-  // chunk requests (the planner's lane emitters skip them).
+  // can see them. They live in a dedicated `InvisibleEntry` variant
+  // and contribute no chunk requests (the planner's lane emitters
+  // skip them).
   for (const entity of entities) {
     if (entity.visible) continue;
     out.push(makeInvisibleEntry(entity));
@@ -334,10 +329,10 @@ function makeFieldEntry(
   wellProxyAvailable: boolean,
   catalog: AssetCatalogSnapshot | null,
 ): FieldEntry {
-  // PRD #545 dropped the legacy `+2` LOD buffer: planning now hands
-  // the caller exactly one level. The orchestrator no longer filters
-  // the request stream to the target level either, so a buffered range
-  // would have queued chunks the cache could never use.
+  // Planning hands the caller exactly one level: the orchestrator
+  // does not filter the request stream to the target level, so
+  // emitting a multi-level buffer would queue chunks the cache could
+  // never use.
   const targetLod = entity.idealTargetLod;
   const coarsestDetailLod = targetLod;
   const fieldProxyAvailable =

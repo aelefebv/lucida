@@ -424,7 +424,7 @@ export function useBridge({
     };
     const bridge = new Bridge(handlers);
     sessionRef.current = new Session({ bridge, contentSource, cpuCache, decodePool });
-    // Slice 4: publish the bridge as React state so consumer hooks
+    // Publish the bridge as React state so consumer hooks
     // (useBookmarks subscribes to `bookmark_changed`) can take a
     // dependency on it and run their subscribe effect once it's live.
     setBridge(bridge);
@@ -638,8 +638,8 @@ export function useBridge({
 
   return {
     sessionRef,
-    /** Slice 4: live bridge once the WS is constructed. `null` until
-     *  the wasm-ready effect has run. */
+    /** Live bridge once the WS is constructed. `null` until the
+     *  wasm-ready effect has run. */
     bridge,
     peers,
     myId,

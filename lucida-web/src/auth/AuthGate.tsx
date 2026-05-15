@@ -1,18 +1,16 @@
 // Top-level wrapper rendered above `<App />`. Drives `useAuthState`
 // and gates the app until authentication resolves.
 //
-// Slice 4 (issue #460) replaces the slice-1 `UnauthPlaceholder` with
-// the real `UnauthLanding`, which mirrors the inline HTML the server
-// middleware returns for fresh browser navigations: capture
-// `location.hash`, redirect to `/auth/start`. This branch only fires
-// when the SPA is already mounted and whoami flips to unauth (e.g.
-// the user signed out, or their session expired in the open tab).
-// Cold-start unauth is handled server-side before React boots.
+// `UnauthLanding` mirrors the inline HTML the server middleware
+// returns for fresh browser navigations: capture `location.hash`,
+// redirect to `/auth/start`. This branch only fires when the SPA is
+// already mounted and whoami flips to unauth (e.g. the user signed
+// out, or their session expired in the open tab). Cold-start unauth
+// is handled server-side before React boots.
 //
-// Slice 3 (issue #459): publishes the resolved principal and the
-// `signOut` action through `AuthSessionContext` so the new
-// `ProfileMenu` (and any future authed-subtree consumer) can read
-// them without prop-drilling.
+// The resolved principal and the `signOut` action are published via
+// `AuthSessionContext` so the authed-subtree (ProfileMenu, future
+// consumers) can read them without prop-drilling.
 
 import type { ReactNode } from "react";
 import { AuthSessionContext } from "./AuthSession.ts";

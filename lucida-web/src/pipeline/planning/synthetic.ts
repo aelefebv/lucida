@@ -41,15 +41,13 @@ export interface CreateSyntheticEntityOverrides
 
 /**
  * Create a valid {@link EntitySnapshot} with sensible defaults, merged
- * with overrides. PRD #563 / Slice 1 dropped the `numLevels` field —
- * the level count is always derived from `levels.length`.
+ * with overrides.
  *
- * PRD #563 / Slice 5: {@link EntitySnapshot} is a discriminated union.
- * The `kind` override selects which variant is returned (default
- * `"Image"` to keep simple test cases unchanged). For `kind: "Field"`
- * callers MAY supply a `parentId`; the helper defaults it to
- * `"synthetic-well"` so existing callers don't have to thread a parent
- * through every fixture.
+ * The `kind` override selects which {@link EntitySnapshot} variant is
+ * returned (default `"Image"`). For `kind: "Field"` callers MAY
+ * supply a `parentId`; the helper defaults it to `"synthetic-well"`
+ * so existing callers don't have to thread a parent through every
+ * fixture.
  */
 export function createSyntheticEntity(
   overrides?: CreateSyntheticEntityOverrides,
@@ -85,11 +83,10 @@ export function createSyntheticEntity(
 
 /**
  * Create a valid {@link PlanningSnapshot} with sensible defaults,
- * merged with overrides. PRD #563 / Slice 3 dropped
- * `previousActiveSet` from the snapshot — tests that need to seed
- * prev state should construct a {@link PlanningState} (see
- * {@link createSyntheticState}) and pass it via the second argument
- * to `plan()`.
+ * merged with overrides. `previousActiveSet` does not live on the
+ * snapshot — tests that need to seed prev state should construct a
+ * {@link PlanningState} (see {@link createSyntheticState}) and pass
+ * it via the second argument to `plan()`.
  */
 export function createSyntheticSnapshot(
   overrides?: Partial<PlanningSnapshot>,

@@ -48,10 +48,10 @@ export interface BridgeHandlers {
    */
   onAssetCatalogUpdate?: (datasetId: string, deltaJson: string) => void;
   /**
-   * PRD #454 slice 4: cross-peer bookmark-sidebar updates. Fired when
-   * the server broadcasts a `bookmark_changed` message because some
-   * client mutated a bookmark whose dataset URLs overlap a loaded
-   * dataset in this session. `useBookmarks` uses this to refetch
+   * Cross-peer bookmark-sidebar updates. Fired when the server
+   * broadcasts a `bookmark_changed` message because some client
+   * mutated a bookmark whose dataset URLs overlap a loaded dataset
+   * in this session. `useBookmarks` uses this to refetch
    * (Created/Updated) or remove from local state (Deleted) without
    * waiting for a manual refresh.
    */
@@ -89,9 +89,9 @@ export class Bridge {
   private pendingDatasetPresence: string | null = null;
   private cursorTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingCursor: string | null = null;
-  /** PRD #454 slice 4: bookmark-sidebar cross-peer subscribers. Owned
-   *  on the bridge so feature code subscribes via a stable handle
-   *  instead of wiring callbacks through React props. */
+  /** Bookmark-sidebar cross-peer subscribers. Owned on the bridge so
+   *  feature code subscribes via a stable handle instead of wiring
+   *  callbacks through React props. */
   private bookmarkChangedListeners: BookmarkChangedListener[] = [];
 
   constructor(handlers: BridgeHandlers, urlOverride?: string) {

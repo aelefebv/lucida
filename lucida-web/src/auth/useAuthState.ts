@@ -2,12 +2,9 @@
 // the rest of the app sees only an authenticated principal (or the
 // unauth landing).
 //
-// Slice 3 (issue #459) extends the slice-1 read-only hook with a
-// `signOut` action used by the new ProfileMenu. The hook returns
-// `{ state, refresh, signOut }`; AuthGate destructures `state` for
-// gating and consumers in the authed subtree can pull `signOut` from
-// context wired up later (or via prop drilling for now — only the
-// ProfileMenu actually invokes it in this slice).
+// The hook returns `{ state, refresh, signOut }`. AuthGate
+// destructures `state` for gating; consumers in the authed subtree
+// can pull `signOut` (e.g. ProfileMenu) via prop drilling.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AuthState } from "./types.ts";
