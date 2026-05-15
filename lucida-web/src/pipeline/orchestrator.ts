@@ -24,6 +24,7 @@ import {
   compositeKey,
 } from "../tickCommon.ts";
 import { plan, emptyPlanStats, groupByWell } from "./planning/index.ts";
+import { DEFAULT_PLANNING_CONFIG } from "./planning/config.ts";
 import type {
   PlanningSnapshot,
   ActiveSetEntry,
@@ -824,7 +825,7 @@ export class Orchestrator {
         assetCatalog: ctx.assetCatalog.snapshot(),
       };
 
-      const result = plan(snapshot);
+      const result = plan(snapshot, DEFAULT_PLANNING_CONFIG);
       this.previousActiveSet.set(dsId, result.activeSet);
       this.requestEpoch = result.epochs.request;
       this._lastRequests = result.requests;

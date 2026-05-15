@@ -12,6 +12,7 @@ import {
   PROXY_LANE_OFFSET,
   DETAIL_LANE_OFFSET,
   OVERVIEW_LANE_OFFSET,
+  PREFETCH_LANE_OFFSET,
   chooseEntityMode,
   chunkOutsideFrustum,
   emptyPlanStats,
@@ -21,7 +22,10 @@ import {
   IMPORTANCE_WEIGHT,
   DISTANCE_WEIGHT,
   WELL_PROXY_PRIORITY_BUMP,
+  DEFAULT_PLANNING_CONFIG,
+  mergeConfig,
 } from "./planning/index.ts";
+import type { PlanningConfig } from "./planning/index.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -1902,5 +1906,505 @@ describe("chunkKey direct format", () => {
     const key = chunkKey(0, 7, 1, 9, 2, 6);
     const parts = key.split("/").map(Number);
     expect(parts).toEqual([0, 7, 1, 9, 2, 6]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PlanningConfig — Slice 3
+// ---------------------------------------------------------------------------
+
+describe("PlanningConfig", () => {
+  it("DEFAULT_PLANNING_CONFIG matches the exported constants for every tunable", () => {
+    expect(DEFAULT_PLANNING_CONFIG.farThresholdPx).toBe(FAR_THRESHOLD_PX);
+    expect(DEFAULT_PLANNING_CONFIG.detailThresholdPx).toBe(DETAIL_THRESHOLD_PX);
+    expect(DEFAULT_PLANNING_CONFIG.hysteresisPx).toBe(HYSTERESIS_PX);
+    expect(DEFAULT_PLANNING_CONFIG.prefetchDepth).toBe(PREFETCH_DEPTH);
+    expect(DEFAULT_PLANNING_CONFIG.importanceWeight).toBe(IMPORTANCE_WEIGHT);
+    expect(DEFAULT_PLANNING_CONFIG.distanceWeight).toBe(DISTANCE_WEIGHT);
+    expect(DEFAULT_PLANNING_CONFIG.wellProxyPriorityBump).toBe(
+      WELL_PROXY_PRIORITY_BUMP,
+    );
+    expect(DEFAULT_PLANNING_CONFIG.detailLaneOffset).toBe(DETAIL_LANE_OFFSET);
+    expect(DEFAULT_PLANNING_CONFIG.proxyLaneOffset).toBe(PROXY_LANE_OFFSET);
+    expect(DEFAULT_PLANNING_CONFIG.prefetchLaneOffset).toBe(
+      PREFETCH_LANE_OFFSET,
+    );
+    expect(DEFAULT_PLANNING_CONFIG.overviewLaneOffset).toBe(
+      OVERVIEW_LANE_OFFSET,
+    );
+  });
+
+  it("mergeConfig({}) returns a config equal to DEFAULT_PLANNING_CONFIG", () => {
+    const merged = mergeConfig({});
+    expect(merged).toEqual(DEFAULT_PLANNING_CONFIG);
+    // Returns a fresh object — not the same reference as the default.
+    expect(merged).not.toBe(DEFAULT_PLANNING_CONFIG);
+  });
+
+  it("mergeConfig({farThresholdPx: 50}) overrides one field, defaults the rest", () => {
+    const merged = mergeConfig({ farThresholdPx: 50 });
+    expect(merged.farThresholdPx).toBe(50);
+    expect(merged.detailThresholdPx).toBe(DEFAULT_PLANNING_CONFIG.detailThresholdPx);
+    expect(merged.hysteresisPx).toBe(DEFAULT_PLANNING_CONFIG.hysteresisPx);
+    expect(merged.prefetchDepth).toBe(DEFAULT_PLANNING_CONFIG.prefetchDepth);
+    expect(merged.importanceWeight).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
+    expect(merged.distanceWeight).toBe(DEFAULT_PLANNING_CONFIG.distanceWeight);
+    expect(merged.wellProxyPriorityBump).toBe(
+      DEFAULT_PLANNING_CONFIG.wellProxyPriorityBump,
+    );
+    expect(merged.detailLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.detailLaneOffset);
+    expect(merged.proxyLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.proxyLaneOffset);
+    expect(merged.prefetchLaneOffset).toBe(
+      DEFAULT_PLANNING_CONFIG.prefetchLaneOffset,
+    );
+    expect(merged.overviewLaneOffset).toBe(
+      DEFAULT_PLANNING_CONFIG.overviewLaneOffset,
+    );
+  });
+
+  it("mergeConfig doesn't mutate the input partial", () => {
+    const partial: Partial<PlanningConfig> = { farThresholdPx: 50 };
+    const before = { ...partial };
+    mergeConfig(partial);
+    expect(partial).toEqual(before);
+    // And only the specified field is present on the input object.
+    expect(Object.keys(partial)).toEqual(["farThresholdPx"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// plan() honors config tunables — Slice 3
+// ---------------------------------------------------------------------------
+//
+// Each test changes one tunable on a tailored synthetic snapshot and
+// asserts that the corresponding behaviour shifts. Defaults are
+// confirmed in PlanningConfig above; here we verify the parameter
+// actually flows through to every code path.
+
+describe("plan() honors config tunables", () => {
+  /**
+   * Single-channel single-LOD plate snapshot at a configurable
+   * projected diagonal. Field has its own catalog entries so it can
+   * promote to any of the three modes.
+   */
+  function makeTunablePlate(opts: {
+    px: number;
+    catalog?: AssetCatalogSnapshot | null;
+    importance?: number;
+    visibleChannels?: number[];
+  }): PlanningSnapshot {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const wellId = "wellT";
+    const fieldId = "fT1";
+    const catalog =
+      opts.catalog ??
+      makeCatalog([
+        [wellId, ["WellProxy3D"]],
+        [fieldId, ["FieldProxy3D"]],
+      ]);
+    return createSyntheticSnapshot({
+      entities: [
+        createSyntheticEntity({
+          entityId: wellId,
+          imageId: "",
+          kind: "Well",
+          projectedDiagonalPx: opts.px,
+          numLevels: 0,
+          levels: [],
+          parentId: null,
+        }),
+        createSyntheticEntity({
+          entityId: fieldId,
+          imageId: "imgT1",
+          kind: "Field",
+          projectedDiagonalPx: opts.px,
+          idealTargetLod: 0,
+          numLevels: 1,
+          levels: [level0],
+          importance: opts.importance ?? 1.0,
+          parentId: wellId,
+        }),
+      ],
+      visibleRegion: {
+        xyBounds: [0, 0, 256, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: null,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: opts.visibleChannels ?? [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+      assetCatalog: catalog,
+    });
+  }
+
+  it("farThresholdPx: raising to 200 promotes a 100px entity to well-as-proxy", () => {
+    const snap = makeTunablePlate({ px: 100 });
+
+    // Default thresholds: 100px → fields-with-proxy-fallback.
+    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    expect(defaultResult.activeSet[0].mode).toBe("fields-with-proxy-fallback");
+
+    // Raise the far threshold past 100 → promotes to well-as-proxy.
+    const result = plan(
+      snap,
+      mergeConfig({ farThresholdPx: 200, detailThresholdPx: 250 }),
+    );
+    expect(result.activeSet).toHaveLength(1);
+    expect(result.activeSet[0].mode).toBe("well-as-proxy");
+  });
+
+  it("detailThresholdPx: lowering to 50 demotes a 100px entity to fields-with-detail", () => {
+    const snap = makeTunablePlate({ px: 100 });
+
+    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    expect(defaultResult.activeSet[0].mode).toBe("fields-with-proxy-fallback");
+
+    // Lower the detail threshold past 100 → fields-with-detail.
+    const result = plan(
+      snap,
+      mergeConfig({ farThresholdPx: 30, detailThresholdPx: 50 }),
+    );
+    expect(result.activeSet[0].mode).toBe("fields-with-detail");
+  });
+
+  it("hysteresisPx: a wider band lets the previous mode win in a wider range", () => {
+    // Settle at 50px in well-as-proxy, then read 100px.
+    const settle = plan(makeTunablePlate({ px: 50 }), DEFAULT_PLANNING_CONFIG);
+    expect(settle.activeSet[0].mode).toBe("well-as-proxy");
+
+    const followup = makeTunablePlate({ px: 100 });
+    followup.previousActiveSet = settle.activeSet;
+
+    // Default hysteresis (5px): 100 is way past farUpper (85), so it
+    // flips out of well-as-proxy.
+    const defaultResult = plan(followup, DEFAULT_PLANNING_CONFIG);
+    expect(defaultResult.activeSet[0].mode).not.toBe("well-as-proxy");
+
+    // Wider hysteresis (50px): 100 falls inside the [80-50, 80+50] = [30, 130]
+    // band, so the prev well-as-proxy mode is preserved.
+    const result = plan(followup, mergeConfig({ hysteresisPx: 50 }));
+    expect(result.activeSet[0].mode).toBe("well-as-proxy");
+  });
+
+  it("prefetchDepth: 0 emits no prefetch chunks; 4 emits T+1..T+4", () => {
+    const level0 = makeLevelGeo(0, [10, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+    });
+    const snap = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBounds: [0, 0, 256, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: null,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+
+    const zero = plan(snap, mergeConfig({ prefetchDepth: 0 }));
+    expect(zero.requests.filter((r) => r.lane === "prefetch")).toHaveLength(0);
+
+    const four = plan(snap, mergeConfig({ prefetchDepth: 4 }));
+    const ts = new Set(
+      four.requests.filter((r) => r.lane === "prefetch").map((r) => r.t),
+    );
+    expect(ts).toEqual(new Set([1, 2, 3, 4]));
+  });
+
+  it("importanceWeight: 0 makes priority no longer depend on importance", () => {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const high = createSyntheticEntity({
+      entityId: "high",
+      imageId: "img-h",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: 1.0,
+    });
+    const low = createSyntheticEntity({
+      entityId: "low",
+      imageId: "img-l",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: 0.0,
+    });
+    const snap = createSyntheticSnapshot({
+      entities: [high, low],
+      visibleRegion: {
+        xyBounds: [0, 0, 256, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: null,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+
+    // Default: importance weight is non-zero → priorities differ.
+    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const defaultDetail = defaultResult.requests.filter(
+      (r) => r.lane === "detail",
+    );
+    const defaultHigh = defaultDetail.find((r) => r.entityId === "high")!;
+    const defaultLow = defaultDetail.find((r) => r.entityId === "low")!;
+    expect(defaultHigh.priority).not.toBe(defaultLow.priority);
+
+    // With importanceWeight = 0, same-distance chunks have equal priority.
+    const result = plan(snap, mergeConfig({ importanceWeight: 0 }));
+    const detail = result.requests.filter((r) => r.lane === "detail");
+    const hi = detail.find((r) => r.entityId === "high")!;
+    const lo = detail.find((r) => r.entityId === "low")!;
+    expect(hi.priority).toBe(lo.priority);
+  });
+
+  it("distanceWeight: 0 removes distance from priority within a lane", () => {
+    // Two chunks at different distances from sortCenter, same importance.
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 1024], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: 1.0,
+    });
+    const snap = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBounds: [0, 0, 1024, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: [960, 128, 0],
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+
+    // Default: distance-based priority differs across columns.
+    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const defaultDetail = defaultResult.requests.filter(
+      (r) => r.lane === "detail",
+    );
+    const defaultPriorities = new Set(defaultDetail.map((r) => r.priority));
+    expect(defaultPriorities.size).toBeGreaterThan(1);
+
+    // distanceWeight = 0 → all detail chunks for one entity share the
+    // same priority because importance is identical and distance no
+    // longer contributes.
+    const result = plan(snap, mergeConfig({ distanceWeight: 0 }));
+    const detail = result.requests.filter((r) => r.lane === "detail");
+    expect(detail.length).toBe(4);
+    const priorities = new Set(detail.map((r) => r.priority));
+    expect(priorities.size).toBe(1);
+  });
+
+  it("wellProxyPriorityBump: changing it shifts the parent-well proxy priority", () => {
+    const snap = makeTunablePlate({ px: 100 });
+
+    const defaultResult = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const defaultWellProxy = defaultResult.proxyRequests.find(
+      (p) => p.kind === "WellProxy3D",
+    )!;
+    expect(defaultWellProxy.priority).toBe(
+      DEFAULT_PLANNING_CONFIG.proxyLaneOffset +
+        DEFAULT_PLANNING_CONFIG.wellProxyPriorityBump,
+    );
+
+    const result = plan(snap, mergeConfig({ wellProxyPriorityBump: 50 }));
+    const wellProxy = result.proxyRequests.find(
+      (p) => p.kind === "WellProxy3D",
+    )!;
+    expect(wellProxy.priority).toBe(
+      DEFAULT_PLANNING_CONFIG.proxyLaneOffset + 50,
+    );
+  });
+
+  it("detailLaneOffset: changing it shifts every detail-chunk priority", () => {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: 1.0,
+    });
+    const snap = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBounds: [0, 0, 256, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: null,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+
+    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const beforeDetail = before.requests.filter((r) => r.lane === "detail");
+    expect(beforeDetail.length).toBe(1);
+    const beforePri = beforeDetail[0].priority;
+
+    const after = plan(snap, mergeConfig({ detailLaneOffset: 250 }));
+    const afterDetail = after.requests.filter((r) => r.lane === "detail");
+    expect(afterDetail.length).toBe(1);
+    // Only the lane offset changed → priority shifts by exactly +250.
+    expect(afterDetail[0].priority).toBeCloseTo(beforePri + 250);
+  });
+
+  it("proxyLaneOffset: changing it shifts every proxy-request priority", () => {
+    const snap = makeTunablePlate({ px: 50 }); // → well-as-proxy
+
+    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const beforeWellProxy = before.proxyRequests.find(
+      (p) => p.kind === "WellProxy3D",
+    )!;
+    expect(beforeWellProxy.priority).toBe(
+      DEFAULT_PLANNING_CONFIG.proxyLaneOffset,
+    );
+
+    const after = plan(snap, mergeConfig({ proxyLaneOffset: 750 }));
+    const afterWellProxy = after.proxyRequests.find(
+      (p) => p.kind === "WellProxy3D",
+    )!;
+    expect(afterWellProxy.priority).toBe(750);
+  });
+
+  it("prefetchLaneOffset: changing it shifts every prefetch-chunk priority", () => {
+    const level0 = makeLevelGeo(0, [10, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: 1.0,
+    });
+    const snap = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBounds: [0, 0, 256, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: null,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+
+    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const beforePrefetch = before.requests.filter(
+      (r) => r.lane === "prefetch" && r.t === 1,
+    );
+    expect(beforePrefetch.length).toBe(1);
+    const beforePri = beforePrefetch[0].priority;
+
+    const after = plan(snap, mergeConfig({ prefetchLaneOffset: 1500 }));
+    const afterPrefetch = after.requests.filter(
+      (r) => r.lane === "prefetch" && r.t === 1,
+    );
+    expect(afterPrefetch.length).toBe(1);
+    // Lane offset shift is +500.
+    expect(afterPrefetch[0].priority).toBeCloseTo(beforePri + 500);
+  });
+
+  it("overviewLaneOffset: changing it shifts every overview-chunk priority", () => {
+    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      idealTargetLod: 0,
+      numLevels: 1,
+      levels: [level0],
+      importance: 1.0,
+    });
+    const snap = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBounds: [0, 0, 256, 256],
+        zRange: [0, 1],
+        effectiveZoom: 1,
+        sortCenter: null,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+
+    const before = plan(snap, DEFAULT_PLANNING_CONFIG);
+    const beforeOverview = before.requests.filter((r) => r.lane === "overview");
+    expect(beforeOverview.length).toBe(1);
+    const beforePri = beforeOverview[0].priority;
+
+    const after = plan(snap, mergeConfig({ overviewLaneOffset: 3000 }));
+    const afterOverview = after.requests.filter((r) => r.lane === "overview");
+    expect(afterOverview.length).toBe(1);
+    // Lane offset shift is +1000.
+    expect(afterOverview[0].priority).toBeCloseTo(beforePri + 1000);
   });
 });
