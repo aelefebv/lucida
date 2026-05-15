@@ -5,6 +5,8 @@ modified: 2026-05-15
 
 # `validatePlanningInputs` as the Dev-Mode Boundary Check
 
+> **Post-ship update (2026-05-15, PR #587):** Check 6 (asset-catalog reference resolution) was withdrawn after a real-app trace surfaced a false positive. The catalog is flattened across all datasets the catalog has ever seen; the snapshot is for one dataset's current tick — they legitimately diverge. See "Check 6 — withdrawn" below. The remaining eight checks are unchanged.
+
 ## Decision
 
 A new function `validatePlanningInputs(snapshot, state)` is added at `lucida-web/src/pipeline/planning/validate.ts`. It runs nine semantic-invariant checks against the planner's two inputs and throws an `Error` with a descriptive message naming the violated invariant on first failure.
@@ -28,7 +30,7 @@ Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
 | 3 | Every `imageId` is unique across `snapshot.entities`. |
 | 4 | Every level on every entity has `shape.length === 5` and `chunk_shape.length === 5`. |
 | 5 | `visibleRegion.xyBoundsVox` is a valid bbox; `zRangeVox` is non-negative. |
-| 6 | Every `assetCatalog` proxy reference points to a known `imageId`. |
+| ~~6~~ | ~~Every `assetCatalog` proxy reference points to a known `entityId`.~~ Withdrawn post-ship — see below. |
 | 7 | Every `minimapPending` map key is a valid `imageId` from `snapshot.entities`. |
 | 8 | `state.previousActiveSet` has no duplicates by `entityId`. |
 | 9 | For each `state.previousActiveSet` entry whose `entityId` is present in `snapshot.entities`, the `kind` matches. |
@@ -59,9 +61,29 @@ The nine checks all correspond to producer-side invariants the type system can't
 - `selection.t < level.shape[Axis.T]` per level — too contextual; varies by which level is being requested.
 - "Every entity has at least one level" — the empty-levels case is exercised today and the planner handles it gracefully; surfacing as a violation would be a behavioural change.
 
+## Check 6 — withdrawn
+
+The original "every `assetCatalog.byEntity` key must be a known `entityId` from `snapshot.entities`" check was withdrawn after PRD #578 / Slice 3 shipped, when a real-app trace produced:
+
+```
+Error: validatePlanningInputs: assetCatalog references unknown entityId
+       ds-b5a7a1d65f96a456:well:D/3
+       at checkAssetCatalogRefs (validate.ts:199)
+       at validatePlanningInputs (validate.ts:329)
+       at plan (plan.ts:65)
+```
+
+Investigation traced the cause to a fundamental misreading of `AssetCatalogSnapshot`. The catalog is built by `pipeline/assetCatalog.ts::snapshot()`, which walks `byDataset` (every dataset the catalog has ever seen) and flattens entries into a single cross-dataset `byEntity` map. The planning snapshot, in contrast, carries `entities` for ONE dataset's current tick. The two will routinely diverge — the catalog can hold entries for entities not currently visible in this tick's snapshot, for entities of other datasets, or for entities of datasets that have since been closed.
+
+Worse, production lookups go in the *opposite direction*: `degradeForCatalog` consults the catalog via per-id `assetCatalog.byEntity.get(entityId)` for entities already in the snapshot. Dangling catalog entries are never iterated and can never harm a tier choice.
+
+The check was wrong both about which direction matters and about whether the two collections are coupled. It was withdrawn entirely, leaving a `// Check 6 withdrawn` comment in `validate.ts` so the surviving check numbers stay stable in cross-references. The composing `validatePlanningInputs` now runs eight checks; the JSDoc + this ADR record the change.
+
+The wider lesson: a runtime invariant that fires on first execution against real producer output is the right way to discover that the invariant was over-specified. The dev-mode posture made the discovery fast and safe.
+
 ## How this decision shows up in code
 
-- `lucida-web/src/pipeline/planning/validate.ts` — new file with nine check helpers + composing `validatePlanningInputs`.
+- `lucida-web/src/pipeline/planning/validate.ts` — eight check helpers + composing `validatePlanningInputs`. (Withdrawn check 6 lives only as a comment block; no `checkAssetCatalogRefs` export.)
 - `lucida-web/src/pipeline/planning/validate.test.ts` — per-check coverage colocated.
 - `lucida-web/src/pipeline/planning/plan.ts` — one-line DEV-gated call at function entry.
 
