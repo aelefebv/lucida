@@ -236,7 +236,13 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
  * `kind`:
  *
  *   - `kind: "well-as-proxy"` ⇒ entity must be `kind: "Well"`.
- *   - `kind: "field"`         ⇒ entity must be `kind: "Field"`.
+ *   - `kind: "field"`         ⇒ entity must be `kind: "Field"` OR
+ *     `kind: "Image"`. The planner's `groupByWell` synthesizes an
+ *     `__image__${entityId}` group for `Image` entities (singletons,
+ *     non-plate datasets) so they go through the same field-mode
+ *     code path as plate fields. The active-set entry it produces is
+ *     therefore a `FieldEntry` even though the entity itself is an
+ *     `ImageSnapshot`. See `pipeline/planning/modes.ts::groupByWell`.
  *   - `kind: "invisible"`     ⇒ NOT validated against entity kind. An
  *     entity can become invisible regardless of its kind, so the
  *     invisible variant is intentionally permissive.
@@ -257,27 +263,33 @@ export function checkPrevActiveSetKindAgreement(
   for (const entry of state.previousActiveSet) {
     const entity = byId.get(entry.entityId);
     if (!entity) continue; // disappeared — not a violation
-    const expectedEntityKind = expectedEntityKindFor(entry);
-    if (expectedEntityKind === null) continue; // invisible — permissive
-    if (entity.kind !== expectedEntityKind) {
+    const allowed = allowedEntityKindsFor(entry);
+    if (allowed === null) continue; // invisible — permissive
+    if (!allowed.includes(entity.kind)) {
+      const expected = allowed.length === 1 ? allowed[0] : allowed.join(" or ");
       throw new Error(
-        `validatePlanningInputs: previousActiveSet entry ${entry.entityId} (kind=${entry.kind}) disagrees with entity kind ${entity.kind} (expected ${expectedEntityKind})`,
+        `validatePlanningInputs: previousActiveSet entry ${entry.entityId} (kind=${entry.kind}) disagrees with entity kind ${entity.kind} (expected ${expected})`,
       );
     }
   }
 }
 
 /**
- * Map an {@link ActiveSetEntry} kind to the {@link EntitySnapshot} kind
- * it must correspond to. Returns `null` for `kind: "invisible"` —
+ * Map an {@link ActiveSetEntry} kind to the set of {@link EntitySnapshot}
+ * kinds it may correspond to. Returns `null` for `kind: "invisible"` —
  * invisible entries are permissive (any entity can become invisible).
+ *
+ * `field` accepts both `Field` and `Image`: see the comment on
+ * {@link checkPrevActiveSetKindAgreement} for the singleton rationale.
  */
-function expectedEntityKindFor(entry: ActiveSetEntry): EntitySnapshot["kind"] | null {
+function allowedEntityKindsFor(
+  entry: ActiveSetEntry,
+): EntitySnapshot["kind"][] | null {
   switch (entry.kind) {
     case "well-as-proxy":
-      return "Well";
+      return ["Well"];
     case "field":
-      return "Field";
+      return ["Field", "Image"];
     case "invisible":
       return null;
   }

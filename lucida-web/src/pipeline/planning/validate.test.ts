@@ -382,13 +382,13 @@ describe("checkPrevActiveSetKindAgreement", () => {
     );
   });
 
-  it("throws when a field entry references a non-Field entity", () => {
+  it("throws when a field entry references a Well entity (only Field/Image allowed)", () => {
     const snap = makeValidSnapshot();
     const state: PlanningState = {
       previousActiveSet: [
         {
           kind: "field",
-          entityId: "well-A", // Well, not Field
+          entityId: "well-A", // Well, not Field/Image
           imageId: "img-well-A",
           mode: "fields-with-detail",
           targetLod: 0,
@@ -400,8 +400,40 @@ describe("checkPrevActiveSetKindAgreement", () => {
       ],
     };
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).toThrow(
-      /disagrees with entity kind Well \(expected Field\)/,
+      /disagrees with entity kind Well \(expected Field or Image\)/,
     );
+  });
+
+  it("passes when a field entry references an Image entity (singleton case)", () => {
+    // Image entities are treated as singleton "wells with one field" by
+    // groupByWell — the active-set entry is a FieldEntry even though the
+    // entity is an ImageSnapshot. See modes.ts::groupByWell.
+    const snap = createSyntheticSnapshot({
+      datasetId: "ds-singleton",
+      entities: [
+        createSyntheticEntity({
+          entityId: "img-only",
+          kind: "Image",
+          imageId: "img-only-image",
+        }),
+      ],
+    });
+    const state: PlanningState = {
+      previousActiveSet: [
+        {
+          kind: "field",
+          entityId: "img-only",
+          imageId: "img-only-image",
+          mode: "fields-with-detail",
+          targetLod: 0,
+          coarsestDetailLod: 0,
+          detailOwnedLodRange: [0, 0],
+          proxyAvailable: false,
+          wellProxyAvailable: false,
+        },
+      ],
+    };
+    expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
 });
 
