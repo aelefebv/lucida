@@ -10,6 +10,7 @@ import type {
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningSnapshot,
+  PlanningState,
 } from "./index.ts";
 
 /**
@@ -39,7 +40,14 @@ export function createSyntheticEntity(
   };
 }
 
-/** Create a valid {@link PlanningSnapshot} with sensible defaults, merged with overrides. */
+/**
+ * Create a valid {@link PlanningSnapshot} with sensible defaults,
+ * merged with overrides. PRD #563 / Slice 3 dropped
+ * `previousActiveSet` from the snapshot — tests that need to seed
+ * prev state should construct a {@link PlanningState} (see
+ * {@link createSyntheticState}) and pass it via the second argument
+ * to `plan()`.
+ */
 export function createSyntheticSnapshot(
   overrides?: Partial<PlanningSnapshot>,
 ): PlanningSnapshot {
@@ -69,9 +77,23 @@ export function createSyntheticSnapshot(
       renderMode: "slice",
       interactionState: "idle",
     },
-    previousActiveSet: [],
     assetCatalog: null,
     minimapPending: new Map<string, MinimapChunkCoord[]>(),
+    ...overrides,
+  };
+}
+
+/**
+ * Construct a {@link PlanningState} for tests. v1 carries a single
+ * field — `previousActiveSet` — so the helper is a thin defaults +
+ * spread. Use this when a test needs to feed a non-empty prev set
+ * into `plan(snapshot, state)` (e.g. hysteresis carry-over).
+ */
+export function createSyntheticState(
+  overrides?: Partial<PlanningState>,
+): PlanningState {
+  return {
+    previousActiveSet: [],
     ...overrides,
   };
 }

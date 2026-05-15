@@ -2,10 +2,7 @@ import { describe, it, expect } from "vitest";
 import type { WasmScene } from "lucida-core";
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../../manifestTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
-import type {
-  ActiveSetEntry,
-  AssetCatalogSnapshot,
-} from "./index.ts";
+import type { AssetCatalogSnapshot } from "./index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
@@ -168,7 +165,6 @@ interface MakeArgsOverrides {
   dataset?: SnapshotDatasetEntry;
   dsSettings?: DatasetSettings | undefined;
   multiChannel?: boolean;
-  prevActiveSet?: ActiveSetEntry[];
   assetCatalog?: AssetCatalogSnapshot;
   mode?: "slice" | "volume";
 }
@@ -179,7 +175,6 @@ function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
     datasetId: "ds1",
     dataset: overrides?.dataset ?? makeDataset(),
     dsSettings: overrides?.dsSettings ?? makeDsSettings(),
-    prevActiveSet: overrides?.prevActiveSet ?? [],
     assetCatalog:
       overrides?.assetCatalog ??
       ({ byEntity: new Map() } as AssetCatalogSnapshot),
@@ -388,23 +383,10 @@ describe("buildPlanningSnapshot — pass-through fields", () => {
     expect(built!.snapshot.assetCatalog).toBe(catalog);
   });
 
-  it("threads the previous active set through into the snapshot", () => {
-    const prev = [
-      {
-        entityId: "field-0",
-        imageId: "img-0",
-        mode: "fields-with-detail" as const,
-        targetLod: 1,
-        coarsestDetailLod: 1,
-        detailOwnedLodRange: [1, 1] as [number, number],
-        proxyKind: undefined,
-        proxyAvailable: false,
-        wellProxyAvailable: false,
-      },
-    ];
-    const built = buildPlanningSnapshot(makeArgs({ prevActiveSet: prev }));
-    expect(built!.snapshot.previousActiveSet).toBe(prev);
-  });
+  // Removed: PRD #563 / Slice 3 — previousActiveSet no longer lives on
+  // the planning snapshot. The orchestrator now passes a separate
+  // PlanningState argument to plan(), and buildPlanningSnapshot has no
+  // knowledge of carry-forward state.
 
   it("threads the epoch counters through into the snapshot", () => {
     const built = buildPlanningSnapshot(makeArgs());
@@ -450,24 +432,11 @@ describe("buildPlanningSnapshot — minimapPending field (Slice 5)", () => {
 });
 
 describe("buildPlanningSnapshot — purity", () => {
-  it("does not mutate the previous active set", () => {
-    const prev = [
-      {
-        entityId: "field-0",
-        imageId: "img-0",
-        mode: "fields-with-detail" as const,
-        targetLod: 1,
-        coarsestDetailLod: 1,
-        detailOwnedLodRange: [1, 1] as [number, number],
-        proxyKind: undefined,
-        proxyAvailable: false,
-        wellProxyAvailable: false,
-      },
-    ];
-    const before = JSON.stringify(prev);
-    buildPlanningSnapshot(makeArgs({ prevActiveSet: prev }));
-    expect(JSON.stringify(prev)).toBe(before);
-  });
+  // The "does not mutate prevActiveSet" assertion was removed as part
+  // of PRD #563 / Slice 3: prev-active-set is no longer carried on the
+  // snapshot, so the snapshot builder no longer accepts it. The
+  // PlanningState round-trip lives entirely in plan() and the
+  // orchestrator now.
 
   it("produces identical output across two calls with identical inputs", () => {
     const args = makeArgs();

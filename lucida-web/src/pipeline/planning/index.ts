@@ -157,7 +157,6 @@ export interface PlanningSnapshot {
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
   selection: SelectionState;
-  previousActiveSet: ActiveSetEntry[];
   /**
    * Asset catalog snapshot for promotion. The orchestrator passes
    * `ctx.assetCatalog.snapshot()` (always non-null since S3); Planning
@@ -181,6 +180,30 @@ export interface PlanningSnapshot {
    * this tick (planning emits no minimap requests).
    */
   minimapPending: Map<string, MinimapChunkCoord[]>;
+}
+
+// ---------------------------------------------------------------------------
+// PlanningState  (carry-forward seam)
+// ---------------------------------------------------------------------------
+
+/**
+ * Carry-forward state that survives across planning ticks. Distinct
+ * from {@link PlanningSnapshot} (the world this tick) and
+ * {@link PlanningConfig} (the tunables). The caller stores the opaque
+ * pointer returned in {@link RequestPlan.nextState} and threads it into
+ * the next call to {@link plan}.
+ *
+ * v1 contains a single field — the previous tick's active set — used by
+ * {@link buildPrevModeByWell} to drive promotion-mode hysteresis. The
+ * container exists so future state (per-well stickiness counters,
+ * anticipation hints, planner state machines) can be added without
+ * churning {@link PlanningSnapshot}'s contract.
+ *
+ * Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
+ * and ADR `0027-planning-state-as-the-carry-forward-seam.md`.
+ */
+export interface PlanningState {
+  previousActiveSet: ActiveSetEntry[];
 }
 
 // ---------------------------------------------------------------------------
@@ -216,6 +239,17 @@ export interface RequestPlan {
    * degradations) and culling effectiveness.
    */
   stats: PlanStats;
+  /**
+   * Opaque carry-forward state for the next tick. The caller stores
+   * this pointer and passes it back as the `state` argument to the
+   * next {@link plan} call; it never inspects or constructs the
+   * contents itself. Today this is `{ previousActiveSet: activeSet }`;
+   * future planner-internal state (stickiness counters, anticipation
+   * hints) drops in here without touching the caller.
+   *
+   * Cited ADR `0027-planning-state-as-the-carry-forward-seam.md`.
+   */
+  nextState: PlanningState;
 }
 
 /**
@@ -720,7 +754,11 @@ function makeInvisibleEntry(entity: EntitySnapshot): ActiveSetEntry {
 
 // Re-exported from `./synthetic.ts` so callers that still import from
 // the planning entry point keep working without churn.
-export { createSyntheticEntity, createSyntheticSnapshot } from "./synthetic.ts";
+export {
+  createSyntheticEntity,
+  createSyntheticSnapshot,
+  createSyntheticState,
+} from "./synthetic.ts";
 
 // ---------------------------------------------------------------------------
 // chunkKey()
@@ -1377,6 +1415,12 @@ function emitOverviewLane(
  * Top-level pure planning function. Composes promotion, chunk
  * iteration, and three-lane scheduling into a single {@link RequestPlan}.
  *
+ * Three-way decomposition (PRD #563 / Slice 3):
+ *   - `snapshot` — the world this tick (entities, region, selection, …).
+ *   - `state` — opaque carry-forward state from the previous tick (the
+ *     pointer the caller stored from the previous {@link RequestPlan.nextState}).
+ *   - `config` — planning tunables (live-twistable from the debug panel).
+ *
  * Postconditions:
  *   - `requests` and `proxyRequests` are sorted ascending by `priority`
  *     (lower value = more urgent).
@@ -1387,9 +1431,13 @@ function emitOverviewLane(
  *   - `epochs.request` is the input epoch + 1; other epoch fields are
  *     forwarded unchanged so consumers can detect plan freshness.
  *   - `stats` reflects work done in this call only — no carry-forward.
+ *   - `nextState` is the opaque carry-forward state for the next tick.
+ *     v1: `{ previousActiveSet: activeSet }`. The caller stores it and
+ *     hands it back unchanged on the next call.
  */
 export function plan(
   snapshot: PlanningSnapshot,
+  state: PlanningState,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): RequestPlan {
   const stats = emptyPlanStats();
@@ -1397,7 +1445,7 @@ export function plan(
   // Step 1: Promote (three-tier, S6).
   const activeSet = assignModes(
     snapshot.entities,
-    snapshot.previousActiveSet,
+    state.previousActiveSet,
     snapshot.assetCatalog,
     stats,
     config,
@@ -1457,8 +1505,11 @@ export function plan(
     request: snapshot.epochs.request + 1,
   };
 
-  // Step 9: Return.
-  return { requests: allRequests, activeSet, epochs, proxyRequests, stats };
+  // Step 9: Return. `nextState` is the opaque pointer the caller will
+  // hand back on the next tick — today derived from `activeSet`, but
+  // future planner-internal state lands here without churning callers.
+  const nextState: PlanningState = { previousActiveSet: activeSet };
+  return { requests: allRequests, activeSet, epochs, proxyRequests, stats, nextState };
 }
 
 // ---------------------------------------------------------------------------
