@@ -16,7 +16,7 @@
     { "type": "style", "section": "Styles", "hidden": true },
     { "type": "test", "section": "Tests", "hidden": true },
     { "type": "ci", "section": "CI", "hidden": true },
-    { "type": "refactor", "section": "Refactors", "hidden": true }
+    { "type": "refactor", "section": "Refactors" }
   ],
   "packages": {
     ".": {}
