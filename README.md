@@ -36,20 +36,21 @@ For any production-shape deployment — multi-user identity, proper admin gating
 
 One-time setup:
 
+rust + cargo, pnpm, wasm-pack, node — your package manager equivalent
 ```bash
-# rust + cargo, pnpm, wasm-pack, node — your package manager equivalent
 (cd lucida-web && pnpm install)
 ```
 
 Two-terminal dev loop:
 
+Terminal 1 — relay server (binds 127.0.0.1:9876, auth auto-disabled on loopback)
 ```bash
-# Terminal 1 — relay server (binds 127.0.0.1:9876, auth auto-disabled on loopback)
 cargo run -p lucida-server
-
-# Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876)
-cd lucida-web && pnpm run build:wasm   # rebuild after any Rust change
-cd lucida-web && pnpm run dev
+```
+Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876)
+```bash
+(cd lucida-web && pnpm run build:wasm ) 
+(cd lucida-web && pnpm run dev)
 ```
 
 Visit <http://localhost:5173>.

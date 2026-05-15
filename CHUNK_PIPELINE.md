@@ -99,15 +99,15 @@ Constants in `planning.ts:23-36`. **Hysteresis bands** of ±5px around each thre
 
 **Catalog-aware degradation** (`planning.ts:537-558`): if the chosen mode wants a proxy that the server's asset catalog doesn't advertise, degrade one tier finer (e.g., wanted well-as-proxy but no `WellProxy3D` exists → drop to fields-with-proxy-fallback). Each degrade increments `PlanStats.catalogDegradations`.
 
-**LOD range** (`planning.ts:611-632`, `makeFieldEntry`):
+**LOD range** (`pipeline/planning/index.ts::makeFieldEntry`):
 
 ```
 targetLod        = entity.idealTargetLod    (from WASM, log2 of pixels-per-chunk)
-coarsestDetailLod    = min(targetLod + 2, maxLevel)
-detailOwnedRange = [targetLod, coarsestDetailLod]
+coarsestDetailLod    = targetLod
+detailOwnedRange = [targetLod, targetLod]
 ```
 
-Two-LOD buffer absorbs zoom transitions smoothly.
+Slice 2 of PRD #545 dropped the legacy +2 LOD buffer: planning now hands the caller exactly one level. The orchestrator no longer filters the request stream to the target level either, so a buffered range would have queued chunks the cache could never use. Cross-LOD smoothing is the shader fallback chain's job; planning emits one level and trusts the chain to draw a coarser fallback while the target loads.
 
 ### 3c. Chunk enumeration & priority (`planning.ts:772-957`)
 
@@ -117,16 +117,19 @@ For each entity in the active set, iterate grid cells inside `xyBounds` ∩ `zRa
 priority = laneOffset + (1 - importance) * 500 + distance * 10
 ```
 
-**Lower number = higher priority.** Lane offsets (`planning.ts:46-56`):
+**Lower number = higher priority.** Lane offsets (`pipeline/planning/config.ts`):
 
-| Lane     | Offset | What                          |
-| -------- | ------ | ----------------------------- |
-| DETAIL   | 0      | Visible chunks                |
-| PROXY    | 500    | Well/field proxy fallbacks    |
-| PREFETCH | 1000   | Next-timepoint prefetch       |
-| OVERVIEW | 2000   | Minimap                       |
+| Lane     | Offset | What                                                              |
+| -------- | ------ | ----------------------------------------------------------------- |
+| MINIMAP  | 0      | Whole-sample low-res context (loaded first)                       |
+| DETAIL   | 500    | Visible chunks                                                    |
+| PROXY    | 1000   | Well/field proxy fallbacks                                        |
+| PREFETCH | 1500   | Next-timepoint prefetch                                           |
+| OVERVIEW | 2500   | Per-entity coarsest pass for shader fallback chain                |
 
-So a centered, important detail chunk wins (~0); a faraway prefetch chunk loses (~1500+).
+So a minimap chunk wins outright on dataset open (~0); a centered detail chunk follows (~500); the per-entity overview backstop loses (~2500+).
+
+The MINIMAP lane was introduced in PRD #545 / ADR 0023; the previously-OVERVIEW-labeled "Minimap" row was relabeled to "shader fallback coarsest" — it's a different producer (per-entity coarsest pass, not whole-sample) that survived the lane split.
 
 ### 3d. Inspecting what planning did
 

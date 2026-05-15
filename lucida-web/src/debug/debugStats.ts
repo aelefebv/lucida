@@ -40,8 +40,20 @@ export interface OrchMemberDebug {
  */
 export interface PlanningDatasetDebug {
   datasetId: string;
-  /** Total chunk requests in the plan, broken down by lane. */
-  lanes: { detail: number; prefetch: number; overview: number };
+  /**
+   * Total chunk requests in the plan, broken down by lane. Slice 5
+   * of PRD #545 added the `minimap` lane (highest priority — see
+   * [[decisions/0023-minimap-lane-with-highest-priority]]); `proxy`
+   * is a chunk-lane reservation used by the type-system extension
+   * (proxy *requests* are still tracked separately in {@link proxyCount}).
+   */
+  lanes: {
+    minimap: number;
+    detail: number;
+    proxy: number;
+    prefetch: number;
+    overview: number;
+  };
   /** Proxy requests in the plan (separate from chunk lanes). */
   proxyCount: number;
   /** Total chunk requests in the plan (sum of `lanes`). */

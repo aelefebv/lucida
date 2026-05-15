@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-15
 ---
 
 # CPU Cache
@@ -35,7 +35,9 @@ Highest-numbered tier evicts first. LRU within each tier (by `insertedAt`), exce
 2. **demoted-detail** — entity navigated away from
 3. **active-detail** — currently visible
 4. **proxy** — fallback resource (well/field proxy)
-5. **overview** (minimap) — most expensive; covers whole dataset
+5. **overview** — per-entity coarsest pass + minimap; most expensive; covers whole dataset
+
+`lane: "minimap"` chunks (introduced in Slice 5 of PRD #545 / ADR 0023) land in the overview cache — the most-protected tier — so the minimap survives memory pressure that would clear other tiers. Combined with the planner emitting minimap at priority 0, the effect is "fetched first, evicted last."
 
 Budgets: main 512 MB, overview 64 MB, proxy 256 MB.
 
