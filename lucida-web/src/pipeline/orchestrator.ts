@@ -6,7 +6,7 @@
 
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { SceneSettings } from "../tickCommon.ts";
-import type { ImageSpec, DatasetManifest, LevelGeometry } from "../manifestTypes.ts";
+import type { DatasetManifest, LevelGeometry } from "../manifestTypes.ts";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
@@ -20,13 +20,13 @@ import { computeMemberIndexMap, iterateColdMembers } from "../renderer/descripto
 // Note: atlas config messages eliminated — worker manages atlases from cold state
 import {
   getSceneSettings,
-  getActiveChannels,
   compositeKey,
 } from "../tickCommon.ts";
 import { plan, emptyPlanStats, groupByWell } from "./planning/index.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./planning/config.ts";
+import { buildPlanningSnapshot } from "./planning/snapshot.ts";
+import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import type {
-  PlanningSnapshot,
   ActiveSetEntry,
   PlanningEpochs,
   EntitySnapshot,
@@ -48,7 +48,6 @@ import {
   type OrchDebug,
   type ColdStateDebug,
   type ColdStateCauseCounts,
-  type PlanningDatasetDebug,
   type UploadTickStats,
   type UploadRollingStats,
 } from "../debug/debugStats.ts";
@@ -283,163 +282,6 @@ function synthesizeWellRosterEntry(
     invModelMatrix: inv,
     dataW: sx2D,
     dataH: sy2D,
-  };
-}
-
-/**
- * Translate a focal entity's projected diagonal into a human-readable
- * mode-band classification. Mirrors the logic in `chooseEntityMode`
- * (planning.ts) so the panel can explain *why* the focal entity is in
- * its current mode without us threading that reason through the active
- * set entry shape.
- */
-function modeReason(diagPx: number): string {
-  if (diagPx < 75) return `${diagPx.toFixed(0)}px < 75 → clearly proxy`;
-  if (diagPx > 155) return `${diagPx.toFixed(0)}px > 155 → clearly detail`;
-  if (diagPx >= 85 && diagPx <= 145) return `${diagPx.toFixed(0)}px ∈ [85, 145] → clearly fallback`;
-  if (diagPx < 85) return `${diagPx.toFixed(0)}px ∈ [75, 85] hysteresis band`;
-  return `${diagPx.toFixed(0)}px ∈ [145, 155] hysteresis band`;
-}
-
-/**
- * Build the per-dataset planning debug snapshot. Pure function — derives
- * everything from the plan, the entity list, and the current cache
- * snapshot. No internal state.
- *
- * Cross-references plan.requests with cpuCache.snapshot() to compute
- * cached/in-flight counts per LOD; consumes plan.stats for catalog
- * degradations and culling counters; picks a focal entity from the
- * visible entities by viewport-center proximity.
- */
-function buildPlanningDatasetDebug(
-  dsId: string,
-  result: RequestPlan,
-  entities: EntitySnapshot[],
-  entityById: Map<string, EntitySnapshot>,
-  visibleRegion: VisibleRegion,
-  cpuCache: CpuCache,
-): PlanningDatasetDebug {
-  const lanes = { detail: 0, prefetch: 0, overview: 0 };
-  const chunksByLevel: Record<number, number> = {};
-  for (const r of result.requests) {
-    lanes[r.lane]++;
-    chunksByLevel[r.level] = (chunksByLevel[r.level] ?? 0) + 1;
-  }
-
-  // Per-LOD breakdown: planned (from plan), cached + in-flight (from cache).
-  const cacheSnap = cpuCache.snapshot();
-  const cached: Record<number, number> = {};
-  const inFlight: Record<number, number> = {};
-  const activeEntityIds = new Set(result.activeSet.map(e => e.entityId));
-  for (const eid of activeEntityIds) {
-    const cs = cacheSnap.cached.get(eid);
-    if (cs) {
-      for (const k of cs) {
-        const lvl = parseInt(k, 10);
-        if (Number.isFinite(lvl)) cached[lvl] = (cached[lvl] ?? 0) + 1;
-      }
-    }
-    const fs = cacheSnap.inFlight.get(eid);
-    if (fs) {
-      for (const k of fs) {
-        const lvl = parseInt(k, 10);
-        if (Number.isFinite(lvl)) inFlight[lvl] = (inFlight[lvl] ?? 0) + 1;
-      }
-    }
-  }
-  const allLevels = new Set<number>([
-    ...Object.keys(chunksByLevel).map(Number),
-    ...Object.keys(cached).map(Number),
-    ...Object.keys(inFlight).map(Number),
-  ]);
-  const lodBreakdown = [...allLevels]
-    .sort((a, b) => a - b)
-    .map(level => ({
-      level,
-      planned: chunksByLevel[level] ?? 0,
-      cached: cached[level] ?? 0,
-      inFlight: inFlight[level] ?? 0,
-    }));
-
-  // Wells by mode. Field-mode entries are deduped by parent well so
-  // counts represent *wells* in each mode, not active-set entries.
-  // Image-only datasets fall through with each image as its own "well"
-  // (parentId is null → wellId == entityId), so a single dataset shows
-  // up as one count without special-casing.
-  const wellsByMode = {
-    wellAsProxy: 0,
-    fieldsWithProxyFallback: 0,
-    fieldsWithDetail: 0,
-  };
-  const wellsSeen = new Set<string>();
-  for (const e of result.activeSet) {
-    if (e.mode === "well-as-proxy") {
-      wellsByMode.wellAsProxy++;
-      continue;
-    }
-    const ent = entityById.get(e.entityId);
-    const wellId = ent?.parentId ?? e.entityId;
-    if (wellsSeen.has(wellId)) continue;
-    wellsSeen.add(wellId);
-    if (e.mode === "fields-with-proxy-fallback") wellsByMode.fieldsWithProxyFallback++;
-    else if (e.mode === "fields-with-detail") wellsByMode.fieldsWithDetail++;
-  }
-
-  // Focal entity: visible entity with centroid nearest viewport-center
-  // (xy midpoint of the visible region — z ignored since the focal
-  // inspector is mostly used for slice-mode navigation).
-  const cx = (visibleRegion.xyBounds[0] + visibleRegion.xyBounds[2]) / 2;
-  const cy = (visibleRegion.xyBounds[1] + visibleRegion.xyBounds[3]) / 2;
-  let focal: EntitySnapshot | null = null;
-  let bestDist = Infinity;
-  for (const e of entities) {
-    if (!e.visible) continue;
-    const dx = e.centroidWorld[0] - cx;
-    const dy = e.centroidWorld[1] - cy;
-    const d = dx * dx + dy * dy;
-    if (d < bestDist) {
-      bestDist = d;
-      focal = e;
-    }
-  }
-  let focalEntity: PlanningDatasetDebug["focalEntity"] = null;
-  if (focal) {
-    const focalId = focal.entityId;
-    const entry = result.activeSet.find(e => e.entityId === focalId);
-    let topPriority: number | null = null;
-    let chunkCount = 0;
-    for (const r of result.requests) {
-      if (r.entityId !== focalId) continue;
-      chunkCount++;
-      if (topPriority === null || r.priority < topPriority) topPriority = r.priority;
-    }
-    focalEntity = {
-      entityId: focal.entityId,
-      parentWellId: focal.parentId ?? null,
-      kind: focal.kind,
-      projectedDiagonalPx: focal.projectedDiagonalPx,
-      projectedAreaPx2: focal.projectedAreaPx2,
-      importance: focal.importance,
-      idealTargetLod: focal.idealTargetLod,
-      detailOwnedRange: entry?.detailOwnedLodRange ?? [0, 0],
-      mode: entry?.mode ?? "unknown",
-      modeReason: modeReason(focal.projectedDiagonalPx),
-      topPriority,
-      chunkCount,
-    };
-  }
-
-  return {
-    datasetId: dsId,
-    lanes,
-    proxyCount: result.proxyRequests.length,
-    totalChunks: result.requests.length,
-    chunksByLevel,
-    lodBreakdown,
-    culling: result.stats.culling,
-    catalogDegradations: result.stats.catalogDegradations,
-    wellsByMode,
-    focalEntity,
   };
 }
 
@@ -707,103 +549,31 @@ export class Orchestrator {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
 
-      // 3b. View query — may return null if dataset not yet registered in scene.
-      // Wire shape from the wasm `view_query` JSON output (snake_case fields
-      // map to camelCase in EntitySnapshot below).
-      type VisibleEntityRow = {
-        entity_id: string;
-        image_id: string;
-        kind: "Image" | "Well" | "Field";
-        visible: boolean;
-        projected_diagonal_px: number;
-        projected_area_px2: number;
-        centroid_world: [number, number, number];
-        ideal_target_lod: number;
-        importance: number;
-      };
-      const vqJson = ctx.scene.view_query(dsId);
-      const vq = JSON.parse(vqJson) as { visible_entities?: VisibleEntityRow[] } | null;
-      if (!vq || !vq.visible_entities) continue;
-
-      // 3c. Member positions
-      const posJson = ctx.scene.member_positions(dsId);
-      const positions: Record<string, [number, number]> = JSON.parse(posJson);
-
-      // 3d. Build EntitySnapshot[]
-      const imageSpecById = new Map<string, ImageSpec>();
-      for (const img of ds.manifest.images) {
-        imageSpecById.set(img.image_id, img);
-      }
-      // Parent lookup from the dataset's manifest. S6 promotion
-      // groups visible fields by `parentId` (the well id) so all fields
-      // of a well agree on a single EntityMode.
-      const parentByEntityId = new Map<string, string | null>();
-      for (const ent of ds.manifest.entities) {
-        parentByEntityId.set(ent.id, ent.parent ?? null);
-      }
-
-      const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
-        const imgSpec = imageSpecById.get(e.image_id);
-        const numLevels = imgSpec ? imgSpec.multiscale.levels.length : 1;
-        const levels = imgSpec ? imgSpec.multiscale.levels : [];
-        const position = positions[e.entity_id] ?? ([0, 0] as [number, number]);
-        return {
-          entityId: e.entity_id,
-          imageId: e.image_id,
-          kind: e.kind,
-          visible: e.visible,
-          projectedDiagonalPx: e.projected_diagonal_px,
-          projectedAreaPx2: e.projected_area_px2,
-          centroidWorld: e.centroid_world,
-          idealTargetLod: e.ideal_target_lod,
-          importance: e.importance,
-          numLevels,
-          levels,
-          position,
-          parentId: parentByEntityId.get(e.entity_id) ?? null,
-        } satisfies EntitySnapshot;
+      // 3b. Build the planning snapshot from live WASM state. Returns
+      // null when `view_query` produces no visible entities (dataset
+      // not yet registered, etc.) — skip the dataset in that case.
+      // Slice 4 (PRD #545) extracted the WASM → snapshot translation
+      // into `planning/snapshot.ts`. Slice 5 will start wiring
+      // `minimapPendingFetch` into the snapshot via the same call;
+      // until then we pass an empty Map for the slot.
+      const built = buildPlanningSnapshot({
+        scene: ctx.scene,
+        datasetId: dsId,
+        dataset: ds,
+        dsSettings,
+        prevActiveSet: this.previousActiveSet.get(dsId) ?? [],
+        assetCatalog: ctx.assetCatalog.snapshot(),
+        minimapPending: new Map(),
+        mode: ctx.mode as "slice" | "volume",
+        multiChannel,
+        currentEpochs,
+        requestEpoch: this.requestEpoch,
+        config: DEFAULT_PLANNING_CONFIG,
       });
+      if (!built) continue;
+      const { snapshot, entities, visibleRegion, selection } = built;
 
-      // 3e. Visible region
-      const vrJson = ctx.scene.visible_region(dsId);
-      const vr = vrJson && vrJson !== "null" ? JSON.parse(vrJson) : null;
-      const visibleRegion: VisibleRegion = vr
-        ? {
-            xyBounds: vr.xy_bounds,
-            zRange: vr.z_range,
-            effectiveZoom: vr.effective_zoom,
-            sortCenter: vr.sort_center,
-            frustumPlanes: vr.frustum_planes,
-          }
-        : {
-            xyBounds: [0, 0, 1024, 1024],
-            zRange: [0, 1],
-            effectiveZoom: 1,
-            sortCenter: null,
-            frustumPlanes: null,
-          };
-
-      // 3f. Selection state
-      // In single-channel mode, plan only for the current C — the upload path
-      // sends one atlas config with one channel, so other channels' data would
-      // contaminate the atlas. Multi-channel mode uses composite keys per channel.
-      let visibleChannels: number[];
-      if (multiChannel && dsSettings?.channel_settings?.length > 0) {
-        visibleChannels = getActiveChannels(dsSettings);
-      } else {
-        visibleChannels = [ctx.scene.c()];
-      }
-
-      const selection: SelectionState = {
-        t: ctx.scene.t(),
-        c: ctx.scene.c(),
-        z: ctx.scene.z(),
-        visibleChannels,
-        renderMode: ctx.mode as "slice" | "volume",
-        interactionState: "idle",
-      };
-
-      // 3g. Track per-entity cache occupancy for telemetry. Planning no
+      // 3c. Track per-entity cache occupancy for telemetry. Planning no
       // longer filters cached chunks (CpuCache.submit() refreshes them
       // and dedups internally), so _lastFilteredRequests sees every
       // requested chunk and the re-send loop can find any of them.
@@ -812,19 +582,7 @@ export class Orchestrator {
         this._lastCachedKeyCounts.set(entity.entityId, cachedKeys?.size ?? 0);
       }
 
-      // 3h. Plan
-      const snapshot: PlanningSnapshot = {
-        epochs: currentEpochs,
-        entities,
-        visibleRegion,
-        selection,
-        previousActiveSet: this.previousActiveSet.get(dsId) ?? [],
-        // S3: real (but empty) snapshot. Planning falls through to
-        // existing two-tier assignModes() since `byEntity.size === 0`.
-        // S6 will start consuming this for proxy promotion.
-        assetCatalog: ctx.assetCatalog.snapshot(),
-      };
-
+      // 3d. Plan
       const result = plan(snapshot, DEFAULT_PLANNING_CONFIG);
       this.previousActiveSet.set(dsId, result.activeSet);
       this.requestEpoch = result.epochs.request;
@@ -844,6 +602,7 @@ export class Orchestrator {
       if (debugStats.enabled) {
         debugStats.planning.byDataset[dsId] = buildPlanningDatasetDebug(
           dsId, result, entities, entityById, visibleRegion, ctx.cpuCache,
+          DEFAULT_PLANNING_CONFIG,
         );
       }
 

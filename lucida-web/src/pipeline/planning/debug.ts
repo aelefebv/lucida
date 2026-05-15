@@ -1,0 +1,198 @@
+/**
+ * Debug builder — derives per-dataset planning telemetry from a fully-
+ * computed {@link RequestPlan}.
+ *
+ * Slice 4 of the planning refactor (PRD #545) extracted this from the
+ * orchestrator. It feeds the DebugPanel "Planning" tab unchanged: same
+ * {@link PlanningDatasetDebug} shape, same focal-entity selection rule,
+ * same lane / LOD / wells-by-mode aggregation. The only behavioural
+ * change is that {@link modeReason} now consumes its threshold values
+ * from {@link PlanningConfig} so they cannot drift from
+ * {@link chooseEntityMode}'s thresholds.
+ *
+ * Pure: no module state, no parameter mutation. Cheap enough that the
+ * orchestrator calls it on every cold-state rebuild.
+ */
+
+import type { CpuCache } from "../cpuCache.ts";
+import type { PlanningDatasetDebug } from "../../debug/debugStats.ts";
+import type {
+  EntitySnapshot,
+  RequestPlan,
+  VisibleRegion,
+} from "./index.ts";
+import type { PlanningConfig } from "./config.ts";
+
+/**
+ * Translate a focal entity's projected diagonal into a human-readable
+ * mode-band classification. Mirrors the logic in
+ * {@link chooseEntityMode} (planning index) so the panel can explain
+ * *why* the focal entity is in its current mode without us threading
+ * that reason through the active-set entry shape.
+ *
+ * Threshold values come from {@link PlanningConfig} — the same struct
+ * {@link chooseEntityMode} consumes — so the two cannot drift.
+ */
+export function modeReason(diagPx: number, config: PlanningConfig): string {
+  const farUpper = config.farThresholdPx + config.hysteresisPx;
+  const farLower = config.farThresholdPx - config.hysteresisPx;
+  const medUpper = config.detailThresholdPx + config.hysteresisPx;
+  const medLower = config.detailThresholdPx - config.hysteresisPx;
+
+  if (diagPx < farLower) return `${diagPx.toFixed(0)}px < ${farLower} → clearly proxy`;
+  if (diagPx > medUpper) return `${diagPx.toFixed(0)}px > ${medUpper} → clearly detail`;
+  if (diagPx >= farUpper && diagPx <= medLower) {
+    return `${diagPx.toFixed(0)}px ∈ [${farUpper}, ${medLower}] → clearly fallback`;
+  }
+  if (diagPx < farUpper) {
+    return `${diagPx.toFixed(0)}px ∈ [${farLower}, ${farUpper}] hysteresis band`;
+  }
+  return `${diagPx.toFixed(0)}px ∈ [${medLower}, ${medUpper}] hysteresis band`;
+}
+
+/**
+ * Build the per-dataset planning debug snapshot. Pure function —
+ * derives everything from the plan, the entity list, and the current
+ * cache snapshot. No internal state.
+ *
+ * Cross-references `plan.requests` with `cpuCache.snapshot()` to
+ * compute cached / in-flight counts per LOD; consumes `plan.stats` for
+ * catalog degradations and culling counters; picks a focal entity
+ * from the visible entities by viewport-center proximity.
+ *
+ * `config` is forwarded to {@link modeReason} so the focal-entity
+ * explanation matches whatever thresholds {@link plan} was running
+ * with this tick.
+ */
+export function buildPlanningDatasetDebug(
+  dsId: string,
+  result: RequestPlan,
+  entities: EntitySnapshot[],
+  entityById: Map<string, EntitySnapshot>,
+  visibleRegion: VisibleRegion,
+  cpuCache: CpuCache,
+  config: PlanningConfig,
+): PlanningDatasetDebug {
+  const lanes = { detail: 0, prefetch: 0, overview: 0 };
+  const chunksByLevel: Record<number, number> = {};
+  for (const r of result.requests) {
+    lanes[r.lane]++;
+    chunksByLevel[r.level] = (chunksByLevel[r.level] ?? 0) + 1;
+  }
+
+  // Per-LOD breakdown: planned (from plan), cached + in-flight (from cache).
+  const cacheSnap = cpuCache.snapshot();
+  const cached: Record<number, number> = {};
+  const inFlight: Record<number, number> = {};
+  const activeEntityIds = new Set(result.activeSet.map(e => e.entityId));
+  for (const eid of activeEntityIds) {
+    const cs = cacheSnap.cached.get(eid);
+    if (cs) {
+      for (const k of cs) {
+        const lvl = parseInt(k, 10);
+        if (Number.isFinite(lvl)) cached[lvl] = (cached[lvl] ?? 0) + 1;
+      }
+    }
+    const fs = cacheSnap.inFlight.get(eid);
+    if (fs) {
+      for (const k of fs) {
+        const lvl = parseInt(k, 10);
+        if (Number.isFinite(lvl)) inFlight[lvl] = (inFlight[lvl] ?? 0) + 1;
+      }
+    }
+  }
+  const allLevels = new Set<number>([
+    ...Object.keys(chunksByLevel).map(Number),
+    ...Object.keys(cached).map(Number),
+    ...Object.keys(inFlight).map(Number),
+  ]);
+  const lodBreakdown = [...allLevels]
+    .sort((a, b) => a - b)
+    .map(level => ({
+      level,
+      planned: chunksByLevel[level] ?? 0,
+      cached: cached[level] ?? 0,
+      inFlight: inFlight[level] ?? 0,
+    }));
+
+  // Wells by mode. Field-mode entries are deduped by parent well so
+  // counts represent *wells* in each mode, not active-set entries.
+  // Image-only datasets fall through with each image as its own "well"
+  // (parentId is null → wellId == entityId), so a single dataset shows
+  // up as one count without special-casing.
+  const wellsByMode = {
+    wellAsProxy: 0,
+    fieldsWithProxyFallback: 0,
+    fieldsWithDetail: 0,
+  };
+  const wellsSeen = new Set<string>();
+  for (const e of result.activeSet) {
+    if (e.mode === "well-as-proxy") {
+      wellsByMode.wellAsProxy++;
+      continue;
+    }
+    const ent = entityById.get(e.entityId);
+    const wellId = ent?.parentId ?? e.entityId;
+    if (wellsSeen.has(wellId)) continue;
+    wellsSeen.add(wellId);
+    if (e.mode === "fields-with-proxy-fallback") wellsByMode.fieldsWithProxyFallback++;
+    else if (e.mode === "fields-with-detail") wellsByMode.fieldsWithDetail++;
+  }
+
+  // Focal entity: visible entity with centroid nearest viewport-center
+  // (xy midpoint of the visible region — z ignored since the focal
+  // inspector is mostly used for slice-mode navigation).
+  const cx = (visibleRegion.xyBounds[0] + visibleRegion.xyBounds[2]) / 2;
+  const cy = (visibleRegion.xyBounds[1] + visibleRegion.xyBounds[3]) / 2;
+  let focal: EntitySnapshot | null = null;
+  let bestDist = Infinity;
+  for (const e of entities) {
+    if (!e.visible) continue;
+    const dx = e.centroidWorld[0] - cx;
+    const dy = e.centroidWorld[1] - cy;
+    const d = dx * dx + dy * dy;
+    if (d < bestDist) {
+      bestDist = d;
+      focal = e;
+    }
+  }
+  let focalEntity: PlanningDatasetDebug["focalEntity"] = null;
+  if (focal) {
+    const focalId = focal.entityId;
+    const entry = result.activeSet.find(e => e.entityId === focalId);
+    let topPriority: number | null = null;
+    let chunkCount = 0;
+    for (const r of result.requests) {
+      if (r.entityId !== focalId) continue;
+      chunkCount++;
+      if (topPriority === null || r.priority < topPriority) topPriority = r.priority;
+    }
+    focalEntity = {
+      entityId: focal.entityId,
+      parentWellId: focal.parentId ?? null,
+      kind: focal.kind,
+      projectedDiagonalPx: focal.projectedDiagonalPx,
+      projectedAreaPx2: focal.projectedAreaPx2,
+      importance: focal.importance,
+      idealTargetLod: focal.idealTargetLod,
+      detailOwnedRange: entry?.detailOwnedLodRange ?? [0, 0],
+      mode: entry?.mode ?? "unknown",
+      modeReason: modeReason(focal.projectedDiagonalPx, config),
+      topPriority,
+      chunkCount,
+    };
+  }
+
+  return {
+    datasetId: dsId,
+    lanes,
+    proxyCount: result.proxyRequests.length,
+    totalChunks: result.requests.length,
+    chunksByLevel,
+    lodBreakdown,
+    culling: result.stats.culling,
+    catalogDegradations: result.stats.catalogDegradations,
+    wellsByMode,
+    focalEntity,
+  };
+}
