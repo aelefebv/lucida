@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-14
+modified: 2026-05-15
 ---
 
 ADRs cite [[principles/index|principles]] as their justification when applicable. Principles never cite back — they remain agnostic to which decisions exist today.
@@ -38,6 +38,9 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0023-minimap-lane-with-highest-priority]] — minimap is its own lane at offset 0 (highest priority); other lanes renumbered upward; minimap fetches first and evicts last (PRD #545; 2026-05-14)
 - [[decisions/0024-catalog-degrade-one-tier-at-a-time]] — catalog-aware mode degradation steps exactly one tier; tier-skipping forbidden; ratification of an existing invariant (PRD #545; 2026-05-14)
 - [[decisions/0025-wells-as-planning-unit]] — on plates, all fields of one well agree on a single mode; per-field divergence within a well is out of scope; ratification of an existing invariant (PRD #545; 2026-05-14)
+- [[decisions/0026-discriminated-active-set-and-entity-types]] — `ActiveSetEntry` and `EntitySnapshot` become discriminated unions with top-level `kind`; per-variant invariants compile-time enforced (PRD #563; 2026-05-15)
+- [[decisions/0027-planning-state-as-the-carry-forward-seam]] — `PlanningState` separates across-tick state from per-tick snapshot; planner returns `nextState` opaquely (PRD #563; 2026-05-15)
+- [[decisions/0028-scene-epochs-rename-and-relocation]] — `PlanningEpochs` → `SceneEpochs` in `pipeline/epochs.ts`; `VisibleRegion` → `pipeline/viewport.ts`; no compat shim (PRD #563; 2026-05-15)
 
 ## Deferred — considered but not built yet
 
