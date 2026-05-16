@@ -36,6 +36,12 @@ import {
   type ProxyEvictable,
 } from "./proxyStore.ts";
 import { Scheduler } from "./scheduler.ts";
+import {
+  classifyFetchError,
+  NeverRetry,
+  OnceTransientRetry,
+  type RetryPolicy,
+} from "./retry.ts";
 import { debugLog } from "../../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
@@ -311,6 +317,22 @@ export class CpuCache {
   // backpressure for the proxy path.
   private counters = new TelemetryCounters();
   private burstFailures = new BurstLogger("cache", "cache.failure_burst");
+
+  /**
+   * Retry rule for the chunk fetch path. `OnceTransientRetry` mirrors
+   * the pre-Slice-8 behaviour: one retry on transient errors, none on
+   * permanent (404 / malformed / setup bugs like "no wire format
+   * registered"). Wired at construction so tests + future variants can
+   * swap policies without touching `fetchAndDecode`.
+   */
+  private chunkRetryPolicy: RetryPolicy = new OnceTransientRetry(TRANSIENT_RETRY_DELAY_MS);
+
+  /**
+   * Retry rule for the proxy fetch path. `NeverRetry` mirrors the
+   * pre-Slice-8 behaviour: no in-fetch retries — the orchestrator
+   * resubmits on the next plan tick if the proxy is still wanted.
+   */
+  private proxyRetryPolicy: RetryPolicy = new NeverRetry();
 
   /**
    * Bumped at the start of every `submit()`. Stamped onto cached
@@ -965,30 +987,38 @@ export class CpuCache {
         controller.signal,
       );
     } catch (err: unknown) {
-      // Aborted — clean and silent
-      if (err instanceof DOMException && err.name === "AbortError") {
+      const fe = classifyFetchError(err);
+
+      // Aborted — clean and silent. Covers both signal aborts
+      // (`DOMException` promoted by `classifyFetchError`) and explicit
+      // caller cancellations (`Dataset removed`).
+      if (fe.kind === "abort") {
         this.chunkScheduler.markInFlightDone(key);
         return;
       }
 
-      // Classify error
-      const message = err instanceof Error ? err.message : String(err);
-      const isPermanent = message.includes("404") || message.includes("malformed");
-
-      if (!isPermanent && retryCount < MAX_TRANSIENT_RETRIES) {
-        // Transient retry
-        await new Promise(r => setTimeout(r, TRANSIENT_RETRY_DELAY_MS));
+      // Retry if the policy allows. Pre-Slice-8 this was a manual
+      // `!isPermanent && retryCount < MAX_TRANSIENT_RETRIES` check
+      // with string-substring classification; now the source's typed
+      // `FetchError.kind` owns the decision and the policy is
+      // injectable.
+      if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
+        await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
         return this.fetchAndDecode(req, controller, key, retryCount + 1);
       }
 
-      // Mark as failed
+      // Final failure: mark in failures map + record telemetry. The
+      // "no wire format registered" path now lands here with
+      // `kind: "permanent"` (Slice 8 bug fix; was misclassified
+      // transient pre-refactor).
+      const isPermanent = fe.kind === "permanent";
       this.failures.set(key, {
         failedUntilContentEpoch: this.currentEpochs.content + 1,
         isPermanent,
       });
-      this.counters.recordFetchFailure(isPermanent, message);
-      this.recordFailureForBurstDetection(isPermanent, message);
+      this.counters.recordFetchFailure(isPermanent, fe.message);
+      this.recordFailureForBurstDetection(isPermanent, fe.message);
       this.chunkScheduler.markInFlightDone(key);
       return;
     }
@@ -1101,15 +1131,23 @@ export class CpuCache {
         controller.signal,
       );
     } catch (err: unknown) {
-      if (err instanceof DOMException && err.name === "AbortError") {
+      const fe = classifyFetchError(err);
+      if (fe.kind === "abort") {
         this.proxyScheduler.markInFlightDone(key);
         return;
       }
-      const message = err instanceof Error ? err.message : String(err);
-      this.counters.recordError(message);
+      // Proxy retry policy is `NeverRetry` — consult it for symmetry
+      // with the chunk path; today it always returns false. No
+      // failures-map entry: the orchestrator resubmits on the next
+      // plan tick if the proxy is still wanted (pre-Slice-8 behaviour
+      // preserved).
+      if (this.proxyRetryPolicy.shouldRetry(fe, 0)) {
+        await new Promise(r => setTimeout(r, this.proxyRetryPolicy.delayMs(0)));
+        if (!this.proxyScheduler.hasInFlight(key)) return;
+        return this.fetchProxy(req, controller, key);
+      }
+      this.counters.recordError(fe.message);
       this.proxyScheduler.markInFlightDone(key);
-      // No retry / failure tracking — orchestrator can resubmit on the
-      // next plan if it still wants this proxy.
       return;
     }
 

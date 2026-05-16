@@ -51,3 +51,11 @@ export {
 
 export { InteractionModeDetector } from "./interactionMode.ts";
 export type { InteractionMode } from "./interactionMode.ts";
+
+export {
+  FetchError,
+  classifyFetchError,
+  OnceTransientRetry,
+  NeverRetry,
+} from "./retry.ts";
+export type { FetchErrorKind, RetryPolicy } from "./retry.ts";

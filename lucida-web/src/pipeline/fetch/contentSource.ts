@@ -8,6 +8,7 @@
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 import type { ProxyKind } from "../assetCatalog.ts";
 import { parseProxyHeader, proxyResponseKey, type ProxyHeaderJs } from "./wireProtocol.ts";
+import { FetchError } from "./retry.ts";
 
 export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
@@ -60,6 +61,10 @@ const DEFAULT_PROXY_TIMEOUT_MS = 60_000;
 
 interface PendingRequest {
   resolve: (data: ArrayBuffer) => void;
+  // Accepts either a typed `FetchError` (`rejectDataset`, `rejectAll`)
+  // or the `DOMException("AbortError")` raised on signal abort. The
+  // catch block in `CpuCache.fetchAndDecode` routes both through
+  // `classifyFetchError`.
   reject: (err: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
 }
@@ -142,7 +147,9 @@ export class ProxiedContentSource implements ContentSource {
       if (key.startsWith(prefix)) {
         clearTimeout(entry.timeoutId);
         this.pending.delete(key);
-        entry.reject(new Error("Dataset removed"));
+        // Dataset removal is a deliberate caller cancellation; treat
+        // identically to a signal abort downstream.
+        entry.reject(new FetchError("Dataset removed", { kind: "abort" }));
       }
     }
     // Proxy keys aren't dataset-scoped (entity IDs are unique enough);
@@ -153,12 +160,14 @@ export class ProxiedContentSource implements ContentSource {
   rejectAll(): void {
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timeoutId);
-      entry.reject(new Error("Bridge disconnected"));
+      // Bridge drop is a transient condition: the reconnect path will
+      // retry. The cache's `OnceTransientRetry` honours that semantics.
+      entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
     }
     this.pending.clear();
     for (const [, entry] of this.pendingProxy) {
       clearTimeout(entry.timeoutId);
-      entry.reject(new Error("Bridge disconnected"));
+      entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
     }
     this.pendingProxy.clear();
   }
@@ -169,14 +178,23 @@ export class ProxiedContentSource implements ContentSource {
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
     const wireFormat = this.imageWireFormats.get(imageId);
     if (!wireFormat) {
-      return Promise.reject(new Error(`No wire format registered for image ${imageId}`));
+      // Setup bug — retrying won't recover. Pre-Slice-8 this was a
+      // plain `Error` and the catch block's substring rules
+      // misclassified it as transient (dechaos pass 5 finding).
+      return Promise.reject(
+        new FetchError(`No wire format registered for image ${imageId}`, {
+          kind: "permanent",
+        }),
+      );
     }
     const dataType = extractDataType(wireFormat);
 
     return new Promise<FetchResult>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pending.delete(compositeKey);
-        reject(new Error(`Chunk ${chunkKey} timed out`));
+        // Timeout preserves the pre-Slice-8 behaviour: a single retry
+        // via `OnceTransientRetry`, then mark transient-failed.
+        reject(new FetchError(`Chunk ${chunkKey} timed out`, { kind: "transient" }));
       }, this.timeoutMs);
 
       this.pending.set(compositeKey, {
@@ -195,6 +213,10 @@ export class ProxiedContentSource implements ContentSource {
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         this.pending.delete(compositeKey);
+        // `DOMException` AbortError is promoted to
+        // `FetchError(kind: "abort")` by `classifyFetchError`. Raising
+        // it directly here keeps the AbortError shape for any
+        // downstream `instanceof DOMException` matcher.
         reject(new DOMException("Aborted", "AbortError"));
       });
     });
@@ -212,7 +234,11 @@ export class ProxiedContentSource implements ContentSource {
     return new Promise<FetchProxyResult>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pendingProxy.delete(responseKey);
-        reject(new Error(`Proxy ${responseKey} timed out`));
+        // Proxy retry policy is `NeverRetry`, so the cache won't retry
+        // — but the timeout is still semantically transient (the next
+        // plan tick may resubmit). Keeping the same kind discipline
+        // here means consumers can reason about kind uniformly.
+        reject(new FetchError(`Proxy ${responseKey} timed out`, { kind: "transient" }));
       }, this.proxyTimeoutMs);
 
       this.pendingProxy.set(responseKey, {
@@ -222,7 +248,11 @@ export class ProxiedContentSource implements ContentSource {
           try {
             header = parseProxyHeader(raw, 0);
           } catch (e) {
-            reject(e instanceof Error ? e : new Error(String(e)));
+            // Malformed header → permanent. `parseProxyHeader` throws
+            // a plain `Error` for bad magic / version; wrap it as a
+            // typed `FetchError` so the cache classifies it correctly.
+            const message = e instanceof Error ? e.message : String(e);
+            reject(new FetchError(message, { kind: "permanent", cause: e }));
             return;
           }
           const data = raw.slice(64);
@@ -247,6 +277,9 @@ export class ProxiedContentSource implements ContentSource {
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         this.pendingProxy.delete(responseKey);
+        // Matches the chunk-path abort site: raise the DOMException
+        // directly; `classifyFetchError` promotes it to
+        // `FetchError(kind: "abort")` downstream.
         reject(new DOMException("Aborted", "AbortError"));
       });
     });

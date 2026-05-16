@@ -1002,6 +1002,57 @@ describe("CpuCache", () => {
       expect(tel.failedChunks.permanent).toBe(1);
       expect(tel.lastError).toContain("404");
     });
+
+    it("'no wire format registered' classifies as permanent — no retry (Slice 8 #602 bug fix)", async () => {
+      // Pre-Slice-8 regression: the cache catch block matched
+      // `err.message.includes("404") || err.message.includes("malformed")`
+      // to decide permanent vs. transient. "No wire format registered
+      // for image X" matched neither, so the cache wasted a retry on
+      // a setup bug. With typed FetchError + classifyFetchError, the
+      // source's `kind: "permanent"` flows through to the cache and
+      // dispatches via the policy.
+      //
+      // End-to-end via ProxiedContentSource (the source that raises
+      // this error) — exercises the full fetch path, not just the
+      // classifier.
+      vi.useFakeTimers();
+      try {
+        const sentMessages: string[] = [];
+        const realSource = new ProxiedContentSource(
+          (json) => sentMessages.push(json),
+        );
+        // Intentionally do NOT call registerImage("image-1") so
+        // `fetch` rejects with the typed permanent FetchError.
+        const decode = createSyncDecode();
+        const cache = new CpuCache(realSource, decode);
+
+        const req = makeRequest();
+        const beforeFetches = sentMessages.length;
+        cache.submit(makePlan([req]));
+
+        // Flush microtasks so the synchronous rejection from `fetch`
+        // is caught and the failure-map entry is recorded. We also
+        // advance well past the retry delay to prove no retry fires.
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS * 4);
+
+        // No additional chunk_request frames went out — the cache did
+        // not retry. (Pre-Slice-8 the cache would have queued one
+        // retry, but the bug above also meant ProxiedContentSource
+        // would have rejected the retry synchronously again, so this
+        // assertion would have caught two synchronous rejections.)
+        const afterFetches = sentMessages.length;
+        expect(afterFetches).toBe(beforeFetches);
+
+        // Telemetry attributes the failure to the permanent bucket,
+        // not transient — the load-bearing reclassification.
+        const tel = cache.telemetry();
+        expect(tel.failedChunks.permanent).toBe(1);
+        expect(tel.failedChunks.transient).toBe(0);
+        expect(tel.lastError).toMatch(/No wire format registered/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // =========================================================================

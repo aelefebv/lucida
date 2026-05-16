@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ProxiedContentSource } from "./contentSource.ts";
 import { proxyResponseKey } from "./wireProtocol.ts";
+import { FetchError } from "./retry.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -98,6 +99,27 @@ describe("ProxiedContentSource.fetch", () => {
         ctrl.signal,
       ),
     ).rejects.toThrow(/No wire format registered for image unregistered-image/);
+  });
+
+  it("the unregistered-image rejection is a FetchError with kind: permanent (Slice 8 #602 bug fix)", async () => {
+    // Pre-Slice-8 the cache classified this as transient (substring
+    // rules matched neither "404" nor "malformed"), so the cache
+    // wasted a retry on a setup bug. The typed FetchError lets the
+    // source own classification; the cache dispatches via
+    // `classifyFetchError`. Locked here so a future change can't
+    // silently regress.
+    const ctrl = new AbortController();
+    try {
+      await source.fetch(
+        { datasetId: "ds-1", imageId: "unregistered-image", chunkKey: "0/0/0/0/0/0" },
+        ctrl.signal,
+      );
+      throw new Error("expected rejection");
+    } catch (err) {
+      expect(err).toBeInstanceOf(FetchError);
+      expect((err as FetchError).kind).toBe("permanent");
+      expect((err as FetchError).message).toMatch(/No wire format registered/);
+    }
   });
 
   it("times out after the configured timeoutMs", async () => {
