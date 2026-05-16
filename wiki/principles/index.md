@@ -13,3 +13,4 @@ ADRs cite principles as the justification for specific decisions. Principles nev
 
 - [[principles/planning]] — what the planning domain optimizes for: visual smoothness, memory bounds, well coherence, purity, WASM as truth, anticipation
 - [[principles/cpu-cache]] — what the host-side cache between network and GPU optimizes for: survive GPU eviction, tier-aware protection, movement over deletion, attention-aware active-set eviction, windowed failure, single fetch path
+- [[principles/upload-pipeline]] — what the CPU → GPU hand-off optimizes for: one hand-off path, cold-state authority, soft byte budget, single tracker, per-dataset state, bounded worker feedback
