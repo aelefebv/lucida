@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Lucida canonical deploy image (PRD #486 slice 5 / issue #491).
+# Lucida canonical deploy image.
 # Per ADR-0020 (wiki/decisions/0020-single-image-with-servedir.md), one
 # container bundles the API binary, the SPA dist, and the WASM pkg. The
 # same image runs in production via Kubernetes, in a developer's
@@ -13,8 +13,8 @@
 #   3. debian:bookworm-slim runtime carrying just the binary, the dist,
 #      and the CA certs needed for outbound HTTPS (Google JWKS, GCS, ...).
 #
-# Distroless was considered and deferred (see PRD #486 "Out of Scope"):
-# the slim-Debian variant keeps a shell available for diagnostics in v1.
+# Distroless was considered and deferred: the slim-Debian variant keeps
+# a shell available for diagnostics in v1.
 
 # =============================================================================
 # Stage 1: rust + wasm-pack
@@ -99,9 +99,9 @@ RUN cd lucida-core && wasm-pack build --target web --out-dir pkg
 # =============================================================================
 # Stage 2: node + pnpm SPA build
 # =============================================================================
-# node:22-slim matches CI's `lts/*` (node 22 is the active LTS as of
-# slice 5 authoring) and stays close to debian:bookworm-slim so the
-# eventual runtime layer shares a libc family with the build layers.
+# node:22-slim matches CI's `lts/*` (node 22 is the active LTS) and
+# stays close to debian:bookworm-slim so the eventual runtime layer
+# shares a libc family with the build layers.
 FROM node:22-slim AS web-builder
 
 # Corepack ships with node and shims pnpm/yarn/etc. lucida-web doesn't
@@ -141,8 +141,8 @@ RUN apt-get update \
 COPY --from=rust-builder /workspace/target/release/lucida-server /usr/local/bin/lucida-server
 COPY --from=web-builder  /web/lucida-web/dist                    /usr/share/lucida/web
 
-# /var/lib/lucida is the canonical writable directory the slice-6 k8s
-# manifests will mount a PVC at. Defaulting WORKDIR here keeps
+# /var/lib/lucida is the canonical writable directory the k8s
+# manifests mount a PVC at. Defaulting WORKDIR here keeps
 # CWD-relative defaults (e.g. LUCIDA_DB_PATH=./lucida.db) landing in
 # the right place when an adopter doesn't override.
 WORKDIR /var/lib/lucida

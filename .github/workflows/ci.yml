@@ -181,8 +181,8 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # Single-arch (amd64) for speed. Multi-arch is the release
-      # workflow's job (PRD #486 slice 7); for PR signal all we need is
-      # "the Dockerfile still builds end-to-end". `load: true` makes the
+      # workflow's job; for PR signal all we need is "the Dockerfile
+      # still builds end-to-end". `load: true` makes the
       # image available for the run-and-probe step on release-please
       # PRs (and for any later local inspection).
       #
@@ -213,10 +213,9 @@ jobs:
       # (which would otherwise demand OAuth on the wildcard bind the
       # Dockerfile sets) — the smoke is verifying process startup +
       # health endpoints, not the auth path. LUCIDA_INSECURE=1 is the
-      # documented opt-in that PR #527 added to make sure you can't
-      # accidentally ship `disabled` on a non-loopback bind without
-      # acknowledging it; the ephemeral CI runner is the textbook
-      # legitimate-insecure case.
+      # documented opt-in that prevents accidentally shipping `disabled`
+      # on a non-loopback bind without acknowledging it; the ephemeral
+      # CI runner is the textbook legitimate-insecure case.
       - name: True smoke (run + probe)
         if: github.head_ref == 'release-please--branches--main'
         run: |

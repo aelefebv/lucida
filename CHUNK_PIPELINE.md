@@ -107,7 +107,7 @@ coarsestDetailLod    = targetLod
 detailOwnedRange = [targetLod, targetLod]
 ```
 
-Slice 2 of PRD #545 dropped the legacy +2 LOD buffer: planning now hands the caller exactly one level. The orchestrator no longer filters the request stream to the target level either, so a buffered range would have queued chunks the cache could never use. Cross-LOD smoothing is the shader fallback chain's job; planning emits one level and trusts the chain to draw a coarser fallback while the target loads.
+Planning hands the caller exactly one level. The orchestrator does not filter the request stream to the target level either, so a buffered range would queue chunks the cache could never use. Cross-LOD smoothing is the shader fallback chain's job; planning emits one level and trusts the chain to draw a coarser fallback while the target loads.
 
 ### 3c. Chunk enumeration & priority (`planning.ts:772-957`)
 
@@ -129,7 +129,7 @@ priority = laneOffset + (1 - importance) * 500 + distance * 10
 
 So a minimap chunk wins outright on dataset open (~0); a centered detail chunk follows (~500); the per-entity overview backstop loses (~2500+).
 
-The MINIMAP lane was introduced in PRD #545 / ADR 0023; the previously-OVERVIEW-labeled "Minimap" row was relabeled to "shader fallback coarsest" — it's a different producer (per-entity coarsest pass, not whole-sample) that survived the lane split.
+The MINIMAP lane and the OVERVIEW "shader fallback coarsest" lane are distinct producers: MINIMAP is the whole-sample low-res context loaded first on dataset open, while OVERVIEW is the per-entity coarsest pass that backstops the shader fallback chain. See ADR-0023.
 
 ### 3d. Inspecting what planning did
 
