@@ -42,6 +42,7 @@ import {
   OnceTransientRetry,
   type RetryPolicy,
 } from "./retry.ts";
+import { RejectionTracker } from "./rejection.ts";
 import { debugLog } from "../../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
@@ -346,13 +347,13 @@ export class CpuCache {
    * Chunks the GPU worker reported as `skipped` (atlas full, incoming
    * farther than farthest existing slot). The orchestrator calls
    * {@link markRejected} on each one and {@link clearRejected} on every
-   * cold-state rebuild, so the set reflects "wanted but not deliverable
-   * under the current camera". `submit()` skips enqueuing rejected
-   * chunks for fetch — and crucially, does NOT refresh `lastSeenTick`
-   * on cached-but-rejected entries, so the active-detail eviction
-   * sweeps them out before useful chunks. Keyed entityId → Set<chunkKey>.
+   * cold-state rebuild, so the tracker reflects "wanted but not
+   * deliverable under the current camera". `submit()` skips enqueuing
+   * rejected chunks for fetch — and crucially, does NOT refresh
+   * `lastSeenTick` on cached-but-rejected entries, so the
+   * active-detail eviction sweeps them out before useful chunks.
    */
-  private rejectedKeys = new Map<string, Set<string>>();
+  private rejectionTracker = new RejectionTracker();
 
   // Listeners notified when new chunks become ready
   private listeners: (() => void)[] = [];
@@ -510,7 +511,7 @@ export class CpuCache {
       // active-detail eviction can sweep the cached copy out — keeping
       // it would burn budget on residency that won't reach the GPU.
       // Cleared on the next cold-state rebuild via `clearRejected()`.
-      if (this.rejectedKeys.get(req.entityId)?.has(req.chunkKey)) {
+      if (this.rejectionTracker.has(req.entityId, req.chunkKey)) {
         continue;
       }
 
@@ -630,19 +631,15 @@ export class CpuCache {
    * via {@link clearRejected} on every cold-state rebuild.
    */
   markRejected(entityId: string, chunkKey: string): void {
-    let set = this.rejectedKeys.get(entityId);
-    if (!set) {
-      set = new Set();
-      this.rejectedKeys.set(entityId, set);
-    }
-    if (set.has(chunkKey)) return;
-    set.add(chunkKey);
+    const wasNew = this.rejectionTracker.mark(entityId, chunkKey);
+    if (!wasNew) return;
 
-    // Slice 9 (`#603`) RejectionTracker will move this fan-out, but
-    // the scheduler-side hook is already in place: abort + slot
-    // release go through `chunkScheduler.cancelOne`.
-    const key = `${entityId}/${chunkKey}`;
-    this.chunkScheduler.cancelOne(key);
+    // First-time rejection: abort the in-flight fetch (if any) so the
+    // bytes are released and no consumer waits on a result that won't
+    // be used. Repeated `markRejected` calls for the same key are
+    // no-ops — the first one already cancelled, and any later refetch
+    // would have been blocked by `submit()`'s rejection-ladder check.
+    this.chunkScheduler.cancelOne(this.inFlightKey({ entityId, chunkKey } as ChunkRequest));
   }
 
   /**
@@ -652,7 +649,7 @@ export class CpuCache {
    * that previously-too-far chunks now fit.
    */
   clearRejected(): void {
-    this.rejectedKeys.clear();
+    this.rejectionTracker.clear();
   }
 
   /** Pull decoded buffers up to budget. Returns new deliveries only. */
@@ -957,7 +954,7 @@ export class CpuCache {
     this.activeEntityIds.clear();
     this.interactionDetector.reset();
     this.failures.clear();
-    this.rejectedKeys.clear();
+    this.rejectionTracker.clear();
     this.lruCounter = 0;
     this.submitTick = 0;
 
