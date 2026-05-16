@@ -20,10 +20,6 @@ function makeEpochs(overrides?: Partial<SceneEpochs>): SceneEpochs {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Tests — pure detector unit (no cache instance, no fetch mock).
-// ---------------------------------------------------------------------------
-
 describe("InteractionModeDetector", () => {
   describe("adaptive eviction", () => {
     it("detects panning from viewEpoch velocity", () => {
@@ -60,20 +56,14 @@ describe("InteractionModeDetector", () => {
     });
 
     it("scrubbing mode protects prefetch over demoted", () => {
-      // The detector-level invariant: rapid selection bumps + zero
-      // view bumps classify as scrubbing, even with later
-      // equal-view-equal-selection pushes mixed in. Integration
-      // coverage of the tier-order consequence lives at the
-      // EvictionPolicy + getTierOrder seam.
+      // Rapid selection bumps + zero view bumps classify as scrubbing,
+      // even with later equal-view/equal-selection pushes mixed in.
       const detector = new InteractionModeDetector(INTERACTION_MODE_WINDOW);
 
-      // Force scrubbing mode via selectionEpoch velocity
       for (let i = 0; i < 5; i++) {
         detector.push(makeEpochs({ view: 1, selection: i + 1 }));
       }
-      // Mirror the original test's three subsequent submits at
-      // (view: 1, selection: 6/7/8). Selection keeps bumping; view
-      // stays put — should remain scrubbing.
+      // Selection keeps bumping; view stays put — still scrubbing.
       detector.push(makeEpochs({ view: 1, selection: 6 }));
       detector.push(makeEpochs({ view: 1, selection: 7 }));
       detector.push(makeEpochs({ view: 1, selection: 8 }));

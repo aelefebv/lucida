@@ -1,13 +1,3 @@
-/**
- * Unit tests for the {@link LRUPolicy} and {@link TieredPolicy}.
- *
- * Synthetic `CacheEntry` literals only — no cache instance, no fetch
- * mock. The `cpuCache.test.ts:eviction tiers` describe block remains
- * as integration coverage for the cache-level wiring; these tests
- * pin the per-policy behavior so stores can swap policies without
- * losing the active-detail tiebreaker contract.
- */
-
 import { describe, it, expect } from "vitest";
 
 import {
@@ -333,9 +323,7 @@ describe("TieredPolicy", () => {
   });
 
   it("reads the live interaction mode each call (modeProvider thunk)", () => {
-    // Pre-Slice-5 the cache called this.interactionDetector.current()
-    // on each eviction; the policy must do the same so a mode change
-    // between two eviction passes is observed.
+    // Mode change between two eviction passes must be observed.
     let mode: InteractionMode = "panning";
     const policy = new TieredPolicy(() => mode);
     const prefetch = makeEntry({

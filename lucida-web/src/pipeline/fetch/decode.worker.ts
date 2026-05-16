@@ -1,10 +1,4 @@
-/**
- * Codec-agnostic decode worker.
- *
- * Two steps per request:
- *   1. Decompress: Raw (no-op) / LZ4 / Zstd
- *   2. Normalize: interpret as dataType, produce GPU-ready Uint16Array buffer
- */
+// Decompress (Raw / LZ4 / Zstd), then normalize to GPU-ready u16.
 
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 
@@ -33,7 +27,7 @@ interface DecodeError {
 function decompressLz4(src: ArrayBuffer): ArrayBuffer {
   const input = new Uint8Array(src);
 
-  // Wire format: 4-byte LE uncompressed size, then LZ4 block data
+  // 4-byte LE uncompressed size, then LZ4 block data.
   const uncompressedSize =
     input[0] | (input[1] << 8) | (input[2] << 16) | (input[3] << 24);
 
@@ -85,10 +79,8 @@ async function decompressZstd(src: ArrayBuffer): Promise<ArrayBuffer> {
   if (!fzstdModule) {
     fzstdModule = await import("fzstd");
   }
-  // fzstd returns a Uint8Array that is a view into a larger underlying
-  // buffer (12-byte prefix + decoded bytes). Slice to get just the
-  // decoded range, otherwise downstream readers see garbage prefix
-  // bytes.
+  // fzstd returns a view into a larger buffer with a 12-byte prefix;
+  // slice to the decoded range so downstream readers don't see garbage.
   const decoded = fzstdModule.decompress(new Uint8Array(src));
   return decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength) as ArrayBuffer;
 }
@@ -106,8 +98,7 @@ function decompress(bytes: ArrayBuffer, wireFormat: WireFormat): ArrayBuffer | P
 function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
   switch (dataType.toLowerCase()) {
     case "uint8":
-      // Pass through raw uint8 data — conversion to uint16 happens at GPU upload
-      // to avoid doubling memory in the decode worker.
+      // Conversion to u16 happens at GPU upload to avoid doubling memory here.
       return buf;
     case "bool": {
       const src = new Uint8Array(buf);
@@ -137,6 +128,6 @@ self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
   }
 };
 
-// Re-export for direct testing (imported as a module, not as a worker)
+// Re-exported for direct testing (imported as a module, not a worker).
 export { decompressLz4, decompressZstd, normalize };
 export type { DecodeRequest, DecodeResponse, DecodeError };

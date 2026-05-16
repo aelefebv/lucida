@@ -1,16 +1,3 @@
-/**
- * Tests for ProxiedContentSource.
- *
- * Exercises the full fetch / fetchProxy flow against the
- * sendMessage callback boundary: each test feeds responses back via
- * handleChunkData / handleProxyData (mirroring the bridge's binary
- * routing) and asserts the promise resolution shape.
- *
- * Pinned behaviours include the "No wire format registered" rejection
- * (raised as a typed permanent FetchError) and the 64-byte-header
- * proxy payload contract.
- */
-
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ProxiedContentSource } from "./contentSource.ts";
 import { proxyResponseKey } from "./wireProtocol.ts";
@@ -102,11 +89,6 @@ describe("ProxiedContentSource.fetch", () => {
   });
 
   it("the unregistered-image rejection is a FetchError with kind: permanent", async () => {
-    // Substring-only classification would treat this as transient
-    // (matches neither "404" nor "malformed"), wasting a retry on a
-    // setup bug. The typed FetchError lets the source own
-    // classification; the cache dispatches via `classifyFetchError`.
-    // Locked here so a future change can't silently regress.
     const ctrl = new AbortController();
     try {
       await source.fetch(

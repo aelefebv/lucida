@@ -1,16 +1,3 @@
-/**
- * Unit tests for {@link ChunkStore}.
- *
- * Synthetic `CacheEntry` literals only — no cache instance, no fetch
- * mock. `cpuCache.test.ts` integration tests cover the store's
- * interaction with the rest of the cache; these tests pin the store's
- * own contract in isolation.
- *
- * Both store flavours (main = TieredPolicy, overview = LRUPolicy) are
- * exercised through the same {@link ChunkStore} class — the policy and
- * eviction-tier-label are injected via constructor options.
- */
-
 import { describe, it, expect, vi } from "vitest";
 
 import { ChunkStore } from "./chunkStore.ts";
@@ -59,11 +46,6 @@ function makeEntry(overrides: Partial<CacheEntry> & {
   return { ...base, ...overrides };
 }
 
-/**
- * Build a main-flavoured store backed by {@link TieredPolicy}, with an
- * `entry.tier`-driven eviction label so victim accounting is faithful
- * to the real cache wiring.
- */
 function makeMainStore(opts?: {
   budgetBytes?: number;
   onEvictionBurst?: (info: {
@@ -83,10 +65,6 @@ function makeMainStore(opts?: {
   return { store, evictionLog };
 }
 
-/**
- * Build an overview-flavoured store backed by {@link LRUPolicy}, with
- * a hardcoded "overview" eviction label.
- */
 function makeOverviewStore(opts?: { budgetBytes?: number }) {
   const evictionLog: EvictionRecordTier[] = [];
   const store = new ChunkStore({
@@ -189,8 +167,7 @@ describe("ChunkStore.cancelDataset", () => {
     expect(store.bytes).toBe(50);
     expect(store.hasEntity("e-1")).toBe(false);
     expect(store.hasEntity("e-2")).toBe(true);
-    // cancelDataset is a dataset removal, not a policy decision — no
-    // eviction records.
+    // Dataset removal does not emit eviction records.
     expect(evictionLog).toEqual([]);
   });
 

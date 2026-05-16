@@ -1,16 +1,5 @@
-/**
- * Tests for the wire-protocol helpers.
- *
- * Pinned behaviour:
- *   - parseProxyHeader: 64-byte little-endian record matching
- *     `lucida_proxy::header::write_header`. Rejects on truncation, bad
- *     magic, and unknown dtype code.
- *   - proxyResponseKey: zero-padded T/C composition for the binary-frame
- *     route. Cross-language contract with the Rust server's
- *     `proxy_response_key` (handler.rs).
- *   - extractDataType: WireFormat discriminator → data_type string. Falls
- *     back to "uint16" when the variant has no recognized shape.
- */
+// Cross-language contract with `lucida_proxy::header::write_header`
+// and the Rust server's `proxy_response_key` (handler.rs).
 
 import { describe, it, expect } from "vitest";
 import { parseProxyHeader, proxyResponseKey } from "./wireProtocol.ts";

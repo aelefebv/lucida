@@ -1,18 +1,6 @@
-/**
- * Typed fetch errors + retry policy.
- *
- * `FetchError` lets the source (which knows what kind of error it
- * raised) own the classification. `RetryPolicy` extracts the retry
- * rule so it's unit-testable and injectable: the chunk path uses
- * `OnceTransientRetry` (retry once on transient, never on
- * permanent/abort); the proxy path uses `NeverRetry` (no retries).
- *
- * `classifyFetchError` is the boundary in the catch block: pre-typed
- * `FetchError`s pass through; `DOMException AbortError`s are promoted;
- * plain `Error` messages fall back to message-substring rules for
- * untyped throws elsewhere in the stack; non-`Error` values are
- * wrapped as transient.
- */
+// `FetchError` lets the source own classification; `RetryPolicy`
+// makes the retry rule injectable. `classifyFetchError` is the catch-
+// block boundary that promotes/wraps non-FetchError throws.
 
 import { debugLog } from "../../debug/logging.ts";
 
@@ -21,28 +9,12 @@ import { debugLog } from "../../debug/logging.ts";
 // ---------------------------------------------------------------------------
 
 /**
- * Categorisation of a fetch failure.
- *
- * - `permanent`: the request will fail the same way on retry (404,
- *   malformed payload, missing setup state, etc.). Do not retry;
- *   record in the failure map; surface via telemetry.
- * - `transient`: a network blip or timeout; retry once if the policy
- *   allows. After the final attempt fails, record as transient in the
- *   failure map.
- * - `abort`: the caller intentionally cancelled (signal aborted,
- *   dataset removed). Silent cleanup; no failure-map entry.
+ * - `permanent`: same failure on retry — record + surface, no retry.
+ * - `transient`: network blip / timeout — eligible for retry.
+ * - `abort`: caller cancelled — silent cleanup, no failure entry.
  */
 export type FetchErrorKind = "permanent" | "transient" | "abort";
 
-/**
- * Typed error raised by `ContentSource` implementations and consumed
- * by `CpuCache`'s fetch error path. The `kind` discriminator drives
- * the retry / failure-map / telemetry dispatch.
- *
- * Use the `cause` option to chain the underlying error (e.g. a
- * `DOMException` from an abort signal) — `Error`'s standard `cause`
- * is preserved via `super(message, { cause })`.
- */
 export class FetchError extends Error {
   readonly kind: FetchErrorKind;
 
@@ -54,18 +26,9 @@ export class FetchError extends Error {
 }
 
 /**
- * Map an arbitrary throw into a `FetchError`.
- *
- * 1. Already a `FetchError`? Returned as-is.
- * 2. `DOMException` with `name === "AbortError"`? Promoted to
- *    `FetchError(kind: "abort")`.
- * 3. Plain `Error`? Falls back to message-substring rules for any
- *    caller that still throws a plain `Error`: `404` / `malformed` →
- *    `permanent`; anything else → `transient`. A `debugLog` warning
- *    surfaces untyped errors so they can be migrated to typed
- *    `FetchError`s.
- * 4. Non-`Error` value? Wrapped in
- *    `FetchError(kind: "transient", message: String(err))`.
+ * Map an arbitrary throw into a `FetchError`. Untyped `Error`s are
+ * classified by message substring (`404`/`malformed` → permanent;
+ * else transient) and logged so they can be migrated to typed throws.
  */
 export function classifyFetchError(err: unknown): FetchError {
   if (err instanceof FetchError) {
@@ -90,24 +53,12 @@ export function classifyFetchError(err: unknown): FetchError {
 // RetryPolicy
 // ---------------------------------------------------------------------------
 
-/**
- * Strategy interface for deciding whether to retry a failed fetch
- * and how long to wait before the next attempt.
- *
- * `attempt` is the zero-based count of attempts already made (so
- * `attempt === 0` means "the first try just failed, considering a
- * retry"). Implementations decide both the cap and the delay.
- */
+/** `attempt` is the zero-based count of attempts already made. */
 export interface RetryPolicy {
   shouldRetry(err: FetchError, attempt: number): boolean;
   delayMs(attempt: number): number;
 }
 
-/**
- * Retry-once policy for transient failures. One retry on a transient
- * error, none on permanent or abort. The delay is a fixed value
- * (the cache constructs this with `TRANSIENT_RETRY_DELAY_MS`).
- */
 export class OnceTransientRetry implements RetryPolicy {
   private readonly delay: number;
 
@@ -124,11 +75,7 @@ export class OnceTransientRetry implements RetryPolicy {
   }
 }
 
-/**
- * No-retry policy for the proxy path: the orchestrator resubmits on
- * the next plan tick if it still wants the proxy, so the fetch path
- * doesn't retry internally.
- */
+/** Orchestrator resubmits on the next plan tick if still wanted. */
 export class NeverRetry implements RetryPolicy {
   shouldRetry(_err: FetchError, _attempt: number): boolean {
     return false;

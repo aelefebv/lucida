@@ -1,14 +1,6 @@
 // @vitest-environment happy-dom
-/**
- * Pre-refactor characterization tests for decompression + normalization.
- *
- * The worker file's `self.onmessage` handler isn't tested here — the
- * worker contract is exercised by integration tests through the
- * DecodePool. These tests pin the two pure functions the message handler
- * composes: decompress (Raw / LZ4 / Zstd) and normalize (uint8 / bool /
- * uint16). decompressLz4, decompressZstd, and normalize are re-exported
- * from decode.worker.ts specifically for these tests.
- */
+// `self.onmessage` is exercised through DecodePool integration tests;
+// these tests pin the pure helpers it composes.
 
 import { describe, it, expect } from "vitest";
 import {
