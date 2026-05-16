@@ -6,8 +6,8 @@ import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx, EntityProxyDescriptor } from "./workerContext.ts";
-import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases, getOrCreateSlicePool, resizeSliceIndirection, remapSliceIndirection } from "./sliceHandlers.ts";
-import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, getOrCreateVolumePool, resizeIndirection, remapIndirection, applyViewHotState, type LodIndirectionMeta } from "./volumeHandlers.ts";
+import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases } from "./sliceHandlers.ts";
+import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, applyViewHotState, type LodIndirectionMeta } from "./volumeHandlers.ts";
 import { computeWantedSet, type ProxyAtlasSnapshot } from "./wantedSet.ts";
 import {
   createProxyAtlas,
@@ -27,10 +27,9 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,
-  iterateColdMembers,
-  memberIdForColdEntry,
   type EntityDescriptorIndex,
 } from "./descriptorBuffer.ts";
+import { applyColdState } from "./coldState/index.ts";
 
 let device: GPUDevice;
 let context: GPUCanvasContext;
@@ -508,234 +507,15 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       case "coldState": {
         currentColdState = msg;
         currentEpochs = msg.epochs;
-
-        // Manage atlases from cold state — create, remap, or rebuild as needed
-        const isMultiCh = msg.visibleChannels.length > 1;
-
-        // Refresh well→fields map so well-proxy uploads can fan out to
-        // child fields' descriptors. Cold state is the source of truth
-        // for active set membership; we rebuild fully each tick.
-        wellToFields.clear();
-        for (const entry of msg.activeSet) {
-          if (entry.parentWellId) {
-            let set = wellToFields.get(entry.parentWellId);
-            if (!set) {
-              set = new Set();
-              wellToFields.set(entry.parentWellId, set);
-            }
-            set.add(entry.entityId);
-          }
-        }
-
-        // First pass: register member→dataset mappings for all entries.
-        // Canonical iteration (descriptorBuffer.iterateColdMembers) walks
-        // activeSet × visibleChannels and uses the same memberId scheme as
-        // the rest of the pipeline: imageId for fields, entityId for
-        // well-as-proxy entries (where imageId === ""). One loop replaces
-        // the previous field/well × single/multi-channel four-branch
-        // conditional.
-        for (const { memberId } of iterateColdMembers(msg)) {
-          memberToDataset.set(memberId, msg.datasetId);
-        }
-
-        // Capture the entityMetas this cold state actually produces
-        // (across pools), so the descriptor build doesn't pick up stale
-        // offsets/dims left over in pools from earlier cold states with
-        // different target LODs.
-        const currentEntityMetas = new Map<string, LodIndirectionMeta[]>();
-
-        if (msg.viewMode === "volume") {
-          // Multi-pool: group entries by (channel, chunk dims). Pools have unique chunk dims,
-          // so fields with different target LODs end up in different pools.
-          // poolKey = datasetId[:chN]:chunkDimsKey
-          const channels = isMultiCh ? msg.visibleChannels : [msg.visibleChannels[0]];
-
-          // Group entries by (channel, chunk dims key) → list of (entry, memberId)
-          interface PoolGroup {
-            poolKey: string;
-            channel: number;
-            chunkDims: [number, number, number]; // [Z, Y, X]
-            entries: Array<{ entry: typeof msg.activeSet[0]; memberId: string }>;
-          }
-          const groups = new Map<string, PoolGroup>();
-
-          for (const channel of channels) {
-            for (const entry of msg.activeSet) {
-              const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
-              if (!targetLevel) continue;
-              const [chunkZ, chunkY, chunkX] = targetLevel.chunkShape;
-              const chunkDimsKey = `${chunkX}x${chunkY}x${chunkZ}`;
-              const poolKey = isMultiCh
-                ? `${msg.datasetId}:ch${channel}:${chunkDimsKey}`
-                : `${msg.datasetId}:${chunkDimsKey}`;
-              const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
-
-              memberToPool.set(memberId, poolKey);
-
-              let group = groups.get(poolKey);
-              if (!group) {
-                group = { poolKey, channel, chunkDims: [chunkZ, chunkY, chunkX], entries: [] };
-                groups.set(poolKey, group);
-              }
-              group.entries.push({ entry, memberId });
-            }
-          }
-
-          // Build each pool with its grouped entries
-          for (const group of groups.values()) {
-            const [pcZ, pcY, pcX] = group.chunkDims;
-            const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
-            let offset = 0;
-
-            for (const { entry, memberId } of group.entries) {
-              // Build per-entity LOD sections (only LODs with matching chunk dims)
-              const [finest, coarsest] = entry.detailOwnedLodRange;
-              const entityLodMetas: LodIndirectionMeta[] = [];
-              for (let lvl = finest; lvl <= coarsest; lvl++) {
-                const lm = entry.levels.find(l => l.level === lvl);
-                if (!lm) continue;
-                const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
-                if (lChunkX !== pcX || lChunkY !== pcY || lChunkZ !== pcZ) continue;
-                const [lGridZ, lGridY, lGridX] = lm.gridShape;
-                const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
-                entityLodMetas.push({
-                  level: lvl,
-                  gridDims: [lGridZ, lGridY, lGridX],
-                  chunkDims: [lChunkZ, lChunkY, lChunkX],
-                  levelDims: [lLevelD, lLevelH, lLevelW],
-                  offset,
-                });
-                offset += lGridX * lGridY * lGridZ;
-              }
-              // Fallback: include target LOD only (no multi-LOD across mismatched dims)
-              if (entityLodMetas.length === 0) {
-                const targetLevel = entry.levels.find(l => l.level === entry.targetLod)!;
-                const [tGridZ, tGridY, tGridX] = targetLevel.gridShape;
-                const [tLevelD, tLevelH, tLevelW] = targetLevel.levelDims;
-                entityLodMetas.push({
-                  level: entry.targetLod,
-                  gridDims: [tGridZ, tGridY, tGridX],
-                  chunkDims: [pcZ, pcY, pcX],
-                  levelDims: [tLevelD, tLevelH, tLevelW],
-                  offset,
-                });
-                offset += tGridX * tGridY * tGridZ;
-              }
-              newEntityMetas.set(memberId, entityLodMetas);
-            }
-
-            const atlas = getOrCreateVolumePool(ctx, group.poolKey, pcX, pcY, pcZ, msg.currentT, group.channel);
-            atlas.entityMetas = newEntityMetas;
-            resizeIndirection(ctx, atlas, offset);
-            remapIndirection(atlas, msg.currentT, group.channel);
-            for (const [memberId, metas] of newEntityMetas) {
-              currentEntityMetas.set(memberId, metas);
-            }
-          }
-        } else {
-          // Slice mode — multi-pool by (channel, chunk dims), same pattern as volume
-          const channels = isMultiCh ? msg.visibleChannels : [msg.visibleChannels[0]];
-
-          interface SlicePoolGroup {
-            poolKey: string;
-            channel: number;
-            chunkDims: [number, number]; // [Y, X] for slice (2D)
-            entries: Array<{ entry: typeof msg.activeSet[0]; memberId: string }>;
-          }
-          const groups = new Map<string, SlicePoolGroup>();
-
-          for (const channel of channels) {
-            for (const entry of msg.activeSet) {
-              const targetLevel = entry.levels.find(l => l.level === entry.targetLod);
-              if (!targetLevel) continue;
-              const [, chunkY, chunkX] = targetLevel.chunkShape;
-              const chunkDimsKey = `${chunkX}x${chunkY}`;
-              const poolKey = isMultiCh
-                ? `${msg.datasetId}:ch${channel}:${chunkDimsKey}`
-                : `${msg.datasetId}:${chunkDimsKey}`;
-              const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
-
-              memberToPool.set(memberId, poolKey);
-
-              let group = groups.get(poolKey);
-              if (!group) {
-                group = { poolKey, channel, chunkDims: [chunkY, chunkX], entries: [] };
-                groups.set(poolKey, group);
-              }
-              group.entries.push({ entry, memberId });
-            }
-          }
-
-          for (const group of groups.values()) {
-            const [pcY, pcX] = group.chunkDims;
-            const newEntityMetas = new Map<string, LodIndirectionMeta[]>();
-            let offset = 0;
-
-            for (const { entry, memberId } of group.entries) {
-              const [finest, coarsest] = entry.detailOwnedLodRange;
-              const entityLodMetas: LodIndirectionMeta[] = [];
-              for (let lvl = finest; lvl <= coarsest; lvl++) {
-                const lm = entry.levels.find(l => l.level === lvl);
-                if (!lm) continue;
-                const [lChunkZ, lChunkY, lChunkX] = lm.chunkShape;
-                if (lChunkX !== pcX || lChunkY !== pcY) continue;
-                const [lGridZ, lGridY, lGridX] = lm.gridShape;
-                const [lLevelD, lLevelH, lLevelW] = lm.levelDims;
-                entityLodMetas.push({
-                  level: lvl,
-                  gridDims: [lGridZ, lGridY, lGridX],
-                  chunkDims: [lChunkZ, lChunkY, lChunkX],
-                  levelDims: [lLevelD, lLevelH, lLevelW],
-                  offset,
-                });
-                offset += lGridX * lGridY; // 2D indirection
-              }
-              if (entityLodMetas.length === 0) {
-                const targetLevel = entry.levels.find(l => l.level === entry.targetLod)!;
-                const [tChunkZ, tChunkY, tChunkX] = targetLevel.chunkShape;
-                const [tGridZ, tGridY, tGridX] = targetLevel.gridShape;
-                const [tLevelD, tLevelH, tLevelW] = targetLevel.levelDims;
-                entityLodMetas.push({
-                  level: entry.targetLod,
-                  gridDims: [tGridZ, tGridY, tGridX],
-                  chunkDims: [tChunkZ, tChunkY, tChunkX],
-                  levelDims: [tLevelD, tLevelH, tLevelW],
-                  offset,
-                });
-                offset += tGridX * tGridY;
-              }
-              newEntityMetas.set(memberId, entityLodMetas);
-            }
-
-            const atlas = getOrCreateSlicePool(ctx, group.poolKey, pcX, pcY, msg.currentZ, msg.currentT, group.channel);
-            atlas.entityMetas = newEntityMetas;
-            resizeSliceIndirection(ctx, atlas, offset);
-            remapSliceIndirection(atlas, msg.currentT, group.channel, msg.currentZ);
-            for (const [memberId, metas] of newEntityMetas) {
-              currentEntityMetas.set(memberId, metas);
-            }
-          }
-        }
-
-        currentEntityMetasByDataset.set(msg.datasetId, currentEntityMetas);
-
-        // Build per-dataset entity descriptor buffer. Replaces any
-        // previous buffer for the same dataset (proxy pool index churn
-        // is acceptable — descriptors are rebuilt fresh each cold
-        // state, same as `entityMetas`).
-        const oldDesc = descriptorBuffersByDataset.get(msg.datasetId);
-        if (oldDesc) destroyDescriptorBuffer(oldDesc);
-        descriptorBuffersByDataset.set(
-          msg.datasetId,
-          buildDescriptorBuffer(
-            device,
-            msg,
-            proxyDescriptorsByEntity,
-            proxyPoolsByDataset,
-            currentEntityMetas,
-          ),
-        );
-
+        applyColdState(ctx, msg, {
+          memberToDataset,
+          memberToPool,
+          wellToFields,
+          currentEntityMetasByDataset,
+          proxyDescriptorsByEntity,
+          proxyPoolsByDataset,
+          descriptorBuffersByDataset,
+        });
         postWantedSet();
         break;
       }
