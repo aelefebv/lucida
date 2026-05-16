@@ -103,17 +103,21 @@ export interface EntityDescriptorIndex {
  * construction.
  *
  * Mirrors the keying in `gpu.worker.ts`'s cold-state handler:
- *   - Single-channel field: `entry.imageId`
- *   - Multi-channel field:  `${entry.imageId}:ch${channel}`
- *   - well-as-proxy single: `entry.entityId` (since `imageId === ""`)
- *   - well-as-proxy multi:  `${entry.entityId}:ch${channel}`
+ *   - Single-channel field:           `entry.imageId`
+ *   - Multi-channel field:            `${entry.imageId}:ch${channel}`
+ *   - Single-channel well-as-proxy:   `entry.entityId`
+ *   - Multi-channel well-as-proxy:    `${entry.entityId}:ch${channel}`
+ *
+ * Slice 11 (PRD #622): `ColdStateActiveEntry` is now a discriminated
+ * union on `kind`; narrowing through `entry.kind` makes the
+ * well-as-proxy variant TS-visible (it has no `imageId`).
  */
 export function memberIdForColdEntry(
   entry: ColdStateActiveEntry,
   channel: number,
   multiChannel: boolean,
 ): string {
-  const base = entry.mode === "well-as-proxy" ? entry.entityId : entry.imageId;
+  const base = entry.kind === "well-as-proxy" ? entry.entityId : entry.imageId;
   return multiChannel ? `${base}:ch${channel}` : base;
 }
 

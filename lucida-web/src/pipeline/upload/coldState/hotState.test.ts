@@ -19,21 +19,36 @@ import type {
 import type { SceneEpochs } from "../../epochs.ts";
 import { buildViewHotState } from "./hotState.ts";
 
-function makeEntry(over: Partial<ColdStateActiveEntry>): ColdStateActiveEntry {
+function makeEntry(over: Partial<Omit<ColdStateActiveEntry, "kind">>): ColdStateActiveEntry {
+  const base = {
+    entityId: over.entityId ?? "ent",
+    targetLod: over.targetLod ?? 0,
+    detailOwnedLodRange: over.detailOwnedLodRange ?? [0, 0] as [number, number],
+    levels: over.levels ?? [],
+    proxyKind: over.proxyKind,
+    proxyAvailable: over.proxyAvailable ?? false,
+    wellProxyAvailable: over.wellProxyAvailable ?? false,
+    modelMatrix: over.modelMatrix ?? new Float32Array(16),
+    invModelMatrix: over.invModelMatrix ?? new Float32Array(16),
+    displayStateByChannel: over.displayStateByChannel ?? {},
+  };
+  // Slice 11: discriminate via `mode` so existing call sites that pass
+  // `mode: "well-as-proxy"` (with `imageId: ""`) keep working.
+  const mode = over.mode ?? "fields-with-detail";
+  if (mode === "well-as-proxy") {
+    return {
+      ...base,
+      kind: "well-as-proxy",
+      mode: "well-as-proxy",
+      parentWellId: null,
+    };
+  }
   return {
-    entityId: "ent",
-    imageId: "img",
-    targetLod: 0,
-    detailOwnedLodRange: [0, 0],
-    levels: [],
-    mode: "fields-with-detail",
-    proxyAvailable: false,
-    wellProxyAvailable: false,
-    parentWellId: null,
-    modelMatrix: new Float32Array(16),
-    invModelMatrix: new Float32Array(16),
-    displayStateByChannel: {},
-    ...over,
+    ...base,
+    kind: "field",
+    imageId: over.imageId ?? "img",
+    mode,
+    parentWellId: over.parentWellId ?? null,
   };
 }
 

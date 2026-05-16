@@ -108,7 +108,9 @@ export function computeWantedSet(
 
   for (const entry of coldState.activeSet) {
     // ---- proxy wanted-set ----
-    if (entry.mode === "well-as-proxy") {
+    // Discriminate via `entry.kind` (Slice 11): narrows the well-as-proxy
+    // variant so subsequent branches see the field variant typed-out.
+    if (entry.kind === "well-as-proxy") {
       // Single proxy per visible channel; no chunks.
       for (const c of coldState.visibleChannels) {
         if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "WellProxy3D")) {
@@ -188,7 +190,10 @@ export function computeWantedSet(
     // ---- existing chunk wanted-set (unchanged) ----
     // Build the list of (workerMemberId, channel) pairs for this entry.
     // Use the canonical memberIdForColdEntry helper so well-as-proxy
-    // entries (imageId === "") resolve to entityId rather than ":chN".
+    // entries resolve to entityId rather than ":chN". (Slice 11
+    // narrows them out earlier via `entry.kind === "well-as-proxy"`,
+    // but the helper still routes through the union so the convention
+    // stays in one place.)
     const members: Array<{ memberId: string; channel: number }> = [];
     if (isMultiChannel) {
       for (const c of coldState.visibleChannels) {

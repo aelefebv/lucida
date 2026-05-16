@@ -81,8 +81,8 @@ export function buildColdActiveEntry(
 
   if (entry.kind === "well-as-proxy") {
     return {
+      kind: "well-as-proxy",
       entityId: entry.entityId,
-      imageId: "",
       targetLod: 0,
       detailOwnedLodRange: [0, 0],
       levels,
@@ -90,7 +90,11 @@ export function buildColdActiveEntry(
       proxyKind: "WellProxy3D",
       proxyAvailable: true,
       wellProxyAvailable: true,
-      parentWellId,
+      // Wells have no parent well; the `parentWellId` we computed above
+      // is unconditionally `null` for the Well snapshot branch, but
+      // pin it here so the type checker can narrow `kind: "well-as-proxy"`
+      // without re-deriving it.
+      parentWellId: null,
       modelMatrix,
       invModelMatrix,
       displayStateByChannel,
@@ -98,6 +102,7 @@ export function buildColdActiveEntry(
   }
   if (entry.kind === "invisible") {
     return {
+      kind: "field",
       entityId: entry.entityId,
       imageId: entry.imageId,
       targetLod: entry.coarsestLod,
@@ -119,6 +124,7 @@ export function buildColdActiveEntry(
   }
   // Narrowed: entry is FieldEntry.
   return {
+    kind: "field",
     entityId: entry.entityId,
     imageId: entry.imageId,
     targetLod: entry.targetLod,

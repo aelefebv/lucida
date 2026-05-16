@@ -8,14 +8,16 @@
  * memberId inline, so the matrix below pins what those call sites now
  * produce by construction.
  *
- * The bug the helper guards against: well-as-proxy entries carry
- * `imageId === ""` (sentinel for "no field — render the well's proxy").
- * Inline `${entry.imageId}:ch${channel}` reconstruction would produce
- * ":ch5" for multi-channel well-as-proxy entries — a key with no entity
- * prefix. Today masked because well-as-proxy entries have empty
- * `levels[]` and the volume/slice pool loops short-circuit at the
- * targetLevel lookup. But the bad key would still get *registered* in
- * memberToPool if any caller bypassed the helper.
+ * The bug the helper guards against: well-as-proxy entries used to
+ * carry `imageId === ""` as a sentinel (Slice 11 promoted that to a
+ * `kind: "well-as-proxy"` discriminator on the union; `imageId` is now
+ * absent on that variant). Inline `${entry.imageId}:ch${channel}`
+ * reconstruction would have produced ":ch5" for multi-channel
+ * well-as-proxy entries — a key with no entity prefix. Today masked
+ * because well-as-proxy entries have empty `levels[]` and the
+ * volume/slice pool loops short-circuit at the targetLevel lookup.
+ * But the bad key would still get *registered* in memberToPool if any
+ * caller bypassed the helper.
  */
 
 import { describe, it, expect } from "vitest";
@@ -47,28 +49,40 @@ function defaultDisplay(): ColdStateActiveEntry["displayStateByChannel"][number]
 }
 
 function makeEntry(
-  opts: Partial<ColdStateActiveEntry> & {
+  opts: Partial<Omit<ColdStateActiveEntry, "kind">> & {
     entityId: string;
     imageId: string;
     mode: ColdStateActiveEntry["mode"];
   },
 ): ColdStateActiveEntry {
-  return {
+  const base = {
     entityId: opts.entityId,
-    imageId: opts.imageId,
     targetLod: opts.targetLod ?? 0,
-    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0],
+    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
     levels: opts.levels ?? [
-      { level: 0, chunkShape: [1, 64, 64], gridShape: [1, 4, 4], levelDims: [1, 256, 256] },
+      { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
-    mode: opts.mode,
     proxyKind: opts.proxyKind,
     proxyAvailable: opts.proxyAvailable ?? false,
     wellProxyAvailable: opts.wellProxyAvailable ?? false,
-    parentWellId: opts.parentWellId ?? null,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplay() },
+  };
+  if (opts.mode === "well-as-proxy") {
+    return {
+      ...base,
+      kind: "well-as-proxy",
+      mode: "well-as-proxy",
+      parentWellId: null,
+    };
+  }
+  return {
+    ...base,
+    kind: "field",
+    imageId: opts.imageId,
+    mode: opts.mode,
+    parentWellId: opts.parentWellId ?? null,
   };
 }
 
@@ -110,9 +124,12 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
   });
 
   it("single-channel well-as-proxy → entityId (NOT empty string)", () => {
-    // Regression: well-as-proxy carries imageId === "". The old inline
-    // `entry.imageId` construction in memberToPool / wantedSet would
-    // have produced "" here. The helper resolves to entityId.
+    // Regression: well-as-proxy entries used to carry imageId === "".
+    // Slice 11 promoted that to a `kind` discriminator, so the helper
+    // routes via `entry.kind === "well-as-proxy"` instead of the
+    // empty-string sentinel. The old inline `entry.imageId`
+    // construction in memberToPool / wantedSet would have produced ""
+    // here. The helper resolves to entityId.
     const e = makeEntry({ entityId: "wellA", imageId: "", mode: "well-as-proxy" });
     expect(memberIdForColdEntry(e, 0, false)).toBe("wellA");
     expect(memberIdForColdEntry(e, 0, false)).not.toBe("");
@@ -126,6 +143,21 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
     const e = makeEntry({ entityId: "wellA", imageId: "", mode: "well-as-proxy" });
     expect(memberIdForColdEntry(e, 2, true)).toBe("wellA:ch2");
     expect(memberIdForColdEntry(e, 2, true)).not.toBe(":ch2");
+  });
+
+  it("memberIdForColdEntry narrows the union via `entry.kind`", () => {
+    // Slice 11: both variants of the discriminated union must produce
+    // their respective memberId without TypeScript or runtime needing
+    // to inspect `imageId === ""`. This test asserts both arms of the
+    // union round-trip through the helper correctly.
+    const field = makeEntry({ entityId: "ent-a", imageId: "img-a", mode: "fields-with-detail" });
+    const well = makeEntry({ entityId: "well-b", imageId: "", mode: "well-as-proxy" });
+    expect(field.kind).toBe("field");
+    expect(well.kind).toBe("well-as-proxy");
+    expect(memberIdForColdEntry(field, 0, false)).toBe("img-a");
+    expect(memberIdForColdEntry(well, 0, false)).toBe("well-b");
+    expect(memberIdForColdEntry(field, 1, true)).toBe("img-a:ch1");
+    expect(memberIdForColdEntry(well, 1, true)).toBe("well-b:ch1");
   });
 
   it("mixed cold state (fields + wells, multi-channel) → canonical order", () => {

@@ -153,8 +153,12 @@ describe("buildColdActiveEntry", () => {
     const entry: ActiveSetEntry = { kind: "well-as-proxy", entityId: "well-0" } as ActiveSetEntry;
     const result = buildColdActiveEntry(entry, new Map(), matricesByEntity, {});
 
+    expect(result.kind).toBe("well-as-proxy");
     expect(result.entityId).toBe("well-0");
-    expect(result.imageId).toBe("");
+    // Slice 11: the well-as-proxy variant has no `imageId` field
+    // (`?: never`). Guard the assertion so the type narrows cleanly.
+    if (result.kind !== "well-as-proxy") throw new Error("expected well-as-proxy");
+    expect((result as unknown as Record<string, unknown>).imageId).toBeUndefined();
     expect(result.targetLod).toBe(0);
     expect(result.detailOwnedLodRange).toEqual([0, 0]);
     expect(result.mode).toBe("well-as-proxy");

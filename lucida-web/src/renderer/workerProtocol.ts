@@ -261,9 +261,13 @@ export interface DestroyMessage {
 
 // --- Cold state (main → worker, per epoch change) ---
 
-export interface ColdStateActiveEntry {
+/**
+ * Shared fields across both {@link ColdStateActiveEntry} variants. Not
+ * exported — consumers should use the discriminated union below and
+ * narrow via `entry.kind`.
+ */
+interface ColdStateActiveEntryBase {
   entityId: string;
-  imageId: string;
   targetLod: number;
   detailOwnedLodRange: [number, number]; // [finest, coarsest]
   levels: Array<{
@@ -272,12 +276,6 @@ export interface ColdStateActiveEntry {
     gridShape: [number, number, number];  // chunks per axis
     levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
   }>;
-  /**
-   * Promotion mode for this entry (set by Planning, propagated by the
-   * orchestrator). The worker uses this to decide which proxy
-   * residency rules apply when computing the wanted-set.
-   */
-  mode: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
   /**
    * Which proxy kind (if any) this entry would prefer. For
    * `well-as-proxy` this is `WellProxy3D`; for field modes it's
@@ -292,13 +290,6 @@ export interface ColdStateActiveEntry {
    * this drives the secondary parent-well-proxy request.
    */
   wellProxyAvailable: boolean;
-  /**
-   * Parent well id for field entries (so the worker can map a field's
-   * descriptor back to its parent's wellProxyHandle). `null` for
-   * non-field entries. The orchestrator always emits a string or null
-   * — never `undefined` — so the field is non-optional.
-   */
-  parentWellId: string | null;
   /**
    * Precomputed column-major model matrix mapping the entity's
    * `[0,1]^3` unit cube to world space. The orchestrator derives this
@@ -324,6 +315,56 @@ export interface ColdStateActiveEntry {
    */
   displayStateByChannel: Record<number, ColdStateDisplayState>;
 }
+
+/**
+ * Per-entity cold-state record. Discriminated union on `kind`:
+ *
+ *   - `kind: "field"` — an image member with a real `imageId` and
+ *     (usually) chunks to upload. `mode` distinguishes whether the
+ *     worker should serve the proxy alongside the chunks
+ *     (`fields-with-proxy-fallback`) or rely on chunks only
+ *     (`fields-with-detail`). Invisible entries from the planner also
+ *     surface as `field` with `mode: "fields-with-detail"` (the legacy
+ *     encoding) so the worker doesn't try to fetch proxies for them.
+ *   - `kind: "well-as-proxy"` — a synthesised well-level entry with no
+ *     backing image; the worker renders the well's proxy directly.
+ *     `imageId` is intentionally absent (`?: never`) — use `entityId`
+ *     as the routing key throughout the pipeline.
+ *
+ * Wire bytes are unchanged from the pre-Slice-11 shape: the producer
+ * always emitted `mode`; the consumer now also receives `kind`, which
+ * lets TypeScript narrow the variant without the `imageId === ""`
+ * sentinel. `mode` is retained for backward compat (logging, debug,
+ * existing inspection paths); future work can drop it once every
+ * consumer routes through `kind`.
+ */
+export type ColdStateActiveEntry =
+  | (ColdStateActiveEntryBase & {
+      kind: "field";
+      /** Image member id from the planner. Always a non-empty string. */
+      imageId: string;
+      mode: "fields-with-detail" | "fields-with-proxy-fallback";
+      /**
+       * Parent well id for field entries (so the worker can map a
+       * field's descriptor back to its parent's wellProxyHandle).
+       * `null` for fields that don't belong to a well. The orchestrator
+       * always emits a string or null — never `undefined`.
+       */
+      parentWellId: string | null;
+    })
+  | (ColdStateActiveEntryBase & {
+      kind: "well-as-proxy";
+      /**
+       * Well-as-proxy entries have no backing image — use the well's
+       * `entityId` as the routing key throughout the pipeline.
+       * Declared `?: never` so the type system rejects any consumer
+       * that tries to read it.
+       */
+      imageId?: never;
+      mode: "well-as-proxy";
+      /** Wells have no parent well. */
+      parentWellId: null;
+    });
 
 /**
  * Per-channel display state in cold state. The worker writes these

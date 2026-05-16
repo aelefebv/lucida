@@ -107,23 +107,48 @@ function defaultDisplayState(): ColdStateActiveEntry["displayStateByChannel"][nu
   };
 }
 
-function makeEntry(opts: Partial<ColdStateActiveEntry> & { entityId: string; imageId: string; mode: ColdStateActiveEntry["mode"] }): ColdStateActiveEntry {
-  return {
+/**
+ * Test-fixture helper. Mode-driven branching keeps existing call sites
+ * unchanged: pass `mode: "well-as-proxy"` (with `imageId: ""`) to get
+ * the well-as-proxy variant; anything else returns a `kind: "field"`
+ * entry. Slice 11 added the `kind` discriminator on
+ * `ColdStateActiveEntry`; this helper hides the variant construction
+ * so test fixtures don't have to.
+ */
+type MakeEntryOpts = Partial<Omit<ColdStateActiveEntry, "kind">> & {
+  entityId: string;
+  imageId: string;
+  mode: ColdStateActiveEntry["mode"];
+};
+function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
+  const base = {
     entityId: opts.entityId,
-    imageId: opts.imageId,
     targetLod: opts.targetLod ?? 0,
-    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0],
+    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
     levels: opts.levels ?? [
-      { level: 0, chunkShape: [1, 64, 64], gridShape: [1, 4, 4], levelDims: [1, 256, 256] },
+      { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
-    mode: opts.mode,
     proxyKind: opts.proxyKind,
     proxyAvailable: opts.proxyAvailable ?? false,
     wellProxyAvailable: opts.wellProxyAvailable ?? false,
-    parentWellId: opts.parentWellId ?? null,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplayState() },
+  };
+  if (opts.mode === "well-as-proxy") {
+    return {
+      ...base,
+      kind: "well-as-proxy",
+      mode: "well-as-proxy",
+      parentWellId: null,
+    };
+  }
+  return {
+    ...base,
+    kind: "field",
+    imageId: opts.imageId,
+    mode: opts.mode,
+    parentWellId: opts.parentWellId ?? null,
   };
 }
 
@@ -193,7 +218,7 @@ function metasFromEntry(entry: ColdStateActiveEntry): LodIndirectionMeta[] {
 function metasForCold(cold: ColdStateMessage): Map<string, LodIndirectionMeta[]> {
   const out = new Map<string, LodIndirectionMeta[]>();
   for (const entry of cold.activeSet) {
-    const memberId = entry.mode === "well-as-proxy" ? entry.entityId : entry.imageId;
+    const memberId = entry.kind === "well-as-proxy" ? entry.entityId : entry.imageId;
     out.set(memberId, metasFromEntry(entry));
   }
   return out;
