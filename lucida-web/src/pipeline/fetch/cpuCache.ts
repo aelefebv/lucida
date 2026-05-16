@@ -21,6 +21,7 @@ import type {
   ProxyRequest,
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
+import { InteractionModeDetector, type InteractionMode } from "./interactionMode.ts";
 import { debugLog } from "../../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
@@ -58,7 +59,6 @@ export interface CpuCacheConfig {
 // ---------------------------------------------------------------------------
 
 type Lane = "minimap" | "detail" | "prefetch" | "overview";
-type InteractionMode = "panning" | "scrubbing" | "idle";
 export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
 /**
@@ -293,8 +293,9 @@ export class CpuCache {
   // Active set tracking
   private activeEntityIds = new Set<string>();
 
-  // Epoch velocity tracking
-  private epochHistory: SceneEpochs[] = [];
+  // Epoch velocity tracking → derives the active interaction mode for
+  // eviction-order selection.
+  private interactionDetector = new InteractionModeDetector(INTERACTION_MODE_WINDOW);
 
   // Failure tracking
   private failures = new Map<string, FailedEntry>(); // inFlightKey → failure
@@ -405,10 +406,7 @@ export class CpuCache {
     this.submitTick++;
 
     // Track epoch velocity
-    this.epochHistory.push({ ...plan.epochs });
-    if (this.epochHistory.length > INTERACTION_MODE_WINDOW) {
-      this.epochHistory.shift();
-    }
+    this.interactionDetector.push(plan.epochs);
 
     // Update active set → demotion
     const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
@@ -689,7 +687,7 @@ export class CpuCache {
     this.decodesSinceSnapshot = 0;
     this.lastTelemetryTime = now;
 
-    const mode = this.detectInteractionMode();
+    const mode = this.interactionDetector.current();
 
     // Per-tier residency: walk every cached entry once and bin.
     const tierResidency = {
@@ -1001,7 +999,7 @@ export class CpuCache {
     this.pendingEnqueuedAt.clear();
     this.ready = [];
     this.activeEntityIds.clear();
-    this.epochHistory = [];
+    this.interactionDetector.reset();
     this.failures.clear();
     this.rejectedKeys.clear();
     this.lruCounter = 0;
@@ -1495,7 +1493,7 @@ export class CpuCache {
     cache: Map<string, Map<string, CacheEntry>>,
     bytesNeeded: number,
   ): void {
-    const mode = this.detectInteractionMode();
+    const mode = this.interactionDetector.current();
     const tierOrder = this.getTierOrder(mode);
     let freed = 0;
     let removed = 0;
@@ -1584,23 +1582,8 @@ export class CpuCache {
   }
 
   // =========================================================================
-  // Interaction Detection
+  // Eviction tier order
   // =========================================================================
-
-  private detectInteractionMode(): InteractionMode {
-    if (this.epochHistory.length < 2) return "idle";
-
-    let viewBumps = 0;
-    let selectionBumps = 0;
-    for (let i = 1; i < this.epochHistory.length; i++) {
-      if (this.epochHistory[i].view !== this.epochHistory[i - 1].view) viewBumps++;
-      if (this.epochHistory[i].selection !== this.epochHistory[i - 1].selection) selectionBumps++;
-    }
-
-    if (selectionBumps > viewBumps && selectionBumps >= 2) return "scrubbing";
-    if (viewBumps >= 2) return "panning";
-    return "idle";
-  }
 
   private getTierOrder(mode: InteractionMode): string[] {
     switch (mode) {

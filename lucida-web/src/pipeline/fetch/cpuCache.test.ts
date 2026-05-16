@@ -834,77 +834,11 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Adaptive eviction
+  // Adaptive eviction tests migrated to interactionMode.test.ts (Slice 3).
+  // The detector is now a pure unit; exercising it through the cache no
+  // longer adds coverage. Integration of the tier-order consequence
+  // lives at the EvictionPolicy seam (planned for Slice 5).
   // =========================================================================
-
-  describe("adaptive eviction", () => {
-    it("detects panning from viewEpoch velocity", () => {
-      const { cache } = createTestCache();
-
-      // Simulate rapid viewEpoch bumps
-      for (let i = 0; i < 5; i++) {
-        cache.submit(makePlan([], [], { view: i + 1, selection: 1 }));
-      }
-
-      const tel = cache.telemetry();
-      expect(tel.interactionMode).toBe("panning");
-    });
-
-    it("detects scrubbing from selectionEpoch velocity", () => {
-      const { cache } = createTestCache();
-
-      // Simulate rapid selectionEpoch bumps
-      for (let i = 0; i < 5; i++) {
-        cache.submit(makePlan([], [], { view: 1, selection: i + 1 }));
-      }
-
-      const tel = cache.telemetry();
-      expect(tel.interactionMode).toBe("scrubbing");
-    });
-
-    it("reports idle when no epochs bumping", () => {
-      const { cache } = createTestCache();
-
-      // Same epochs every submit
-      for (let i = 0; i < 5; i++) {
-        cache.submit(makePlan([], [], { view: 1, selection: 1 }));
-      }
-
-      const tel = cache.telemetry();
-      expect(tel.interactionMode).toBe("idle");
-    });
-
-    it("scrubbing mode protects prefetch over demoted", async () => {
-      const budget = 256;
-      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
-      source.autoResolveBytes = 100;
-
-      // Force scrubbing mode via selectionEpoch velocity
-      for (let i = 0; i < 5; i++) {
-        cache.submit(makePlan([], [], { view: 1, selection: i + 1 }));
-      }
-
-      // Insert a detail chunk for entity-1 (will be demoted later)
-      const e1detail = makeRequest({ entityId: "entity-1", imageId: "image-1", lane: "detail", chunkKey: "0/0/0/0/0/0" });
-      cache.submit(makePlan([e1detail], [makeActiveEntry("entity-1")], { view: 1, selection: 6 }));
-      await flush();
-
-      // Demote entity-1 by switching active set to entity-2, and add a prefetch chunk
-      const prefetch = makeRequest({ entityId: "entity-2", imageId: "image-2", lane: "prefetch", chunkKey: "0/0/0/0/0/1" });
-      cache.submit(makePlan([e1detail, prefetch], [makeActiveEntry("entity-2")], { view: 1, selection: 7 }));
-      await flush();
-
-      // Add one more active-detail to force eviction (300 > 256)
-      const e2detail = makeRequest({ entityId: "entity-2", imageId: "image-2", lane: "detail", chunkKey: "0/0/0/0/0/2" });
-      cache.submit(makePlan([e1detail, prefetch, e2detail], [makeActiveEntry("entity-2")], { view: 1, selection: 8 }));
-      await flush();
-
-      // In scrubbing mode: demoted evicts first, prefetch protected
-      const snap = cache.snapshot();
-      expect(snap.cached.has("entity-1")).toBe(false); // demoted-detail, evicted first
-      expect(snap.cached.get("entity-2")?.has("0/0/0/0/0/1")).toBe(true); // prefetch, protected
-    });
-  });
 
   // =========================================================================
   // Minimap lane routing (ADR 0023)

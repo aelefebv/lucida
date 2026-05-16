@@ -48,3 +48,6 @@ export {
   DECODE_POOL_HEADROOM,
   defaultPoolSize,
 } from "./decodePool.ts";
+
+export { InteractionModeDetector } from "./interactionMode.ts";
+export type { InteractionMode } from "./interactionMode.ts";
