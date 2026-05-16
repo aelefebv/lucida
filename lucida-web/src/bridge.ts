@@ -30,8 +30,8 @@ export interface BridgeHandlers {
   onAck: (seq: number) => void;
   onChunkData?: (key: string, data: ArrayBuffer) => void;
   /**
-   * S5: binary frame whose key starts with `proxy/`. Routed separately
-   * from `onChunkData` so the content source's proxy promise map can be
+   * Binary frame whose key starts with `proxy/`. Routed separately from
+   * `onChunkData` so the content source's proxy promise map can be
    * resolved without colliding with chunk pending requests.
    */
   onProxyData?: (key: string, data: ArrayBuffer) => void;
@@ -43,8 +43,7 @@ export interface BridgeHandlers {
   onDatasetPresenceUpdate?: (clientId: ClientId, datasetOrder: string[], datasetSettings: Record<string, unknown>) => void;
   onOpenDatasetFailed?: (url: string, error: string) => void;
   /**
-   * S5 will start emitting these. S3 server doesn't, so the handler may
-   * be called with an empty `delta.added` only as a sanity check (no-op).
+   * The server may emit an empty `delta.added` as a sanity check (no-op).
    */
   onAssetCatalogUpdate?: (datasetId: string, deltaJson: string) => void;
   /**
@@ -219,7 +218,7 @@ export class Bridge {
     const keyBytes = new Uint8Array(buffer, 6, keyLen);
     const key = new TextDecoder().decode(keyBytes);
     const payload = buffer.slice(6 + keyLen);
-    // S5: proxy frames use the same envelope as chunk frames but with a
+    // Proxy frames use the same envelope as chunk frames but with a
     // `proxy/...` key prefix and a different payload layout (header +
     // u16 voxels). Route them to the proxy handler so the content
     // source can resolve the matching pending promise.

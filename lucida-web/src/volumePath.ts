@@ -65,7 +65,6 @@ function computeScissorRect(
   return [x, y, w, h];
 }
 
-/** VolumeState — empty after S5.3 migration to Orchestrator delivery. */
 export type VolumeState = Record<string, never>;
 
 export function createVolumeState(): VolumeState { return {}; }
@@ -83,7 +82,7 @@ interface PlanResult {
   viewC: number;
   multiChannel: boolean;
   epochs: SceneEpochs;
-  /** M1: per-dataset memberId → entity index map. */
+  /** Per-dataset memberId → entity index map. */
   entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
@@ -140,9 +139,9 @@ function uploadAndRenderVolume(
 
         for (const m of members) {
           const compKey = compositeKey(m.imageId, ch);
-          // M1: model matrix is in the descriptor; CPU side still needs
-          // it for the scissor rect projection. Same source as M1 cold
-          // state (synthesised for well-as-proxy, scene query for fields).
+          // Model matrix is in the descriptor; CPU side still needs it
+          // for the scissor rect projection. Same source as cold state
+          // (synthesised for well-as-proxy, scene query for fields).
           const model = m.modelMatrix
             ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
 
@@ -227,7 +226,7 @@ export function tickVolume(
 
   // Volume-specific rendering state. Camera position drives ray-marching
   // in the shader (different from `rayHitLocal`, which is residency-only
-  // and emitted by the orchestrator on viewEpoch advance — see M3).
+  // and emitted by the orchestrator on viewEpoch advance).
   const eye = new Float32Array(scene.eye_position());
 
   if (debugStats.enabled) {

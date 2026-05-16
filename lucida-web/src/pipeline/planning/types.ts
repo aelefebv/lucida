@@ -126,8 +126,7 @@ export interface CacheStateSnapshot {
 // ---------------------------------------------------------------------------
 
 // Re-exported from `./assetCatalog.ts` so consumers of the planning
-// snapshot don't need a separate import. S3 wires the snapshot through
-// the orchestrator with `byEntity` empty; S6 makes Planning consume it.
+// snapshot don't need a separate import.
 export type { AssetCatalogSnapshot, ProxyKind } from "../assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
@@ -174,8 +173,8 @@ export interface PlanningSnapshot {
   selection: SelectionState;
   /**
    * Asset catalog snapshot for promotion. The orchestrator passes
-   * `ctx.assetCatalog.snapshot()` (always non-null since S3); Planning
-   * S6 consults it to decide whether `well-as-proxy` /
+   * `ctx.assetCatalog.snapshot()` (always non-null); Planning consults
+   * it to decide whether `well-as-proxy` /
    * `fields-with-proxy-fallback` are reachable for each well.
    *
    * `null` is still accepted for callers that want to opt out — e.g.
@@ -241,7 +240,7 @@ export interface RequestPlan {
   activeSet: ActiveSetEntry[];
   epochs: SceneEpochs;
   /**
-   * Proxy assets to fetch alongside chunks. Populated by S6 promotion.
+   * Proxy assets to fetch alongside chunks. Populated by promotion.
    * Always defined — empty array when no entries use a proxy mode.
    * Sorted ascending by `priority`. CpuCache routes these to
    * `ContentSource.fetchProxy`.
@@ -330,8 +329,8 @@ export interface ChunkRequest {
  * [`CpuCache.submit`] which routes it to
  * [`ContentSource.fetchProxy`].
  *
- * S6 populates these from the three-tier promotion: `WellProxy3D` for
- * wells in `well-as-proxy` and as a parent fallback for
+ * Populated from the three-tier promotion: `WellProxy3D` for wells in
+ * `well-as-proxy` and as a parent fallback for
  * `fields-with-proxy-fallback`; `FieldProxy3D` for fields in
  * `fields-with-proxy-fallback` and `fields-with-detail`.
  */

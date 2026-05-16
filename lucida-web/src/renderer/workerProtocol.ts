@@ -76,12 +76,8 @@ export interface VolumeChunkDataMessage {
 }
 
 /**
- * S5: a generated proxy asset delivered to the worker. Carries the
- * compact `[Z, Y, X]` u16 voxel buffer plus identifying metadata.
- *
- * No GPU work happens for this message in S5 — the worker just records
- * receipt in a debug map. S7 will hook this up to a "proxy texture"
- * residency tier.
+ * A generated proxy asset delivered to the worker. Carries the compact
+ * `[Z, Y, X]` u16 voxel buffer plus identifying metadata.
  */
 export interface ProxyAssetDataMessage {
   type: "proxyAssetData";
@@ -107,7 +103,7 @@ export interface VolumeLayerParams {
   renderMode: "translucent" | "max_intensity";
   scissorRect?: [number, number, number, number];
   /**
-   * S8: per-entity id used by the worker to look up the proxy descriptor
+   * Per-entity id used by the worker to look up the proxy descriptor
    * (`proxyDescriptorsByEntity`). For field entries this is the field's
    * entity id; for `well-as-proxy` entries this is the well's entity id.
    * Optional for backward compat — when absent, the worker has no proxy
@@ -115,8 +111,8 @@ export interface VolumeLayerParams {
    */
   entityId?: string;
   /**
-   * M1 (DOMAINS step 8a): index into the per-dataset entity descriptor
-   * buffer. Required for the worker to resolve descriptor + display state.
+   * Index into the per-dataset entity descriptor buffer. Required for
+   * the worker to resolve descriptor + display state.
    */
   entityIndex: number;
 }
@@ -147,9 +143,9 @@ export interface SliceLayerParams {
   offsetX?: number;
   /** Member position offset in voxels along Y (default 0). */
   offsetY?: number;
-  /** S8: see {@link VolumeLayerParams.entityId}. */
+  /** See {@link VolumeLayerParams.entityId}. */
   entityId?: string;
-  /** M1: see {@link VolumeLayerParams.entityIndex}. */
+  /** See {@link VolumeLayerParams.entityIndex}. */
   entityIndex: number;
 }
 
@@ -245,66 +241,66 @@ export interface ColdStateActiveEntry {
     levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
   }>;
   /**
-   * S7: promotion mode for this entry (set by Planning, propagated by
-   * the orchestrator). The worker uses this to decide which proxy
+   * Promotion mode for this entry (set by Planning, propagated by the
+   * orchestrator). The worker uses this to decide which proxy
    * residency rules apply when computing the wanted-set.
    */
   mode: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
   /**
-   * S7: which proxy kind (if any) this entry would prefer. For
+   * Which proxy kind (if any) this entry would prefer. For
    * `well-as-proxy` this is `WellProxy3D`; for field modes it's
    * `FieldProxy3D` if the catalog advertises it.
    */
   proxyKind?: "WellProxy3D" | "FieldProxy3D";
-  /** S7: catalog says the preferred proxy is fetchable. */
+  /** Catalog says the preferred proxy is fetchable. */
   proxyAvailable: boolean;
   /**
-   * S7: catalog says the parent well's `WellProxy3D` is fetchable.
-   * For `well-as-proxy` entries equals `proxyAvailable`; for field
-   * entries this drives the secondary parent-well-proxy request.
+   * Catalog says the parent well's `WellProxy3D` is fetchable. For
+   * `well-as-proxy` entries equals `proxyAvailable`; for field entries
+   * this drives the secondary parent-well-proxy request.
    */
   wellProxyAvailable: boolean;
   /**
-   * S7: parent well id for field entries (so the worker can map a
-   * field's descriptor back to its parent's wellProxyHandle). `null`
-   * for non-field entries.
+   * Parent well id for field entries (so the worker can map a field's
+   * descriptor back to its parent's wellProxyHandle). `null` for
+   * non-field entries.
    */
   parentWellId?: string | null;
   /**
-   * M1 (DOMAINS step 8a): precomputed column-major model matrix mapping
-   * the entity's `[0,1]^3` unit cube to world space. The orchestrator
-   * derives this from `scene.member_model_matrix` for field entries and
-   * synthesises it from the well AABB for `well-as-proxy` entries (see
+   * Precomputed column-major model matrix mapping the entity's
+   * `[0,1]^3` unit cube to world space. The orchestrator derives this
+   * from `scene.member_model_matrix` for field entries and synthesises
+   * it from the well AABB for `well-as-proxy` entries (see
    * `synthesizeWellRosterEntry` in orchestrator.ts). The worker writes
    * this directly into the descriptor buffer; render messages no longer
    * carry per-frame model matrices.
    */
   modelMatrix: Float32Array;
-  /** M1: inverse of {@link modelMatrix}. */
+  /** Inverse of {@link modelMatrix}. */
   invModelMatrix: Float32Array;
   /**
-   * M2 (DOMAINS step 8a): per-channel display state, keyed by channel
-   * index. Iteration yields one descriptor entry per (entry, channel),
-   * so the worker indexes this map by `cold.visibleChannels[ch]` for
-   * each yielded combination. Single-channel mode populates the lone
-   * active channel; multi-channel composite populates each visible
-   * channel with its own contrast/gamma/opacity/colormap. Display-state
-   * changes bump `epochs.selection`, which re-runs the orchestrator and
-   * re-emits cold state — this map is the worker's sole source of
-   * display state for the descriptor buffer.
+   * Per-channel display state, keyed by channel index. Iteration yields
+   * one descriptor entry per (entry, channel), so the worker indexes
+   * this map by `cold.visibleChannels[ch]` for each yielded
+   * combination. Single-channel mode populates the lone active channel;
+   * multi-channel composite populates each visible channel with its own
+   * contrast/gamma/opacity/colormap. Display-state changes bump
+   * `epochs.selection`, which re-runs the orchestrator and re-emits
+   * cold state — this map is the worker's sole source of display state
+   * for the descriptor buffer.
    */
   displayStateByChannel: Record<number, ColdStateDisplayState>;
 }
 
 /**
- * M2: per-channel display state in cold state. The worker writes these
+ * Per-channel display state in cold state. The worker writes these
  * fields into the GPU `EntityDescriptor` and resolves `colormapName` to
  * a CPU-side LUT texture binding per draw (the descriptor's
  * `colormapLutIndex` is informational, not authoritative).
  *
  * `channelMask` is a single-bit-per-active-channel flag used as a
  * forward-compatibility marker; the existing `imageId:chN` memberId
- * encoding fully captures channel selection in M2.
+ * encoding fully captures channel selection.
  */
 export interface ColdStateDisplayState {
   contrastMin: number;
@@ -328,12 +324,12 @@ export interface ColdStateMessage {
 }
 
 /**
- * M3 (DOMAINS step 8a): per-viewEpoch hot-state delivery of camera-ray
- * pick coordinates for chunk eviction prioritization. Residency-only
- * (CPU-side) — never read by the shader. The orchestrator emits one
- * message per dataset when `epochs.view` advances; the worker writes
- * each entry into `rayHitPerEntity` so subsequent chunk-data messages
- * can use it for `findFarthestSlot`'s distance metric.
+ * Per-viewEpoch hot-state delivery of camera-ray pick coordinates for
+ * chunk eviction prioritization. Residency-only (CPU-side) — never
+ * read by the shader. The orchestrator emits one message per dataset
+ * when `epochs.view` advances; the worker writes each entry into
+ * `rayHitPerEntity` so subsequent chunk-data messages can use it for
+ * `findFarthestSlot`'s distance metric.
  */
 export interface ViewHotStateMessage {
   type: "viewHotState";
@@ -389,7 +385,7 @@ export interface ChunksEvictedMessage {
   skipped?: string[];
 }
 
-/** S7: a chunk that the worker is missing from its atlas. */
+/** A chunk that the worker is missing from its atlas. */
 export type MissingChunk = {
   kind: "chunk";
   entityId: string;
@@ -397,7 +393,7 @@ export type MissingChunk = {
 };
 
 /**
- * S7: a proxy asset that the worker is missing from its proxy atlas.
+ * A proxy asset that the worker is missing from its proxy atlas.
  *
  * `datasetId` is included so the orchestrator can clear its
  * `proxyDeliveredToWorker` tracking by composite key without scanning
@@ -417,7 +413,7 @@ export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
   epochs: SceneEpochs;
   /**
-   * S7: discriminated union over chunks and proxies. Existing chunk
+   * Discriminated union over chunks and proxies. Existing chunk
    * consumers should match on `kind === "chunk"` to extract `chunkKey`;
    * the orchestrator uses proxy entries to know which proxies to
    * re-deliver from CpuCache.

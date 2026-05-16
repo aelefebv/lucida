@@ -64,7 +64,7 @@ export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 /**
  * A delivery from the CPU cache that the orchestrator routes to the GPU
  * worker. The discriminated union covers both regular chunks
- * (`kind: "chunk"`, the default for backward compat) and S5 proxy
+ * (`kind: "chunk"`, the default for backward compat) and proxy
  * deliveries (`kind: "proxy"`).
  *
  * Existing call sites that work with chunks should not need changes:
@@ -114,14 +114,14 @@ export interface CacheTelemetry {
   mainBudget: number;
   overviewBytes: number;
   overviewBudget: number;
-  /** S5: proxy tier bytes / budget. */
+  /** Proxy tier bytes / budget. */
   proxyBytes: number;
   proxyBudget: number;
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   inFlightCount: number;
   inFlightBytes: number;
-  /** S5: in-flight proxy fetches (count, estimated bytes). */
+  /** In-flight proxy fetches (count, estimated bytes). */
   inFlightProxyCount: number;
   inFlightProxyBytes: number;
   pendingCount: number;
@@ -270,7 +270,7 @@ export class CpuCache {
   private overviewBytes = 0;
 
   /**
-   * Proxy cache (S5): datasetId → innerKey → ProxyCacheEntry where
+   * Proxy cache: datasetId → innerKey → ProxyCacheEntry where
    * innerKey is `${entityId}|${kind}|${t}|${c}`.
    *
    * Eviction tier order is detail > proxy > overview, so under memory
@@ -469,7 +469,7 @@ export class CpuCache {
     }
     this.pendingEnqueuedAt = nextEnqueuedAt;
 
-    // S5: route proxy requests to fetchProxy. Mirrors the chunk path:
+    // Route proxy requests to fetchProxy. Mirrors the chunk path:
     // dedup against the proxy cache + in-flight map, then enqueue.
     const proxyRequests = plan.proxyRequests ?? [];
 
@@ -1229,7 +1229,7 @@ export class CpuCache {
   }
 
   // =========================================================================
-  // Proxy Fetch Scheduler (S5)
+  // Proxy Fetch Scheduler
   // =========================================================================
 
   private startProxyFetches(): void {
@@ -1287,8 +1287,8 @@ export class CpuCache {
       const failed = this.inFlightProxy.get(key);
       if (failed) this.inFlightProxyBytes -= failed.estimatedBytes;
       this.inFlightProxy.delete(key);
-      // No retry / failure tracking in S5 — orchestrator can resubmit on
-      // the next plan if it still wants this proxy.
+      // No retry / failure tracking — orchestrator can resubmit on the
+      // next plan if it still wants this proxy.
       return;
     }
 

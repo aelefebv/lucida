@@ -60,7 +60,7 @@ const memberToPool = new Map<string, string>();
 const currentEntityMetasByDataset = new Map<string, Map<string, LodIndirectionMeta[]>>();
 
 /**
- * S7: GPU residency for proxies. One pool per
+ * GPU residency for proxies. One pool per
  * `(datasetId, kind, slotDims, channel)` combo (see `proxyPoolKey()`).
  * Outer map keyed by datasetId so per-dataset cleanup is cheap.
  */
@@ -84,9 +84,9 @@ const proxyDescriptorsByEntity = new Map<string, EntityProxyDescriptor>();
 const wellToFields = new Map<string, Set<string>>();
 
 /**
- * M1 (DOMAINS step 8a): per-dataset entity descriptor buffer + index
- * maps. Built fresh on each cold state. Render handlers bind
- * `idx.buffer` plus a small uniform with the layer's `entityIndex`.
+ * Per-dataset entity descriptor buffer + index maps. Built fresh on
+ * each cold state. Render handlers bind `idx.buffer` plus a small
+ * uniform with the layer's `entityIndex`.
  */
 const descriptorBuffersByDataset = new Map<string, EntityDescriptorIndex>();
 
@@ -253,7 +253,7 @@ function getOrCreateProxyPool(
 }
 
 /**
- * S7: real GPU upload for a delivered proxy asset.
+ * GPU upload for a delivered proxy asset.
  *
  *   1. Stale-check vs current cold-state epochs; drop on stale.
  *   2. Resolve / create the per-(dataset, kind, dims, channel) pool.
@@ -340,10 +340,10 @@ function handleProxyAssetData(msg: ProxyAssetDataMessage): void {
     `dims=${slotDims}`,
   );
 
-  // M1: proxy handles changed → rebuild this dataset's descriptor
-  // buffer so the GPU sees the new pool/slot indices on the next draw.
-  // Cheap relative to a per-frame buffer write since cold-state churn
-  // already triggers full rebuilds.
+  // Proxy handles changed → rebuild this dataset's descriptor buffer
+  // so the GPU sees the new pool/slot indices on the next draw. Cheap
+  // relative to a per-frame buffer write since cold-state churn already
+  // triggers full rebuilds.
   if (currentColdState && currentColdState.datasetId === msg.datasetId) {
     const oldDesc = descriptorBuffersByDataset.get(msg.datasetId);
     if (oldDesc) destroyDescriptorBuffer(oldDesc);
@@ -460,8 +460,8 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           const poolKey = memberToPool.get(memberId);
           const datasetId = memberToDataset.get(memberId) ?? null;
           if (!poolKey) {
-            // S8: no chunk pool — still report datasetId so the handler
-            // can bind a dummy chunk atlas and proceed with a proxy-only
+            // No chunk pool — still report datasetId so the handler can
+            // bind a dummy chunk atlas and proceed with a proxy-only
             // render (well-as-proxy entries take this path).
             return datasetId ? { poolKey: null, datasetId } : null;
           }
@@ -470,7 +470,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
 
       case "proxyAssetData": {
-        // S7: real GPU upload into a dedicated proxy atlas pool.
+        // GPU upload into a dedicated proxy atlas pool.
         handleProxyAssetData(msg);
         break;
       }
@@ -510,9 +510,9 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         // Manage atlases from cold state — create, remap, or rebuild as needed
         const isMultiCh = msg.visibleChannels.length > 1;
 
-        // S7: refresh well→fields map so well-proxy uploads can fan
-        // out to child fields' descriptors. Cold state is the source
-        // of truth for active set membership; we rebuild fully each tick.
+        // Refresh well→fields map so well-proxy uploads can fan out to
+        // child fields' descriptors. Cold state is the source of truth
+        // for active set membership; we rebuild fully each tick.
         wellToFields.clear();
         for (const entry of msg.activeSet) {
           if (entry.parentWellId) {
@@ -526,10 +526,10 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         }
 
         // First pass: register member→dataset mappings for all entries.
-        // S8: well-as-proxy entries have `imageId === ""` per planning;
-        // the volume/slice path emits layers keyed by the well's
-        // entityId (multi-channel: composite of entityId + channel).
-        // Register both keys so layerToPool can resolve them.
+        // well-as-proxy entries have `imageId === ""` per planning; the
+        // volume/slice path emits layers keyed by the well's entityId
+        // (multi-channel: composite of entityId + channel). Register
+        // both keys so layerToPool can resolve them.
         for (const entry of msg.activeSet) {
           if (isMultiCh) {
             for (const ch of msg.visibleChannels) {
@@ -550,10 +550,10 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           }
         }
 
-        // M1 fix: capture the entityMetas this cold state actually
-        // produces (across pools), so the descriptor build doesn't pick
-        // up stale offsets/dims left over in pools from earlier cold
-        // states with different target LODs.
+        // Capture the entityMetas this cold state actually produces
+        // (across pools), so the descriptor build doesn't pick up stale
+        // offsets/dims left over in pools from earlier cold states with
+        // different target LODs.
         const currentEntityMetas = new Map<string, LodIndirectionMeta[]>();
 
         if (msg.viewMode === "volume") {
@@ -731,10 +731,10 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
 
         currentEntityMetasByDataset.set(msg.datasetId, currentEntityMetas);
 
-        // M1: build per-dataset entity descriptor buffer. Replaces any
+        // Build per-dataset entity descriptor buffer. Replaces any
         // previous buffer for the same dataset (proxy pool index churn
-        // is acceptable in M1 — descriptors are rebuilt fresh each
-        // cold state, same as `entityMetas`).
+        // is acceptable — descriptors are rebuilt fresh each cold
+        // state, same as `entityMetas`).
         const oldDesc = descriptorBuffersByDataset.get(msg.datasetId);
         if (oldDesc) destroyDescriptorBuffer(oldDesc);
         descriptorBuffersByDataset.set(
@@ -756,14 +756,14 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         removeSliceResources(msg.datasetId);
         removeVolumeResources(msg.datasetId);
         removeMinimapResources(msg.datasetId);
-        // S7: also destroy proxy pools for this dataset (and clear
+        // Also destroy proxy pools for this dataset (and clear
         // descriptors that referenced it).
         const dsPools = proxyPoolsByDataset.get(msg.datasetId);
         if (dsPools) {
           for (const pool of dsPools.values()) destroyProxyAtlas(pool);
           proxyPoolsByDataset.delete(msg.datasetId);
         }
-        // M1: drop the per-dataset descriptor buffer.
+        // Drop the per-dataset descriptor buffer.
         const desc = descriptorBuffersByDataset.get(msg.datasetId);
         if (desc) {
           destroyDescriptorBuffer(desc);
@@ -779,14 +779,14 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         memberToDataset.clear();
         memberToPool.clear();
         currentEntityMetasByDataset.clear();
-        // S7: tear down proxy atlas pools and descriptors.
+        // Tear down proxy atlas pools and descriptors.
         for (const dsPools of proxyPoolsByDataset.values()) {
           for (const pool of dsPools.values()) destroyProxyAtlas(pool);
         }
         proxyPoolsByDataset.clear();
         proxyDescriptorsByEntity.clear();
         wellToFields.clear();
-        // M1: tear down all entity descriptor buffers.
+        // Tear down all entity descriptor buffers.
         for (const desc of descriptorBuffersByDataset.values()) {
           destroyDescriptorBuffer(desc);
         }

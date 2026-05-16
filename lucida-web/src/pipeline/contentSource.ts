@@ -53,13 +53,13 @@ export interface FetchProxyResult {
   header: ProxyHeaderJs;
   /** Raw u16 voxel bytes (little-endian), length `dims[0]*dims[1]*dims[2]*2`. */
   data: ArrayBuffer;
-  /** Always `Raw { u16 }` for proxies in S5 — included for parity with chunk fetches. */
+  /** Always `Raw { u16 }` for proxies — included for parity with chunk fetches. */
   wireFormat: WireFormat;
 }
 
 export interface ContentSource {
   fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult>;
-  /** S5: fetch a proxy asset. Resolves with header + raw voxel bytes. */
+  /** Fetch a proxy asset. Resolves with header + raw voxel bytes. */
   fetchProxy(request: FetchProxyRequest, signal: AbortSignal): Promise<FetchProxyResult>;
 }
 

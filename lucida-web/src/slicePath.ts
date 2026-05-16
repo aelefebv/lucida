@@ -9,7 +9,6 @@ import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
-/** SliceState — empty after S5.3 migration to Orchestrator delivery. */
 export type SliceState = Record<string, never>;
 
 export function createSliceState(): SliceState { return {}; }
@@ -22,7 +21,7 @@ interface SlicePlanResult {
   vpCy: number;
   multiChannel: boolean;
   epochs: SceneEpochs;
-  /** M1: per-dataset memberId → entity index map. */
+  /** Per-dataset memberId → entity index map. */
   entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
@@ -88,9 +87,9 @@ function uploadAndRenderSlice(
         if (z >= dsShapeL[Axis.Z] || ch >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
 
         for (const m of members) {
-          // S8 fix: synthesized well-as-proxy entries carry their own
-          // dataW/dataH (the well's world-space AABB footprint). Fall back
-          // to the dataset's full-res image dims for normal field entries.
+          // Synthesized well-as-proxy entries carry their own dataW/dataH
+          // (the well's world-space AABB footprint). Fall back to the
+          // dataset's full-res image dims for normal field entries.
           const layerDataW = m.dataW ?? fullResWidth;
           const layerDataH = m.dataH ?? fullResHeight;
           const compKey = compositeKey(m.imageId, ch);
@@ -113,8 +112,8 @@ function uploadAndRenderSlice(
       if (z >= dsShapeL[Axis.Z] || c >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
 
       for (const m of members) {
-        // S8 fix: synthesized well-as-proxy entries carry their own
-        // dataW/dataH (the well's world-space AABB footprint).
+        // Synthesized well-as-proxy entries carry their own dataW/dataH
+        // (the well's world-space AABB footprint).
         const layerDataW = m.dataW ?? fullResWidth;
         const layerDataH = m.dataH ?? fullResHeight;
         const entityIndex = indexByMember.get(m.imageId);

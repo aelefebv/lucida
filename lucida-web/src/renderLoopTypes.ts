@@ -56,8 +56,7 @@ export interface TickContext {
   /**
    * Local mirror of per-entity proxy availability. Populated by
    * `bridge` from `DatasetOpened.catalog` and any subsequent
-   * `AssetCatalogUpdate` server messages. Empty in S3 — Planning
-   * doesn't consume it until S6.
+   * `AssetCatalogUpdate` server messages.
    */
   assetCatalog: AssetCatalog;
 }

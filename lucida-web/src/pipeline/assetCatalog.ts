@@ -9,10 +9,6 @@
  *      and
  *   2. maintains a JS-side `Map` flattened across datasets that Planning
  *      can read via `snapshot()` without paying a JSON round-trip per tick.
- *
- * S3 scaffold: bridge wires this up but never receives non-empty data,
- * so `snapshot()` always returns an empty `byEntity`. S5 fills in real
- * data; S6 makes Planning consume it.
  */
 
 export type ProxyKind = "WellProxy3D" | "FieldProxy3D";

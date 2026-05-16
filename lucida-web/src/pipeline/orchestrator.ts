@@ -129,33 +129,33 @@ export interface MemberRosterEntry {
   imageId: string;
   position: [number, number];
   /**
-   * S8: entity id from the planning active set entry that produced this
+   * Entity id from the planning active set entry that produced this
    * roster member. Forwarded to the GPU worker per-layer so it can look
    * up the proxy descriptor for shader binding.
    */
   entityId?: string;
   /**
-   * S8: promotion mode from the planning active set entry. Drives the
+   * Promotion mode from the planning active set entry. Drives the
    * shader's `renderMode` branch (well-as-proxy direct sample vs
    * detail+proxy fallback). Optional for backward compat.
    */
   mode?: "well-as-proxy" | "fields-with-proxy-fallback" | "fields-with-detail";
   /**
-   * S8: optional precomputed world-space model matrix for the
-   * `[0,1]^3` unit cube that bounds this member. When present, the
-   * render path uses it instead of querying `scene.member_model_matrix`.
-   * Used by `well-as-proxy` entries because wells aren't in
-   * `derived.members` and therefore have no native model matrix.
-   * Column-major 4×4. `invModelMatrix` is the matching inverse.
+   * Optional precomputed world-space model matrix for the `[0,1]^3` unit
+   * cube that bounds this member. When present, the render path uses it
+   * instead of querying `scene.member_model_matrix`. Used by
+   * `well-as-proxy` entries because wells aren't in `derived.members`
+   * and therefore have no native model matrix. Column-major 4×4.
+   * `invModelMatrix` is the matching inverse.
    */
   modelMatrix?: Float32Array;
   invModelMatrix?: Float32Array;
   /**
-   * S8 fix: optional 2D world-space footprint of the member (in voxel
-   * units, the same coordinate frame as `position`). When present, the
-   * slice path uses these instead of the dataset's per-image dataW/dataH
-   * for layer sizing — necessary for synthesized `well-as-proxy`
-   * entries whose footprint spans multiple field images.
+   * Optional 2D world-space footprint of the member (in voxel units, the
+   * same coordinate frame as `position`). When present, the slice path
+   * uses these instead of the dataset's per-image dataW/dataH for layer
+   * sizing — necessary for synthesized `well-as-proxy` entries whose
+   * footprint spans multiple field images.
    */
   dataW?: number;
   dataH?: number;
@@ -168,17 +168,17 @@ export interface OrchestratorResult {
   multiChannel: boolean;
   epochs: SceneEpochs;
   /**
-   * M1 (DOMAINS step 8a): per-dataset memberId → entity index map. Both
-   * the worker (when building the descriptor buffer) and the render
-   * paths (when assembling layers) read from this map. Computed
-   * deterministically from the same `cold.activeSet × cold.visibleChannels`
-   * iteration the worker uses, so indices agree by construction.
+   * Per-dataset memberId → entity index map. Both the worker (when
+   * building the descriptor buffer) and the render paths (when
+   * assembling layers) read from this map. Computed deterministically
+   * from the same `cold.activeSet × cold.visibleChannels` iteration the
+   * worker uses, so indices agree by construction.
    */
   entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
 /**
- * S8: build a synthetic roster entry for a `well-as-proxy` entry.
+ * Build a synthetic roster entry for a `well-as-proxy` entry.
  *
  * Wells aren't in `derived.members` so `scene.member_model_matrix` would
  * return identity for them; instead we compute the well's world-space
@@ -314,9 +314,9 @@ export class Orchestrator {
   } | null = null;
   private requestEpoch = 0;
   /**
-   * M3 (DOMAINS step 8a): per-dataset last-emitted viewEpoch. Tracked so
-   * `viewHotState` only fires when the camera-ray pick may have moved.
-   * Cleared on dataset removal.
+   * Per-dataset last-emitted viewEpoch. Tracked so `viewHotState` only
+   * fires when the camera-ray pick may have moved. Cleared on dataset
+   * removal.
    */
   private lastViewEpochByDataset = new Map<string, number>();
   private _lastRequests: ChunkRequest[] = [];
@@ -522,7 +522,7 @@ export class Orchestrator {
       view: rawEpochs.view,
       selection: rawEpochs.selection,
       // `asset_epoch()` is the authoritative source. Older WASM builds
-      // without the binding fall back to 0 (functional no-op for S3).
+      // without the binding fall back to 0 (functional no-op).
       asset:
         typeof ctx.scene.asset_epoch === "function"
           ? ctx.scene.asset_epoch()
@@ -682,9 +682,9 @@ export class Orchestrator {
       // tracking, triggering re-delivery on the next tick.
 
       // 3j. Build member roster from active set for render layer construction.
-      // S8: forward the planning entry's entityId + mode so the render
-      // path can dispatch per-mode (well-as-proxy emits one layer per
-      // well; field modes iterate fields).
+      // Forward the planning entry's entityId + mode so the render path
+      // can dispatch per-mode (well-as-proxy emits one layer per well;
+      // field modes iterate fields).
       //
       // For `well-as-proxy` entries the well typically isn't in the
       // visible_entities query result (which iterates `derived.members`
@@ -730,7 +730,7 @@ export class Orchestrator {
       }
       memberRoster.set(dsId, rosterEntries);
 
-      // M1: build a model-matrix lookup keyed by entityId so cold state
+      // Build a model-matrix lookup keyed by entityId so cold state
       // includes precomputed model matrices (worker can't query WASM,
       // and `well-as-proxy` matrices were already synthesised here).
       const matricesByEntity = new Map<string, { model: Float32Array; inv: Float32Array }>();
@@ -744,20 +744,20 @@ export class Orchestrator {
       }
 
       // Send cold state to the worker — drives atlas creation/remap +
-      // wanted-set + descriptor buffer build. M2: passes dataset
-      // settings so per-channel display state (contrast/gamma/opacity/
-      // colormap) gets baked into descriptor entries.
+      // wanted-set + descriptor buffer build. Passes dataset settings so
+      // per-channel display state (contrast/gamma/opacity/colormap) gets
+      // baked into descriptor entries.
       const coldMsg = this.sendColdState(
         dsId, result.activeSet, entities, selection, visibleRegion,
         currentEpochs, ctx, matricesByEntity, dsSettings,
       );
-      // M1: compute the same memberId → entityIndex map the worker
-      // builds from cold state. Both sides converge by construction
-      // because they walk the same canonical iteration order.
+      // Compute the same memberId → entityIndex map the worker builds
+      // from cold state. Both sides converge by construction because
+      // they walk the same canonical iteration order.
       entityIndexByDataset.set(dsId, computeMemberIndexMap(coldMsg));
 
-      // M3: emit viewEpoch hot-state with per-entity ray-pick coords.
-      // Posted before subsequent render messages so the worker's
+      // Emit viewEpoch hot-state with per-entity ray-pick coords. Posted
+      // before subsequent render messages so the worker's
       // `rayHitPerEntity` is current when chunk-data eviction fires.
       // Keyed by memberId (imageId or imageId:chN) — same convention
       // chunk-data uses for `findFarthestSlot` distance lookups.
@@ -1347,8 +1347,8 @@ export class Orchestrator {
   }
 
   /**
-   * Deliver decoded chunks to the GPU worker via RenderClient.
-   * Replaces uploadChunksForMembers() -- called from slicePath/volumePath after S5.3.
+   * Deliver decoded chunks to the GPU worker via RenderClient. Called
+   * from slicePath/volumePath.
    *
    * Telemetry: writes per-tick stats to `currentUploadStats` and pushes
    * to the rolling window via `publishUploadStats`. Skip reasons are
@@ -1386,9 +1386,7 @@ export class Orchestrator {
     // Send each delivery to the worker.
     for (const delivery of deliveries) {
       if (delivery.kind === "proxy") {
-        // S5: proxies are routed to a dedicated worker message. The
-        // worker stub just logs receipt — S7 lands the actual GPU
-        // upload.
+        // Proxies are routed to a dedicated worker message.
         const sent = this.sendProxyDeliveryToWorker(ctx, delivery, epochs);
         if (sent > 0) {
           this.currentUploadStats.uploadedProxies++;
@@ -1625,7 +1623,7 @@ export class Orchestrator {
     for (const key of this.proxyDeliveredToWorker) {
       if (key.startsWith(prefix)) this.proxyDeliveredToWorker.delete(key);
     }
-    // M3: drop the cached lastViewEpoch entry. If `workerMemberId` is a
+    // Drop the cached lastViewEpoch entry. If `workerMemberId` is a
     // bare datasetId this clears the right entry; for imageId-shaped IDs
     // it's a no-op (the dataset entry survives, which is correct — the
     // dataset itself wasn't removed).
@@ -1732,8 +1730,7 @@ export class Orchestrator {
   }
 
   /**
-   * S5: forward a proxy delivery to the GPU worker. The worker stub
-   * just logs receipt; S7 will hook this up to real GPU residency.
+   * Forward a proxy delivery to the GPU worker.
    *
    * Records the composite key in `proxyDeliveredToWorker` so subsequent
    * cache-hit ticks (which re-submit `_lastProxyRequests`) can short-
@@ -1859,12 +1856,11 @@ export class Orchestrator {
       return m;
     };
 
-    // M2: build per-channel display state once per cold-state assembly.
+    // Build per-channel display state once per cold-state assembly.
     // Single-channel: lone visible channel falls back to dataset-level
     // contrast/gamma when no per-channel override exists. Multi-channel:
     // each visible channel gets its own override (already validated by
-    // the planning entry-iteration above). Mirrors the source the old
-    // per-frame layer params used in volumePath.ts / slicePath.ts.
+    // the planning entry-iteration above).
     const opacity = dsSettings?.opacity ?? 1;
     const dsContrastMin = dsSettings?.contrast_min ?? 0;
     const dsContrastMax = dsSettings?.contrast_max ?? 65535;
@@ -1906,8 +1902,8 @@ export class Orchestrator {
         return { level: idx, chunkShape, gridShape, levelDims };
       });
 
-      // S7: forward Planning's promotion mode + proxy availability so
-      // the worker's wanted-set knows whether to ask for proxies.
+      // Forward Planning's promotion mode + proxy availability so the
+      // worker's wanted-set knows whether to ask for proxies.
       // `parentWellId` lets the worker fan out a well-proxy upload to
       // its child fields' descriptors. Narrowing on `kind === "Field"`
       // gives a `FieldSnapshot` whose `parentId` is non-null by
@@ -1915,7 +1911,7 @@ export class Orchestrator {
       const parentWellId =
         entity?.kind === "Field" ? entity.parentId : null;
 
-      // M1: precomputed model matrices. For field entries, sourced from
+      // Precomputed model matrices. For field entries, sourced from
       // `scene.member_model_matrix`; for `well-as-proxy` entries, from
       // `synthesizeWellRosterEntry`'s AABB. Falls back to identity for
       // entries without a roster match (defensive — descriptor entries
@@ -1998,12 +1994,12 @@ export class Orchestrator {
   }
 
   /**
-   * M3 (DOMAINS step 8a): build and send a viewEpoch hot-state message.
-   * Walks the same canonical iteration as `buildDescriptorBuffer` so the
-   * memberIds match what the worker uses to key chunk-eviction distance
-   * lookups. One ray-pick per dataset (the WASM scene's
-   * `ray_hit_local_image` is a per-dataset query) replicated to every
-   * member, including per-channel composite keys.
+   * Build and send a viewEpoch hot-state message. Walks the same
+   * canonical iteration as `buildDescriptorBuffer` so the memberIds
+   * match what the worker uses to key chunk-eviction distance lookups.
+   * One ray-pick per dataset (the WASM scene's `ray_hit_local_image` is
+   * a per-dataset query) replicated to every member, including
+   * per-channel composite keys.
    */
   private sendViewHotState(
     dsId: string,

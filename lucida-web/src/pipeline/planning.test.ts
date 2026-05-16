@@ -120,7 +120,7 @@ function asInvisible(entry: ActiveSetEntry) {
 }
 
 // ---------------------------------------------------------------------------
-// Promotion / demotion (legacy two-tier semantics, mapped to S6 modes)
+// Promotion / demotion (legacy two-tier semantics, mapped to current modes)
 // ---------------------------------------------------------------------------
 //
 // Without an asset catalog the only reachable mode is `fields-with-detail`,
@@ -1224,7 +1224,7 @@ describe("plan()", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Three-tier proxy request emission (S6)
+// Three-tier proxy request emission
 // ---------------------------------------------------------------------------
 
 describe("plan() — proxy request emission", () => {
