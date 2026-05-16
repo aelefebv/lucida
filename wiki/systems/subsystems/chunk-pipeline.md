@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-15
+modified: 2026-05-16
 ---
 
 # Chunk Pipeline
@@ -18,7 +18,7 @@ This article captures the *shape*, *invariants*, and *gotchas* — the things th
 Every RAF tick runs four phases in this order, then reschedules if work remains:
 
 1. **Plan** — query WASM (`view_query`, `member_positions`, `visible_region`); decide which entities are active and at what LOD; enumerate wanted chunks with priorities. Owned by [[planning-domain]].
-2. **Upload** — drain decoded chunks from the [[cpu-cache]] to the GPU worker, filtered by what the worker still wants and bounded by the per-frame byte budget.
+2. **Upload** — drain decoded chunks from the [[cpu-cache]] to the GPU worker, bounded by the per-frame byte budget. Drain/resend/dispatch is owned by the [[upload-pipeline|Uploader]] (post-PRD #607); the Orchestrator is planner-only.
 3. **Render** — slice or volume path; throttled if only `residencyDirty` changed (≈30 fps cap on chunk-arrival redraws), immediate if `interactiveDirty`. Owned by [[gpu-residency]] downstream of `renderLoop.ts`.
 4. **Minimap** — same indirection lookups, smaller atlas, render-key skips when stationary.
 
@@ -26,6 +26,7 @@ Every RAF tick runs four phases in this order, then reschedules if work remains:
 
 - [[planning-domain]] — what to fetch and at what priority
 - [[cpu-cache]] — fetch scheduling, decode pool, eviction tiers, drain
+- [[upload-pipeline]] — `pipeline/upload/` Uploader; cold/hot state emission, drain/resend/dispatch, worker feedback
 - [[gpu-residency]] — atlases, indirection, descriptor buffer, fallback chain
 - [[worker-protocol]] — message contract between main thread and GPU worker
 - [[multichannel-and-colormaps]] — composite key naming, per-channel settings, LUT sampling
@@ -41,8 +42,8 @@ Every RAF tick runs four phases in this order, then reschedules if work remains:
 
 ## Gotchas
 
-- **Exceeding the 16 MB/frame upload budget starves other work.** The budget is reserved across slice + volume; over-budget chunks defer to the next frame. There's a separate 2 MB minimap budget.
-- **Worker eviction reporting is async** — the worker posts `chunksEvicted` (evicted + skipped); the main thread reconciles against `proxyDeliveredToWorker` and `sentSet` on receipt. Forgetting this drift causes "I sent it, why didn't it draw?" symptoms.
+- **Exceeding the 8 MB/frame upload budget starves other work.** The budget is `MAIN_VIEW_UPLOAD_BUDGET_BYTES` in `pipeline/upload/constants.ts`, reserved across slice + volume; over-budget chunks defer to the next frame. There's a separate 2 MB minimap budget. (Pre-refactor docs said 16 MB — verified incorrect during PRD #607 Slice 3.)
+- **Worker eviction reporting is async** — the worker posts `chunksEvicted` (evicted + skipped); the main thread reconciles via the [[upload-pipeline|Uploader]]'s `DeliveryTracker` on receipt. The tracker consolidates the four maps the orchestrator used to scatter (`deliverySentToWorker`, `deliveryRejectedByWorker`, `widToEntityId`, `proxyDeliveredToWorker`). Forgetting this drift causes "I sent it, why didn't it draw?" symptoms.
 - **Hysteresis bands of ±5px around each promotion threshold** prevent flapping when the user dwells near a boundary. If you tune thresholds in `planning.ts`, keep the band; without it, plates oscillate between modes during normal scroll.
 - **Catalog-aware degradation** — if planning wants a proxy that the server's `AssetCatalog` doesn't advertise, it degrades one tier finer (e.g., wanted well-as-proxy but no `WellProxy3D` available → drop to fields-with-proxy-fallback). This is silent; observable only via the debug panel.
 - **`residencyDirty` is throttled (~33ms) but the tick still runs in the gap to keep uploading.** Only the *render* is throttled. If you change this, expect either visible jitter (no throttle) or upload starvation (throttling the whole tick).

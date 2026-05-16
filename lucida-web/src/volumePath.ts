@@ -2,68 +2,14 @@
 import { Axis } from "./axes.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
+import { computeScissorRect } from "./pipeline/upload/scissor.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
 import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
+import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
-
-/**
- * Project a well's [0,1]³ unit-cube AABB to screen space and return a scissor rect.
- * Returns null if the well is fully off-screen.
- */
-function computeScissorRect(
-  modelMatrix: Float32Array,
-  viewProj: Float32Array,
-  canvasW: number,
-  canvasH: number,
-): [number, number, number, number] | null {
-  let minX = Infinity, minY = Infinity;
-  let maxX = -Infinity, maxY = -Infinity;
-
-  for (let i = 0; i < 8; i++) {
-    const cx = i & 1;
-    const cy = (i >> 1) & 1;
-    const cz = (i >> 2) & 1;
-
-    // Model transform (column-major): local [0,1]³ → world
-    const wx = modelMatrix[0] * cx + modelMatrix[4] * cy + modelMatrix[8] * cz + modelMatrix[12];
-    const wy = modelMatrix[1] * cx + modelMatrix[5] * cy + modelMatrix[9] * cz + modelMatrix[13];
-    const wz = modelMatrix[2] * cx + modelMatrix[6] * cy + modelMatrix[10] * cz + modelMatrix[14];
-    const ww = modelMatrix[3] * cx + modelMatrix[7] * cy + modelMatrix[11] * cz + modelMatrix[15];
-
-    // ViewProj transform: world → clip
-    const clipX = viewProj[0] * wx + viewProj[4] * wy + viewProj[8] * wz + viewProj[12] * ww;
-    const clipY = viewProj[1] * wx + viewProj[5] * wy + viewProj[9] * wz + viewProj[13] * ww;
-    const clipW = viewProj[3] * wx + viewProj[7] * wy + viewProj[11] * wz + viewProj[15] * ww;
-
-    if (clipW <= 0) {
-      // Vertex behind camera — conservative fallback to full screen
-      return [0, 0, canvasW, canvasH];
-    }
-
-    // NDC [-1,1] → screen (WebGPU: top-left origin, y-down)
-    const ndcX = clipX / clipW;
-    const ndcY = clipY / clipW;
-    const sx = (ndcX + 1) * 0.5 * canvasW;
-    const sy = (1 - ndcY) * 0.5 * canvasH;
-
-    minX = Math.min(minX, sx);
-    minY = Math.min(minY, sy);
-    maxX = Math.max(maxX, sx);
-    maxY = Math.max(maxY, sy);
-  }
-
-  // Clamp to canvas bounds and compute integer rect
-  const x = Math.max(0, Math.floor(minX));
-  const y = Math.max(0, Math.floor(minY));
-  const w = Math.min(canvasW, Math.ceil(maxX)) - x;
-  const h = Math.min(canvasH, Math.ceil(maxY)) - y;
-
-  if (w <= 0 || h <= 0) return null; // fully off-screen
-  return [x, y, w, h];
-}
 
 export type VolumeState = Record<string, never>;
 
@@ -88,12 +34,12 @@ interface PlanResult {
 
 
 /**
- * Upload+render phase: deliver decoded chunks via Orchestrator, build layer
+ * Upload+render phase: deliver decoded chunks via Uploader, build layer
  * params, and render. Returns true if more work remains.
  */
 function uploadAndRenderVolume(
   ctx: TickContext,
-  orchestrator: Orchestrator,
+  uploader: Uploader,
   plan: PlanResult,
   shouldRender: boolean = true,
 ): boolean {
@@ -101,8 +47,8 @@ function uploadAndRenderVolume(
   const { memberRoster, settings, eye, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel, entityIndexByDataset } = plan;
   const { layerOrder, allSettings } = settings;
 
-  // Use Orchestrator delivery loop instead of uploadChunksForMembers
-  const budgetExhausted = orchestrator.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
+  // Use Uploader delivery loop instead of uploadChunksForMembers
+  const budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
 
   if (!shouldRender) return budgetExhausted;
 
@@ -205,6 +151,7 @@ function uploadAndRenderVolume(
 export function tickVolume(
   ctx: TickContext,
   orchestrator: Orchestrator,
+  uploader: Uploader,
   minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
@@ -254,7 +201,7 @@ export function tickVolume(
   };
 
   const t1 = debugStats.enabled ? performance.now() : 0;
-  const result = uploadAndRenderVolume(ctx, orchestrator, planResult, shouldRender);
+  const result = uploadAndRenderVolume(ctx, uploader, planResult, shouldRender);
   if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
   return result;
 }

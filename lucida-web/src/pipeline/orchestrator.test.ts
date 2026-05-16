@@ -1,15 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
-import type {
-  CpuCache,
-  ReadyProxyDelivery,
-  ReadyDelivery,
-} from "./fetch/index.ts";
+import type { CpuCache } from "./fetch/index.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
-import type { ProxyRequest } from "./planning/index.ts";
-import type { ColdStateMessage, MissingProxy } from "../renderer/workerProtocol.ts";
+
+// Planner-only tests for Orchestrator (post-Slice 10 of PRD #607).
+// Upload-side describes (proxy delivery, cold-state display state,
+// viewHotState emission, chunk delivery, handleChunksEvicted, multi-
+// dataset upload characterization, cold-state lifecycle invariant)
+// migrated to `upload/uploader.test.ts`. The two describes here cover
+// only the planner role: epoch caching + multi-dataset planning state.
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
 function createMockAssetCatalog(): AssetCatalog {
@@ -26,6 +27,10 @@ function createMockCpuCache(): CpuCache {
     drain: vi.fn(() => []),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     getCached: vi.fn(() => null),
+    // Chunk-delivery tests (Slice 1 of PRD #607) consult this method
+    // from the resend pass. Default to a miss so cache-hit fixtures
+    // don't accidentally re-emit deliveries across unrelated describes.
+    getCachedChunk: vi.fn(() => null),
     telemetry: vi.fn(),
     updateConfig: vi.fn(),
     subscribe: vi.fn(() => () => {}),
@@ -197,6 +202,7 @@ describe("epoch caching", () => {
   // The Orchestrator should skip plan() when epochs haven't changed.
 
   let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+  let Uploader: typeof import("./upload/uploader.ts").Uploader;
   let planSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
@@ -212,8 +218,8 @@ describe("epoch caching", () => {
       return { ...actual, plan: planSpy };
     });
 
-    const orchestratorModule = await import("./orchestrator.ts");
-    Orchestrator = orchestratorModule.Orchestrator;
+    Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+    Uploader = (await import("./upload/uploader.ts")).Uploader;
   });
 
   function makeCtx(
@@ -232,6 +238,10 @@ describe("epoch caching", () => {
     } as unknown as TickContext;
   }
 
+  function makeOrch(): InstanceType<typeof Orchestrator> {
+    return new Orchestrator(new Uploader());
+  }
+
   function makeOrchestratorDeps(epochOverrides?: Partial<{ content: number; layout: number; view: number; selection: number }>) {
     const scene = createMockScene({
       epochs: { content: 1, layout: 1, view: 1, selection: 1, ...epochOverrides },
@@ -248,7 +258,7 @@ describe("epoch caching", () => {
 
   it("calls plan() on the first invocation", () => {
     const { scene, datasets } = makeOrchestratorDeps();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
 
@@ -257,7 +267,7 @@ describe("epoch caching", () => {
 
   it("returns cached result when epochs are unchanged", () => {
     const { scene, datasets } = makeOrchestratorDeps();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     const ctx = makeCtx(scene, datasets);
     const result1 = orch.planAndFetch(ctx, emptyMinimap);
@@ -271,7 +281,7 @@ describe("epoch caching", () => {
 
   it("re-plans when viewEpoch changes", () => {
     const { datasets } = makeOrchestratorDeps();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
@@ -285,7 +295,7 @@ describe("epoch caching", () => {
 
   it("re-plans when contentEpoch changes", () => {
     const { datasets } = makeOrchestratorDeps();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
@@ -299,7 +309,7 @@ describe("epoch caching", () => {
 
   it("re-plans when layoutEpoch changes", () => {
     const { datasets } = makeOrchestratorDeps();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
@@ -313,7 +323,7 @@ describe("epoch caching", () => {
 
   it("re-plans when selectionEpoch changes", () => {
     const { datasets } = makeOrchestratorDeps();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
     orch.planAndFetch(makeCtx(scene1, datasets), emptyMinimap);
@@ -332,6 +342,7 @@ describe("epoch caching", () => {
 
 describe("multi-dataset planning", () => {
   let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+  let Uploader: typeof import("./upload/uploader.ts").Uploader;
   let planSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
@@ -345,9 +356,13 @@ describe("multi-dataset planning", () => {
       return { ...actual, plan: planSpy };
     });
 
-    const orchestratorModule = await import("./orchestrator.ts");
-    Orchestrator = orchestratorModule.Orchestrator;
+    Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+    Uploader = (await import("./upload/uploader.ts")).Uploader;
   });
+
+  function makeOrch(): InstanceType<typeof Orchestrator> {
+    return new Orchestrator(new Uploader());
+  }
 
   function makeMultiDatasetScene() {
     return createMockScene({
@@ -445,7 +460,7 @@ describe("multi-dataset planning", () => {
   it("calls plan() once per dataset", () => {
     const scene = makeMultiDatasetScene();
     const datasets = makeTwoDatasetEntries();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     planSpy.mockClear();
     orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
@@ -457,7 +472,7 @@ describe("multi-dataset planning", () => {
   it("merged result contains entries from both datasets", () => {
     const scene = makeMultiDatasetScene();
     const datasets = makeTwoDatasetEntries();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     const result = orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
 
@@ -478,7 +493,7 @@ describe("multi-dataset planning", () => {
     //     and threaded back, not a re-derived `activeSet`.
     const scene = makeMultiDatasetScene();
     const datasets = makeTwoDatasetEntries();
-    const orch = new Orchestrator();
+    const orch = makeOrch();
 
     // Tick 1 — capture the planner-returned results per dataset so we
     // can compare them to tick-2's incoming state.
@@ -536,489 +551,5 @@ describe("multi-dataset planning", () => {
     expect(tick2Ds2State.previousActiveSet).toEqual(tick1Ds2Result.activeSet);
     expect(tick2Ds1State).toBe(tick1Ds1Result.nextState);
     expect(tick2Ds2State).toBe(tick1Ds2Result.nextState);
-  });
-});
-
-// ===========================================================================
-// 3. Proxy delivery tracking
-// ===========================================================================
-
-describe("proxy delivery tracking", () => {
-  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    const orchestratorModule = await import("./orchestrator.ts");
-    Orchestrator = orchestratorModule.Orchestrator;
-  });
-
-  function makeProxyRequest(
-    overrides?: Partial<ProxyRequest>,
-  ): ProxyRequest {
-    return {
-      datasetId: "ds1",
-      entityId: "field-0",
-      imageId: "img-0",
-      kind: "FieldProxy3D",
-      t: 0,
-      c: 0,
-      priority: 0,
-      ...overrides,
-    };
-  }
-
-  function makeProxyDelivery(
-    overrides?: Partial<ReadyProxyDelivery>,
-  ): ReadyProxyDelivery {
-    return {
-      kind: "proxy",
-      datasetId: "ds1",
-      entityId: "field-0",
-      imageId: "img-0",
-      proxyKind: "FieldProxy3D",
-      t: 0,
-      c: 0,
-      header: {
-        algorithmVersion: 1,
-        sourceContentHash: new Uint8Array(32),
-        dims: [4, 4, 4],
-        dtype: "u16",
-      },
-      data: new ArrayBuffer(128),
-      epochs: {
-        content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1,
-      },
-      ...overrides,
-    };
-  }
-
-  function makeMockCpuCache(opts?: {
-    drainResult?: ReadyDelivery[];
-    cachedProxies?: Map<string, ReadyProxyDelivery>;
-  }): CpuCache {
-    const drained = opts?.drainResult ?? [];
-    const cached = opts?.cachedProxies ?? new Map();
-    return {
-      submit: vi.fn(),
-      // drain() consumed once per call
-      drain: vi.fn(() => {
-        const out = drained.slice();
-        drained.length = 0;
-        return out;
-      }),
-      snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
-      getCached: vi.fn(() => null),
-      getCachedProxy: vi.fn(
-        (datasetId: string, entityId: string, kind: string, t: number, c: number) => {
-          return cached.get(`${datasetId}|${entityId}|${kind}|${t}|${c}`) ?? null;
-        },
-      ),
-      telemetry: vi.fn(),
-      updateConfig: vi.fn(),
-      subscribe: vi.fn(() => () => {}),
-      reset: vi.fn(),
-      markRejected: vi.fn(),
-      clearRejected: vi.fn(),
-    } as unknown as CpuCache;
-  }
-
-  function makeCtx(opts: {
-    cpuCache: CpuCache;
-    proxyAssetDataMock?: ReturnType<typeof vi.fn>;
-  }): TickContext {
-    return {
-      scene: {
-        multi_channel: () => false,
-      } as unknown,
-      datasets: new Map(),
-      client: {
-        coldState: vi.fn(),
-        viewHotState: vi.fn(),
-        proxyAssetData: opts.proxyAssetDataMock ?? vi.fn(),
-      } as unknown,
-      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
-      mode: "slice",
-      renderScale: 1,
-      cpuCache: opts.cpuCache,
-      assetCatalog: new AssetCatalog({ apply_asset_catalog_delta: () => {} }),
-    } as unknown as TickContext;
-  }
-
-  function proxyKey(req: ProxyRequest | ReadyProxyDelivery): string {
-    if ("kind" in req && req.kind === "proxy") {
-      return `${req.datasetId}|${req.entityId}|${req.proxyKind}|${req.t}|${req.c}`;
-    }
-    const r = req as ProxyRequest;
-    return `${r.datasetId}|${r.entityId}|${r.kind}|${r.t}|${r.c}`;
-  }
-
-  it("proxy delivery tracked after first send", () => {
-    const orch = new Orchestrator();
-    const delivery = makeProxyDelivery();
-    const cpuCache = makeMockCpuCache({ drainResult: [delivery] });
-    const proxyAssetData = vi.fn();
-    const ctx = makeCtx({ cpuCache, proxyAssetDataMock: proxyAssetData });
-
-    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
-
-    expect(proxyAssetData).toHaveBeenCalledTimes(1);
-    expect(orch.getProxyDeliveredKeys().has(proxyKey(delivery))).toBe(true);
-  });
-
-  it("proxy resend uses getCachedProxy when key missing from delivered set", () => {
-    const orch = new Orchestrator();
-    const delivery = makeProxyDelivery();
-    const req = makeProxyRequest();
-
-    // Pre-populate _lastProxyRequests so the resend pass has work to do.
-    (orch as unknown as { _lastProxyRequests: ProxyRequest[] })._lastProxyRequests = [req];
-
-    // Cache returns the proxy on getCachedProxy lookup.
-    const cached = new Map<string, ReadyProxyDelivery>();
-    cached.set(proxyKey(req), delivery);
-    const cpuCache = makeMockCpuCache({ cachedProxies: cached });
-    const proxyAssetData = vi.fn();
-    const ctx = makeCtx({ cpuCache, proxyAssetDataMock: proxyAssetData });
-
-    // First call: drain returns nothing (we left it empty), but the
-    // resend pass should still pick up the cached proxy because the
-    // key is missing from delivered tracking.
-    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
-    expect(proxyAssetData).toHaveBeenCalledTimes(1);
-    expect(orch.getProxyDeliveredKeys().has(proxyKey(req))).toBe(true);
-
-    // Second call: key is now in delivered set → no resend.
-    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
-    expect(proxyAssetData).toHaveBeenCalledTimes(1);
-
-    // After explicit clear, resend kicks in again.
-    orch.getProxyDeliveredKeys().delete(proxyKey(req));
-    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
-    expect(proxyAssetData).toHaveBeenCalledTimes(2);
-  });
-
-  it("proxyDeliveredToWorker persists across full plans (worker proxy pools survive cold state)", async () => {
-    // Worker proxy pools are not rebuilt on cold state (only chunk atlases
-    // are). Re-sending proxies on every full plan would upload-spam them
-    // every time a view epoch bumps (e.g., wheel scroll). Worker eviction
-    // is reported via wantedSetDelta; that's the only signal that should
-    // clear the tracking.
-    const orch = new Orchestrator();
-
-    const scene = createMockScene({
-      epochs: { content: 1, layout: 1, view: 1, selection: 1 },
-    });
-    const datasets = new Map<string, DatasetEntry>([
-      ["ds1", { manifest: createMockContent() }],
-    ]);
-    const cpuCache = makeMockCpuCache();
-    const ctx = {
-      scene,
-      datasets,
-      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown,
-      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
-      mode: "slice",
-      renderScale: 1,
-      cpuCache,
-      assetCatalog: new AssetCatalog({ apply_asset_catalog_delta: () => {} }),
-    } as unknown as TickContext;
-
-    orch.getProxyDeliveredKeys().add("ds1|x|FieldProxy3D|0|0");
-    expect(orch.getProxyDeliveredKeys().size).toBe(1);
-
-    orch.planAndFetch(ctx, new Map());
-    expect(orch.getProxyDeliveredKeys().size).toBe(1);
-  });
-
-  it("handleWantedSetDelta with proxy entries clears delivered tracking", () => {
-    const orch = new Orchestrator();
-    const key = "ds1|field-0|FieldProxy3D|0|0";
-    orch.getProxyDeliveredKeys().add(key);
-    expect(orch.getProxyDeliveredKeys().has(key)).toBe(true);
-
-    const missing: MissingProxy = {
-      kind: "proxy",
-      datasetId: "ds1",
-      entityId: "field-0",
-      proxyKind: "FieldProxy3D",
-      t: 0,
-      c: 0,
-    };
-    orch.handleWantedSetDelta([missing]);
-
-    expect(orch.getProxyDeliveredKeys().has(key)).toBe(false);
-  });
-});
-
-// ===========================================================================
-// 4. cold-state display state propagation
-// ===========================================================================
-
-describe("cold-state display state", () => {
-  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    const orchestratorModule = await import("./orchestrator.ts");
-    Orchestrator = orchestratorModule.Orchestrator;
-  });
-
-  function makeCtxWithSpy(
-    scene: unknown,
-    datasets: Map<string, DatasetEntry>,
-    coldStateSpy: ReturnType<typeof vi.fn>,
-  ): TickContext {
-    return {
-      scene,
-      datasets,
-      client: { coldState: coldStateSpy, viewHotState: vi.fn() } as unknown,
-      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
-      mode: "slice",
-      renderScale: 1,
-      cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
-    } as unknown as TickContext;
-  }
-
-  it("populates displayStateByChannel from per-channel settings on the active channel", () => {
-    const orch = new Orchestrator();
-    const scene = createMockScene({
-      c: 1,
-      allSettings: {
-        ds1: {
-          visible: true,
-          opacity: 0.6,
-          contrast_min: 0,
-          contrast_max: 65535,
-          gamma: 1,
-          blend_mode: "alpha",
-          channel_settings: [
-            { visible: true, colormap: "magenta", contrast_min: 10, contrast_max: 100, gamma: 1.1 },
-            { visible: true, colormap: "viridis", contrast_min: 50, contrast_max: 500, gamma: 1.5 },
-          ],
-          channel_blend_mode: "additive",
-        },
-      },
-    });
-    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
-    const coldStateSpy = vi.fn();
-    orch.planAndFetch(makeCtxWithSpy(scene, datasets, coldStateSpy), new Map());
-
-    expect(coldStateSpy).toHaveBeenCalledTimes(1);
-    const cold = coldStateSpy.mock.calls[0][0] as ColdStateMessage;
-    expect(cold.activeSet.length).toBeGreaterThan(0);
-    const ds = cold.activeSet[0].displayStateByChannel[1];
-    expect(ds).toBeDefined();
-    expect(ds.contrastMin).toBe(50);
-    expect(ds.contrastMax).toBe(500);
-    expect(ds.gamma).toBe(1.5);
-    expect(ds.opacity).toBe(0.6);
-    expect(ds.colormapName).toBe("viridis");
-    expect(ds.channelMask).toBe(1 << 1);
-  });
-
-  it("contrast change re-emits cold state when selectionEpoch bumps", async () => {
-    // The dataset-settings cache is generation-keyed (`bumpSettingsGeneration`)
-    // — the real codepath bumps it via `useDatasetSettings`. We bump
-    // explicitly between the two ticks so the second `getSceneSettings`
-    // call observes the new contrast value.
-    const { bumpSettingsGeneration } = await import("../tickCommon.ts");
-    const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
-    const sceneA = createMockScene({
-      epochs: { content: 1, layout: 1, view: 1, selection: 1 },
-      allSettings: {
-        ds1: {
-          visible: true,
-          opacity: 1,
-          contrast_min: 0,
-          contrast_max: 1000,
-          gamma: 1,
-          blend_mode: "alpha",
-          channel_settings: [],
-          channel_blend_mode: "additive",
-        },
-      },
-    });
-    const sceneB = createMockScene({
-      epochs: { content: 1, layout: 1, view: 1, selection: 2 },
-      allSettings: {
-        ds1: {
-          visible: true,
-          opacity: 1,
-          contrast_min: 0,
-          contrast_max: 9999,
-          gamma: 1,
-          blend_mode: "alpha",
-          channel_settings: [],
-          channel_blend_mode: "additive",
-        },
-      },
-    });
-    const spyA = vi.fn();
-    const spyB = vi.fn();
-    orch.planAndFetch(makeCtxWithSpy(sceneA, datasets, spyA), new Map());
-    bumpSettingsGeneration();
-    orch.planAndFetch(makeCtxWithSpy(sceneB, datasets, spyB), new Map());
-
-    expect(spyA).toHaveBeenCalledTimes(1);
-    expect(spyB).toHaveBeenCalledTimes(1);
-    const coldA = spyA.mock.calls[0][0] as ColdStateMessage;
-    const coldB = spyB.mock.calls[0][0] as ColdStateMessage;
-    expect(coldA.activeSet[0].displayStateByChannel[0].contrastMax).toBe(1000);
-    expect(coldB.activeSet[0].displayStateByChannel[0].contrastMax).toBe(9999);
-    expect(coldB.epochs.selection).toBe(2);
-  });
-
-  it("multi-channel emits per-channel display state for every visible channel", () => {
-    const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
-    const scene = createMockScene({
-      multiChannel: true,
-      allSettings: {
-        ds1: {
-          visible: true,
-          opacity: 1,
-          contrast_min: 0,
-          contrast_max: 1,
-          gamma: 1,
-          blend_mode: "alpha",
-          channel_settings: [
-            { visible: true, colormap: "magenta", contrast_min: 0, contrast_max: 100, gamma: 1 },
-            { visible: true, colormap: "green",   contrast_min: 0, contrast_max: 200, gamma: 1.2 },
-          ],
-          channel_blend_mode: "additive",
-        },
-      },
-    });
-    const spy = vi.fn();
-    orch.planAndFetch(makeCtxWithSpy(scene, datasets, spy), new Map());
-    const cold = spy.mock.calls[0][0] as ColdStateMessage;
-    expect(cold.visibleChannels).toEqual([0, 1]);
-    const dsByCh = cold.activeSet[0].displayStateByChannel;
-    expect(dsByCh[0].colormapName).toBe("magenta");
-    expect(dsByCh[0].contrastMax).toBe(100);
-    expect(dsByCh[1].colormapName).toBe("green");
-    expect(dsByCh[1].contrastMax).toBe(200);
-  });
-});
-
-// ===========================================================================
-// 5. viewHotState emission (per-viewEpoch ray-pick coords)
-// ===========================================================================
-
-describe("viewHotState emission", () => {
-  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    const orchestratorModule = await import("./orchestrator.ts");
-    Orchestrator = orchestratorModule.Orchestrator;
-  });
-
-  function makeCtxWithViewHotSpy(
-    scene: unknown,
-    datasets: Map<string, DatasetEntry>,
-    viewHotSpy: ReturnType<typeof vi.fn>,
-  ): TickContext {
-    return {
-      scene,
-      datasets,
-      client: { coldState: vi.fn(), viewHotState: viewHotSpy } as unknown,
-      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
-      mode: "slice",
-      renderScale: 1,
-      cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
-    } as unknown as TickContext;
-  }
-
-  it("emits one viewHotState message per dataset on initial plan", () => {
-    const orch = new Orchestrator();
-    const scene = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
-    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
-    const viewHotSpy = vi.fn();
-    orch.planAndFetch(makeCtxWithViewHotSpy(scene, datasets, viewHotSpy), new Map());
-    expect(viewHotSpy).toHaveBeenCalledTimes(1);
-    const msg = viewHotSpy.mock.calls[0][0];
-    expect(msg.type).toBe("viewHotState");
-    expect(msg.datasetId).toBe("ds1");
-    expect(msg.epochs.view).toBe(1);
-    expect(msg.rayHitsByEntity.length).toBeGreaterThan(0);
-  });
-
-  it("uses ray hits sourced from scene.ray_hit_local_image", () => {
-    const orch = new Orchestrator();
-    const customScene = createMockScene();
-    (customScene as unknown as { ray_hit_local_image: () => Float32Array }).ray_hit_local_image =
-      () => new Float32Array([0.25, 0.5, 0.75]);
-    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
-    const viewHotSpy = vi.fn();
-    orch.planAndFetch(makeCtxWithViewHotSpy(customScene, datasets, viewHotSpy), new Map());
-    const msg = viewHotSpy.mock.calls[0][0];
-    expect(msg.rayHitsByEntity[0][1]).toEqual([0.25, 0.5, 0.75]);
-  });
-
-  it("does not re-emit viewHotState when viewEpoch is unchanged across ticks", async () => {
-    const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
-    const sceneA = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
-    const viewHotA = vi.fn();
-    orch.planAndFetch(makeCtxWithViewHotSpy(sceneA, datasets, viewHotA), new Map());
-    expect(viewHotA).toHaveBeenCalledTimes(1);
-
-    // Selection epoch bumps but view epoch does NOT — re-plan happens but
-    // hot state should be skipped since the camera-ray pick can't have
-    // moved without a viewEpoch advance.
-    const { bumpSettingsGeneration } = await import("../tickCommon.ts");
-    bumpSettingsGeneration();
-    const sceneB = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 2 } });
-    const viewHotB = vi.fn();
-    orch.planAndFetch(makeCtxWithViewHotSpy(sceneB, datasets, viewHotB), new Map());
-    expect(viewHotB).not.toHaveBeenCalled();
-  });
-
-  it("re-emits viewHotState when viewEpoch advances", () => {
-    const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
-    const sceneA = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
-    const viewHotA = vi.fn();
-    orch.planAndFetch(makeCtxWithViewHotSpy(sceneA, datasets, viewHotA), new Map());
-    expect(viewHotA).toHaveBeenCalledTimes(1);
-
-    const sceneB = createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } });
-    const viewHotB = vi.fn();
-    orch.planAndFetch(makeCtxWithViewHotSpy(sceneB, datasets, viewHotB), new Map());
-    expect(viewHotB).toHaveBeenCalledTimes(1);
-    expect(viewHotB.mock.calls[0][0].epochs.view).toBe(2);
-  });
-
-  it("multi-channel emits one rayHit entry per (member, channel) composite", () => {
-    const orch = new Orchestrator();
-    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
-    const scene = createMockScene({
-      multiChannel: true,
-      allSettings: {
-        ds1: {
-          visible: true,
-          opacity: 1,
-          contrast_min: 0,
-          contrast_max: 1,
-          gamma: 1,
-          blend_mode: "alpha",
-          channel_settings: [
-            { visible: true, colormap: "magenta", contrast_min: 0, contrast_max: 100, gamma: 1 },
-            { visible: true, colormap: "green",   contrast_min: 0, contrast_max: 200, gamma: 1.2 },
-          ],
-          channel_blend_mode: "additive",
-        },
-      },
-    });
-    const viewHotSpy = vi.fn();
-    orch.planAndFetch(makeCtxWithViewHotSpy(scene, datasets, viewHotSpy), new Map());
-    const msg = viewHotSpy.mock.calls[0][0];
-    const memberIds = msg.rayHitsByEntity.map((e: [string, unknown]) => e[0]);
-    expect(memberIds).toContain("img-0:ch0");
-    expect(memberIds).toContain("img-0:ch1");
   });
 });

@@ -323,7 +323,7 @@ export interface UploadTickStats {
   skippedOverview: number;
   /** Chunk level didn't match `targetLevelByImage[imageId]`. Stale plan. */
   skippedWrongLod: number;
-  /** Chunk already in `deliverySentToWorker` for the worker memberId. */
+  /** Chunk already in the orchestrator's `DeliveryTracker` sent set for the worker memberId. */
   skippedAlreadySent: number;
   /** Couldn't resolve dataset/imageSpec/level meta — should be ~0; bug indicator. */
   skippedNoMeta: number;
@@ -337,7 +337,7 @@ export interface UploadTickStats {
   /**
    * Chunks the worker has reported as `skipped` (atlas full + farther
    * than the farthest existing slot). Tracked in the orchestrator's
-   * `deliveryRejectedByWorker` map and skipped by the resend pass until
+   * `DeliveryTracker` rejected set and skipped by the resend pass until
    * the next plan rebuild clears the rejection state.
    */
   resendChunksRejected: number;

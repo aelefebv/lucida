@@ -1,6 +1,6 @@
 ---
 created: 2026-05-15
-modified: 2026-05-15
+modified: 2026-05-16
 ---
 
 # `cpuCache.ts` split into `pipeline/fetch/` modules
@@ -16,12 +16,6 @@ The eleven sibling modules: `types.ts`, `cpuCache.ts` (coordinator), `chunkStore
 [[decisions/0008-cpu-cache-as-sole-fetch-path]] documented `cpuCache.ts` at "~900 lines and dense" with the mitigation being clear `submit → schedule → decode → drain` phase boundaries. The file has nearly doubled since then; the phase boundaries are no longer crisp inside it. Reading or modifying any one phase requires holding the whole god-object in your head.
 
 The split mirrors [[decisions/0029-planning-index-split-into-per-concern-files]] in shape: a single overgrown file becomes a directory of 100–500 LOC modules, with a thin coordinator on top, behaviour-preserving except for explicit named bug fixes. The two refactors are symmetric across the chunk pipeline (planning is upstream of fetch/decode); having matching shape on both halves makes the pipeline read as one consistent system rather than two unrelated styles.
-
-## Why no principle citation
-
-`principles/cpu-cache.md` does not yet exist. An INTERVIEW pass to author it is queued in [[queue]] (2026-05-15 entry) for after this refactor settles — the principles emerge from the patterns visible in the cleaner post-refactor code, and pre-authoring would risk coupling the principles to today's specific shape.
-
-This is consistent with [[decisions/0008-cpu-cache-as-sole-fetch-path]], which also predates the principles framework.
 
 ## Why the integration test suite stays monolithic
 

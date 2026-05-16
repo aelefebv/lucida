@@ -229,8 +229,8 @@ On the main thread, `orchestrator.handleWantedSetDelta` clears `proxyDeliveredTo
 
 Each tick:
 
-1. `cpuCache.drain(MAIN_VIEW_UPLOAD_BUDGET_BYTES = 16MB)` returns ready chunks.
-2. Filter to those in `workerWantedSet` (don't waste bandwidth on chunks the worker no longer needs).
+1. `cpuCache.drain(MAIN_VIEW_UPLOAD_BUDGET_BYTES = 8MB)` returns ready chunks.
+2. Filter by lane (drop `prefetch`/`overview`) and by target LOD (drop chunks whose `level` doesn't match `targetLevelByImage[delivery.imageId]`).
 3. `client.sliceChunkData(...)` or `client.volumeChunkData(...)` — posts the typed array + metadata to the worker.
 4. Worker writes to atlas slot, updates indirection buffer entry.
 5. `sentSet.add(chunkKey)` to avoid re-uploading until next eviction.
@@ -300,7 +300,7 @@ Composites multi-layer outputs (per-channel composites for multichannel mode, pe
 | Question                                       | Answer                                                                                                                                |
 | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | **What gets fetched first?**                   | Lowest priority number wins. Detail-lane chunks at high importance and near viewport center fetch first (≈0). Runway/overview lanes wait. |
-| **What gets uploaded to GPU first?**           | Whatever drained from `cpuCache.ready[]` this tick that's also in `workerWantedSet`. Drain order matches the order chunks finished decoding (FIFO within priority). |
+| **What gets uploaded to GPU first?**           | Whatever drained from `cpuCache.ready[]` this tick that survives the upload-pass filter (lane is `detail`, level matches the per-image target LOD). Drain order matches the order chunks finished decoding (FIFO within priority). |
 | **What gets evicted from CPU cache first?**    | Tier order: prefetch → demoted-detail → active-detail → proxy → overview. LRU within tier, **except active-detail**: least-recently-seen-in-plan first, then highest priority number (= farthest from focal) first. |
 | **What gets evicted from GPU atlas first?**    | Pure LRU on slot `touchOrder` (per pool). The orchestrator drives "what should be there"; the worker just reports what it lost.       |
 | **What LOD is chosen?**                        | `idealTargetLod` from WASM view query (computed from projected diagonal vs. ideal pixels-per-chunk), with a +2 LOD buffer (`detailOwnedLodRange`). |
@@ -345,7 +345,7 @@ PROXY_POOL_CAPACITY          = 64         # slots per pool
 
 # Render throttling
 RESIDENCY_RENDER_INTERVAL_MS      = 33 ms      # batch chunk arrivals, ≈30 fps cap
-MAIN_VIEW_UPLOAD_BUDGET      = 16 MB / frame
+MAIN_VIEW_UPLOAD_BUDGET      = 8 MB / frame
 ```
 
 ## Key file map

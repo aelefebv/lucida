@@ -1,29 +1,31 @@
 /** Main-thread API wrapping the GPU render worker. */
 import type {
-  SliceChunk,
-  VolumeChunk,
+  Chunk,
   VolumeLayerParams,
   SliceLayerParams,
   MinimapLayerParams,
   WorkerToMainMessage,
   ColdStateMessage,
   ViewHotStateMessage,
-  MissingChunk,
-  MissingProxy,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type {
+  UploadClient,
+  ChunksEvictedHandler,
+  WantedSetHandler,
+} from "../pipeline/upload/uploadClient.ts";
 
-export class RenderClient {
+export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
-  onChunksEvicted: ((datasetId: string, evicted: string[], skipped: string[]) => void) | null = null;
+  onChunksEvicted: ChunksEvictedHandler | null = null;
   /**
    * Missing entries are a discriminated union over chunks and proxies.
    * Consumers should match on `kind === "chunk"` to handle chunk gaps.
    */
-  onWantedSetDelta: ((epochs: SceneEpochs, missing: Array<MissingChunk | MissingProxy>) => void) | null = null;
+  onWantedSetDelta: WantedSetHandler | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -85,7 +87,7 @@ export class RenderClient {
     epochs: SceneEpochs,
   ) {
     const transferList: ArrayBuffer[] = [];
-    const workerChunks: VolumeChunk[] = chunks.map(chunk => {
+    const workerChunks: Chunk[] = chunks.map(chunk => {
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -122,7 +124,7 @@ export class RenderClient {
     epochs: SceneEpochs,
   ) {
     const transferList: ArrayBuffer[] = [];
-    const workerChunks: SliceChunk[] = chunks.map(chunk => {
+    const workerChunks: Chunk[] = chunks.map(chunk => {
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -259,7 +261,7 @@ export class RenderClient {
     chunkZ: number,
   ) {
     const transferList: ArrayBuffer[] = [];
-    const workerChunks: VolumeChunk[] = chunks.map(chunk => {
+    const workerChunks: Chunk[] = chunks.map(chunk => {
       // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
       // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
       const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength) as ArrayBuffer;

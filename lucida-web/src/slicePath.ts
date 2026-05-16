@@ -2,11 +2,12 @@
 import { Axis } from "./axes.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
-import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./renderLoopTypes.ts";
+import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
+import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { debugStats } from "./debug/debugStats.ts";
 
 export type SliceState = Record<string, never>;
@@ -26,12 +27,12 @@ interface SlicePlanResult {
 }
 
 /**
- * Upload+render phase: deliver decoded chunks via Orchestrator, build layer
+ * Upload+render phase: deliver decoded chunks via Uploader, build layer
  * params, and render.
  */
 function uploadAndRenderSlice(
   ctx: TickContext,
-  orchestrator: Orchestrator,
+  uploader: Uploader,
   sliceZ: number,
   sliceT: number,
   sliceC: number,
@@ -49,8 +50,8 @@ function uploadAndRenderSlice(
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
 
-  // Use Orchestrator delivery loop instead of uploadChunksForMembers
-  const budgetExhausted = orchestrator.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, sliceZ);
+  // Use Uploader delivery loop instead of uploadChunksForMembers
+  const budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, sliceZ);
 
   if (!shouldRender) return budgetExhausted;
 
@@ -151,6 +152,7 @@ function uploadAndRenderSlice(
 export function tickSlice(
   ctx: TickContext,
   orchestrator: Orchestrator,
+  uploader: Uploader,
   sliceZ: number,
   sliceT: number,
   sliceC: number,
@@ -184,7 +186,7 @@ export function tickSlice(
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
-  return uploadAndRenderSlice(ctx, orchestrator, sliceZ, sliceT, sliceC, planResult, shouldRender);
+  return uploadAndRenderSlice(ctx, uploader, sliceZ, sliceT, sliceC, planResult, shouldRender);
 }
 
 export function clearSliceForDataset(_state: SliceState, _dsId: string): void {}

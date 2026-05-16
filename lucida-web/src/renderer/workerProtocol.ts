@@ -22,7 +22,17 @@ export interface ResizeMessage {
   height: number;
 }
 
-export interface SliceChunk {
+/**
+ * A single chunk payload carried by `sliceChunkData`,
+ * `volumeChunkData`, and `minimapUploadOverviewChunksForLayer`. The
+ * shape is identical across all three callers (previously two parallel
+ * `SliceChunk` / `VolumeChunk` interfaces); folded into one `Chunk`
+ * type per the dechaos contract scan (Pass 5 finding: "structurally
+ * identical, fold or discriminate"). The `chunks: Chunk[]` array shape
+ * on the envelope messages is unchanged — that's a wire-protocol
+ * contract change tracked separately (see issue #620 discussion).
+ */
+export interface Chunk {
   data: ArrayBuffer;
   dataType: string;
   x: number;
@@ -35,7 +45,7 @@ export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
   datasetId: string;
-  chunks: SliceChunk[];
+  chunks: Chunk[];
   level: number;
   z: number;
   t: number;
@@ -50,20 +60,11 @@ export interface SliceChunkDataMessage {
   fullResZ: number;
 }
 
-export interface VolumeChunk {
-  data: ArrayBuffer;
-  dataType: string;
-  x: number;
-  y: number;
-  z: number;
-  key: string;
-}
-
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
   epochs: SceneEpochs;
   datasetId: string;
-  chunks: VolumeChunk[];
+  chunks: Chunk[];
   level: number;
   t: number;
   c: number;
@@ -201,7 +202,7 @@ export interface MinimapSetOverviewForLayerMessage {
 export interface MinimapUploadOverviewChunksForLayerMessage {
   type: "minimapUploadOverviewChunksForLayer";
   datasetId: string;
-  chunks: VolumeChunk[];
+  chunks: Chunk[];
   t: number;
   c: number;
   levelWidth: number;
@@ -263,9 +264,10 @@ export interface ColdStateActiveEntry {
   /**
    * Parent well id for field entries (so the worker can map a field's
    * descriptor back to its parent's wellProxyHandle). `null` for
-   * non-field entries.
+   * non-field entries. The orchestrator always emits a string or null
+   * — never `undefined` — so the field is non-optional.
    */
-  parentWellId?: string | null;
+  parentWellId: string | null;
   /**
    * Precomputed column-major model matrix mapping the entity's
    * `[0,1]^3` unit cube to world space. The orchestrator derives this
@@ -396,9 +398,9 @@ export type MissingChunk = {
  * A proxy asset that the worker is missing from its proxy atlas.
  *
  * `datasetId` is included so the orchestrator can clear its
- * `proxyDeliveredToWorker` tracking by composite key without scanning
- * `_lastProxyRequests`. Populated from `coldState.datasetId` in
- * `wantedSet.computeWantedSet`.
+ * `DeliveryTracker` proxy-delivered entry by composite key without
+ * scanning `_lastProxyRequests`. Populated from `coldState.datasetId`
+ * in `wantedSet.computeWantedSet`.
  */
 export type MissingProxy = {
   kind: "proxy";
