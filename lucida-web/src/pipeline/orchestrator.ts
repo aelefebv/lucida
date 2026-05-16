@@ -284,11 +284,30 @@ export class Orchestrator {
    */
   private lastViewEpochByDataset = new Map<string, number>();
   private _lastRequests: ChunkRequest[] = [];
-  private _lastVisibleRegion: VisibleRegion | null = null;
-  private _lastEntities: EntitySnapshot[] = [];
-  private _lastCachedKeyCounts = new Map<string, number>();
-  /** Last filtered requests, kept for the deliverToWorker resend pass on cache hits. */
-  private _lastFilteredRequests: ChunkRequest[] = [];
+  /**
+   * Per-dataset snapshot of the most recent visible region. Keyed by
+   * datasetId. Consumed by the `orchDebug` aggregator (which iterates
+   * every dataset). Cleared per-dataset by {@link clearMemberResources}.
+   */
+  private _lastVisibleRegion = new Map<string, VisibleRegion>();
+  /**
+   * Per-dataset snapshot of the most recent entity list. Keyed by
+   * datasetId. Same shape and lifecycle as {@link _lastVisibleRegion}.
+   */
+  private _lastEntities = new Map<string, EntitySnapshot[]>();
+  /**
+   * Per-dataset cached-key counts. Outer key is datasetId; inner map
+   * is entityId → number of CpuCache-cached chunk keys. Consumed by
+   * the `orchDebug` aggregator.
+   */
+  private _lastCachedKeyCounts = new Map<string, Map<string, number>>();
+  /**
+   * Per-dataset last filtered requests, kept for the deliverToWorker
+   * resend pass on cache hits. Keyed by datasetId so multi-dataset
+   * rebuilds preserve every dataset's requests (previously a flat
+   * `ChunkRequest[]` was last-dataset-wins; see #613).
+   */
+  private _lastFilteredRequests = new Map<string, ChunkRequest[]>();
   /**
    * Per-dataset snapshot of the most recent full `plan()` output. Held so
    * the DebugPanel "dump" buttons can print all datasets, not just the
@@ -297,11 +316,13 @@ export class Orchestrator {
    */
   private _lastPlanByDataset = new Map<string, RequestPlan>();
   /**
-   * Last proxy requests produced by `plan()`, kept for the deliverToWorker
-   * proxy resend pass on cache hits (see `:735-751`). Not re-submitted to
-   * CpuCache — fetches stay alive on their own now that submit is additive.
+   * Per-dataset last proxy requests produced by `plan()`, kept for the
+   * deliverToWorker proxy resend pass on cache hits (see `:735-751`).
+   * Not re-submitted to CpuCache — fetches stay alive on their own now
+   * that submit is additive. Keyed by datasetId so multi-dataset
+   * rebuilds preserve every dataset's proxy requests (see #613).
    */
-  private _lastProxyRequests: ProxyRequest[] = [];
+  private _lastProxyRequests = new Map<string, ProxyRequest[]>();
 
   // Delivery state — tracks what's been sent to the GPU worker
   private deliverySentToWorker = new Map<string, Set<string>>();
@@ -581,10 +602,12 @@ export class Orchestrator {
       // longer filters cached chunks (CpuCache.submit() refreshes them
       // and dedups internally), so _lastFilteredRequests sees every
       // requested chunk and the re-send loop can find any of them.
+      const cachedKeyCountsForDataset = new Map<string, number>();
       for (const entity of entities) {
         const cachedKeys = ctx.cpuCache.snapshot().cached.get(entity.entityId);
-        this._lastCachedKeyCounts.set(entity.entityId, cachedKeys?.size ?? 0);
+        cachedKeyCountsForDataset.set(entity.entityId, cachedKeys?.size ?? 0);
       }
+      this._lastCachedKeyCounts.set(dsId, cachedKeyCountsForDataset);
 
       // 3d. Plan. The opaque carry-forward state travels separately
       // from the snapshot via {@link PlanningState}; we store the
@@ -595,8 +618,8 @@ export class Orchestrator {
       this.planningState.set(dsId, result.nextState);
       this.requestEpoch = result.epochs.request;
       this._lastRequests = result.requests;
-      this._lastVisibleRegion = visibleRegion;
-      this._lastEntities = entities;
+      this._lastVisibleRegion.set(dsId, visibleRegion);
+      this._lastEntities.set(dsId, entities);
       this._lastPlanByDataset.set(dsId, result);
 
       const entityById = new Map(entities.map(e => [e.entityId, e]));
@@ -617,14 +640,15 @@ export class Orchestrator {
       // The planner stamps `datasetId` onto every ChunkRequest and
       // ProxyRequest at emit time (from `snapshot.datasetId`); no
       // post-`plan()` mutation pass is needed here.
-      this._lastProxyRequests = result.proxyRequests;
+      this._lastProxyRequests.set(dsId, result.proxyRequests);
 
       // 3i. Track this dataset's requests for re-send / wid-mapping.
       // No LOD-filter step gates the request stream: planning emits
       // exactly one level per entity. `_lastFilteredRequests` keeps
       // its historical name for compatibility with the re-send loop
-      // below.
-      this._lastFilteredRequests = result.requests;
+      // below. Per-dataset map so multi-dataset rebuilds preserve every
+      // dataset's requests (see #613).
+      this._lastFilteredRequests.set(dsId, result.requests);
       // Build wid → entityId for this dataset so handleChunksEvicted
       // can resolve `cpuCache.markRejected(entityId, ...)` from the
       // worker's report (which carries workerMemberId, not entityId).
@@ -794,7 +818,11 @@ export class Orchestrator {
 
     // Step 4 — Orchestrator debug snapshot
     if (debugStats.enabled) {
-      // Collect from all datasets' plans (last dataset wins for activeSet — fine for single-dataset debug)
+      // Aggregate from all per-dataset state (active sets, visible
+      // regions, entity diagnostics, cached-key counts). Multi-dataset
+      // rebuilds previously kept only the last-processed dataset's
+      // snapshot for these fields; #613 made the underlying state
+      // per-dataset, so the aggregator now walks every entry.
       const orchDebug: OrchDebug = {
         activeSet: [],
         laneCount: { detail: 0, prefetch: 0, overview: 0 },
@@ -887,22 +915,41 @@ export class Orchestrator {
         }));
       }
 
-      // Coordinate diagnostic
-      orchDebug.visibleRegion = this._lastVisibleRegion
+      // Coordinate diagnostic. OrchDebug exposes a single
+      // `visibleRegion` field; pick the first dataset's region (insertion
+      // order matches dataset iteration in step 3) so it's deterministic
+      // and matches the single-dataset case verbatim. Multi-dataset
+      // consumers wanting every region can read the per-dataset map
+      // directly via the orchestrator (debug surface only).
+      const firstVisibleRegion = this._lastVisibleRegion.values().next().value;
+      orchDebug.visibleRegion = firstVisibleRegion
         ? {
-            xyBounds: this._lastVisibleRegion.xyBoundsVox,
-            zRange: this._lastVisibleRegion.zRangeVox,
-            effectiveZoom: this._lastVisibleRegion.effectiveZoom,
+            xyBounds: firstVisibleRegion.xyBoundsVox,
+            zRange: firstVisibleRegion.zRangeVox,
+            effectiveZoom: firstVisibleRegion.effectiveZoom,
           }
         : null;
-      orchDebug.entityDiag = this._lastEntities.slice(0, 5).map(e => ({
-        entityId: e.entityId,
-        position: e.layoutPositionVox,
-        fullShape: e.levels.length > 0
-          ? [e.levels[0].shape[Axis.X], e.levels[0].shape[Axis.Y]] as [number, number]
-          : null,
-        cachedKeys: this._lastCachedKeyCounts.get(e.entityId) ?? 0,
-      }));
+      // entityDiag is a flat array on the wire; aggregate the first
+      // 5 entities across every dataset so multi-dataset debug isn't
+      // truncated to the last-processed dataset's first 5 (the prior
+      // last-dataset-wins behavior).
+      const entityDiagEntries: OrchDebug["entityDiag"] = [];
+      for (const [dsId, entities] of this._lastEntities) {
+        const cachedKeyCountsForDataset = this._lastCachedKeyCounts.get(dsId);
+        for (const e of entities) {
+          if (entityDiagEntries.length >= 5) break;
+          entityDiagEntries.push({
+            entityId: e.entityId,
+            position: e.layoutPositionVox,
+            fullShape: e.levels.length > 0
+              ? [e.levels[0].shape[Axis.X], e.levels[0].shape[Axis.Y]] as [number, number]
+              : null,
+            cachedKeys: cachedKeyCountsForDataset?.get(e.entityId) ?? 0,
+          });
+        }
+        if (entityDiagEntries.length >= 5) break;
+      }
+      orchDebug.entityDiag = entityDiagEntries;
 
       debugStats.orch = orchDebug;
     }
@@ -1331,10 +1378,15 @@ export class Orchestrator {
     let remaining = budget;
     let budgetExhausted = false;
 
-    // Build target level map from current plan for LOD filtering
+    // Build target level map from current plan for LOD filtering.
+    // Merge across all datasets so multi-dataset rebuilds see every
+    // dataset's requested levels, not just the last-processed one
+    // (see #613).
     const targetLevelByImage = new Map<string, number>();
-    for (const req of this._lastFilteredRequests) {
-      targetLevelByImage.set(req.imageId, req.level);
+    for (const requests of this._lastFilteredRequests.values()) {
+      for (const req of requests) {
+        targetLevelByImage.set(req.imageId, req.level);
+      }
     }
 
     // Drain new deliveries from CpuCache
@@ -1395,40 +1447,44 @@ export class Orchestrator {
     // Re-send evicted chunks (budget permitting).
     // Use _lastFilteredRequests (target-level only) to avoid flipping the atlas
     // config between levels, which clears the sent set and causes flickering.
-    if (!budgetExhausted && this._lastFilteredRequests.length > 0) {
-      for (const req of this._lastFilteredRequests) {
-        if (budgetExhausted) break;
-        if (req.lane === "prefetch") continue;
-        this.currentUploadStats.resendChunksConsidered++;
+    // Iterate every dataset's requests so multi-dataset rebuilds resend
+    // for every dataset, not just the last-processed one (see #613).
+    if (!budgetExhausted) {
+      outer: for (const requests of this._lastFilteredRequests.values()) {
+        for (const req of requests) {
+          if (budgetExhausted) break outer;
+          if (req.lane === "prefetch") continue;
+          this.currentUploadStats.resendChunksConsidered++;
 
-        const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
-        const ss = this.deliverySentToWorker.get(wid);
-        if (ss?.has(req.chunkKey)) {
-          this.currentUploadStats.resendChunksAlreadySent++;
-          continue;
-        }
+          const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
+          const ss = this.deliverySentToWorker.get(wid);
+          if (ss?.has(req.chunkKey)) {
+            this.currentUploadStats.resendChunksAlreadySent++;
+            continue;
+          }
 
-        // Worker rejected this chunk under the current camera (atlas
-        // full + too far). Don't re-attempt until the next cold-state
-        // rebuild clears `deliveryRejectedByWorker`.
-        if (this.deliveryRejectedByWorker.get(wid)?.has(req.chunkKey)) {
-          this.currentUploadStats.resendChunksRejected++;
-          continue;
-        }
+          // Worker rejected this chunk under the current camera (atlas
+          // full + too far). Don't re-attempt until the next cold-state
+          // rebuild clears `deliveryRejectedByWorker`.
+          if (this.deliveryRejectedByWorker.get(wid)?.has(req.chunkKey)) {
+            this.currentUploadStats.resendChunksRejected++;
+            continue;
+          }
 
-        const cached = ctx.cpuCache.getCachedChunk(req.entityId, req.chunkKey);
-        if (!cached) {
-          this.currentUploadStats.resendChunksNotCached++;
-          continue;
-        }
+          const cached = ctx.cpuCache.getCachedChunk(req.entityId, req.chunkKey);
+          if (!cached) {
+            this.currentUploadStats.resendChunksNotCached++;
+            continue;
+          }
 
-        const sent = this.sendDeliveryToWorker(ctx, cached, multiChannel, sliceZ, epochs);
-        if (sent > 0) {
-          this.currentUploadStats.resendChunkUploads++;
-          this.currentUploadStats.bytesUploaded += sent;
-          this.recordUploadEvent(tickStart, sent, true);
-          remaining -= sent;
-          if (remaining <= 0) budgetExhausted = true;
+          const sent = this.sendDeliveryToWorker(ctx, cached, multiChannel, sliceZ, epochs);
+          if (sent > 0) {
+            this.currentUploadStats.resendChunkUploads++;
+            this.currentUploadStats.bytesUploaded += sent;
+            this.recordUploadEvent(tickStart, sent, true);
+            remaining -= sent;
+            if (remaining <= 0) budgetExhausted = true;
+          }
         }
       }
     }
@@ -1439,32 +1495,36 @@ export class Orchestrator {
     // anything already tracked as delivered, and look up the cached
     // entry via `getCachedProxy`. New deliveries (above) populate
     // `proxyDeliveredToWorker` themselves; this pass closes the gap
-    // for cache hits where `submit()` is now a no-op.
-    if (!budgetExhausted && this._lastProxyRequests.length > 0) {
-      for (const req of this._lastProxyRequests) {
-        if (budgetExhausted) break;
-        this.currentUploadStats.resendProxiesConsidered++;
+    // for cache hits where `submit()` is now a no-op. Iterate every
+    // dataset's proxy requests so multi-dataset rebuilds resend for
+    // every dataset, not just the last-processed one (see #613).
+    if (!budgetExhausted) {
+      outer: for (const requests of this._lastProxyRequests.values()) {
+        for (const req of requests) {
+          if (budgetExhausted) break outer;
+          this.currentUploadStats.resendProxiesConsidered++;
 
-        if (this.proxyDeliveredToWorker.has(proxyKeyFromRequest(req))) {
-          this.currentUploadStats.resendProxiesAlreadyDelivered++;
-          continue;
-        }
+          if (this.proxyDeliveredToWorker.has(proxyKeyFromRequest(req))) {
+            this.currentUploadStats.resendProxiesAlreadyDelivered++;
+            continue;
+          }
 
-        const cached = ctx.cpuCache.getCachedProxy(
-          req.datasetId, req.entityId, req.kind, req.t, req.c,
-        );
-        if (!cached) {
-          this.currentUploadStats.resendProxiesNotCached++;
-          continue;
-        }
+          const cached = ctx.cpuCache.getCachedProxy(
+            req.datasetId, req.entityId, req.kind, req.t, req.c,
+          );
+          if (!cached) {
+            this.currentUploadStats.resendProxiesNotCached++;
+            continue;
+          }
 
-        const sent = this.sendProxyDeliveryToWorker(ctx, cached, epochs);
-        if (sent > 0) {
-          this.currentUploadStats.resendProxyUploads++;
-          this.currentUploadStats.bytesUploaded += sent;
-          this.recordUploadEvent(tickStart, sent, true);
-          remaining -= sent;
-          if (remaining <= 0) budgetExhausted = true;
+          const sent = this.sendProxyDeliveryToWorker(ctx, cached, epochs);
+          if (sent > 0) {
+            this.currentUploadStats.resendProxyUploads++;
+            this.currentUploadStats.bytesUploaded += sent;
+            this.recordUploadEvent(tickStart, sent, true);
+            remaining -= sent;
+            if (remaining <= 0) budgetExhausted = true;
+          }
         }
       }
     }
@@ -1585,6 +1645,19 @@ export class Orchestrator {
     // dataset call and per-member calls; one of them clears.
     delete debugStats.planning.byDataset[workerMemberId];
     this._lastPlanByDataset.delete(workerMemberId);
+
+    // Drop per-dataset state added in #613. All keyed by datasetId; for
+    // member-shaped ids these are no-ops, which matches the
+    // best-effort cleanup pattern above.
+    this._lastFilteredRequests.delete(workerMemberId);
+    this._lastProxyRequests.delete(workerMemberId);
+    this._lastEntities.delete(workerMemberId);
+    this._lastVisibleRegion.delete(workerMemberId);
+    this._lastCachedKeyCounts.delete(workerMemberId);
+    // Previously absent — without this delete, a dataset removed and
+    // re-added kept its prior `PlanningState` (`previousActiveSet` etc.)
+    // across the gap. See dechaos contract-scan Verified-assumption #3.
+    this.planningState.delete(workerMemberId);
   }
 
   /**

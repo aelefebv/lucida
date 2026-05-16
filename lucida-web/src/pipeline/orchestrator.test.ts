@@ -676,7 +676,11 @@ describe("proxy delivery tracking", () => {
     const req = makeProxyRequest();
 
     // Pre-populate _lastProxyRequests so the resend pass has work to do.
-    (orch as unknown as { _lastProxyRequests: ProxyRequest[] })._lastProxyRequests = [req];
+    // #613: the field is now per-dataset (`Map<string, ProxyRequest[]>`)
+    // so multi-dataset rebuilds resend for every dataset. Tests that
+    // seed it directly use a single synthetic dsId.
+    (orch as unknown as { _lastProxyRequests: Map<string, ProxyRequest[]> })
+      ._lastProxyRequests = new Map([["ds-test", [req]]]);
 
     // Cache returns the proxy on getCachedProxy lookup.
     const cached = new Map<string, ReadyProxyDelivery>();
@@ -1171,13 +1175,15 @@ describe("chunk delivery (drain pass)", () => {
    * deliverToWorker depends on `_lastFilteredRequests` (target-LOD map +
    * resend loop) being populated. Tests that pin drain-pass behavior set
    * this directly so the test doesn't have to round-trip through plan().
+   * #613: the field is per-dataset (`Map<string, ChunkRequest[]>`); tests
+   * use a single synthetic dsId.
    */
   function seedLastRequests(
     orch: import("./orchestrator.ts").Orchestrator,
     reqs: ChunkRequest[],
   ): void {
-    (orch as unknown as { _lastFilteredRequests: ChunkRequest[] })
-      ._lastFilteredRequests = reqs;
+    (orch as unknown as { _lastFilteredRequests: Map<string, ChunkRequest[]> })
+      ._lastFilteredRequests = new Map([["ds-test", reqs]]);
   }
 
   it("drain happy path: slice mode → sliceChunkData called with expected args", () => {
@@ -1515,8 +1521,9 @@ describe("handleChunksEvicted", () => {
 //   - `deliverySentToWorker.clear()` runs once per per-dataset step
 //     inside `planAndFetch`, effectively clearing everything early on.
 //
-// Slice 4 (#613) fixes the per-dataset maps. Once shipped the
-// `it.fails(...)` markers below flip to `it(...)`.
+// Slice 4 (#613) fixed the per-dataset maps. The previously
+// `it.fails(...)` regressions are now `it(...)` and pass against the
+// shipped fix; see commit history.
 
 describe("multi-dataset upload characterization", () => {
   let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
@@ -1546,26 +1553,14 @@ describe("multi-dataset upload characterization", () => {
 
   function makeTwoDatasetEntries(): Map<string, DatasetEntry> {
     const content1 = createMockContent();
+    // The mock scene's `view_query` is dsId-agnostic — it returns the
+    // same `field-0` / `img-0` entity for both datasets. To keep both
+    // datasets producing requests (otherwise the entity has no matching
+    // image in the manifest → `levels=[]` → zero requests), ds2 reuses
+    // the same `img-0` image spec under a different dataset_id.
     const content2: DatasetManifest = {
       ...createMockContent(),
       dataset_id: "ds2",
-      images: [
-        {
-          image_id: "img-1",
-          owner: "field-0",
-          multiscale: {
-            axes: [],
-            data_type: "uint16",
-            levels: [{
-              level_index: 0,
-              shape: [1, 1, 1, 512, 512],
-              chunk_shape: [1, 1, 1, 256, 256],
-              grid_shape: [1, 1, 1, 2, 2],
-              scale: [1, 1, 1, 1, 1],
-            }],
-          },
-        },
-      ],
     } as unknown as DatasetManifest;
     return new Map<string, DatasetEntry>([
       ["ds1", { manifest: content1 }],
@@ -1594,53 +1589,62 @@ describe("multi-dataset upload characterization", () => {
     } as unknown as TickContext;
   }
 
-  // The current bug: after a multi-dataset rebuild, _lastFilteredRequests
-  // holds only the LAST dataset's requests, not a per-dataset map.
-  // After Slice 4 lands, the field becomes per-dataset and this test
-  // flips to `it(...)` (verifying ds1's requests survived).
-  it.fails(
-    "documents bug; fixed in Slice 4 #613: _lastFilteredRequests keeps both datasets' requests",
+  // Fixed in Slice 4 (#613); see commit history. `_lastFilteredRequests`
+  // is a `Map<datasetId, ChunkRequest[]>`, so a multi-dataset rebuild
+  // preserves every dataset's requests rather than the last-processed
+  // one's. The resend pass in `deliverToWorker` iterates every entry.
+  it(
+    "fixed in Slice 4 #613: _lastFilteredRequests keeps both datasets' requests",
     () => {
       const orch = new Orchestrator();
       const scene = makeMultiDatasetScene();
       const datasets = makeTwoDatasetEntries();
       orch.planAndFetch(makeCtx(scene, datasets), new Map());
 
-      const lastReqs = (orch as unknown as {
-        _lastFilteredRequests: ChunkRequest[];
+      const lastFilteredByDataset = (orch as unknown as {
+        _lastFilteredRequests: Map<string, ChunkRequest[]>;
       })._lastFilteredRequests;
-      // Today: only ds2's image-1 requests survive. Post-Slice-4: both.
-      const imageIds = new Set(lastReqs.map(r => r.imageId));
-      expect(imageIds.has("img-0")).toBe(true);
-      expect(imageIds.has("img-1")).toBe(true);
+      // Per-dataset map exposes both ds1 and ds2 entries. Pre-#613 the
+      // flat field would have only the last-processed dataset's
+      // requests; now each dataset's request list survives. (The mock
+      // `view_query` is dsId-agnostic and returns `field-0/img-0` for
+      // both datasets, so the per-dataset arrays are non-empty for
+      // both keys; the test pins survival, not differentiation.)
+      expect(lastFilteredByDataset.has("ds1")).toBe(true);
+      expect(lastFilteredByDataset.has("ds2")).toBe(true);
+      const ds1Reqs = lastFilteredByDataset.get("ds1") ?? [];
+      const ds2Reqs = lastFilteredByDataset.get("ds2") ?? [];
+      expect(ds1Reqs.length).toBeGreaterThan(0);
+      expect(ds2Reqs.length).toBeGreaterThan(0);
+      // Pre-#613 would have only one populated entry (overwritten);
+      // post-#613 both datasets' arrays land in the map under their
+      // own keys.
+      const ds1Images = new Set(ds1Reqs.map(r => r.imageId));
+      const ds2Images = new Set(ds2Reqs.map(r => r.imageId));
+      expect(ds1Images.has("img-0")).toBe(true);
+      expect(ds2Images.has("img-0")).toBe(true);
     },
   );
 
-  it.fails(
-    "documents bug; fixed in Slice 4 #613: _lastProxyRequests keeps both datasets' proxies",
+  it(
+    "fixed in Slice 4 #613: _lastProxyRequests keeps both datasets' proxies",
     () => {
-      // The proxy list has the same last-dataset-wins shape. Today's
-      // fixtures don't produce any proxies (visible_entities only has
-      // field-0 in both datasets and the plan doesn't promote to
-      // proxy), so we assert the symmetric shape: both datasets'
-      // requests should be reachable via the field even if today's
-      // arrays are empty. Post-Slice-4 the per-dataset map exposes
-      // both keys.
+      // Today's fixtures don't produce any actual proxy requests
+      // (visible_entities only has field-0 in both datasets and the
+      // plan doesn't promote to proxy), so this asserts the per-dataset
+      // map shape: both datasets register entries (even when empty),
+      // confirming the last-dataset-wins overwrite is gone.
       const orch = new Orchestrator();
       const scene = makeMultiDatasetScene();
       const datasets = makeTwoDatasetEntries();
       orch.planAndFetch(makeCtx(scene, datasets), new Map());
 
-      // We can't directly inspect a per-dataset map field that doesn't
-      // exist yet, so we assert the post-refactor presence of the
-      // field name. Slice 4 will add `_lastProxyRequestsByDataset` (or
-      // equivalent) and this test will check both ds1 and ds2 entries.
       const lastProxyByDataset = (orch as unknown as {
-        _lastProxyRequestsByDataset?: Map<string, ProxyRequest[]>;
-      })._lastProxyRequestsByDataset;
+        _lastProxyRequests: Map<string, ProxyRequest[]>;
+      })._lastProxyRequests;
       expect(lastProxyByDataset).toBeDefined();
-      expect(lastProxyByDataset!.has("ds1")).toBe(true);
-      expect(lastProxyByDataset!.has("ds2")).toBe(true);
+      expect(lastProxyByDataset.has("ds1")).toBe(true);
+      expect(lastProxyByDataset.has("ds2")).toBe(true);
     },
   );
 
