@@ -5,9 +5,9 @@
  * Does not decode, normalize, or cache.
  */
 
-import type { WireFormat } from "../manifestTypes.ts";
+import type { WireFormat } from "../../manifestTypes.ts";
 import { extractDataType } from "./decodePool.ts";
-import type { ProxyKind } from "./assetCatalog.ts";
+import type { ProxyKind } from "../assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
 // Interface

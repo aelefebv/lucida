@@ -9,7 +9,7 @@ import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, cle
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { Orchestrator } from "./pipeline/orchestrator.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
-import type { CpuCache } from "./pipeline/cpuCache.ts";
+import type { CpuCache } from "./pipeline/fetch/index.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 

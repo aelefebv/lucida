@@ -14,9 +14,9 @@ import type {
   ActiveSetEntry,
   ProxyRequest,
   RequestPlan,
-} from "./planning/index.ts";
-import type { SceneEpochs } from "./epochs.ts";
-import { emptyPlanStats } from "./planning/index.ts";
+} from "../planning/index.ts";
+import type { SceneEpochs } from "../epochs.ts";
+import { emptyPlanStats } from "../planning/index.ts";
 
 // ---------------------------------------------------------------------------
 // Test Factories

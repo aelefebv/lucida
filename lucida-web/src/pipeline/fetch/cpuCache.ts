@@ -19,9 +19,9 @@ import type {
   ChunkRequest,
   CacheStateSnapshot,
   ProxyRequest,
-} from "./planning/index.ts";
-import type { SceneEpochs } from "./epochs.ts";
-import { debugLog } from "../debug/logging.ts";
+} from "../planning/index.ts";
+import type { SceneEpochs } from "../epochs.ts";
+import { debugLog } from "../../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
 // Constants

@@ -2,7 +2,7 @@
 import type { WasmScene } from "lucida-core";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { RenderClient } from "./renderer/renderClient.ts";
-import type { CpuCache } from "./pipeline/cpuCache.ts";
+import type { CpuCache } from "./pipeline/fetch/index.ts";
 import type { AssetCatalog } from "./pipeline/assetCatalog.ts";
 import type { Session } from "./session.ts";
 
