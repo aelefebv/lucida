@@ -11,10 +11,14 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16 } from "./dataTypeUtil.ts";
 import {
-  parseChunkKey,
   parseCompositeKey,
   makeCompositeKey,
 } from "./chunkKeys.ts";
+import {
+  chunkDistSq as sharedChunkDistSq,
+  findFarthestSlot as sharedFindFarthestSlot,
+} from "./eviction.ts";
+import { remapSharedIndirection } from "./remap.ts";
 
 /** Per-LOD indirection section metadata. */
 export interface LodIndirectionMeta {
@@ -51,38 +55,25 @@ export interface AtlasState {
  * Iterates composite slot keys, looks up each entity's lodMetas, and writes
  * chunks into the correct per-entity per-LOD section. Chunks for other T/C
  * or entities not in entityMetas remain in atlas.slots but are unmapped.
+ *
+ * Delegates to the shared `remapSharedIndirection` kernel. Volume mode
+ * passes `targetChunkZForMember: null` to (a) disable the Z filter and
+ * (b) select volume index arithmetic (Z multiplier included).
  */
 export function remapIndirection(
   atlas: AtlasState,
   currentT: number,
   currentC: number,
 ): void {
-  atlas.indirectionData.fill(0xFFFFFFFF);
-  atlas.slotGridIdx.fill(-1);
-
-  for (const [compositeKey, slotIndex] of atlas.slots) {
-    const parsed = parseCompositeKey(compositeKey);
-    if (!parsed) continue;
-
-    const lodMetas = atlas.entityMetas.get(parsed.memberId);
-    if (!lodMetas) continue; // entity no longer in active set
-
-    const chunk = parseChunkKey(parsed.chunkKey);
-    if (!chunk) continue;
-    if (chunk.t !== currentT) continue;
-    if (chunk.c !== currentC) continue;
-
-    const meta = lodMetas.find(m => m.level === chunk.level);
-    if (!meta) continue;
-
-    const [, gridY, gridX] = meta.gridDims;
-    const globalIdx = meta.offset + chunk.z * gridY * gridX + chunk.y * gridX + chunk.x;
-    if (globalIdx >= 0 && globalIdx < atlas.indirectionData.length) {
-      atlas.indirectionData[globalIdx] = slotIndex;
-      atlas.slotGridIdx[slotIndex] = globalIdx;
-    }
-  }
-
+  remapSharedIndirection({
+    slots: atlas.slots,
+    slotGridIdx: atlas.slotGridIdx,
+    indirectionData: atlas.indirectionData,
+    entityMetas: atlas.entityMetas,
+    currentT,
+    currentC,
+    targetChunkZForMember: null,
+  });
   atlas.indirectionDirty = true;
 }
 
@@ -204,65 +195,32 @@ function destroyAtlas(atlas: AtlasState): void {
 }
 
 /**
- * Squared distance from a chunk grid coordinate to a reference point in [0,1] entity-local space.
- * Uses the chunk's own LOD dims (from lodMeta) for normalization since LODs may have different grids.
+ * Squared distance from a chunk grid coordinate to a reference point
+ * in [0,1] entity-local space. Volume-mode wrapper around the shared
+ * 2D/3D-capable kernel (`eviction.chunkDistSq`); the explicit `cz`
+ * argument keeps the volume call sites locally readable.
  */
 function chunkDistSq(
   lodMeta: LodIndirectionMeta,
   cx: number, cy: number, cz: number,
   cam: [number, number, number],
 ): number {
-  const [, levelH, levelW] = lodMeta.levelDims;
-  const [, , chunkX] = lodMeta.chunkDims;
-  const [, chunkY] = lodMeta.chunkDims;
-  const [chunkZ] = lodMeta.chunkDims;
-  const levelD = lodMeta.levelDims[0];
-  const px = (cx + 0.5) * chunkX / Math.max(levelW, 1);
-  const py = (cy + 0.5) * chunkY / Math.max(levelH, 1);
-  const pz = (cz + 0.5) * chunkZ / Math.max(levelD, 1);
-  const dx = px - cam[0];
-  const dy = py - cam[1];
-  const dz = pz - cam[2];
-  return dx * dx + dy * dy + dz * dz;
+  return sharedChunkDistSq(lodMeta, cx, cy, cz, cam);
 }
 
 /**
- * Find the best eviction candidate: prefer stale (unmapped) chunks, then farthest mapped chunk.
- * Distance reference is per-entity (rayHitPerEntity).
+ * Find the best eviction candidate: prefer stale (unmapped) chunks,
+ * then farthest mapped chunk. Distance reference is per-entity
+ * (`rayHitPerEntity`). Delegates to the shared kernel with `is3D: true`.
  */
 function findFarthestSlot(atlas: AtlasState): { key: string; dist: number } {
-  let farthestKey = "";
-  let maxDist = -1;
-
-  for (const [compositeKey, slotIdx] of atlas.slots) {
-    const gridIdx = atlas.slotGridIdx[slotIdx];
-    if (gridIdx < 0) {
-      // Stale chunk (not mapped in indirection) — always prefer for eviction
-      return { key: compositeKey, dist: Infinity };
-    }
-
-    const parsed = parseCompositeKey(compositeKey);
-    if (!parsed) continue;
-    const lodMetas = atlas.entityMetas.get(parsed.memberId);
-    if (!lodMetas) {
-      // Entity gone from active set — prefer for eviction
-      return { key: compositeKey, dist: Infinity };
-    }
-    const chunk = parseChunkKey(parsed.chunkKey);
-    if (!chunk) continue;
-    const lodMeta = lodMetas.find(m => m.level === chunk.level);
-    if (!lodMeta) continue;
-
-    const cam = rayHitPerEntity.get(parsed.memberId) ?? [0.5, 0.5, 0.5];
-    const dist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
-
-    if (dist > maxDist) {
-      maxDist = dist;
-      farthestKey = compositeKey;
-    }
-  }
-
-  return { key: farthestKey, dist: maxDist };
+  return sharedFindFarthestSlot({
+    slots: atlas.slots,
+    slotGridIdx: atlas.slotGridIdx,
+    entityMetas: atlas.entityMetas,
+    cameraFor: (memberId) => rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5],
+    is3D: true,
+  });
 }
 
 /**

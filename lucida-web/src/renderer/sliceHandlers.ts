@@ -11,7 +11,12 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16Slice } from "./dataTypeUtil.ts";
 import { type LodIndirectionMeta } from "./volumeHandlers.ts";
-import { parseChunkKey, parseCompositeKey, makeCompositeKey } from "./chunkKeys.ts";
+import { parseCompositeKey, makeCompositeKey } from "./chunkKeys.ts";
+import {
+  chunkDistSq as sharedChunkDistSq,
+  findFarthestSlot as sharedFindFarthestSlot,
+} from "./eviction.ts";
+import { remapSharedIndirection } from "./remap.ts";
 
 /** Per-entity Z metadata for slice mode (drives Z-chunk filtering and re-slice detection). */
 export interface SliceEntityZInfo {
@@ -83,6 +88,11 @@ function computeTargetChunkZ(zInfo: SliceEntityZInfo | undefined, currentZ: numb
  * Remap the 2D indirection buffer for the current state.
  * Walks composite slot keys, looks up each entity's lodMetas + Z info,
  * and writes chunks matching current T/C and target Z into per-entity sections.
+ *
+ * Delegates to the shared `remapSharedIndirection` kernel; the slice
+ * mode is selected by passing a non-null `targetChunkZForMember`
+ * callback (which also drops the volume Z multiplier in the
+ * global-index arithmetic).
  */
 export function remapSliceIndirection(
   atlas: SliceAtlasState,
@@ -90,36 +100,16 @@ export function remapSliceIndirection(
   currentC: number,
   currentZ: number,
 ): void {
-  atlas.indirectionData.fill(0xFFFFFFFF);
-  atlas.slotGridIdx.fill(-1);
-
-  for (const [compositeKey, slotIndex] of atlas.slots) {
-    const parsedComposite = parseCompositeKey(compositeKey);
-    if (!parsedComposite) continue;
-
-    const lodMetas = atlas.entityMetas.get(parsedComposite.memberId);
-    if (!lodMetas) continue; // entity no longer in active set
-
-    const chunk = parseChunkKey(parsedComposite.chunkKey);
-    if (!chunk) continue;
-    if (chunk.t !== currentT) continue;
-    if (chunk.c !== currentC) continue;
-
-    // Z filter (per entity)
-    const targetChunkZ = computeTargetChunkZ(atlas.entityZInfo.get(parsedComposite.memberId), currentZ);
-    if (targetChunkZ !== null && chunk.z !== targetChunkZ) continue;
-
-    const meta = lodMetas.find(m => m.level === chunk.level);
-    if (!meta) continue;
-
-    const [, , lodGridX] = meta.gridDims;
-    const globalIdx = meta.offset + chunk.y * lodGridX + chunk.x;
-    if (globalIdx >= 0 && globalIdx < atlas.indirectionData.length) {
-      atlas.indirectionData[globalIdx] = slotIndex;
-      atlas.slotGridIdx[slotIndex] = globalIdx;
-    }
-  }
-
+  remapSharedIndirection({
+    slots: atlas.slots,
+    slotGridIdx: atlas.slotGridIdx,
+    indirectionData: atlas.indirectionData,
+    entityMetas: atlas.entityMetas,
+    currentT,
+    currentC,
+    targetChunkZForMember: (memberId) =>
+      computeTargetChunkZ(atlas.entityZInfo.get(memberId), currentZ),
+  });
   atlas.indirectionDirty = true;
 }
 
@@ -213,54 +203,33 @@ export function resizeSliceIndirection(ctx: WorkerCtx, atlas: SliceAtlasState, t
   });
 }
 
-/** Squared distance from a chunk grid coordinate to a reference UV. Uses entity-specific level dims. */
+/**
+ * Squared distance from a chunk grid coordinate to a reference UV.
+ * Slice-mode wrapper around the shared 2D/3D-capable kernel
+ * (`eviction.chunkDistSq` with `cz: null`); the explicit 2D signature
+ * keeps the slice call sites locally readable.
+ */
 function chunkDistSq2D(
   lodMeta: LodIndirectionMeta,
   cx: number, cy: number,
   cam: [number, number],
 ): number {
-  const [, levelH, levelW] = lodMeta.levelDims;
-  const [, , chunkX] = lodMeta.chunkDims;
-  const [, chunkY] = lodMeta.chunkDims;
-  const px = (cx + 0.5) * chunkX / Math.max(levelW, 1);
-  const py = (cy + 0.5) * chunkY / Math.max(levelH, 1);
-  const dx = px - cam[0];
-  const dy = py - cam[1];
-  return dx * dx + dy * dy;
+  return sharedChunkDistSq(lodMeta, cx, cy, null, cam);
 }
 
-/** Find the best eviction candidate: prefer stale, then farthest. Per-entity distance reference. */
+/**
+ * Find the best eviction candidate: prefer stale, then farthest.
+ * Per-entity distance reference (`cameraUVPerEntity`). Delegates to the
+ * shared kernel with `is3D: false`.
+ */
 function findFarthestSlot2D(atlas: SliceAtlasState): { key: string; dist: number } {
-  let farthestKey = "";
-  let maxDist = -1;
-
-  for (const [compositeKey, slotIdx] of atlas.slots) {
-    const gridIdx = atlas.slotGridIdx[slotIdx];
-    if (gridIdx < 0) {
-      return { key: compositeKey, dist: Infinity };
-    }
-
-    const parsed = parseCompositeKey(compositeKey);
-    if (!parsed) continue;
-    const lodMetas = atlas.entityMetas.get(parsed.memberId);
-    if (!lodMetas) {
-      return { key: compositeKey, dist: Infinity };
-    }
-    const chunk = parseChunkKey(parsed.chunkKey);
-    if (!chunk) continue;
-    const lodMeta = lodMetas.find(m => m.level === chunk.level);
-    if (!lodMeta) continue;
-
-    const cam = cameraUVPerEntity.get(parsed.memberId) ?? [0.5, 0.5];
-    const dist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
-
-    if (dist > maxDist) {
-      maxDist = dist;
-      farthestKey = compositeKey;
-    }
-  }
-
-  return { key: farthestKey, dist: maxDist };
+  return sharedFindFarthestSlot({
+    slots: atlas.slots,
+    slotGridIdx: atlas.slotGridIdx,
+    entityMetas: atlas.entityMetas,
+    cameraFor: (memberId) => cameraUVPerEntity.get(memberId) ?? [0.5, 0.5],
+    is3D: false,
+  });
 }
 
 export function handleSliceChunkData(
