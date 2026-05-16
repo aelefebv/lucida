@@ -263,9 +263,10 @@ export interface ColdStateActiveEntry {
   /**
    * Parent well id for field entries (so the worker can map a field's
    * descriptor back to its parent's wellProxyHandle). `null` for
-   * non-field entries.
+   * non-field entries. The orchestrator always emits a string or null
+   * — never `undefined` — so the field is non-optional.
    */
-  parentWellId?: string | null;
+  parentWellId: string | null;
   /**
    * Precomputed column-major model matrix mapping the entity's
    * `[0,1]^3` unit cube to world space. The orchestrator derives this

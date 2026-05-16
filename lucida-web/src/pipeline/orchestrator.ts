@@ -13,8 +13,8 @@ import type {
   ColdStateMessage,
   ColdStateDisplayState,
   ViewHotStateMessage,
-  MissingChunk as MissingChunkLite,
-  MissingProxy as MissingProxyLite,
+  MissingChunk,
+  MissingProxy,
 } from "../renderer/workerProtocol.ts";
 import type { DatasetSettings } from "../tickCommon.ts";
 import { computeMemberIndexMap, iterateColdMembers } from "../renderer/descriptorBuffer.ts";
@@ -62,67 +62,29 @@ import {
   type UploadRollingStats,
 } from "../debug/debugStats.ts";
 import { debugLog } from "../debug/logging.ts";
-
-// ---------------------------------------------------------------------------
-// Cold-state rebuild telemetry constants
-// ---------------------------------------------------------------------------
-//
-// `planAndFetch` either takes the epoch fast-path (cache hit) or runs a full
-// rebuild. We track both paths so the panel can show hit rate, rebuild rate,
-// per-epoch cause attribution, and timing — and so we can flag pathological
-// non-view churn.
-
-/** Rolling-window size for hit/rebuild rates and cause attribution. */
-const COLD_STATE_WINDOW_MS = 1000;
-
-/** Bounded sample buffer for p50/p95 rebuild duration. */
-const COLD_STATE_DURATION_SAMPLES = 60;
-
-/**
- * Threshold above which sustained non-view rebuild churn is considered
- * pathological. View-epoch churn is expected during camera motion;
- * other epochs (selection, content, layout, asset) bumping at >30/s is
- * almost always a bug.
- */
-const COLD_STATE_CHURN_THRESHOLD_PER_SEC = 30;
-
-/** How long the rate must stay above threshold before a log fires. */
-const COLD_STATE_CHURN_SUSTAIN_MS = 2000;
-
-/** Don't re-log churn more often than this. */
-const COLD_STATE_CHURN_LOG_RATE_LIMIT_MS = 2000;
+import {
+  COLD_STATE_CHURN_LOG_RATE_LIMIT_MS,
+  COLD_STATE_CHURN_SUSTAIN_MS,
+  COLD_STATE_CHURN_THRESHOLD_PER_SEC,
+  COLD_STATE_DURATION_SAMPLES,
+  COLD_STATE_WINDOW_MS,
+  UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
+  UPLOAD_FILTER_RATIO_THRESHOLD,
+  UPLOAD_LOG_RATE_LIMIT_MS,
+  UPLOAD_LOG_SUSTAIN_MS,
+  UPLOAD_RESEND_RATIO_THRESHOLD,
+  UPLOAD_SIZE_SAMPLES,
+  UPLOAD_WINDOW_MS,
+} from "./upload/constants.ts";
+import {
+  proxyKeyFromDelivery,
+  proxyKeyFromMissing,
+  proxyKeyFromRequest,
+} from "./upload/proxyKeys.ts";
+import { identityMatrix } from "./upload/coldState/identity.ts";
 
 /** Per-epoch cause keys we attribute rebuilds to. */
 type ColdStateCauseKey = "content" | "layout" | "view" | "selection" | "asset";
-
-// ---------------------------------------------------------------------------
-// Upload (CPU → GPU hand-off) telemetry constants
-// ---------------------------------------------------------------------------
-
-/** Rolling window for bytes/sec, uploads/sec, ratios, exhausted-tick count. */
-const UPLOAD_WINDOW_MS = 1000;
-
-/** Bounded sample buffer for p50/p95 upload byte size. */
-const UPLOAD_SIZE_SAMPLES = 120;
-
-/** Consecutive ticks of `budgetExhausted=true` before logging. */
-const UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD = 3;
-
-/** Resend ratio above which `upload.resend_storm` arms (atlas thrashing). */
-const UPLOAD_RESEND_RATIO_THRESHOLD = 0.5;
-
-/** Filter ratio above which `upload.drain_waste` arms (decoded chunks unwanted). */
-const UPLOAD_FILTER_RATIO_THRESHOLD = 0.5;
-
-/**
- * Sustain duration for resend_storm and drain_waste before a log fires.
- * Mirrors the cold-state churn pattern — short bursts during transitions
- * (e.g. zoom transitions) are normal and shouldn't spam the console.
- */
-const UPLOAD_LOG_SUSTAIN_MS = 2000;
-
-/** Don't re-log the same condition more often than this. */
-const UPLOAD_LOG_RATE_LIMIT_MS = 2000;
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -1486,7 +1448,7 @@ export class Orchestrator {
         if (budgetExhausted) break;
         this.currentUploadStats.resendProxiesConsidered++;
 
-        if (this.proxyDeliveredToWorker.has(this.proxyKeyFromRequest(req))) {
+        if (this.proxyDeliveredToWorker.has(proxyKeyFromRequest(req))) {
           this.currentUploadStats.resendProxiesAlreadyDelivered++;
           continue;
         }
@@ -1583,7 +1545,7 @@ export class Orchestrator {
    * re-emission to recover from a worker-side eviction.
    */
   handleWantedSetDelta(
-    missing: Array<MissingChunkLite | MissingProxyLite>,
+    missing: Array<MissingChunk | MissingProxy>,
   ): void {
     this.workerWantedSet.clear();
     for (const entry of missing) {
@@ -1598,7 +1560,7 @@ export class Orchestrator {
           break;
         }
         case "proxy": {
-          this.proxyDeliveredToWorker.delete(this.proxyKeyFromMissing(entry));
+          this.proxyDeliveredToWorker.delete(proxyKeyFromMissing(entry));
           break;
         }
       }
@@ -1754,27 +1716,8 @@ export class Orchestrator {
       delivery.data,
       epochs,
     );
-    this.proxyDeliveredToWorker.add(this.proxyKeyFromDelivery(delivery));
+    this.proxyDeliveredToWorker.add(proxyKeyFromDelivery(delivery));
     return delivery.data.byteLength;
-  }
-
-  /**
-   * Composite key used by `proxyDeliveredToWorker`. Two small helpers —
-   * one for `ReadyProxyDelivery` (uses `proxyKind`) and one for
-   * `ProxyRequest` / `MissingProxy` (uses `kind` / `proxyKind`) — keep
-   * each call site honest about which shape it has without runtime
-   * branching.
-   */
-  private proxyKeyFromDelivery(delivery: ReadyProxyDelivery): string {
-    return `${delivery.datasetId}|${delivery.entityId}|${delivery.proxyKind}|${delivery.t}|${delivery.c}`;
-  }
-
-  private proxyKeyFromRequest(req: ProxyRequest): string {
-    return `${req.datasetId}|${req.entityId}|${req.kind}|${req.t}|${req.c}`;
-  }
-
-  private proxyKeyFromMissing(missing: MissingProxyLite): string {
-    return `${missing.datasetId}|${missing.entityId}|${missing.proxyKind}|${missing.t}|${missing.c}`;
   }
 
   /**
@@ -1851,12 +1794,6 @@ export class Orchestrator {
     dsSettings: DatasetSettings | undefined,
   ): ColdStateMessage {
     const entityById = new Map(entities.map(e => [e.entityId, e]));
-
-    const identityMatrix = (): Float32Array => {
-      const m = new Float32Array(16);
-      m[0] = m[5] = m[10] = m[15] = 1;
-      return m;
-    };
 
     // Build per-channel display state once per cold-state assembly.
     // Single-channel: lone visible channel falls back to dataset-level

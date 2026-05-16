@@ -10,6 +10,7 @@ import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset,
 import { Orchestrator } from "./pipeline/orchestrator.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
+import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
 
@@ -190,8 +191,7 @@ export class RenderLoop {
       if (this.mode === "slice") {
         this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs);
       } else {
-        const identity = new Float32Array(16);
-        identity[0] = identity[5] = identity[10] = identity[15] = 1;
+        const identity = identityMatrix();
         this.client.volumeRenderMultiPass([], identity, new Float32Array([0, 0, 1]), w, h, w, h, zeroEpochs, identity, new Float32Array([0, 0, -1]), 0, 0);
       }
     }
