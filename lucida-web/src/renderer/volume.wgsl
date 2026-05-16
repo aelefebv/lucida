@@ -149,10 +149,9 @@ fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f)
 // when `lodCount == 0` the detail loop is a no-op; when a proxy slot is
 // `0xFFFFFFFFu` the proxy step returns the sentinel and we move on.
 //
-// Note: the well-proxy sample uses the field's local `pos` (no
-// field-to-well transform yet — see S8 PRD #405 and follow-up). Visually
-// this means the well-proxy fallback in field entries displays proxy
-// voxels at field-local coordinates, which is spatially incorrect but
+// Well-proxy sample uses the field's local `pos` (no field-to-well
+// transform yet). The well-proxy fallback in field entries displays
+// proxy voxels at field-local coordinates — spatially incorrect but
 // produces a non-blank result while detail chunks load. Well-as-proxy
 // entries don't need the transform — `lodCount == 0` makes the detail
 // loop a no-op, the field proxy step is also a no-op (no field handle),

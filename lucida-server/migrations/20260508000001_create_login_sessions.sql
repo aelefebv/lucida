@@ -1,16 +1,13 @@
--- Slice 2 (PRD #455, issue #457): the first table in lucida.db.
+-- Session store backing `lucida.db`.
 --
--- Schema decisions live in PRD #455 §"Schema decisions"; the short
--- version: opaque session id (UUID v4) as primary key, denormalized
--- email/display_name/picture_url snapshotted at session creation, and
--- three TIMESTAMP columns that collectively encode the idle-timeout +
--- hard-cap policy (created_at + last_used_at + expires_at).
+-- Opaque session id (UUID v4) as primary key; email/display_name/picture_url
+-- denormalized at session creation; three TIMESTAMP columns collectively
+-- encode the idle-timeout + hard-cap policy.
 --
 -- Indexes:
--- * expires_at — supports the cleanup sweep (slice 8) and the
---   range-deletion in delete_expired().
--- * email — supports future "list all sessions for user X" queries
---   (logout-all-devices, admin tooling). Cheap to maintain.
+-- * expires_at — supports the cleanup sweep and delete_expired().
+-- * email — supports "list all sessions for user X" (logout-all-devices,
+--   admin tooling).
 
 CREATE TABLE login_sessions (
     id            TEXT PRIMARY KEY,
