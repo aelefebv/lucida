@@ -27,8 +27,14 @@ import {
   LRUPolicy,
   TieredPolicy,
   getTierOrder,
-  type EvictionPolicy,
 } from "./eviction.ts";
+import { ChunkStore } from "./chunkStore.ts";
+import {
+  ProxyStore,
+  proxyInnerKey,
+  type ProxyCacheEntry,
+  type ProxyEvictable,
+} from "./proxyStore.ts";
 import { debugLog } from "../../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
@@ -222,48 +228,14 @@ interface FailedEntry {
   isPermanent: boolean;
 }
 
-/** Per-entry record for the proxy cache. */
-interface ProxyCacheEntry {
-  header: ProxyHeaderJs;
-  data: ArrayBuffer;
-  bytes: number;
-  datasetId: string;
-  entityId: string;
-  imageId: string;
-  proxyKind: "WellProxy3D" | "FieldProxy3D";
-  t: number;
-  c: number;
-  insertedAt: number;
-  epochs: SceneEpochs;
-}
-
 interface InFlightProxyEntry {
   request: ProxyRequest;
   controller: AbortController;
   estimatedBytes: number;
 }
 
-/**
- * Adapter shape passed to {@link LRUPolicy} for proxy eviction. Maps
- * `ProxyCacheEntry.bytes` → `sizeBytes` for the policy interface while
- * carrying the `datasetId` + inner-map `key` the cache needs to remove
- * the victim from its two-level Map.
- */
-interface ProxyEvictable {
-  insertedAt: number;
-  sizeBytes: number;
-  datasetId: string;
-  key: string;
-  entry: ProxyCacheEntry;
-}
-
-/**
- * Compose the inner proxy cache key. Entries are partitioned per-dataset
- * (outer Map) so dataset removal can drop the whole subtree at once.
- */
-function proxyInnerKey(req: { entityId: string; kind: string; t: number; c: number }): string {
-  return `${req.entityId}|${req.kind}|${req.t}|${req.c}`;
-}
+// `ProxyCacheEntry`, `ProxyEvictable`, and `proxyInnerKey` moved to
+// `proxyStore.ts` in Slice 6 (`#600`); imported above.
 
 // ---------------------------------------------------------------------------
 // CpuCache
@@ -274,24 +246,29 @@ export class CpuCache {
   private decode: DecodePool;
   private config: CpuCacheConfig;
 
-  // Detail cache: entityId → chunkKey → CacheEntry
-  private mainCache = new Map<string, Map<string, CacheEntry>>();
-  private mainBytes = 0;
-
-  // Overview cache: entityId → chunkKey → CacheEntry
-  private overviewCache = new Map<string, Map<string, CacheEntry>>();
-  private overviewBytes = 0;
+  /**
+   * Detail (main) chunk store. Tiered LRU eviction with the
+   * active-detail tiebreaker. See `chunkStore.ts` for the public
+   * surface; the cache wires its policy + telemetry sink at
+   * construction.
+   */
+  private chunkStore!: ChunkStore;
 
   /**
-   * Proxy cache: datasetId → innerKey → ProxyCacheEntry where
-   * innerKey is `${entityId}|${kind}|${t}|${c}`.
-   *
+   * Overview chunk store. Pure LRU eviction; serves both lane="overview"
+   * and lane="minimap" entries (see ADR 0023). Same {@link ChunkStore}
+   * class as the main store, parameterized by a different policy +
+   * eviction-tier label.
+   */
+  private overviewStore!: ChunkStore;
+
+  /**
+   * Proxy store: two-level Map<datasetId, Map<innerKey, ProxyCacheEntry>>.
    * Eviction tier order is detail > proxy > overview, so under memory
    * pressure proxies stick around longer than overview chunks but are
    * dropped before in-use detail chunks.
    */
-  private proxyCache = new Map<string, Map<string, ProxyCacheEntry>>();
-  private proxyBytes = 0;
+  private proxyStore!: ProxyStore;
 
   // Fetch scheduler state
   private pendingRequests: ChunkRequest[] = [];
@@ -365,16 +342,6 @@ export class CpuCache {
     content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
   };
 
-  // Eviction policies. The main (detail) cache uses tiered LRU with the
-  // active-detail tiebreaker; overview + proxy caches use pure LRU.
-  // TieredPolicy is constructed in the constructor body so it can close
-  // over `this.interactionDetector`. The proxy adapter shape carries
-  // back-references the cache needs to remove the victim from its
-  // two-level Map.
-  private mainPolicy: EvictionPolicy<CacheEntry>;
-  private overviewPolicy: EvictionPolicy<CacheEntry> = new LRUPolicy<CacheEntry>();
-  private proxyPolicy: EvictionPolicy<ProxyEvictable> = new LRUPolicy<ProxyEvictable>();
-
   constructor(source: ContentSource, decode: DecodePool, config?: Partial<CpuCacheConfig>) {
     this.source = source;
     this.decode = decode;
@@ -385,7 +352,46 @@ export class CpuCache {
       maxConcurrentFetches: config?.maxConcurrentFetches ?? (decode.size * FETCH_CONCURRENCY_MULTIPLIER),
       maxBytesInFlight: config?.maxBytesInFlight ?? DEFAULT_MAX_BYTES_IN_FLIGHT,
     };
-    this.mainPolicy = new TieredPolicy(() => this.interactionDetector.current());
+
+    // Wire the three stores. Eviction policies and telemetry sinks
+    // flow in via store-options; insert + eviction collapse into one
+    // call on the store side (see Slice 6 / chunkStore.ts).
+    //
+    // Eviction-burst log is main-cache only (matches pre-Slice-6
+    // behavior) — only the main store gets `onEvictionBurst`.
+    const mainPolicy = new TieredPolicy(() => this.interactionDetector.current());
+    this.chunkStore = new ChunkStore({
+      policy: mainPolicy,
+      budgetBytes: this.config.mainBudgetBytes,
+      // For main-cache evictions the entry's tier is the truth: an
+      // active-detail eviction counts under activeDetail even though
+      // the cache type is "main".
+      evictionTier: (entry) => entry.tier,
+      recordEviction: (tier) => this.counters.recordEviction(tier),
+      onEvictionBurst: ({ removed, bytesFreed, bytesNeeded }) => {
+        debugLog("cache", "cache.eviction_burst", {
+          cache: "main",
+          removed,
+          bytesFreed,
+          bytesNeeded,
+          mode: this.interactionDetector.current(),
+        });
+      },
+    });
+    this.overviewStore = new ChunkStore({
+      policy: new LRUPolicy<CacheEntry>(),
+      budgetBytes: this.config.overviewBudgetBytes,
+      // Overview cache entries all carry tier "prefetch" cosmetically
+      // (see `laneToTier`); evictions count under the "overview"
+      // aggregate, not the tier-specific buckets.
+      evictionTier: () => "overview",
+      recordEviction: (tier) => this.counters.recordEviction(tier),
+    });
+    this.proxyStore = new ProxyStore({
+      policy: new LRUPolicy<ProxyEvictable>(),
+      budgetBytes: this.config.proxyBudgetBytes,
+      recordEviction: () => this.counters.recordEviction("proxy"),
+    });
   }
 
   // =========================================================================
@@ -545,32 +551,12 @@ export class CpuCache {
       r => r.datasetId !== datasetId,
     );
 
-    // 5. Cached chunks (detail + overview).
-    for (const entityId of entityIds) {
-      const detailMap = this.mainCache.get(entityId);
-      if (detailMap) {
-        for (const entry of detailMap.values()) {
-          this.mainBytes -= entry.sizeBytes;
-        }
-        this.mainCache.delete(entityId);
-      }
-      const overviewMap = this.overviewCache.get(entityId);
-      if (overviewMap) {
-        for (const entry of overviewMap.values()) {
-          this.overviewBytes -= entry.sizeBytes;
-        }
-        this.overviewCache.delete(entityId);
-      }
-    }
+    // 5. Cached chunks (detail + overview) — fan out to the stores.
+    this.chunkStore.cancelDataset(entityIds);
+    this.overviewStore.cancelDataset(entityIds);
 
     // 6. Cached proxies under this dataset.
-    const proxyMap = this.proxyCache.get(datasetId);
-    if (proxyMap) {
-      for (const entry of proxyMap.values()) {
-        this.proxyBytes -= entry.bytes;
-      }
-      this.proxyCache.delete(datasetId);
-    }
+    this.proxyStore.cancelDataset(datasetId);
 
     // 7. Ready deliveries.
     this.ready = this.ready.filter(d => {
@@ -659,12 +645,12 @@ export class CpuCache {
    */
   snapshot(): CacheStateSnapshot {
     const cached = new Map<string, Set<string>>();
-    for (const [entityId, chunks] of this.mainCache) {
-      cached.set(entityId, new Set(chunks.keys()));
+    for (const [entityId, chunkKeys] of this.chunkStore.entityChunkKeys()) {
+      cached.set(entityId, new Set(chunkKeys));
     }
-    for (const [entityId, chunks] of this.overviewCache) {
+    for (const [entityId, chunkKeys] of this.overviewStore.entityChunkKeys()) {
       const existing = cached.get(entityId) ?? new Set();
-      for (const key of chunks.keys()) existing.add(key);
+      for (const key of chunkKeys) existing.add(key);
       cached.set(entityId, existing);
     }
 
@@ -685,42 +671,19 @@ export class CpuCache {
     const counters = this.counters.snapshot(now);
     const mode = this.interactionDetector.current();
 
-    // Per-tier residency: walk every cached entry once and bin. The
-    // walk stays here for now; Slice 5/6 will move it onto the
-    // per-cache stores once those are extracted.
+    // Per-tier residency is composed from each store's own walk: the
+    // main store bins by `entry.tier` (active/demoted/prefetch); the
+    // overview + proxy stores total their entries into a single bucket.
+    const mainTiers = this.chunkStore.tierResidency();
+    const overviewTotals = this.overviewStore.totalResidency();
+    const proxyTotals = this.proxyStore.totalResidency();
     const tierResidency = {
-      activeDetail: { count: 0, bytes: 0 },
-      demotedDetail: { count: 0, bytes: 0 },
-      prefetch: { count: 0, bytes: 0 },
-      overview: { count: 0, bytes: 0 },
-      proxy: { count: 0, bytes: 0 },
+      activeDetail: mainTiers.activeDetail,
+      demotedDetail: mainTiers.demotedDetail,
+      prefetch: mainTiers.prefetch,
+      overview: overviewTotals,
+      proxy: proxyTotals,
     };
-    for (const entityMap of this.mainCache.values()) {
-      for (const e of entityMap.values()) {
-        if (e.tier === "active-detail") {
-          tierResidency.activeDetail.count++;
-          tierResidency.activeDetail.bytes += e.sizeBytes;
-        } else if (e.tier === "demoted-detail") {
-          tierResidency.demotedDetail.count++;
-          tierResidency.demotedDetail.bytes += e.sizeBytes;
-        } else {
-          tierResidency.prefetch.count++;
-          tierResidency.prefetch.bytes += e.sizeBytes;
-        }
-      }
-    }
-    for (const entityMap of this.overviewCache.values()) {
-      for (const e of entityMap.values()) {
-        tierResidency.overview.count++;
-        tierResidency.overview.bytes += e.sizeBytes;
-      }
-    }
-    for (const datasetMap of this.proxyCache.values()) {
-      for (const e of datasetMap.values()) {
-        tierResidency.proxy.count++;
-        tierResidency.proxy.bytes += e.bytes;
-      }
-    }
 
     // Pending-queue starvation signal: oldest enqueue timestamp wins.
     // Stays in cpuCache because pendingEnqueuedAt is scheduler state
@@ -735,11 +698,11 @@ export class CpuCache {
     }
 
     return {
-      mainBytes: this.mainBytes,
+      mainBytes: this.chunkStore.bytes,
       mainBudget: this.config.mainBudgetBytes,
-      overviewBytes: this.overviewBytes,
+      overviewBytes: this.overviewStore.bytes,
       overviewBudget: this.config.overviewBudgetBytes,
-      proxyBytes: this.proxyBytes,
+      proxyBytes: this.proxyStore.bytes,
       proxyBudget: this.config.proxyBudgetBytes,
       maxConcurrentFetches: this.config.maxConcurrentFetches,
       maxBytesInFlight: this.config.maxBytesInFlight,
@@ -784,8 +747,8 @@ export class CpuCache {
    */
   getCachedChunk(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
     const entry =
-      this.mainCache.get(entityId)?.get(chunkKey) ??
-      this.overviewCache.get(entityId)?.get(chunkKey) ??
+      this.chunkStore.get(entityId, chunkKey) ??
+      this.overviewStore.get(entityId, chunkKey) ??
       null;
     if (!entry) return null;
     return {
@@ -817,7 +780,7 @@ export class CpuCache {
     t: number,
     c: number,
   ): ReadyProxyDelivery | null {
-    const entry = this.proxyCache.get(datasetId)?.get(proxyInnerKey({ entityId, kind, t, c }));
+    const entry = this.proxyStore.get(datasetId, proxyInnerKey({ entityId, kind, t, c }));
     if (!entry) return null;
     return this.proxyEntryToDelivery(entry);
   }
@@ -847,8 +810,8 @@ export class CpuCache {
    */
   getCachedChunkTier(entityId: string, chunkKey: string): EvictionTier | null {
     const entry =
-      this.mainCache.get(entityId)?.get(chunkKey) ??
-      this.overviewCache.get(entityId)?.get(chunkKey);
+      this.chunkStore.get(entityId, chunkKey) ??
+      this.overviewStore.get(entityId, chunkKey);
     return entry?.tier ?? null;
   }
 
@@ -881,21 +844,11 @@ export class CpuCache {
     insertedAt: number;
   }> {
     const out: ReturnType<CpuCache["getCacheDump"]> = [];
-    for (const entityMap of this.mainCache.values()) {
-      for (const e of entityMap.values()) {
-        out.push({
-          entityId: e.entityId, cache: "main", level: e.level, tier: e.tier,
-          bytes: e.sizeBytes, chunkKey: e.chunkKey, insertedAt: e.insertedAt,
-        });
-      }
+    for (const e of this.chunkStore.dump()) {
+      out.push({ ...e, cache: "main" });
     }
-    for (const entityMap of this.overviewCache.values()) {
-      for (const e of entityMap.values()) {
-        out.push({
-          entityId: e.entityId, cache: "overview", level: e.level, tier: e.tier,
-          bytes: e.sizeBytes, chunkKey: e.chunkKey, insertedAt: e.insertedAt,
-        });
-      }
+    for (const e of this.overviewStore.dump()) {
+      out.push({ ...e, cache: "overview" });
     }
     return out;
   }
@@ -913,16 +866,7 @@ export class CpuCache {
     bytes: number;
     insertedAt: number;
   }> {
-    const out: ReturnType<CpuCache["getProxyCacheDump"]> = [];
-    for (const [datasetId, inner] of this.proxyCache) {
-      for (const e of inner.values()) {
-        out.push({
-          datasetId, entityId: e.entityId, proxyKind: e.proxyKind,
-          t: e.t, c: e.c, bytes: e.bytes, insertedAt: e.insertedAt,
-        });
-      }
-    }
-    return out;
+    return this.proxyStore.dump();
   }
 
   /**
@@ -977,13 +921,10 @@ export class CpuCache {
     this.inFlightProxy.clear();
     this.inFlightProxyBytes = 0;
 
-    // Clear caches
-    this.mainCache.clear();
-    this.mainBytes = 0;
-    this.overviewCache.clear();
-    this.overviewBytes = 0;
-    this.proxyCache.clear();
-    this.proxyBytes = 0;
+    // Clear caches — fan out to each store.
+    this.chunkStore.reset();
+    this.overviewStore.reset();
+    this.proxyStore.reset();
 
     // Clear state
     this.pendingRequests = [];
@@ -1164,13 +1105,9 @@ export class CpuCache {
     // effect is "fetched first, evicted last" — minimap survives
     // memory pressure that clears detail chunks.
     if (lane === "overview" || lane === "minimap") {
-      this.evictIfNeeded(this.overviewCache, this.config.overviewBudgetBytes, decoded.byteLength, "overview");
-      this.insertEntry(this.overviewCache, cacheEntry);
-      this.overviewBytes += decoded.byteLength;
+      this.overviewStore.insert(cacheEntry);
     } else {
-      this.evictIfNeeded(this.mainCache, this.config.mainBudgetBytes, decoded.byteLength, "main");
-      this.insertEntry(this.mainCache, cacheEntry);
-      this.mainBytes += decoded.byteLength;
+      this.chunkStore.insert(cacheEntry);
     }
 
     // Mark as ready for drain
@@ -1270,7 +1207,7 @@ export class CpuCache {
       inFlightEntry.estimatedBytes = responseBytes;
     }
 
-    // Insert into proxy cache
+    // Insert into proxy cache (store handles eviction internally).
     const cacheEntry: ProxyCacheEntry = {
       header: result.header,
       data: result.data,
@@ -1285,15 +1222,7 @@ export class CpuCache {
       epochs: { ...this.currentEpochs },
     };
 
-    this.evictProxyIfNeeded(responseBytes);
-
-    let datasetMap = this.proxyCache.get(req.datasetId);
-    if (!datasetMap) {
-      datasetMap = new Map();
-      this.proxyCache.set(req.datasetId, datasetMap);
-    }
-    datasetMap.set(proxyInnerKey(req), cacheEntry);
-    this.proxyBytes += responseBytes;
+    this.proxyStore.insert(req.datasetId, proxyInnerKey(req), cacheEntry);
 
     if (this.inFlightProxy.has(key)) {
       this.inFlightProxyBytes -= responseBytes;
@@ -1308,42 +1237,8 @@ export class CpuCache {
     this.startProxyFetches();
   }
 
-  private evictProxyIfNeeded(incomingBytes: number): void {
-    if (this.proxyBytes + incomingBytes <= this.config.proxyBudgetBytes) return;
-    const needed = this.proxyBytes + incomingBytes - this.config.proxyBudgetBytes;
-
-    // Flatten into an adapter shape that exposes `sizeBytes` to the
-    // policy while keeping the back-references the cache needs to
-    // actually remove the entry. The proxy entry's own `bytes` field
-    // is mapped to `sizeBytes` so {@link LRUPolicy} can serve both
-    // cache shapes without ProxyCacheEntry having to rename its field.
-    const evictables: ProxyEvictable[] = [];
-    for (const [datasetId, inner] of this.proxyCache) {
-      for (const [k, e] of inner) {
-        evictables.push({
-          insertedAt: e.insertedAt,
-          sizeBytes: e.bytes,
-          datasetId,
-          key: k,
-          entry: e,
-        });
-      }
-    }
-
-    const victims = this.proxyPolicy.selectVictims(evictables, needed);
-    for (const v of victims) {
-      const inner = this.proxyCache.get(v.datasetId);
-      if (inner) {
-        inner.delete(v.key);
-        if (inner.size === 0) this.proxyCache.delete(v.datasetId);
-      }
-      this.proxyBytes -= v.entry.bytes;
-      this.counters.recordEviction("proxy");
-    }
-  }
-
   private isProxyCached(req: ProxyRequest): boolean {
-    return this.proxyCache.get(req.datasetId)?.has(proxyInnerKey(req)) === true;
+    return this.proxyStore.has(req.datasetId, proxyInnerKey(req));
   }
 
   private inFlightProxyKey(req: ProxyRequest): string {
@@ -1383,115 +1278,31 @@ export class CpuCache {
   // Cache Management
   // =========================================================================
 
-  private insertEntry(cache: Map<string, Map<string, CacheEntry>>, entry: CacheEntry): void {
-    let entityMap = cache.get(entry.entityId);
-    if (!entityMap) {
-      entityMap = new Map();
-      cache.set(entry.entityId, entityMap);
-    }
-    entityMap.set(entry.chunkKey, entry);
-  }
-
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
     // `minimap` shares the overview cache (see ADR 0023) so we look
-    // in the same map. Other lanes (detail / prefetch) live in
-    // mainCache.
+    // in the same store. Other lanes (detail / prefetch) live in the
+    // main chunk store.
     const usesOverviewCache = req.lane === "overview" || req.lane === "minimap";
-    const cache = usesOverviewCache ? this.overviewCache : this.mainCache;
-    return cache.get(req.entityId)?.get(req.chunkKey);
+    const store = usesOverviewCache ? this.overviewStore : this.chunkStore;
+    return store.get(req.entityId, req.chunkKey);
   }
 
   private demoteEntity(entityId: string): void {
-    const entityMap = this.mainCache.get(entityId);
-    if (!entityMap) return;
-    for (const entry of entityMap.values()) {
-      if (entry.tier === "active-detail") {
-        entry.tier = "demoted-detail";
-      }
-    }
+    // Only the main store carries tiered entries; the overview store
+    // is LRU-only and demotion would be meaningless there.
+    this.chunkStore.demoteEntity(entityId);
   }
 
   private laneToTier(lane: Lane): EvictionTier {
     if (lane === "prefetch") return "prefetch";
-    // overview + minimap share the overview cache (simple LRU, tier
+    // overview + minimap share the overview store (simple LRU, tier
     // doesn't matter — see ADR 0023). The "prefetch" tier value here
-    // is purely a no-op label for entries that live in overviewCache;
-    // the active-detail / demoted-detail / prefetch distinctions only
-    // matter for mainCache entries.
+    // is purely a no-op label for entries that live in the overview
+    // store; the active-detail / demoted-detail / prefetch
+    // distinctions only matter for entries in the main chunk store.
     if (lane === "overview" || lane === "minimap") return "prefetch";
     // Only "detail" remains.
     return "active-detail";
-  }
-
-  // =========================================================================
-  // Eviction
-  // =========================================================================
-
-  private evictIfNeeded(
-    cache: Map<string, Map<string, CacheEntry>>,
-    budget: number,
-    incomingBytes: number,
-    cacheType: "main" | "overview",
-  ): void {
-    const currentBytes = cacheType === "main" ? this.mainBytes : this.overviewBytes;
-    if (currentBytes + incomingBytes <= budget) return;
-
-    const bytesNeeded = currentBytes + incomingBytes - budget;
-    const entries = this.collectEntries(cache);
-    const policy = cacheType === "main" ? this.mainPolicy : this.overviewPolicy;
-    const victims = policy.selectVictims(entries, bytesNeeded);
-
-    let freed = 0;
-    for (const victim of victims) {
-      this.removeEntry(cache, victim, cacheType);
-      freed += victim.sizeBytes;
-    }
-
-    // Eviction-burst log fires when a single eviction pass removes a
-    // lot of entries. Stays at the call site — the count of removals
-    // is something the cache observes as it processes the policy's
-    // output. Only emitted for the main cache (matches prior behavior).
-    if (cacheType === "main" && victims.length >= 16) {
-      debugLog("cache", "cache.eviction_burst", {
-        cache: "main",
-        removed: victims.length,
-        bytesFreed: freed,
-        bytesNeeded,
-        mode: this.interactionDetector.current(),
-      });
-    }
-  }
-
-  private removeEntry(
-    cache: Map<string, Map<string, CacheEntry>>,
-    entry: CacheEntry,
-    cacheType: "main" | "overview",
-  ): void {
-    const entityMap = cache.get(entry.entityId);
-    if (entityMap) {
-      entityMap.delete(entry.chunkKey);
-      if (entityMap.size === 0) cache.delete(entry.entityId);
-    }
-    if (cacheType === "main") this.mainBytes -= entry.sizeBytes;
-    else this.overviewBytes -= entry.sizeBytes;
-    if (cacheType === "overview") {
-      this.counters.recordEviction("overview");
-    } else {
-      // For main-cache evictions the entry's tier is the truth: an
-      // active-detail eviction counts under activeDetail even though
-      // the cacheType is "main".
-      this.counters.recordEviction(entry.tier);
-    }
-  }
-
-  private collectEntries(cache: Map<string, Map<string, CacheEntry>>): CacheEntry[] {
-    const result: CacheEntry[] = [];
-    for (const entityMap of cache.values()) {
-      for (const entry of entityMap.values()) {
-        result.push(entry);
-      }
-    }
-    return result;
   }
 
   // =========================================================================
