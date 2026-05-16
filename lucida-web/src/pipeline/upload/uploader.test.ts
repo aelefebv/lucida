@@ -11,6 +11,7 @@ import type { TickContext } from "../../renderLoopTypes.ts";
 import { AssetCatalog } from "../assetCatalog.ts";
 import type { ChunkRequest, ProxyRequest } from "../planning/index.ts";
 import type { ColdStateMessage, MissingProxy } from "../../renderer/workerProtocol.ts";
+import type { DeliveryTracker } from "./delivery/tracker.ts";
 
 // Upload-side describes migrated out of `orchestrator.test.ts` as part
 // of Slice 10 (PRD #607). The Uploader owns delivery tracking, cold/hot
@@ -1047,23 +1048,21 @@ describe("chunk delivery (drain pass)", () => {
 
 describe("handleChunksEvicted", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
-  let DeliveryTracker: typeof import("./delivery/tracker.ts").DeliveryTracker;
 
   beforeEach(async () => {
     vi.resetModules();
     Uploader = (await import("./uploader.ts")).Uploader;
-    DeliveryTracker = (await import("./delivery/tracker.ts")).DeliveryTracker;
   });
 
   function getTracker(
     uploader: InstanceType<typeof Uploader>,
-  ): InstanceType<typeof DeliveryTracker> {
+  ): DeliveryTracker {
     // Private field access for test inspection. The tracker is the
     // canonical source of chunk-side state; `wasChunkSent` /
     // `wasChunkRejected` give us cleaner assertions than poking at the
     // raw `chunkSent` / `chunkRejected` maps.
     return (uploader as unknown as {
-      deliveryTracker: InstanceType<typeof DeliveryTracker>;
+      deliveryTracker: DeliveryTracker;
     }).deliveryTracker;
   }
 
@@ -1314,11 +1313,10 @@ describe("multi-dataset upload characterization", () => {
     // `deliveryTracker.onColdStateRebuild()` call at the top of the
     // rebuild path consolidates the reset — same observable result.
     // Post-Slice-10 the call moves to `uploader.onPlanRebuildStart()`.
-    const { DeliveryTracker } = await import("./delivery/tracker.ts");
     const uploader = new Uploader();
     const orch = new Orchestrator(uploader);
     const tracker = (uploader as unknown as {
-      deliveryTracker: InstanceType<typeof DeliveryTracker>;
+      deliveryTracker: DeliveryTracker;
     }).deliveryTracker;
     // Pre-seed a tracking entry that should be cleared by the rebuild.
     tracker.markChunkSent("img-stale", "field-stale", "k1");
@@ -1373,12 +1371,11 @@ describe("cold-state lifecycle invariant", () => {
     //
     // Post-Slice-10 the call is hoisted to `uploader.onPlanRebuildStart()`
     // at the top of the rebuild path. This test guards against regressions.
-    const { DeliveryTracker } = await import("./delivery/tracker.ts");
     const uploader = new Uploader();
     const orch = new Orchestrator(uploader);
     // Seed: pretend a previous tick delivered a chunk for "img-0".
     const tracker = (uploader as unknown as {
-      deliveryTracker: InstanceType<typeof DeliveryTracker>;
+      deliveryTracker: DeliveryTracker;
     }).deliveryTracker;
     tracker.markChunkSent("img-0", "field-0", "0/0/0/0/0/0");
 
