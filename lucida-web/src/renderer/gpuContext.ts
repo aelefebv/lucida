@@ -2,6 +2,36 @@
 
 export const OFFSCREEN_FORMAT: GPUTextureFormat = "rgba16float";
 
+/**
+ * Subset of `GPUSupportedLimits` that renderer code actually queries.
+ * Centralized so atlas-sizing math can be called from pure helpers
+ * without depending on the live `GPUDevice` object.
+ */
+export interface DeviceLimits {
+  maxTextureDimension2D: number;
+  maxTextureDimension3D: number;
+  maxStorageBufferBindingSize: number;
+  maxBufferSize: number;
+}
+
+/**
+ * Read the queried device limits with WebGPU-spec-minimum fallbacks.
+ * If a device reports a lower value than the spec minimum (rare but
+ * legal), the queried value wins. `device.limits` itself is optional
+ * here so partial mocks in unit tests (which may stub out only some
+ * of the device surface) fall back to the spec minimums.
+ */
+export function getDeviceLimits(device: GPUDevice): DeviceLimits {
+  const limits = device.limits as Partial<GPUSupportedLimits> | undefined;
+  return {
+    maxTextureDimension2D: limits?.maxTextureDimension2D ?? 8192,
+    maxTextureDimension3D: limits?.maxTextureDimension3D ?? 2048,
+    maxStorageBufferBindingSize:
+      limits?.maxStorageBufferBindingSize ?? 128 * 1024 * 1024,
+    maxBufferSize: limits?.maxBufferSize ?? 256 * 1024 * 1024,
+  };
+}
+
 export function createOffscreenTarget(device: GPUDevice, w: number, h: number): GPUTexture {
   return device.createTexture({
     size: [w, h],

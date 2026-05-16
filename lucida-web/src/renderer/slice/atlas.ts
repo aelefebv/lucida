@@ -14,7 +14,8 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import { SLICE_ATLAS_BUDGET } from "../workerProtocol.ts";
-import { createSliceTexture } from "../gpuContext.ts";
+import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
+import { computeAtlasGeometry } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 
 /** Per-entity Z metadata for slice mode (drives Z-chunk filtering and re-slice detection). */
@@ -70,15 +71,14 @@ function createSliceAtlas(
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
 ): SliceAtlasState {
-  const chunkTexels = chunkX * chunkY;
-  const maxSlots = Math.floor(SLICE_ATLAS_BUDGET / (chunkTexels * 2));
-  const slotsPerAxis = Math.floor(Math.sqrt(maxSlots));
-  const slotsX = Math.min(slotsPerAxis, Math.floor(8192 / chunkX));
-  const slotsY = Math.min(slotsPerAxis, Math.floor(8192 / chunkY));
-  const totalSlots = slotsX * slotsY;
-
-  const atlasW = slotsX * chunkX;
-  const atlasH = slotsY * chunkY;
+  const limits = getDeviceLimits(device);
+  const geom = computeAtlasGeometry(
+    limits,
+    [chunkX, chunkY],
+    SLICE_ATLAS_BUDGET,
+    "2d",
+  );
+  const { slotsX, slotsY, totalSlots, atlasW, atlasH } = geom;
 
   const texture = createSliceTexture(device, atlasW, atlasH, null);
 

@@ -14,6 +14,8 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
+import { getDeviceLimits } from "../gpuContext.ts";
+import { computeAtlasGeometry } from "../atlasSizing.ts";
 
 /** Per-LOD indirection section metadata. */
 export interface LodIndirectionMeta {
@@ -91,17 +93,16 @@ function createVolumeAtlas(
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
 ): AtlasState {
-  const chunkTexels = chunkX * chunkY * chunkZ;
-  const maxSlots = Math.floor(VOLUME_ATLAS_BUDGET / (chunkTexels * 2));
-  const slotsPerAxis = Math.floor(Math.cbrt(maxSlots));
-  const slotsX = Math.min(slotsPerAxis, Math.floor(2048 / chunkX));
-  const slotsY = Math.min(slotsPerAxis, Math.floor(2048 / chunkY));
-  const slotsZ = Math.min(slotsPerAxis, Math.floor(2048 / chunkZ));
-  const totalSlots = slotsX * slotsY * slotsZ;
-
-  const atlasW = slotsX * chunkX;
-  const atlasH = slotsY * chunkY;
-  const atlasD = slotsZ * chunkZ;
+  const limits = getDeviceLimits(device);
+  const geom = computeAtlasGeometry(
+    limits,
+    [chunkX, chunkY, chunkZ],
+    VOLUME_ATLAS_BUDGET,
+    "3d",
+  );
+  const { slotsX, slotsY, totalSlots, atlasW, atlasH } = geom;
+  const slotsZ = geom.slotsZ!;
+  const atlasD = geom.atlasD!;
 
   const texture = device.createTexture({
     size: [atlasW, atlasH, atlasD],
