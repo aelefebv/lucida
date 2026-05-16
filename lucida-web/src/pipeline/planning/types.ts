@@ -1,13 +1,6 @@
 /**
- * Planning domain — type and interface definitions.
- *
- * Every interface and type alias the planner produces or consumes lives
- * here. Sibling modules (`./modes.ts`, `./chunks.ts`, `./emit.ts`,
- * `./plan.ts`) import their types from this leaf module so they remain
- * free of circular dependencies. `./index.ts` re-exports everything for
- * the public API.
- *
- * See ADR 0029.
+ * Planning types and interfaces. Leaf module so siblings can import
+ * without circular dependencies. See ADR 0029.
  */
 
 import type { LevelGeometry } from "../../manifestTypes.ts";

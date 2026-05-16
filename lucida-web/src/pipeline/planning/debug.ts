@@ -1,15 +1,7 @@
 /**
- * Debug builder — derives per-dataset planning telemetry from a fully-
- * computed {@link RequestPlan}.
- *
- * Feeds the DebugPanel "Planning" tab: {@link PlanningDatasetDebug}
- * shape, focal-entity selection by viewport-center proximity, lane /
- * LOD / wells-by-mode aggregation. {@link modeReason} consumes its
- * threshold values from {@link PlanningConfig} (the same struct
- * {@link chooseEntityMode} reads) so the two cannot drift.
- *
- * Pure: no module state, no parameter mutation. Cheap enough that the
- * orchestrator calls it on every cold-state rebuild.
+ * Per-dataset planning telemetry derived from a {@link RequestPlan}.
+ * Feeds the DebugPanel "Planning" tab. Pure; cheap enough to call on
+ * every cold-state rebuild.
  */
 
 import type { CpuCache } from "../fetch/index.ts";
@@ -23,13 +15,8 @@ import type { PlanningConfig } from "./config.ts";
 
 /**
  * Translate a focal entity's projected diagonal into a human-readable
- * mode-band classification. Mirrors the logic in
- * {@link chooseEntityMode} (planning index) so the panel can explain
- * *why* the focal entity is in its current mode without us threading
- * that reason through the active-set entry shape.
- *
- * Threshold values come from {@link PlanningConfig} — the same struct
- * {@link chooseEntityMode} consumes — so the two cannot drift.
+ * mode-band classification. Mirrors {@link chooseEntityMode}; both
+ * read the same {@link PlanningConfig} so they cannot drift.
  */
 export function modeReason(diagPx: number, config: PlanningConfig): string {
   const farUpper = config.farThresholdPx + config.hysteresisPx;

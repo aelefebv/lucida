@@ -1,13 +1,7 @@
 /**
- * Planning domain — lane emission helpers and priority computation.
- *
- * Translates active-set entries and minimap-pending coords into
- * {@link ChunkRequest} / {@link ProxyRequest} streams, one per planning
- * lane. The lane offsets and priority weights live on
- * {@link PlanningConfig} so they can be live-tuned. `computePriority`
- * is the shared formula every emitter consumes.
- *
- * See ADR 0029.
+ * Lane emission helpers + priority computation. Translates active-set
+ * entries and minimap-pending coords into {@link ChunkRequest} /
+ * {@link ProxyRequest} streams, one per lane. See ADR 0029.
  */
 
 import { Axis } from "../../axes.ts";
@@ -30,12 +24,9 @@ import type {
 // ---------------------------------------------------------------------------
 
 /**
- * Compute a numeric priority for a chunk request.
- *
- * Lower values = more urgent.  The lane offset separates the lanes
- * (detail < proxy < prefetch < overview), while importance and distance
- * provide intra-lane ordering. Both coefficients live on
- * {@link PlanningConfig} so they can be twisted live.
+ * Numeric priority for a chunk request. Lower = more urgent. Lane
+ * offset separates lanes (detail < proxy < prefetch < overview);
+ * importance and distance order within a lane.
  */
 function computePriority(
   laneOffset: number,

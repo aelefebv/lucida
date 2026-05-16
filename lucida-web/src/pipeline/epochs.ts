@@ -1,14 +1,8 @@
 /**
- * Scene-state epoch counters.
- *
- * Each field is bumped when a particular slice of scene state changes; the
- * orchestrator and downstream consumers (planning, renderer) read these
- * counters to detect what has changed since their last view of the world.
- *
- * Of the six fields only `request` is planning-specific (bumped by
- * {@link plan} each tick); the rest track scene-state changes that
- * planning consumes but does not own. See ADR 0028 for the rename
- * rationale (formerly `PlanningEpochs` in `pipeline/planning/index.ts`).
+ * Scene-state epoch counters. Each field bumps when its slice of scene
+ * state changes; consumers diff against their last read to detect what
+ * changed. Only `request` is planning-owned (bumped by {@link plan}).
+ * See ADR 0028.
  */
 export interface SceneEpochs {
   content: number;

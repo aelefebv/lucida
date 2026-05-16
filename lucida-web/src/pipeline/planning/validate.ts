@@ -295,21 +295,13 @@ function allowedEntityKindsFor(
 
 /**
  * Run the seven semantic-invariant checks on `plan()`'s inputs. Throws
- * on first failure; the message names the violated invariant and the
- * offending id where applicable. Called from {@link plan} only when
- * `import.meta.env.DEV` is true.
+ * on first failure with the violated invariant and the offending id.
+ * Called from {@link plan} only when `import.meta.env.DEV` is true.
  *
- * Originally nine checks per ADR 0031; checks 6 (assetCatalog refs)
- * and 7 (minimapPending keys) were withdrawn — both shared the same
- * root issue: producer scope (cross-dataset registry / all dataset
- * images) didn't match snapshot scope (one dataset's currently visible
- * entities). Check 9's mapping was also widened. See the comments
- * above the withdrawn-check blocks for details.
- *
- * Order is fixed (matches ADR 0031). Earlier checks build the referential
- * context later checks rely on (e.g. uniqueness before reference-resolution),
- * so a violation in an earlier check fires before a downstream check could
- * be misled.
+ * Order is fixed (see ADR 0031): earlier checks build referential
+ * context later checks rely on (e.g. uniqueness before reference
+ * resolution), so a violation fires before a downstream check could be
+ * misled.
  */
 export function validatePlanningInputs(
   snapshot: PlanningSnapshot,

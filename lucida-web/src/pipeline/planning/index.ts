@@ -1,20 +1,6 @@
 /**
- * Planning domain — public barrel.
- *
- * This module is a re-export only — no type/function/const definitions
- * of its own. The planning core lives in sibling files:
- *
- *   - `./types.ts`   — every interface and type alias
- *   - `./modes.ts`   — promotion-mode decision logic
- *   - `./chunks.ts`  — chunk enumeration and culling primitives
- *   - `./emit.ts`    — lane emission helpers + priority computation
- *   - `./plan.ts`    — top-level `plan()` function
- *   - `./config.ts`  — tunables and default values
- *   - `./synthetic.ts` — test fixtures
- *
- * Every external consumer (orchestrator, cpuCache, debug derivation,
- * tests, …) imports from this barrel so the public surface is stable
- * across the file split. See ADR 0029.
+ * Planning domain — public barrel. See ADR 0029.
+ * Core lives in sibling files; this module is re-exports only.
  */
 
 // ---------------------------------------------------------------------------

@@ -5,12 +5,8 @@ import type { CpuCache } from "./fetch/index.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
 
-// Planner-only tests for Orchestrator. Upload-side describes (proxy
-// delivery, cold-state display state, viewHotState emission, chunk
-// delivery, handleChunksEvicted, multi-dataset upload characterization,
-// cold-state lifecycle invariant) live in `upload/uploader.test.ts`.
-// The two describes here cover only the planner role: epoch caching +
-// multi-dataset planning state.
+// Planner-only tests: epoch caching + multi-dataset planning state.
+// Upload-side describes live in `upload/uploader.test.ts`.
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
 function createMockAssetCatalog(): AssetCatalog {

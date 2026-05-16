@@ -1,10 +1,4 @@
-/**
- * Test fixtures for the planning module.
- *
- * Extracted from `index.ts` so production paths don't need to import the
- * synthetic builders. Re-exported from `index.ts` for callers that
- * already import them through the main entry point.
- */
+/** Test fixtures for the planning module. */
 
 import type {
   EntitySnapshot,
@@ -17,38 +11,17 @@ import type {
 } from "./index.ts";
 
 /**
- * Overrides accepted by {@link createSyntheticEntity}. The `kind`
- * discriminator selects which {@link EntitySnapshot} variant is
- * returned; for `kind: "Field"` callers MAY supply `parentId` (it
- * defaults to `"synthetic-well"` so simple test cases keep working
- * unchanged).
- *
- * Modelled as a single options bag rather than overloads so callers can
- * still spread an existing entity and tweak a field without ceremony.
- * The variant-specific fields are optional here; the function constructs
- * the correct variant based on `kind` and supplies sensible defaults.
+ * Overrides for {@link createSyntheticEntity}. `kind` selects the
+ * {@link EntitySnapshot} variant; `parentId` defaults to
+ * `"synthetic-well"` for `kind: "Field"` and is ignored otherwise.
  */
 export interface CreateSyntheticEntityOverrides
   extends Partial<Omit<FieldSnapshot, "kind" | "parentId">> {
   kind?: "Image" | "Well" | "Field";
-  /**
-   * Required (or defaulted) when `kind === "Field"`. Ignored for
-   * `kind: "Image"` and `kind: "Well"` (those variants have no
-   * `parentId` field).
-   */
   parentId?: string;
 }
 
-/**
- * Create a valid {@link EntitySnapshot} with sensible defaults, merged
- * with overrides.
- *
- * The `kind` override selects which {@link EntitySnapshot} variant is
- * returned (default `"Image"`). For `kind: "Field"` callers MAY
- * supply a `parentId`; the helper defaults it to `"synthetic-well"`
- * so existing callers don't have to thread a parent through every
- * fixture.
- */
+/** Build a valid {@link EntitySnapshot} with defaults, merged with overrides. */
 export function createSyntheticEntity(
   overrides?: CreateSyntheticEntityOverrides,
 ): EntitySnapshot {

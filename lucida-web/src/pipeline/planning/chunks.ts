@@ -1,12 +1,6 @@
 /**
- * Planning domain — chunk enumeration and frustum culling primitives.
- *
- * Spatial enumeration of LOD chunks for an entity, with culling against
- * the visible region's xy-bounds, z-range, and optional frustum
- * half-planes. Pure helpers — no side effects beyond mutating the
- * caller-supplied `stats` accumulator.
- *
- * See ADR 0029.
+ * Chunk enumeration + frustum culling primitives. Pure (only mutates
+ * the caller-supplied `stats` accumulator). See ADR 0029.
  */
 
 import { Axis } from "../../axes.ts";
