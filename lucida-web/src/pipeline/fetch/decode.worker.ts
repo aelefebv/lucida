@@ -86,9 +86,12 @@ async function decompressZstd(src: ArrayBuffer): Promise<ArrayBuffer> {
   if (!fzstdModule) {
     fzstdModule = await import("fzstd");
   }
-  // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
-  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
-  return fzstdModule.decompress(new Uint8Array(src)).buffer as ArrayBuffer;
+  // fzstd returns a Uint8Array that is a view into a larger underlying
+  // buffer (12-byte prefix + decoded bytes). Slice to get just the
+  // decoded range, otherwise downstream readers see garbage prefix
+  // bytes. Surfaced by Slice 1 characterization tests.
+  const decoded = fzstdModule.decompress(new Uint8Array(src));
+  return decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength) as ArrayBuffer;
 }
 
 function decompress(bytes: ArrayBuffer, wireFormat: WireFormat): ArrayBuffer | Promise<ArrayBuffer> {
@@ -136,5 +139,5 @@ self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
 };
 
 // Re-export for direct testing (imported as a module, not as a worker)
-export { decompressLz4, normalize };
+export { decompressLz4, decompressZstd, normalize };
 export type { DecodeRequest, DecodeResponse, DecodeError };

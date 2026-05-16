@@ -1,4 +1,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock debugLog so the rate-limited log assertions in the
+// "characterization gaps" describe block can spy on it. Other tests
+// don't trigger backpressure / eviction-burst paths under normal
+// fixtures, so the mock is a no-op for them.
+vi.mock("../../debug/logging.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../debug/logging.ts")>();
+  return { ...actual, debugLog: vi.fn() };
+});
+import { debugLog } from "../../debug/logging.ts";
+
 import { CpuCache, type CpuCacheConfig } from "./cpuCache.ts";
 import type {
   ContentSource,
@@ -1420,6 +1431,155 @@ describe("CpuCache", () => {
       cache.drain(Infinity);
       expect(source.fetchProxyCount).toBe(before);
     });
+  });
+
+  // =========================================================================
+  // Characterization gaps surfaced by the dechaos pre-refactor pass.
+  // Pin behaviour as it stands today; the upcoming refactor (PRD #592)
+  // preserves these contracts unless a slice explicitly fixes them.
+  // =========================================================================
+
+  describe("characterization gaps (pre-refactor)", () => {
+    beforeEach(() => {
+      vi.mocked(debugLog).mockClear();
+    });
+
+    it("cancelled-during-decode: chunk still lands in cache and ready[]", async () => {
+      // Race per dechaos pass 5: a fetch resolves *before* cancelDataset,
+      // but the queued decode microtask runs *after* it. The cache-insert
+      // and ready-push paths run unconditionally (no inFlight check), so
+      // the chunk lands in both. The orchestrator's wanted-set filter
+      // handles the stale delivery downstream — this test pins the
+      // behaviour rather than asserts it as a defect.
+      const { cache, source } = createTestCache();
+      const req = makeRequest({ x: 0, y: 0, z: 0 });
+      cache.submit(makePlan([req]));
+      expect(source.fetchCount).toBe(1);
+
+      // Resolve first: the source's promise settles; fetchAndDecode's
+      // continuation is queued for the next microtask but has not run.
+      source.resolve("entity-1/image-1/0/0/0/0/0/0");
+
+      // Cancel between resolve and the queued continuation. abort()
+      // fires but is a no-op against the already-resolved promise; the
+      // inFlight map entry is deleted.
+      cache.cancelDataset("entity-1", ["entity-1"]);
+
+      await flush();
+
+      expect(cache.getCachedChunk("entity-1", req.chunkKey)).not.toBeNull();
+      const deliveries = cache.drain(Infinity);
+      expect(deliveries).toHaveLength(1);
+      const delivery = deliveries[0];
+      expect(delivery.kind).toBe("chunk");
+      if (delivery.kind === "chunk") {
+        expect(delivery.chunkKey).toBe(req.chunkKey);
+      }
+    });
+
+    it("pendingOldestAgeMs: telemetry reports the age of the oldest pending enqueue", async () => {
+      vi.useFakeTimers();
+      try {
+        // Constrain concurrency so a request stays pending.
+        const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+        const r1 = makeRequest({ x: 0 });
+        const r2 = makeRequest({ x: 1 });
+        cache.submit(makePlan([r1, r2]));
+        expect(source.fetchCount).toBe(1);
+
+        const t0 = cache.telemetry().pendingOldestAgeMs;
+        expect(t0).toBeGreaterThanOrEqual(0);
+
+        vi.advanceTimersByTime(250);
+        const t1 = cache.telemetry().pendingOldestAgeMs;
+        expect(t1).toBeGreaterThanOrEqual(t0);
+        // Conservative bound: at least the time we advanced.
+        expect(t1).toBeGreaterThanOrEqual(200);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("backpressure log fires at most once per second under sustained queue depth", () => {
+      vi.useFakeTimers();
+      try {
+        // The gate is `now - lastAt >= 1000`. lastAt starts at 0, so
+        // performance.now() must be ≥ 1000 for the first emit. Fake
+        // timers give us a deterministic clock.
+        vi.advanceTimersByTime(2000);
+
+        const { cache } = createTestCache({
+          maxConcurrentFetches: 1,
+          maxBytesInFlight: 1,
+        });
+        const requests = [0, 1, 2, 3, 4].map((x) => makeRequest({ x }));
+
+        cache.submit(makePlan(requests));
+        const firstCallCount = vi.mocked(debugLog).mock.calls.filter(
+          (c) => c[1] === "cache.backpressure",
+        ).length;
+        expect(firstCallCount).toBe(1);
+
+        // Within 1 second, the rate limit suppresses additional emits.
+        vi.advanceTimersByTime(500);
+        cache.submit(makePlan(requests));
+        const stillOne = vi.mocked(debugLog).mock.calls.filter(
+          (c) => c[1] === "cache.backpressure",
+        ).length;
+        expect(stillOne).toBe(1);
+
+        // After the 1-second window elapses, a new emit fires.
+        vi.advanceTimersByTime(600);
+        cache.submit(makePlan(requests));
+        const afterWindow = vi.mocked(debugLog).mock.calls.filter(
+          (c) => c[1] === "cache.backpressure",
+        ).length;
+        expect(afterWindow).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("eviction-burst log fires when ≥16 entries evict in one pass", async () => {
+      // Tight budget + many tiny entries forces a single insert to
+      // evict 16+ neighbours.
+      const { cache, source } = createTestCache({
+        mainBudgetBytes: 16,
+        maxConcurrentFetches: 100,
+        maxBytesInFlight: 1024,
+      });
+      // Each fetch returns 1 byte; cache is empty until we fill it.
+      source.autoResolveBytes = 1;
+
+      const fillers = Array.from({ length: 16 }, (_, i) =>
+        makeRequest({ x: i, lane: "prefetch" }),
+      );
+      cache.submit(makePlan(fillers));
+      await flush();
+
+      // Drain to clear ready[]. Cache now holds 16 × 1B in main.
+      cache.drain(Infinity);
+      vi.mocked(debugLog).mockClear();
+
+      // Insert one bigger entry that requires evicting all 16.
+      source.autoResolveBytes = 16;
+      cache.submit(
+        makePlan([makeRequest({ x: 100, lane: "detail" })]),
+      );
+      await flush();
+
+      const evictionLogs = vi.mocked(debugLog).mock.calls.filter(
+        (c) => c[1] === "cache.eviction_burst",
+      );
+      expect(evictionLogs.length).toBeGreaterThanOrEqual(1);
+      expect(evictionLogs[0][2]).toMatchObject({ removed: expect.any(Number) });
+      const removedArg = (evictionLogs[0][2] as { removed: number }).removed;
+      expect(removedArg).toBeGreaterThanOrEqual(16);
+    });
+
+    it.todo(
+      "imageWireFormats cleared on dataset removal — activated by Slice 4 (#598)",
+    );
   });
 });
 
