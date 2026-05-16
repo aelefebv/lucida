@@ -19,10 +19,6 @@ The split mirrors [[decisions/0032-cpucache-split-into-pipeline-fetch]] in shape
 
 `pipeline/upload/` mirrors `pipeline/fetch/` for the same composability reasons spelled out in 0032: the eight-pass dechaos analysis under `wiki/outputs/dechaos-upload-2026-05-15/` identified the same kinds of extractable units (a state tracker, pure builders, telemetry counters, a feedback handler) and recommended the same kind of directory-of-small-files destination. The eleven modules below are not an arbitrary count — they correspond one-to-one with the extractable seams Pass 2 ranked and Pass 6 confirmed.
 
-## Why no principle citation
-
-`principles/upload-pipeline.md` does not yet exist. An INTERVIEW pass to author it is queued in [[queue]] (2026-05-16 entry) for after this refactor settles — the principles emerge from the patterns visible in the cleaner post-refactor code, and pre-authoring would risk coupling the principles to today's specific shape. Same reasoning the fetch refactor's [[decisions/0032-cpucache-split-into-pipeline-fetch]] used for `principles/cpu-cache.md`.
-
 ## Why the integration test suite stays monolithic through Slice 9
 
 `orchestrator.test.ts` (1024 LOC, 20 `it()` blocks) is the existing safety net. It covers planning + cold-state + viewHotState + proxy delivery end-to-end. Chunk delivery has zero direct tests today, which is why Slice 1 adds ~525 LOC of characterization tests *to the existing file* before any structural change starts — those tests need to be there at Slice 2 and Slice 5 and Slice 7 alike, and giving them a stable home means not splitting the file in parallel.
