@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-13
+modified: 2026-05-16
 ---
 
 # Systems
@@ -30,6 +30,7 @@ Major modules and subsystems within Lucida. Articles are split into two sub-fold
 - [[chunk-pipeline]] — overview of the end-to-end path from dataset URL to pixels; pointer to the deep trace in `CHUNK_PIPELINE.md`
 - [[planning-domain]] — wanted-set computation, LOD promotion with hysteresis, lane-based priority formula
 - [[cpu-cache]] — sole chunk fetch path; tiered LRU eviction; decode pool dispatch; drain to GPU
+- [[upload-pipeline]] — `pipeline/upload/` Uploader; cold/hot state emission, drain/resend/dispatch, delivery tracking, worker feedback
 - [[gpu-residency]] — atlases (slice, volume, multi-pool proxy), indirection, descriptor buffer, semantic fallback chain
 - [[worker-protocol]] — typed `postMessage` contract for cold/hot/delta state between main thread and GPU worker
 - [[scene-state-and-epochs]] — typed epoch counters drive the orchestrator's frame fast-path
