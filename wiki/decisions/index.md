@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-15
+modified: 2026-05-16
 ---
 
 ADRs cite [[principles/index|principles]] as their justification when applicable. Principles never cite back — they remain agnostic to which decisions exist today.
@@ -46,6 +46,7 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0031-validate-planning-inputs-dev-mode-boundary-check]] — `validatePlanningInputs(snapshot, state)` runs seven semantic-invariant checks at `plan()` entry; gated by `import.meta.env.DEV`; throws on violation (no degrade); originally nine, checks 6 and 7 withdrawn post-ship for producer-vs-snapshot scope mismatch (PRD #578; 2026-05-15)
 - [[decisions/0032-cpucache-split-into-pipeline-fetch]] — `cpuCache.ts` (1627 lines) splits into a `pipeline/fetch/` directory of focused modules with `cpuCache.ts` as a ~250 LOC coordinator; mirrors [[decisions/0029-planning-index-split-into-per-concern-files]] in shape; integration test suite stays monolithic; two latent bugs ride along inside the slices that surface them; chunk/proxy `Scheduler` unification deferred (PRD #592; 2026-05-15)
 - [[decisions/0033-typed-fetch-error]] — `ContentSource` raises typed `FetchError(kind: "permanent" | "transient" | "abort")` at every rejection site; `CpuCache.fetchAndDecode` dispatches via `classifyFetchError` + injected `RetryPolicy` (`OnceTransientRetry` / `NeverRetry`); fixes the "no wire format registered" misclassification surfaced by dechaos pass 5 (PRD #592, issue #602; 2026-05-15)
+- [[decisions/0034-orchestrator-split-into-pipeline-upload]] — `orchestrator.ts` (2027 lines) splits into a planner-only `Orchestrator` (~400 LOC) plus a new `Uploader` coordinator (~250 LOC) backed by `pipeline/upload/` — mirrors [[decisions/0032-cpucache-split-into-pipeline-fetch]] in shape; integration test suite stays monolithic through Slice 9; two latent bugs ride along (`workerWantedSet` dead state, multi-dataset resend under-resend); chunk/proxy asset-abstraction explicitly NOT pursued (PRD #607; 2026-05-16)
 
 ## Deferred — considered but not built yet
 
