@@ -1,12 +1,12 @@
-//! End-to-end HTTP tests for `AuthMode::Disabled` (PRD #527, slice 1).
+//! End-to-end HTTP tests for `AuthMode::Disabled`.
 //!
 //! Spawn the actual `lucida-server` binary in disabled mode, then drive
-//! it over real HTTP via `reqwest`. The regression these tests close:
-//! before PRD #527 the binary booted fine in disabled mode but every
-//! request 401'd because `build_extractor` always returned the cookie
-//! extractor regardless of `AuthMode`. `auth_config_e2e.rs` only checks
-//! that the binary boots and binds; these tests close the gap by
-//! exercising actual HTTP request/response.
+//! it over real HTTP via `reqwest`. The regression these tests close: if
+//! `build_extractor` returned the cookie extractor regardless of
+//! `AuthMode`, every request would 401 even though the binary booted
+//! fine. `auth_config_e2e.rs` only checks that the binary boots and
+//! binds; these tests close the gap by exercising actual HTTP
+//! request/response.
 //!
 //! Each test:
 //! - Picks a unique loopback (or `0.0.0.0`) port via `pick_loopback_port`.
@@ -182,9 +182,8 @@ async fn assert_whoami_returns_dev_principal(server: &SpawnedServer) {
 
 // ---------------------------------------------------------------------
 // Test 1: loopback default (no LUCIDA_AUTH set) → whoami yields dev
-// principal. THE regression test for PRD #527 — pre-fix this would
-// 401 because the cookie extractor demanded a session cookie no
-// route had minted.
+// principal. The regression this pins: if the cookie extractor demands
+// a session cookie no route minted in disabled mode, this would 401.
 // ---------------------------------------------------------------------
 
 #[tokio::test]
@@ -266,9 +265,9 @@ async fn browse_works_without_cookie_in_disabled_mode() {
 }
 
 // ---------------------------------------------------------------------
-// Test 4: POST /auth/dev/login is gone. PRD #527 retired the route in
-// favour of the stub extractor; this is the positive test that the
-// removal stuck.
+// Test 4: POST /auth/dev/login is gone. The route was retired in favour
+// of the stub extractor; this is the positive test that the removal
+// stuck.
 //
 // `LUCIDA_WEB_DIST` is pointed at an empty tempdir so the SPA static-
 // serve fallback returns its missing-dist landing (200 + HTML body)

@@ -149,8 +149,8 @@ fn clear_all_skips_top_level_files() {
 #[test]
 fn clear_specific_dataset_url_hash_matches_proxy_cache_layout() {
     // Sanity check: the helper walks the *exact* directory the
-    // `ProxyCache` would have created for the same URL. If S4's hashing
-    // scheme changes, this test surfaces the drift.
+    // `ProxyCache` would have created for the same URL. If the
+    // hashing scheme changes, this test surfaces the drift.
     let tmp = tempfile::tempdir().unwrap();
     let cache_dir = tmp.path().to_path_buf();
     let expected_subdir = cache_dir.join(hex16(&dataset_url_hash16(URL_A)));

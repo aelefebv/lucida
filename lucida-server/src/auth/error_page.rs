@@ -1,8 +1,8 @@
 //! `/auth/error` server-rendered page.
 //!
-//! Slice 5 (PRD #455 §"Error UX"): the user-facing destination after
-//! `auth_callback` rejects a sign-in. Three rendering modes, all
-//! distinguishable from the `code=` query param:
+//! User-facing destination after `auth_callback` rejects a sign-in.
+//! Three rendering modes, all distinguishable from the `code=` query
+//! param:
 //!
 //! * `hd_mismatch` — verified Google account, but the `hd` claim is
 //!   absent or not in `LUCIDA_ALLOWED_HOSTED_DOMAINS`. The user knows

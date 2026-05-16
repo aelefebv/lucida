@@ -1,4 +1,4 @@
-//! PRD #454 slice 4: live `BookmarkChanged` broadcasts.
+//! Live `BookmarkChanged` broadcasts.
 //!
 //! After a successful `POST` / `PATCH` / `DELETE` on a bookmark, the
 //! handler hands off to [`broadcast_bookmark_change`] which:

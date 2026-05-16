@@ -12,9 +12,8 @@ use serde::{Deserialize, Serialize};
 pub struct DatasetOpened {
     pub manifest: DatasetManifest,
     pub fetch: FetchSource,
-    /// Initial asset catalog. Empty in S3 — populated by S5.
-    /// `#[serde(default)]` keeps backward compat with messages that omit
-    /// the field (older clients/snapshots).
+    /// Initial asset catalog. `#[serde(default)]` keeps backward compat
+    /// with messages that omit the field (older clients/snapshots).
     #[serde(default)]
     pub catalog: AssetCatalog,
 }

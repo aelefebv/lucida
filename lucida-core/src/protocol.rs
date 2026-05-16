@@ -103,16 +103,15 @@ pub enum ServerMessage {
     /// Sent when OpenRemoteDataset cannot be fulfilled.
     OpenDatasetFailed { url: String, error: String },
     /// Incremental update to a dataset's asset catalog.
-    /// Reserved for S5; S3 server never emits this.
     AssetCatalogUpdate {
         dataset_id: DatasetId,
         delta: AssetCatalogDelta,
     },
-    /// PRD #454 slice 4: a server-stored bookmark was created, renamed,
-    /// or deleted. Broadcast to clients whose session has at least one
-    /// loaded dataset that overlaps `dataset_urls`. The client refetches
-    /// the bookmark by id (on Created/Updated) or removes it from local
-    /// state (on Deleted) — keeping the broadcast payload small.
+    /// A server-stored bookmark was created, renamed, or deleted.
+    /// Broadcast to clients whose session has at least one loaded dataset
+    /// that overlaps `dataset_urls`. The client refetches the bookmark by
+    /// id (on Created/Updated) or removes it from local state (on
+    /// Deleted) — keeping the broadcast payload small.
     ///
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift (see `wiki/gotchas/scene-document-state-json-compat`).
@@ -123,10 +122,9 @@ pub enum ServerMessage {
     },
 }
 
-/// PRD #454 slice 4: the kind of mutation a `BookmarkChanged` describes.
-/// Wire encoding is the lowercase variant name (`"created"` / `"updated"`
-/// / `"deleted"`) so the JSON shape stays stable if the Rust enum is
-/// later renamed.
+/// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
+/// the lowercase variant name (`"created"` / `"updated"` / `"deleted"`)
+/// so the JSON shape stays stable if the Rust enum is later renamed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BookmarkAction {

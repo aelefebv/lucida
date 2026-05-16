@@ -5,15 +5,14 @@
 //! `datasets` + `active_layouts` fields are the document-state surface (what
 //! is loaded), and `camera` + `view` + `display` + `dataset_order` +
 //! `dataset_settings` mirror the [`PresenceState`] surface (how it's being
-//! looked at). Slice 1 of #454 carries it inline in the URL hash; slice 2
-//! will store the same record server-side, addressed by an opaque ID.
+//! looked at). Inline in the URL hash; also stored server-side and addressed
+//! by an opaque ID.
 //!
 //! The schema is a wire format: every field that doesn't always serialize is
 //! marked `#[serde(default)]` so a recipient on an older `v: 1` codepath can
 //! tolerate later additive evolution. The `v` field is the version gate —
-//! `v: 1` is the only spec covered by this slice; the encoder rejects
-//! unknown major versions; future bumps (`v: 2`+) require an explicit
-//! migration story.
+//! `v: 1` is the only spec; the encoder rejects unknown major versions;
+//! future bumps (`v: 2`+) require an explicit migration story.
 //!
 //! Tests at the bottom of this file lock the wire format. Don't touch them
 //! casually — see [[gotchas/scene-document-state-json-compat]].
@@ -33,10 +32,10 @@ use crate::camera::Camera;
 use crate::scene::{DatasetDisplaySettings, DisplayState};
 use crate::view::ViewState;
 
-/// Schema version of the [`SavedView`] wire format. Slice 1 of PRD #454
-/// emits and accepts only this version. Recipients that see a higher
-/// version should best-effort apply known fields and surface a warning;
-/// recipients that see a missing/zero version should reject.
+/// Schema version of the [`SavedView`] wire format. Encoders emit and
+/// accept only this version. Recipients that see a higher version should
+/// best-effort apply known fields and surface a warning; recipients that
+/// see a missing/zero version should reject.
 pub const SAVED_VIEW_VERSION: u32 = 1;
 
 /// Capture record for a "saved view" — the user's complete view of one or

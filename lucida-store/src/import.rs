@@ -1356,8 +1356,8 @@ mod tests {
             })
     }
 
-    /// Bug C / S3: stage translations stored in microns must be converted to
-    /// voxel units before forming the field->well transform.
+    /// Stage translations stored in microns must be converted to voxel
+    /// units before forming the field->well transform.
     /// FOV 0 at (0, 0); FOV 1 at (100 µm, 200 µm). With Y/X scale of
     /// 0.5 µm/voxel the second FOV ends up at (200, 400) voxels.
     #[tokio::test]
@@ -1666,9 +1666,9 @@ mod tests {
             vec!["t", "c", "z", "m", "y", "x"],
         );
 
-        // PRD #447 Slice 2: levels[0].chunk_byte_layout captures the m=2
-        // chunk requiring prefix slicing — canonical chunk is
-        // 2048*1504*2 = 6160384 bytes; on-disk chunk is twice that.
+        // levels[0].chunk_byte_layout captures the m=2 chunk requiring
+        // prefix slicing — canonical chunk is 2048*1504*2 = 6160384
+        // bytes; on-disk chunk is twice that.
         assert_eq!(result.binding_seed.images[0].levels.len(), 1);
         let level0 = &result.binding_seed.images[0].levels[0];
         assert_eq!(level0.level_index, 0);
@@ -1680,9 +1680,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Helper for PRD #447 Slice 1 tests: synthesize a 6D OME-Zarr fixture
-    /// with custom axes order and chunk shape so we can exercise the
-    /// non-prefix rejection path.
+    /// Synthesize a 6D OME-Zarr fixture with custom axes order and
+    /// chunk shape so we can exercise the non-prefix rejection path.
     fn create_6d_fixture_with_axes(
         dir: &std::path::Path,
         axes: &[&str],
@@ -1754,9 +1753,9 @@ mod tests {
         .unwrap();
     }
 
-    /// PRD #447 Slice 2: 6D-with-m + lz4 codec + m chunk_size=2 →
-    /// import succeeds; the binding seed records [`StorageCompression::Lz4`]
-    /// and the per-level layout reflects pinned-axis prefix slicing
+    /// 6D-with-m + lz4 codec + m chunk_size=2 → import succeeds;
+    /// the binding seed records [`StorageCompression::Lz4`] and the
+    /// per-level layout reflects pinned-axis prefix slicing
     /// (canonical_byte_size != on_disk_byte_size).
     #[tokio::test]
     async fn import_6d_with_m_and_lz4_compresses_and_slices() {
@@ -1789,8 +1788,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// PRD #447 Slice 2: 6D-with-m + blosc-zstd-bitshuffle → import
-    /// succeeds and records the validated [`BloscConfig`] in level info.
+    /// 6D-with-m + blosc-zstd-bitshuffle → import succeeds and records
+    /// the validated [`BloscConfig`] in level info.
     #[tokio::test]
     async fn import_6d_with_m_and_blosc() {
         let dir = temp_dir("import_6d_m_blosc");
@@ -1829,9 +1828,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// PRD #447 Slice 1: non-prefix axis layout (e.g. `[t,c,z,y,m,x]` with
-    /// y_chunk > 1) is rejected at import with an error that names the
-    /// offending axis and the phrase "non-prefix".
+    /// Non-prefix axis layout (e.g. `[t,c,z,y,m,x]` with y_chunk > 1)
+    /// is rejected at import with an error that names the offending
+    /// axis and the phrase "non-prefix".
     #[tokio::test]
     async fn import_rejects_non_prefix_pinned_axis_layout() {
         let dir = temp_dir("import_6d_m_nonprefix");
@@ -1857,10 +1856,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Helper for PRD #447 Slice 2 rejection tests: synthesize a single-image
-    /// 5D OME-Zarr with one or more pyramid levels and a custom codec chain
-    /// per level. Each level shares the same shape/chunk; only the codec
-    /// chain varies. The fixture is metadata-only (no chunk bytes).
+    /// Synthesize a single-image 5D OME-Zarr with one or more pyramid
+    /// levels and a custom codec chain per level, used by the codec
+    /// rejection tests. Each level shares the same shape/chunk; only
+    /// the codec chain varies. The fixture is metadata-only (no chunk
+    /// bytes).
     fn create_5d_fixture_with_per_level_codecs(
         dir: &std::path::Path,
         per_level_codecs: &[Vec<serde_json::Value>],
@@ -1929,9 +1929,8 @@ mod tests {
         }
     }
 
-    /// PRD #447 Slice 2: an unknown codec name (`gzip`) at level 0 fails
-    /// import with a message that names both the offending codec and the
-    /// level index.
+    /// An unknown codec name (`gzip`) at level 0 fails import with a
+    /// message that names both the offending codec and the level index.
     #[tokio::test]
     async fn import_rejects_unknown_codec_with_level_and_name() {
         let dir = temp_dir("import_reject_gzip_l0");
@@ -1958,8 +1957,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// PRD #447 Slice 2: a `bytes` codec with `endian: "big"` fails import
-    /// with a message that names the offending value.
+    /// A `bytes` codec with `endian: "big"` fails import with a
+    /// message that names the offending value.
     #[tokio::test]
     async fn import_rejects_big_endian_bytes_codec() {
         let dir = temp_dir("import_reject_big_endian");
@@ -1981,8 +1980,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// PRD #447 Slice 2: a mid-pyramid codec change (level 0 lz4, level 1
-    /// `gzip`) fails import with a message that pinpoints level 1.
+    /// A mid-pyramid codec change (level 0 lz4, level 1 `gzip`) fails
+    /// import with a message that pinpoints level 1.
     #[tokio::test]
     async fn import_rejects_mid_pyramid_unknown_codec() {
         let dir = temp_dir("import_reject_mid_pyramid");
@@ -2015,8 +2014,8 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// PRD #447 Slice 2: blosc with an unsupported `cname` (`blosclz`) fails
-    /// import with a message that names the offending value verbatim.
+    /// Blosc with an unsupported `cname` (`blosclz`) fails import with
+    /// a message that names the offending value verbatim.
     #[tokio::test]
     async fn import_rejects_blosc_with_unsupported_cname() {
         let dir = temp_dir("import_reject_blosc_blosclz");

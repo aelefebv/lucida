@@ -1,14 +1,14 @@
 //! SQLite-backed `LoginSessionStore`.
 //!
-//! Slice 2 (PRD #455) opens — and creates if missing — the lucida
-//! database file, runs the bundled migrations, and serves session
-//! reads/writes from it. The schema and indexes are defined in
+//! Opens — and creates if missing — the lucida database file, runs the
+//! bundled migrations, and serves session reads/writes from it. The
+//! schema and indexes are defined in
 //! `migrations/20260508000001_create_login_sessions.sql`; the migration
 //! is run idempotently at startup via `sqlx::migrate!`.
 //!
 //! Connection-pool sizing: a single SQLite file is the bottleneck
-//! anyway; default pool of 5 is plenty for the loopback-only deployment
-//! shape this slice targets.
+//! anyway; the default pool of 5 is plenty for the loopback-only
+//! deployment shape.
 
 use std::path::Path;
 
@@ -91,9 +91,9 @@ impl SqliteSessionStore {
         Ok(Self { pool })
     }
 
-    /// Borrow the underlying connection pool. Slice 4 (PRD #455)
-    /// derives `SqlitePendingAuthStore` from the same pool so both
-    /// stores share a single SQLite file + connection budget.
+    /// Borrow the underlying connection pool. `SqlitePendingAuthStore`
+    /// is derived from the same pool so both stores share a single
+    /// SQLite file + connection budget.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
@@ -253,8 +253,8 @@ mod tests {
 
     /// Smoke test for the production "mint a session per request" path:
     /// 16 concurrent inserts with UUID v4 ids must all land successfully
-    /// and produce 16 distinct rows. (Slice 2's dev-login + slice 4's
-    /// OAuth callback each call `create()` with a fresh UUID per call.)
+    /// and produce 16 distinct rows. (The OAuth callback calls
+    /// `create()` with a fresh UUID per call.)
     #[tokio::test]
     async fn parallel_inserts_produce_distinct_ids() {
         let store = SqliteSessionStore::open_in_memory().await.unwrap();

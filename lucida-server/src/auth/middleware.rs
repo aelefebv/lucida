@@ -5,11 +5,9 @@
 //!
 //! ## 401 response shape
 //!
-//! Per PRD #455 §"REST API contract", unauthenticated requests to HTML
-//! routes render the `UnauthLanding` page (so the JS shim can capture
-//! `location.hash` for the OAuth roundtrip), while API routes get bare
-//! JSON. Slice 4 (issue #460) lands that branching: HTML navigation
-//! gets `200 + text/html` carrying the JS shim, API clients get
+//! Unauthenticated requests to HTML routes render the `UnauthLanding`
+//! page (so the JS shim can capture `location.hash` for the OAuth
+//! roundtrip): `200 + text/html` carrying the JS shim. API clients get
 //! `401 + JSON`. The classification helper (`accepts_html`) is also
 //! used by the integration test to assert correct branching without
 //! standing up a real browser.
@@ -19,9 +17,8 @@
 //! `/auth/start`, `/auth/callback`, `/auth/whoami`, and `/auth/logout`
 //! MUST NOT serve the unauth landing themselves — doing so would either
 //! bounce the user back to `/auth/start` from `/auth/start` (infinite
-//! loop) or hide the callback's session-mint from the browser. Slice 4
-//! keeps these routes on a separate router that the auth middleware
-//! never wraps.
+//! loop) or hide the callback's session-mint from the browser. These
+//! routes live on a separate router that the auth middleware never wraps.
 
 use std::sync::Arc;
 
@@ -74,15 +71,15 @@ pub async fn auth_middleware(
 
 /// Build a 401 (or 5xx) response.
 ///
-/// Slice 4 (issue #460) branches HTML vs JSON on the request's
-/// `Accept` header. HTML navigations get the unauth landing page
-/// (which JS-shims to `/auth/start`) at `200 OK` so the page actually
-/// renders — a 401 with HTML body would still show the body, but
-/// keeping the success status removes one source of confused browser
-/// devtools chatter for the handoff page. API clients keep the bare
-/// JSON 401. `Internal` errors stay bare-JSON for both shapes; an
-/// HTML page that says "internal error" without context is worse
-/// than a 500 that the browser renders as plain text.
+/// Branches HTML vs JSON on the request's `Accept` header. HTML
+/// navigations get the unauth landing page (which JS-shims to
+/// `/auth/start`) at `200 OK` so the page actually renders — a 401
+/// with HTML body would still show the body, but keeping the success
+/// status removes one source of confused browser devtools chatter for
+/// the handoff page. API clients keep the bare JSON 401. `Internal`
+/// errors stay bare-JSON for both shapes; an HTML page that says
+/// "internal error" without context is worse than a 500 that the
+/// browser renders as plain text.
 ///
 /// On HTML routes the page also branches on the `lucida_signed_out`
 /// marker cookie (set by `/auth/logout`). When present, the user just
@@ -131,9 +128,8 @@ fn unauthenticated_response(err: &AuthError, headers: &HeaderMap) -> Response {
 }
 
 /// Best-effort classification: does the client appear to want an HTML
-/// page back? Wired through to the response branch in slice 4; today
-/// it's exposed for callers (and as a smoke target for tests) so the
-/// future branching has a stable home.
+/// page back? Wired through to the response branch and exposed for
+/// callers (and as a smoke target for tests).
 pub fn accepts_html(headers: &HeaderMap) -> bool {
     headers
         .get(header::ACCEPT)
@@ -149,7 +145,7 @@ pub fn accepts_html(headers: &HeaderMap) -> bool {
 /// store. ADR-0018's loopback-default safety promise relies on this
 /// branch existing — without it the cookie extractor would 401 every
 /// request and the SPA would loop into a `/auth/start` that isn't
-/// registered (the regression PRD #527 fixes).
+/// registered.
 ///
 /// `Google` → [`SessionCookieExtractor`]: read the `lucida_session`
 /// cookie, look up the row, enforce idle + hard-cap, derive `is_admin`
@@ -315,10 +311,9 @@ mod tests {
     }
 
     /// Disabled-mode wiring: `build_extractor` returns the stub, and
-    /// the middleware attaches `dev@local` even with no cookie. This
-    /// pins the regression PRD #527 fixed: pre-fix, this same setup
-    /// would 401 because `build_extractor` always returned the cookie
-    /// extractor regardless of `AuthMode`.
+    /// the middleware attaches `dev@local` even with no cookie. Pins
+    /// the regression where `build_extractor` always returned the
+    /// cookie extractor regardless of `AuthMode`, 401ing every request.
     #[tokio::test]
     async fn build_extractor_disabled_mode_attaches_dev_principal_with_no_cookie() {
         let store = Arc::new(MemorySessionStore::new());
@@ -357,8 +352,8 @@ mod tests {
         assert!(!accepts_html(&headers));
     }
 
-    /// Slice 4 (issue #460): HTML navigations get the unauth landing
-    /// page back instead of the bare JSON 401 the API path uses.
+    /// HTML navigations get the unauth landing page back instead of
+    /// the bare JSON 401 the API path uses.
     #[tokio::test]
     async fn middleware_returns_unauth_landing_html_to_browsers() {
         let store = Arc::new(MemorySessionStore::new());

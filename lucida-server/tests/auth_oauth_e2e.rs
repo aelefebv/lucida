@@ -1,4 +1,4 @@
-//! End-to-end OAuth flow test for slice 4 (PRD #455, issue #460).
+//! End-to-end OAuth flow test.
 //!
 //! Stands up two axum apps inside the test process:
 //!
@@ -226,10 +226,9 @@ fn mint_id_token(
     mint_id_token_full(private_pem, email, name, picture, hd, true)
 }
 
-/// Slice 5 needs to forge tokens with `email_verified: false` to
-/// exercise the unverified-rejection path. `mint_id_token` keeps the
-/// slice-4 default of `true` so existing call sites don't need
-/// updating.
+/// Lets tests forge tokens with `email_verified: false` to exercise
+/// the unverified-rejection path. `mint_id_token` keeps the default
+/// of `true` so existing call sites don't need updating.
 fn mint_id_token_full(
     private_pem: &str,
     email: &str,
@@ -269,7 +268,7 @@ async fn build_lucida_app(mock_base: &str) -> LucidaApp {
     build_lucida_app_with_allowed_domains(mock_base, &[]).await
 }
 
-/// Slice 5 entry point: same wiring as `build_lucida_app` but with
+/// Same wiring as `build_lucida_app` but with
 /// `LUCIDA_ALLOWED_HOSTED_DOMAINS` set to the supplied list. Empty
 /// list = OSS-permissive default (any verified email accepted).
 async fn build_lucida_app_with_allowed_domains(mock_base: &str, allowed: &[&str]) -> LucidaApp {
@@ -305,8 +304,8 @@ async fn build_lucida_app_with_allowed_domains(mock_base: &str, allowed: &[&str]
 
     // Public half: /auth/start + /auth/callback + /auth/error. NOT
     // wrapped in the middleware (would loop). Mirrors `main.rs`'s
-    // split. /auth/error is plumbed in slice 5 so the integration
-    // test can probe the redirect target end-to-end.
+    // split. /auth/error is plumbed so the integration test can probe
+    // the redirect target end-to-end.
     let public = Router::new()
         .route(
             "/auth/start",
@@ -431,9 +430,9 @@ async fn full_oauth_flow_lands_user_at_intended_path_with_hash() {
 
 #[tokio::test]
 async fn callback_with_unknown_state_redirects_to_auth_failed() {
-    // Slice 5 changed the failure shape: instead of JSON 400, every
-    // failure 302s to /auth/error?code=auth_failed (generic; details
-    // stay in server logs to avoid aiding reconnaissance).
+    // Every callback failure 302s to /auth/error?code=auth_failed
+    // (generic; details stay in server logs to avoid aiding
+    // reconnaissance).
     let keys = build_test_keys();
     let (mock_base, _mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
     let app = build_lucida_app(&mock_base).await;
@@ -480,7 +479,7 @@ async fn callback_replay_of_consumed_state_returns_400() {
     let cb_res = app.router.clone().oneshot(cb_req).await.unwrap();
     assert_eq!(cb_res.status(), StatusCode::FOUND);
 
-    // Replay the same state token — slice 5: 302 to /auth/error?code=auth_failed.
+    // Replay the same state token — 302 to /auth/error?code=auth_failed.
     let replay = Request::builder()
         .uri(format!("/auth/callback?code=c&state={state_token}"))
         .body(Body::empty())
@@ -494,9 +493,9 @@ async fn callback_replay_of_consumed_state_returns_400() {
 #[tokio::test]
 async fn callback_with_invalid_jwt_signature_redirects_to_auth_failed() {
     // Use a fresh keypair for the JWKS but sign with a *different*
-    // private key — the signature must fail validation. Slice 5 makes
-    // this 302 to /auth/error?code=auth_failed (vague to user;
-    // detail in the server logs).
+    // private key — the signature must fail validation. The handler
+    // 302s to /auth/error?code=auth_failed (vague to user; detail in
+    // the server logs).
     let presented = build_test_keys();
     let (mock_base, mock_state) = spawn_mock_google(presented.jwks_json.clone()).await;
     let app = build_lucida_app(&mock_base).await;
@@ -629,7 +628,7 @@ async fn auth_start_without_marker_cookie_omits_prompt() {
     assert!(set_cookies.is_empty());
 }
 
-// -- slice 5: hosted-domain + email_verified --------------------------
+// -- hosted-domain + email_verified -----------------------------------
 
 /// `LUCIDA_ALLOWED_HOSTED_DOMAINS=allowedcorp.com` + a JWT with
 /// `hd: othercorp.com`: callback must NOT mint a session, MUST 302 to

@@ -22,9 +22,8 @@ pub struct ServerBindingSeed {
 /// Per-image server-side storage metadata. `levels` is one
 /// [`LevelBindingInfo`] per multiscale level, in level-index order.
 ///
-/// Slice 2 of PRD #447 unified Slice 1's parallel `storage_codecs` /
-/// `chunk_byte_layouts` Vecs into this single field so the import-time
-/// codec parser is the only producer of [`StorageCompression`] values.
+/// Codec parsing happens once at import time so the import-time codec
+/// parser is the only producer of [`StorageCompression`] values.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageBindingSeed {
     pub image_id: ImageId,
@@ -38,9 +37,9 @@ pub struct ImageBindingSeed {
 /// `ImageBindingSeed.axes_names`), and the canonical-byte slice layout.
 ///
 /// `chunk_shape` is needed by the resolver to divide wire `t`/`c` voxel
-/// coords by the on-disk chunk size on those axes (PRD #451). The slice
-/// step on the server uses the same shape to compute the intra-chunk
-/// `(t, c)` indices passed into [`ChunkByteLayout::slice_range`].
+/// coords by the on-disk chunk size on those axes. The slice step on
+/// the server uses the same shape to compute the intra-chunk `(t, c)`
+/// indices passed into [`ChunkByteLayout::slice_range`].
 ///
 /// Built at import time from a strict-validated codec chain
 /// ([`crate::codec::parse_codec_chain`]) and the level's chunk shape

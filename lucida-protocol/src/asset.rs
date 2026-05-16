@@ -4,10 +4,6 @@
 //! The catalog is *capability* metadata, not content. A well exists
 //! regardless of whether a proxy has been generated for it; the catalog
 //! simply tells Planning which proxy kinds it can request.
-//!
-//! S3 scaffold: types defined and round-trip serializable. Server sends
-//! empty catalogs in `DatasetOpened` and emits no deltas yet. S5 fills
-//! in real availability data; S6 makes Planning consume it.
 
 use lucida_content::EntityId;
 use serde::{Deserialize, Serialize};
@@ -36,8 +32,8 @@ pub struct ProxyAvailability {
 
 /// Incremental update to an [`AssetCatalog`].
 ///
-/// V1 only carries additions (new proxies become available). Removal /
-/// invalidation is deferred until S5 needs it.
+/// V1 only carries additions (new proxies become available); removal /
+/// invalidation is deferred.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetCatalogDelta {
     pub added: Vec<ProxyAvailability>,

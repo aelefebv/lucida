@@ -1,4 +1,4 @@
-//! Cross-peer bookmark broadcast e2e (PRD #454 slice 4, issue #477).
+//! Cross-peer bookmark broadcast e2e.
 //!
 //! Stands up the real bookmarks router behind the real auth middleware
 //! and wires it to a real `Session` + `UnicastRoutes` map. Exercises:
@@ -103,10 +103,10 @@ async fn build_rig() -> Rig {
         .unwrap();
 
     let config = Arc::new(AuthConfig::for_tests());
-    // Cookie extractor explicitly: PRD #527 made `build_extractor`
-    // pick the stub for `Disabled` mode, but this test relies on
-    // per-cookie identities (`alice@x` vs `bob@x`) to drive the
-    // bookmark-broadcast assertions.
+    // Cookie extractor explicitly: `build_extractor` picks the stub
+    // for `Disabled` mode, but this test relies on per-cookie
+    // identities (`alice@x` vs `bob@x`) to drive the bookmark-
+    // broadcast assertions.
     let extractor: SharedExtractor = Arc::new(SessionCookieExtractor::new(
         Arc::clone(&config),
         auth_session_store as Arc<dyn LoginSessionStore>,
@@ -523,9 +523,9 @@ async fn delete_broadcasts_deleted_action() {
 }
 
 /// Self-broadcast is intentional: the originating client receives the
-/// broadcast too. Slice 3's optimistic local state in `useBookmarks`
-/// reconciles cleanly via the broadcast-driven refetch (the server's
-/// returned bookmark is canonical).
+/// broadcast too. The web client's optimistic local state in
+/// `useBookmarks` reconciles cleanly via the broadcast-driven refetch
+/// (the server's returned bookmark is canonical).
 #[tokio::test]
 async fn self_broadcast_originator_receives_message() {
     let rig = build_rig().await;

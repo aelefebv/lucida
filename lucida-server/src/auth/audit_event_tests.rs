@@ -1,8 +1,8 @@
-//! Slice 8 audit-event coverage tests.
+//! Audit-event coverage tests.
 //!
-//! PRD #455 §"Audit logging" defines a fixed table of `tracing` events
-//! (`auth.signin.*`, `auth.session.*`, `auth.failure.*`, `auth.startup.*`).
-//! This module spins up an in-process tracing subscriber, exercises the
+//! A fixed table of `tracing` events (`auth.signin.*`, `auth.session.*`,
+//! `auth.failure.*`, `auth.startup.*`) is the audit-log surface. This
+//! module spins up an in-process tracing subscriber, exercises the
 //! production code path that should emit each event, and asserts the
 //! event fired with the documented level.
 //!
@@ -380,14 +380,14 @@ fn insecure_mode_event_fires_at_warn_with_bind_field() {
 }
 
 // ---------------------------------------------------------------------------
-// auth.startup.config_error — slice 7 emits before fail-fast exit
+// auth.startup.config_error — emitted before fail-fast exit
 // ---------------------------------------------------------------------------
 
 #[test]
 fn config_error_event_fires_at_error() {
     // Mirror the call shape main.rs uses; the from_env error itself
     // doesn't emit (it's the caller that logs). This test guards the
-    // PRD-specified event name + level.
+    // event name + level.
     let (events, _) = capture(|| {
         tracing::error!(
             error = %"LUCIDA_AUTH=google requires LUCIDA_GOOGLE_CLIENT_ID",
@@ -398,7 +398,7 @@ fn config_error_event_fires_at_error() {
 }
 
 // ---------------------------------------------------------------------------
-// auth.signin.success — slice 4 emits in handlers; assert call shape
+// auth.signin.success — emitted in callback handler; assert call shape
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -416,7 +416,7 @@ fn signin_success_event_fires_at_info_with_email_field() {
 }
 
 // ---------------------------------------------------------------------------
-// auth.signin.rejected.hd_mismatch — slice 5 emits in callback handler
+// auth.signin.rejected.hd_mismatch — emitted in callback handler
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -435,7 +435,7 @@ fn hd_mismatch_event_fires_at_warn_with_attempted_fields() {
 }
 
 // ---------------------------------------------------------------------------
-// auth.signin.rejected.unverified — slice 5 emits in callback handler
+// auth.signin.rejected.unverified — emitted in callback handler
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -451,7 +451,7 @@ fn unverified_event_fires_at_warn_with_attempted_email() {
 }
 
 // ---------------------------------------------------------------------------
-// auth.signin.error.* — slice 4 emits the four flavors from callback
+// auth.signin.error.* — four flavors emitted from callback
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -487,7 +487,7 @@ fn signin_error_network_event_fires_at_error() {
 }
 
 // ---------------------------------------------------------------------------
-// auth.logout — slice 3 emits in logout handler
+// auth.logout — emitted in logout handler
 // ---------------------------------------------------------------------------
 
 #[test]

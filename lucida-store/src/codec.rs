@@ -1,8 +1,8 @@
 //! Storage-codec types and import-time codec-chain validation.
 //!
-//! Slice 2 of PRD #447 (issue #449) extracts these definitions out of
-//! `lucida-server::decode` so the import pipeline can run strict validation
-//! over the codec chain before the binding ever reaches the chunk-fetch path.
+//! Hosts the codec definitions so the import pipeline can run strict
+//! validation over the codec chain before the binding ever reaches the
+//! chunk-fetch path.
 //!
 //! The actual decompression implementations live in
 //! [`lucida_server::decode`] because they pull in `zstd` / `lz4_flex` /

@@ -24,9 +24,9 @@ pub fn set_debug_categories(csv: &str) {
 /// Stable, content-derived dataset id for a URL. Mirrors
 /// `lucida_server::handler::dataset_id_for_url` so the web client can
 /// compute the same id the server will assign on `OpenRemoteDataset` —
-/// used by the saved-views encoder/applier (PRD #454, slice 1) to diff
-/// the requested dataset list against currently-loaded ids without
-/// a JS-side blake3 implementation.
+/// used by the saved-views encoder/applier to diff the requested dataset
+/// list against currently-loaded ids without a JS-side blake3
+/// implementation.
 #[wasm_bindgen]
 pub fn dataset_id_for_url(url: &str) -> String {
     crate::saved_view::dataset_id_for_url(url)

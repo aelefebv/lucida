@@ -1,6 +1,6 @@
-//! End-to-end startup tests for `AuthConfig::from_env` (slice 7,
-//! issue #462). We spawn the actual `lucida-server` binary with various
-//! `LUCIDA_*` env-var combinations and assert it either:
+//! End-to-end startup tests for `AuthConfig::from_env`. We spawn the
+//! actual `lucida-server` binary with various `LUCIDA_*` env-var
+//! combinations and assert it either:
 //!
 //! - boots and starts listening (we close the listener as soon as we
 //!   see the bind succeed via a short port-poll), or

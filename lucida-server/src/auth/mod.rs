@@ -1,8 +1,6 @@
 //! Authentication subsystem.
 //!
-//! Module map (slice 4 lands the OAuth flow on top of slice 2's
-//! cookies + sessions and slice 3's logout; full setup per PRD #455
-//! §"Crates and modules"):
+//! Module map:
 //!
 //! - `config` — runtime knobs read from env at boot (cookie name,
 //!   timeouts, db path, secure-cookie mode, auth mode + Google
@@ -26,19 +24,18 @@
 //!   attaches the resulting principal to request extensions.
 //!   `build_extractor` picks between the three implementations based
 //!   on `AuthMode`.
-//! - `handlers` — `/auth/whoami`, `/auth/logout` (slice 3),
-//!   `/auth/start` and `/auth/callback` (slice 4), `/auth/error`
-//!   (slice 5).
+//! - `handlers` — `/auth/whoami`, `/auth/logout`, `/auth/start`,
+//!   `/auth/callback`, and `/auth/error`.
 //! - `unauth_landing` — small inline HTML the middleware serves on an
 //!   unauth HTML navigation; carries the JS shim that captures
 //!   `location.hash` before redirecting to `/auth/start`.
-//! - `error_page` — slice 5's `/auth/error` server-rendered page;
-//!   user-facing destination after callback rejections (hd mismatch,
-//!   unverified email, generic auth failure).
-//! - `extractors` — slice 6's `AdminRequired` axum extractor: pulls
-//!   the principal out of extensions and 403s on `!is_admin`. Handlers
+//! - `error_page` — `/auth/error` server-rendered page; user-facing
+//!   destination after callback rejections (hd mismatch, unverified
+//!   email, generic auth failure).
+//! - `extractors` — `AdminRequired` axum extractor: pulls the
+//!   principal out of extensions and 403s on `!is_admin`. Handlers
 //!   wear it declaratively rather than hand-rolling the gate.
-//! - `cleanup` — slice 8's hourly background sweep that drops expired
+//! - `cleanup` — hourly background sweep that drops expired
 //!   `login_sessions` and `pending_auth` rows so storage growth stays
 //!   bounded over the life of a long-running deployment.
 

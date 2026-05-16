@@ -1,12 +1,9 @@
 //! Auth HTTP handlers.
 //!
-//! Slice 2 (PRD #455) landed `/auth/whoami` (kept from slice 1). Slice
-//! 3 (issue #459) lands `/auth/logout`. Slice 4 (issue #460) lands the
-//! OAuth flow: `/auth/start` and `/auth/callback`. `/auth/error`
-//! arrives in slice 5. PRD #527 retires the dev-login handler in
-//! favour of [`crate::auth::principal::StubPrincipalExtractor`] —
-//! disabled mode now yields the dev principal directly out of the
-//! middleware rather than requiring a session-minting POST.
+//! Hosts `/auth/whoami`, `/auth/logout`, the OAuth flow
+//! (`/auth/start` + `/auth/callback`), and the `/auth/error` page.
+//! Disabled mode bypasses these handlers by yielding the dev principal
+//! directly from [`crate::auth::principal::StubPrincipalExtractor`].
 
 use std::sync::Arc;
 
@@ -95,7 +92,7 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
         && let Err(e) = state.store.delete(id).await
     {
         // Even on store failure, fall through to clear the cookie.
-        // Worst case the row lingers until the slice-8 sweep; the
+        // Worst case the row lingers until the background sweep; the
         // browser is forced unauthenticated immediately, which is
         // the user-visible promise of logout.
         tracing::error!(error = %e, "logout.delete_session.failed");
@@ -104,8 +101,7 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
     // Always emit the audit event so the absence of a row in the audit
     // log distinguishes "user never clicked sign-out" from "endpoint
     // hit but storage hiccuped." Email may be None for cookieless
-    // calls or expired/unknown sessions; that's fine — slice 8 will
-    // expand the audit shape, this slice just lands the event.
+    // calls or expired/unknown sessions.
     info!(
         email = email.as_deref().unwrap_or("<unknown>"),
         "auth.logout"
@@ -132,7 +128,7 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
         .into_response()
 }
 
-// -- /auth/start + /auth/callback (slice 4) -------------------------------
+// -- /auth/start + /auth/callback -----------------------------------------
 
 /// State for the OAuth-flow handlers. Mirrors the `LogoutState`
 /// pattern: only the wiring each handler actually needs, so unit
@@ -248,18 +244,15 @@ pub struct CallbackQuery {
 /// `GET /auth/callback?code=…&state=…`
 ///
 /// Validates the state token, exchanges the code with Google,
-/// validates the JWT, applies slice-5's hosted-domain + email_verified
+/// validates the JWT, applies the hosted-domain + email_verified
 /// checks, mints a `LoginSession`, sets the cookie, and 302s to the
 /// originally-captured path + hash.
 ///
-/// Slice 5 (PRD #455 §"Error UX") changes the failure shape: instead
-/// of returning JSON 4xx/5xx (slice 4 default), every failure 302s to
-/// `/auth/error?code=…`. Two flavors:
+/// Every failure 302s to `/auth/error?code=…`. Two flavors:
 ///
-/// * `code=hd_mismatch` / `code=unverified` — user-fixable rejections
-///   from the slice-5 policy. Detail params (attempted_email,
-///   allowed_domains) included so the page can render the actionable
-///   message from the PRD.
+/// * `code=hd_mismatch` / `code=unverified` — user-fixable rejections.
+///   Detail params (attempted_email, allowed_domains) included so the
+///   page can render the actionable message.
 /// * `code=auth_failed` — every other error path (state mismatch,
 ///   code exchange failure, JWT invalid, store failure). Deliberately
 ///   vague to the user; logs hold details server-side.
@@ -296,8 +289,7 @@ pub async fn auth_callback(
     let pending = match state.pending_store.consume(state_token).await {
         Ok(Some(row)) => row,
         Ok(None) => {
-            // Missing or already-used. The named log event the slice's
-            // acceptance criteria call out.
+            // Missing or already-used.
             warn!(state = %state_token, "auth.signin.error.state_mismatch");
             return redirect_to_error(&[("code", "auth_failed")]);
         }
@@ -331,11 +323,11 @@ pub async fn auth_callback(
         }
     };
 
-    // Slice 5 policy: email_verified + (optional) hd allowlist. The
+    // Apply the email_verified + (optional) hd allowlist policy. The
     // raw mapping (`principal_from_claims`) is applied inside
     // `principal_or_rejection_from_claims` on accept; on reject we
-    // emit the audit event the PRD specifies and bounce to the error
-    // page with the structured detail params.
+    // emit an audit event and bounce to the error page with the
+    // structured detail params.
     let principal = match principal_or_rejection_from_claims(
         &claims,
         &state.config.allowed_hosted_domains,
@@ -457,7 +449,7 @@ pub(crate) fn redirect_target(intended_path: &str, intended_hash: &str) -> Strin
 
 /// Generate a 256-bit cryptographically-random state token, base64url
 /// encoded (no padding) so it slots into a query param without further
-/// escaping. PRD #455 calls out 256 bits as the minimum.
+/// escaping. 256 bits is the minimum acceptable entropy.
 pub(crate) fn random_state_token() -> String {
     let bytes: [u8; 32] = rand::random();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
@@ -518,7 +510,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // -- /auth/logout (slice 3) -------------------------------------------
+    // -- /auth/logout -----------------------------------------------------
 
     fn logout_state_with(store: Arc<MemorySessionStore>) -> LogoutState {
         LogoutState {
@@ -657,7 +649,7 @@ mod tests {
         );
     }
 
-    // -- redirect_target + random_state_token (slice 4) -----------------
+    // -- redirect_target + random_state_token ---------------------------
 
     #[test]
     fn redirect_target_appends_hash_when_present() {

@@ -4,16 +4,16 @@
 //! corresponds to one wire-format chunk (1 t, 1 c, all z, all y, all x).
 //! Two cases produce non-trivial slices:
 //!
-//! 1. **Pinned axes** (PRD #444/447). When an OME-Zarr has non-canonical
-//!    axes (e.g. CZI's `m`), the on-disk chunk file may bundle multiple
+//! 1. **Pinned axes**. When an OME-Zarr has non-canonical axes (e.g.
+//!    CZI's `m`), the on-disk chunk file may bundle multiple
 //!    pinned-index slices together. Pinned-index 0 is always picked, and
 //!    when its chunk_size > 1 the canonical bytes are the prefix of the
 //!    on-disk bytes.
 //!
-//! 2. **Canonical-indexed axes** (PRD #451 / this module). When a
-//!    canonical axis `t` or `c` itself has chunk_size > 1, the on-disk
-//!    chunk holds N timepoints/channels concatenated. The wire chunk key
-//!    addresses one timepoint/channel; the server picks the right one by
+//! 2. **Canonical-indexed axes** (`t` / `c`). When the canonical axis
+//!    itself has chunk_size > 1, the on-disk chunk holds N
+//!    timepoints/channels concatenated. The wire chunk key addresses
+//!    one timepoint/channel; the server picks the right one by
 //!    computing an intra-chunk offset.
 //!
 //! Both cases are handled uniformly by [`ChunkByteLayout::slice_range`],
@@ -273,7 +273,7 @@ mod tests {
 
     #[test]
     fn six_d_with_m_chunk_size_2_slices() {
-        // The CZI export from PRD #447.
+        // The CZI export fixture (6D with m pinned).
         let layout = compute_chunk_byte_layout(
             &axes(&["t", "c", "z", "m", "y", "x"]),
             &[1, 1, 1, 2, 2048, 1504],
@@ -397,11 +397,11 @@ mod tests {
         assert!(msg.contains("length mismatch"), "{msg}");
     }
 
-    // PRD #451: canonical-indexed (t, c) chunk_size > 1 cases.
+    // Canonical-indexed (t, c) chunk_size > 1 cases.
 
     #[test]
     fn lif_test_shape_c_bundled() {
-        // The lif_test.ome.zarr from PRD #451: 5 channels in one chunk.
+        // The lif_test.ome.zarr fixture: 5 channels in one chunk.
         let layout = compute_chunk_byte_layout(
             &axes(&["t", "c", "z", "y", "x"]),
             &[1, 5, 1, 1024, 1024],
@@ -533,7 +533,7 @@ mod tests {
     #[test]
     fn rejects_pinned_after_kept_canonical_with_canonical_indexed_chunked() {
         // [t, c, y, m, x] with chunk_y > 1 and chunk_m > 1: m (pinned) comes
-        // after y (kept, chunk>1). Same kind of failure as PRD #447.
+        // after y (kept, chunk>1). Same kind of non-prefix layout failure.
         let err = compute_chunk_byte_layout(
             &axes(&["t", "c", "y", "m", "x"]),
             &[1, 5, 1024, 2, 1024],

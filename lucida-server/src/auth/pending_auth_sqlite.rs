@@ -1,9 +1,8 @@
 //! SQLite-backed `PendingAuthStore`.
 //!
-//! Slice 4 (PRD #455) — sits next to `SqliteSessionStore`, shares the
-//! same SQLite file and pool. Construction reuses the same migrator,
-//! so opening either store advances the schema to the latest
-//! migration.
+//! Sits next to `SqliteSessionStore`, shares the same SQLite file and
+//! pool. Construction reuses the same migrator, so opening either
+//! store advances the schema to the latest migration.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

@@ -16,11 +16,11 @@ use crate::proxy::{ProxyCache, ProxyGenerator};
 /// (which now resolve to the same DatasetId) can reuse the import work and
 /// rebroadcast the canonical DatasetOpened to the requesting client.
 ///
-/// `proxy_cache` and `proxy_generator` were added by S4 (PRD #397):
-/// each binding has its own per-dataset cache directory keyed by the URL
-/// hash, and its own bounded-concurrency generator scoped to that
-/// dataset's content graph and store. They are only built once per
-/// dataset, so the dedup map and semaphore live as long as the binding.
+/// Each binding has its own per-dataset proxy cache directory keyed by
+/// the URL hash, and its own bounded-concurrency generator scoped to
+/// that dataset's content graph and store. They are only built once
+/// per dataset, so the dedup map and semaphore live as long as the
+/// binding.
 pub struct ServerBinding {
     pub source_url: String,
     pub store: Arc<dyn ObjectStore>,
@@ -47,9 +47,8 @@ struct ImageResolver {
     levels: Vec<LevelBindingInfo>,
 }
 
-/// Re-exported alias preserved from Slice 1's API. The chunk-fetch path
-/// destructures this struct exactly as before; Slice 2 just changed where
-/// the type is defined and how it's populated.
+/// Re-exported alias kept for downstream chunk-fetch call sites that
+/// destructure the type by its old name.
 pub type LevelInfo = LevelBindingInfo;
 
 impl ChunkResolver {
@@ -81,9 +80,9 @@ impl ChunkResolver {
 
     /// Resolve a canonical chunk key to an object store path for a given
     /// image. Uses the per-level chunk_shape to translate wire `t`/`c` voxel
-    /// coords into disk-grid coords (PRD #451). Falls back to all-1s if the
-    /// level isn't in the binding (e.g. malformed key) — preserves the
-    /// pre-PRD-#451 behavior on legacy paths.
+    /// coords into disk-grid coords. Falls back to all-1s if the level
+    /// isn't in the binding (e.g. malformed key) — preserves the legacy
+    /// "one wire chunk = one disk chunk" behaviour for those paths.
     pub fn resolve(&self, image_id: &ImageId, key: &str) -> Option<String> {
         let img = self.images.get(image_id)?;
         let level = parse_level_from_chunk_key(key);
@@ -189,7 +188,7 @@ mod tests {
 
     #[test]
     fn resolve_c_bundled_divides_channel() {
-        // PRD #451: lif_test-shaped binding. Wire c=3 with chunk_c=5 → disk c=0.
+        // lif_test-shaped binding. Wire c=3 with chunk_c=5 → disk c=0.
         let seed = make_seed(vec![make_image_seed_with_chunk(
             "lif",
             vec!["t", "c", "z", "y", "x"],

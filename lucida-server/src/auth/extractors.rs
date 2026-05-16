@@ -1,6 +1,5 @@
 //! Axum extractors for auth-gated handlers.
 //!
-//! Slice 6 (PRD #455 §"Permission model" + §"Admin role bootstrap").
 //! [`AdminRequired`] reads the [`AuthPrincipal`] the auth middleware
 //! attached to request extensions and short-circuits with 403 if the
 //! principal is not an admin. Handlers that need admin-only access
@@ -8,14 +7,13 @@
 //! and don't repeat the check.
 //!
 //! The check is purely on `principal.is_admin`; the bool itself is
-//! derived per-request inside the principal extractor (slice 6 wires
-//! `LUCIDA_ADMIN_EMAILS` in `auth/principal.rs`). Keeping the extractor
-//! ignorant of how `is_admin` was computed means future changes — e.g.
-//! a database-backed role table — don't ripple here.
+//! derived per-request inside the principal extractor (from
+//! `LUCIDA_ADMIN_EMAILS`, plumbed in `auth/principal.rs`). Keeping the
+//! extractor ignorant of how `is_admin` was computed means future
+//! changes — e.g. a database-backed role table — don't ripple here.
 //!
-//! 403 shape: JSON `{"error":"forbidden"}` (PRD did not specify; the
-//! parent agent picked this for parity with the middleware's
-//! `{"error":"unauthenticated"}` shape).
+//! 403 shape: JSON `{"error":"forbidden"}`, mirroring the middleware's
+//! `{"error":"unauthenticated"}`.
 
 use axum::Json;
 use axum::extract::FromRequestParts;
