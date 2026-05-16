@@ -1,34 +1,37 @@
 /**
- * Orchestrator — assembles PlanningSnapshot from live WASM scene state,
- * invokes plan(), and routes the output to CpuCache for fetching and
- * delivery to the GPU worker.
+ * Orchestrator — the planner role of what used to be a single 2027-LOC
+ * god class. Drives per-tick planning: builds the `PlanningSnapshot`
+ * from live WASM scene state, calls `plan()` per dataset, caches the
+ * result on the epoch ladder, and routes the output through an
+ * {@link Uploader} for cold-state emission and chunk delivery.
+ *
+ * Upload-side concerns (cold-state assembly, view hot-state, drain /
+ * resend / dispatch, delivery tracking, worker feedback, telemetry)
+ * live on the {@link Uploader} after Slice 10 of PRD #607. The
+ * Orchestrator owns one Uploader per render loop and calls dedicated
+ * Uploader methods inline during `planAndFetch` rather than passing a
+ * wide "tick bundle" struct (see uploader.ts for the rationale).
+ *
+ * See `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`
+ * for the design rationale.
  */
 
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { SceneSettings } from "../tickCommon.ts";
 import { Axis } from "../axes.ts";
-import type {
-  ColdStateMessage,
-  MissingChunk,
-  MissingProxy,
-} from "../renderer/workerProtocol.ts";
-import type { DatasetSettings } from "../tickCommon.ts";
-import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
-// Note: atlas config messages eliminated — worker manages atlases from cold state
 import {
   getSceneSettings,
   compositeKey,
 } from "../tickCommon.ts";
+import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
 import { plan, emptyPlanStats } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
 import { buildPlanningSnapshot } from "./planning/snapshot.ts";
 import { buildPlanningDatasetDebug } from "./planning/debug.ts";
 import type {
-  ActiveSetEntry,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningState,
-  SelectionState,
   ChunkRequest,
   RequestPlan,
 } from "./planning/index.ts";
@@ -45,26 +48,11 @@ import type { CpuCache } from "./fetch/index.ts";
 import type { ProxyRequest } from "./planning/index.ts";
 import {
   debugStats,
-  emptyUploadTickStats,
   type OrchDebug,
-  type UploadTickStats,
 } from "../debug/debugStats.ts";
-import { UploadTelemetry } from "./upload/telemetry/upload.ts";
-import {
-  ColdStateTelemetry,
-  type ColdStateCauseKey,
-} from "./upload/telemetry/coldState.ts";
-import { buildColdState } from "./upload/coldState/build.ts";
+import type { ColdStateCauseKey } from "./upload/telemetry/coldState.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
-import { buildViewHotState } from "./upload/coldState/hotState.ts";
-import { DeliveryTracker } from "./upload/delivery/tracker.ts";
-import { WorkerFeedback } from "./upload/delivery/feedback.ts";
-import { buildManifestByImage } from "./upload/delivery/manifestIndex.ts";
-import { runDrainPass } from "./upload/delivery/drain.ts";
-import {
-  runChunkResendPass,
-  runProxyResendPass,
-} from "./upload/delivery/resend.ts";
+import type { Uploader } from "./upload/uploader.ts";
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -127,6 +115,16 @@ export { synthesizeWellRosterEntry } from "./upload/coldState/roster.ts";
 
 export class Orchestrator {
   /**
+   * Upload-phase coordinator. Holds delivery tracking, telemetry,
+   * cold/hot-state emission, drain/resend dispatch, and worker feedback.
+   * Constructed externally (by `RenderLoop`) and threaded in so the
+   * upload-side state survives across orchestrator-only lifecycles
+   * (today there's only one Orchestrator per loop, but the split keeps
+   * the seam honest).
+   */
+  private readonly uploader: Uploader;
+
+  /**
    * Per-dataset opaque planner carry-forward state. The orchestrator
    * stores `result.nextState` after each `plan()` call and threads the
    * matching entry back as the `state` argument on the next tick.
@@ -154,12 +152,6 @@ export class Orchestrator {
     numLevels: number;
   } | null = null;
   private requestEpoch = 0;
-  /**
-   * Per-dataset last-emitted viewEpoch. Tracked so `viewHotState` only
-   * fires when the camera-ray pick may have moved. Cleared on dataset
-   * removal.
-   */
-  private lastViewEpochByDataset = new Map<string, number>();
   private _lastRequests: ChunkRequest[] = [];
   /**
    * Per-dataset snapshot of the most recent visible region. Keyed by
@@ -179,82 +171,12 @@ export class Orchestrator {
    */
   private _lastCachedKeyCounts = new Map<string, Map<string, number>>();
   /**
-   * Per-dataset last filtered requests, kept for the deliverToWorker
-   * resend pass on cache hits. Keyed by datasetId so multi-dataset
-   * rebuilds preserve every dataset's requests (previously a flat
-   * `ChunkRequest[]` was last-dataset-wins; see #613).
-   */
-  private _lastFilteredRequests = new Map<string, ChunkRequest[]>();
-  /**
    * Per-dataset snapshot of the most recent full `plan()` output. Held so
    * the DebugPanel "dump" buttons can print all datasets, not just the
    * last one in iteration order. Cleared per-dataset by
    * {@link clearMemberResources}.
    */
   private _lastPlanByDataset = new Map<string, RequestPlan>();
-  /**
-   * Per-dataset last proxy requests produced by `plan()`, kept for the
-   * deliverToWorker proxy resend pass on cache hits (see `:735-751`).
-   * Not re-submitted to CpuCache — fetches stay alive on their own now
-   * that submit is additive. Keyed by datasetId so multi-dataset
-   * rebuilds preserve every dataset's proxy requests (see #613).
-   */
-  private _lastProxyRequests = new Map<string, ProxyRequest[]>();
-
-  /**
-   * Delivery state for both chunks and proxies. Owns four maps that
-   * were previously scattered as orchestrator fields
-   * (`deliverySentToWorker`, `deliveryRejectedByWorker`, `widToEntityId`,
-   * `proxyDeliveredToWorker`). The implicit lifetime invariants
-   * ("clear sent / rejected / wid on every cold-state rebuild", "proxy
-   * delivery survives cold state") are encoded as method contracts on
-   * the tracker. See Seam F of the dechaos boundary scan.
-   */
-  private deliveryTracker = new DeliveryTracker();
-
-  /**
-   * Worker → main-thread feedback handlers. Owns the body of
-   * `handleChunksEvicted` and `handleWantedSetDelta`; the orchestrator
-   * methods are thin delegations. Constructed eagerly here (no
-   * constructor wiring needed) since it only depends on
-   * `this.deliveryTracker`, which is initialised above. See Seam G of
-   * the dechaos boundary scan.
-   */
-  private workerFeedback = new WorkerFeedback(this.deliveryTracker);
-
-  // -------------------------------------------------------------------------
-  // Telemetry collaborators (Slice 9 of PRD #607)
-  // -------------------------------------------------------------------------
-
-  /**
-   * Cold-state rebuild telemetry. Owns the events ring buffer, the
-   * cumulative + windowed counters, the per-epoch cause attribution,
-   * the p50/p95 sample buffer, and the sustained-non-view-churn
-   * detector. The orchestrator calls `recordHit` / `recordRebuild` at
-   * the right sites in `planAndFetch` and reads the snapshot via
-   * `publish()` when attaching to `debugStats.orch.coldState`.
-   */
-  private readonly coldStateTelemetry = new ColdStateTelemetry();
-
-  /**
-   * Upload telemetry. Owns the events ring buffer, the per-tick
-   * aggregate ring buffer, the p50/p95 size sketch, the cumulative
-   * counters, and the three sustained-anomaly detectors
-   * (`upload.budget_exhausted_sustained`, `upload.resend_storm`,
-   * `upload.drain_waste`). The orchestrator calls `recordEvent` per
-   * upload (wired through the drain/resend passes) and `publish` at
-   * the end of each `deliverToWorker` invocation.
-   */
-  private readonly uploadTelemetry = new UploadTelemetry();
-
-  /**
-   * Per-tick stats for the in-progress `deliverToWorker` call. Reset
-   * to zero at the start of each call; the drain/resend passes
-   * mutate the skip/byte fields directly. Handed to
-   * {@link uploadTelemetry} via `publish(now, stats)` at the end of
-   * the tick.
-   */
-  private currentUploadStats: UploadTickStats = emptyUploadTickStats();
 
   /**
    * Unsubscribe from the planning configStore. Called from {@link dispose}
@@ -264,7 +186,8 @@ export class Orchestrator {
    */
   private configStoreUnsub: () => void;
 
-  constructor() {
+  constructor(uploader: Uploader) {
+    this.uploader = uploader;
     // Subscribe to live planning-config changes. A config tweak doesn't
     // bump any WASM epoch, so without this hook the orchestrator's
     // epoch fast-path would keep returning the cached plan and the
@@ -326,10 +249,10 @@ export class Orchestrator {
     }
 
     if (isHit) {
-      this.coldStateTelemetry.recordHit(tickStart);
+      this.uploader.coldStateTelemetry.recordHit(tickStart);
       if (debugStats.enabled && debugStats.orch) {
         debugStats.orch.epochCacheHit = true;
-        debugStats.orch.coldState = this.coldStateTelemetry.publish();
+        debugStats.orch.coldState = this.uploader.coldStateTelemetry.publish();
       }
       // Replay member stats from the last full planning run so the panel
       // doesn't blink to "Visible: 0 / 0" between non-planning ticks.
@@ -346,12 +269,12 @@ export class Orchestrator {
 
     // Cold-state rebuild path. Drop worker-rejection state on both
     // sides — the camera, active set, or selection has shifted enough
-    // that previously-too-far chunks may now fit. `onColdStateRebuild`
-    // clears chunk sent / rejected / wid-to-entity tracking in one
-    // shot; the per-dataset loop below re-populates wid→entity from
-    // the new `_lastFilteredRequests` via `recordMember`. Proxy
+    // that previously-too-far chunks may now fit. The Uploader's
+    // `onPlanRebuildStart` clears chunk sent / rejected / wid-to-entity
+    // tracking in one shot; the per-dataset loop below re-populates
+    // wid→entity from the new requests via `recordPlanForDataset`. Proxy
     // tracking survives — worker proxy pools persist across cold state.
-    this.deliveryTracker.onColdStateRebuild();
+    this.uploader.onPlanRebuildStart();
     ctx.cpuCache.clearRejected();
 
     // Step 2 — Settings
@@ -434,42 +357,21 @@ export class Orchestrator {
         );
       }
 
-      // The planner stamps `datasetId` onto every ChunkRequest and
-      // ProxyRequest at emit time (from `snapshot.datasetId`); no
-      // post-`plan()` mutation pass is needed here.
-      this._lastProxyRequests.set(dsId, result.proxyRequests);
+      // 3e. Hand off per-dataset planner output to the Uploader. Stashes
+      // per-dataset request snapshots for the resend pass and
+      // pre-populates the tracker's wid → entityId reverse lookup so a
+      // worker eviction report that arrives before any chunk has been
+      // sent can still resolve `cpuCache.markRejected(entityId, ...)`.
+      this.uploader.recordPlanForDataset(
+        dsId, result.requests, result.proxyRequests, multiChannel,
+      );
 
-      // 3i. Track this dataset's requests for re-send / wid-mapping.
-      // No LOD-filter step gates the request stream: planning emits
-      // exactly one level per entity. `_lastFilteredRequests` keeps
-      // its historical name for compatibility with the re-send loop
-      // below. Per-dataset map so multi-dataset rebuilds preserve every
-      // dataset's requests (see #613).
-      this._lastFilteredRequests.set(dsId, result.requests);
-      // Build wid → entityId for this dataset so handleChunksEvicted
-      // can resolve `cpuCache.markRejected(entityId, ...)` from the
-      // worker's report (which carries workerMemberId, not entityId).
-      // Pre-populated here at plan time so an eviction that arrives
-      // before any chunk has been sent still resolves the entityId.
-      // Multi-dataset case: rebuilt cumulatively across the loop since
-      // `onColdStateRebuild` clears once at the top of the rebuild path.
-      for (const req of result.requests) {
-        const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
-        this.deliveryTracker.recordMember(wid, req.entityId);
-      }
-      // Note: proxy delivery tracking is NOT cleared here. Worker proxy pools
-      // persist across cold states (they're created lazily in getOrCreateProxyPool
-      // and only destroyed on dataset removal). Re-sending proxies on every full
-      // plan would upload-spam them every time a view epoch bumps (e.g., wheel
-      // scroll). When the worker actually evicts a proxy, its wantedSetDelta
-      // reports it as missing and handleWantedSetDelta clears the per-entry
-      // tracking, triggering re-delivery on the next tick.
-
-      // 3j. Build member roster + per-entity matrix map from the active
+      // 3f. Build member roster + per-entity matrix map from the active
       // set in a single walk (Slice 6c, PRD #607). The roster is
       // consumed by slicePath/volumePath for layer construction; the
-      // matrices map is consumed below by `sendColdState` so the worker
-      // gets precomputed model matrices baked into descriptor entries.
+      // matrices map is consumed below by `uploader.sendColdState` so
+      // the worker gets precomputed model matrices baked into descriptor
+      // entries.
       //
       // `well-as-proxy` entries are synthesised (their well isn't in
       // `derived.members`); `invisible` entries are skipped (they don't
@@ -487,10 +389,17 @@ export class Orchestrator {
       // wanted-set + descriptor buffer build. Passes dataset settings so
       // per-channel display state (contrast/gamma/opacity/colormap) gets
       // baked into descriptor entries.
-      const coldMsg = this.sendColdState(
-        dsId, result.activeSet, entities, selection, visibleRegion,
-        currentEpochs, ctx, matricesByEntity, dsSettings,
-      );
+      const coldMsg = this.uploader.sendColdState({
+        ctx,
+        datasetId: dsId,
+        activeSet: result.activeSet,
+        entities,
+        selection,
+        visibleRegion,
+        epochs: currentEpochs,
+        matricesByEntity,
+        dsSettings,
+      });
       // Compute the same memberId → entityIndex map the worker builds
       // from cold state. Both sides converge by construction because
       // they walk the same canonical iteration order.
@@ -500,19 +409,14 @@ export class Orchestrator {
       // before subsequent render messages so the worker's
       // `rayHitPerEntity` is current when chunk-data eviction fires.
       // Keyed by memberId (imageId or imageId:chN) — same convention
-      // chunk-data uses for `findFarthestSlot` distance lookups.
-      const lastView = this.lastViewEpochByDataset.get(dsId);
-      if (lastView !== currentEpochs.view) {
-        this.sendViewHotState(dsId, coldMsg, ctx, currentEpochs);
-        this.lastViewEpochByDataset.set(dsId, currentEpochs.view);
-      }
-
-      // Chunk delivery tracking was cleared once at the top of the
-      // rebuild path via `deliveryTracker.onColdStateRebuild()` — see
-      // the comment above the call. The worker rebuilds slice/volume
-      // atlas pools on each cold state, so all chunks must be re-
-      // uploaded to fill the rebuilt atlases; the tracker reset
-      // ensures the resend pass sees every chunk as un-sent.
+      // chunk-data uses for `findFarthestSlot` distance lookups. The
+      // Uploader short-circuits when the viewEpoch is unchanged.
+      this.uploader.sendViewHotStateIfAdvanced({
+        ctx,
+        datasetId: dsId,
+        coldMsg,
+        epochs: currentEpochs,
+      });
 
       // Submit chunk + proxy requests in a single call so they don't
       // cancel each other. Proxies sit in their own queue inside
@@ -591,7 +495,7 @@ export class Orchestrator {
         // Replaced after `coldStateTelemetry.recordRebuild` below —
         // placeholder here so the type checks during the in-progress
         // assembly.
-        coldState: this.coldStateTelemetry.publish(),
+        coldState: this.uploader.coldStateTelemetry.publish(),
         visibleRegion: null,
         entityDiag: [],
       };
@@ -730,168 +634,31 @@ export class Orchestrator {
     // *after* step 4 means the OrchDebug published this tick reflects
     // the rebuild we just did.
     const tickEnd = performance.now();
-    this.coldStateTelemetry.recordRebuild(tickStart, causes, tickEnd - tickStart);
+    this.uploader.coldStateTelemetry.recordRebuild(
+      tickStart, causes, tickEnd - tickStart,
+    );
     if (debugStats.enabled && debugStats.orch) {
-      debugStats.orch.coldState = this.coldStateTelemetry.publish();
+      debugStats.orch.coldState = this.uploader.coldStateTelemetry.publish();
     }
 
     return this.cachedResult;
   }
 
   /**
-   * Deliver decoded chunks to the GPU worker via RenderClient. Called
-   * from slicePath/volumePath.
+   * Clear planner-side per-dataset state on dataset removal. Drops the
+   * planning-state carry-forward, the debug snapshots, and the entries
+   * keyed under the supplied id in the per-dataset maps. Upload-side
+   * state cleanup is the Uploader's responsibility — the RenderLoop
+   * calls both `orchestrator.clearMemberResources(id)` and
+   * `uploader.clearDataset(id)` during removal.
    *
-   * Composition of three extracted passes (see `upload/delivery/`):
-   * - {@link runDrainPass} — iterate `cpuCache.drain(budget)` output
-   *   and dispatch chunks / proxies that pass `classifyDelivery`.
-   * - {@link runChunkResendPass} — re-send chunks the worker evicted
-   *   or never received, sourced from `_lastFilteredRequests`.
-   * - {@link runProxyResendPass} — same shape for proxies, sourced
-   *   from `_lastProxyRequests`.
-   *
-   * Each pass owns its own counter writes (skips + uploads) onto the
-   * shared `currentUploadStats`. The per-tick manifest index built by
-   * `buildManifestByImage` eliminates the O(D × I) per-chunk scan the
-   * old `sendDeliveryToWorker` did.
+   * The id is ambiguous (it can be a datasetId, an imageId, or a
+   * `${imageId}:ch${c}` composite key). Each `delete` is a no-op when
+   * the id doesn't match its expected shape; the dataset-removal path
+   * sees one explicit datasetId call plus per-member calls, one of
+   * which clears.
    */
-  deliverToWorker(
-    ctx: TickContext,
-    budget: number,
-    sliceZ: number | null,
-  ): boolean {
-    const tickStart = performance.now();
-    this.currentUploadStats = emptyUploadTickStats();
-    this.currentUploadStats.bytesBudget = budget;
-
-    const multiChannel = ctx.scene.multi_channel();
-    const epochs = this.lastEpochs ?? { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
-    const viewMode = ctx.mode;
-
-    // Build per-tick lookup tables: target LOD by image (drives the
-    // drain pass's wrongLod filter) and the per-image manifest index
-    // (eliminates the per-chunk dataset scan during dispatch).
-    const targetLevelByImage = new Map<string, number>();
-    for (const requests of this._lastFilteredRequests.values()) {
-      for (const req of requests) {
-        targetLevelByImage.set(req.imageId, req.level);
-      }
-    }
-    const manifestByImage = buildManifestByImage(ctx.datasets);
-
-    const deliveries = ctx.cpuCache.drain(budget);
-    for (const d of deliveries) {
-      if (d.kind === "proxy") this.currentUploadStats.drainedProxies++;
-      else this.currentUploadStats.drainedChunks++;
-    }
-
-    const recordUpload = (bytes: number, isResend: boolean): void => {
-      this.uploadTelemetry.recordEvent(tickStart, bytes, isResend);
-    };
-    const passCtx = {
-      tracker: this.deliveryTracker,
-      client: ctx.client,
-      multiChannel,
-      viewMode,
-      sliceZ,
-      epochs,
-      stats: this.currentUploadStats,
-      recordUpload,
-    } as const;
-
-    const drainRes = runDrainPass({
-      deliveries,
-      targetByImage: targetLevelByImage,
-      manifestByImage,
-      ...passCtx,
-      remaining: budget,
-    });
-    let remaining = drainRes.remaining;
-    let budgetExhausted = drainRes.budgetExhausted;
-
-    if (!budgetExhausted) {
-      const chunkRes = runChunkResendPass({
-        requestsByDataset: this._lastFilteredRequests,
-        manifestByImage,
-        cpuCache: ctx.cpuCache,
-        ...passCtx,
-        remaining,
-      });
-      remaining = chunkRes.remaining;
-      budgetExhausted = chunkRes.budgetExhausted;
-    }
-
-    if (!budgetExhausted) {
-      const proxyRes = runProxyResendPass({
-        requestsByDataset: this._lastProxyRequests,
-        tracker: this.deliveryTracker,
-        cpuCache: ctx.cpuCache,
-        client: ctx.client,
-        epochs,
-        stats: this.currentUploadStats,
-        recordUpload,
-        remaining,
-      });
-      remaining = proxyRes.remaining;
-      budgetExhausted = proxyRes.budgetExhausted;
-    }
-
-    this.currentUploadStats.budgetExhausted = budgetExhausted;
-    this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
-
-    return deliveries.length > 0 || budgetExhausted;
-  }
-
-  /**
-   * Process a worker `chunksEvicted` report. Delegates to
-   * {@link WorkerFeedback.handleChunksEvicted} — see that method for
-   * the full eviction-vs-skipped semantics.
-   */
-  handleChunksEvicted(
-    workerMemberId: string,
-    evicted: string[],
-    skipped: string[],
-    cpuCache: CpuCache,
-  ): void {
-    this.workerFeedback.handleChunksEvicted(
-      workerMemberId, evicted, skipped, cpuCache,
-    );
-  }
-
-  /**
-   * Process a wanted-set delta from the GPU worker. Delegates to
-   * {@link WorkerFeedback.handleWantedSetDelta} — only the proxy
-   * branch is meaningful (chunk entries are intentionally ignored
-   * post-Slice 3).
-   */
-  handleWantedSetDelta(
-    missing: Array<MissingChunk | MissingProxy>,
-  ): void {
-    this.workerFeedback.handleWantedSetDelta(missing);
-  }
-
-  /** Get all tracked worker member IDs (for multi-channel transition cleanup). */
-  getTrackedMemberIds(): string[] {
-    return [...this.deliveryTracker.trackedKeys()];
-  }
-
-  /** Clear all delivery state for a member (e.g. on dataset removal). */
   clearMemberResources(workerMemberId: string): void {
-    // Two-pronged cleanup: chunk-side tracking is keyed by
-    // workerMemberId, proxy-side tracking is keyed by composite
-    // `${datasetId}|...`. `workerMemberId` here is either a datasetId,
-    // an imageId, or `${imageId}:ch${c}` — the id shape is ambiguous,
-    // so we call both. Each is a no-op when the id doesn't match its
-    // expected shape; the worker recreates pools on next request
-    // anyway.
-    this.deliveryTracker.clearMember(workerMemberId);
-    this.deliveryTracker.clearDataset(workerMemberId);
-    // Drop the cached lastViewEpoch entry. If `workerMemberId` is a
-    // bare datasetId this clears the right entry; for imageId-shaped IDs
-    // it's a no-op (the dataset entry survives, which is correct — the
-    // dataset itself wasn't removed).
-    this.lastViewEpochByDataset.delete(workerMemberId);
-
     // Drop the planning debug entry. Same dataset-vs-member ambiguity:
     // member ids never match a key in `planning.byDataset`, so the delete
     // is a no-op for those calls. Dataset removal sees both an explicit
@@ -902,8 +669,6 @@ export class Orchestrator {
     // Drop per-dataset state added in #613. All keyed by datasetId; for
     // member-shaped ids these are no-ops, which matches the
     // best-effort cleanup pattern above.
-    this._lastFilteredRequests.delete(workerMemberId);
-    this._lastProxyRequests.delete(workerMemberId);
     this._lastEntities.delete(workerMemberId);
     this._lastVisibleRegion.delete(workerMemberId);
     this._lastCachedKeyCounts.delete(workerMemberId);
@@ -920,17 +685,6 @@ export class Orchestrator {
    */
   getLastPlans(): ReadonlyMap<string, RequestPlan> {
     return this._lastPlanByDataset;
-  }
-
-  /**
-   * Test-only accessor for the proxy-delivered tracking set. Marked
-   * `// @internal` — used by `orchestrator.test.ts` to assert the
-   * cache-hit short-circuit no longer re-uploads cached proxies.
-   *
-   * @internal
-   */
-  getProxyDeliveredKeys(): Set<string> {
-    return this.deliveryTracker.getProxyDeliveredKeys();
   }
 
   /**
@@ -981,66 +735,4 @@ export class Orchestrator {
       nextState: { previousActiveSet: [] },
     });
   }
-
-  /**
-   * Build and send a `ColdStateMessage` to the GPU worker.
-   *
-   * The pure build lives in `upload/coldState/build.ts`; this wrapper
-   * forwards the planner output, posts the message, and returns it so
-   * the caller can derive a deterministic entity-index map.
-   *
-   * Chunk delivery tracker reset is hoisted to once-per-tick in the
-   * planning loop (`deliveryTracker.onColdStateRebuild()` at the top of
-   * the rebuild path — Slice 5). Calling it here would multi-clear in
-   * multi-dataset rebuilds.
-   */
-  private sendColdState(
-    dsId: string,
-    activeSet: ActiveSetEntry[],
-    entities: EntitySnapshot[],
-    selection: SelectionState,
-    visibleRegion: VisibleRegion,
-    epochs: SceneEpochs,
-    ctx: TickContext,
-    matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>,
-    dsSettings: DatasetSettings | undefined,
-  ): ColdStateMessage {
-    const msg = buildColdState({
-      datasetId: dsId,
-      activeSet,
-      entities,
-      selection,
-      visibleRegion,
-      epochs,
-      matricesByEntity,
-      dsSettings,
-    });
-    ctx.client.coldState(msg);
-    return msg;
-  }
-
-  /**
-   * Build and send a viewEpoch hot-state message. The pure build lives
-   * in `upload/coldState/hotState.ts`; this wrapper just collects the
-   * per-dataset ray hit from the WASM scene and emits to the worker.
-   *
-   * The message must be posted before subsequent render messages so the
-   * worker's `rayHitPerEntity` is current when chunk-data eviction fires.
-   */
-  private sendViewHotState(
-    dsId: string,
-    cold: ColdStateMessage,
-    ctx: TickContext,
-    epochs: SceneEpochs,
-  ): void {
-    const hit = Array.from(ctx.scene.ray_hit_local_image(dsId)) as [number, number, number];
-    const msg = buildViewHotState({
-      coldMsg: cold,
-      rayHit: hit,
-      epochs,
-      datasetId: dsId,
-    });
-    ctx.client.viewHotState(msg);
-  }
 }
-

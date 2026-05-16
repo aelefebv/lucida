@@ -8,6 +8,7 @@ import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
 import { Orchestrator } from "./pipeline/orchestrator.ts";
+import { Uploader } from "./pipeline/upload/uploader.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
@@ -55,7 +56,16 @@ export class RenderLoop {
   private sliceState: SliceState = createSliceState();
   private volumeState: VolumeState = createVolumeState();
   private minimapState: MinimapState = createMinimapState();
-  private orchestrator = new Orchestrator();
+  /**
+   * Upload coordinator (Slice 10 of PRD #607). Owns delivery tracking,
+   * telemetry, cold/hot-state emission, drain/resend dispatch, and
+   * worker feedback. Constructed alongside the Orchestrator so
+   * `client.onChunksEvicted` / `client.onWantedSetDelta` callbacks wire
+   * directly here (the orchestrator no longer carries the
+   * upload-feedback handlers).
+   */
+  private uploader = new Uploader();
+  private orchestrator = new Orchestrator(this.uploader);
   private cpuCacheUnsub: () => void;
   private configStoreUnsub: () => void;
 
@@ -91,19 +101,20 @@ export class RenderLoop {
   }
 
   start(): void {
-    // When the worker evicts or skips chunks, update the orchestrator's delivery
-    // tracking so they can be re-sent. Evictions trigger a new tick.
+    // When the worker evicts or skips chunks, update the uploader's
+    // delivery tracking so they can be re-sent. Evictions trigger a new
+    // tick.
     this.client.onChunksEvicted = (datasetId: string, evicted: string[], skipped: string[]) => {
-      this.orchestrator.handleChunksEvicted(datasetId, evicted, skipped, this.session.cpuCache);
+      this.uploader.handleChunksEvicted(datasetId, evicted, skipped, this.session.cpuCache);
       if (evicted.length > 0) {
         this.setDirty("residency", "chunks_evicted");
       }
     };
 
-    // When the worker reports its wanted-set, update the orchestrator and
+    // When the worker reports its wanted-set, update the uploader and
     // schedule a tick so wanted chunks can be delivered from CpuCache.
     this.client.onWantedSetDelta = (_epochs, missing) => {
-      this.orchestrator.handleWantedSetDelta(missing);
+      this.uploader.handleWantedSetDelta(missing);
       if (missing.length > 0) {
         this.setDirty("residency", "wanted_set_delta");
       }
@@ -174,11 +185,16 @@ export class RenderLoop {
     clearSliceForMembers(this.sliceState, memberIds);
     clearMinimapForDataset(this.minimapState, id);
 
-    // Remove GPU + orchestrator resources for this dataset's members
+    // Remove GPU + orchestrator + uploader resources for this dataset's
+    // members. The orchestrator owns planner-side per-dataset state; the
+    // uploader owns delivery tracking / per-dataset request snapshots /
+    // last-view-epoch entries. Both need their own cleanup pass.
     this.client.removeLayerResources(id);
     this.orchestrator.clearMemberResources(id);
+    this.uploader.clearDataset(id);
     for (const mid of memberIds) {
       this.orchestrator.clearMemberResources(mid);
+      this.uploader.clearMember(mid);
       this.client.removeLayerResources(mid);
     }
 
@@ -209,21 +225,22 @@ export class RenderLoop {
     if (mc === this.prevMultiChannel) return;
     this.prevMultiChannel = mc;
 
-    const trackedIds = this.orchestrator.getTrackedMemberIds();
+    const trackedIds = this.uploader.getTrackedMemberIds();
     for (const key of trackedIds) {
       const isComposite = /:ch\d+$/.test(key);
       if ((mc && !isComposite) || (!mc && isComposite)) {
         this.client.removeLayerResources(key);
         this.orchestrator.clearMemberResources(key);
+        this.uploader.clearMember(key);
       }
     }
   }
 
-  /** Collect member IDs associated with a dataset from orchestrator tracking. */
+  /** Collect member IDs associated with a dataset from uploader tracking. */
   private collectMemberIds(dsId: string): string[] {
     const ids = new Set<string>();
     const prefix = dsId + ":";
-    for (const key of this.orchestrator.getTrackedMemberIds()) {
+    for (const key of this.uploader.getTrackedMemberIds()) {
       if (key === dsId || key.startsWith(prefix)) ids.add(key);
     }
     ids.delete(dsId);
@@ -480,11 +497,11 @@ export class RenderLoop {
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.orchestrator, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickSlice(ctx, this.orchestrator, this.uploader, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
         this.setDirty("residency", "tick_slice_continuation");
       }
     } else {
-      if (tickVolume(ctx, this.orchestrator, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickVolume(ctx, this.orchestrator, this.uploader, this.minimapState.pendingFetch, shouldRender)) {
         this.setDirty("residency", "tick_volume_continuation");
       }
     }

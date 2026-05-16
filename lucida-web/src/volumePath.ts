@@ -8,6 +8,7 @@ import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
 import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
+import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 
 export type VolumeState = Record<string, never>;
@@ -33,12 +34,12 @@ interface PlanResult {
 
 
 /**
- * Upload+render phase: deliver decoded chunks via Orchestrator, build layer
+ * Upload+render phase: deliver decoded chunks via Uploader, build layer
  * params, and render. Returns true if more work remains.
  */
 function uploadAndRenderVolume(
   ctx: TickContext,
-  orchestrator: Orchestrator,
+  uploader: Uploader,
   plan: PlanResult,
   shouldRender: boolean = true,
 ): boolean {
@@ -46,8 +47,8 @@ function uploadAndRenderVolume(
   const { memberRoster, settings, eye, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel, entityIndexByDataset } = plan;
   const { layerOrder, allSettings } = settings;
 
-  // Use Orchestrator delivery loop instead of uploadChunksForMembers
-  const budgetExhausted = orchestrator.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
+  // Use Uploader delivery loop instead of uploadChunksForMembers
+  const budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
 
   if (!shouldRender) return budgetExhausted;
 
@@ -150,6 +151,7 @@ function uploadAndRenderVolume(
 export function tickVolume(
   ctx: TickContext,
   orchestrator: Orchestrator,
+  uploader: Uploader,
   minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
@@ -199,7 +201,7 @@ export function tickVolume(
   };
 
   const t1 = debugStats.enabled ? performance.now() : 0;
-  const result = uploadAndRenderVolume(ctx, orchestrator, planResult, shouldRender);
+  const result = uploadAndRenderVolume(ctx, uploader, planResult, shouldRender);
   if (debugStats.enabled) debugStats.uploadTimeMs = performance.now() - t1;
   return result;
 }

@@ -74,3 +74,8 @@ export {
   ColdStateTelemetry,
   type ColdStateCauseKey,
 } from "./telemetry/coldState.ts";
+
+// Uploader (Slice 10 of PRD #607). Owns the upload-phase concerns the
+// pre-refactor Orchestrator god-class also carried alongside planning;
+// see `uploader.ts` JSDoc for the planner → uploader seam.
+export { Uploader } from "./uploader.ts";
