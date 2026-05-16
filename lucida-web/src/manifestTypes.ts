@@ -104,6 +104,14 @@ export type WireFormat =
   | { Lz4: { data_type: string } }
   | { Zstd: { data_type: string } };
 
+/** Extract data_type string from a WireFormat variant. */
+export function extractDataType(wf: WireFormat): string {
+  if ("Raw" in wf) return wf.Raw.data_type;
+  if ("Lz4" in wf) return wf.Lz4.data_type;
+  if ("Zstd" in wf) return wf.Zstd.data_type;
+  return "uint16";
+}
+
 export interface DirectFetchDescriptor {
   images: DirectImageSpec[];
 }

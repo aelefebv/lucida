@@ -1,7 +1,5 @@
 import type { Bridge } from "./bridge.ts";
-import type { ProxiedContentSource } from "./pipeline/contentSource.ts";
-import type { CpuCache } from "./pipeline/cpuCache.ts";
-import type { DecodePool } from "./pipeline/decodePool.ts";
+import type { ProxiedContentSource, CpuCache, DecodePool } from "./pipeline/fetch/index.ts";
 import { AssetCatalog } from "./pipeline/assetCatalog.ts";
 import { LayoutRegistry } from "./pipeline/layoutRegistry.ts";
 import type { WasmScene } from "lucida-core";

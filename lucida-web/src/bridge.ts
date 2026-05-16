@@ -28,13 +28,14 @@ export interface BridgeHandlers {
   onSnapshot: (seq: number, documentJson: string, peers: PresenceState[], yourId: ClientId) => void;
   onCommand: (seq: number, commandJson: string) => void;
   onAck: (seq: number) => void;
-  onChunkData?: (key: string, data: ArrayBuffer) => void;
   /**
-   * Binary frame whose key starts with `proxy/`. Routed separately from
-   * `onChunkData` so the content source's proxy promise map can be
-   * resolved without colliding with chunk pending requests.
+   * Binary frame received from the WebSocket. The bridge parses the
+   * envelope (client_id + keyLen + key + payload) and forwards
+   * (key, payload) here. The chunk-vs-proxy routing decision lives
+   * in the application layer (the content source) so the bridge stays
+   * a generic binary transport.
    */
-  onProxyData?: (key: string, data: ArrayBuffer) => void;
+  onBinary?: (key: string, payload: ArrayBuffer) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
   onPeerLeft?: (clientId: ClientId) => void;
   onPresenceUpdate?: (clientId: ClientId, camera: unknown, view: PresenceState["view"], display: PresenceState["display"]) => void;
@@ -218,15 +219,10 @@ export class Bridge {
     const keyBytes = new Uint8Array(buffer, 6, keyLen);
     const key = new TextDecoder().decode(keyBytes);
     const payload = buffer.slice(6 + keyLen);
-    // Proxy frames use the same envelope as chunk frames but with a
-    // `proxy/...` key prefix and a different payload layout (header +
-    // u16 voxels). Route them to the proxy handler so the content
-    // source can resolve the matching pending promise.
-    if (key.startsWith("proxy/")) {
-      this.handlers.onProxyData?.(key, payload);
-    } else {
-      this.handlers.onChunkData?.(key, payload);
-    }
+    // The transport doesn't know the application's chunk-vs-proxy
+    // taxonomy — forward the (key, payload) pair and let the
+    // application layer dispatch.
+    this.handlers.onBinary?.(key, payload);
   }
 
   private scheduleReconnect() {

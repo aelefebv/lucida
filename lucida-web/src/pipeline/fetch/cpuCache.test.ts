@@ -1,5 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// Mock debugLog so the rate-limited log assertions in the
+// "characterization gaps" describe block can spy on it. Other tests
+// don't trigger backpressure / eviction-burst paths under normal
+// fixtures, so the mock is a no-op for them.
+vi.mock("../../debug/logging.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../debug/logging.ts")>();
+  return { ...actual, debugLog: vi.fn() };
+});
+import { debugLog } from "../../debug/logging.ts";
+
 import { CpuCache, type CpuCacheConfig } from "./cpuCache.ts";
+import { ProxiedContentSource } from "./contentSource.ts";
 import type {
   ContentSource,
   FetchRequest,
@@ -14,9 +26,9 @@ import type {
   ActiveSetEntry,
   ProxyRequest,
   RequestPlan,
-} from "./planning/index.ts";
-import type { SceneEpochs } from "./epochs.ts";
-import { emptyPlanStats } from "./planning/index.ts";
+} from "../planning/index.ts";
+import type { SceneEpochs } from "../epochs.ts";
+import { emptyPlanStats } from "../planning/index.ts";
 
 // ---------------------------------------------------------------------------
 // Test Factories
@@ -93,9 +105,14 @@ function createMockContentSource(): MockContentSource {
       return Promise.resolve({
         header: source.proxyHeader,
         data: new ArrayBuffer(bytes),
-        wireFormat: { Raw: { data_type: "uint16" } },
       });
     },
+
+    // No-op: the cache doesn't drive `handleBinary` — only the bridge
+    // does, and these tests don't exercise the bridge path. The mock
+    // implements the method to satisfy the `ContentSource` interface
+    // post Slice 11.
+    handleBinary(_key: string, _data: ArrayBuffer): void {},
 
     resolve(compositeKey: string, bytes?: ArrayBuffer, dataType?: string) {
       const entry = pendingFetches.get(compositeKey);
@@ -396,7 +413,6 @@ describe("CpuCache", () => {
           proxyResolve = () => resolve({
             header: source.proxyHeader,
             data: new ArrayBuffer(64),
-            wireFormat: { Raw: { data_type: "uint16" } },
           });
           signal.addEventListener("abort", () => {
             reject(new DOMException("Aborted", "AbortError"));
@@ -825,77 +841,11 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Adaptive eviction
+  // Adaptive eviction tests migrated to interactionMode.test.ts (Slice 3).
+  // The detector is now a pure unit; exercising it through the cache no
+  // longer adds coverage. Integration of the tier-order consequence
+  // lives at the EvictionPolicy seam (planned for Slice 5).
   // =========================================================================
-
-  describe("adaptive eviction", () => {
-    it("detects panning from viewEpoch velocity", () => {
-      const { cache } = createTestCache();
-
-      // Simulate rapid viewEpoch bumps
-      for (let i = 0; i < 5; i++) {
-        cache.submit(makePlan([], [], { view: i + 1, selection: 1 }));
-      }
-
-      const tel = cache.telemetry();
-      expect(tel.interactionMode).toBe("panning");
-    });
-
-    it("detects scrubbing from selectionEpoch velocity", () => {
-      const { cache } = createTestCache();
-
-      // Simulate rapid selectionEpoch bumps
-      for (let i = 0; i < 5; i++) {
-        cache.submit(makePlan([], [], { view: 1, selection: i + 1 }));
-      }
-
-      const tel = cache.telemetry();
-      expect(tel.interactionMode).toBe("scrubbing");
-    });
-
-    it("reports idle when no epochs bumping", () => {
-      const { cache } = createTestCache();
-
-      // Same epochs every submit
-      for (let i = 0; i < 5; i++) {
-        cache.submit(makePlan([], [], { view: 1, selection: 1 }));
-      }
-
-      const tel = cache.telemetry();
-      expect(tel.interactionMode).toBe("idle");
-    });
-
-    it("scrubbing mode protects prefetch over demoted", async () => {
-      const budget = 256;
-      const { cache, source } = createTestCache({ mainBudgetBytes: budget });
-      source.autoResolveBytes = 100;
-
-      // Force scrubbing mode via selectionEpoch velocity
-      for (let i = 0; i < 5; i++) {
-        cache.submit(makePlan([], [], { view: 1, selection: i + 1 }));
-      }
-
-      // Insert a detail chunk for entity-1 (will be demoted later)
-      const e1detail = makeRequest({ entityId: "entity-1", imageId: "image-1", lane: "detail", chunkKey: "0/0/0/0/0/0" });
-      cache.submit(makePlan([e1detail], [makeActiveEntry("entity-1")], { view: 1, selection: 6 }));
-      await flush();
-
-      // Demote entity-1 by switching active set to entity-2, and add a prefetch chunk
-      const prefetch = makeRequest({ entityId: "entity-2", imageId: "image-2", lane: "prefetch", chunkKey: "0/0/0/0/0/1" });
-      cache.submit(makePlan([e1detail, prefetch], [makeActiveEntry("entity-2")], { view: 1, selection: 7 }));
-      await flush();
-
-      // Add one more active-detail to force eviction (300 > 256)
-      const e2detail = makeRequest({ entityId: "entity-2", imageId: "image-2", lane: "detail", chunkKey: "0/0/0/0/0/2" });
-      cache.submit(makePlan([e1detail, prefetch, e2detail], [makeActiveEntry("entity-2")], { view: 1, selection: 8 }));
-      await flush();
-
-      // In scrubbing mode: demoted evicts first, prefetch protected
-      const snap = cache.snapshot();
-      expect(snap.cached.has("entity-1")).toBe(false); // demoted-detail, evicted first
-      expect(snap.cached.get("entity-2")?.has("0/0/0/0/0/1")).toBe(true); // prefetch, protected
-    });
-  });
 
   // =========================================================================
   // Minimap lane routing (ADR 0023)
@@ -1057,6 +1007,57 @@ describe("CpuCache", () => {
       const tel = cache.telemetry();
       expect(tel.failedChunks.permanent).toBe(1);
       expect(tel.lastError).toContain("404");
+    });
+
+    it("'no wire format registered' classifies as permanent — no retry (Slice 8 #602 bug fix)", async () => {
+      // Pre-Slice-8 regression: the cache catch block matched
+      // `err.message.includes("404") || err.message.includes("malformed")`
+      // to decide permanent vs. transient. "No wire format registered
+      // for image X" matched neither, so the cache wasted a retry on
+      // a setup bug. With typed FetchError + classifyFetchError, the
+      // source's `kind: "permanent"` flows through to the cache and
+      // dispatches via the policy.
+      //
+      // End-to-end via ProxiedContentSource (the source that raises
+      // this error) — exercises the full fetch path, not just the
+      // classifier.
+      vi.useFakeTimers();
+      try {
+        const sentMessages: string[] = [];
+        const realSource = new ProxiedContentSource(
+          (json) => sentMessages.push(json),
+        );
+        // Intentionally do NOT call registerImage("image-1") so
+        // `fetch` rejects with the typed permanent FetchError.
+        const decode = createSyncDecode();
+        const cache = new CpuCache(realSource, decode);
+
+        const req = makeRequest();
+        const beforeFetches = sentMessages.length;
+        cache.submit(makePlan([req]));
+
+        // Flush microtasks so the synchronous rejection from `fetch`
+        // is caught and the failure-map entry is recorded. We also
+        // advance well past the retry delay to prove no retry fires.
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS * 4);
+
+        // No additional chunk_request frames went out — the cache did
+        // not retry. (Pre-Slice-8 the cache would have queued one
+        // retry, but the bug above also meant ProxiedContentSource
+        // would have rejected the retry synchronously again, so this
+        // assertion would have caught two synchronous rejections.)
+        const afterFetches = sentMessages.length;
+        expect(afterFetches).toBe(beforeFetches);
+
+        // Telemetry attributes the failure to the permanent bucket,
+        // not transient — the load-bearing reclassification.
+        const tel = cache.telemetry();
+        expect(tel.failedChunks.permanent).toBe(1);
+        expect(tel.failedChunks.transient).toBe(0);
+        expect(tel.lastError).toMatch(/No wire format registered/);
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
@@ -1419,6 +1420,257 @@ describe("CpuCache", () => {
       const before = source.fetchProxyCount;
       cache.drain(Infinity);
       expect(source.fetchProxyCount).toBe(before);
+    });
+  });
+
+  // =========================================================================
+  // Characterization gaps surfaced by the dechaos pre-refactor pass.
+  // Pin behaviour as it stands today; the upcoming refactor (PRD #592)
+  // preserves these contracts unless a slice explicitly fixes them.
+  // =========================================================================
+
+  describe("characterization gaps (pre-refactor)", () => {
+    beforeEach(() => {
+      vi.mocked(debugLog).mockClear();
+    });
+
+    it("cancelled-during-decode: chunk still lands in cache and ready[]", async () => {
+      // Race per dechaos pass 5: a fetch resolves *before* cancelDataset,
+      // but the queued decode microtask runs *after* it. The cache-insert
+      // and ready-push paths run unconditionally (no inFlight check), so
+      // the chunk lands in both. The orchestrator's wanted-set filter
+      // handles the stale delivery downstream — this test pins the
+      // behaviour rather than asserts it as a defect.
+      const { cache, source } = createTestCache();
+      const req = makeRequest({ x: 0, y: 0, z: 0 });
+      cache.submit(makePlan([req]));
+      expect(source.fetchCount).toBe(1);
+
+      // Resolve first: the source's promise settles; fetchAndDecode's
+      // continuation is queued for the next microtask but has not run.
+      source.resolve("entity-1/image-1/0/0/0/0/0/0");
+
+      // Cancel between resolve and the queued continuation. abort()
+      // fires but is a no-op against the already-resolved promise; the
+      // inFlight map entry is deleted.
+      cache.cancelDataset("entity-1", ["entity-1"]);
+
+      await flush();
+
+      expect(cache.getCachedChunk("entity-1", req.chunkKey)).not.toBeNull();
+      const deliveries = cache.drain(Infinity);
+      expect(deliveries).toHaveLength(1);
+      const delivery = deliveries[0];
+      expect(delivery.kind).toBe("chunk");
+      if (delivery.kind === "chunk") {
+        expect(delivery.chunkKey).toBe(req.chunkKey);
+      }
+    });
+
+    it("pendingOldestAgeMs: telemetry reports the age of the oldest pending enqueue", async () => {
+      vi.useFakeTimers();
+      try {
+        // Constrain concurrency so a request stays pending.
+        const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+        const r1 = makeRequest({ x: 0 });
+        const r2 = makeRequest({ x: 1 });
+        cache.submit(makePlan([r1, r2]));
+        expect(source.fetchCount).toBe(1);
+
+        const t0 = cache.telemetry().pendingOldestAgeMs;
+        expect(t0).toBeGreaterThanOrEqual(0);
+
+        vi.advanceTimersByTime(250);
+        const t1 = cache.telemetry().pendingOldestAgeMs;
+        expect(t1).toBeGreaterThanOrEqual(t0);
+        // Conservative bound: at least the time we advanced.
+        expect(t1).toBeGreaterThanOrEqual(200);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("backpressure log fires at most once per second under sustained queue depth", () => {
+      vi.useFakeTimers();
+      try {
+        // The gate is `now - lastAt >= 1000`. lastAt starts at 0, so
+        // performance.now() must be ≥ 1000 for the first emit. Fake
+        // timers give us a deterministic clock.
+        vi.advanceTimersByTime(2000);
+
+        const { cache } = createTestCache({
+          maxConcurrentFetches: 1,
+          maxBytesInFlight: 1,
+        });
+        const requests = [0, 1, 2, 3, 4].map((x) => makeRequest({ x }));
+
+        cache.submit(makePlan(requests));
+        const firstCallCount = vi.mocked(debugLog).mock.calls.filter(
+          (c) => c[1] === "cache.backpressure",
+        ).length;
+        expect(firstCallCount).toBe(1);
+
+        // Within 1 second, the rate limit suppresses additional emits.
+        vi.advanceTimersByTime(500);
+        cache.submit(makePlan(requests));
+        const stillOne = vi.mocked(debugLog).mock.calls.filter(
+          (c) => c[1] === "cache.backpressure",
+        ).length;
+        expect(stillOne).toBe(1);
+
+        // After the 1-second window elapses, a new emit fires.
+        vi.advanceTimersByTime(600);
+        cache.submit(makePlan(requests));
+        const afterWindow = vi.mocked(debugLog).mock.calls.filter(
+          (c) => c[1] === "cache.backpressure",
+        ).length;
+        expect(afterWindow).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("eviction-burst log fires when ≥16 entries evict in one pass", async () => {
+      // Tight budget + many tiny entries forces a single insert to
+      // evict 16+ neighbours.
+      const { cache, source } = createTestCache({
+        mainBudgetBytes: 16,
+        maxConcurrentFetches: 100,
+        maxBytesInFlight: 1024,
+      });
+      // Each fetch returns 1 byte; cache is empty until we fill it.
+      source.autoResolveBytes = 1;
+
+      const fillers = Array.from({ length: 16 }, (_, i) =>
+        makeRequest({ x: i, lane: "prefetch" }),
+      );
+      cache.submit(makePlan(fillers));
+      await flush();
+
+      // Drain to clear ready[]. Cache now holds 16 × 1B in main.
+      cache.drain(Infinity);
+      vi.mocked(debugLog).mockClear();
+
+      // Insert one bigger entry that requires evicting all 16.
+      source.autoResolveBytes = 16;
+      cache.submit(
+        makePlan([makeRequest({ x: 100, lane: "detail" })]),
+      );
+      await flush();
+
+      const evictionLogs = vi.mocked(debugLog).mock.calls.filter(
+        (c) => c[1] === "cache.eviction_burst",
+      );
+      expect(evictionLogs.length).toBeGreaterThanOrEqual(1);
+      expect(evictionLogs[0][2]).toMatchObject({ removed: expect.any(Number) });
+      const removedArg = (evictionLogs[0][2] as { removed: number }).removed;
+      expect(removedArg).toBeGreaterThanOrEqual(16);
+    });
+
+    it("imageWireFormats cleared on dataset removal (Slice 4 #598 fix)", async () => {
+      // Construct a ProxiedContentSource directly — the leak fix lives
+      // on it, not on the cache. Register an image, drop the dataset
+      // via unregisterDataset, then assert the next fetch rejects with
+      // the unregistered-image error (proves the registration entry
+      // was deleted).
+      const sentMessages: string[] = [];
+      const source = new ProxiedContentSource(
+        (json) => sentMessages.push(json),
+      );
+      source.registerImage("image-leak", { Raw: { data_type: "uint16" } });
+
+      // Sanity check: a fetch on the registered image dispatches a
+      // request (the wire-format lookup succeeds).
+      const ctrlBefore = new AbortController();
+      const before = source.fetch(
+        { datasetId: "ds-leak", imageId: "image-leak", chunkKey: "0/0/0/0/0/0" },
+        ctrlBefore.signal,
+      );
+      expect(sentMessages.length).toBe(1);
+      ctrlBefore.abort();
+      await expect(before).rejects.toMatchObject({ name: "AbortError" });
+
+      // Drop the dataset's image registrations.
+      source.unregisterDataset(["image-leak"]);
+
+      const ctrlAfter = new AbortController();
+      await expect(
+        source.fetch(
+          { datasetId: "ds-leak", imageId: "image-leak", chunkKey: "0/0/0/0/0/0" },
+          ctrlAfter.signal,
+        ),
+      ).rejects.toThrow(/No wire format registered for image image-leak/);
+    });
+
+    it("telemetry shape regression — locks the CacheTelemetry surface for slices 5-10", async () => {
+      // After a known sequence (one submit + flush + drain), the
+      // CacheTelemetry shape must match this reference. Subsequent
+      // slices touch counters, eviction, stores, and scheduler — a
+      // shape regression would surface here immediately. Numeric
+      // values are normalized via expect.any(Number) where they
+      // depend on wall-clock or running averages.
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.submit(makePlan([makeRequest()]));
+      await flush();
+      cache.drain(Infinity);
+
+      const tel = cache.telemetry();
+      expect(tel).toEqual({
+        mainBytes: expect.any(Number),
+        mainBudget: expect.any(Number),
+        overviewBytes: expect.any(Number),
+        overviewBudget: expect.any(Number),
+        proxyBytes: expect.any(Number),
+        proxyBudget: expect.any(Number),
+        maxConcurrentFetches: expect.any(Number),
+        maxBytesInFlight: expect.any(Number),
+        inFlightCount: expect.any(Number),
+        inFlightBytes: expect.any(Number),
+        inFlightProxyCount: expect.any(Number),
+        inFlightProxyBytes: expect.any(Number),
+        pendingCount: expect.any(Number),
+        pendingProxyCount: expect.any(Number),
+        pendingOldestAgeMs: expect.any(Number),
+        readyCount: expect.any(Number),
+        hitRate: expect.any(Number),
+        evictionsPerSec: expect.any(Number),
+        evictionsByTier: {
+          activeDetail: expect.any(Number),
+          demotedDetail: expect.any(Number),
+          prefetch: expect.any(Number),
+          overview: expect.any(Number),
+          proxy: expect.any(Number),
+        },
+        interactionMode: expect.stringMatching(/^(panning|scrubbing|idle)$/),
+        evictionTierOrder: expect.any(Array),
+        failedChunks: {
+          transient: expect.any(Number),
+          permanent: expect.any(Number),
+        },
+        lastError: null,
+        decodesPerSec: expect.any(Number),
+        decodeWorkersTotal: expect.any(Number),
+        avgDecodeMs: expect.any(Number),
+        decodeP50Ms: expect.any(Number),
+        decodeP95Ms: expect.any(Number),
+        tierResidency: {
+          activeDetail: { count: expect.any(Number), bytes: expect.any(Number) },
+          demotedDetail: { count: expect.any(Number), bytes: expect.any(Number) },
+          prefetch: { count: expect.any(Number), bytes: expect.any(Number) },
+          overview: { count: expect.any(Number), bytes: expect.any(Number) },
+          proxy: { count: expect.any(Number), bytes: expect.any(Number) },
+        },
+      });
+
+      // A few load-bearing values from the known-input sequence — one
+      // submit + a non-cached fetch + drain leaves a single
+      // active-detail entry of 64 bytes. Hit rate is 0 because the
+      // first submit was a miss.
+      expect(tel.hitRate).toBe(0);
+      expect(tel.tierResidency.activeDetail.count).toBe(1);
+      expect(tel.tierResidency.activeDetail.bytes).toBe(64);
+      expect(tel.mainBytes).toBe(64);
     });
   });
 });

@@ -49,7 +49,7 @@ import type {
   CpuCache,
   ReadyChunkDelivery,
   ReadyProxyDelivery,
-} from "./cpuCache.ts";
+} from "./fetch/index.ts";
 import type { ProxyRequest } from "./planning/index.ts";
 import {
   debugStats,

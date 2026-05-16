@@ -5,7 +5,7 @@ import type {
   CpuCache,
   ReadyProxyDelivery,
   ReadyDelivery,
-} from "./cpuCache.ts";
+} from "./fetch/index.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
 import type { ProxyRequest } from "./planning/index.ts";

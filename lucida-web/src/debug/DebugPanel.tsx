@@ -20,7 +20,7 @@ import {
 import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import type { DatasetState } from "../types.ts";
-import type { CacheTelemetry } from "../pipeline/cpuCache.ts";
+import type { CacheTelemetry } from "../pipeline/fetch/index.ts";
 import type { Session } from "../session.ts";
 import { ConfigTab } from "./ConfigTab.tsx";
 import "./DebugPanel.css";
@@ -141,7 +141,7 @@ function shortId(id: string, max = 16): string {
 }
 
 /** Dump CPU cache contents to the console, grouped by entity → cache → tier. */
-function dumpCache(cache: import("../pipeline/cpuCache.ts").CpuCache | undefined | null): void {
+function dumpCache(cache: import("../pipeline/fetch/index.ts").CpuCache | undefined | null): void {
   if (!cache) {
     console.warn("[DebugPanel] cpuCache not available");
     return;
@@ -178,7 +178,7 @@ function dumpCache(cache: import("../pipeline/cpuCache.ts").CpuCache | undefined
 }
 
 /** Dump pending CPU-cache requests to the console, sorted by priority. */
-function dumpPending(cache: import("../pipeline/cpuCache.ts").CpuCache | undefined | null): void {
+function dumpPending(cache: import("../pipeline/fetch/index.ts").CpuCache | undefined | null): void {
   if (!cache) {
     console.warn("[DebugPanel] cpuCache not available");
     return;

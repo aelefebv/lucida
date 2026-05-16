@@ -12,7 +12,7 @@
  * orchestrator calls it on every cold-state rebuild.
  */
 
-import type { CpuCache } from "../cpuCache.ts";
+import type { CpuCache } from "../fetch/index.ts";
 import type { PlanningDatasetDebug } from "../../debug/debugStats.ts";
 import type {
   EntitySnapshot,

@@ -5,9 +5,7 @@ export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import { Axis } from "../axes.ts";
 import type { DatasetManifest, FetchSource } from "../manifestTypes.ts";
-import { DecodePool } from "../pipeline/decodePool.ts";
-import { ProxiedContentSource } from "../pipeline/contentSource.ts";
-import { CpuCache } from "../pipeline/cpuCache.ts";
+import { DecodePool, ProxiedContentSource, CpuCache } from "../pipeline/fetch/index.ts";
 import { derivedBuildersFor } from "../pipeline/layoutBuilders.ts";
 import { Session } from "../session.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -281,11 +279,8 @@ export function useBridge({
         }
       },
       onAck: (_seq) => {},
-      onChunkData: (key, data) => {
-        contentSource.handleChunkData(key, data);
-      },
-      onProxyData: (key, data) => {
-        contentSource.handleProxyData(key, data);
+      onBinary: (key, data) => {
+        contentSource.handleBinary(key, data);
       },
       onPeerJoined: (clientId, presence) => {
         setPeers(prev => {

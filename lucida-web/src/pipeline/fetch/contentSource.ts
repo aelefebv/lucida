@@ -5,9 +5,12 @@
  * Does not decode, normalize, or cache.
  */
 
-import type { WireFormat } from "../manifestTypes.ts";
-import { extractDataType } from "./decodePool.ts";
-import type { ProxyKind } from "./assetCatalog.ts";
+import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
+import type { ProxyKind } from "../assetCatalog.ts";
+import { parseProxyHeader, proxyResponseKey, type ProxyHeaderJs } from "./wireProtocol.ts";
+import { FetchError } from "./retry.ts";
+
+export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -36,100 +39,22 @@ export interface FetchProxyRequest {
   c: number;
 }
 
-/**
- * Parsed proxy header. Mirrors the Rust `ProxyHeader` after the binary
- * 64-byte little-endian record is decoded — see
- * `lucida_proxy::header::write_header` for the canonical layout.
- */
-export interface ProxyHeaderJs {
-  algorithmVersion: number;
-  sourceContentHash: Uint8Array; // 32 bytes
-  /** `[Z, Y, X]` voxel counts. */
-  dims: [number, number, number];
-  dtype: "u16";
-}
-
 export interface FetchProxyResult {
   header: ProxyHeaderJs;
   /** Raw u16 voxel bytes (little-endian), length `dims[0]*dims[1]*dims[2]*2`. */
   data: ArrayBuffer;
-  /** Always `Raw { u16 }` for proxies — included for parity with chunk fetches. */
-  wireFormat: WireFormat;
 }
 
 export interface ContentSource {
   fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult>;
   /** Fetch a proxy asset. Resolves with header + raw voxel bytes. */
   fetchProxy(request: FetchProxyRequest, signal: AbortSignal): Promise<FetchProxyResult>;
-}
-
-// ---------------------------------------------------------------------------
-// Proxy header parsing
-// ---------------------------------------------------------------------------
-
-/**
- * Parse a 64-byte proxy header out of `buffer` starting at `offset`.
- * Layout (little-endian, exactly mirrors `lucida_proxy::header`):
- *
- * ```text
- *  0..4    magic              "LPRX"
- *  4..8    algorithm version  u32
- *  8..20   dims [Z, Y, X]     u32 × 3
- * 20..24   dtype code         u32
- * 24..56   source hash        u8 × 32
- * 56..64   reserved
- * ```
- */
-export function parseProxyHeader(buffer: ArrayBuffer, offset = 0): ProxyHeaderJs {
-  if (buffer.byteLength < offset + 64) {
-    throw new Error(`Proxy header truncated: need 64 bytes, got ${buffer.byteLength - offset}`);
-  }
-  const view = new DataView(buffer, offset, 64);
-
-  // Magic check.
-  if (
-    view.getUint8(0) !== 0x4c /* 'L' */ ||
-    view.getUint8(1) !== 0x50 /* 'P' */ ||
-    view.getUint8(2) !== 0x52 /* 'R' */ ||
-    view.getUint8(3) !== 0x58 /* 'X' */
-  ) {
-    throw new Error("Bad proxy header magic");
-  }
-
-  const algorithmVersion = view.getUint32(4, true);
-  const dims: [number, number, number] = [
-    view.getUint32(8, true),
-    view.getUint32(12, true),
-    view.getUint32(16, true),
-  ];
-  const dtypeCode = view.getUint32(20, true);
-  if (dtypeCode !== 0) {
-    throw new Error(`Unknown proxy dtype code: ${dtypeCode}`);
-  }
-  // Copy out the 32-byte hash so callers can hold it independently of `buffer`.
-  const sourceContentHash = new Uint8Array(32);
-  sourceContentHash.set(new Uint8Array(buffer, offset + 24, 32));
-
-  return {
-    algorithmVersion,
-    sourceContentHash,
-    dims,
-    dtype: "u16",
-  };
-}
-
-/**
- * Compose the proxy response key. Mirrors the server's
- * `proxy_response_key` (handler.rs); the two MUST stay in lockstep so the
- * client can route binary frames back to the right pending request.
- */
-export function proxyResponseKey(
-  entityId: string,
-  kind: ProxyKind,
-  t: number,
-  c: number,
-): string {
-  return `proxy/${entityId}/${kind}/T${t.toString().padStart(5, "0")}_C${c.toString().padStart(3, "0")}`;
+  /**
+   * Route a binary frame from the transport layer (e.g. the bridge's
+   * WebSocket) to the appropriate pending request. Owns the
+   * chunk-vs-proxy dispatch decision so the transport stays generic.
+   */
+  handleBinary(key: string, data: ArrayBuffer): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +67,10 @@ const DEFAULT_PROXY_TIMEOUT_MS = 60_000;
 
 interface PendingRequest {
   resolve: (data: ArrayBuffer) => void;
+  // Accepts either a typed `FetchError` (`rejectDataset`, `rejectAll`)
+  // or the `DOMException("AbortError")` raised on signal abort. The
+  // catch block in `CpuCache.fetchAndDecode` routes both through
+  // `classifyFetchError`.
   reject: (err: Error) => void;
   timeoutId: ReturnType<typeof setTimeout>;
 }
@@ -176,7 +105,39 @@ export class ProxiedContentSource implements ContentSource {
     this.imageWireFormats.set(imageId, wireFormat);
   }
 
-  /** Route binary chunk data from bridge. Called by the onChunkData handler. */
+  /**
+   * Drop wire-format registrations for the listed images. Pair with
+   * `cancelDataset` on the cache from the dataset-removal lifecycle —
+   * without this, `imageWireFormats` accumulates entries indefinitely
+   * across long sessions of open/close cycles (real long-session leak
+   * surfaced by dechaos pass 4 of the fetch refactor).
+   *
+   * The caller passes the imageIds because `ProxiedContentSource` is
+   * dataset-agnostic: it has no datasetId → imageIds mapping of its
+   * own. The dataset-lifecycle owner (RenderLoop / useBridge) holds
+   * that mapping in the manifest.
+   */
+  unregisterDataset(imageIds: readonly string[]): void {
+    for (const id of imageIds) {
+      this.imageWireFormats.delete(id);
+    }
+  }
+
+  /**
+   * Route a binary frame from the bridge to the matching pending
+   * chunk- or proxy-request. The transport delivers (key, payload)
+   * without knowing the application's chunk-vs-proxy taxonomy; this
+   * method owns the dispatch by sniffing the `proxy/` key prefix.
+   */
+  handleBinary(key: string, data: ArrayBuffer): void {
+    if (key.startsWith("proxy/")) {
+      this.handleProxyData(key, data);
+    } else {
+      this.handleChunkData(key, data);
+    }
+  }
+
+  /** Route binary chunk data to a pending chunk request. */
   handleChunkData(key: string, data: ArrayBuffer): void {
     const entry = this.pending.get(key);
     if (entry) {
@@ -186,10 +147,7 @@ export class ProxiedContentSource implements ContentSource {
     }
   }
 
-  /**
-   * Route binary proxy data from bridge. Called when the bridge receives
-   * a binary frame whose key starts with `proxy/`.
-   */
+  /** Route binary proxy data to a pending proxy request. */
   handleProxyData(key: string, data: ArrayBuffer): void {
     const entry = this.pendingProxy.get(key);
     if (entry) {
@@ -206,7 +164,9 @@ export class ProxiedContentSource implements ContentSource {
       if (key.startsWith(prefix)) {
         clearTimeout(entry.timeoutId);
         this.pending.delete(key);
-        entry.reject(new Error("Dataset removed"));
+        // Dataset removal is a deliberate caller cancellation; treat
+        // identically to a signal abort downstream.
+        entry.reject(new FetchError("Dataset removed", { kind: "abort" }));
       }
     }
     // Proxy keys aren't dataset-scoped (entity IDs are unique enough);
@@ -217,12 +177,14 @@ export class ProxiedContentSource implements ContentSource {
   rejectAll(): void {
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timeoutId);
-      entry.reject(new Error("Bridge disconnected"));
+      // Bridge drop is a transient condition: the reconnect path will
+      // retry. The cache's `OnceTransientRetry` honours that semantics.
+      entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
     }
     this.pending.clear();
     for (const [, entry] of this.pendingProxy) {
       clearTimeout(entry.timeoutId);
-      entry.reject(new Error("Bridge disconnected"));
+      entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
     }
     this.pendingProxy.clear();
   }
@@ -233,14 +195,23 @@ export class ProxiedContentSource implements ContentSource {
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
     const wireFormat = this.imageWireFormats.get(imageId);
     if (!wireFormat) {
-      return Promise.reject(new Error(`No wire format registered for image ${imageId}`));
+      // Setup bug — retrying won't recover. Pre-Slice-8 this was a
+      // plain `Error` and the catch block's substring rules
+      // misclassified it as transient (dechaos pass 5 finding).
+      return Promise.reject(
+        new FetchError(`No wire format registered for image ${imageId}`, {
+          kind: "permanent",
+        }),
+      );
     }
     const dataType = extractDataType(wireFormat);
 
     return new Promise<FetchResult>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pending.delete(compositeKey);
-        reject(new Error(`Chunk ${chunkKey} timed out`));
+        // Timeout preserves the pre-Slice-8 behaviour: a single retry
+        // via `OnceTransientRetry`, then mark transient-failed.
+        reject(new FetchError(`Chunk ${chunkKey} timed out`, { kind: "transient" }));
       }, this.timeoutMs);
 
       this.pending.set(compositeKey, {
@@ -259,6 +230,10 @@ export class ProxiedContentSource implements ContentSource {
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         this.pending.delete(compositeKey);
+        // `DOMException` AbortError is promoted to
+        // `FetchError(kind: "abort")` by `classifyFetchError`. Raising
+        // it directly here keeps the AbortError shape for any
+        // downstream `instanceof DOMException` matcher.
         reject(new DOMException("Aborted", "AbortError"));
       });
     });
@@ -276,7 +251,11 @@ export class ProxiedContentSource implements ContentSource {
     return new Promise<FetchProxyResult>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pendingProxy.delete(responseKey);
-        reject(new Error(`Proxy ${responseKey} timed out`));
+        // Proxy retry policy is `NeverRetry`, so the cache won't retry
+        // — but the timeout is still semantically transient (the next
+        // plan tick may resubmit). Keeping the same kind discipline
+        // here means consumers can reason about kind uniformly.
+        reject(new FetchError(`Proxy ${responseKey} timed out`, { kind: "transient" }));
       }, this.proxyTimeoutMs);
 
       this.pendingProxy.set(responseKey, {
@@ -286,14 +265,17 @@ export class ProxiedContentSource implements ContentSource {
           try {
             header = parseProxyHeader(raw, 0);
           } catch (e) {
-            reject(e instanceof Error ? e : new Error(String(e)));
+            // Malformed header → permanent. `parseProxyHeader` throws
+            // a plain `Error` for bad magic / version; wrap it as a
+            // typed `FetchError` so the cache classifies it correctly.
+            const message = e instanceof Error ? e.message : String(e);
+            reject(new FetchError(message, { kind: "permanent", cause: e }));
             return;
           }
           const data = raw.slice(64);
           resolve({
             header,
             data,
-            wireFormat: { Raw: { data_type: "uint16" } },
           });
         },
         reject: (err) => { clearTimeout(timeoutId); reject(err); },
@@ -312,6 +294,9 @@ export class ProxiedContentSource implements ContentSource {
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         this.pendingProxy.delete(responseKey);
+        // Matches the chunk-path abort site: raise the DOMException
+        // directly; `classifyFetchError` promotes it to
+        // `FetchError(kind: "abort")` downstream.
         reject(new DOMException("Aborted", "AbortError"));
       });
     });

@@ -25,7 +25,7 @@ import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
-import type { CpuCache } from "../pipeline/cpuCache.ts";
+import type { CpuCache } from "../pipeline/fetch/index.ts";
 import {
   DEBUG_OVERLAYS,
   isOverlayEnabled,
@@ -89,7 +89,7 @@ interface ChunkRect {
    * cheapest. `null` for cached chunks where the lookup failed
    * (rare; treat as fallback green).
    */
-  tier?: import("../pipeline/cpuCache.ts").EvictionTier | null;
+  tier?: import("../pipeline/fetch/index.ts").EvictionTier | null;
 }
 
 const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
@@ -120,7 +120,7 @@ function plannedColor(rank: number | undefined): string {
  *   prefetch       → teal         (cheapest to lose)
  */
 function cachedColor(
-  tier: import("../pipeline/cpuCache.ts").EvictionTier | null | undefined,
+  tier: import("../pipeline/fetch/index.ts").EvictionTier | null | undefined,
 ): string {
   switch (tier) {
     case "active-detail":  return "rgba(80, 220, 120, 0.36)";
@@ -615,7 +615,7 @@ export function DebugOverlays({
                   }
                   let status: ChunkRect["status"] = "planned";
                   let priorityRank: number | undefined;
-                  let tier: import("../pipeline/cpuCache.ts").EvictionTier | null | undefined;
+                  let tier: import("../pipeline/fetch/index.ts").EvictionTier | null | undefined;
                   if (cachedSet?.has(key)) {
                     status = "cached";
                     if (enabled.cachedTier) {
