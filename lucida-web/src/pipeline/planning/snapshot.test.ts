@@ -132,9 +132,9 @@ function makeDataset(
     dataset_id: "ds1",
     name: "test",
     kind: "Single",
-    // PRD #563 / Slice 5: the default stub scene returns `field-0` as a
-    // Field, so the default manifest must carry the matching parent edge
-    // or `buildPlanningSnapshot` throws. Tests that exercise the
+    // The default stub scene returns `field-0` as a Field, so the
+    // default manifest must carry the matching parent edge or
+    // `buildPlanningSnapshot` throws. Tests that exercise the
     // missing-edge throw branch override `entities` with `[]`.
     entities: [
       { id: "well-0", kind: "Well", parent: null, labels: {} },
@@ -285,7 +285,7 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
     });
     const built = buildPlanningSnapshot(makeArgs({ scene, dataset }));
     const ent = built!.entities[0];
-    // PRD #563 / Slice 5: narrow on `kind === "Field"` to read parentId.
+    // Narrow on `kind === "Field"` to read parentId.
     expect(ent.kind).toBe("Field");
     if (ent.kind === "Field") {
       expect(ent.parentId).toBe("well-1");
@@ -293,10 +293,10 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
   });
 
   it("throws when a Field-kind entity has no manifest parent edge", () => {
-    // PRD #563 / Slice 5: a Field without a parent is an invariant
-    // violation. The builder surfaces it explicitly rather than
-    // silently coercing to null. Override the dataset to drop the
-    // parent edge for the default `field-0` scene entity.
+    // A Field without a parent is an invariant violation; the
+    // builder surfaces it explicitly rather than silently coercing
+    // to null. Override the dataset to drop the parent edge for the
+    // default `field-0` scene entity.
     const dataset = makeDataset({ entities: [] });
     expect(() =>
       buildPlanningSnapshot(makeArgs({ dataset })),
@@ -412,7 +412,7 @@ describe("buildPlanningSnapshot — selection state", () => {
     expect(builtVolume!.selection.renderMode).toBe("volume");
   });
 
-  it("interactionState is always idle (Slice 4 invariant)", () => {
+  it("interactionState is always idle", () => {
     const built = buildPlanningSnapshot(makeArgs());
     expect(built!.selection.interactionState).toBe("idle");
   });
@@ -429,11 +429,6 @@ describe("buildPlanningSnapshot — pass-through fields", () => {
     expect(built!.snapshot.assetCatalog).toBe(catalog);
   });
 
-  // Removed: PRD #563 / Slice 3 — previousActiveSet no longer lives on
-  // the planning snapshot. The orchestrator now passes a separate
-  // PlanningState argument to plan(), and buildPlanningSnapshot has no
-  // knowledge of carry-forward state.
-
   it("threads the epoch counters through into the snapshot", () => {
     const built = buildPlanningSnapshot(makeArgs());
     expect(built!.snapshot.epochs).toEqual(makeEpochs());
@@ -445,7 +440,7 @@ describe("buildPlanningSnapshot — pass-through fields", () => {
   });
 });
 
-describe("buildPlanningSnapshot — minimapPending field (Slice 5)", () => {
+describe("buildPlanningSnapshot — minimapPending field", () => {
   it("threads a non-empty minimapPending through into the snapshot unchanged", () => {
     const minimapPending = new Map([
       [
@@ -458,8 +453,8 @@ describe("buildPlanningSnapshot — minimapPending field (Slice 5)", () => {
       minimapPending,
     });
     expect(built).not.toBeNull();
-    // Slice 5 (PRD #545 / ADR 0023) exposes the slot on the snapshot
-    // so `plan()`'s `emitMinimapLane` can consume it.
+    // Per ADR 0023 the slot is exposed on the snapshot so `plan()`'s
+    // `emitMinimapLane` can consume it.
     expect(built!.snapshot.minimapPending).toBe(minimapPending);
     expect(built!.snapshot.minimapPending.get("img-0")).toEqual([
       { level: 0, x: 0, y: 0, z: 0, t: 0, c: 0, key: "0/0/0/0/0/0" },
@@ -478,12 +473,6 @@ describe("buildPlanningSnapshot — minimapPending field (Slice 5)", () => {
 });
 
 describe("buildPlanningSnapshot — purity", () => {
-  // The "does not mutate prevActiveSet" assertion was removed as part
-  // of PRD #563 / Slice 3: prev-active-set is no longer carried on the
-  // snapshot, so the snapshot builder no longer accepts it. The
-  // PlanningState round-trip lives entirely in plan() and the
-  // orchestrator now.
-
   it("produces identical output across two calls with identical inputs", () => {
     const args = makeArgs();
     const a = buildPlanningSnapshot(args)!;

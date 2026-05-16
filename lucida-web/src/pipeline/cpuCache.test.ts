@@ -154,8 +154,8 @@ function makePlan(
   activeSet?: ActiveSetEntry[],
   epochs?: Partial<SceneEpochs>,
 ): RequestPlan {
-  // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; the
-  // default fixture builds a single FieldEntry.
+  // ActiveSetEntry is a discriminated union; the default fixture
+  // builds a single FieldEntry.
   const resolvedActiveSet: ActiveSetEntry[] = activeSet ?? [{
     kind: "field",
     entityId: "entity-1",
@@ -182,7 +182,7 @@ function makePlan(
       ...epochs,
     },
     stats: emptyPlanStats(),
-    // PRD #563 / Slice 3: nextState mirrors what plan() returns —
+    // nextState mirrors what plan() returns —
     // `previousActiveSet: activeSet` for the v1 single-field state.
     nextState: { previousActiveSet: resolvedActiveSet },
   };
@@ -317,7 +317,7 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Fetch lifecycle decoupled from plan omission (PRD #420)
+  // Fetch lifecycle decoupled from plan omission
   // =========================================================================
 
   describe("fetch lifecycle decoupled from plan omission", () => {
@@ -424,7 +424,7 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // cancelDataset (PRD #420)
+  // cancelDataset
   // =========================================================================
 
   describe("cancelDataset", () => {
@@ -898,7 +898,7 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Minimap lane routing (Slice 5 / ADR 0023)
+  // Minimap lane routing (ADR 0023)
   // =========================================================================
   //
   // Minimap chunks land in the overview cache (most-protected eviction
@@ -906,7 +906,7 @@ describe("CpuCache", () => {
   // cache. Combined with the planner emitting minimap at priority 0
   // (highest), the effect is "fetched first, evicted last."
 
-  describe("minimap lane routing (Slice 5)", () => {
+  describe("minimap lane routing", () => {
     it("routes lane: \"minimap\" chunks to the overview cache", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 100;
@@ -1302,9 +1302,9 @@ describe("CpuCache", () => {
       // No new network fetch.
       expect(source.fetchProxyCount).toBe(fetchesBefore);
 
-      // PRD #409 / S2: cache-hit submit() is a no-op for proxies (mirrors
-      // the chunk path). The orchestrator now resends evicted proxies via
-      // `getCachedProxy`, so `submit()` no longer needs to push to ready.
+      // Cache-hit submit() is a no-op for proxies (mirrors the chunk
+      // path). The orchestrator resends evicted proxies via
+      // `getCachedProxy`, so `submit()` doesn't need to push to ready.
       const replays = cache.drain(Infinity);
       expect(replays).toHaveLength(0);
     });

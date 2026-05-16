@@ -65,8 +65,8 @@ function makeCatalog(
 /**
  * Build a singleton field-mode active-set entry for an Image-kind
  * entity. Used by the migrated legacy tests so synthetic snapshots
- * still produce one entry per entity. PRD #563 / Slice 4: returns the
- * discriminated `FieldEntry` variant explicitly.
+ * still produce one entry per entity. Returns the discriminated
+ * `FieldEntry` variant explicitly.
  */
 function makeFieldDetailEntry(
   entityId: string,
@@ -88,10 +88,10 @@ function makeFieldDetailEntry(
   };
 }
 
-// PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; tests
-// that read field-mode-only fields (`mode`, `targetLod`, etc.) need to
-// narrow first. These helpers fail the test with a descriptive message
-// if the entry is a different variant.
+// ActiveSetEntry is a discriminated union; tests that read
+// field-mode-only fields (`mode`, `targetLod`, etc.) need to narrow
+// first. These helpers fail the test with a descriptive message if
+// the entry is a different variant.
 function asField(entry: ActiveSetEntry) {
   if (entry.kind !== "field") {
     throw new Error(
@@ -164,9 +164,9 @@ describe("assignModes — three-tier (no catalog)", () => {
   });
 
   it("invisible entity emits an InvisibleEntry at coarsest LOD", () => {
-    // PRD #563 / Slice 4: invisibles are now their own variant (no
-    // longer conflated with `fields-with-detail`). They carry only
-    // `coarsestLod`, no LOD range / mode / proxy fields.
+    // Invisibles are their own variant (not conflated with
+    // `fields-with-detail`). They carry only `coarsestLod`, no
+    // LOD range / mode / proxy fields.
     const entity = createSyntheticEntity({
       visible: false,
       projectedDiagonalPx: 200,
@@ -184,7 +184,7 @@ describe("assignModes — three-tier (no catalog)", () => {
 // ---------------------------------------------------------------------------
 
 describe("LOD range", () => {
-  it("sets coarsestDetailLod = targetLod for a field-mode entity (no +2 buffer post-PRD-545)", () => {
+  it("sets coarsestDetailLod = targetLod for a field-mode entity (no +2 buffer)", () => {
     const entity = createSyntheticEntity({
       kind: "Image",
       projectedDiagonalPx: 200,
@@ -233,8 +233,8 @@ describe("LOD range", () => {
   });
 
   it("invisible entity coarsestLod is the coarsest level", () => {
-    // PRD #563 / Slice 4: InvisibleEntry only carries `coarsestLod`;
-    // no `targetLod`/`coarsestDetailLod`/`detailOwnedLodRange` fields.
+    // InvisibleEntry only carries `coarsestLod`; no
+    // `targetLod`/`coarsestDetailLod`/`detailOwnedLodRange` fields.
     const entity = createSyntheticEntity({
       kind: "Image",
       visible: false,
@@ -366,9 +366,9 @@ describe("assignModes — three-tier with catalog", () => {
     expect(result).toHaveLength(1);
     const wp = asWellAsProxy(result[0]);
     expect(wp.entityId).toBe("wellA");
-    // PRD #563 / Slice 4: WellAsProxyEntry has no imageId / proxyKind /
-    // proxyAvailable fields — those invariants are now compile-time
-    // enforced rather than asserted at runtime.
+    // WellAsProxyEntry has no imageId / proxyKind / proxyAvailable
+    // fields — those invariants are compile-time enforced rather
+    // than asserted at runtime.
   });
 
   it("mid well (100px) with catalog → one fields-with-proxy-fallback per field", () => {
@@ -494,8 +494,8 @@ describe("assignModes — three-tier with catalog", () => {
       ["wellG", ["WellProxy3D"]],
       ["fG1", ["FieldProxy3D"]],
     ]);
-    // PRD #563 / Slice 4: WellAsProxyEntry now carries only `kind`
-    // and `entityId`; LOD/proxy bookkeeping is implicit.
+    // WellAsProxyEntry carries only `kind` and `entityId`;
+    // LOD/proxy bookkeeping is implicit.
     const prev: ActiveSetEntry[] = [
       { kind: "well-as-proxy", entityId: "wellG" },
     ];
@@ -554,9 +554,7 @@ function makeLevelGeo(
 /**
  * Build a stub `levels` array of length `n` for tests that only care
  * about the entity's level count (e.g. invisible-entry coarsest-LOD
- * tests) rather than per-level geometry. PRD #563 / Slice 1 dropped
- * `EntitySnapshot.numLevels`, so callers that previously wrote
- * `numLevels: 5` now provide `levels: makeStubLevels(5)` instead.
+ * tests) rather than per-level geometry.
  */
 function makeStubLevels(n: number): LevelGeometry[] {
   const levels: LevelGeometry[] = [];
@@ -658,9 +656,8 @@ describe("iterateChunks", () => {
       levels: [level0],
       layoutPositionVox: [0, 0],
     });
-    // PRD #563 / Slice 4: WellAsProxyEntry carries only `kind` +
-    // `entityId`; the chunk-iteration short-circuit reads `kind`, not
-    // `mode`.
+    // WellAsProxyEntry carries only `kind` + `entityId`; the
+    // chunk-iteration short-circuit reads `kind`, not `mode`.
     const entry: ActiveSetEntry = { kind: "well-as-proxy", entityId: "wellX" };
 
     const result = iterateChunks(entity, entry, makeVisibleRegion(), makeSelection());
@@ -668,8 +665,8 @@ describe("iterateChunks", () => {
   });
 
   it("invisible entry produces no chunk requests", () => {
-    // PRD #563 / Slice 4: InvisibleEntry is a distinct variant —
-    // iterateChunks short-circuits on `kind !== "field"`.
+    // InvisibleEntry is a distinct variant — iterateChunks
+    // short-circuits on `kind !== "field"`.
     const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
       entityId: "invX",
@@ -1235,11 +1232,10 @@ describe("plan() — proxy request emission", () => {
    * Build a minimal plate snapshot with one well + N fields. All fields
    * share the same image-level geometry (single LOD, 256x256, 1 chunk).
    *
-   * PRD #563 / Slice 3: prev-active-set carry-over is no longer
-   * carried on the snapshot. Tests that need to seed prev state should
-   * construct a {@link PlanningState} (or thread `result.nextState`
-   * from the previous tick) and pass it as the second argument to
-   * `plan()`.
+   * Prev-active-set carry-over lives on {@link PlanningState}, not on
+   * the snapshot. Tests that need to seed prev state should construct
+   * a `PlanningState` (or thread `result.nextState` from the previous
+   * tick) and pass it as the second argument to `plan()`.
    */
   function makePlateSnapshot(opts: {
     wellId: string;
@@ -1407,9 +1403,8 @@ describe("plan() — proxy request emission", () => {
   });
 
   it("lane priority order: minimap (0) < detail (500) < proxy (1000) < prefetch (1500) < overview (2500)", () => {
-    // Slice 5 of PRD #545 promoted minimap to its own lane and renumbered
-    // every other lane offset upward. The renumbering is part of the
-    // public contract — downstream priority comparisons depend on it.
+    // Lane offsets are part of the public contract — downstream
+    // priority comparisons depend on this ordering.
     expect(MINIMAP_LANE_OFFSET).toBe(0);
     expect(DETAIL_LANE_OFFSET).toBe(500);
     expect(PROXY_LANE_OFFSET).toBe(1000);
@@ -1518,11 +1513,11 @@ describe("plan() — proxy request emission", () => {
   });
 
   it("PlanningState round-trip: feeding result.nextState back is equivalent to threading previousActiveSet manually", () => {
-    // PRD #563 / Slice 3: the planner returns an opaque `nextState`
-    // pointer; the caller is supposed to hand it back unchanged on the
-    // next tick. This test pins that "hand back" path to the same
-    // outcome a hand-derived `{ previousActiveSet: result.activeSet }`
-    // state produces — proving the round-trip is lossless.
+    // The planner returns an opaque `nextState` pointer; the caller
+    // is supposed to hand it back unchanged on the next tick. This
+    // test pins that "hand back" path to the same outcome a
+    // hand-derived `{ previousActiveSet: result.activeSet }` state
+    // produces — proving the round-trip is lossless.
     const catalog = makeCatalog([
       ["wellR", ["WellProxy3D"]],
       ["fR1", ["FieldProxy3D"]],
@@ -1792,7 +1787,7 @@ describe("plan() edge cases", () => {
     const result = plan(snap, createSyntheticState());
 
     expect(result.activeSet).toHaveLength(2);
-    // PRD #563 / Slice 4: invisibles now ride their own variant.
+    // Invisibles ride their own variant.
     for (const entry of result.activeSet) {
       expect(entry.kind).toBe("invisible");
     }
@@ -1882,14 +1877,12 @@ describe("iterateChunks edge cases", () => {
   });
 });
 
-// PRD #563 / Slice 5: the orphan-field test ("field whose parentId ===
-// null gets a synthetic-key group") was removed. {@link FieldSnapshot}
-// now requires a non-null `parentId` at the type level — an orphan
-// field is a producer invariant violation, not a code path. The
-// snapshot builder throws on a missing manifest parent edge for a
-// Field, and the per-variant defaults in {@link createSyntheticEntity}
-// supply a synthetic parent id so test fixtures don't have to thread
-// one through every call.
+// {@link FieldSnapshot} requires a non-null `parentId` at the type
+// level — an orphan field is a producer invariant violation, not a
+// code path. The snapshot builder throws on a missing manifest
+// parent edge for a Field, and the per-variant defaults in
+// {@link createSyntheticEntity} supply a synthetic parent id so
+// test fixtures don't have to thread one through every call.
 
 describe("assignModes edge cases", () => {
   it("stale previousActiveSet entries (entities no longer present) are silently ignored", () => {
@@ -1897,9 +1890,6 @@ describe("assignModes edge cases", () => {
     // entries pointing to ids that don't exist anymore. assignModes
     // should not throw and the empty entities list should produce an
     // empty result.
-    //
-    // PRD #563 / Slice 4: ActiveSetEntry is a discriminated union; the
-    // stale prev shape uses the new variant constructors directly.
     const stalePrev: ActiveSetEntry[] = [
       { kind: "well-as-proxy", entityId: "ghost-well" },
       {
@@ -1994,7 +1984,7 @@ describe("chunkKey direct format", () => {
 });
 
 // ---------------------------------------------------------------------------
-// PlanningConfig — Slice 3
+// PlanningConfig
 // ---------------------------------------------------------------------------
 
 describe("PlanningConfig", () => {
@@ -2019,7 +2009,7 @@ describe("PlanningConfig", () => {
     );
   });
 
-  it("renumbered lane offsets — Slice 5: 0 / 500 / 1000 / 1500 / 2500", () => {
+  it("lane offsets: 0 / 500 / 1000 / 1500 / 2500", () => {
     // Hard-pinned values so a future re-number is loud.
     expect(MINIMAP_LANE_OFFSET).toBe(0);
     expect(DETAIL_LANE_OFFSET).toBe(500);
@@ -2068,7 +2058,7 @@ describe("PlanningConfig", () => {
 });
 
 // ---------------------------------------------------------------------------
-// plan() honors config tunables — Slice 3
+// plan() honors config tunables
 // ---------------------------------------------------------------------------
 //
 // Each test changes one tunable on a tailored synthetic snapshot and
@@ -2178,7 +2168,7 @@ describe("plan() honors config tunables", () => {
     expect(settle.activeSet[0].kind).toBe("well-as-proxy");
 
     const followup = makeTunablePlate({ px: 100 });
-    // PRD #563 / Slice 3: prev active set carries via PlanningState now.
+    // Prev active set carries via PlanningState.
     const followupState = settle.nextState;
 
     // Default hysteresis (5px): 100 is way past farUpper (85), so it
@@ -2390,9 +2380,9 @@ describe("plan() honors config tunables", () => {
     const beforePri = beforeDetail[0].priority;
 
     // Override offset is `default + 250` so the delta is +250
-    // regardless of the renumbered default. Slice 5 changed
-    // DETAIL_LANE_OFFSET from 0 → 500; the override must be
-    // computed off the live default rather than hard-coded.
+    // regardless of the default. The override is computed off the
+    // live default rather than hard-coded so a future re-number
+    // doesn't silently break this assertion.
     const newOffset = DEFAULT_PLANNING_CONFIG.detailLaneOffset + 250;
     const after = plan(snap, createSyntheticState(), mergeConfig({ detailLaneOffset: newOffset }));
     const afterDetail = after.requests.filter((r) => r.lane === "detail");
@@ -2455,8 +2445,9 @@ describe("plan() honors config tunables", () => {
     expect(beforePrefetch.length).toBe(1);
     const beforePri = beforePrefetch[0].priority;
 
-    // Override is `default + 500` so the delta is +500 regardless of
-    // the renumbered default (Slice 5 shifted prefetch 1000 → 1500).
+    // Override is `default + 500` so the delta is +500 regardless
+    // of the default — computed off the live default rather than
+    // hard-coded.
     const newOffset = DEFAULT_PLANNING_CONFIG.prefetchLaneOffset + 500;
     const after = plan(snap, createSyntheticState(), mergeConfig({ prefetchLaneOffset: newOffset }));
     const afterPrefetch = after.requests.filter(
@@ -2502,7 +2493,8 @@ describe("plan() honors config tunables", () => {
     const beforePri = beforeOverview[0].priority;
 
     // Override is `default + 1000` so the delta is +1000 regardless
-    // of the renumbered default (Slice 5 shifted overview 2000 → 2500).
+    // of the default — computed off the live default rather than
+    // hard-coded.
     const newOffset = DEFAULT_PLANNING_CONFIG.overviewLaneOffset + 1000;
     const after = plan(snap, createSyntheticState(), mergeConfig({ overviewLaneOffset: newOffset }));
     const afterOverview = after.requests.filter((r) => r.lane === "overview");
@@ -2513,17 +2505,15 @@ describe("plan() honors config tunables", () => {
 });
 
 // ---------------------------------------------------------------------------
-// emitMinimapLane — Slice 5 (PRD #545 / ADR 0023)
+// emitMinimapLane (ADR 0023)
 // ---------------------------------------------------------------------------
 //
-// The minimap lane is a Slice 5 promotion: minimap chunks now ride
-// their own dedicated highest-priority lane instead of being shoved
-// onto OVERVIEW at priority 2000 by the orchestrator. The planner
-// pulls them from `snapshot.minimapPending` and emits them with
-// `priority = MINIMAP_LANE_OFFSET` directly (no importance / distance
-// terms — minimap is per-dataset, not per-entity).
+// Minimap chunks ride their own dedicated highest-priority lane.
+// The planner pulls them from `snapshot.minimapPending` and emits
+// them with `priority = MINIMAP_LANE_OFFSET` directly (no importance
+// / distance terms — minimap is per-dataset, not per-entity).
 
-describe("plan() — minimap lane (Slice 5)", () => {
+describe("plan() — minimap lane", () => {
   /** Build a minimal snapshot with one visible Image entity and a non-empty minimapPending. */
   function makeMinimapSnapshot(opts?: {
     minimapPending?: Map<string, MinimapChunkCoord[]>;
@@ -2623,22 +2613,21 @@ describe("plan() — minimap lane (Slice 5)", () => {
     expect(result.requests.some((r) => r.lane === "minimap")).toBe(false);
   });
 
-  // The previous "skips coords for an imageId that no visible entity
-  // matches" test asserted graceful no-op for a dangling minimap key.
-  // PRD #578 / Slice 3 (ADR 0031) replaces that with a dev-mode boundary
-  // throw — `validatePlanningInputs` (called at the top of `plan()` in
-  // dev mode) flags an unknown `minimapPending` key at the producer
-  // boundary instead of letting the planner silently ignore it. The
-  // throw behaviour is covered by `validate.test.ts > checkMinimapKeys`.
+  // The "skips coords for an imageId that no visible entity matches"
+  // case isn't covered here: per ADR 0031, `validatePlanningInputs`
+  // (called at the top of `plan()` in dev mode) throws on an unknown
+  // `minimapPending` key at the producer boundary instead of letting
+  // the planner silently ignore it. That throw is covered by
+  // `validate.test.ts > checkMinimapKeys`.
 
   it("sorts before every other lane after the priority sort (smallest priority first)", () => {
     const snap = makeMinimapSnapshot();
     const result = plan(snap, createSyntheticState());
     expect(result.requests.length).toBeGreaterThan(0);
-    // Slice 5 invariant: minimap chunks are at priority 0, every
-    // other lane is >= DETAIL_LANE_OFFSET (= 500). plan()'s ascending
-    // priority sort therefore guarantees the first non-minimap entry
-    // comes after every minimap entry.
+    // Minimap chunks are at priority 0, every other lane is
+    // >= DETAIL_LANE_OFFSET (= 500). plan()'s ascending priority
+    // sort therefore guarantees the first non-minimap entry comes
+    // after every minimap entry.
     let lastMinimapIdx = -1;
     let firstNonMinimapIdx = -1;
     for (let i = 0; i < result.requests.length; i++) {
@@ -2665,7 +2654,7 @@ describe("plan() — minimap lane (Slice 5)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Discriminated ActiveSetEntry — PRD #563 / Slice 4
+// Discriminated ActiveSetEntry
 // ---------------------------------------------------------------------------
 //
 // These tests pin the variant shapes produced by `assignModes` (and
@@ -2822,16 +2811,15 @@ describe("ActiveSetEntry variants", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Discriminated EntitySnapshot — PRD #563 / Slice 5
+// Discriminated EntitySnapshot
 // ---------------------------------------------------------------------------
 //
 // These tests pin the variant shapes produced by `createSyntheticEntity`
-// and the round-trip behaviour of `groupByWell` / `buildPrevModeByWell`
-// after the discrimination. The pre-slice flat shape carried `parentId:
-// string | null` on every entity; after the slice `parentId: string`
-// lives only on `FieldSnapshot`.
+// and the round-trip behaviour of `groupByWell` / `buildPrevModeByWell`.
+// `parentId: string` lives only on `FieldSnapshot`; the other variants
+// don't carry the field at all.
 
-describe("createSyntheticEntity — discriminated variants (PRD #563 / Slice 5)", () => {
+describe("createSyntheticEntity — discriminated variants", () => {
   it("kind: \"Image\" returns an ImageSnapshot with no parentId field", () => {
     const e = createSyntheticEntity({ kind: "Image" });
     expect(e.kind).toBe("Image");
@@ -2870,11 +2858,11 @@ describe("createSyntheticEntity — discriminated variants (PRD #563 / Slice 5)"
   });
 });
 
-describe("groupByWell — round-trip with discriminated entities (PRD #563 / Slice 5)", () => {
-  it("groups a mixed entity list identically to the pre-slice expected output", () => {
+describe("groupByWell — round-trip with discriminated entities", () => {
+  it("groups a mixed entity list", () => {
     // Build a snapshot of mixed entity kinds and assert the grouping
-    // matches the structure the pre-slice flat-shape version produced
-    // for the same inputs.
+    // structure (well-as-proxy entries indexed by wellId; fields
+    // indexed by their parent well).
     const entities: EntitySnapshot[] = [
       createSyntheticEntity({
         entityId: "well-A",
@@ -2960,7 +2948,7 @@ describe("groupByWell — round-trip with discriminated entities (PRD #563 / Sli
   });
 });
 
-describe("buildPrevModeByWell — round-trip with discriminated entities (PRD #563 / Slice 5)", () => {
+describe("buildPrevModeByWell — round-trip with discriminated entities", () => {
   it("indexes prev field-mode entries back to their parent well", () => {
     // Mixed kinds in the new entity list; previousActiveSet has both a
     // well-as-proxy entry (entityId === wellId) and a field entry that

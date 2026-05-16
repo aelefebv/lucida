@@ -318,10 +318,10 @@ describe("useBookmarks — CRUD wrappers", () => {
   });
 });
 
-// PRD #454 slice 4: live BookmarkChanged subscription. Verifies the
-// hook reconciles local state in response to bridge-dispatched
-// broadcasts: refetch + merge on Created/Updated, drop on Deleted.
-describe("useBookmarks — BookmarkChanged subscription (slice 4)", () => {
+// Live BookmarkChanged subscription. Verifies the hook reconciles
+// local state in response to bridge-dispatched broadcasts: refetch
+// + merge on Created/Updated, drop on Deleted.
+describe("useBookmarks — BookmarkChanged subscription", () => {
   it("subscribes when a bridge is supplied and unsubscribes on unmount", async () => {
     apiSpy.responder = () => jsonResponse(200, []);
     const stub = makeStubBridge();
