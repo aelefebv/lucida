@@ -38,6 +38,7 @@ export { buildViewHotState } from "./coldState/hotState.ts";
 export { computeScissorRect } from "./scissor.ts";
 
 export { DeliveryTracker } from "./delivery/tracker.ts";
+export { WorkerFeedback } from "./delivery/feedback.ts";
 export {
   buildManifestByImage,
   type ManifestEntry,

@@ -72,6 +72,7 @@ import { buildColdState } from "./upload/coldState/build.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
 import { buildViewHotState } from "./upload/coldState/hotState.ts";
 import { DeliveryTracker } from "./upload/delivery/tracker.ts";
+import { WorkerFeedback } from "./upload/delivery/feedback.ts";
 import { buildManifestByImage } from "./upload/delivery/manifestIndex.ts";
 import { runDrainPass } from "./upload/delivery/drain.ts";
 import {
@@ -227,6 +228,16 @@ export class Orchestrator {
    * the tracker. See Seam F of the dechaos boundary scan.
    */
   private deliveryTracker = new DeliveryTracker();
+
+  /**
+   * Worker → main-thread feedback handlers. Owns the body of
+   * `handleChunksEvicted` and `handleWantedSetDelta`; the orchestrator
+   * methods are thin delegations. Constructed eagerly here (no
+   * constructor wiring needed) since it only depends on
+   * `this.deliveryTracker`, which is initialised above. See Seam G of
+   * the dechaos boundary scan.
+   */
+  private workerFeedback = new WorkerFeedback(this.deliveryTracker);
 
   // -------------------------------------------------------------------------
   // Cold-state rebuild telemetry. See COLD_STATE_* constants above.
@@ -1287,25 +1298,9 @@ export class Orchestrator {
   }
 
   /**
-   * Process a worker `chunksEvicted` report.
-   *
-   * `evicted` chunks were in the atlas and got displaced by closer
-   * arrivals — they should be re-eligible for upload (the orch may
-   * still want them under the same plan).
-   *
-   * `skipped` chunks never made it into the atlas (full + incoming
-   * farther than the farthest existing slot). Without rejection
-   * tracking they would be re-sent every tick by the resend pass,
-   * driving `upload.resend_storm`. The tracker adds them to its
-   * rejected set so the resend pass can short-circuit; the orchestrator
-   * then forwards each skipped-with-known-entityId to
-   * `cpuCache.markRejected` so the cache stops re-fetching them
-   * under eviction churn.
-   *
-   * Both sets are removed from the tracker's sent set (skipped chunks
-   * were optimistically added there by `sendDeliveryToWorker`).
-   * Evicted chunks are also removed from the rejected set since
-   * acceptance + later eviction proves the chunk was deliverable.
+   * Process a worker `chunksEvicted` report. Delegates to
+   * {@link WorkerFeedback.handleChunksEvicted} — see that method for
+   * the full eviction-vs-skipped semantics.
    */
   handleChunksEvicted(
     workerMemberId: string,
@@ -1313,36 +1308,21 @@ export class Orchestrator {
     skipped: string[],
     cpuCache: CpuCache,
   ): void {
-    const { rejectedNew } = this.deliveryTracker.markChunkEvicted(
-      workerMemberId, evicted, skipped,
+    this.workerFeedback.handleChunksEvicted(
+      workerMemberId, evicted, skipped, cpuCache,
     );
-    for (const { entityId, chunkKey } of rejectedNew) {
-      cpuCache.markRejected(entityId, chunkKey);
-    }
   }
 
   /**
-   * Process a wanted-set delta from the GPU worker.
-   *
-   * For each missing proxy, clear the entry from the tracker's
-   * proxy-delivered set so the next tick's resend pass picks it up
-   * via `getCachedProxy`. Chunk entries are ignored: the chunk-resend
-   * path is driven by `cpuCache` drain order plus the upload-pass
-   * lane/LOD filter in `deliverToWorker` — there is no per-chunk
-   * worker-wanted-set on the orchestrator.
-   *
-   * Proxy resends must be tracked (not just chunk resends): the
-   * cache-hit short-circuit means we can't rely on `submit()`
-   * re-emission to recover from a worker-side eviction.
+   * Process a wanted-set delta from the GPU worker. Delegates to
+   * {@link WorkerFeedback.handleWantedSetDelta} — only the proxy
+   * branch is meaningful (chunk entries are intentionally ignored
+   * post-Slice 3).
    */
   handleWantedSetDelta(
     missing: Array<MissingChunk | MissingProxy>,
   ): void {
-    for (const entry of missing) {
-      if (entry.kind === "proxy") {
-        this.deliveryTracker.clearProxyDelivered(entry);
-      }
-    }
+    this.workerFeedback.handleWantedSetDelta(missing);
   }
 
   /** Get all tracked worker member IDs (for multi-channel transition cleanup). */
