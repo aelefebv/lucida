@@ -189,8 +189,10 @@ export interface OrchestratorResult {
  *
  * Returns `null` if no field model matrices were available (defensive;
  * caller already filters out wells with zero visible fields).
+ *
+ * @internal Exported for unit tests; not part of the public surface.
  */
-function synthesizeWellRosterEntry(
+export function synthesizeWellRosterEntry(
   ctx: TickContext,
   dsId: string,
   wellEntityId: string,

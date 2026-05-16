@@ -12,8 +12,10 @@ import type { SceneEpochs } from "./pipeline/epochs.ts";
 /**
  * Project a well's [0,1]³ unit-cube AABB to screen space and return a scissor rect.
  * Returns null if the well is fully off-screen.
+ *
+ * @internal Exported for unit tests; not part of the public surface.
  */
-function computeScissorRect(
+export function computeScissorRect(
   modelMatrix: Float32Array,
   viewProj: Float32Array,
   canvasW: number,

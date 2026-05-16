@@ -1,14 +1,15 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import type {
   CpuCache,
+  ReadyChunkDelivery,
   ReadyProxyDelivery,
   ReadyDelivery,
 } from "./fetch/index.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
-import type { ProxyRequest } from "./planning/index.ts";
+import type { ChunkRequest, ProxyRequest } from "./planning/index.ts";
 import type { ColdStateMessage, MissingProxy } from "../renderer/workerProtocol.ts";
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
@@ -26,6 +27,10 @@ function createMockCpuCache(): CpuCache {
     drain: vi.fn(() => []),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     getCached: vi.fn(() => null),
+    // Chunk-delivery tests (Slice 1 of PRD #607) consult this method
+    // from the resend pass. Default to a miss so cache-hit fixtures
+    // don't accidentally re-emit deliveries across unrelated describes.
+    getCachedChunk: vi.fn(() => null),
     telemetry: vi.fn(),
     updateConfig: vi.fn(),
     subscribe: vi.fn(() => () => {}),
@@ -1020,5 +1025,719 @@ describe("viewHotState emission", () => {
     const memberIds = msg.rayHitsByEntity.map((e: [string, unknown]) => e[0]);
     expect(memberIds).toContain("img-0:ch0");
     expect(memberIds).toContain("img-0:ch1");
+  });
+});
+
+// ===========================================================================
+// 6. Chunk delivery (drain pass)
+// ===========================================================================
+//
+// Pre-refactor characterization tests (Slice 1 of PRD #607). The drain
+// pass + dispatch + resend pass + LOD/lane filters are the largest blind
+// spot in upload-phase coverage — these tests pin the contracts before
+// the Seam B/F extractions land.
+//
+// All tests share a richer fixture: `makeChunkDelivery`, a custom
+// `client` mock with both `sliceChunkData` and `volumeChunkData` stubs,
+// and a dataset manifest containing one image with two LODs so a
+// chunk's `level` can be mapped to real level meta. Stats are read from
+// `debugStats.upload.tick` (enabled in `beforeEach`).
+
+describe("chunk delivery (drain pass)", () => {
+  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+  // After `vi.resetModules()` re-import the same `debugStats` instance
+  // the orchestrator binds, otherwise the orchestrator's writes land
+  // on a different module instance than the assertion-side reads.
+  let scopedDebugStats: typeof import("../debug/debugStats.ts").debugStats;
+  let originalEnabled: boolean;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+    scopedDebugStats = (await import("../debug/debugStats.ts")).debugStats;
+    originalEnabled = scopedDebugStats.enabled;
+    scopedDebugStats.enabled = true;
+  });
+
+  afterEach(() => {
+    scopedDebugStats.enabled = originalEnabled;
+  });
+
+  function makeChunkDelivery(
+    overrides?: Partial<ReadyChunkDelivery>,
+  ): ReadyChunkDelivery {
+    return {
+      kind: "chunk",
+      entityId: "field-0",
+      imageId: "img-0",
+      level: 0,
+      t: 0,
+      c: 0,
+      z: 0,
+      y: 0,
+      x: 0,
+      chunkKey: overrides?.chunkKey ?? "0/0/0/0/0/0",
+      data: new ArrayBuffer(1024),
+      dataType: "uint16",
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      lane: "detail",
+      ...overrides,
+    };
+  }
+
+  function makeChunkRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
+    return {
+      datasetId: "ds1",
+      entityId: "field-0",
+      imageId: "img-0",
+      level: 0,
+      t: 0,
+      c: 0,
+      z: 0,
+      y: 0,
+      x: 0,
+      lane: "detail",
+      priority: 0,
+      chunkKey: overrides?.chunkKey ?? "0/0/0/0/0/0",
+      ...overrides,
+    };
+  }
+
+  function makeChunkCpuCache(opts: {
+    drainResult?: ReadyDelivery[];
+    cachedChunks?: Map<string, ReadyChunkDelivery>;
+  } = {}): CpuCache {
+    const drained = opts.drainResult ?? [];
+    const cached = opts.cachedChunks ?? new Map();
+    return {
+      submit: vi.fn(),
+      drain: vi.fn(() => {
+        const out = drained.slice();
+        drained.length = 0;
+        return out;
+      }),
+      snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
+      getCached: vi.fn(() => null),
+      getCachedChunk: vi.fn((entityId: string, chunkKey: string) =>
+        cached.get(`${entityId}|${chunkKey}`) ?? null,
+      ),
+      getCachedProxy: vi.fn(() => null),
+      telemetry: vi.fn(),
+      updateConfig: vi.fn(),
+      subscribe: vi.fn(() => () => {}),
+      reset: vi.fn(),
+      markRejected: vi.fn(),
+      clearRejected: vi.fn(),
+    } as unknown as CpuCache;
+  }
+
+  /** Build a TickContext with chunk-data client stubs and a one-dataset/one-image manifest. */
+  function makeChunkCtx(opts: {
+    cpuCache: CpuCache;
+    mode?: "slice" | "volume";
+    multiChannel?: boolean;
+    sliceChunkData?: ReturnType<typeof vi.fn>;
+    volumeChunkData?: ReturnType<typeof vi.fn>;
+    manifestOverride?: DatasetManifest;
+  }): TickContext {
+    const sliceFn = opts.sliceChunkData ?? vi.fn();
+    const volumeFn = opts.volumeChunkData ?? vi.fn();
+    const manifest = opts.manifestOverride ?? createMockContent();
+    return {
+      scene: {
+        multi_channel: () => opts.multiChannel ?? false,
+      } as unknown,
+      datasets: new Map<string, DatasetEntry>([["ds1", { manifest }]]),
+      client: {
+        coldState: vi.fn(),
+        viewHotState: vi.fn(),
+        proxyAssetData: vi.fn(),
+        sliceChunkData: sliceFn,
+        volumeChunkData: volumeFn,
+        removeLayerResources: vi.fn(),
+        onChunksEvicted: null,
+        onWantedSetDelta: null,
+      } as unknown,
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
+      mode: opts.mode ?? "slice",
+      renderScale: 1,
+      cpuCache: opts.cpuCache,
+      assetCatalog: new AssetCatalog({ apply_asset_catalog_delta: () => {} }),
+    } as unknown as TickContext;
+  }
+
+  /**
+   * Seed the orchestrator's per-tick state without running planAndFetch.
+   * deliverToWorker depends on `_lastFilteredRequests` (target-LOD map +
+   * resend loop) being populated. Tests that pin drain-pass behavior set
+   * this directly so the test doesn't have to round-trip through plan().
+   */
+  function seedLastRequests(
+    orch: import("./orchestrator.ts").Orchestrator,
+    reqs: ChunkRequest[],
+  ): void {
+    (orch as unknown as { _lastFilteredRequests: ChunkRequest[] })
+      ._lastFilteredRequests = reqs;
+  }
+
+  it("drain happy path: slice mode → sliceChunkData called with expected args", () => {
+    const orch = new Orchestrator();
+    const delivery = makeChunkDelivery();
+    const cpuCache = makeChunkCpuCache({ drainResult: [delivery] });
+    const sliceFn = vi.fn();
+    const ctx = makeChunkCtx({ cpuCache, mode: "slice", sliceChunkData: sliceFn });
+    seedLastRequests(orch, [makeChunkRequest()]);
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    expect(sliceFn).toHaveBeenCalledTimes(1);
+    // First positional arg: workerMemberId; single-channel = bare imageId.
+    expect(sliceFn.mock.calls[0][0]).toBe("img-0");
+    // Second: chunks array of exactly one element (the orchestrator
+    // never batches today — see contract scan §"arrays carry one element").
+    expect(sliceFn.mock.calls[0][1]).toHaveLength(1);
+    expect(sliceFn.mock.calls[0][1][0].key).toBe("0/0/0/0/0/0");
+    expect(scopedDebugStats.upload!.tick!.uploadedChunks).toBe(1);
+    expect(scopedDebugStats.upload!.tick!.bytesUploaded).toBe(1024);
+  });
+
+  it("drain happy path: volume mode → volumeChunkData called instead", () => {
+    const orch = new Orchestrator();
+    const delivery = makeChunkDelivery();
+    const cpuCache = makeChunkCpuCache({ drainResult: [delivery] });
+    const sliceFn = vi.fn();
+    const volumeFn = vi.fn();
+    const ctx = makeChunkCtx({
+      cpuCache, mode: "volume",
+      sliceChunkData: sliceFn, volumeChunkData: volumeFn,
+    });
+    seedLastRequests(orch, [makeChunkRequest()]);
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, null);
+
+    expect(sliceFn).not.toHaveBeenCalled();
+    expect(volumeFn).toHaveBeenCalledTimes(1);
+    expect(volumeFn.mock.calls[0][0]).toBe("img-0");
+    expect(volumeFn.mock.calls[0][1]).toHaveLength(1);
+  });
+
+  it("lane=prefetch → skippedPrefetch bumps; no client call", () => {
+    const orch = new Orchestrator();
+    const delivery = makeChunkDelivery({ lane: "prefetch" });
+    const cpuCache = makeChunkCpuCache({ drainResult: [delivery] });
+    const sliceFn = vi.fn();
+    const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
+    seedLastRequests(orch, [makeChunkRequest()]);
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    expect(sliceFn).not.toHaveBeenCalled();
+    expect(scopedDebugStats.upload!.tick!.skippedPrefetch).toBe(1);
+    expect(scopedDebugStats.upload!.tick!.uploadedChunks).toBe(0);
+  });
+
+  it("lane=overview → skippedOverview bumps; no client call", () => {
+    const orch = new Orchestrator();
+    const delivery = makeChunkDelivery({ lane: "overview" });
+    const cpuCache = makeChunkCpuCache({ drainResult: [delivery] });
+    const sliceFn = vi.fn();
+    const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
+    seedLastRequests(orch, [makeChunkRequest()]);
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    expect(sliceFn).not.toHaveBeenCalled();
+    expect(scopedDebugStats.upload!.tick!.skippedOverview).toBe(1);
+    expect(scopedDebugStats.upload!.tick!.uploadedChunks).toBe(0);
+  });
+
+  it("level mismatch (delivery.level != target) → skippedWrongLod bumps; no client call", () => {
+    const orch = new Orchestrator();
+    // Plan asks for level 1 but the drained chunk is level 0.
+    const delivery = makeChunkDelivery({ level: 0 });
+    const cpuCache = makeChunkCpuCache({ drainResult: [delivery] });
+    const sliceFn = vi.fn();
+    const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
+    seedLastRequests(orch, [makeChunkRequest({ level: 1, chunkKey: "1/0/0/0/0/0" })]);
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    expect(sliceFn).not.toHaveBeenCalled();
+    expect(scopedDebugStats.upload!.tick!.skippedWrongLod).toBe(1);
+  });
+
+  it("already-sent guard: second call with same chunkKey/memberId → skippedAlreadySent", () => {
+    const orch = new Orchestrator();
+    // First call sends; second call drains the same chunk again, and the
+    // already-sent guard bumps `skippedAlreadySent`.
+    const cpuCache1 = makeChunkCpuCache({ drainResult: [makeChunkDelivery()] });
+    const sliceFn = vi.fn();
+    const ctx1 = makeChunkCtx({ cpuCache: cpuCache1, sliceChunkData: sliceFn });
+    seedLastRequests(orch, [makeChunkRequest()]);
+    orch.deliverToWorker(ctx1, 8 * 1024 * 1024, 0);
+    expect(sliceFn).toHaveBeenCalledTimes(1);
+
+    // Second tick: same delivery, same manifest, but the sentSet now
+    // contains the chunk key.
+    const cpuCache2 = makeChunkCpuCache({ drainResult: [makeChunkDelivery()] });
+    const ctx2 = makeChunkCtx({ cpuCache: cpuCache2, sliceChunkData: sliceFn });
+    orch.deliverToWorker(ctx2, 8 * 1024 * 1024, 0);
+
+    expect(sliceFn).toHaveBeenCalledTimes(1); // no second send
+    expect(scopedDebugStats.upload!.tick!.skippedAlreadySent).toBe(1);
+  });
+
+  it("manifest-not-found: delivery for an unknown imageId → skippedNoMeta; no client call", () => {
+    const orch = new Orchestrator();
+    const delivery = makeChunkDelivery({ imageId: "img-ghost" });
+    const cpuCache = makeChunkCpuCache({ drainResult: [delivery] });
+    const sliceFn = vi.fn();
+    // Target table maps the ghost image to level 0 so the wrong-LOD
+    // filter passes and we reach `sendDeliveryToWorker`'s manifest scan.
+    seedLastRequests(orch, [makeChunkRequest({ imageId: "img-ghost" })]);
+    const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    expect(sliceFn).not.toHaveBeenCalled();
+    expect(scopedDebugStats.upload!.tick!.skippedNoMeta).toBe(1);
+  });
+
+  it("resend pass: chunk in _lastFilteredRequests not in sentSet, cache returns it → re-uploaded", () => {
+    const orch = new Orchestrator();
+    const req = makeChunkRequest({ chunkKey: "0/0/0/1/0/0" });
+    const cachedDelivery = makeChunkDelivery({ chunkKey: "0/0/0/1/0/0" });
+    const cachedMap = new Map<string, ReadyChunkDelivery>();
+    cachedMap.set(`${req.entityId}|${req.chunkKey}`, cachedDelivery);
+    const cpuCache = makeChunkCpuCache({ cachedChunks: cachedMap });
+    const sliceFn = vi.fn();
+    const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
+    seedLastRequests(orch, [req]);
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    // No drain happened → resend pass picked it up.
+    expect(sliceFn).toHaveBeenCalledTimes(1);
+    expect(scopedDebugStats.upload!.tick!.resendChunkUploads).toBe(1);
+    expect(scopedDebugStats.upload!.tick!.resendChunksConsidered).toBe(1);
+  });
+
+  it("resend pass: chunk in deliveryRejectedByWorker → skipped; resendChunksRejected bumps", () => {
+    const orch = new Orchestrator();
+    const req = makeChunkRequest({ chunkKey: "0/0/0/2/0/0" });
+    const cpuCache = makeChunkCpuCache();
+    const sliceFn = vi.fn();
+    const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
+    seedLastRequests(orch, [req]);
+    // Mark the chunk as rejected for the worker member id (= imageId
+    // since multiChannel = false). The resend pass checks this map
+    // BEFORE consulting the cache, so the cache mock is irrelevant here.
+    (orch as unknown as {
+      deliveryRejectedByWorker: Map<string, Set<string>>;
+    }).deliveryRejectedByWorker.set("img-0", new Set([req.chunkKey]));
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    expect(sliceFn).not.toHaveBeenCalled();
+    expect(scopedDebugStats.upload!.tick!.resendChunksRejected).toBe(1);
+    expect(scopedDebugStats.upload!.tick!.resendChunkUploads).toBe(0);
+  });
+
+  it("resend pass: cache miss for re-considered chunk → resendChunksNotCached bumps", () => {
+    const orch = new Orchestrator();
+    const req = makeChunkRequest({ chunkKey: "0/0/0/3/0/0" });
+    // Empty cachedChunks map → getCachedChunk returns null.
+    const cpuCache = makeChunkCpuCache();
+    const sliceFn = vi.fn();
+    const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
+    seedLastRequests(orch, [req]);
+
+    orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+
+    expect(sliceFn).not.toHaveBeenCalled();
+    expect(scopedDebugStats.upload!.tick!.resendChunksNotCached).toBe(1);
+    expect(scopedDebugStats.upload!.tick!.resendChunkUploads).toBe(0);
+  });
+
+  it("budget-exhausted soft cap: a single oversize chunk still uploads but flips budgetExhausted", () => {
+    const orch = new Orchestrator();
+    // 4 MB chunk, 1 MB budget — `remaining -= sent` lands at -3 MB,
+    // the check `if (remaining <= 0) budgetExhausted = true` fires
+    // AFTER the upload succeeded. UploadTickStats.budgetExhausted
+    // docs this overshoot explicitly.
+    const big = makeChunkDelivery({ data: new ArrayBuffer(4 * 1024 * 1024) });
+    const cpuCache = makeChunkCpuCache({ drainResult: [big] });
+    const sliceFn = vi.fn();
+    const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
+    seedLastRequests(orch, [makeChunkRequest()]);
+
+    const ret = orch.deliverToWorker(ctx, 1 * 1024 * 1024, 0);
+
+    expect(sliceFn).toHaveBeenCalledTimes(1);
+    expect(scopedDebugStats.upload!.tick!.budgetExhausted).toBe(true);
+    expect(scopedDebugStats.upload!.tick!.bytesUploaded).toBe(4 * 1024 * 1024);
+    // Return signal: caller schedules another tick.
+    expect(ret).toBe(true);
+  });
+});
+
+// ===========================================================================
+// 7. handleChunksEvicted characterization
+// ===========================================================================
+
+describe("handleChunksEvicted", () => {
+  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+  });
+
+  function seedSentSet(
+    orch: import("./orchestrator.ts").Orchestrator,
+    wid: string,
+    keys: string[],
+  ): void {
+    const map = (orch as unknown as {
+      deliverySentToWorker: Map<string, Set<string>>;
+    }).deliverySentToWorker;
+    map.set(wid, new Set(keys));
+  }
+
+  function seedRejectedSet(
+    orch: import("./orchestrator.ts").Orchestrator,
+    wid: string,
+    keys: string[],
+  ): void {
+    const map = (orch as unknown as {
+      deliveryRejectedByWorker: Map<string, Set<string>>;
+    }).deliveryRejectedByWorker;
+    map.set(wid, new Set(keys));
+  }
+
+  function seedWidToEntity(
+    orch: import("./orchestrator.ts").Orchestrator,
+    wid: string,
+    entityId: string,
+  ): void {
+    const map = (orch as unknown as {
+      widToEntityId: Map<string, string>;
+    }).widToEntityId;
+    map.set(wid, entityId);
+  }
+
+  function getSentSet(
+    orch: import("./orchestrator.ts").Orchestrator,
+    wid: string,
+  ): Set<string> | undefined {
+    return (orch as unknown as {
+      deliverySentToWorker: Map<string, Set<string>>;
+    }).deliverySentToWorker.get(wid);
+  }
+
+  function getRejectedSet(
+    orch: import("./orchestrator.ts").Orchestrator,
+    wid: string,
+  ): Set<string> | undefined {
+    return (orch as unknown as {
+      deliveryRejectedByWorker: Map<string, Set<string>>;
+    }).deliveryRejectedByWorker.get(wid);
+  }
+
+  it("evicted keys are removed from deliverySentToWorker", () => {
+    const orch = new Orchestrator();
+    seedSentSet(orch, "img-0", ["k1", "k2", "k3"]);
+
+    orch.handleChunksEvicted("img-0", ["k1", "k3"], [], createMockCpuCache());
+
+    expect(getSentSet(orch, "img-0")).toEqual(new Set(["k2"]));
+  });
+
+  it("evicted keys are removed from deliveryRejectedByWorker (acceptance proves deliverable)", () => {
+    const orch = new Orchestrator();
+    seedRejectedSet(orch, "img-0", ["k1", "k2"]);
+
+    orch.handleChunksEvicted("img-0", ["k1"], [], createMockCpuCache());
+
+    expect(getRejectedSet(orch, "img-0")).toEqual(new Set(["k2"]));
+  });
+
+  it("skipped keys are added to deliveryRejectedByWorker", () => {
+    const orch = new Orchestrator();
+    seedSentSet(orch, "img-0", ["k1"]);
+
+    orch.handleChunksEvicted("img-0", [], ["k1", "k2"], createMockCpuCache());
+
+    expect(getRejectedSet(orch, "img-0")).toEqual(new Set(["k1", "k2"]));
+    // skipped also removes from sent.
+    expect(getSentSet(orch, "img-0")).toEqual(new Set());
+  });
+
+  it("skipped keys are forwarded to cpuCache.markRejected with the resolved entityId", () => {
+    const orch = new Orchestrator();
+    seedWidToEntity(orch, "img-0:ch1", "field-0");
+    const cpuCache = createMockCpuCache();
+    const markRejected = cpuCache.markRejected as ReturnType<typeof vi.fn>;
+
+    orch.handleChunksEvicted("img-0:ch1", [], ["kA", "kB"], cpuCache);
+
+    expect(markRejected).toHaveBeenCalledTimes(2);
+    expect(markRejected.mock.calls[0]).toEqual(["field-0", "kA"]);
+    expect(markRejected.mock.calls[1]).toEqual(["field-0", "kB"]);
+  });
+
+  it("silent skip: markRejected NOT called when widToEntityId has no entry", () => {
+    const orch = new Orchestrator();
+    // No seedWidToEntity → widToEntityId.get returns undefined.
+    const cpuCache = createMockCpuCache();
+    const markRejected = cpuCache.markRejected as ReturnType<typeof vi.fn>;
+
+    orch.handleChunksEvicted("img-ghost", [], ["k1"], cpuCache);
+
+    expect(markRejected).not.toHaveBeenCalled();
+    // The rejected set still receives the key (so the resend pass
+    // short-circuits future re-attempts), but the cache isn't told.
+    expect(getRejectedSet(orch, "img-ghost")).toEqual(new Set(["k1"]));
+  });
+});
+
+// ===========================================================================
+// 8. Multi-dataset characterization
+// ===========================================================================
+//
+// Pin the verified bugs from Pass 5 of the dechaos scan
+// (`05-contract-scan.md`):
+//
+//   - `_lastFilteredRequests` is a flat `ChunkRequest[]` overwritten
+//     per-dataset → the resend pass only sees the LAST dataset's
+//     requests after a multi-dataset rebuild. Same shape for
+//     `_lastProxyRequests`.
+//   - `deliverySentToWorker.clear()` runs once per per-dataset step
+//     inside `planAndFetch`, effectively clearing everything early on.
+//
+// Slice 4 (#613) fixes the per-dataset maps. Once shipped the
+// `it.fails(...)` markers below flip to `it(...)`.
+
+describe("multi-dataset upload characterization", () => {
+  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+  });
+
+  function makeMultiDatasetScene() {
+    return createMockScene({
+      datasetOrder: ["ds1", "ds2"],
+      allSettings: {
+        ds1: {
+          visible: true, opacity: 1,
+          contrast_min: 0, contrast_max: 1, gamma: 1,
+          blend_mode: "alpha", channel_settings: [], channel_blend_mode: "additive",
+        },
+        ds2: {
+          visible: true, opacity: 1,
+          contrast_min: 0, contrast_max: 1, gamma: 1,
+          blend_mode: "alpha", channel_settings: [], channel_blend_mode: "additive",
+        },
+      },
+    });
+  }
+
+  function makeTwoDatasetEntries(): Map<string, DatasetEntry> {
+    const content1 = createMockContent();
+    const content2: DatasetManifest = {
+      ...createMockContent(),
+      dataset_id: "ds2",
+      images: [
+        {
+          image_id: "img-1",
+          owner: "field-0",
+          multiscale: {
+            axes: [],
+            data_type: "uint16",
+            levels: [{
+              level_index: 0,
+              shape: [1, 1, 1, 512, 512],
+              chunk_shape: [1, 1, 1, 256, 256],
+              grid_shape: [1, 1, 1, 2, 2],
+              scale: [1, 1, 1, 1, 1],
+            }],
+          },
+        },
+      ],
+    } as unknown as DatasetManifest;
+    return new Map<string, DatasetEntry>([
+      ["ds1", { manifest: content1 }],
+      ["ds2", { manifest: content2 }],
+    ]);
+  }
+
+  function makeCtx(
+    scene: unknown,
+    datasets: Map<string, DatasetEntry>,
+    coldSpy: ReturnType<typeof vi.fn> = vi.fn(),
+    viewHotSpy: ReturnType<typeof vi.fn> = vi.fn(),
+  ): TickContext {
+    return {
+      scene,
+      datasets,
+      client: {
+        coldState: coldSpy,
+        viewHotState: viewHotSpy,
+      } as unknown,
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: createMockCpuCache(),
+      assetCatalog: new AssetCatalog({ apply_asset_catalog_delta: () => {} }),
+    } as unknown as TickContext;
+  }
+
+  // The current bug: after a multi-dataset rebuild, _lastFilteredRequests
+  // holds only the LAST dataset's requests, not a per-dataset map.
+  // After Slice 4 lands, the field becomes per-dataset and this test
+  // flips to `it(...)` (verifying ds1's requests survived).
+  it.fails(
+    "documents bug; fixed in Slice 4 #613: _lastFilteredRequests keeps both datasets' requests",
+    () => {
+      const orch = new Orchestrator();
+      const scene = makeMultiDatasetScene();
+      const datasets = makeTwoDatasetEntries();
+      orch.planAndFetch(makeCtx(scene, datasets), new Map());
+
+      const lastReqs = (orch as unknown as {
+        _lastFilteredRequests: ChunkRequest[];
+      })._lastFilteredRequests;
+      // Today: only ds2's image-1 requests survive. Post-Slice-4: both.
+      const imageIds = new Set(lastReqs.map(r => r.imageId));
+      expect(imageIds.has("img-0")).toBe(true);
+      expect(imageIds.has("img-1")).toBe(true);
+    },
+  );
+
+  it.fails(
+    "documents bug; fixed in Slice 4 #613: _lastProxyRequests keeps both datasets' proxies",
+    () => {
+      // The proxy list has the same last-dataset-wins shape. Today's
+      // fixtures don't produce any proxies (visible_entities only has
+      // field-0 in both datasets and the plan doesn't promote to
+      // proxy), so we assert the symmetric shape: both datasets'
+      // requests should be reachable via the field even if today's
+      // arrays are empty. Post-Slice-4 the per-dataset map exposes
+      // both keys.
+      const orch = new Orchestrator();
+      const scene = makeMultiDatasetScene();
+      const datasets = makeTwoDatasetEntries();
+      orch.planAndFetch(makeCtx(scene, datasets), new Map());
+
+      // We can't directly inspect a per-dataset map field that doesn't
+      // exist yet, so we assert the post-refactor presence of the
+      // field name. Slice 4 will add `_lastProxyRequestsByDataset` (or
+      // equivalent) and this test will check both ds1 and ds2 entries.
+      const lastProxyByDataset = (orch as unknown as {
+        _lastProxyRequestsByDataset?: Map<string, ProxyRequest[]>;
+      })._lastProxyRequestsByDataset;
+      expect(lastProxyByDataset).toBeDefined();
+      expect(lastProxyByDataset!.has("ds1")).toBe(true);
+      expect(lastProxyByDataset!.has("ds2")).toBe(true);
+    },
+  );
+
+  it("deliverySentToWorker is empty after a fresh multi-dataset rebuild (clear-all behavior)", () => {
+    // Pre-Slice-4 the per-dataset loop calls `deliverySentToWorker.clear()`
+    // once per dataset (effectively all-or-nothing). Post-Slice-4 the
+    // intent is once-per-rebuild — same observable result. This test
+    // characterizes the current behavior: empty after a rebuild.
+    const orch = new Orchestrator();
+    // Pre-seed a tracking entry that should be cleared by the rebuild.
+    (orch as unknown as {
+      deliverySentToWorker: Map<string, Set<string>>;
+    }).deliverySentToWorker.set("img-stale", new Set(["k1"]));
+
+    const scene = makeMultiDatasetScene();
+    const datasets = makeTwoDatasetEntries();
+    orch.planAndFetch(makeCtx(scene, datasets), new Map());
+
+    const sentMap = (orch as unknown as {
+      deliverySentToWorker: Map<string, Set<string>>;
+    }).deliverySentToWorker;
+    expect(sentMap.has("img-stale")).toBe(false);
+  });
+
+  it("per-dataset sendColdState + sendViewHotState: each dataset receives its own message on initial plan", () => {
+    const orch = new Orchestrator();
+    const scene = makeMultiDatasetScene();
+    const datasets = makeTwoDatasetEntries();
+    const coldSpy = vi.fn();
+    const viewHotSpy = vi.fn();
+    orch.planAndFetch(makeCtx(scene, datasets, coldSpy, viewHotSpy), new Map());
+
+    // One coldState per dataset.
+    expect(coldSpy).toHaveBeenCalledTimes(2);
+    const coldDsIds = coldSpy.mock.calls.map(c => (c[0] as ColdStateMessage).datasetId);
+    expect(coldDsIds).toEqual(["ds1", "ds2"]);
+    // viewHotState fires the first time per dataset (lastViewEpoch unset).
+    expect(viewHotSpy).toHaveBeenCalledTimes(2);
+    const hotDsIds = viewHotSpy.mock.calls.map(c => c[0].datasetId);
+    expect(hotDsIds).toEqual(["ds1", "ds2"]);
+  });
+});
+
+// ===========================================================================
+// 9. Cold-state lifecycle invariant
+// ===========================================================================
+
+describe("cold-state lifecycle invariant", () => {
+  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+  });
+
+  it("after sendColdState, deliverySentToWorker is empty for previously-sent keys", () => {
+    // Invariant: every `sendColdState` is followed by
+    // `deliverySentToWorker.clear()` (today inside the per-dataset
+    // loop; post-Slice-4 once per rebuild). Without this the worker
+    // would build a fresh atlas while the orchestrator believed it had
+    // already supplied chunks — atlas would stay empty for stale keys.
+    //
+    // After the Seam B refactor folds the clear into sendColdState
+    // itself, this test guards against regressions.
+    const orch = new Orchestrator();
+    // Seed: pretend a previous tick delivered a chunk for "img-0".
+    (orch as unknown as {
+      deliverySentToWorker: Map<string, Set<string>>;
+    }).deliverySentToWorker.set("img-0", new Set(["0/0/0/0/0/0"]));
+
+    // Trigger a fresh rebuild.
+    const scene = createMockScene({
+      epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+    });
+    const datasets = new Map<string, DatasetEntry>([
+      ["ds1", { manifest: createMockContent() }],
+    ]);
+    const ctx: TickContext = {
+      scene,
+      datasets,
+      client: { coldState: vi.fn(), viewHotState: vi.fn() } as unknown,
+      canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
+      mode: "slice",
+      renderScale: 1,
+      cpuCache: createMockCpuCache(),
+      assetCatalog: new AssetCatalog({ apply_asset_catalog_delta: () => {} }),
+    } as unknown as TickContext;
+
+    orch.planAndFetch(ctx, new Map());
+
+    const sentMap = (orch as unknown as {
+      deliverySentToWorker: Map<string, Set<string>>;
+    }).deliverySentToWorker;
+    // Either the entire entry is gone, or the set is empty — both
+    // satisfy the invariant. The orchestrator currently calls
+    // `.clear()` on the Map, dropping the entry entirely.
+    const sent = sentMap.get("img-0");
+    expect(sent === undefined || sent.size === 0).toBe(true);
   });
 });
