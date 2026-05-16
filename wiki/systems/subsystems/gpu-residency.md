@@ -18,7 +18,7 @@ How chunk bytes become atlas slots become indirection-buffer entries become shad
 - `worker/lifecycle.ts` — `destroy` handler: tears down atlases + descriptor buffers + proxy pools.
 - `worker/state.ts` — the `RendererState` interface (see "De-globalized session state" below).
 
-The mode-specific code lives in three sibling subdirectories: `volume/` (`atlas.ts`, `upload.ts`, `eviction.ts`, `render.ts`, `remap.ts`), `slice/` (same plus `zRetarget.ts`), and `coldState/` (`apply.ts`, `groupEntries.ts`, `entityMetas.ts` — the 200-LOC ingestion block that used to live in the dispatch switch). The proxy lifecycle lives in `proxy/` (`upload.ts`, `propagate.ts`). Descriptor serialization is in `descriptor/` (`layout.ts` for the byte-layout SSoT, `transient.ts` for the minimap path). Top-level helpers `chunkKeys.ts` (`parseChunkKey`, `makeCompositeKey`, `derivePoolKey`) and `poolKeys.ts` (`chunkPoolKey`) are no longer trapped inside `volumeHandlers.ts`.
+The mode-specific code lives in three sibling subdirectories: `volume/` (`atlas.ts`, `upload.ts`, `eviction.ts`, `render.ts`, `remap.ts`), `slice/` (same plus `zRetarget.ts`), and `coldState/` (`apply.ts`, `groupEntries.ts`, `entityMetas.ts` — the 200-LOC cold-state ingestion block). The proxy lifecycle lives in `proxy/` (`upload.ts`, `propagate.ts`). Descriptor serialization is in `descriptor/` (`layout.ts` for the byte-layout SSoT, `transient.ts` for the minimap path). Top-level helpers `chunkKeys.ts` (`parseChunkKey`, `makeCompositeKey`, `derivePoolKey`) and `poolKeys.ts` (`chunkPoolKey`) live at the top of `renderer/` rather than being trapped inside a single mode's handler file.
 
 The algorithmic core (`wantedSet.ts`, `proxyAtlas.ts`, `descriptorBuffer.ts`, `epochCheck.ts`, `dataTypeUtil.ts`) is unchanged — it was already well-tested and structurally healthy.
 
@@ -68,7 +68,7 @@ The chain runs **inside the volume ray-march loop** as well, so a ray that cross
 
 ## Cold-state ingestion
 
-`coldState/apply.ts` is the 200-LOC orchestration that used to live in `case "coldState"` of the dispatch switch. On every cold-state message it: (1) clears the routing Maps owned by the removed wells; (2) walks `iterateColdMembers(msg)` to repopulate `state.memberToDataset` + `state.memberToPool` via the canonical `memberIdForColdEntry` helper (the helper that fixes the well-as-proxy `imageId === ""` pool-registry bug — see ADR 0035); (3) rebuilds the per-dataset `entityMetas` snapshot; (4) rebuilds the descriptor buffer.
+`coldState/apply.ts` is the cold-state orchestration. On every cold-state message it: (1) clears the routing Maps owned by the removed wells; (2) walks `iterateColdMembers(msg)` to repopulate `state.memberToDataset` + `state.memberToPool` via the canonical `memberIdForColdEntry` helper (the helper that fixes the well-as-proxy `imageId === ""` pool-registry bug — see ADR 0035); (3) rebuilds the per-dataset `entityMetas` snapshot; (4) rebuilds the descriptor buffer.
 
 `coldState/groupEntries.ts` and `coldState/entityMetas.ts` are the pure pieces apply.ts delegates to. The discriminated `ColdStateActiveEntry` union (`kind: "field" | "well-as-proxy"`, replacing the `imageId === ""` sentinel) lives in [[worker-protocol]]; the apply pipeline narrows via `entry.kind` instead of sentinel-sniffing.
 

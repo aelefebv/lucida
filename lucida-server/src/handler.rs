@@ -713,8 +713,8 @@ fn parse_level_from_chunk_key(key: &str) -> u32 {
 
 /// Parse the wire `(t, c)` voxel coordinates from a canonical chunk key
 /// (`"{level}/t/c/z/y/x"`). Returns `(0, 0)` if the key is malformed —
-/// downstream slice math then yields the canonical prefix, matching
-/// pre-PRD-#451 behavior on legacy paths.
+/// downstream slice math then yields the canonical prefix, which is the
+/// safe fallback for legacy paths.
 fn parse_t_c_from_chunk_key(key: &str) -> (u64, u64) {
     let mut parts = key.split('/');
     let _level = parts.next();

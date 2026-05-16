@@ -21,7 +21,7 @@ modified: 2026-05-16
 - `viewHotState` — view-only fast path; carries ray-pick coords used for GPU eviction distance. Sent only when `view` epoch bumps.
 - `sliceChunkData { epochs, memberId, chunks[], level, z, t, c, ... }` — typed array transfer of decoded chunks for the slice path. The owner key is **memberId**.
 - `volumeChunkData { epochs, memberId, chunks[], level, t, c, ... }` — same for volume.
-- `proxyAsset` — S5: a generated proxy asset (`[Z, Y, X]` u16 voxel buffer + identifying metadata). Stays `datasetId`-keyed (proxies are routed per dataset, not per member).
+- `proxyAsset` — a generated proxy asset (`[Z, Y, X]` u16 voxel buffer + identifying metadata). Stays `datasetId`-keyed (proxies are routed per dataset, not per member).
 - `requestEpoch` — bumps the request epoch so the worker re-evaluates.
 - `setUploadBudget` — runtime tunable.
 

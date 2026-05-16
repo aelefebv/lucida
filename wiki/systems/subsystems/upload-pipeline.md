@@ -13,7 +13,7 @@ The Uploader is the symmetric downstream counterpart to [[cpu-cache]]: the cache
 
 `orchestrator.ts` was a dual-personality god-object: planning (driven by view state, produces request plans) and upload (driven by tick budget, dispatches bytes to the worker) coexisted in one 2027-line class because both touched [[cpu-cache]] and worker IPC during early development. The two roles share almost no state in practice — `lastEpochs`, `requestEpoch`, and `lastViewEpochByDataset` were the only fields read by both — yet every modification required reasoning across both phases.
 
-The split mirrors the fetch/decode refactor (see [[decisions/0032-cpucache-split-into-pipeline-fetch]]) in shape and cadence: a single overgrown file becomes a coordinator plus a directory of small modules, behaviour-preserving except for explicit named bug fixes. Eight passes of dechaos analysis (under `wiki/outputs/dechaos-upload-2026-05-15/`) identified the same kinds of extractable units as the fetch side did — a state tracker, pure builders, telemetry counters, a feedback handler — and the eleven post-refactor modules correspond one-to-one with the seams that pass ranked.
+The split mirrors the fetch/decode refactor (see [[decisions/0032-cpucache-split-into-pipeline-fetch]]) in shape and cadence: a single overgrown file becomes a coordinator plus a directory of small modules, behaviour-preserving except for explicit named bug fixes. The eleven modules correspond one-to-one with the extractable units the fetch side surfaced — a state tracker, pure builders, telemetry counters, a feedback handler.
 
 ## Module layout
 
@@ -49,7 +49,7 @@ The Orchestrator drives one Uploader per render loop and feeds it through five d
 
 **Pure cold-state builders** (`buildColdState`, `buildViewHotState`, `buildRoster`, `buildDisplayStateByChannel`, `synthesizeWellRosterEntry`, `identityMatrix`) are side-effect-free functions that take a planner snapshot and return a wire message. Extracting them gave the cold-state assembly its own test surface and unblocked the `sendColdState` wrapper shrinking to a few lines.
 
-**Drain / resend / dispatch** is a three-pass pipeline. The drain pass iterates `cpuCache.drain(budget)` output and runs `classifyDelivery` (rejects unknown widths, wrong-LOD chunks, etc.). The chunk and proxy resend passes walk `lastFilteredRequests` and `lastProxyRequests` and run their respective classifiers. All three passes share the same `manifestByImage` memo built once per tick by `buildManifestByImage` — eliminating the O(D × I) per-chunk dataset scan the pre-refactor `sendDeliveryToWorker` did. Each pass owns its own counter writes onto the shared `currentUploadStats` and stops dispatching when the byte budget is exhausted.
+**Drain / resend / dispatch** is a three-pass pipeline. The drain pass iterates `cpuCache.drain(budget)` output and runs `classifyDelivery` (rejects unknown widths, wrong-LOD chunks, etc.). The chunk and proxy resend passes walk `lastFilteredRequests` and `lastProxyRequests` and run their respective classifiers. All three passes share the same `manifestByImage` memo built once per tick by `buildManifestByImage` — the lookup is O(1) per chunk instead of an O(D × I) per-chunk dataset scan. Each pass owns its own counter writes onto the shared `currentUploadStats` and stops dispatching when the byte budget is exhausted.
 
 ## Interactions
 
@@ -60,7 +60,7 @@ The Orchestrator drives one Uploader per render loop and feeds it through five d
 
 ## Invariants
 
-- **`onPlanRebuildStart()` runs exactly once per cold-state rebuild tick.** The atlas state is global per worker, so the per-dataset loop's `sendColdState` calls must see a single shared reset rather than per-dataset multi-clears. Pairing cold-state emission with tracker reset is now an explicit invariant (it was implicit and code-order-dependent pre-refactor).
+- **`onPlanRebuildStart()` runs exactly once per cold-state rebuild tick.** The atlas state is global per worker, so the per-dataset loop's `sendColdState` calls must see a single shared reset rather than per-dataset multi-clears. Pairing cold-state emission with tracker reset is an explicit invariant of the Uploader.
 - **`lastFilteredRequests` and `lastProxyRequests` are per-dataset Maps.** Both are keyed `Map<datasetId, …>` so the resend pass iterates every dataset's snapshot rather than collapsing to whichever dataset was processed last in the planning loop.
 - **`MAIN_VIEW_UPLOAD_BUDGET_BYTES = 8 MB` is a soft cap.** `deliverToWorker` may overshoot by up to one chunk's size before setting `budgetExhausted`, since the byte accounting happens after dispatch. The minimap path uses a separate 2 MB budget (still in `renderLoopTypes.ts`).
 - **The slice-vs-volume branch lives only in `dispatchChunk`.** The Uploader reads `viewMode` from `TickContext.mode` and threads it into the dispatch call; the drain and resend passes are mode-agnostic. If you find a second site branching on view mode, it's a leak.

@@ -7,7 +7,7 @@ modified: 2026-05-16
 
 `lucida-web/src/pipeline/fetch/` — host-side cache between the network and the GPU. A directory of focused modules with `cpuCache.ts` as a thin coordinator that fans out to collaborators (interaction-mode detector, telemetry counters, eviction policies, three stores, two schedulers, retry policy + typed errors, rejection tracker, wire-protocol helpers). See [[decisions/0032-cpucache-split-into-pipeline-fetch]] for the directory-layout philosophy and the per-module rationale.
 
-After S5, this is the **sole** chunk fetch path. The old `SharedChunkQueue` was deleted; if you see a reference to it anywhere, that's stale.
+This is the **sole** chunk fetch path. If you see a reference to a `SharedChunkQueue` anywhere, that's stale.
 
 ## Module layout
 

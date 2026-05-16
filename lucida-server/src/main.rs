@@ -446,8 +446,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // `cargo run --bin lucida-server` is friction-free for local dev.
     // Set LUCIDA_BIND=0.0.0.0:9876 (or a deployment-specific interface)
     // to expose on all interfaces; production deployments must do so
-    // explicitly. Pre-slice-7 deployments that relied on the old
-    // hardcoded 0.0.0.0 default need to set LUCIDA_BIND going forward.
+    // explicitly.
     let bind_addr = auth_config.bind_addr;
     let listener = tokio::net::TcpListener::bind(bind_addr)
         .await

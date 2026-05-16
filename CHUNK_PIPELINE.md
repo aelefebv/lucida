@@ -22,7 +22,7 @@ Wire shape of the broadcast (matches Rust `DocumentCommand::DatasetOpened(Datase
 { "type": "dataset_opened",
   "manifest": <DatasetManifest>,   // structural blueprint: entities, transforms, images, layouts
   "fetch":    <FetchSource>,        // how to get bytes: { Proxied | Direct | Local }
-  "catalog":  <AssetCatalog> }      // proxy-availability seed (empty in S3, populated S5+)
+  "catalog":  <AssetCatalog> }      // proxy-availability seed (seeded by the server; may be empty if the server doesn't generate proxies)
 ```
 
 The web client doesn't know in advance — it learns by inspecting `manifest.kind` on the returned event (`lucida-web/src/manifestTypes.ts`).
@@ -147,7 +147,7 @@ The DebugPanel **Planning** tab renders this per dataset; two console-dump butto
 
 ## 4. CPU cache: fetch scheduling & decoding
 
-`lucida-web/src/pipeline/cpuCache.ts:203-934` is the **sole** chunk-fetch path (the old `SharedChunkQueue` was deleted in S5).
+`lucida-web/src/pipeline/cpuCache.ts:203-934` is the **sole** chunk-fetch path.
 
 ### 4a. Submit flow (`cpuCache.ts:306-369`)
 
