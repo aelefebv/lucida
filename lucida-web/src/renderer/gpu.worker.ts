@@ -1,5 +1,5 @@
 /** WebGPU render worker — thin dispatcher to handler modules. */
-import type { MainToWorkerMessage, WorkerToMainMessage, ColdStateMessage, ProxyAssetDataMessage } from "./workerProtocol.ts";
+import type { MainToWorkerMessage, WorkerToMainMessage, ColdStateMessage } from "./workerProtocol.ts";
 import { initGPU, createOffscreenTarget } from "./gpuContext.ts";
 import { SliceRenderer } from "./sliceRenderer.ts";
 import { VolumeRenderer } from "./volumeRenderer.ts";
@@ -10,17 +10,9 @@ import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources,
 import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, applyViewHotState, type LodIndirectionMeta } from "./volumeHandlers.ts";
 import { computeWantedSet, type ProxyAtlasSnapshot } from "./wantedSet.ts";
 import {
-  createProxyAtlas,
-  allocateProxySlot,
-  proxyPoolKey,
-  proxySlotKey,
-  proxySlotOrigin,
   destroyProxyAtlas,
   type ProxyAtlasState,
-  type ProxyHandle,
-  type ProxyKind,
 } from "./proxyAtlas.ts";
-import { isStaleDelivery } from "./epochCheck.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 import { getColormapData } from "../colormaps.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
@@ -30,6 +22,7 @@ import {
   type EntityDescriptorIndex,
 } from "./descriptorBuffer.ts";
 import { applyColdState } from "./coldState/index.ts";
+import { handleProxyUpload } from "./proxy/index.ts";
 
 let device: GPUDevice;
 let context: GPUCanvasContext;
@@ -92,16 +85,9 @@ const wellToFields = new Map<string, Set<string>>();
 const descriptorBuffersByDataset = new Map<string, EntityDescriptorIndex>();
 
 /**
- * Default capacity per proxy pool. 64 keeps memory modest (a 64³ slot
- * × 64 = 16 MiB per pool at u16) while comfortably covering visible
- * wells/fields in typical plate views.
- */
-const PROXY_POOL_CAPACITY = 64;
-
-/**
  * Worker-side counters for HITL: how many proxy uploads we've handled
  * and how many were dropped due to staleness. Inspect from DevTools
- * via `self.__lucidaProxyStats`.
+ * via `self.__lucidaProxyStats`. Mutated by `handleProxyUpload`.
  */
 const proxyStats = { uploaded: 0, dropped: 0, evicted: 0 };
 (self as unknown as { __lucidaProxyStats?: typeof proxyStats }).__lucidaProxyStats =
@@ -218,150 +204,26 @@ function postWantedSet() {
   post({ type: "wantedSetDelta", epochs: currentEpochs, missing: result.missing });
 }
 
-/** Get-or-create the proxy descriptor for an entity. */
-function getOrCreateProxyDescriptor(entityId: string): EntityProxyDescriptor {
-  let d = proxyDescriptorsByEntity.get(entityId);
-  if (!d) {
-    d = { fieldProxyHandle: null, wellProxyHandle: null };
-    proxyDescriptorsByEntity.set(entityId, d);
-  }
-  return d;
-}
-
 /**
- * Get-or-create a proxy atlas pool for the given dataset / kind /
- * dims / channel. Pool key encodes all four so different shapes get
- * independent pools.
+ * Rebuild the per-dataset entity descriptor buffer iff the upload's
+ * dataset matches the current cold state. Proxy uploads for other
+ * datasets stay resident in their pools, but their descriptor buffer
+ * isn't refreshed until cold state lands for that dataset.
  */
-function getOrCreateProxyPool(
-  datasetId: string,
-  kind: ProxyKind,
-  slotDims: [number, number, number],
-  channel: number,
-): { poolKey: string; pool: ProxyAtlasState } {
-  const poolKey = proxyPoolKey(datasetId, kind, slotDims, channel);
-  let dsPools = proxyPoolsByDataset.get(datasetId);
-  if (!dsPools) {
-    dsPools = new Map();
-    proxyPoolsByDataset.set(datasetId, dsPools);
-  }
-  let pool = dsPools.get(poolKey);
-  if (!pool) {
-    pool = createProxyAtlas(device, kind, slotDims, channel, PROXY_POOL_CAPACITY);
-    dsPools.set(poolKey, pool);
-  }
-  return { poolKey, pool };
-}
-
-/**
- * GPU upload for a delivered proxy asset.
- *
- *   1. Stale-check vs current cold-state epochs; drop on stale.
- *   2. Resolve / create the per-(dataset, kind, dims, channel) pool.
- *   3. Allocate (or look up) the slot for `(entityId, t, c)`; LRU-evict
- *      from the pool's `touchOrder` if full.
- *   4. `device.queue.writeTexture` the raw u16 buffer into the slot
- *      region (origin = `[slotIndex * X, 0, 0]`; size = slotDims).
- *   5. Update the entity's descriptor; if this is a `WellProxy3D`,
- *      fan out to all child fields' descriptors so their
- *      `wellProxyHandle` points at the same slot.
- */
-function handleProxyAssetData(msg: ProxyAssetDataMessage): void {
-  if (!device) return;
-
-  // 0. Staleness — drop if older than the current cold-state epoch.
-  if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    proxyStats.dropped++;
-    console.log(
-      "[gpu.worker] proxyAssetData: dropped stale",
-      msg.entityId,
-      msg.kind,
-      `T${msg.t}/C${msg.c}`,
-      `(deliveryEpoch=${JSON.stringify(msg.epochs)})`,
-    );
-    return;
-  }
-
-  const slotDims = msg.dims;
-  const [slotZ, slotY, slotX] = slotDims;
-  const expectedBytes = slotZ * slotY * slotX * 2;
-  if (msg.data.byteLength < expectedBytes) {
-    console.warn(
-      `[gpu.worker] proxyAssetData: short buffer (have ${msg.data.byteLength}, need ${expectedBytes}) for ${msg.entityId} ${msg.kind}`,
-    );
-    return;
-  }
-
-  // 1-2. Resolve pool.
-  const { poolKey, pool } = getOrCreateProxyPool(msg.datasetId, msg.kind, slotDims, msg.c);
-
-  // 3. Allocate slot (may evict LRU). An eviction happens iff this is
-  // a brand-new key AND the pool has no free slots before the call.
-  const compositeKey = proxySlotKey(msg.entityId, msg.t, msg.c);
-  const willEvict =
-    !pool.slots.has(compositeKey) && pool.freeSlots.length === 0;
-  const slotIndex = allocateProxySlot(pool, compositeKey);
-  if (willEvict) proxyStats.evicted++;
-
-  // 4. Upload to the slot region. Layout is 1-D-along-X.
-  const origin = proxySlotOrigin(pool, slotIndex);
-  device.queue.writeTexture(
-    { texture: pool.texture, origin },
-    msg.data,
-    { bytesPerRow: slotX * 2, rowsPerImage: slotY },
-    [slotX, slotY, slotZ],
+function rebuildDescriptorIfMatching(datasetId: string): void {
+  if (!currentColdState || currentColdState.datasetId !== datasetId) return;
+  const oldDesc = descriptorBuffersByDataset.get(datasetId);
+  if (oldDesc) destroyDescriptorBuffer(oldDesc);
+  descriptorBuffersByDataset.set(
+    datasetId,
+    buildDescriptorBuffer(
+      device,
+      currentColdState,
+      proxyDescriptorsByEntity,
+      proxyPoolsByDataset,
+      entityMetasForDataset(datasetId),
+    ),
   );
-
-  // 5. Update descriptors.
-  const handle: ProxyHandle = { poolKey, slotIndex };
-  const desc = getOrCreateProxyDescriptor(msg.entityId);
-  if (msg.kind === "FieldProxy3D") {
-    desc.fieldProxyHandle = handle;
-  } else {
-    // WellProxy3D — set on the well itself AND propagate to all child
-    // fields so their `wellProxyHandle` points at the parent's slot.
-    desc.wellProxyHandle = handle;
-    const childFields = wellToFields.get(msg.entityId);
-    if (childFields) {
-      for (const fid of childFields) {
-        const fdesc = getOrCreateProxyDescriptor(fid);
-        fdesc.wellProxyHandle = handle;
-      }
-    }
-  }
-
-  proxyStats.uploaded++;
-  console.log(
-    "[gpu.worker] proxyAssetData uploaded",
-    msg.entityId,
-    msg.kind,
-    `T${msg.t}/C${msg.c}`,
-    `pool=${poolKey}`,
-    `slot=${slotIndex}/${pool.capacity}`,
-    `dims=${slotDims}`,
-  );
-
-  // Proxy handles changed → rebuild this dataset's descriptor buffer
-  // so the GPU sees the new pool/slot indices on the next draw. Cheap
-  // relative to a per-frame buffer write since cold-state churn already
-  // triggers full rebuilds.
-  if (currentColdState && currentColdState.datasetId === msg.datasetId) {
-    const oldDesc = descriptorBuffersByDataset.get(msg.datasetId);
-    if (oldDesc) destroyDescriptorBuffer(oldDesc);
-    descriptorBuffersByDataset.set(
-      msg.datasetId,
-      buildDescriptorBuffer(
-        device,
-        currentColdState,
-        proxyDescriptorsByEntity,
-        proxyPoolsByDataset,
-        entityMetasForDataset(msg.datasetId),
-      ),
-    );
-  }
-
-  // Recompute wanted-set: this proxy may satisfy outstanding requests.
-  postWantedSet();
 }
 
 let ctx: WorkerCtx;
@@ -471,8 +333,11 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
 
       case "proxyAssetData": {
-        // GPU upload into a dedicated proxy atlas pool.
-        handleProxyAssetData(msg);
+        const outcome = handleProxyUpload(ctx, msg, currentEpochs, {
+          proxyPoolsByDataset, proxyDescriptorsByEntity, wellToFields, proxyStats,
+        });
+        if (outcome.rebuildDescriptor) rebuildDescriptorIfMatching(msg.datasetId);
+        if (outcome.wantedSetChanged) postWantedSet();
         break;
       }
 
