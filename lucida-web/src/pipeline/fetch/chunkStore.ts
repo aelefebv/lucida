@@ -21,7 +21,7 @@
  * collaborator. Nothing outside `pipeline/fetch/` should import it.
  */
 
-import type { CacheEntry, EvictionTier } from "./cpuCache.ts";
+import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { EvictionPolicy } from "./eviction.ts";
 import type { EvictionRecordTier } from "./telemetry.ts";
 

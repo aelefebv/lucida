@@ -11,7 +11,6 @@ import type {
   ContentSource,
   FetchResult,
   FetchProxyResult,
-  ProxyHeaderJs,
 } from "./contentSource.ts";
 import type { DecodePool } from "./decodePool.ts";
 import type {
@@ -21,7 +20,7 @@ import type {
   ProxyRequest,
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
-import { InteractionModeDetector, type InteractionMode } from "./interactionMode.ts";
+import { InteractionModeDetector } from "./interactionMode.ts";
 import { BurstLogger, TelemetryCounters } from "./telemetry.ts";
 import {
   LRUPolicy,
@@ -44,6 +43,32 @@ import {
 } from "./retry.ts";
 import { RejectionTracker } from "./rejection.ts";
 import { debugLog } from "../../debug/logging.ts";
+import type {
+  CacheEntry,
+  CacheTelemetry,
+  CpuCacheConfig,
+  EvictionTier,
+  Lane,
+  ReadyChunkDelivery,
+  ReadyDelivery,
+  ReadyProxyDelivery,
+} from "./types.ts";
+
+// Re-export the public-surface types so callers that imported them via
+// `./cpuCache.ts` keep working unchanged. The barrel (`./index.ts`)
+// pulls types from `./types.ts` directly.
+export type {
+  CacheEntry,
+  CacheTelemetry,
+  CpuCacheConfig,
+  EvictionTier,
+  Lane,
+  ReadyChunkDelivery,
+  ReadyDelivery,
+  ReadyProxyDelivery,
+  TierCounters,
+  TierResidencyEntry,
+} from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -59,180 +84,13 @@ export const MAX_TRANSIENT_RETRIES = 1;
 export const INTERACTION_MODE_WINDOW = 10;
 
 // ---------------------------------------------------------------------------
-// Configuration
+// Internal types
 // ---------------------------------------------------------------------------
-
-export interface CpuCacheConfig {
-  mainBudgetBytes: number;
-  overviewBudgetBytes: number;
-  /**
-   * Budget for the proxy tier in bytes. Proxies are a small middle layer
-   * (between detail and overview) — see [`DEFAULT_PROXY_BUDGET`]. Eviction
-   * tier order: detail > proxy > overview.
-   */
-  proxyBudgetBytes: number;
-  maxConcurrentFetches: number;
-  maxBytesInFlight: number;
-}
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-type Lane = "minimap" | "detail" | "prefetch" | "overview";
-export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
-
-/**
- * A delivery from the CPU cache that the orchestrator routes to the GPU
- * worker. The discriminated union covers both regular chunks
- * (`kind: "chunk"`) and proxy deliveries (`kind: "proxy"`); both
- * variants stamp the discriminator explicitly so consumers narrow
- * unambiguously.
- */
-export type ReadyDelivery = ReadyChunkDelivery | ReadyProxyDelivery;
-
-export interface ReadyChunkDelivery {
-  /** Discriminant. */
-  kind: "chunk";
-  entityId: string;
-  imageId: string;
-  level: number;
-  t: number;
-  c: number;
-  z: number;
-  y: number;
-  x: number;
-  chunkKey: string;
-  data: ArrayBuffer;
-  dataType: string;
-  epochs: SceneEpochs;
-  lane: Lane;
-}
-
-/**
- * A delivered proxy asset. Carries the parsed header + raw u16 voxel
- * bytes. The orchestrator forwards this to the worker via
- * `client.proxyAssetData(...)`.
- */
-export interface ReadyProxyDelivery {
-  kind: "proxy";
-  datasetId: string;
-  entityId: string;
-  imageId: string;
-  proxyKind: "WellProxy3D" | "FieldProxy3D";
-  t: number;
-  c: number;
-  header: ProxyHeaderJs;
-  data: ArrayBuffer;
-  epochs: SceneEpochs;
-}
-
-export interface CacheTelemetry {
-  mainBytes: number;
-  mainBudget: number;
-  overviewBytes: number;
-  overviewBudget: number;
-  /** Proxy tier bytes / budget. */
-  proxyBytes: number;
-  proxyBudget: number;
-  maxConcurrentFetches: number;
-  maxBytesInFlight: number;
-  inFlightCount: number;
-  inFlightBytes: number;
-  /** In-flight proxy fetches (count, estimated bytes). */
-  inFlightProxyCount: number;
-  inFlightProxyBytes: number;
-  pendingCount: number;
-  pendingProxyCount: number;
-  /** Age (ms) of the longest-waiting entry in the chunk scheduler's
-   *  pending queue; 0 if empty. */
-  pendingOldestAgeMs: number;
-  /** Decoded chunks waiting for the orchestrator's drain pass. */
-  readyCount: number;
-  hitRate: number;
-  evictionsPerSec: number;
-  /** Eviction count per tier in the last telemetry window. Resets on each call. */
-  evictionsByTier: TierCounters;
-  interactionMode: InteractionMode;
-  evictionTierOrder: string[];
-  failedChunks: { transient: number; permanent: number };
-  lastError: string | null;
-  decodesPerSec: number;
-  decodeWorkersTotal: number;
-  avgDecodeMs: number;
-  /** 50th and 95th percentile decode latency from a rolling 100-sample window. */
-  decodeP50Ms: number;
-  decodeP95Ms: number;
-  /** Cached chunks broken down by eviction tier (count + bytes per tier). */
-  tierResidency: {
-    activeDetail: TierResidencyEntry;
-    demotedDetail: TierResidencyEntry;
-    prefetch: TierResidencyEntry;
-    overview: TierResidencyEntry;
-    proxy: TierResidencyEntry;
-  };
-}
-
-export interface TierResidencyEntry {
-  count: number;
-  bytes: number;
-}
-
-export interface TierCounters {
-  activeDetail: number;
-  demotedDetail: number;
-  prefetch: number;
-  overview: number;
-  proxy: number;
-}
-
-/**
- * Internal cache entry. Exported so the {@link EvictionPolicy}
- * implementations in `eviction.ts` can operate on cache contents.
- * Slice 6 (`#600`) will relocate this to a colocated `types.ts` when
- * the per-cache stores extract.
- */
-export interface CacheEntry {
-  data: ArrayBuffer;
-  sizeBytes: number;
-  lane: Lane;
-  tier: EvictionTier;
-  entityId: string;
-  imageId: string;
-  level: number;
-  t: number;
-  c: number;
-  z: number;
-  y: number;
-  x: number;
-  chunkKey: string;
-  insertedAt: number;
-  epochs: SceneEpochs;
-  dataType: string;
-  /**
-   * Priority recorded the last time this chunk appeared in a plan
-   * (lower = more urgent; mirrors `ChunkRequest.priority`). Used as the
-   * secondary sort key for active-detail eviction so distant chunks go
-   * before focal ones. Refreshed on every `submit()` that includes the
-   * chunk; can be stale for chunks not currently planned (frustum-culled,
-   * out-of-LOD-range), but `lastSeenTick` handles that case.
-   */
-  priority: number;
-  /**
-   * Submit-tick counter from the last `submit()` that planned this
-   * chunk. Primary sort key for active-detail eviction: chunks not
-   * present in the current plan get evicted before chunks that are.
-   */
-  lastSeenTick: number;
-}
 
 interface FailedEntry {
   failedUntilContentEpoch: number;
   isPermanent: boolean;
 }
-
-// `ProxyCacheEntry`, `ProxyEvictable`, and `proxyInnerKey` moved to
-// `proxyStore.ts` in Slice 6 (`#600`); imported above.
 
 // ---------------------------------------------------------------------------
 // CpuCache
@@ -486,11 +344,13 @@ export class CpuCache {
     // Track epoch velocity
     this.interactionDetector.push(plan.epochs);
 
-    // Update active set → demotion
+    // Update active set → demotion. Only the main store carries tiered
+    // entries; the overview store is LRU-only and demotion would be
+    // meaningless there.
     const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
     for (const entityId of this.activeEntityIds) {
       if (!newActiveIds.has(entityId)) {
-        this.demoteEntity(entityId);
+        this.chunkStore.demoteEntity(entityId);
       }
     }
     this.activeEntityIds = newActiveIds;
@@ -778,25 +638,8 @@ export class CpuCache {
   getCachedChunk(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
     const entry =
       this.chunkStore.get(entityId, chunkKey) ??
-      this.overviewStore.get(entityId, chunkKey) ??
-      null;
-    if (!entry) return null;
-    return {
-      kind: "chunk",
-      entityId: entry.entityId,
-      imageId: entry.imageId,
-      level: entry.level,
-      t: entry.t,
-      c: entry.c,
-      z: entry.z,
-      y: entry.y,
-      x: entry.x,
-      chunkKey: entry.chunkKey,
-      data: entry.data,
-      dataType: entry.dataType,
-      epochs: entry.epochs,
-      lane: entry.lane,
-    };
+      this.overviewStore.get(entityId, chunkKey);
+    return entry ? this.chunkEntryToDelivery(entry) : null;
   }
 
   /**
@@ -875,14 +718,10 @@ export class CpuCache {
     chunkKey: string;
     insertedAt: number;
   }> {
-    const out: ReturnType<CpuCache["getCacheDump"]> = [];
-    for (const e of this.chunkStore.dump()) {
-      out.push({ ...e, cache: "main" });
-    }
-    for (const e of this.overviewStore.dump()) {
-      out.push({ ...e, cache: "overview" });
-    }
-    return out;
+    return [
+      ...this.chunkStore.dump().map(e => ({ ...e, cache: "main" as const })),
+      ...this.overviewStore.dump().map(e => ({ ...e, cache: "overview" as const })),
+    ];
   }
 
   /**
@@ -1082,22 +921,7 @@ export class CpuCache {
     }
 
     // Mark as ready for drain
-    this.ready.push({
-      kind: "chunk",
-      entityId: req.entityId,
-      imageId: req.imageId,
-      level: req.level,
-      t: req.t,
-      c: req.c,
-      z: req.z,
-      y: req.y,
-      x: req.x,
-      chunkKey: req.chunkKey,
-      data: decoded,
-      dataType: result.dataType,
-      epochs: cacheEntry.epochs,
-      lane,
-    });
+    this.ready.push(this.chunkEntryToDelivery(cacheEntry));
 
     // Notify listeners that a new chunk is ready
     this.notifyListeners();
@@ -1216,6 +1040,25 @@ export class CpuCache {
     };
   }
 
+  private chunkEntryToDelivery(entry: CacheEntry): ReadyChunkDelivery {
+    return {
+      kind: "chunk",
+      entityId: entry.entityId,
+      imageId: entry.imageId,
+      level: entry.level,
+      t: entry.t,
+      c: entry.c,
+      z: entry.z,
+      y: entry.y,
+      x: entry.x,
+      chunkKey: entry.chunkKey,
+      data: entry.data,
+      dataType: entry.dataType,
+      epochs: entry.epochs,
+      lane: entry.lane,
+    };
+  }
+
   // =========================================================================
   // Cache Management
   // =========================================================================
@@ -1227,12 +1070,6 @@ export class CpuCache {
     const usesOverviewCache = req.lane === "overview" || req.lane === "minimap";
     const store = usesOverviewCache ? this.overviewStore : this.chunkStore;
     return store.get(req.entityId, req.chunkKey);
-  }
-
-  private demoteEntity(entityId: string): void {
-    // Only the main store carries tiered entries; the overview store
-    // is LRU-only and demotion would be meaningless there.
-    this.chunkStore.demoteEntity(entityId);
   }
 
   private laneToTier(lane: Lane): EvictionTier {

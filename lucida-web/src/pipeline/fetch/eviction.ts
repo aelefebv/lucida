@@ -17,7 +17,7 @@
  * the policy doesn't see).
  */
 
-import type { CacheEntry, EvictionTier } from "./cpuCache.ts";
+import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 
 /**

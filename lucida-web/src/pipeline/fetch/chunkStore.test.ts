@@ -16,7 +16,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import { ChunkStore } from "./chunkStore.ts";
 import { LRUPolicy, TieredPolicy } from "./eviction.ts";
-import type { CacheEntry, EvictionTier } from "./cpuCache.ts";
+import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { EvictionRecordTier } from "./telemetry.ts";
 import type { SceneEpochs } from "../epochs.ts";
 

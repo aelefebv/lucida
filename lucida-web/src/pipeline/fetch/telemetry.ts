@@ -19,7 +19,7 @@
  */
 
 import { debugLog, type DebugCategory } from "../../debug/logging.ts";
-import type { EvictionTier, TierCounters } from "./cpuCache.ts";
+import type { EvictionTier, TierCounters } from "./types.ts";
 
 /** Fresh per-tier eviction counter. Shared shape with cpuCache exports. */
 export function freshTierCounters(): TierCounters {

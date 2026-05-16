@@ -25,7 +25,7 @@ export type {
   CacheTelemetry,
   TierResidencyEntry,
   TierCounters,
-} from "./cpuCache.ts";
+} from "./types.ts";
 
 export { ProxiedContentSource } from "./contentSource.ts";
 export type {

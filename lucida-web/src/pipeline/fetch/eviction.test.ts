@@ -17,7 +17,7 @@ import {
   getTierOrder,
   type EvictableEntry,
 } from "./eviction.ts";
-import type { CacheEntry, EvictionTier } from "./cpuCache.ts";
+import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 import type { SceneEpochs } from "../epochs.ts";
 
