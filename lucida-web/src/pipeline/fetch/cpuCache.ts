@@ -22,6 +22,7 @@ import type {
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { InteractionModeDetector, type InteractionMode } from "./interactionMode.ts";
+import { BurstLogger, TelemetryCounters } from "./telemetry.ts";
 import { debugLog } from "../../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
@@ -238,17 +239,6 @@ function proxyInnerKey(req: { entityId: string; kind: string; t: number; c: numb
   return `${req.entityId}|${req.kind}|${req.t}|${req.c}`;
 }
 
-function freshTierCounters(): TierCounters {
-  return { activeDetail: 0, demotedDetail: 0, prefetch: 0, overview: 0, proxy: 0 };
-}
-
-/** Pick a percentile from a numeric array. Sorts in place; copy first if needed. */
-function percentile(sorted: readonly number[], p: number): number {
-  if (sorted.length === 0) return 0;
-  const idx = Math.max(0, Math.min(sorted.length - 1, Math.floor(p * sorted.length)));
-  return sorted[idx];
-}
-
 // ---------------------------------------------------------------------------
 // CpuCache
 // ---------------------------------------------------------------------------
@@ -300,8 +290,18 @@ export class CpuCache {
   // Failure tracking
   private failures = new Map<string, FailedEntry>(); // inFlightKey → failure
 
-  // Monotonic counter for LRU ordering
+  // Monotonic counter for LRU ordering, tied to insertion order so the
+  // eviction policies can sort entries oldest-first.
   private lruCounter = 0;
+
+  // Telemetry counters and rate-limited debug loggers. Counter
+  // mutations go through verb calls (`recordHit`, `recordEviction`,
+  // …); the cache composes the public `CacheTelemetry` from
+  // `counters.snapshot(now)` plus the per-call store walk in
+  // `telemetry()`.
+  private counters = new TelemetryCounters();
+  private burstBackpressure = new BurstLogger("cache", "cache.backpressure");
+  private burstFailures = new BurstLogger("cache", "cache.failure_burst");
 
   /**
    * Bumped at the start of every `submit()`. Stamped onto cached
@@ -326,22 +326,6 @@ export class CpuCache {
   // Listeners notified when new chunks become ready
   private listeners: (() => void)[] = [];
 
-  // Telemetry
-  private totalHits = 0;
-  private totalRequests = 0;
-  private evictionsSinceSnapshot = 0;
-  /**
-   * Per-tier eviction counts since the last `telemetry()` call. Reset on
-   * each call so consumers see "evictions in the last window" rather
-   * than cumulative since boot.
-   */
-  private evictionsByTierSinceSnapshot: TierCounters = freshTierCounters();
-  private lastTelemetryTime = performance.now();
-  private lastError: string | null = null;
-  private decodeTimes: number[] = [];
-  private transientFailures = 0;
-  private permanentFailures = 0;
-
   /**
    * Enqueue timestamps for entries currently in `pendingRequests`.
    * Keyed by `inFlightKey(req)`. Used to surface starvation: the
@@ -349,23 +333,6 @@ export class CpuCache {
    * Cleared when an entry transitions to in-flight or is dropped.
    */
   private pendingEnqueuedAt = new Map<string, number>();
-
-  // Running average of decoded chunk sizes for in-flight byte estimation
-  private avgDecodedBytes = 0;
-  private completedFetches = 0;
-
-  // Decode throughput tracking
-  private decodesSinceSnapshot = 0;
-
-  // Rate-limited log state. One slot per event kind; we skip emission
-  // if we logged within the last second, but track aggregate counts so
-  // a burst still surfaces at most one summary per second.
-  private cacheLogState = {
-    backpressureLastAt: 0,
-    backpressureSkipped: 0,
-    failureLastAt: 0,
-    failureBurstCount: 0,
-  };
 
   // Current epochs (for failure clearing)
   private currentEpochs: SceneEpochs = {
@@ -426,7 +393,7 @@ export class CpuCache {
     for (const req of plan.requests) {
       const key = this.inFlightKey(req);
 
-      this.totalRequests++;
+      this.counters.recordRequest();
 
       // Worker has rejected this chunk under the current camera (atlas
       // full + too far). Skip without refreshing `lastSeenTick` so the
@@ -443,7 +410,7 @@ export class CpuCache {
       // refresh signal reaches every still-wanted entry.
       const cachedEntry = this.lookupCachedEntry(req);
       if (cachedEntry) {
-        this.totalHits++;
+        this.counters.recordHit();
         cachedEntry.priority = req.priority;
         cachedEntry.lastSeenTick = this.submitTick;
         continue;
@@ -678,18 +645,12 @@ export class CpuCache {
   /** Current stats for debug panel. */
   telemetry(): CacheTelemetry {
     const now = performance.now();
-    const elapsed = (now - this.lastTelemetryTime) / 1000 || 1;
-    const evictionsPerSec = this.evictionsSinceSnapshot / elapsed;
-    const decodesPerSec = this.decodesSinceSnapshot / elapsed;
-    const evictionsByTier = this.evictionsByTierSinceSnapshot;
-    this.evictionsSinceSnapshot = 0;
-    this.evictionsByTierSinceSnapshot = freshTierCounters();
-    this.decodesSinceSnapshot = 0;
-    this.lastTelemetryTime = now;
-
+    const counters = this.counters.snapshot(now);
     const mode = this.interactionDetector.current();
 
-    // Per-tier residency: walk every cached entry once and bin.
+    // Per-tier residency: walk every cached entry once and bin. The
+    // walk stays here for now; Slice 5/6 will move it onto the
+    // per-cache stores once those are extracted.
     const tierResidency = {
       activeDetail: { count: 0, bytes: 0 },
       demotedDetail: { count: 0, bytes: 0 },
@@ -725,6 +686,8 @@ export class CpuCache {
     }
 
     // Pending-queue starvation signal: oldest enqueue timestamp wins.
+    // Stays in cpuCache because pendingEnqueuedAt is scheduler state
+    // (Slice 7 will relocate it).
     let pendingOldestAgeMs = 0;
     if (this.pendingEnqueuedAt.size > 0) {
       let oldest = now;
@@ -732,17 +695,6 @@ export class CpuCache {
         if (t < oldest) oldest = t;
       }
       pendingOldestAgeMs = now - oldest;
-    }
-
-    // Decode percentiles from the rolling window.
-    let decodeP50Ms = 0;
-    let decodeP95Ms = 0;
-    let avgDecodeMs = 0;
-    if (this.decodeTimes.length > 0) {
-      avgDecodeMs = this.decodeTimes.reduce((a, b) => a + b, 0) / this.decodeTimes.length;
-      const sorted = [...this.decodeTimes].sort((a, b) => a - b);
-      decodeP50Ms = percentile(sorted, 0.5);
-      decodeP95Ms = percentile(sorted, 0.95);
     }
 
     return {
@@ -762,18 +714,21 @@ export class CpuCache {
       pendingProxyCount: this.pendingProxyRequests.length,
       pendingOldestAgeMs,
       readyCount: this.ready.length,
-      hitRate: this.totalRequests > 0 ? this.totalHits / this.totalRequests : 0,
-      evictionsPerSec,
-      evictionsByTier,
+      hitRate: counters.hitRate,
+      evictionsPerSec: counters.evictionsPerSec,
+      evictionsByTier: counters.evictionsByTier,
       interactionMode: mode,
       evictionTierOrder: this.getTierOrder(mode),
-      failedChunks: { transient: this.transientFailures, permanent: this.permanentFailures },
-      lastError: this.lastError,
-      decodesPerSec,
+      failedChunks: {
+        transient: counters.transientFailures,
+        permanent: counters.permanentFailures,
+      },
+      lastError: counters.lastError,
+      decodesPerSec: counters.decodesPerSec,
       decodeWorkersTotal: this.decode.size,
-      avgDecodeMs,
-      decodeP50Ms,
-      decodeP95Ms,
+      avgDecodeMs: counters.avgDecodeMs,
+      decodeP50Ms: counters.decodeP50Ms,
+      decodeP95Ms: counters.decodeP95Ms,
       tierResidency,
     };
   }
@@ -1008,19 +963,10 @@ export class CpuCache {
     // Clear listeners
     this.listeners = [];
 
-    // Reset telemetry
-    this.totalHits = 0;
-    this.totalRequests = 0;
-    this.evictionsSinceSnapshot = 0;
-    this.evictionsByTierSinceSnapshot = freshTierCounters();
-    this.decodesSinceSnapshot = 0;
-    this.lastTelemetryTime = performance.now();
-    this.lastError = null;
-    this.decodeTimes = [];
-    this.transientFailures = 0;
-    this.permanentFailures = 0;
-    this.avgDecodedBytes = 0;
-    this.completedFetches = 0;
+    // Reset telemetry counters; the rate-limited burst loggers are
+    // stateless wrt boot timing (their windows are clock-relative)
+    // so they don't need an explicit reset.
+    this.counters.reset();
   }
 
   // =========================================================================
@@ -1045,27 +991,24 @@ export class CpuCache {
       (this.inFlight.size >= this.config.maxConcurrentFetches ||
         this.inFlightBytes >= this.config.maxBytesInFlight)
     ) {
-      this.cacheLogState.backpressureSkipped += this.pendingRequests.length;
-      const now = performance.now();
-      if (now - this.cacheLogState.backpressureLastAt >= 1000) {
-        debugLog("cache", "cache.backpressure", {
+      this.burstBackpressure.recordSkipped(
+        this.pendingRequests.length,
+        (skipped) => ({
           pending: this.pendingRequests.length,
           inFlight: this.inFlight.size,
           maxConcurrent: this.config.maxConcurrentFetches,
           inFlightBytes: this.inFlightBytes,
           maxBytes: this.config.maxBytesInFlight,
-          skippedSinceLastLog: this.cacheLogState.backpressureSkipped,
-        });
-        this.cacheLogState.backpressureLastAt = now;
-        this.cacheLogState.backpressureSkipped = 0;
-      }
+          skippedSinceLastLog: skipped,
+        }),
+      );
     }
   }
 
   private startSingleFetch(req: ChunkRequest): void {
     const key = this.inFlightKey(req);
     const controller = new AbortController();
-    const estimate = this.avgDecodedBytes;
+    const estimate = this.counters.averageDecodedBytes();
     const entry: InFlightEntry = { request: req, controller, estimatedBytes: estimate };
     this.inFlightBytes += estimate;
     this.inFlight.set(key, entry);
@@ -1110,9 +1053,7 @@ export class CpuCache {
         failedUntilContentEpoch: this.currentEpochs.content + 1,
         isPermanent,
       });
-      if (isPermanent) this.permanentFailures++;
-      else this.transientFailures++;
-      this.lastError = message;
+      this.counters.recordFetchFailure(isPermanent, message);
       this.recordFailureForBurstDetection(isPermanent, message);
       const failedEntry = this.inFlight.get(key);
       if (failedEntry) this.inFlightBytes -= failedEntry.estimatedBytes;
@@ -1129,19 +1070,16 @@ export class CpuCache {
     }
 
     // Update running average for future estimates
-    this.completedFetches++;
-    this.avgDecodedBytes += (responseBytes - this.avgDecodedBytes) / this.completedFetches;
+    this.counters.recordCompletedFetch(responseBytes);
 
     // Decode
     let decoded: ArrayBuffer;
     try {
       const t0 = performance.now();
       decoded = await this.decode.decode(result.bytes, result.wireFormat);
-      this.decodeTimes.push(performance.now() - t0);
-      if (this.decodeTimes.length > 100) this.decodeTimes.shift();
-      this.decodesSinceSnapshot++;
+      this.counters.recordDecode(performance.now() - t0);
     } catch (err: unknown) {
-      this.lastError = err instanceof Error ? err.message : String(err);
+      this.counters.recordError(err instanceof Error ? err.message : String(err));
       // Guard: submit() may have already cancelled this entry during decode
       if (this.inFlight.has(key)) {
         this.inFlightBytes -= responseBytes;
@@ -1245,7 +1183,7 @@ export class CpuCache {
     // We don't have a running average for proxy sizes yet; reuse the chunk
     // average as a rough estimate. Corrected to actual size once the
     // response arrives.
-    const estimate = this.avgDecodedBytes;
+    const estimate = this.counters.averageDecodedBytes();
     const entry: InFlightProxyEntry = { request: req, controller, estimatedBytes: estimate };
     this.inFlightProxyBytes += estimate;
     this.inFlightProxy.set(key, entry);
@@ -1278,7 +1216,7 @@ export class CpuCache {
         return;
       }
       const message = err instanceof Error ? err.message : String(err);
-      this.lastError = message;
+      this.counters.recordError(message);
       const failed = this.inFlightProxy.get(key);
       if (failed) this.inFlightProxyBytes -= failed.estimatedBytes;
       this.inFlightProxy.delete(key);
@@ -1354,8 +1292,7 @@ export class CpuCache {
       }
       this.proxyBytes -= entry.bytes;
       freed += entry.bytes;
-      this.evictionsSinceSnapshot++;
-      this.evictionsByTierSinceSnapshot.proxy++;
+      this.counters.recordEviction("proxy");
     }
   }
 
@@ -1374,22 +1311,11 @@ export class CpuCache {
    * surfacing real outages (e.g., the WS bridge dropping mid-fetch).
    */
   private recordFailureForBurstDetection(isPermanent: boolean, message: string): void {
-    const now = performance.now();
-    if (now - this.cacheLogState.failureLastAt >= 1000) {
-      // Window rolled — start a new one.
-      this.cacheLogState.failureLastAt = now;
-      this.cacheLogState.failureBurstCount = 1;
-      return;
-    }
-    this.cacheLogState.failureBurstCount++;
-    if (this.cacheLogState.failureBurstCount === 4) {
-      // First time we cross the burst threshold within the window.
-      debugLog("cache", "cache.failure_burst", {
-        failuresInLastSec: this.cacheLogState.failureBurstCount,
-        lastFailurePermanent: isPermanent,
-        lastError: message,
-      });
-    }
+    this.burstFailures.recordBurst(4, (count) => ({
+      failuresInLastSec: count,
+      lastFailurePermanent: isPermanent,
+      lastError: message,
+    }));
   }
 
   private proxyEntryToDelivery(entry: ProxyCacheEntry): ReadyProxyDelivery {
@@ -1546,15 +1472,13 @@ export class CpuCache {
     }
     if (cacheType === "main") this.mainBytes -= entry.sizeBytes;
     else this.overviewBytes -= entry.sizeBytes;
-    this.evictionsSinceSnapshot++;
     if (cacheType === "overview") {
-      this.evictionsByTierSinceSnapshot.overview++;
-    } else if (entry.tier === "active-detail") {
-      this.evictionsByTierSinceSnapshot.activeDetail++;
-    } else if (entry.tier === "demoted-detail") {
-      this.evictionsByTierSinceSnapshot.demotedDetail++;
+      this.counters.recordEviction("overview");
     } else {
-      this.evictionsByTierSinceSnapshot.prefetch++;
+      // For main-cache evictions the entry's tier is the truth: an
+      // active-detail eviction counts under activeDetail even though
+      // the cacheType is "main".
+      this.counters.recordEviction(entry.tier);
     }
   }
 

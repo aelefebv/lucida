@@ -151,6 +151,12 @@ export class RenderLoop {
       unsub();
       this.unsubs.delete(id);
     }
+    // Capture image IDs from the manifest BEFORE deleting the dataset
+    // entry so we can pair the cache cleanup with a wire-format
+    // unregistration on the content source (closes the
+    // imageWireFormats leak; see contentSource.unregisterDataset).
+    const manifest = this.datasets.get(id)?.manifest;
+    const imageIds = manifest ? manifest.images.map(img => img.image_id) : [];
     this.datasets.delete(id);
 
     // Collect member IDs that were keyed under this dataset.
@@ -159,6 +165,7 @@ export class RenderLoop {
     const memberIds = this.collectMemberIds(id);
 
     this.session.cpuCache.cancelDataset(id, memberIds);
+    this.session.contentSource.unregisterDataset(imageIds);
 
     clearVolumeForDataset(this.volumeState, id);
     clearSliceForDataset(this.sliceState, id);

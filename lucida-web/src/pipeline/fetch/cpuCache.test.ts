@@ -11,6 +11,7 @@ vi.mock("../../debug/logging.ts", async (importOriginal) => {
 import { debugLog } from "../../debug/logging.ts";
 
 import { CpuCache, type CpuCacheConfig } from "./cpuCache.ts";
+import { ProxiedContentSource } from "./contentSource.ts";
 import type {
   ContentSource,
   FetchRequest,
@@ -1509,9 +1510,111 @@ describe("CpuCache", () => {
       expect(removedArg).toBeGreaterThanOrEqual(16);
     });
 
-    it.todo(
-      "imageWireFormats cleared on dataset removal — activated by Slice 4 (#598)",
-    );
+    it("imageWireFormats cleared on dataset removal (Slice 4 #598 fix)", async () => {
+      // Construct a ProxiedContentSource directly — the leak fix lives
+      // on it, not on the cache. Register an image, drop the dataset
+      // via unregisterDataset, then assert the next fetch rejects with
+      // the unregistered-image error (proves the registration entry
+      // was deleted).
+      const sentMessages: string[] = [];
+      const source = new ProxiedContentSource(
+        (json) => sentMessages.push(json),
+      );
+      source.registerImage("image-leak", { Raw: { data_type: "uint16" } });
+
+      // Sanity check: a fetch on the registered image dispatches a
+      // request (the wire-format lookup succeeds).
+      const ctrlBefore = new AbortController();
+      const before = source.fetch(
+        { datasetId: "ds-leak", imageId: "image-leak", chunkKey: "0/0/0/0/0/0" },
+        ctrlBefore.signal,
+      );
+      expect(sentMessages.length).toBe(1);
+      ctrlBefore.abort();
+      await expect(before).rejects.toMatchObject({ name: "AbortError" });
+
+      // Drop the dataset's image registrations.
+      source.unregisterDataset(["image-leak"]);
+
+      const ctrlAfter = new AbortController();
+      await expect(
+        source.fetch(
+          { datasetId: "ds-leak", imageId: "image-leak", chunkKey: "0/0/0/0/0/0" },
+          ctrlAfter.signal,
+        ),
+      ).rejects.toThrow(/No wire format registered for image image-leak/);
+    });
+
+    it("telemetry shape regression — locks the CacheTelemetry surface for slices 5-10", async () => {
+      // After a known sequence (one submit + flush + drain), the
+      // CacheTelemetry shape must match this reference. Subsequent
+      // slices touch counters, eviction, stores, and scheduler — a
+      // shape regression would surface here immediately. Numeric
+      // values are normalized via expect.any(Number) where they
+      // depend on wall-clock or running averages.
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.submit(makePlan([makeRequest()]));
+      await flush();
+      cache.drain(Infinity);
+
+      const tel = cache.telemetry();
+      expect(tel).toEqual({
+        mainBytes: expect.any(Number),
+        mainBudget: expect.any(Number),
+        overviewBytes: expect.any(Number),
+        overviewBudget: expect.any(Number),
+        proxyBytes: expect.any(Number),
+        proxyBudget: expect.any(Number),
+        maxConcurrentFetches: expect.any(Number),
+        maxBytesInFlight: expect.any(Number),
+        inFlightCount: expect.any(Number),
+        inFlightBytes: expect.any(Number),
+        inFlightProxyCount: expect.any(Number),
+        inFlightProxyBytes: expect.any(Number),
+        pendingCount: expect.any(Number),
+        pendingProxyCount: expect.any(Number),
+        pendingOldestAgeMs: expect.any(Number),
+        readyCount: expect.any(Number),
+        hitRate: expect.any(Number),
+        evictionsPerSec: expect.any(Number),
+        evictionsByTier: {
+          activeDetail: expect.any(Number),
+          demotedDetail: expect.any(Number),
+          prefetch: expect.any(Number),
+          overview: expect.any(Number),
+          proxy: expect.any(Number),
+        },
+        interactionMode: expect.stringMatching(/^(panning|scrubbing|idle)$/),
+        evictionTierOrder: expect.any(Array),
+        failedChunks: {
+          transient: expect.any(Number),
+          permanent: expect.any(Number),
+        },
+        lastError: null,
+        decodesPerSec: expect.any(Number),
+        decodeWorkersTotal: expect.any(Number),
+        avgDecodeMs: expect.any(Number),
+        decodeP50Ms: expect.any(Number),
+        decodeP95Ms: expect.any(Number),
+        tierResidency: {
+          activeDetail: { count: expect.any(Number), bytes: expect.any(Number) },
+          demotedDetail: { count: expect.any(Number), bytes: expect.any(Number) },
+          prefetch: { count: expect.any(Number), bytes: expect.any(Number) },
+          overview: { count: expect.any(Number), bytes: expect.any(Number) },
+          proxy: { count: expect.any(Number), bytes: expect.any(Number) },
+        },
+      });
+
+      // A few load-bearing values from the known-input sequence — one
+      // submit + a non-cached fetch + drain leaves a single
+      // active-detail entry of 64 bytes. Hit rate is 0 because the
+      // first submit was a miss.
+      expect(tel.hitRate).toBe(0);
+      expect(tel.tierResidency.activeDetail.count).toBe(1);
+      expect(tel.tierResidency.activeDetail.bytes).toBe(64);
+      expect(tel.mainBytes).toBe(64);
+    });
   });
 });
 

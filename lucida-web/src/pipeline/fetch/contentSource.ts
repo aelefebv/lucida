@@ -94,6 +94,24 @@ export class ProxiedContentSource implements ContentSource {
     this.imageWireFormats.set(imageId, wireFormat);
   }
 
+  /**
+   * Drop wire-format registrations for the listed images. Pair with
+   * `cancelDataset` on the cache from the dataset-removal lifecycle —
+   * without this, `imageWireFormats` accumulates entries indefinitely
+   * across long sessions of open/close cycles (real long-session leak
+   * surfaced by dechaos pass 4 of the fetch refactor).
+   *
+   * The caller passes the imageIds because `ProxiedContentSource` is
+   * dataset-agnostic: it has no datasetId → imageIds mapping of its
+   * own. The dataset-lifecycle owner (RenderLoop / useBridge) holds
+   * that mapping in the manifest.
+   */
+  unregisterDataset(imageIds: readonly string[]): void {
+    for (const id of imageIds) {
+      this.imageWireFormats.delete(id);
+    }
+  }
+
   /** Route binary chunk data from bridge. Called by the onChunkData handler. */
   handleChunkData(key: string, data: ArrayBuffer): void {
     const entry = this.pending.get(key);
