@@ -60,10 +60,6 @@ export {
   type RunProxyResendPassArgs,
 } from "./delivery/resend.ts";
 
-// Telemetry collaborators. See `Orchestrator` for wiring; consumers
-// outside the orchestrator don't typically need these directly, but the
-// barrel re-exports them so the upload package has a single import
-// surface.
 export {
   SustainedCondition,
   ConsecutiveTickDetector,
@@ -74,14 +70,8 @@ export {
   type ColdStateCauseKey,
 } from "./telemetry/coldState.ts";
 
-// Uploader. Owns the upload-phase concerns the orchestrator hands off
-// alongside planning; see `uploader.ts` JSDoc for the planner → uploader
-// seam.
 export { Uploader } from "./uploader.ts";
 
-// Narrow facet of `RenderClient` the upload phase consumes; lets
-// dispatch/drain/resend depend on the smaller surface. See
-// `uploadClient.ts` JSDoc.
 export type {
   UploadClient,
   ChunksEvictedHandler,

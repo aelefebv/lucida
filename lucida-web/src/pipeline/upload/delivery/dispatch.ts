@@ -1,17 +1,7 @@
 /**
- * Free-function chunk and proxy dispatch helpers.
- *
- * Wraps `client.sliceChunkData` / `client.volumeChunkData` /
- * `client.proxyAssetData` with structured args derived from a
- * `ReadyChunkDelivery` / `ReadyProxyDelivery` + level meta.
- *
- * Lifted out of `Orchestrator.sendDeliveryToWorker` and
- * `sendProxyDeliveryToWorker` so the dispatch loop has no orchestrator
- * state and the per-tick manifest index lookup happens once at the
- * caller (see `manifestIndex.ts`).
- *
- * See Pass 3 `sendDeliveryToWorker` decomposition and Pass 6 Items 7-8
- * of the dechaos upload scan for the rationale.
+ * Free-function chunk and proxy dispatch helpers. Wrap
+ * `client.sliceChunkData` / `client.volumeChunkData` / `client.proxyAssetData`
+ * with structured args derived from a delivery + level meta.
  */
 
 import type { ReadyChunkDelivery, ReadyProxyDelivery } from "../../fetch/index.ts";
@@ -21,12 +11,8 @@ import type { ManifestEntry } from "./manifestIndex.ts";
 import { Axis } from "../../../axes.ts";
 
 /**
- * Send a single chunk delivery to the GPU worker. Resolves all
- * level-meta-derived arguments from the pre-built manifest entry and
- * picks the slice vs volume variant based on `viewMode`.
- *
- * Returns nothing — the caller owns counter accounting (tracker mark,
- * stats bumps) so the dispatch step stays a thin postMessage wrapper.
+ * Picks the slice vs volume client variant based on `viewMode`.
+ * Caller owns counter accounting (tracker mark, stats bumps).
  */
 export function dispatchChunk(
   client: UploadClient,
@@ -87,11 +73,6 @@ export function dispatchChunk(
   }
 }
 
-/**
- * Send a proxy asset delivery to the GPU worker. Thin wrapper around
- * `client.proxyAssetData` that destructures the delivery into the
- * positional-arg layout the client method expects.
- */
 export function dispatchProxy(
   client: UploadClient,
   delivery: ReadyProxyDelivery,

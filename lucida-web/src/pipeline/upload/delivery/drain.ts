@@ -1,14 +1,7 @@
 /**
- * Drain-pass primitives: pure `classifyDelivery` filter + `runDrainPass`
- * loop.
- *
- * The drain pass iterates `cpuCache.drain(budget)` output: for each
- * delivery it asks `classifyDelivery` whether to send or skip, applies
- * the verdict (counter bump + dispatch), and stops when the byte
- * budget is exhausted.
- *
- * See Pass 2 Seam D / Pass 6 Item 1 of the dechaos upload scan for
- * the rationale.
+ * Drain pass — iterates `cpuCache.drain(budget)` output: classify each
+ * delivery, apply the verdict (counter bump + dispatch), stop when the
+ * byte budget is exhausted.
  */
 
 import type {
@@ -34,14 +27,9 @@ export type FilterVerdict =
   | { action: "skip"; reason: "prefetch" | "overview" | "wrongLod" | "noMeta" };
 
 /**
- * Pure filter applied per delivery in the drain pass. Returns a verdict;
- * the caller applies side effects (counter bumps, send) based on it.
- *
- * Proxies always pass (the worker proxy pool has its own admission
- * policy; there's no per-tick lane/LOD filter on proxies). Chunks are
- * filtered by lane (prefetch/overview belong to other pipelines),
- * target-LOD (level must match the most recent plan for the image),
- * and manifest membership (image must resolve to a `ManifestEntry`).
+ * Pure filter. Proxies always pass (the worker proxy pool has its own
+ * admission policy). Chunks are filtered by lane, target-LOD, and
+ * manifest membership.
  */
 export function classifyDelivery(
   delivery: ReadyDelivery,
@@ -87,17 +75,7 @@ export interface RunPassResult {
   budgetExhausted: boolean;
 }
 
-/**
- * Drain-pass loop: iterate decoded deliveries, classify each, dispatch
- * the ones that pass, and stop when the byte budget is exhausted.
- *
- * Counter accounting is uniform across chunk and proxy paths — both
- * write directly to `stats` here (the old `sendDeliveryToWorker` had
- * helper-internal `skippedAlreadySent` / `skippedNoMeta` writes for
- * chunks but no equivalent for proxies; the asymmetry goes away after
- * extraction because `classifyDelivery` produces every skip reason
- * and the caller bumps every counter uniformly).
- */
+/** Iterate decoded deliveries, classify, dispatch, stop on byte budget. */
 export function runDrainPass(args: RunDrainPassArgs): RunPassResult {
   const {
     deliveries,
@@ -177,14 +155,9 @@ export function runDrainPass(args: RunDrainPassArgs): RunPassResult {
 // ---------------------------------------------------------------------------
 
 /**
- * Dispatch a chunk delivery to the worker, accounting for already-sent
- * guards. Bumps `stats.skippedAlreadySent` and returns 0 when the
- * tracker already shows the chunk on the worker; otherwise calls
- * `dispatchChunk`, marks the tracker, and returns the bytes sent.
- *
- * Exported as a free helper (rather than inlined) so the chunk-resend
- * pass can reuse the same dispatch shape without duplicating the
- * tracker-mark / byteLength bookkeeping.
+ * Dispatch a chunk + mark the tracker, with an already-sent guard.
+ * Returns bytes sent (0 on skip). Exported so `runChunkResendPass`
+ * reuses the same dispatch shape.
  */
 export function sendChunk(
   client: UploadClient,
@@ -221,10 +194,7 @@ export function sendChunk(
   return delivery.data.byteLength;
 }
 
-/**
- * Dispatch a proxy delivery to the worker and record it in the
- * tracker's proxy-delivered set. Returns the bytes sent.
- */
+/** Dispatch a proxy + mark the tracker. Returns bytes sent. */
 export function sendProxy(
   client: UploadClient,
   delivery: ReadyProxyDelivery,

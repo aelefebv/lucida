@@ -1,14 +1,7 @@
 /**
- * Cold-state roster builders.
- *
- * The roster is the per-dataset list of `MemberRosterEntry` records that
- * the render paths (slice + volume) consume to build layer params. The
- * same matrices are consumed by `buildColdState` to populate per-entry
- * model matrices in the cold-state message sent to the GPU worker.
- *
- * `buildRoster` wraps the per-active-set walk into a single pure builder
- * that produces both the roster list and the matricesByEntity map in one
- * pass.
+ * Per-dataset roster of `MemberRosterEntry` records: consumed by the
+ * render paths to build layer params, and by `buildColdState` for the
+ * per-entry model matrices. `buildRoster` produces both in one pass.
  */
 import { Axis } from "../../../axes.ts";
 import type { TickContext } from "../../../renderLoopTypes.ts";
@@ -20,19 +13,15 @@ import { groupByWell } from "../../planning/index.ts";
 import type { MemberRosterEntry } from "../../orchestrator.ts";
 
 /**
- * Build a synthetic roster entry for a `well-as-proxy` entry.
+ * Synthetic roster entry for a `well-as-proxy` entry.
  *
- * Wells aren't in `derived.members` so `scene.member_model_matrix` would
- * return identity for them; instead we compute the well's world-space
- * AABB by unioning each visible field's `[0,1]^3` cube transformed by
- * its own model matrix, then build a translate+scale matrix that maps
- * `[0,1]^3` onto that AABB. The shader marches a ray through this
- * synthetic cube and samples the well's proxy texture once per fragment.
+ * Wells aren't in `derived.members` (so `scene.member_model_matrix`
+ * returns identity for them). Instead we compute the well's world-space
+ * AABB by unioning each visible field's `[0,1]^3` cube, then build a
+ * translate+scale matrix mapping `[0,1]^3` onto that AABB. The shader
+ * ray-marches this synthetic cube and samples the well's proxy texture.
  *
- * Returns `null` if no field model matrices were available (defensive;
- * caller already filters out wells with zero visible fields).
- *
- * Pure modulo `ctx.scene.member_model_matrix` reads.
+ * Returns `null` if no field matrices were available.
  */
 export function synthesizeWellRosterEntry(
   ctx: TickContext,
@@ -140,23 +129,7 @@ export interface BuildRosterResult {
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
 }
 
-/**
- * Walk an active set and produce both the render roster and the
- * matrices map in a single pass.
- *
- * Behaviour:
- *   - `well-as-proxy` entries are synthesised via
- *     {@link synthesizeWellRosterEntry}; skipped if the well has zero
- *     visible fields (no geometry to render).
- *   - `invisible` entries are skipped (they don't render).
- *   - `field` entries look up their `EntitySnapshot` and produce a
- *     roster entry forwarding `imageId`, `position`, `entityId`, `mode`.
- *
- * For every produced entry with an `entityId`, this builder records the
- * model + inverse matrices into `matricesByEntity`. `well-as-proxy`
- * entries reuse the synthesised matrices; field entries look them up
- * from `scene.member_model_matrix` / `inv_member_model_matrix`.
- */
+/** Single-pass walk of the active set producing roster + matrices map. */
 export function buildRoster(args: {
   activeSet: ActiveSetEntry[];
   entities: EntitySnapshot[];

@@ -1,14 +1,7 @@
 /**
- * Resend-pass primitives: pure `classifyChunkResend` /
- * `classifyProxyResend` dedup filters + the `runChunkResendPass` /
- * `runProxyResendPass` loops.
- *
- * The resend passes walk the planner's most-recent per-dataset
- * request lists (`_lastFilteredRequests`, `_lastProxyRequests`) and
- * re-send anything the worker hasn't yet received (atlas / proxy pool
- * eviction recovery). Mirrors the cpuCache dedup ladder pattern.
- *
- * See Pass 2 Seam E / Pass 6 Item 2 of the dechaos upload scan.
+ * Resend passes — walk the planner's most-recent per-dataset request
+ * lists and re-send anything the worker hasn't yet received (atlas /
+ * proxy pool eviction recovery). Mirrors the cpuCache dedup ladder.
  */
 
 import type {
@@ -46,13 +39,10 @@ export type ResendVerdict<T> =
   | { action: "send"; cached: T };
 
 /**
- * Pure dedup filter for the chunk resend pass.
- *
- * Order matches the historical inline ladder in `deliverToWorker`:
+ * Pure dedup filter. Order:
  *   1. prefetch — never resent (cache-only lane);
  *   2. already-sent — tracker says the worker has it;
- *   3. rejected — worker reported it as too-far (atlas full + farther
- *      than farthest existing slot);
+ *   3. rejected — worker reported it as too-far;
  *   4. not-cached — cpuCache has no entry to resend.
  */
 export function classifyChunkResend(
@@ -74,13 +64,10 @@ export function classifyChunkResend(
 }
 
 /**
- * Pure dedup filter for the proxy resend pass.
- *
+ * Pure dedup filter. Proxies have no lane or rejection concept, so
+ * the ladder is shorter than `classifyChunkResend`:
  *   1. already-delivered — tracker has the composite key;
  *   2. not-cached — cpuCache has no entry to resend.
- *
- * Proxies have no lane or rejection concept (different from chunks),
- * so the ladder is shorter.
  */
 export function classifyProxyResend(
   req: ProxyRequest,
@@ -106,7 +93,7 @@ export function classifyProxyResend(
 // ---------------------------------------------------------------------------
 
 export interface RunChunkResendPassArgs {
-  /** Per-dataset request map (kept this shape after #613). */
+  /** Per-dataset map (avoids last-dataset-wins; #613). */
   requestsByDataset: Map<string, ChunkRequest[]>;
   manifestByImage: Map<string, ManifestEntry>;
   tracker: DeliveryTracker;
@@ -121,11 +108,7 @@ export interface RunChunkResendPassArgs {
   remaining: number;
 }
 
-/**
- * Iterate every dataset's most-recent filtered chunk requests, dedup
- * via `classifyChunkResend`, and re-send anything the worker hasn't
- * yet acked. Stops on the byte budget like the drain pass.
- */
+/** Re-send chunks the worker hasn't yet acked. Stops on the byte budget. */
 export function runChunkResendPass(
   args: RunChunkResendPassArgs,
 ): RunPassResult {
@@ -155,9 +138,7 @@ export function runChunkResendPass(
 
       const verdict = classifyChunkResend(req, workerMemberId, tracker, cpuCache);
 
-      // Resend "considered" counts everything that wasn't an upfront
-      // prefetch skip — matches the prior inline counter that bumped
-      // right after the lane filter.
+      // Resend "considered" excludes upfront prefetch skips.
       if (verdict.action === "skip" && verdict.reason === "prefetch") {
         continue;
       }
@@ -211,11 +192,7 @@ export interface RunProxyResendPassArgs {
   remaining: number;
 }
 
-/**
- * Iterate every dataset's most-recent proxy requests, dedup via
- * `classifyProxyResend`, and re-send anything not already in the
- * tracker's delivered set. Stops on the byte budget.
- */
+/** Re-send proxies not already in the tracker's delivered set. Stops on the byte budget. */
 export function runProxyResendPass(
   args: RunProxyResendPassArgs,
 ): RunPassResult {

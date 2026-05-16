@@ -1,17 +1,7 @@
 /**
- * Per-channel display-state builder for cold-state messages.
- *
- * The worker writes one display-state record per (entry × visible channel)
- * pair into the GPU `EntityDescriptor`. This function bakes the per-channel
- * overrides — falling back to dataset-level contrast / gamma / opacity when
- * no per-channel override exists.
- *
- * Single-channel mode populates the lone active channel; multi-channel mode
- * populates every visible channel. The caller passes whatever `visibleChannels`
- * the planner has selected.
- *
- * Pure function — no orchestrator or scene state. Extracted from
- * `Orchestrator.sendColdState` so the build can be unit-tested without mocks.
+ * Per-channel display-state builder. Bakes per-channel overrides into
+ * the cold-state message, falling back to dataset-level contrast / gamma
+ * / opacity when no per-channel override exists.
  */
 import type { ColdStateDisplayState } from "../../../renderer/workerProtocol.ts";
 import type { DatasetSettings } from "../../../tickCommon.ts";

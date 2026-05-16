@@ -1,23 +1,6 @@
 /**
- * WorkerFeedback — owns the worker → main-thread feedback handlers.
- *
- * The GPU worker reports two things back to the orchestrator:
- *
- * - `chunksEvicted` — chunks the atlas displaced (or refused: the
- *   incoming chunk was farther than the farthest existing slot when
- *   the atlas was full).
- * - `wantedSetDelta` — items the worker is missing. The chunk branch is
- *   dead state (no per-chunk wanted-set lives on the orchestrator);
- *   only the proxy branch is meaningful.
- *
- * Both handlers were previously methods on `Orchestrator`. They are
- * extracted here so the orchestrator's worker-feedback surface is a
- * pair of one-line delegations, and so the handlers can be tested
- * directly against `DeliveryTracker` without spinning up the full
- * orchestrator.
- *
- * See `wiki/outputs/dechaos-upload-2026-05-15/02-boundary-scan.md`
- * Seam G for the design rationale.
+ * WorkerFeedback — owns the worker → main-thread feedback handlers
+ * (`chunksEvicted`, `wantedSetDelta`).
  */
 
 import type { CpuCache } from "../../fetch/index.ts";
@@ -35,21 +18,14 @@ export class WorkerFeedback {
   }
 
   /**
-   * Process a worker eviction report.
+   * - `evicted` chunks were displaced by closer arrivals — re-eligible
+   *   under the same plan.
+   * - `skipped` chunks never made it in (atlas full + too far) —
+   *   recorded as rejected and forwarded to `cpuCache.markRejected`
+   *   when the entityId is known, so the cache stops re-fetching them.
    *
-   * - `evicted` chunks were in the atlas and got displaced by closer
-   *   arrivals. They're re-eligible for upload under the same plan.
-   * - `skipped` chunks never made it into the atlas (full + incoming
-   *   farther than the farthest existing slot). They're recorded as
-   *   rejected on the tracker and — for skipped chunks whose
-   *   `memberId` resolves to a known entityId — forwarded to
-   *   `cpuCache.markRejected` so the cache stops re-fetching them
-   *   under eviction churn.
-   *
-   * The cpuCache parameter is kept here because the orchestrator owns
-   * no cpuCache reference today (it gets one through `ctx.cpuCache` in
-   * tick methods). The Uploader could hold its own and the parameter
-   * could drop.
+   * `cpuCache` is a parameter because the orchestrator owns no
+   * cpuCache reference today (it gets one through `ctx.cpuCache`).
    */
   handleChunksEvicted(
     memberId: string,
@@ -66,16 +42,10 @@ export class WorkerFeedback {
   }
 
   /**
-   * Process a wanted-set delta. Only the proxy branch is meaningful:
-   * when the worker reports a missing proxy, clear the proxy-delivered
-   * tracking so the next tick's resend pass picks it up via
-   * `getCachedProxy`. Chunk entries in the delta are intentionally
-   * ignored — the orchestrator has no per-chunk wanted-set; see
-   * `CHUNK_PIPELINE.md` and the dechaos outputs for rationale.
-   *
-   * Proxy resends must be tracked (not just chunk resends): the
-   * cache-hit short-circuit means we can't rely on `submit()`
-   * re-emission to recover from a worker-side eviction.
+   * Only the proxy branch is meaningful — the orchestrator has no
+   * per-chunk wanted-set (see `CHUNK_PIPELINE.md`). Proxy resends MUST
+   * be tracked: the cache-hit short-circuit means we can't rely on
+   * `submit()` re-emission to recover from a worker-side eviction.
    */
   handleWantedSetDelta(
     missing: Array<MissingChunk | MissingProxy>,

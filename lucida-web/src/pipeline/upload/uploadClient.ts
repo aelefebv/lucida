@@ -1,22 +1,7 @@
 /**
- * `UploadClient` — narrow facet of {@link RenderClient} consumed by the
- * upload phase (CPU → GPU hand-off).
- *
- * The upload path only needs cold/hot state emission, chunk + proxy
- * dispatch, layer-resource removal, and the two worker → main feedback
- * callback fields. The render-side methods on `RenderClient`
- * (`volumeRenderMultiPass`, `sliceRenderMultiPass`, `minimap*`,
- * `updateCursorData`, `destroy`, etc.) are deliberately NOT part of
- * this interface — those stay on `RenderClient` and on the
- * `TickContext.client` typing the render-side code consumes.
- *
- * Today `RenderClient` exposes the feedback handlers
- * (`onChunksEvicted`, `onWantedSetDelta`) as assignable fields, set
- * externally from `RenderLoop.start`. This interface keeps the same
- * shape for backward compatibility.
- *
- * See `wiki/outputs/dechaos-upload-2026-05-15/02-boundary-scan.md`
- * Seam O (`RenderClient` knows too many message shapes).
+ * `UploadClient` — narrow facet of `RenderClient` consumed by the upload
+ * phase. Render-side methods (`volumeRenderMultiPass`, `minimap*`, etc.)
+ * are deliberately NOT part of this interface.
  */
 import type {
   ColdStateMessage,
@@ -27,12 +12,8 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 
 /**
- * Callback type for the worker's `chunksEvicted` report. The first
- * argument is the worker-side member id (single-channel `imageId` or
- * multi-channel `imageId:chN`) — the same identifier the orchestrator
- * uses to key per-member delivery tracking. Previously named
- * `datasetId` on both the wire protocol and this typedef; renamed per
- * dechaos Pass 5 Contract Issue 3.
+ * Worker `chunksEvicted` callback. `memberId` is the worker-side member
+ * id: single-channel `imageId` or multi-channel `imageId:chN`.
  */
 export type ChunksEvictedHandler = (
   memberId: string,
@@ -40,31 +21,17 @@ export type ChunksEvictedHandler = (
   skipped: string[],
 ) => void;
 
-/**
- * Callback type for the worker's `wantedSetDelta` report. The `missing`
- * array is a discriminated union over chunks and proxies; consumers
- * match on `kind === "chunk" | "proxy"`.
- */
 export type WantedSetHandler = (
   epochs: SceneEpochs,
   missing: Array<MissingChunk | MissingProxy>,
 ) => void;
 
-/**
- * Narrow facet of `RenderClient` that the upload phase consumes.
- *
- * Surface: cold/hot state emission, chunk + proxy dispatch, layer
- * resource removal, and worker → main feedback callbacks. Render-side
- * methods stay on the full `RenderClient` and are not part of this
- * interface.
- */
 export interface UploadClient {
   coldState(msg: ColdStateMessage): void;
 
   /**
-   * Posts a viewEpoch hot-state message. Must be sent before subsequent
-   * render messages so the worker's `rayHitPerEntity` is current when
-   * chunk-data eviction fires.
+   * Must be sent before subsequent render messages so the worker's
+   * `rayHitPerEntity` is current when chunk-data eviction fires.
    */
   viewHotState(msg: ViewHotStateMessage): void;
 
@@ -129,16 +96,6 @@ export interface UploadClient {
 
   removeLayerResources(datasetId: string): void;
 
-  /**
-   * Assignable feedback handler — backward-compatible with the existing
-   * `RenderClient.onChunksEvicted` field. See type docstring on
-   * {@link ChunksEvictedHandler} for argument shape notes.
-   */
   onChunksEvicted: ChunksEvictedHandler | null;
-
-  /**
-   * Assignable feedback handler — backward-compatible with the existing
-   * `RenderClient.onWantedSetDelta` field.
-   */
   onWantedSetDelta: WantedSetHandler | null;
 }

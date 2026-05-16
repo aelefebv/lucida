@@ -1302,11 +1302,9 @@ describe("multi-dataset upload characterization", () => {
   );
 
   it("tracker.wasChunkSent returns false after a fresh multi-dataset rebuild (clear-all behavior)", async () => {
-    // Pre-Slice-4 the per-dataset loop called `deliverySentToWorker.clear()`
-    // once per dataset (effectively all-or-nothing). Post-Slice-5 a single
-    // `deliveryTracker.onColdStateRebuild()` call at the top of the
-    // rebuild path consolidates the reset — same observable result.
-    // Post-Slice-10 the call moves to `uploader.onPlanRebuildStart()`.
+    // A single `uploader.onPlanRebuildStart()` at the top of the
+    // rebuild path consolidates the chunk-tracker reset across every
+    // dataset in the rebuild.
     const uploader = new Uploader();
     const orch = new Orchestrator(uploader);
     const tracker = (uploader as unknown as {
@@ -1357,14 +1355,12 @@ describe("cold-state lifecycle invariant", () => {
   });
 
   it("after sendColdState, tracker.wasChunkSent returns false for previously-sent keys", async () => {
-    // Invariant: every cold-state rebuild calls
-    // `deliveryTracker.onColdStateRebuild()`, which clears the sent /
-    // rejected / wid → entity maps in one shot. Without this the worker
-    // would build a fresh atlas while the orchestrator believed it had
-    // already supplied chunks — atlas would stay empty for stale keys.
-    //
-    // Post-Slice-10 the call is hoisted to `uploader.onPlanRebuildStart()`
-    // at the top of the rebuild path. This test guards against regressions.
+    // Invariant: `uploader.onPlanRebuildStart()` at the top of every
+    // rebuild path calls `deliveryTracker.onColdStateRebuild()`, which
+    // clears the sent / rejected / wid → entity maps in one shot.
+    // Without this the worker would build a fresh atlas while the
+    // orchestrator believed chunks were already supplied — atlas would
+    // stay empty for stale keys.
     const uploader = new Uploader();
     const orch = new Orchestrator(uploader);
     // Seed: pretend a previous tick delivered a chunk for "img-0".
