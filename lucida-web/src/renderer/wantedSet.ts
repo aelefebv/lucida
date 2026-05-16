@@ -13,6 +13,7 @@ import type {
 } from "./workerProtocol.ts";
 import type { ProxyKind } from "../pipeline/assetCatalog.ts";
 import { makeCompositeKey } from "./chunkKeys.ts";
+import { memberIdForColdEntry } from "./descriptorBuffer.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -186,15 +187,21 @@ export function computeWantedSet(
 
     // ---- existing chunk wanted-set (unchanged) ----
     // Build the list of (workerMemberId, channel) pairs for this entry.
+    // Use the canonical memberIdForColdEntry helper so well-as-proxy
+    // entries (imageId === "") resolve to entityId rather than ":chN".
     const members: Array<{ memberId: string; channel: number }> = [];
     if (isMultiChannel) {
       for (const c of coldState.visibleChannels) {
-        members.push({ memberId: `${entry.imageId}:ch${c}`, channel: c });
+        members.push({
+          memberId: memberIdForColdEntry(entry, c, true),
+          channel: c,
+        });
       }
     } else {
+      const channel = coldState.visibleChannels[0];
       members.push({
-        memberId: entry.imageId,
-        channel: coldState.visibleChannels[0],
+        memberId: memberIdForColdEntry(entry, channel, false),
+        channel,
       });
     }
 

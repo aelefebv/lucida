@@ -27,6 +27,8 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,
+  iterateColdMembers,
+  memberIdForColdEntry,
   type EntityDescriptorIndex,
 } from "./descriptorBuffer.ts";
 
@@ -526,28 +528,14 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         }
 
         // First pass: register member→dataset mappings for all entries.
-        // well-as-proxy entries have `imageId === ""` per planning; the
-        // volume/slice path emits layers keyed by the well's entityId
-        // (multi-channel: composite of entityId + channel). Register
-        // both keys so layerToPool can resolve them.
-        for (const entry of msg.activeSet) {
-          if (isMultiCh) {
-            for (const ch of msg.visibleChannels) {
-              if (entry.imageId) {
-                memberToDataset.set(`${entry.imageId}:ch${ch}`, msg.datasetId);
-              }
-              if (entry.mode === "well-as-proxy") {
-                memberToDataset.set(`${entry.entityId}:ch${ch}`, msg.datasetId);
-              }
-            }
-          } else {
-            if (entry.imageId) {
-              memberToDataset.set(entry.imageId, msg.datasetId);
-            }
-            if (entry.mode === "well-as-proxy") {
-              memberToDataset.set(entry.entityId, msg.datasetId);
-            }
-          }
+        // Canonical iteration (descriptorBuffer.iterateColdMembers) walks
+        // activeSet × visibleChannels and uses the same memberId scheme as
+        // the rest of the pipeline: imageId for fields, entityId for
+        // well-as-proxy entries (where imageId === ""). One loop replaces
+        // the previous field/well × single/multi-channel four-branch
+        // conditional.
+        for (const { memberId } of iterateColdMembers(msg)) {
+          memberToDataset.set(memberId, msg.datasetId);
         }
 
         // Capture the entityMetas this cold state actually produces
@@ -580,7 +568,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
               const poolKey = isMultiCh
                 ? `${msg.datasetId}:ch${channel}:${chunkDimsKey}`
                 : `${msg.datasetId}:${chunkDimsKey}`;
-              const memberId = isMultiCh ? `${entry.imageId}:ch${channel}` : entry.imageId;
+              const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
 
               memberToPool.set(memberId, poolKey);
 
@@ -665,7 +653,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
               const poolKey = isMultiCh
                 ? `${msg.datasetId}:ch${channel}:${chunkDimsKey}`
                 : `${msg.datasetId}:${chunkDimsKey}`;
-              const memberId = isMultiCh ? `${entry.imageId}:ch${channel}` : entry.imageId;
+              const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
 
               memberToPool.set(memberId, poolKey);
 
