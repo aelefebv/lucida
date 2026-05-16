@@ -45,29 +45,15 @@ import type { CpuCache } from "./fetch/index.ts";
 import type { ProxyRequest } from "./planning/index.ts";
 import {
   debugStats,
-  emptyColdStateDebug,
   emptyUploadTickStats,
   type OrchDebug,
-  type ColdStateDebug,
-  type ColdStateCauseCounts,
   type UploadTickStats,
-  type UploadRollingStats,
 } from "../debug/debugStats.ts";
-import { debugLog } from "../debug/logging.ts";
+import { UploadTelemetry } from "./upload/telemetry/upload.ts";
 import {
-  COLD_STATE_CHURN_LOG_RATE_LIMIT_MS,
-  COLD_STATE_CHURN_SUSTAIN_MS,
-  COLD_STATE_CHURN_THRESHOLD_PER_SEC,
-  COLD_STATE_DURATION_SAMPLES,
-  COLD_STATE_WINDOW_MS,
-  UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
-  UPLOAD_FILTER_RATIO_THRESHOLD,
-  UPLOAD_LOG_RATE_LIMIT_MS,
-  UPLOAD_LOG_SUSTAIN_MS,
-  UPLOAD_RESEND_RATIO_THRESHOLD,
-  UPLOAD_SIZE_SAMPLES,
-  UPLOAD_WINDOW_MS,
-} from "./upload/constants.ts";
+  ColdStateTelemetry,
+  type ColdStateCauseKey,
+} from "./upload/telemetry/coldState.ts";
 import { buildColdState } from "./upload/coldState/build.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
 import { buildViewHotState } from "./upload/coldState/hotState.ts";
@@ -79,9 +65,6 @@ import {
   runChunkResendPass,
   runProxyResendPass,
 } from "./upload/delivery/resend.ts";
-
-/** Per-epoch cause keys we attribute rebuilds to. */
-type ColdStateCauseKey = "content" | "layout" | "view" | "selection" | "asset";
 
 /** A visible member for render layer construction. */
 export interface MemberRosterEntry {
@@ -240,103 +223,38 @@ export class Orchestrator {
   private workerFeedback = new WorkerFeedback(this.deliveryTracker);
 
   // -------------------------------------------------------------------------
-  // Cold-state rebuild telemetry. See COLD_STATE_* constants above.
+  // Telemetry collaborators (Slice 9 of PRD #607)
   // -------------------------------------------------------------------------
 
   /**
-   * Rolling 1s window of cold-state events. Each tick of `planAndFetch`
-   * appends one entry (either a hit or a rebuild); entries older than
-   * `COLD_STATE_WINDOW_MS` are pruned in {@link pruneColdStateWindow}.
-   * The DebugPanel "Render" tab + header pulse derive from this.
+   * Cold-state rebuild telemetry. Owns the events ring buffer, the
+   * cumulative + windowed counters, the per-epoch cause attribution,
+   * the p50/p95 sample buffer, and the sustained-non-view-churn
+   * detector. The orchestrator calls `recordHit` / `recordRebuild` at
+   * the right sites in `planAndFetch` and reads the snapshot via
+   * `publish()` when attaching to `debugStats.orch.coldState`.
    */
-  private coldStateEvents: Array<{
-    at: number;
-    kind: "hit" | "rebuild";
-    /** Empty for hits and for the very first rebuild (no prior epochs to diff). */
-    causes: ColdStateCauseKey[];
-    /** Wall-clock duration of the rebuild path; undefined for hits. */
-    durationMs?: number;
-  }> = [];
-  private coldStateRebuildCount = 0;
-  private coldStateHitCount = 0;
-  private coldStateCauseTotal: ColdStateCauseCounts = {
-    content: 0, layout: 0, view: 0, selection: 0, asset: 0,
-  };
-  /** Bounded sample buffer for p50/p95 rebuild duration. FIFO. */
-  private coldStateRebuildDurations: number[] = [];
-  private coldStateLastRebuildAt = 0;
-  private coldStateLastRebuildMs: number | null = null;
-  /**
-   * Cached `ColdStateDebug` snapshot. Updated each tick by
-   * {@link publishColdStateDebug}. Read by both the hit and rebuild
-   * branches of `planAndFetch` to populate `debugStats.orch.coldState`.
-   */
-  private coldStateDebug: ColdStateDebug = emptyColdStateDebug();
-  /**
-   * Sustained-non-view-churn detector. `aboveThresholdSince` tracks the
-   * timestamp at which we crossed `COLD_STATE_CHURN_THRESHOLD_PER_SEC`;
-   * `lastLogAt` rate-limits `cold_state.churn` events.
-   */
-  private coldStateChurnState = {
-    aboveThresholdSince: null as number | null,
-    lastLogAt: 0,
-  };
+  private readonly coldStateTelemetry = new ColdStateTelemetry();
 
-  // -------------------------------------------------------------------------
-  // Upload telemetry (deliverToWorker). See UPLOAD_* constants above.
-  // -------------------------------------------------------------------------
+  /**
+   * Upload telemetry. Owns the events ring buffer, the per-tick
+   * aggregate ring buffer, the p50/p95 size sketch, the cumulative
+   * counters, and the three sustained-anomaly detectors
+   * (`upload.budget_exhausted_sustained`, `upload.resend_storm`,
+   * `upload.drain_waste`). The orchestrator calls `recordEvent` per
+   * upload (wired through the drain/resend passes) and `publish` at
+   * the end of each `deliverToWorker` invocation.
+   */
+  private readonly uploadTelemetry = new UploadTelemetry();
 
   /**
    * Per-tick stats for the in-progress `deliverToWorker` call. Reset
-   * to zero at the start of each call; sendDeliveryToWorker /
-   * sendProxyDeliveryToWorker mutate the skip/byte fields directly.
-   * Published to debugStats and pushed onto the rolling window at end
-   * of tick.
+   * to zero at the start of each call; the drain/resend passes
+   * mutate the skip/byte fields directly. Handed to
+   * {@link uploadTelemetry} via `publish(now, stats)` at the end of
+   * the tick.
    */
   private currentUploadStats: UploadTickStats = emptyUploadTickStats();
-
-  /**
-   * Rolling 1s window of upload events. Each successful upload (drain
-   * or resend, chunk or proxy) appends one entry; pruned on each
-   * `deliverToWorker` call.
-   */
-  private uploadEvents: Array<{
-    at: number;
-    bytes: number;
-    isResend: boolean;
-  }> = [];
-  /**
-   * Rolling 1s window of per-tick aggregates. Lets us compute the
-   * filter ratio (drained vs filtered) and the
-   * `budgetExhaustedTicksLastSecond` count without re-summing per
-   * upload event.
-   */
-  private uploadTickWindow: Array<{
-    at: number;
-    drained: number;
-    drainedChunks: number;
-    uploaded: number;
-    skipped: number;
-    skippedPrefetch: number;
-    skippedOverview: number;
-    skippedWrongLod: number;
-    skippedAlreadySent: number;
-    skippedNoMeta: number;
-    budgetExhausted: boolean;
-  }> = [];
-  /** Bounded sample buffer for p50/p95 upload size. FIFO. */
-  private uploadSizeSamples: number[] = [];
-  private uploadTotalBytes = 0;
-  private uploadTotalUploads = 0;
-  private uploadConsecutiveExhausted = 0;
-  /** Sustained-condition state for the three upload log events. */
-  private uploadLogState = {
-    budgetExhaustedLastLogAt: 0,
-    resendStormSince: null as number | null,
-    resendStormLastLogAt: 0,
-    drainWasteSince: null as number | null,
-    drainWasteLastLogAt: 0,
-  };
 
   /**
    * Unsubscribe from the planning configStore. Called from {@link dispose}
@@ -408,10 +326,10 @@ export class Orchestrator {
     }
 
     if (isHit) {
-      this.recordColdStateHit(tickStart);
+      this.coldStateTelemetry.recordHit(tickStart);
       if (debugStats.enabled && debugStats.orch) {
         debugStats.orch.epochCacheHit = true;
-        debugStats.orch.coldState = this.coldStateDebug;
+        debugStats.orch.coldState = this.coldStateTelemetry.publish();
       }
       // Replay member stats from the last full planning run so the panel
       // doesn't blink to "Visible: 0 / 0" between non-planning ticks.
@@ -670,9 +588,10 @@ export class Orchestrator {
         members: [],
         hasMixedLevels: false,
         epochCacheHit: false,
-        // Replaced after `recordColdStateRebuild` below — placeholder
-        // here so the type checks during the in-progress assembly.
-        coldState: this.coldStateDebug,
+        // Replaced after `coldStateTelemetry.recordRebuild` below —
+        // placeholder here so the type checks during the in-progress
+        // assembly.
+        coldState: this.coldStateTelemetry.publish(),
         visibleRegion: null,
         entityDiag: [],
       };
@@ -811,386 +730,12 @@ export class Orchestrator {
     // *after* step 4 means the OrchDebug published this tick reflects
     // the rebuild we just did.
     const tickEnd = performance.now();
-    this.recordColdStateRebuild(tickStart, causes, tickEnd - tickStart);
+    this.coldStateTelemetry.recordRebuild(tickStart, causes, tickEnd - tickStart);
     if (debugStats.enabled && debugStats.orch) {
-      debugStats.orch.coldState = this.coldStateDebug;
+      debugStats.orch.coldState = this.coldStateTelemetry.publish();
     }
 
     return this.cachedResult;
-  }
-
-  // -------------------------------------------------------------------------
-  // Cold-state telemetry helpers — see private fields above for state.
-  // -------------------------------------------------------------------------
-
-  private recordColdStateHit(now: number): void {
-    this.coldStateHitCount++;
-    this.coldStateEvents.push({ at: now, kind: "hit", causes: [] });
-    this.pruneColdStateWindow(now);
-    this.publishColdStateDebug();
-  }
-
-  private recordColdStateRebuild(
-    now: number,
-    causes: ColdStateCauseKey[],
-    durationMs: number,
-  ): void {
-    this.coldStateRebuildCount++;
-    for (const c of causes) this.coldStateCauseTotal[c]++;
-    this.coldStateLastRebuildAt = now;
-    this.coldStateLastRebuildMs = durationMs;
-    this.coldStateRebuildDurations.push(durationMs);
-    if (this.coldStateRebuildDurations.length > COLD_STATE_DURATION_SAMPLES) {
-      this.coldStateRebuildDurations.shift();
-    }
-    this.coldStateEvents.push({ at: now, kind: "rebuild", causes, durationMs });
-    this.pruneColdStateWindow(now);
-    this.maybeLogColdStateChurn(now);
-    this.publishColdStateDebug();
-  }
-
-  private pruneColdStateWindow(now: number): void {
-    const cutoff = now - COLD_STATE_WINDOW_MS;
-    while (this.coldStateEvents.length > 0 && this.coldStateEvents[0].at < cutoff) {
-      this.coldStateEvents.shift();
-    }
-  }
-
-  /**
-   * Sustained-non-view-churn detector. Camera motion legitimately bumps
-   * `view` at high rates, so we ignore it here; any *other* epoch
-   * sustaining > {@link COLD_STATE_CHURN_THRESHOLD_PER_SEC} for >
-   * {@link COLD_STATE_CHURN_SUSTAIN_MS} fires one rate-limited log line
-   * with the dominant cause. Mirrors the `cache.backpressure` pattern.
-   */
-  private maybeLogColdStateChurn(now: number): void {
-    let nonViewRebuilds = 0;
-    const causeCounts: Record<string, number> = {};
-    for (const e of this.coldStateEvents) {
-      if (e.kind !== "rebuild") continue;
-      let nonView = false;
-      for (const c of e.causes) {
-        if (c === "view") continue;
-        nonView = true;
-        causeCounts[c] = (causeCounts[c] ?? 0) + 1;
-      }
-      if (nonView) nonViewRebuilds++;
-    }
-
-    const above = nonViewRebuilds > COLD_STATE_CHURN_THRESHOLD_PER_SEC;
-    if (!above) {
-      this.coldStateChurnState.aboveThresholdSince = null;
-      return;
-    }
-
-    if (this.coldStateChurnState.aboveThresholdSince === null) {
-      this.coldStateChurnState.aboveThresholdSince = now;
-      return;
-    }
-
-    const sustainedFor = now - this.coldStateChurnState.aboveThresholdSince;
-    const sinceLastLog = now - this.coldStateChurnState.lastLogAt;
-    if (sustainedFor < COLD_STATE_CHURN_SUSTAIN_MS) return;
-    if (sinceLastLog < COLD_STATE_CHURN_LOG_RATE_LIMIT_MS) return;
-
-    const dominant =
-      Object.entries(causeCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "?";
-    debugLog("orch", "cold_state.churn", {
-      rebuildsLastSec: this.coldStateEvents.filter(e => e.kind === "rebuild").length,
-      nonViewRebuildsLastSec: nonViewRebuilds,
-      dominantCause: dominant,
-      causeCountsLastSec: causeCounts,
-      sustainedMs: Math.round(sustainedFor),
-    });
-    this.coldStateChurnState.lastLogAt = now;
-  }
-
-  private publishColdStateDebug(): void {
-    let rebuilds = 0;
-    let hits = 0;
-    const causeLastSecond: ColdStateCauseCounts = {
-      content: 0, layout: 0, view: 0, selection: 0, asset: 0,
-    };
-    for (const e of this.coldStateEvents) {
-      if (e.kind === "rebuild") {
-        rebuilds++;
-        for (const c of e.causes) causeLastSecond[c]++;
-      } else {
-        hits++;
-      }
-    }
-    const total = rebuilds + hits;
-
-    let p50: number | null = null;
-    let p95: number | null = null;
-    if (this.coldStateRebuildDurations.length > 0) {
-      const sorted = [...this.coldStateRebuildDurations].sort((a, b) => a - b);
-      p50 = sorted[Math.floor(sorted.length * 0.5)];
-      p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
-    }
-
-    this.coldStateDebug = {
-      rebuilds: this.coldStateRebuildCount,
-      cacheHits: this.coldStateHitCount,
-      hitRate: total > 0 ? hits / total : NaN,
-      rebuildsLastSecond: rebuilds,
-      hitsLastSecond: hits,
-      causeLastSecond,
-      causeTotal: { ...this.coldStateCauseTotal },
-      lastRebuildMs: this.coldStateLastRebuildMs,
-      rebuildP50Ms: p50,
-      rebuildP95Ms: p95,
-      lastRebuildAt: this.coldStateLastRebuildAt,
-    };
-  }
-
-  // -------------------------------------------------------------------------
-  // Upload telemetry helpers — see UPLOAD_* constants and private fields above.
-  // -------------------------------------------------------------------------
-
-  /** Record one upload event (drain-path or resend-path) into the rolling window. */
-  private recordUploadEvent(now: number, bytes: number, isResend: boolean): void {
-    this.uploadEvents.push({ at: now, bytes, isResend });
-    this.uploadSizeSamples.push(bytes);
-    if (this.uploadSizeSamples.length > UPLOAD_SIZE_SAMPLES) {
-      this.uploadSizeSamples.shift();
-    }
-    this.uploadTotalBytes += bytes;
-    this.uploadTotalUploads += 1;
-  }
-
-  /**
-   * Aggregate `currentUploadStats` into the rolling window, derive
-   * rolling stats, fire anomaly logs, and publish to debugStats.
-   * Called at the end of each `deliverToWorker` invocation.
-   */
-  private publishUploadStats(now: number): void {
-    const skipped =
-      this.currentUploadStats.skippedPrefetch +
-      this.currentUploadStats.skippedOverview +
-      this.currentUploadStats.skippedWrongLod +
-      this.currentUploadStats.skippedAlreadySent +
-      this.currentUploadStats.skippedNoMeta;
-    const drained =
-      this.currentUploadStats.drainedChunks + this.currentUploadStats.drainedProxies;
-    const uploaded =
-      this.currentUploadStats.uploadedChunks + this.currentUploadStats.uploadedProxies;
-    this.uploadTickWindow.push({
-      at: now,
-      drained,
-      drainedChunks: this.currentUploadStats.drainedChunks,
-      uploaded,
-      skipped,
-      skippedPrefetch: this.currentUploadStats.skippedPrefetch,
-      skippedOverview: this.currentUploadStats.skippedOverview,
-      skippedWrongLod: this.currentUploadStats.skippedWrongLod,
-      skippedAlreadySent: this.currentUploadStats.skippedAlreadySent,
-      skippedNoMeta: this.currentUploadStats.skippedNoMeta,
-      budgetExhausted: this.currentUploadStats.budgetExhausted,
-    });
-
-    const cutoff = now - UPLOAD_WINDOW_MS;
-    while (this.uploadEvents.length > 0 && this.uploadEvents[0].at < cutoff) {
-      this.uploadEvents.shift();
-    }
-    while (this.uploadTickWindow.length > 0 && this.uploadTickWindow[0].at < cutoff) {
-      this.uploadTickWindow.shift();
-    }
-
-    let bytesInWindow = 0;
-    let uploadsInWindow = 0;
-    let resendUploads = 0;
-    for (const e of this.uploadEvents) {
-      bytesInWindow += e.bytes;
-      uploadsInWindow += 1;
-      if (e.isResend) resendUploads += 1;
-    }
-    let drainedInWindow = 0;
-    let drainedChunksInWindow = 0;
-    let skippedInWindow = 0;
-    let exhaustedTicks = 0;
-    let winSkippedPrefetch = 0;
-    let winSkippedOverview = 0;
-    let winSkippedWrongLod = 0;
-    let winSkippedAlreadySent = 0;
-    let winSkippedNoMeta = 0;
-    for (const t of this.uploadTickWindow) {
-      drainedInWindow += t.drained;
-      drainedChunksInWindow += t.drainedChunks;
-      skippedInWindow += t.skipped;
-      winSkippedPrefetch += t.skippedPrefetch;
-      winSkippedOverview += t.skippedOverview;
-      winSkippedWrongLod += t.skippedWrongLod;
-      winSkippedAlreadySent += t.skippedAlreadySent;
-      winSkippedNoMeta += t.skippedNoMeta;
-      if (t.budgetExhausted) exhaustedTicks += 1;
-    }
-    const skippedInWindowByCause = {
-      skippedPrefetch: winSkippedPrefetch,
-      skippedOverview: winSkippedOverview,
-      skippedWrongLod: winSkippedWrongLod,
-      skippedAlreadySent: winSkippedAlreadySent,
-      skippedNoMeta: winSkippedNoMeta,
-    };
-    // Upload-bound counts: chunks that were *meant* to upload to the
-    // main GPU atlas. Excludes prefetch (cache-only), overview
-    // (minimap path), and proxies (separate atlas + always-uploads).
-    const drainedUploadBoundInWindow =
-      drainedChunksInWindow - winSkippedPrefetch - winSkippedOverview;
-    const skippedUploadBoundInWindow =
-      winSkippedWrongLod + winSkippedAlreadySent + winSkippedNoMeta;
-
-    let p50: number | null = null;
-    let p95: number | null = null;
-    if (this.uploadSizeSamples.length > 0) {
-      const sorted = [...this.uploadSizeSamples].sort((a, b) => a - b);
-      p50 = sorted[Math.floor(sorted.length * 0.5)];
-      p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))];
-    }
-
-    const rolling: UploadRollingStats = {
-      // Window is exactly UPLOAD_WINDOW_MS = 1000 ms, so bytes-in-window
-      // equals bytes-per-sec by construction.
-      bytesPerSec: bytesInWindow,
-      uploadsPerSec: uploadsInWindow,
-      resendRatio: uploadsInWindow > 0 ? resendUploads / uploadsInWindow : NaN,
-      filterRatio:
-        drainedUploadBoundInWindow > 0
-          ? skippedUploadBoundInWindow / drainedUploadBoundInWindow
-          : NaN,
-      uploadSizeP50: p50,
-      uploadSizeP95: p95,
-      totalBytes: this.uploadTotalBytes,
-      totalUploads: this.uploadTotalUploads,
-      budgetExhaustedTicksLastSecond: exhaustedTicks,
-    };
-
-    this.maybeLogUploadAnomalies(now, rolling, {
-      drainedInWindow,
-      skippedInWindow,
-      drainedUploadBoundInWindow,
-      skippedUploadBoundInWindow,
-      byCause: skippedInWindowByCause,
-    });
-
-    if (debugStats.enabled) {
-      debugStats.upload = {
-        tick: { ...this.currentUploadStats },
-        rolling,
-      };
-    }
-  }
-
-  /**
-   * Three sustained-anomaly detectors:
-   *
-   * 1. `upload.budget_exhausted_sustained` — N consecutive ticks where
-   *    `budgetExhausted=true`. Indicates the CPU→GPU pipe is saturated;
-   *    upload work is being deferred to subsequent ticks.
-   * 2. `upload.resend_storm` — most uploads come from the resend pass,
-   *    sustained > 2s. Worker is evicting faster than fresh decodes
-   *    can fill; usually pool capacity vs working set mismatch.
-   * 3. `upload.drain_waste` — most drained chunks are filtered out,
-   *    sustained > 2s. Decode pool is burning cycles on chunks the GPU
-   *    no longer wants — often a planning/wanted-set sync issue.
-   */
-  private maybeLogUploadAnomalies(
-    now: number,
-    rolling: UploadRollingStats,
-    window: {
-      drainedInWindow: number;
-      skippedInWindow: number;
-      drainedUploadBoundInWindow: number;
-      skippedUploadBoundInWindow: number;
-      byCause: {
-        skippedPrefetch: number;
-        skippedOverview: number;
-        skippedWrongLod: number;
-        skippedAlreadySent: number;
-        skippedNoMeta: number;
-      };
-    },
-  ): void {
-    // 1. Sustained budget exhaustion — count consecutive ticks.
-    if (this.currentUploadStats.budgetExhausted) {
-      this.uploadConsecutiveExhausted += 1;
-      if (
-        this.uploadConsecutiveExhausted >= UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD &&
-        now - this.uploadLogState.budgetExhaustedLastLogAt >= UPLOAD_LOG_RATE_LIMIT_MS
-      ) {
-        debugLog("orch", "upload.budget_exhausted_sustained", {
-          consecutiveTicks: this.uploadConsecutiveExhausted,
-          bytesUploadedThisTick: this.currentUploadStats.bytesUploaded,
-          bytesBudget: this.currentUploadStats.bytesBudget,
-        });
-        this.uploadLogState.budgetExhaustedLastLogAt = now;
-      }
-    } else {
-      this.uploadConsecutiveExhausted = 0;
-    }
-
-    // 2. Resend storm.
-    if (
-      !Number.isNaN(rolling.resendRatio) &&
-      rolling.resendRatio > UPLOAD_RESEND_RATIO_THRESHOLD
-    ) {
-      if (this.uploadLogState.resendStormSince === null) {
-        this.uploadLogState.resendStormSince = now;
-      } else {
-        const sustained = now - this.uploadLogState.resendStormSince;
-        if (
-          sustained >= UPLOAD_LOG_SUSTAIN_MS &&
-          now - this.uploadLogState.resendStormLastLogAt >= UPLOAD_LOG_RATE_LIMIT_MS
-        ) {
-          debugLog("orch", "upload.resend_storm", {
-            resendRatio: rolling.resendRatio,
-            uploadsPerSec: rolling.uploadsPerSec,
-            sustainedMs: Math.round(sustained),
-          });
-          this.uploadLogState.resendStormLastLogAt = now;
-        }
-      }
-    } else {
-      this.uploadLogState.resendStormSince = null;
-    }
-
-    // 3. Drain waste.
-    if (
-      !Number.isNaN(rolling.filterRatio) &&
-      rolling.filterRatio > UPLOAD_FILTER_RATIO_THRESHOLD
-    ) {
-      if (this.uploadLogState.drainWasteSince === null) {
-        this.uploadLogState.drainWasteSince = now;
-      } else {
-        const sustained = now - this.uploadLogState.drainWasteSince;
-        if (
-          sustained >= UPLOAD_LOG_SUSTAIN_MS &&
-          now - this.uploadLogState.drainWasteLastLogAt >= UPLOAD_LOG_RATE_LIMIT_MS
-        ) {
-          debugLog("orch", "upload.drain_waste", {
-            // filterRatio is now upload-bound: skipped non-prefetch /
-            // (drained chunks − prefetch − overview). High = real
-            // planning/wanted-set sync issue (chunks meant to upload
-            // got filtered for stale-LOD, already-sent, or no-meta).
-            filterRatio: rolling.filterRatio,
-            drainedUploadBoundInWindow: window.drainedUploadBoundInWindow,
-            skippedUploadBoundInWindow: window.skippedUploadBoundInWindow,
-            skippedWrongLod: window.byCause.skippedWrongLod,
-            skippedAlreadySent: window.byCause.skippedAlreadySent,
-            skippedNoMeta: window.byCause.skippedNoMeta,
-            // Informational — prefetch/overview decode load doesn't
-            // count toward the ratio, but it's useful context for
-            // "was the decode pool busy this window?".
-            skippedPrefetch: window.byCause.skippedPrefetch,
-            skippedOverview: window.byCause.skippedOverview,
-            sustainedMs: Math.round(sustained),
-          });
-          this.uploadLogState.drainWasteLastLogAt = now;
-        }
-      }
-    } else {
-      this.uploadLogState.drainWasteSince = null;
-    }
   }
 
   /**
@@ -1241,7 +786,7 @@ export class Orchestrator {
     }
 
     const recordUpload = (bytes: number, isResend: boolean): void => {
-      this.recordUploadEvent(tickStart, bytes, isResend);
+      this.uploadTelemetry.recordEvent(tickStart, bytes, isResend);
     };
     const passCtx = {
       tracker: this.deliveryTracker,
@@ -1292,7 +837,7 @@ export class Orchestrator {
     }
 
     this.currentUploadStats.budgetExhausted = budgetExhausted;
-    this.publishUploadStats(tickStart);
+    this.uploadTelemetry.publish(tickStart, this.currentUploadStats);
 
     return deliveries.length > 0 || budgetExhausted;
   }

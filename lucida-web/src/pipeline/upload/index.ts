@@ -60,3 +60,17 @@ export {
   type RunChunkResendPassArgs,
   type RunProxyResendPassArgs,
 } from "./delivery/resend.ts";
+
+// Telemetry collaborators (Slice 9 of PRD #607). See `Orchestrator` for
+// wiring; consumers outside the orchestrator don't typically need these
+// directly, but the barrel re-exports them so the upload package has a
+// single import surface.
+export {
+  SustainedCondition,
+  ConsecutiveTickDetector,
+} from "./telemetry/sustained.ts";
+export { UploadTelemetry } from "./telemetry/upload.ts";
+export {
+  ColdStateTelemetry,
+  type ColdStateCauseKey,
+} from "./telemetry/coldState.ts";
