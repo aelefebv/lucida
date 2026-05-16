@@ -26,5 +26,15 @@ export {
 } from "./proxyKeys.ts";
 
 export { identityMatrix } from "./coldState/identity.ts";
+export { buildDisplayStateByChannel } from "./coldState/displayState.ts";
+export {
+  buildRoster,
+  synthesizeWellRosterEntry,
+  type BuildRosterResult,
+} from "./coldState/roster.ts";
+export { buildColdState, buildColdActiveEntry } from "./coldState/build.ts";
+export { buildViewHotState } from "./coldState/hotState.ts";
+
+export { computeScissorRect } from "./scissor.ts";
 
 export { DeliveryTracker } from "./delivery/tracker.ts";

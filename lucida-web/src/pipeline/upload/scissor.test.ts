@@ -1,10 +1,11 @@
 /**
- * Characterization tests for `computeScissorRect`.
+ * Tests for `computeScissorRect`.
  *
- * Pre-refactor (Slice 1 of PRD #607): pin the projection + clamp math
- * before this helper migrates into a sub-module. Pure-function tests.
+ * Slice 6f (PRD #607) moved this helper from `volumePath.ts` into
+ * `pipeline/upload/scissor.ts`. Tests were authored as characterization
+ * tests in Slice 1 and migrated alongside the function.
  *
- * Contract under test (volumePath.ts:16-66):
+ * Contract under test:
  *   - Project all 8 corners of `[0,1]^3` through `model` then `viewProj`.
  *   - If any corner has `clipW <= 0` (behind camera) → conservative
  *     full-screen fallback `[0, 0, canvasW, canvasH]`.
@@ -13,7 +14,7 @@
  *   - Return `null` if the clamped rect is degenerate (w<=0 or h<=0).
  */
 import { describe, it, expect } from "vitest";
-import { computeScissorRect } from "./volumePath.ts";
+import { computeScissorRect } from "./scissor.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers

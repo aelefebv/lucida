@@ -1,11 +1,14 @@
 /**
- * Characterization tests for `synthesizeWellRosterEntry`.
+ * Tests for `synthesizeWellRosterEntry`.
  *
- * Pre-refactor (Slice 1 of PRD #607): pin the AABB-union math and
- * defensive null branches before the helper migrates into a sub-module
- * during a later slice. Pure-function tests — no orchestrator state.
+ * Authored as characterization tests in Slice 1 of PRD #607 to pin the
+ * AABB-union math and defensive null branches before the helper migrated.
+ * Slice 6b moved the helper from `orchestrator.ts` into
+ * `pipeline/upload/coldState/roster.ts`; this test file migrated alongside.
  *
- * Contract under test (see orchestrator.ts:182-285):
+ * Pure-function tests — no orchestrator state.
+ *
+ * Contract under test:
  *   - Union the 3D AABB of every child field's `[0,1]^3` cube transformed
  *     by its `member_model_matrix`.
  *   - Union the 2D AABB of every child field's `(layoutPositionVox, lvl0 X/Y)`.
@@ -16,9 +19,9 @@
  *     `position` + `dataW` + `dataH`.
  */
 import { describe, it, expect } from "vitest";
-import type { TickContext } from "../renderLoopTypes.ts";
-import type { EntitySnapshot } from "./planning/index.ts";
-import { synthesizeWellRosterEntry } from "./orchestrator.ts";
+import type { TickContext } from "../../../renderLoopTypes.ts";
+import type { EntitySnapshot } from "../../planning/index.ts";
+import { synthesizeWellRosterEntry } from "./roster.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
