@@ -8,9 +8,7 @@
  * per-channel, so only the first composite per memberId carries it.
  *
  * Pure function — given a cold-state message + ray-hit + epochs +
- * datasetId, returns a `ViewHotStateMessage`. Extracted from
- * `Orchestrator.sendViewHotState` in Slice 6e of PRD #607 to make the
- * build mock-free.
+ * datasetId, returns a `ViewHotStateMessage`.
  */
 import type {
   ColdStateMessage,

@@ -1,14 +1,14 @@
 /**
- * Uploader — owns every upload-phase concern that the pre-refactor
- * Orchestrator god-class also carried alongside its planning role.
+ * Uploader — owns every upload-phase concern that the orchestrator hands
+ * off alongside its planning role.
  *
- * After Slices 5-9 extracted the collaborators ({@link DeliveryTracker},
- * {@link WorkerFeedback}, {@link UploadTelemetry}, {@link ColdStateTelemetry},
- * pure cold-state builders, drain/resend passes, dispatch helpers), the
- * Uploader's body is composition: methods are thin wrappers wiring the
- * collaborators together. The Orchestrator drives one Uploader instance
- * per render loop and calls dedicated methods from `planAndFetch` rather
- * than passing a wide "tick bundle" struct.
+ * The Uploader's body is composition: the collaborators
+ * ({@link DeliveryTracker}, {@link WorkerFeedback}, {@link UploadTelemetry},
+ * {@link ColdStateTelemetry}, pure cold-state builders, drain/resend passes,
+ * dispatch helpers) carry the real work, and the Uploader's methods are thin
+ * wrappers wiring them together. The Orchestrator drives one Uploader
+ * instance per render loop and calls dedicated methods from `planAndFetch`
+ * rather than passing a wide "tick bundle" struct.
  *
  * See `wiki/outputs/dechaos-upload-2026-05-15/02-boundary-scan.md` Seam A
  * (the headline split) and `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`
@@ -34,8 +34,7 @@
  * The bundle-type alternative (a single `PlanTickBundle` object passed to
  * `applyTick`) was considered and rejected: each method has a focused
  * signature; widening to a struct couples evolution of the bundle to
- * every callsite. See the issue HITL discussion and Slice 10 commit
- * message for context.
+ * every callsite.
  */
 
 import type { CpuCache } from "../fetch/index.ts";
@@ -418,8 +417,7 @@ export class Uploader {
   /**
    * Process a wanted-set delta from the GPU worker. Delegates to
    * {@link WorkerFeedback.handleWantedSetDelta} — only the proxy
-   * branch is meaningful (chunk entries are intentionally ignored
-   * post-Slice 3).
+   * branch is meaningful (chunk entries are intentionally ignored).
    */
   handleWantedSetDelta(
     missing: Array<MissingChunk | MissingProxy>,

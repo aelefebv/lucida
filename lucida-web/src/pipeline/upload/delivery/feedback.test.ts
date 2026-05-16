@@ -1,9 +1,8 @@
 /**
- * Unit tests for {@link WorkerFeedback}. The handlers were previously
- * methods on `Orchestrator`; these tests cover the extracted module at
- * the unit-of-extraction level. Higher-level coverage of the same
- * effects (against the full orchestrator) lives in the Slice 1
- * characterization tests.
+ * Unit tests for {@link WorkerFeedback}. These tests exercise the
+ * extracted module directly against `DeliveryTracker`; higher-level
+ * coverage of the same effects against the full orchestrator lives in
+ * the orchestrator characterization tests.
  */
 
 import { describe, it, expect, vi } from "vitest";

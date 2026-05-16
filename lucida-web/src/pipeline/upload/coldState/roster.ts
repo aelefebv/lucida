@@ -6,10 +6,9 @@
  * same matrices are consumed by `buildColdState` to populate per-entry
  * model matrices in the cold-state message sent to the GPU worker.
  *
- * `synthesizeWellRosterEntry` was moved from `orchestrator.ts` in Slice
- * 6b of PRD #607; `buildRoster` (Slice 6c) wraps the per-active-set walk
- * into a single pure builder that produces both the roster list and the
- * matricesByEntity map in one pass.
+ * `buildRoster` wraps the per-active-set walk into a single pure builder
+ * that produces both the roster list and the matricesByEntity map in one
+ * pass.
  */
 import { Axis } from "../../../axes.ts";
 import type { TickContext } from "../../../renderLoopTypes.ts";
@@ -157,9 +156,6 @@ export interface BuildRosterResult {
  * model + inverse matrices into `matricesByEntity`. `well-as-proxy`
  * entries reuse the synthesised matrices; field entries look them up
  * from `scene.member_model_matrix` / `inv_member_model_matrix`.
- *
- * Slice 6c (PRD #607) — replaces the inline loop previously inside
- * `planAndFetch` (~lines 670-706 post-Slice-5).
  */
 export function buildRoster(args: {
   activeSet: ActiveSetEntry[];

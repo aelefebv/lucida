@@ -6,12 +6,12 @@
  * the `ColdStateMessage` the GPU worker consumes. The build is mock-free:
  * the `Orchestrator.sendColdState` wrapper is responsible for the side
  * effect (posting the message + clearing the chunk delivery tracker on
- * rebuild — the latter is hoisted to once-per-tick in Slice 5).
+ * rebuild — the latter is hoisted to once-per-tick).
  *
  * `buildColdActiveEntry` collapses the three near-identical
- * `well-as-proxy` / `invisible` / `field` variant literals from the
- * pre-refactor `sendColdState` body into one branching function with one
- * shared computation block (levels, parentWellId, matrices). Slice 6d.
+ * `well-as-proxy` / `invisible` / `field` variant literals into one
+ * branching function with one shared computation block (levels,
+ * parentWellId, matrices).
  */
 import { Axis } from "../../../axes.ts";
 import type { LevelGeometry } from "../../../manifestTypes.ts";
@@ -149,7 +149,7 @@ export function buildColdActiveEntry(
  *
  * Per-tick invariant: every call corresponds to a worker atlas rebuild;
  * the orchestrator's chunk delivery tracker is cleared once per tick
- * before any `buildColdState` call (Slice 5, `deliveryTracker.onColdStateRebuild`).
+ * before any `buildColdState` call (`deliveryTracker.onColdStateRebuild`).
  */
 export function buildColdState(args: {
   datasetId: string;

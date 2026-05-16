@@ -10,8 +10,8 @@
  *
  * 2. Telemetry windows / thresholds for both the cold-state rebuild
  *    detector and the upload anomaly detectors. Lifted out of
- *    `orchestrator.ts` so the per-pass telemetry modules (extracted in
- *    later slices of PRD #607) own their tuning knobs.
+ *    `orchestrator.ts` so the per-pass telemetry modules own their
+ *    tuning knobs.
  */
 
 // ---------------------------------------------------------------------------

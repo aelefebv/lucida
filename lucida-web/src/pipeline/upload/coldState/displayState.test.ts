@@ -1,8 +1,6 @@
 /**
- * Unit tests for `buildDisplayStateByChannel`.
- *
- * Slice 6a (PRD #607): pure-function builder extracted from
- * `Orchestrator.sendColdState`. The build is testable with no mocks.
+ * Unit tests for `buildDisplayStateByChannel` — pure-function builder
+ * for the per-channel display state baked into the cold-state message.
  *
  * Contract under test:
  *   - For each visible channel, a `ColdStateDisplayState` is produced

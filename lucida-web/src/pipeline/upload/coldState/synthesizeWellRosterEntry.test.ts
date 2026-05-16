@@ -1,11 +1,6 @@
 /**
  * Tests for `synthesizeWellRosterEntry`.
  *
- * Authored as characterization tests in Slice 1 of PRD #607 to pin the
- * AABB-union math and defensive null branches before the helper migrated.
- * Slice 6b moved the helper from `orchestrator.ts` into
- * `pipeline/upload/coldState/roster.ts`; this test file migrated alongside.
- *
  * Pure-function tests — no orchestrator state.
  *
  * Contract under test:

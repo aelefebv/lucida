@@ -73,7 +73,7 @@ export class UploadTelemetry {
   private uploadTotalBytes = 0;
   private uploadTotalUploads = 0;
 
-  // Three sustained-anomaly detectors (Slice 9a helpers).
+  // Three sustained-anomaly detectors.
   private readonly budgetExhaustedDetector = new ConsecutiveTickDetector({
     threshold: UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
     rateLimitMs: UPLOAD_LOG_RATE_LIMIT_MS,
@@ -251,7 +251,7 @@ export class UploadTelemetry {
    *    no longer wants — often a planning/wanted-set sync issue.
    *
    * Each detector collapses to a single `detector.tick(...)` call via
-   * the Slice 9a helpers.
+   * the shared helpers in `sustained.ts`.
    */
   private runAnomalyDetectors(
     now: number,

@@ -13,10 +13,7 @@
  * Today `RenderClient` exposes the feedback handlers
  * (`onChunksEvicted`, `onWantedSetDelta`) as assignable fields, set
  * externally from `RenderLoop.start`. This interface keeps the same
- * shape for backward compatibility — converting to a typed
- * `subscribe(handler): () => void` pattern is captured as a follow-up
- * (out of scope for this slice). See PRD #607 Slice 11 issue #620 for
- * the rationale.
+ * shape for backward compatibility.
  *
  * See `wiki/outputs/dechaos-upload-2026-05-15/02-boundary-scan.md`
  * Seam O (`RenderClient` knows too many message shapes).

@@ -1,11 +1,10 @@
 /**
  * Unit tests for `buildColdState` / `buildColdActiveEntry`.
  *
- * Slice 6d (PRD #607): the end-to-end pure builder collapses three
- * near-duplicate per-variant literals from the old `sendColdState`
- * (well-as-proxy / invisible / field) into one branching function and
- * a top-level `Array.map`. Tests cover each variant + display-state
- * fallback + empty active set + multi-dataset shape.
+ * The end-to-end pure builder collapses three near-duplicate per-variant
+ * literals (well-as-proxy / invisible / field) into one branching
+ * function and a top-level `Array.map`. Tests cover each variant +
+ * display-state fallback + empty active set + multi-dataset shape.
  */
 import { describe, it, expect } from "vitest";
 import { Axis } from "../../../axes.ts";
@@ -155,8 +154,8 @@ describe("buildColdActiveEntry", () => {
 
     expect(result.kind).toBe("well-as-proxy");
     expect(result.entityId).toBe("well-0");
-    // Slice 11: the well-as-proxy variant has no `imageId` field
-    // (`?: never`). Guard the assertion so the type narrows cleanly.
+    // The well-as-proxy variant has no `imageId` field (`?: never`).
+    // Guard the assertion so the type narrows cleanly.
     if (result.kind !== "well-as-proxy") throw new Error("expected well-as-proxy");
     expect((result as unknown as Record<string, unknown>).imageId).toBeUndefined();
     expect(result.targetLod).toBe(0);

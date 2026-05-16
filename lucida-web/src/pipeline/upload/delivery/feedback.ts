@@ -6,9 +6,9 @@
  * - `chunksEvicted` — chunks the atlas displaced (or refused: the
  *   incoming chunk was farther than the farthest existing slot when
  *   the atlas was full).
- * - `wantedSetDelta` — items the worker is missing. After Slice 3 the
- *   chunk branch is dead state (there is no per-chunk wanted-set on
- *   the orchestrator); only the proxy branch is meaningful.
+ * - `wantedSetDelta` — items the worker is missing. The chunk branch is
+ *   dead state (no per-chunk wanted-set lives on the orchestrator);
+ *   only the proxy branch is meaningful.
  *
  * Both handlers were previously methods on `Orchestrator`. They are
  * extracted here so the orchestrator's worker-feedback surface is a
@@ -48,8 +48,8 @@ export class WorkerFeedback {
    *
    * The cpuCache parameter is kept here because the orchestrator owns
    * no cpuCache reference today (it gets one through `ctx.cpuCache` in
-   * tick methods). After the Slice 10 Uploader extraction the
-   * Uploader could hold its own and the parameter can drop.
+   * tick methods). The Uploader could hold its own and the parameter
+   * could drop.
    */
   handleChunksEvicted(
     memberId: string,
@@ -66,13 +66,12 @@ export class WorkerFeedback {
   }
 
   /**
-   * Process a wanted-set delta. After Slice 3, only the proxy branch
-   * is meaningful: when the worker reports a missing proxy, clear the
-   * proxy-delivered tracking so the next tick's resend pass picks it
-   * up via `getCachedProxy`. Chunk entries in the delta are
-   * intentionally ignored — Slice 3 deleted the dead
-   * `workerWantedSet` field; see `CHUNK_PIPELINE.md` and the dechaos
-   * outputs for rationale.
+   * Process a wanted-set delta. Only the proxy branch is meaningful:
+   * when the worker reports a missing proxy, clear the proxy-delivered
+   * tracking so the next tick's resend pass picks it up via
+   * `getCachedProxy`. Chunk entries in the delta are intentionally
+   * ignored — the orchestrator has no per-chunk wanted-set; see
+   * `CHUNK_PIPELINE.md` and the dechaos outputs for rationale.
    *
    * Proxy resends must be tracked (not just chunk resends): the
    * cache-hit short-circuit means we can't rely on `submit()`

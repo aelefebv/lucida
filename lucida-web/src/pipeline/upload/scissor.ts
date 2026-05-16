@@ -10,9 +10,8 @@
  *
  * Pure function. WebGPU convention: top-left origin, y-down.
  *
- * Moved from `volumePath.ts` in Slice 6f of PRD #607 — lives next to the
- * other cold-state / upload builders so the render-path file stays focused
- * on render orchestration.
+ * Lives next to the other cold-state / upload builders so the
+ * render-path file stays focused on render orchestration.
  */
 export function computeScissorRect(
   modelMatrix: Float32Array,
