@@ -1,6 +1,6 @@
 /**
- * Shared eviction kernels used by both `volumeHandlers` and
- * `sliceHandlers`.
+ * Shared eviction kernels used by both `renderer/volume/eviction` and
+ * `renderer/slice/eviction`.
  *
  * Why one module:
  *
@@ -24,7 +24,7 @@
  * tests, and any future split-out volume/slice eviction files.
  */
 
-import type { LodIndirectionMeta } from "./volumeHandlers.ts";
+import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import { parseChunkKey, parseCompositeKey } from "./chunkKeys.ts";
 
 /**

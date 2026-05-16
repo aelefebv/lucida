@@ -44,12 +44,12 @@ import {
   getVolumeAtlases,
   handleVolumeChunkData,
   type LodIndirectionMeta,
-} from "./volumeHandlers.ts";
+} from "./volume/index.ts";
 import {
   destroyAllSliceResources,
   getOrCreateSlicePool,
   handleSliceChunkData,
-} from "./sliceHandlers.ts";
+} from "./slice/index.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
   Chunk,

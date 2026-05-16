@@ -1,6 +1,6 @@
 /**
- * Shared indirection-remap kernel used by both `volumeHandlers` and
- * `sliceHandlers`.
+ * Shared indirection-remap kernel used by both `renderer/volume/remap`
+ * and `renderer/slice/remap`.
  *
  * Both handlers walk the same composite-slot-key map and write a
  * slot-index back into a flat `indirectionData` Uint32Array at a
@@ -23,7 +23,7 @@
  * No GPU coupling, no module state — safe to import from anywhere.
  */
 
-import type { LodIndirectionMeta } from "./volumeHandlers.ts";
+import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import { parseChunkKey, parseCompositeKey } from "./chunkKeys.ts";
 
 export interface RemapParams {

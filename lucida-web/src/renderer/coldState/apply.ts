@@ -22,8 +22,8 @@
  * mutated) — the descriptor build resolves pool indices through them
  * but cold-state ingestion doesn't touch proxy state.
  *
- * Pool state (volume + slice atlases) lives in `volumeHandlers` /
- * `sliceHandlers` module globals today; this function calls into
+ * Pool state (volume + slice atlases) lives in `renderer/volume/atlas` /
+ * `renderer/slice/atlas` module globals today; this function calls into
  * `getOrCreateVolumePool` / `getOrCreateSlicePool` to allocate them.
  * Slice 8 will pull that state up onto a ctx-owned `RendererState`.
  */
@@ -42,12 +42,12 @@ import {
   resizeIndirection,
   remapIndirection,
   type LodIndirectionMeta,
-} from "../volumeHandlers.ts";
+} from "../volume/index.ts";
 import {
   getOrCreateSlicePool,
   resizeSliceIndirection,
   remapSliceIndirection,
-} from "../sliceHandlers.ts";
+} from "../slice/index.ts";
 import { groupEntriesByPool } from "./groupEntries.ts";
 import { computeEntityMetas } from "./entityMetas.ts";
 

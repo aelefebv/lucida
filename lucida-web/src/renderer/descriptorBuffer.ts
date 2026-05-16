@@ -27,7 +27,7 @@ import type {
 } from "./workerProtocol.ts";
 import type { EntityProxyDescriptor } from "./workerContext.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
-import type { LodIndirectionMeta } from "./volumeHandlers.ts";
+import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import {
   DESCRIPTOR_ENTRY_SIZE,
   DESCRIPTOR_LOD_INFO_SIZE,

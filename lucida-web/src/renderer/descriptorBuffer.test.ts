@@ -45,7 +45,7 @@ import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 import type { EntityProxyDescriptor } from "./workerContext.ts";
 import type { ColdStateActiveEntry, ColdStateMessage } from "./workerProtocol.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
-import type { LodIndirectionMeta } from "./volumeHandlers.ts";
+import type { LodIndirectionMeta } from "./volume/atlas.ts";
 
 // ---------------------------------------------------------------------------
 // Mock GPU device — buffer creation only.

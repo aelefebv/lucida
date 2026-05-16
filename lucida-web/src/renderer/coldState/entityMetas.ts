@@ -18,7 +18,7 @@
  */
 
 import type { ColdStateActiveEntry } from "../workerProtocol.ts";
-import type { LodIndirectionMeta } from "../volumeHandlers.ts";
+import type { LodIndirectionMeta } from "../volume/atlas.ts";
 
 /**
  * Compute per-LOD indirection metas for a single entry against a pool's

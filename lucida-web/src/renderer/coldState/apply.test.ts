@@ -10,15 +10,16 @@
  * state.
  *
  * Mocks `WorkerCtx` + `GPUDevice` — no real GPU. Pool state lives in
- * volumeHandlers / sliceHandlers module globals today (Slice 8 will
- * pull it onto a ctx-owned RendererState), so we tear down between
- * tests via `destroyAllVolumeResources` / `destroyAllSliceResources`.
+ * `renderer/volume/atlas` + `renderer/slice/atlas` module globals today
+ * (Slice 8 will pull it onto a ctx-owned RendererState), so we tear
+ * down between tests via `destroyAllVolumeResources` /
+ * `destroyAllSliceResources`.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
 // Polyfill the GPU usage constants the production code reads at module
-// scope. Slice extractions import `volumeHandlers` / `sliceHandlers`
+// scope. Slice extractions import `volume/atlas` / `slice/atlas`
 // which reference `GPUTextureUsage.*` / `GPUBufferUsage.*` literals
 // when allocating atlases.
 (globalThis as Record<string, unknown>).GPUTextureUsage = {
@@ -45,11 +46,11 @@ import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import {
   destroyAllVolumeResources,
   getVolumeAtlases,
-} from "../volumeHandlers.ts";
+} from "../volume/index.ts";
 import {
   destroyAllSliceResources,
   getSliceAtlases,
-} from "../sliceHandlers.ts";
+} from "../slice/index.ts";
 
 // ---------------------------------------------------------------------------
 // Mock GPU device — texture + buffer creation only.
@@ -192,9 +193,9 @@ function makeCold(
 
 describe("Suite A — applyColdState", () => {
   beforeEach(() => {
-    // Pool state lives in volumeHandlers / sliceHandlers module globals
-    // (Slice 8 will own these on ctx). Tear down between tests so each
-    // case starts from a clean slate.
+    // Pool state lives in renderer/volume/atlas + renderer/slice/atlas
+    // module globals (Slice 8 will own these on ctx). Tear down between
+    // tests so each case starts from a clean slate.
     destroyAllVolumeResources();
     destroyAllSliceResources();
   });
@@ -217,7 +218,7 @@ describe("Suite A — applyColdState", () => {
     expect(reg.memberToDataset.get("imgA")).toBe("ds1");
     // memberToPool maps to the canonical key.
     expect(reg.memberToPool.get("imgA")).toBe("ds1:64x64x32");
-    // One pool created in volumeHandlers' module Map.
+    // One pool created in volume/atlas' module Map.
     expect(getVolumeAtlases().size).toBe(1);
     const atlas = getVolumeAtlases().get("ds1:64x64x32")!;
     expect(atlas).toBeTruthy();

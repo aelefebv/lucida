@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
-import { remapIndirection, applyViewHotState, getRayHitForMember, type AtlasState, type LodIndirectionMeta } from "./volumeHandlers.ts";
+import { remapIndirection, applyViewHotState, getRayHitForMember, type AtlasState, type LodIndirectionMeta } from "./volume/index.ts";
 import { parseChunkKey } from "./chunkKeys.ts";
-import { remapSliceIndirection, type SliceAtlasState } from "./sliceHandlers.ts";
+import { remapSliceIndirection, type SliceAtlasState } from "./slice/index.ts";
 import type { ViewHotStateMessage } from "./workerProtocol.ts";
 
 // ---------------------------------------------------------------------------

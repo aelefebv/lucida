@@ -6,8 +6,8 @@ import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerCtx, EntityProxyDescriptor } from "./workerContext.ts";
-import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases } from "./sliceHandlers.ts";
-import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, applyViewHotState, type LodIndirectionMeta } from "./volumeHandlers.ts";
+import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases } from "./slice/index.ts";
+import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, applyViewHotState, type LodIndirectionMeta } from "./volume/index.ts";
 import { computeWantedSet, type ProxyAtlasSnapshot } from "./wantedSet.ts";
 import {
   destroyProxyAtlas,

@@ -4,7 +4,7 @@ import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "./descriptorBuffer.ts";
 import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 
-import type { LodIndirectionMeta } from "./volumeHandlers.ts";
+import type { LodIndirectionMeta } from "./volume/atlas.ts";
 
 // Uniform buffer layout (240 bytes):
 //   offset 0:   invViewProj     mat4x4f   (64B)
