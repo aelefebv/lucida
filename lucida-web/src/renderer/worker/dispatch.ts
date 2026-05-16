@@ -1,0 +1,201 @@
+/**
+ * Worker message dispatcher: route a single {@link MainToWorkerMessage}
+ * to the appropriate per-mode handler.
+ *
+ * Extracted from the `self.onmessage` switch in `gpu.worker.ts` (Slice 9)
+ * so the entry point shrinks to a thin event listener.
+ *
+ * Cases `init` and `destroy` are handled in the entry point itself —
+ * the former assembles the {@link WorkerCtx} (so we don't have one yet),
+ * the latter shuts the worker down. Everything else flows through this
+ * function.
+ *
+ * Renderer-thin cases (`updateCursorData`, `viewHotState`) stay inline
+ * here — they're small enough that extracting them into individual files
+ * would obscure rather than clarify. The bigger cases delegate to their
+ * existing per-mode files (`coldState/apply.ts`, `proxy/upload.ts`,
+ * `slice/upload.ts`, `slice/render.ts`, `volume/upload.ts`,
+ * `volume/render.ts`, `minimapHandlers.ts`).
+ */
+
+import type { WorkerCtx } from "../workerContext.ts";
+import type { MainToWorkerMessage } from "../workerProtocol.ts";
+import { destroyProxyAtlas } from "../proxyAtlas.ts";
+import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
+import { applyColdState } from "../coldState/index.ts";
+import { handleProxyUpload } from "../proxy/index.ts";
+import {
+  handleSliceChunkData,
+  handleSliceRenderMultiPass,
+  removeSliceResources,
+} from "../slice/index.ts";
+import {
+  applyViewHotState,
+  handleVolumeChunkData,
+  handleVolumeRenderMultiPass,
+  removeVolumeResources,
+} from "../volume/index.ts";
+import {
+  handleMinimapDestroy,
+  handleMinimapInit,
+  handleMinimapRender,
+  handleMinimapSetOverview,
+  handleMinimapUploadOverviewChunks,
+  removeMinimapResources,
+} from "../minimapHandlers.ts";
+import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
+
+/**
+ * Dispatch one main-thread message. The caller is responsible for
+ * funnelling thrown errors back to the main thread as `error` messages.
+ */
+export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage): Promise<void> {
+  switch (msg.type) {
+    case "init":
+      // Handled by the entry point (it assembles the ctx). Reaching
+      // here means a duplicate `init` — ignore.
+      return;
+
+    case "resize": {
+      const canvas = ctx.context.canvas as OffscreenCanvas;
+      canvas.width = msg.width;
+      canvas.height = msg.height;
+      return;
+    }
+
+    case "sliceChunkData": {
+      const memberId = msg.memberId;
+      const poolKey = ctx.state.memberToPool.get(memberId);
+      if (!poolKey) return;
+      handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
+      return;
+    }
+    case "sliceRenderMultiPass":
+      handleSliceRenderMultiPass(ctx, msg, (memberId) => {
+        const poolKey = ctx.state.memberToPool.get(memberId);
+        const datasetId = ctx.state.memberToDataset.get(memberId) ?? null;
+        if (!poolKey) {
+          // No chunk pool — still report dataset so the handler can
+          // bind a dummy chunk atlas and proceed with proxy-only render
+          // (e.g. well-as-proxy entries).
+          return datasetId ? { poolKey: null, datasetId } : null;
+        }
+        return { poolKey, datasetId };
+      });
+      return;
+
+    case "volumeChunkData": {
+      const memberId = msg.memberId;
+      const poolKey = ctx.state.memberToPool.get(memberId);
+      if (!poolKey) {
+        // No pool registered yet (cold state hasn't arrived for this member)
+        return;
+      }
+      handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
+      return;
+    }
+    case "volumeRenderMultiPass":
+      handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
+        const poolKey = ctx.state.memberToPool.get(memberId);
+        const datasetId = ctx.state.memberToDataset.get(memberId) ?? null;
+        if (!poolKey) {
+          // No chunk pool — still report datasetId so the handler can
+          // bind a dummy chunk atlas and proceed with a proxy-only
+          // render (well-as-proxy entries take this path).
+          return datasetId ? { poolKey: null, datasetId } : null;
+        }
+        return { poolKey, datasetId };
+      });
+      return;
+
+    case "proxyAssetData": {
+      const outcome = handleProxyUpload(ctx, msg);
+      if (outcome.rebuildDescriptor) rebuildDescriptorIfMatching(ctx, msg.datasetId);
+      if (outcome.wantedSetChanged) ctx.postWantedSet();
+      return;
+    }
+
+    case "minimapInit":
+      handleMinimapInit(ctx, msg);
+      return;
+    case "minimapRender":
+      handleMinimapRender(ctx, msg);
+      return;
+    case "minimapSetOverviewForLayer":
+      handleMinimapSetOverview(ctx, msg);
+      return;
+    case "minimapUploadOverviewChunksForLayer":
+      handleMinimapUploadOverviewChunks(ctx, msg);
+      return;
+    case "minimapDestroy":
+      handleMinimapDestroy();
+      return;
+
+    case "updateCursorData": {
+      const cr = ctx.getCursorRenderer();
+      cr.updateCursors(new Float32Array(msg.data), msg.count);
+      return;
+    }
+
+    case "viewHotState":
+      applyViewHotState(ctx, msg);
+      return;
+
+    case "coldState":
+      ctx.state.currentColdState = msg;
+      ctx.state.currentEpochs = msg.epochs;
+      applyColdState(ctx, msg);
+      ctx.postWantedSet();
+      return;
+
+    case "removeLayerResources": {
+      removeSliceResources(ctx, msg.datasetId);
+      removeVolumeResources(ctx, msg.datasetId);
+      removeMinimapResources(msg.datasetId);
+      // Destroy proxy pools for this dataset.
+      const dsPools = ctx.state.proxyPoolsByDataset.get(msg.datasetId);
+      if (dsPools) {
+        for (const pool of dsPools.values()) destroyProxyAtlas(pool);
+        ctx.state.proxyPoolsByDataset.delete(msg.datasetId);
+      }
+      // Drop the per-dataset descriptor buffer.
+      const desc = ctx.state.descriptorBuffersByDataset.get(msg.datasetId);
+      if (desc) {
+        destroyDescriptorBuffer(desc);
+        ctx.state.descriptorBuffersByDataset.delete(msg.datasetId);
+      }
+      ctx.state.currentEntityMetasByDataset.delete(msg.datasetId);
+
+      // Slice 8: clear member-id routing for entries owned by this
+      // dataset so dropped layers don't keep stale memberToDataset /
+      // memberToPool entries around. Previously these maps grew
+      // monotonically across the worker's lifetime (#632 leak).
+      for (const [memberId, dsId] of ctx.state.memberToDataset) {
+        if (dsId === msg.datasetId) {
+          ctx.state.memberToDataset.delete(memberId);
+          ctx.state.memberToPool.delete(memberId);
+        }
+      }
+      // Drop well→fields entries owned by this dataset. Tracked via
+      // wellsByDataset so we don't have to scan every well's child set.
+      const wells = ctx.state.wellsByDataset.get(msg.datasetId);
+      if (wells) {
+        for (const wellId of wells) ctx.state.wellToFields.delete(wellId);
+        ctx.state.wellsByDataset.delete(msg.datasetId);
+      }
+      // If the dataset being dropped is the one whose cold state is
+      // active, clear that pointer too — no more renders/uploads will
+      // arrive against this state.
+      if (ctx.state.currentColdState?.datasetId === msg.datasetId) {
+        ctx.state.currentColdState = null;
+      }
+      return;
+    }
+
+    case "destroy":
+      // Handled by the entry point (it owns the lifecycle so it can
+      // null out the ctx before calling `self.close()`). Reaching here
+      // means a duplicate `destroy` — ignore.
+      return;
+  }
+}
