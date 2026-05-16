@@ -15,7 +15,6 @@ import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import {
   type SliceAtlasState,
   getDummySliceIndirection,
-  getSliceAtlases,
 } from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
 
@@ -31,7 +30,7 @@ export function handleSliceRenderMultiPass(
   const renderer = ctx.getSliceRenderer();
   const comp = ctx.getCompositor();
   const pool = ctx.ensureOffscreenPool(msg.layers.length, msg.canvasW, msg.canvasH);
-  const atlasMap = getSliceAtlases();
+  const atlasMap = ctx.state.sliceAtlases;
 
   const renderedLayers: CompositeLayer[] = [];
 
@@ -62,7 +61,7 @@ export function handleSliceRenderMultiPass(
     const ox = layer.offsetX ?? 0;
     const oy = layer.offsetY ?? 0;
     if (hasDetail) {
-      setCameraUVForMember(memberId, [
+      setCameraUVForMember(ctx.state, memberId, [
         (msg.cx - ox) / layer.dataW,
         (msg.cy - oy) / layer.dataH,
       ]);

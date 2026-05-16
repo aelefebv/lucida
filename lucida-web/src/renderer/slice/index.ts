@@ -14,7 +14,6 @@ export {
   destroySliceAtlas,
   getDummySliceIndirection,
   getOrCreateSlicePool,
-  getSliceAtlases,
   removeSliceAtlas,
   resizeSliceIndirection,
 } from "./atlas.ts";
@@ -41,6 +40,7 @@ import {
   removeSliceAtlas,
 } from "./atlas.ts";
 import { clearAllCameraUVs, clearCameraUVForMember } from "./eviction.ts";
+import type { WorkerCtx } from "../workerContext.ts";
 
 /**
  * Remove resources for a removed entity or dataset.
@@ -50,13 +50,13 @@ import { clearAllCameraUVs, clearCameraUVForMember } from "./eviction.ts";
  * `clearCameraUVForMember` (per-entity camera-UV cleanup) so the
  * atlas module stays independent of the eviction module.
  */
-export function removeSliceResources(idOrMember: string): void {
-  removeSliceAtlas(idOrMember);
-  clearCameraUVForMember(idOrMember);
+export function removeSliceResources(ctx: WorkerCtx, idOrMember: string): void {
+  removeSliceAtlas(ctx, idOrMember);
+  clearCameraUVForMember(ctx.state, idOrMember);
 }
 
 /** Tear down every slice pool, the dummy indirection buffer, and all camera-UV state. */
-export function destroyAllSliceResources(): void {
-  destroyAllSliceAtlasResources();
-  clearAllCameraUVs();
+export function destroyAllSliceResources(ctx: WorkerCtx): void {
+  destroyAllSliceAtlasResources(ctx);
+  clearAllCameraUVs(ctx.state);
 }

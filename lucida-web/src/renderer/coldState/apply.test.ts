@@ -9,14 +9,13 @@
  * Z retargeting, cold-state churn (replace), empty active-set cold
  * state.
  *
- * Mocks `WorkerCtx` + `GPUDevice` — no real GPU. Pool state lives in
- * `renderer/volume/atlas` + `renderer/slice/atlas` module globals today
- * (Slice 8 will pull it onto a ctx-owned RendererState), so we tear
- * down between tests via `destroyAllVolumeResources` /
- * `destroyAllSliceResources`.
+ * Mocks `WorkerCtx` + `GPUDevice` — no real GPU. Slice 8 moved the
+ * per-dataset atlas Map onto `ctx.state.{volumeAtlases, sliceAtlases}`,
+ * so each test owns its own RendererState via `makeCtx()` and no module
+ * teardown is required between cases.
  */
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 // Polyfill the GPU usage constants the production code reads at module
 // scope. Slice extractions import `volume/atlas` / `slice/atlas`
@@ -35,22 +34,13 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
   UNIFORM: 0x40,
 };
 
-import { applyColdState, type ColdStateRegistries } from "./apply.ts";
-import type { WorkerCtx, EntityProxyDescriptor } from "../workerContext.ts";
+import { applyColdState } from "./apply.ts";
+import type { WorkerCtx } from "../workerContext.ts";
 import type {
   ColdStateMessage,
   ColdStateActiveEntry,
 } from "../workerProtocol.ts";
-import type { ProxyAtlasState } from "../proxyAtlas.ts";
-import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
-import {
-  destroyAllVolumeResources,
-  getVolumeAtlases,
-} from "../volume/index.ts";
-import {
-  destroyAllSliceResources,
-  getSliceAtlases,
-} from "../slice/index.ts";
+import { createInitialState, type RendererState } from "../worker/state.ts";
 
 // ---------------------------------------------------------------------------
 // Mock GPU device — texture + buffer creation only.
@@ -82,13 +72,14 @@ function makeMockDevice(): GPUDevice {
 }
 
 function makeCtx(device: GPUDevice): WorkerCtx {
-  // Only `device` is actually used by applyColdState; the rest can be
-  // stub no-ops since pool creation / descriptor build only touch
-  // `ctx.device`.
+  // Only `device` + `state` are actually used by applyColdState; the
+  // rest can be stub no-ops since pool creation / descriptor build only
+  // touch `ctx.device` and `ctx.state`.
   return {
     device,
     context: {} as GPUCanvasContext,
     format: "bgra8unorm",
+    state: createInitialState(),
     getSliceRenderer: () => ({} as never),
     getVolumeRenderer: () => ({} as never),
     getCompositor: () => ({} as never),
@@ -102,18 +93,6 @@ function makeCtx(device: GPUDevice): WorkerCtx {
     lookupProxyDescriptor: () => null,
     lookupProxyPool: () => null,
     lookupEntityDescriptor: () => null,
-  };
-}
-
-function makeRegistries(): ColdStateRegistries {
-  return {
-    memberToDataset: new Map(),
-    memberToPool: new Map(),
-    wellToFields: new Map(),
-    currentEntityMetasByDataset: new Map(),
-    proxyDescriptorsByEntity: new Map<string, EntityProxyDescriptor>(),
-    proxyPoolsByDataset: new Map<string, Map<string, ProxyAtlasState>>(),
-    descriptorBuffersByDataset: new Map<string, EntityDescriptorIndex>(),
   };
 }
 
@@ -187,40 +166,38 @@ function makeCold(
   };
 }
 
+function vol(state: RendererState) {
+  return state.volumeAtlases;
+}
+function sli(state: RendererState) {
+  return state.sliceAtlases;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe("Suite A — applyColdState", () => {
-  beforeEach(() => {
-    // Pool state lives in renderer/volume/atlas + renderer/slice/atlas
-    // module globals (Slice 8 will own these on ctx). Tear down between
-    // tests so each case starts from a clean slate.
-    destroyAllVolumeResources();
-    destroyAllSliceResources();
-  });
-
   // -------------------------------------------------------------------------
   // 1. Single-channel volume cold state
   // -------------------------------------------------------------------------
   it("single-channel volume → one pool group + correct entityMetas + indirection sized to gridX*gridY*gridZ", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const cold = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
     ]);
-    applyColdState(ctx, cold, reg);
+    applyColdState(ctx, cold);
 
     // memberToDataset populated for the single member.
-    expect(reg.memberToDataset.get("imgA")).toBe("ds1");
+    expect(ctx.state.memberToDataset.get("imgA")).toBe("ds1");
     // memberToPool maps to the canonical key.
-    expect(reg.memberToPool.get("imgA")).toBe("ds1:64x64x32");
-    // One pool created in volume/atlas' module Map.
-    expect(getVolumeAtlases().size).toBe(1);
-    const atlas = getVolumeAtlases().get("ds1:64x64x32")!;
+    expect(ctx.state.memberToPool.get("imgA")).toBe("ds1:64x64x32");
+    // One pool created.
+    expect(vol(ctx.state).size).toBe(1);
+    const atlas = vol(ctx.state).get("ds1:64x64x32")!;
     expect(atlas).toBeTruthy();
     // entityMetas pinned on the atlas.
     expect(atlas.entityMetas.get("imgA")).toEqual([
@@ -229,9 +206,9 @@ describe("Suite A — applyColdState", () => {
     // Indirection sized to gridX*gridY*gridZ = 2*4*4 = 32.
     expect(atlas.indirectionData.length).toBe(32);
     // Snapshot captured for the dataset.
-    expect(reg.currentEntityMetasByDataset.get("ds1")?.get("imgA")).toHaveLength(1);
+    expect(ctx.state.currentEntityMetasByDataset.get("ds1")?.get("imgA")).toHaveLength(1);
     // Descriptor buffer was built for the dataset.
-    expect(reg.descriptorBuffersByDataset.has("ds1")).toBe(true);
+    expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -239,7 +216,6 @@ describe("Suite A — applyColdState", () => {
   // -------------------------------------------------------------------------
   it("multi-channel volume → one pool group per channel + per-channel memberIds + per-channel pool keys", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const cold = makeCold(
       [
         makeEntry({
@@ -250,18 +226,18 @@ describe("Suite A — applyColdState", () => {
       ],
       { visibleChannels: [0, 1, 2] },
     );
-    applyColdState(ctx, cold, reg);
+    applyColdState(ctx, cold);
 
     // memberToDataset populated for each (entry, channel).
-    expect(reg.memberToDataset.get("imgA:ch0")).toBe("ds1");
-    expect(reg.memberToDataset.get("imgA:ch1")).toBe("ds1");
-    expect(reg.memberToDataset.get("imgA:ch2")).toBe("ds1");
+    expect(ctx.state.memberToDataset.get("imgA:ch0")).toBe("ds1");
+    expect(ctx.state.memberToDataset.get("imgA:ch1")).toBe("ds1");
+    expect(ctx.state.memberToDataset.get("imgA:ch2")).toBe("ds1");
     // Per-channel pool keys + memberIds.
-    expect(reg.memberToPool.get("imgA:ch0")).toBe("ds1:ch0:64x64x32");
-    expect(reg.memberToPool.get("imgA:ch1")).toBe("ds1:ch1:64x64x32");
-    expect(reg.memberToPool.get("imgA:ch2")).toBe("ds1:ch2:64x64x32");
+    expect(ctx.state.memberToPool.get("imgA:ch0")).toBe("ds1:ch0:64x64x32");
+    expect(ctx.state.memberToPool.get("imgA:ch1")).toBe("ds1:ch1:64x64x32");
+    expect(ctx.state.memberToPool.get("imgA:ch2")).toBe("ds1:ch2:64x64x32");
     // 3 pool atlases — one per channel.
-    expect(getVolumeAtlases().size).toBe(3);
+    expect(vol(ctx.state).size).toBe(3);
   });
 
   // -------------------------------------------------------------------------
@@ -269,7 +245,6 @@ describe("Suite A — applyColdState", () => {
   // -------------------------------------------------------------------------
   it("mixed fields + well-as-proxy → only fields register a chunk pool; well registers in memberToDataset only", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const cold = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
@@ -282,17 +257,17 @@ describe("Suite A — applyColdState", () => {
         levels: [],
       }),
     ]);
-    applyColdState(ctx, cold, reg);
+    applyColdState(ctx, cold);
 
     // Both entries land in memberToDataset (iterateColdMembers walks
     // both — well-as-proxy resolves to entityId).
-    expect(reg.memberToDataset.get("imgA")).toBe("ds1");
-    expect(reg.memberToDataset.get("wellA")).toBe("ds1");
+    expect(ctx.state.memberToDataset.get("imgA")).toBe("ds1");
+    expect(ctx.state.memberToDataset.get("wellA")).toBe("ds1");
     // Only the field registers a pool (groupEntriesByPool skips
     // entries with no targetLevel).
-    expect(reg.memberToPool.has("imgA")).toBe(true);
-    expect(reg.memberToPool.has("wellA")).toBe(false);
-    expect(getVolumeAtlases().size).toBe(1);
+    expect(ctx.state.memberToPool.has("imgA")).toBe(true);
+    expect(ctx.state.memberToPool.has("wellA")).toBe(false);
+    expect(vol(ctx.state).size).toBe(1);
   });
 
   // -------------------------------------------------------------------------
@@ -300,7 +275,6 @@ describe("Suite A — applyColdState", () => {
   // -------------------------------------------------------------------------
   it("two fields with the same chunk dims → ONE pool group with sequential entityMetas offsets", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const cold = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
@@ -311,10 +285,10 @@ describe("Suite A — applyColdState", () => {
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
     ]);
-    applyColdState(ctx, cold, reg);
+    applyColdState(ctx, cold);
 
-    expect(getVolumeAtlases().size).toBe(1);
-    const atlas = getVolumeAtlases().get("ds1:64x64x32")!;
+    expect(vol(ctx.state).size).toBe(1);
+    const atlas = vol(ctx.state).get("ds1:64x64x32")!;
     // Both members live in the same pool.
     expect(atlas.entityMetas.size).toBe(2);
     // Sequential offsets: A starts at 0; B starts at 32 (= 2*4*4 from A).
@@ -329,7 +303,6 @@ describe("Suite A — applyColdState", () => {
   // -------------------------------------------------------------------------
   it("two fields with different chunk dims → TWO pool groups + separate entityMetas", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const cold = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
@@ -340,17 +313,17 @@ describe("Suite A — applyColdState", () => {
         levels: [{ level: 0, chunkShape: [16, 32, 32], gridShape: [4, 8, 8], levelDims: [64, 256, 256] }],
       }),
     ]);
-    applyColdState(ctx, cold, reg);
+    applyColdState(ctx, cold);
 
-    expect(getVolumeAtlases().size).toBe(2);
-    const a = getVolumeAtlases().get("ds1:64x64x32")!;
-    const b = getVolumeAtlases().get("ds1:32x32x16")!;
+    expect(vol(ctx.state).size).toBe(2);
+    const a = vol(ctx.state).get("ds1:64x64x32")!;
+    const b = vol(ctx.state).get("ds1:32x32x16")!;
     expect(a.entityMetas.get("imgA")).toBeTruthy();
     expect(a.entityMetas.has("imgB")).toBe(false);
     expect(b.entityMetas.get("imgB")).toBeTruthy();
     expect(b.entityMetas.has("imgA")).toBe(false);
-    expect(reg.memberToPool.get("imgA")).toBe("ds1:64x64x32");
-    expect(reg.memberToPool.get("imgB")).toBe("ds1:32x32x16");
+    expect(ctx.state.memberToPool.get("imgA")).toBe("ds1:64x64x32");
+    expect(ctx.state.memberToPool.get("imgB")).toBe("ds1:32x32x16");
   });
 
   // -------------------------------------------------------------------------
@@ -358,7 +331,6 @@ describe("Suite A — applyColdState", () => {
   // -------------------------------------------------------------------------
   it("slice mode → 2D pool key + entityMetas computed for 2D indirection", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const cold = makeCold(
       [
         makeEntry({
@@ -372,12 +344,12 @@ describe("Suite A — applyColdState", () => {
       ],
       { viewMode: "slice", currentZ: 0 },
     );
-    applyColdState(ctx, cold, reg);
+    applyColdState(ctx, cold);
 
-    expect(getSliceAtlases().size).toBe(1);
-    const atlas = getSliceAtlases().get("ds1:128x128")!;
+    expect(sli(ctx.state).size).toBe(1);
+    const atlas = sli(ctx.state).get("ds1:128x128")!;
     expect(atlas).toBeTruthy();
-    expect(reg.memberToPool.get("imgA")).toBe("ds1:128x128");
+    expect(ctx.state.memberToPool.get("imgA")).toBe("ds1:128x128");
     const metas = atlas.entityMetas.get("imgA")!;
     expect(metas).toHaveLength(2);
     // 2D offsets: LOD0 occupies gridX*gridY = 2*2 = 4 entries starting at 0;
@@ -393,17 +365,16 @@ describe("Suite A — applyColdState", () => {
   // -------------------------------------------------------------------------
   it("two cold states in a row → memberToPool is repopulated; descriptor buffer is destroyed + replaced", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const coldA = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
     ]);
-    applyColdState(ctx, coldA, reg);
-    const descA = reg.descriptorBuffersByDataset.get("ds1")!;
+    applyColdState(ctx, coldA);
+    const descA = ctx.state.descriptorBuffersByDataset.get("ds1")!;
     const descABuffer = descA.buffer as unknown as MockBuffer;
-    expect(reg.memberToPool.get("imgA")).toBe("ds1:64x64x32");
+    expect(ctx.state.memberToPool.get("imgA")).toBe("ds1:64x64x32");
 
     // Second cold state — different active set.
     const coldB = makeCold([
@@ -412,18 +383,18 @@ describe("Suite A — applyColdState", () => {
         levels: [{ level: 0, chunkShape: [16, 32, 32], gridShape: [4, 8, 8], levelDims: [64, 256, 256] }],
       }),
     ]);
-    applyColdState(ctx, coldB, reg);
+    applyColdState(ctx, coldB);
     // memberToPool for B is set.
-    expect(reg.memberToPool.get("imgB")).toBe("ds1:32x32x16");
+    expect(ctx.state.memberToPool.get("imgB")).toBe("ds1:32x32x16");
     // Old descriptor buffer was destroyed (the new one replaces it).
     expect(descABuffer.destroyed).toBe(true);
     // A new descriptor buffer was written.
-    const descB = reg.descriptorBuffersByDataset.get("ds1")!;
+    const descB = ctx.state.descriptorBuffersByDataset.get("ds1")!;
     expect(descB).not.toBe(descA);
-    // NOTE: memberToPool retains A's entry (worker doesn't clean this
-    // up today — Slice 8 will). We pin current behavior; the field is
-    // simply not referenced by the new cold state's pools.
-    expect(reg.memberToPool.has("imgA")).toBe(true);
+    // NOTE: memberToPool retains A's entry — applyColdState only adds
+    // mappings for the new cold state's members. removeLayerResources
+    // owns the dataset-level cleanup. We pin the current behavior here.
+    expect(ctx.state.memberToPool.has("imgA")).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -431,20 +402,19 @@ describe("Suite A — applyColdState", () => {
   // -------------------------------------------------------------------------
   it("empty active set → no pools, no panics, empty descriptor buffer still created", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const cold = makeCold([]);
-    expect(() => applyColdState(ctx, cold, reg)).not.toThrow();
+    expect(() => applyColdState(ctx, cold)).not.toThrow();
     // No pools.
-    expect(getVolumeAtlases().size).toBe(0);
+    expect(vol(ctx.state).size).toBe(0);
     // No memberToPool entries.
-    expect(reg.memberToPool.size).toBe(0);
+    expect(ctx.state.memberToPool.size).toBe(0);
     // No memberToDataset entries (iterateColdMembers yields nothing).
-    expect(reg.memberToDataset.size).toBe(0);
+    expect(ctx.state.memberToDataset.size).toBe(0);
     // Snapshot recorded (empty) for the dataset.
-    expect(reg.currentEntityMetasByDataset.get("ds1")?.size).toBe(0);
+    expect(ctx.state.currentEntityMetasByDataset.get("ds1")?.size).toBe(0);
     // Descriptor buffer was still built (empty buffer is fine — the
     // build path always runs).
-    expect(reg.descriptorBuffersByDataset.has("ds1")).toBe(true);
+    expect(ctx.state.descriptorBuffersByDataset.has("ds1")).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -452,7 +422,6 @@ describe("Suite A — applyColdState", () => {
   // -------------------------------------------------------------------------
   it("populates wellToFields from entries' parentWellId", () => {
     const ctx = makeCtx(makeMockDevice());
-    const reg = makeRegistries();
     const cold = makeCold([
       makeEntry({
         entityId: "field1", imageId: "img1", mode: "fields-with-detail",
@@ -467,8 +436,11 @@ describe("Suite A — applyColdState", () => {
         parentWellId: "wellB",
       }),
     ]);
-    applyColdState(ctx, cold, reg);
-    expect(reg.wellToFields.get("wellA")).toEqual(new Set(["field1", "field2"]));
-    expect(reg.wellToFields.get("wellB")).toEqual(new Set(["field3"]));
+    applyColdState(ctx, cold);
+    expect(ctx.state.wellToFields.get("wellA")).toEqual(new Set(["field1", "field2"]));
+    expect(ctx.state.wellToFields.get("wellB")).toEqual(new Set(["field3"]));
+    // Slice 8: wellsByDataset tracks which wells came from this dataset so
+    // removeLayerResources can clear them cheaply.
+    expect(ctx.state.wellsByDataset.get("ds1")).toEqual(new Set(["wellA", "wellB"]));
   });
 });

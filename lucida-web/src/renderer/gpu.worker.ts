@@ -1,103 +1,40 @@
 /** WebGPU render worker — thin dispatcher to handler modules. */
-import type { MainToWorkerMessage, WorkerToMainMessage, ColdStateMessage } from "./workerProtocol.ts";
+import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.ts";
 import { initGPU, createOffscreenTarget } from "./gpuContext.ts";
 import { SliceRenderer } from "./sliceRenderer.ts";
 import { VolumeRenderer } from "./volumeRenderer.ts";
 import { LayerCompositor } from "./layerCompositor.ts";
 import { CursorRenderer } from "./cursorRenderer.ts";
-import type { WorkerCtx, EntityProxyDescriptor } from "./workerContext.ts";
-import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources, getSliceAtlases } from "./slice/index.ts";
-import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, getVolumeAtlases, applyViewHotState, type LodIndirectionMeta } from "./volume/index.ts";
+import type { WorkerCtx } from "./workerContext.ts";
+import { handleSliceChunkData, handleSliceRenderMultiPass, removeSliceResources, destroyAllSliceResources } from "./slice/index.ts";
+import { handleVolumeChunkData, handleVolumeRenderMultiPass, removeVolumeResources, destroyAllVolumeResources, applyViewHotState } from "./volume/index.ts";
 import { computeWantedSet, type ProxyAtlasSnapshot } from "./wantedSet.ts";
-import {
-  destroyProxyAtlas,
-  type ProxyAtlasState,
-} from "./proxyAtlas.ts";
+import { destroyProxyAtlas } from "./proxyAtlas.ts";
 import { handleMinimapInit, handleMinimapRender, handleMinimapSetOverview, handleMinimapUploadOverviewChunks, handleMinimapDestroy, removeMinimapResources, destroyAllMinimapResources } from "./minimapHandlers.ts";
 import { getColormapData } from "../colormaps.ts";
-import type { SceneEpochs } from "../pipeline/epochs.ts";
 import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,
-  type EntityDescriptorIndex,
 } from "./descriptorBuffer.ts";
 import { applyColdState } from "./coldState/index.ts";
 import { handleProxyUpload } from "./proxy/index.ts";
+import { createInitialState } from "./worker/index.ts";
 
 let device: GPUDevice;
 let context: GPUCanvasContext;
 let format: GPUTextureFormat;
 
+// Renderer-class singletons (lazy-init on first use). Persisted across
+// messages; not per-session state, so they stay at module scope. Slice 9
+// lifts them into `worker/resources.ts`.
 let sliceRenderer: SliceRenderer | null = null;
 let volumeRenderer: VolumeRenderer | null = null;
 let compositor: LayerCompositor | null = null;
 let cursorRenderer: CursorRenderer | null = null;
 
-let currentEpochs: SceneEpochs | null = null;
-let currentColdState: ColdStateMessage | null = null;
-
-/** Map from worker member ID (imageId or imageId:chN) to the dataset ID it belongs to. */
-const memberToDataset = new Map<string, string>();
-
-/** Map from worker member ID to the shared pool key it currently belongs to.
- *  Pool key encodes chunk dims so fields with different target LODs use different pools. */
-const memberToPool = new Map<string, string>();
-
-/**
- * Per-dataset entityMetas snapshot captured during the most recent cold
- * state. Each cold state replaces this for its dataset so the descriptor
- * build sees only the offsets/dims of the pool(s) the current cold state
- * actually populated — not stale entries left over in other pools from
- * earlier cold states (which would point into a different pool's
- * indirection layout than the one bound at draw time).
- */
-const currentEntityMetasByDataset = new Map<string, Map<string, LodIndirectionMeta[]>>();
-
-/**
- * GPU residency for proxies. One pool per
- * `(datasetId, kind, slotDims, channel)` combo (see `proxyPoolKey()`).
- * Outer map keyed by datasetId so per-dataset cleanup is cheap.
- */
-const proxyPoolsByDataset = new Map<string, Map<string, ProxyAtlasState>>();
-
-/**
- * Per-entity proxy descriptor table. Keyed by entityId. Field-mode
- * entities get their `wellProxyHandle` populated when the parent
- * well's proxy lands (see `propagateWellProxyToFields`).
- *
- * The {@link EntityProxyDescriptor} type lives in `workerContext.ts` so
- * render handlers can read it via `WorkerCtx.lookupProxyDescriptor`.
- */
-const proxyDescriptorsByEntity = new Map<string, EntityProxyDescriptor>();
-
-/**
- * Well → set of child field entityIds, populated from cold state (main
- * thread sends `parentWellId` per field entry). Used so a `WellProxy3D`
- * upload can fan out to its child fields' descriptors.
- */
-const wellToFields = new Map<string, Set<string>>();
-
-/**
- * Per-dataset entity descriptor buffer + index maps. Built fresh on
- * each cold state. Render handlers bind `idx.buffer` plus a small
- * uniform with the layer's `entityIndex`.
- */
-const descriptorBuffersByDataset = new Map<string, EntityDescriptorIndex>();
-
-/**
- * Worker-side counters for HITL: how many proxy uploads we've handled
- * and how many were dropped due to staleness. Inspect from DevTools
- * via `self.__lucidaProxyStats`. Mutated by `handleProxyUpload`.
- */
-const proxyStats = { uploaded: 0, dropped: 0, evicted: 0 };
-(self as unknown as { __lucidaProxyStats?: typeof proxyStats }).__lucidaProxyStats =
-  proxyStats;
-(self as unknown as { __lucidaProxyPools?: typeof proxyPoolsByDataset }).__lucidaProxyPools =
-  proxyPoolsByDataset;
-(self as unknown as { __lucidaProxyDescriptors?: typeof proxyDescriptorsByEntity }).__lucidaProxyDescriptors =
-  proxyDescriptorsByEntity;
-
-// LUT texture cache for colormap rendering
+// LUT texture cache for colormap rendering. Same rationale as the
+// renderer-class singletons above — a per-device cache, not per-session
+// state. Slice 9 owns it.
 const lutCache = new Map<string, GPUTexture>();
 
 function getOrCreateLUT(name: string): GPUTexture {
@@ -116,7 +53,8 @@ function getOrCreateLUT(name: string): GPUTexture {
   return tex;
 }
 
-// Shared offscreen texture pool (used by slice + volume render)
+// Shared offscreen texture pool (used by slice + volume render). Per-canvas
+// resource; Slice 9 lifts it into `worker/resources.ts`.
 let offscreenPool: GPUTexture[] = [];
 let poolWidth = 0;
 let poolHeight = 0;
@@ -134,7 +72,8 @@ function ensureOffscreenPool(count: number, w: number, h: number): GPUTexture[] 
   return offscreenPool;
 }
 
-// 1x1 dummy texture for unset bindings (slice renderer)
+// 1x1 dummy texture for unset bindings (slice renderer). Per-device
+// singleton; Slice 9 lifts it into `worker/resources.ts`.
 let dummyTexture: GPUTexture | null = null;
 function getDummyTexture(): GPUTexture {
   if (!dummyTexture) {
@@ -147,7 +86,8 @@ function getDummyTexture(): GPUTexture {
   return dummyTexture;
 }
 
-// 1x1x1 dummy 3D texture for unset bindings (minimap renderer)
+// 1x1x1 dummy 3D texture for unset bindings (minimap renderer). Per-device
+// singleton; Slice 9 lifts it into `worker/resources.ts`.
 let dummy3DTexture: GPUTexture | null = null;
 function getDummy3DTexture(): GPUTexture {
   if (!dummy3DTexture) {
@@ -172,7 +112,7 @@ function post(msg: WorkerToMainMessage) {
  */
 function buildProxyAtlasSnapshot(datasetId: string): Map<string, ProxyAtlasSnapshot> {
   const snap = new Map<string, ProxyAtlasSnapshot>();
-  const pools = proxyPoolsByDataset.get(datasetId);
+  const pools = ctx.state.proxyPoolsByDataset.get(datasetId);
   if (!pools) return snap;
   for (const [poolKey, pool] of pools) {
     snap.set(poolKey, { kind: pool.kind, slots: pool.slots });
@@ -180,28 +120,19 @@ function buildProxyAtlasSnapshot(datasetId: string): Map<string, ProxyAtlasSnaps
   return snap;
 }
 
-/**
- * Look up the entity metas snapshot captured during the most recent
- * cold state for `datasetId`. Returns an empty map if no cold state has
- * touched that dataset yet (e.g., proxy upload arrived before the first
- * cold state).
- */
-function entityMetasForDataset(datasetId: string): Map<string, LodIndirectionMeta[]> {
-  return currentEntityMetasByDataset.get(datasetId) ?? new Map();
-}
-
 /** Compute and post wanted-set delta from current cold state + atlas state. */
 function postWantedSet() {
-  if (!currentColdState || !currentEpochs) return;
-  const proxySnap = buildProxyAtlasSnapshot(currentColdState.datasetId);
+  const state = ctx.state;
+  if (!state.currentColdState || !state.currentEpochs) return;
+  const proxySnap = buildProxyAtlasSnapshot(state.currentColdState.datasetId);
   const result = computeWantedSet(
-    currentColdState,
-    getVolumeAtlases(),
-    getSliceAtlases(),
-    memberToPool,
+    state.currentColdState,
+    state.volumeAtlases,
+    state.sliceAtlases,
+    state.memberToPool,
     proxySnap,
   );
-  post({ type: "wantedSetDelta", epochs: currentEpochs, missing: result.missing });
+  post({ type: "wantedSetDelta", epochs: state.currentEpochs, missing: result.missing });
 }
 
 /**
@@ -211,17 +142,18 @@ function postWantedSet() {
  * isn't refreshed until cold state lands for that dataset.
  */
 function rebuildDescriptorIfMatching(datasetId: string): void {
-  if (!currentColdState || currentColdState.datasetId !== datasetId) return;
-  const oldDesc = descriptorBuffersByDataset.get(datasetId);
+  const state = ctx.state;
+  if (!state.currentColdState || state.currentColdState.datasetId !== datasetId) return;
+  const oldDesc = state.descriptorBuffersByDataset.get(datasetId);
   if (oldDesc) destroyDescriptorBuffer(oldDesc);
-  descriptorBuffersByDataset.set(
+  state.descriptorBuffersByDataset.set(
     datasetId,
     buildDescriptorBuffer(
       device,
-      currentColdState,
-      proxyDescriptorsByEntity,
-      proxyPoolsByDataset,
-      entityMetasForDataset(datasetId),
+      state.currentColdState,
+      state.proxyDescriptorsByEntity,
+      state.proxyPoolsByDataset,
+      state.currentEntityMetasByDataset.get(datasetId) ?? new Map(),
     ),
   );
 }
@@ -238,10 +170,12 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         device = result.device;
         context = result.context;
         format = result.format;
+        const state = createInitialState();
         ctx = {
           device,
           context,
           format,
+          state,
           getSliceRenderer() {
             if (!sliceRenderer) sliceRenderer = new SliceRenderer(device);
             return sliceRenderer;
@@ -265,17 +199,26 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
           post,
           postWantedSet,
           lookupProxyDescriptor(entityId: string) {
-            return proxyDescriptorsByEntity.get(entityId) ?? null;
+            return state.proxyDescriptorsByEntity.get(entityId) ?? null;
           },
           lookupProxyPool(datasetId: string, poolKey: string) {
-            const dsPools = proxyPoolsByDataset.get(datasetId);
+            const dsPools = state.proxyPoolsByDataset.get(datasetId);
             if (!dsPools) return null;
             return dsPools.get(poolKey) ?? null;
           },
           lookupEntityDescriptor(datasetId: string) {
-            return descriptorBuffersByDataset.get(datasetId) ?? null;
+            return state.descriptorBuffersByDataset.get(datasetId) ?? null;
           },
         };
+        // Devtools/HITL surfaces — point at the ctx-owned state so a
+        // DevTools breakpoint sees current values rather than a stale
+        // pre-init pointer.
+        (self as unknown as { __lucidaProxyStats?: typeof state.proxyStats }).__lucidaProxyStats =
+          state.proxyStats;
+        (self as unknown as { __lucidaProxyPools?: typeof state.proxyPoolsByDataset }).__lucidaProxyPools =
+          state.proxyPoolsByDataset;
+        (self as unknown as { __lucidaProxyDescriptors?: typeof state.proxyDescriptorsByEntity }).__lucidaProxyDescriptors =
+          state.proxyDescriptorsByEntity;
         post({ type: "ready" });
         break;
       }
@@ -289,15 +232,15 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
 
       case "sliceChunkData": {
         const memberId = msg.memberId;
-        const poolKey = memberToPool.get(memberId);
+        const poolKey = ctx.state.memberToPool.get(memberId);
         if (!poolKey) break;
-        handleSliceChunkData(ctx, msg, currentEpochs, poolKey, memberId);
+        handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
         break;
       }
       case "sliceRenderMultiPass":
         handleSliceRenderMultiPass(ctx, msg, (memberId) => {
-          const poolKey = memberToPool.get(memberId);
-          const datasetId = memberToDataset.get(memberId) ?? null;
+          const poolKey = ctx.state.memberToPool.get(memberId);
+          const datasetId = ctx.state.memberToDataset.get(memberId) ?? null;
           if (!poolKey) {
             // No chunk pool — still report dataset so the handler can
             // bind a dummy chunk atlas and proceed with proxy-only render
@@ -310,18 +253,18 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
 
       case "volumeChunkData": {
         const memberId = msg.memberId;
-        const poolKey = memberToPool.get(memberId);
+        const poolKey = ctx.state.memberToPool.get(memberId);
         if (!poolKey) {
           // No pool registered yet (cold state hasn't arrived for this member)
           break;
         }
-        handleVolumeChunkData(ctx, msg, currentEpochs, poolKey, memberId);
+        handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
         break;
       }
       case "volumeRenderMultiPass":
         handleVolumeRenderMultiPass(ctx, msg, (memberId) => {
-          const poolKey = memberToPool.get(memberId);
-          const datasetId = memberToDataset.get(memberId) ?? null;
+          const poolKey = ctx.state.memberToPool.get(memberId);
+          const datasetId = ctx.state.memberToDataset.get(memberId) ?? null;
           if (!poolKey) {
             // No chunk pool — still report datasetId so the handler can
             // bind a dummy chunk atlas and proceed with a proxy-only
@@ -333,9 +276,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
 
       case "proxyAssetData": {
-        const outcome = handleProxyUpload(ctx, msg, currentEpochs, {
-          proxyPoolsByDataset, proxyDescriptorsByEntity, wellToFields, proxyStats,
-        });
+        const outcome = handleProxyUpload(ctx, msg);
         if (outcome.rebuildDescriptor) rebuildDescriptorIfMatching(msg.datasetId);
         if (outcome.wantedSetChanged) postWantedSet();
         break;
@@ -365,67 +306,83 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       }
 
       case "viewHotState": {
-        applyViewHotState(msg);
+        applyViewHotState(ctx, msg);
         break;
       }
 
       case "coldState": {
-        currentColdState = msg;
-        currentEpochs = msg.epochs;
-        applyColdState(ctx, msg, {
-          memberToDataset,
-          memberToPool,
-          wellToFields,
-          currentEntityMetasByDataset,
-          proxyDescriptorsByEntity,
-          proxyPoolsByDataset,
-          descriptorBuffersByDataset,
-        });
+        ctx.state.currentColdState = msg;
+        ctx.state.currentEpochs = msg.epochs;
+        applyColdState(ctx, msg);
         postWantedSet();
         break;
       }
 
       case "removeLayerResources": {
-        removeSliceResources(msg.datasetId);
-        removeVolumeResources(msg.datasetId);
+        removeSliceResources(ctx, msg.datasetId);
+        removeVolumeResources(ctx, msg.datasetId);
         removeMinimapResources(msg.datasetId);
-        // Also destroy proxy pools for this dataset (and clear
-        // descriptors that referenced it).
-        const dsPools = proxyPoolsByDataset.get(msg.datasetId);
+        // Destroy proxy pools for this dataset.
+        const dsPools = ctx.state.proxyPoolsByDataset.get(msg.datasetId);
         if (dsPools) {
           for (const pool of dsPools.values()) destroyProxyAtlas(pool);
-          proxyPoolsByDataset.delete(msg.datasetId);
+          ctx.state.proxyPoolsByDataset.delete(msg.datasetId);
         }
         // Drop the per-dataset descriptor buffer.
-        const desc = descriptorBuffersByDataset.get(msg.datasetId);
+        const desc = ctx.state.descriptorBuffersByDataset.get(msg.datasetId);
         if (desc) {
           destroyDescriptorBuffer(desc);
-          descriptorBuffersByDataset.delete(msg.datasetId);
+          ctx.state.descriptorBuffersByDataset.delete(msg.datasetId);
         }
-        currentEntityMetasByDataset.delete(msg.datasetId);
+        ctx.state.currentEntityMetasByDataset.delete(msg.datasetId);
+
+        // Slice 8: clear member-id routing for entries owned by this
+        // dataset so dropped layers don't keep stale memberToDataset /
+        // memberToPool entries around. Previously these maps grew
+        // monotonically across the worker's lifetime (#632 leak).
+        for (const [memberId, dsId] of ctx.state.memberToDataset) {
+          if (dsId === msg.datasetId) {
+            ctx.state.memberToDataset.delete(memberId);
+            ctx.state.memberToPool.delete(memberId);
+          }
+        }
+        // Drop well→fields entries owned by this dataset. Tracked via
+        // wellsByDataset so we don't have to scan every well's child set.
+        const wells = ctx.state.wellsByDataset.get(msg.datasetId);
+        if (wells) {
+          for (const wellId of wells) ctx.state.wellToFields.delete(wellId);
+          ctx.state.wellsByDataset.delete(msg.datasetId);
+        }
+        // If the dataset being dropped is the one whose cold state is
+        // active, clear that pointer too — no more renders/uploads will
+        // arrive against this state.
+        if (ctx.state.currentColdState?.datasetId === msg.datasetId) {
+          ctx.state.currentColdState = null;
+        }
         break;
       }
 
       case "destroy":
-        currentEpochs = null;
-        currentColdState = null;
-        memberToDataset.clear();
-        memberToPool.clear();
-        currentEntityMetasByDataset.clear();
+        ctx.state.currentEpochs = null;
+        ctx.state.currentColdState = null;
+        ctx.state.memberToDataset.clear();
+        ctx.state.memberToPool.clear();
+        ctx.state.currentEntityMetasByDataset.clear();
         // Tear down proxy atlas pools and descriptors.
-        for (const dsPools of proxyPoolsByDataset.values()) {
+        for (const dsPools of ctx.state.proxyPoolsByDataset.values()) {
           for (const pool of dsPools.values()) destroyProxyAtlas(pool);
         }
-        proxyPoolsByDataset.clear();
-        proxyDescriptorsByEntity.clear();
-        wellToFields.clear();
+        ctx.state.proxyPoolsByDataset.clear();
+        ctx.state.proxyDescriptorsByEntity.clear();
+        ctx.state.wellToFields.clear();
+        ctx.state.wellsByDataset.clear();
         // Tear down all entity descriptor buffers.
-        for (const desc of descriptorBuffersByDataset.values()) {
+        for (const desc of ctx.state.descriptorBuffersByDataset.values()) {
           destroyDescriptorBuffer(desc);
         }
-        descriptorBuffersByDataset.clear();
-        destroyAllSliceResources();
-        destroyAllVolumeResources();
+        ctx.state.descriptorBuffersByDataset.clear();
+        destroyAllSliceResources(ctx);
+        destroyAllVolumeResources(ctx);
         destroyAllMinimapResources();
         for (const tex of offscreenPool) tex.destroy();
         offscreenPool = [];

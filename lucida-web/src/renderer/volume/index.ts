@@ -16,7 +16,6 @@ export {
   getDepthTexture,
   getDummyIndirection,
   getOrCreateVolumePool,
-  getVolumeAtlases,
   removeVolumeAtlas,
   resizeIndirection,
 } from "./atlas.ts";
@@ -42,6 +41,7 @@ import {
   removeVolumeAtlas,
 } from "./atlas.ts";
 import { clearAllRayHits, clearRayHitForMember } from "./eviction.ts";
+import type { WorkerCtx } from "../workerContext.ts";
 
 /**
  * Remove resources for a removed entity or dataset.
@@ -51,13 +51,13 @@ import { clearAllRayHits, clearRayHitForMember } from "./eviction.ts";
  * `clearRayHitForMember` (per-entity ray-pick cleanup) so the atlas
  * module stays independent of the eviction module.
  */
-export function removeVolumeResources(idOrMember: string): void {
-  removeVolumeAtlas(idOrMember);
-  clearRayHitForMember(idOrMember);
+export function removeVolumeResources(ctx: WorkerCtx, idOrMember: string): void {
+  removeVolumeAtlas(ctx, idOrMember);
+  clearRayHitForMember(ctx.state, idOrMember);
 }
 
 /** Tear down every volume pool, the depth texture, the dummy indirection buffer, and all ray-pick state. */
-export function destroyAllVolumeResources(): void {
-  destroyAllVolumeAtlasResources();
-  clearAllRayHits();
+export function destroyAllVolumeResources(ctx: WorkerCtx): void {
+  destroyAllVolumeAtlasResources(ctx);
+  clearAllRayHits(ctx.state);
 }

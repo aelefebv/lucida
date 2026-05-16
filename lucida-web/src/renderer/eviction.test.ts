@@ -39,18 +39,16 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 import {
   applyViewHotState,
-  destroyAllVolumeResources,
   getOrCreateVolumePool,
-  getVolumeAtlases,
   handleVolumeChunkData,
   type LodIndirectionMeta,
 } from "./volume/index.ts";
 import {
-  destroyAllSliceResources,
   getOrCreateSlicePool,
   handleSliceChunkData,
 } from "./slice/index.ts";
 import type { WorkerCtx } from "./workerContext.ts";
+import { createInitialState } from "./worker/state.ts";
 import type {
   Chunk,
   SliceChunkDataMessage,
@@ -95,6 +93,7 @@ function makeMockCtx(): TestCtx {
   let postWantedSetCalls = 0;
   const ctx = {
     device: makeMockDevice(),
+    state: createInitialState(),
     post(msg: WorkerToMainMessage) { posts.push(msg); },
     postWantedSet() { postWantedSetCalls++; },
   } as unknown as WorkerCtx;
@@ -203,14 +202,11 @@ function makeSliceMeta(gridY: number, gridX: number): LodIndirectionMeta {
   };
 }
 
-// Helpers to drain global state between tests so the module-level
-// `atlasPerDataset` map doesn't bleed between cases. Calling
-// `destroyAll*` clears the atlas Map + per-entity ray-hit / camera-UV
-// references.
-beforeEach(() => {
-  destroyAllVolumeResources();
-  destroyAllSliceResources();
-});
+// Slice 8 moved every previously-module-level atlas / eviction Map onto
+// `ctx.state` via `RendererState`. Each test creates its own ctx via
+// `makeMockCtx`, so no cross-test cleanup is required. `beforeEach` is
+// retained as a hook surface in case future tests need to re-spy mocks.
+beforeEach(() => {});
 
 // ---------------------------------------------------------------------------
 // Volume eviction
@@ -230,7 +226,7 @@ describe("handleVolumeChunkData — eviction policy", () => {
     atlas.freeSlots = [0]; // exactly one free slot
 
     // Member A is interested in the upper-left corner (rayHit near 0,0,0).
-    applyViewHotState({
+    applyViewHotState(ctx, {
       type: "viewHotState",
       epochs: epochs(),
       datasetId: poolKey,
@@ -269,7 +265,7 @@ describe("handleVolumeChunkData — eviction policy", () => {
 
     // A's ray-hit far from its chunk; B's near its chunk → A's cached
     // chunk should be the farthest and thus the eviction target.
-    applyViewHotState({
+    applyViewHotState(ctx, {
       type: "viewHotState",
       epochs: epochs(),
       datasetId: poolKey,
@@ -306,7 +302,7 @@ describe("handleVolumeChunkData — eviction policy", () => {
     atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
     atlas.freeSlots = [0];
 
-    applyViewHotState({
+    applyViewHotState(ctx, {
       type: "viewHotState",
       epochs: epochs(),
       datasetId: poolKey,
@@ -368,7 +364,7 @@ describe("handleVolumeChunkData — eviction policy", () => {
     handleVolumeChunkData(ctx, makeVolumeMsg(memberA, []), epochs(), poolKey, memberA);
 
     expect(posts.length).toBe(0);
-    expect(getVolumeAtlases().get(poolKey)?.slots.size).toBe(0);
+    expect(ctx.state.volumeAtlases.get(poolKey)?.slots.size).toBe(0);
   });
 });
 

@@ -16,7 +16,6 @@ import {
   ensureDepthTexture,
   getDepthTexture,
   getDummyIndirection,
-  getVolumeAtlases,
 } from "./atlas.ts";
 
 export function handleVolumeRenderMultiPass(
@@ -35,7 +34,7 @@ export function handleVolumeRenderMultiPass(
 
   const canvasView = ctx.context.getCurrentTexture().createView();
   let isFirstLayer = true;
-  const atlasMap = getVolumeAtlases();
+  const atlasMap = ctx.state.volumeAtlases;
 
   for (const layer of msg.layers) {
     const memberId = layer.datasetId;

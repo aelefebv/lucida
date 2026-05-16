@@ -5,6 +5,7 @@ import type { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerToMainMessage } from "./workerProtocol.ts";
 import type { ProxyAtlasState, ProxyHandle } from "./proxyAtlas.ts";
 import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
+import type { RendererState } from "./worker/state.ts";
 
 /**
  * Per-entity proxy descriptor — handles into the GPU proxy atlases.
@@ -21,6 +22,13 @@ export interface WorkerCtx {
   device: GPUDevice;
   context: GPUCanvasContext;
   format: GPUTextureFormat;
+  /**
+   * Per-session worker state — every Map / counter / pointer that
+   * previously lived as a module global across the worker + per-mode
+   * handler files. Owned by the dispatcher; handlers mutate it directly.
+   * See {@link RendererState} for the shape.
+   */
+  state: RendererState;
   getSliceRenderer(): SliceRenderer;
   getVolumeRenderer(): VolumeRenderer;
   getCompositor(): LayerCompositor;

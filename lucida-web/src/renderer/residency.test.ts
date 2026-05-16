@@ -3,6 +3,14 @@ import { remapIndirection, applyViewHotState, getRayHitForMember, type AtlasStat
 import { parseChunkKey } from "./chunkKeys.ts";
 import { remapSliceIndirection, type SliceAtlasState } from "./slice/index.ts";
 import type { ViewHotStateMessage } from "./workerProtocol.ts";
+import type { WorkerCtx } from "./workerContext.ts";
+import { createInitialState } from "./worker/state.ts";
+
+/** Build a minimal ctx whose only populated field is `state`. The
+ * applyViewHotState handler only touches `ctx.state.rayHitPerEntity`. */
+function makeStubCtx(): WorkerCtx {
+  return { state: createInitialState() } as unknown as WorkerCtx;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -286,30 +294,34 @@ describe("applyViewHotState", () => {
   }
 
   it("populates rayHitPerEntity for each entry", () => {
-    applyViewHotState(makeMsg([
+    const ctx = makeStubCtx();
+    applyViewHotState(ctx, makeMsg([
       ["m3-entA", [0.1, 0.2, 0.3]],
       ["m3-entB", [0.4, 0.5, 0.6]],
     ]));
-    expect(getRayHitForMember("m3-entA")).toEqual([0.1, 0.2, 0.3]);
-    expect(getRayHitForMember("m3-entB")).toEqual([0.4, 0.5, 0.6]);
+    expect(getRayHitForMember(ctx.state, "m3-entA")).toEqual([0.1, 0.2, 0.3]);
+    expect(getRayHitForMember(ctx.state, "m3-entB")).toEqual([0.4, 0.5, 0.6]);
   });
 
   it("latest message wins for the same entity (idempotent overwrite)", () => {
-    applyViewHotState(makeMsg([["m3-entC", [0.1, 0.1, 0.1]]]));
-    applyViewHotState(makeMsg([["m3-entC", [0.9, 0.9, 0.9]]]));
-    expect(getRayHitForMember("m3-entC")).toEqual([0.9, 0.9, 0.9]);
+    const ctx = makeStubCtx();
+    applyViewHotState(ctx, makeMsg([["m3-entC", [0.1, 0.1, 0.1]]]));
+    applyViewHotState(ctx, makeMsg([["m3-entC", [0.9, 0.9, 0.9]]]));
+    expect(getRayHitForMember(ctx.state, "m3-entC")).toEqual([0.9, 0.9, 0.9]);
   });
 
   it("supports multi-channel composite memberId keying (imageId:chN)", () => {
-    applyViewHotState(makeMsg([
+    const ctx = makeStubCtx();
+    applyViewHotState(ctx, makeMsg([
       ["m3-img:ch0", [0.2, 0.2, 0.2]],
       ["m3-img:ch1", [0.7, 0.7, 0.7]],
     ]));
-    expect(getRayHitForMember("m3-img:ch0")).toEqual([0.2, 0.2, 0.2]);
-    expect(getRayHitForMember("m3-img:ch1")).toEqual([0.7, 0.7, 0.7]);
+    expect(getRayHitForMember(ctx.state, "m3-img:ch0")).toEqual([0.2, 0.2, 0.2]);
+    expect(getRayHitForMember(ctx.state, "m3-img:ch1")).toEqual([0.7, 0.7, 0.7]);
   });
 
   it("entries not yet seen return undefined (handlers fall back to [0.5,0.5,0.5])", () => {
-    expect(getRayHitForMember("m3-never-seen")).toBeUndefined();
+    const ctx = makeStubCtx();
+    expect(getRayHitForMember(ctx.state, "m3-never-seen")).toBeUndefined();
   });
 });

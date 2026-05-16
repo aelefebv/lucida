@@ -1,9 +1,11 @@
 /**
  * Slice atlas state — pool allocation, indirection sizing, per-entity
- * Z metadata, stale-on-Z-change tracking, dummy indirection buffer,
- * and per-dataset registry.
+ * Z metadata, stale-on-Z-change tracking, dummy indirection buffer.
  *
- * Extracted from `sliceHandlers.ts` in Slice 7. Behavior is unchanged.
+ * Extracted from `sliceHandlers.ts` in Slice 7. Slice 8 moved the
+ * per-dataset registry onto `ctx.state.sliceAtlases`; this module now
+ * mutates that Map through the passed ctx instead of holding its own
+ * module-local copy.
  *
  * Composed cleanups (`removeSliceResources`, `destroyAllSliceResources`)
  * live in `slice/index.ts` so this module stays free of dependencies on
@@ -47,11 +49,9 @@ export interface SliceAtlasState {
   indirectionDirty: boolean;
 }
 
-const atlasPerDataset = new Map<string, SliceAtlasState>();
-
-// Shared dummy 2D indirection buffer for well-as-proxy slice layers
-// (chunk bindings still need valid GPU resources even though the shader
-// short-circuits to the proxy texture).
+// Shared dummy 2D indirection buffer for well-as-proxy slice layers.
+// Stays at module scope: it's a per-device singleton, not per-session
+// state. Slice 9 lifts it into `worker/resources.ts`.
 let dummySliceIndirectionBuf: GPUBuffer | null = null;
 export function getDummySliceIndirection(device: GPUDevice): GPUBuffer {
   if (!dummySliceIndirectionBuf) {
@@ -62,10 +62,6 @@ export function getDummySliceIndirection(device: GPUDevice): GPUBuffer {
     device.queue.writeBuffer(dummySliceIndirectionBuf, 0, new Uint32Array([0xFFFFFFFF]));
   }
   return dummySliceIndirectionBuf;
-}
-
-export function getSliceAtlases(): Map<string, SliceAtlasState> {
-  return atlasPerDataset;
 }
 
 /** Create a shared slice pool. Indirection sized later from entityMetas. */
@@ -121,8 +117,9 @@ export function destroySliceAtlas(atlas: SliceAtlasState): void {
 }
 
 /**
- * Get or create a shared slice pool with the given chunk dims.
- * Cold state handler sets entityMetas and resizes indirection afterward.
+ * Get or create a shared slice pool with the given chunk dims. Stores the
+ * pool in `ctx.state.sliceAtlases`. Cold state handler sets entityMetas
+ * and resizes indirection afterward.
  */
 export function getOrCreateSlicePool(
   ctx: WorkerCtx,
@@ -130,7 +127,8 @@ export function getOrCreateSlicePool(
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
 ): SliceAtlasState {
-  const existing = atlasPerDataset.get(poolKey);
+  const atlases = ctx.state.sliceAtlases;
+  const existing = atlases.get(poolKey);
   if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY) {
     // Mark stale on Z change before updating z
     if (z !== existing.z && existing.slots.size > 0) {
@@ -143,7 +141,7 @@ export function getOrCreateSlicePool(
   }
   if (existing) destroySliceAtlas(existing);
   const newAtlas = createSliceAtlas(ctx.device, chunkX, chunkY, z, t, c);
-  atlasPerDataset.set(poolKey, newAtlas);
+  atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
 
@@ -163,11 +161,12 @@ export function resizeSliceIndirection(ctx: WorkerCtx, atlas: SliceAtlasState, t
  * Composed cleanup that also clears per-entity camera-UV state lives
  * in `slice/index.ts` as `removeSliceResources`.
  */
-export function removeSliceAtlas(idOrMember: string): void {
-  const atlas = atlasPerDataset.get(idOrMember);
+export function removeSliceAtlas(ctx: WorkerCtx, idOrMember: string): void {
+  const atlases = ctx.state.sliceAtlases;
+  const atlas = atlases.get(idOrMember);
   if (atlas) {
     destroySliceAtlas(atlas);
-    atlasPerDataset.delete(idOrMember);
+    atlases.delete(idOrMember);
   }
 }
 
@@ -176,9 +175,10 @@ export function removeSliceAtlas(idOrMember: string): void {
  * cleanup that also clears per-entity camera-UV state lives in
  * `slice/index.ts` as `destroyAllSliceResources`.
  */
-export function destroyAllSliceAtlasResources(): void {
-  for (const atlas of atlasPerDataset.values()) destroySliceAtlas(atlas);
-  atlasPerDataset.clear();
+export function destroyAllSliceAtlasResources(ctx: WorkerCtx): void {
+  const atlases = ctx.state.sliceAtlases;
+  for (const atlas of atlases.values()) destroySliceAtlas(atlas);
+  atlases.clear();
   dummySliceIndirectionBuf?.destroy();
   dummySliceIndirectionBuf = null;
 }

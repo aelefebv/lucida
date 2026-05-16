@@ -1,16 +1,20 @@
 /**
  * Cold-state ingestion orchestrator.
  *
- * Extracted from `gpu.worker.ts:506-753`. The dispatcher's `case
- * "coldState"` shrinks to: capture msg + epochs, call `applyColdState`,
- * post wanted set.
+ * Extracted from `gpu.worker.ts:506-753` (Slice 4). Slice 8 promoted
+ * every previously-module-level registry onto `WorkerCtx.state`; this
+ * function now reads + mutates them via `ctx.state.*` directly instead
+ * of taking a `ColdStateRegistries` parameter.
  *
- * Mutates the registries the worker hands in:
+ * Reads + writes (all on `ctx.state`):
  *   - `memberToDataset` / `memberToPool` — routing registries used by
  *     chunk + render handlers to look up which dataset / pool a
  *     memberId belongs to.
  *   - `wellToFields` — well → child-field set, used so a `WellProxy3D`
  *     upload can fan out to its child fields' descriptors.
+ *   - `wellsByDataset` — dataset → wells currently referenced in
+ *     wellToFields; tracked so `removeLayerResources` can drop a
+ *     dataset's entries without scanning every well.
  *   - `currentEntityMetasByDataset` — per-dataset entity-metas snapshot
  *     for the most recent cold state. The descriptor buffer build pulls
  *     from this so it doesn't pick up stale offsets from pools that
@@ -21,21 +25,14 @@
  * `proxyDescriptorsByEntity` + `proxyPoolsByDataset` are READ (not
  * mutated) — the descriptor build resolves pool indices through them
  * but cold-state ingestion doesn't touch proxy state.
- *
- * Pool state (volume + slice atlases) lives in `renderer/volume/atlas` /
- * `renderer/slice/atlas` module globals today; this function calls into
- * `getOrCreateVolumePool` / `getOrCreateSlicePool` to allocate them.
- * Slice 8 will pull that state up onto a ctx-owned `RendererState`.
  */
 
-import type { WorkerCtx, EntityProxyDescriptor } from "../workerContext.ts";
+import type { WorkerCtx } from "../workerContext.ts";
 import type { ColdStateMessage } from "../workerProtocol.ts";
-import type { ProxyAtlasState } from "../proxyAtlas.ts";
 import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,
   iterateColdMembers,
-  type EntityDescriptorIndex,
 } from "../descriptorBuffer.ts";
 import {
   getOrCreateVolumePool,
@@ -52,21 +49,6 @@ import { groupEntriesByPool } from "./groupEntries.ts";
 import { computeEntityMetas } from "./entityMetas.ts";
 
 /**
- * The registries `applyColdState` reads + mutates. Passed in explicitly
- * so this slice doesn't depend on Slice 8 (state ownership cleanup);
- * the worker module still owns the actual Maps.
- */
-export interface ColdStateRegistries {
-  memberToDataset: Map<string, string>;
-  memberToPool: Map<string, string>;
-  wellToFields: Map<string, Set<string>>;
-  currentEntityMetasByDataset: Map<string, Map<string, LodIndirectionMeta[]>>;
-  proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>;
-  proxyPoolsByDataset: Map<string, Map<string, ProxyAtlasState>>;
-  descriptorBuffersByDataset: Map<string, EntityDescriptorIndex>;
-}
-
-/**
  * Apply a cold-state message: refresh well→fields, register
  * member→dataset mappings, build pool groups, allocate atlases, compute
  * + write entityMetas, resize + remap indirection, capture per-dataset
@@ -75,24 +57,34 @@ export interface ColdStateRegistries {
  * Caller is responsible for posting the wanted-set after this returns
  * (kept outside so this function has a single concern).
  */
-export function applyColdState(
-  ctx: WorkerCtx,
-  msg: ColdStateMessage,
-  reg: ColdStateRegistries,
-): void {
+export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
+  const state = ctx.state;
+
   // 1. Refresh well→fields map so well-proxy uploads can fan out to
   // child fields' descriptors. Cold state is the source of truth for
-  // active set membership; rebuild fully each tick.
-  reg.wellToFields.clear();
+  // active set membership; we rebuild this dataset's contribution
+  // fully each tick. Other datasets' entries stay untouched so the
+  // worker can hold multiple datasets concurrently.
+  const prevWells = state.wellsByDataset.get(msg.datasetId);
+  if (prevWells) {
+    for (const wellId of prevWells) state.wellToFields.delete(wellId);
+  }
+  const wellsForDataset = new Set<string>();
   for (const entry of msg.activeSet) {
     if (entry.parentWellId) {
-      let set = reg.wellToFields.get(entry.parentWellId);
+      let set = state.wellToFields.get(entry.parentWellId);
       if (!set) {
         set = new Set();
-        reg.wellToFields.set(entry.parentWellId, set);
+        state.wellToFields.set(entry.parentWellId, set);
       }
       set.add(entry.entityId);
+      wellsForDataset.add(entry.parentWellId);
     }
+  }
+  if (wellsForDataset.size > 0) {
+    state.wellsByDataset.set(msg.datasetId, wellsForDataset);
+  } else {
+    state.wellsByDataset.delete(msg.datasetId);
   }
 
   // 2. Register member→dataset mappings for every (entry, channel)
@@ -100,7 +92,7 @@ export function applyColdState(
   // produces the same memberId scheme used elsewhere in the pipeline
   // (imageId for fields, entityId for well-as-proxy).
   for (const { memberId } of iterateColdMembers(msg)) {
-    reg.memberToDataset.set(memberId, msg.datasetId);
+    state.memberToDataset.set(memberId, msg.datasetId);
   }
 
   // 3. Build pool groups (volume or slice) — partitions activeSet by
@@ -125,7 +117,7 @@ export function applyColdState(
     let offset = 0;
 
     for (const { entry, memberId } of group.entries) {
-      reg.memberToPool.set(memberId, group.poolKey);
+      state.memberToPool.set(memberId, group.poolKey);
       const { metas, nextOffset } = computeEntityMetas(
         entry,
         group.chunkDims,
@@ -158,20 +150,20 @@ export function applyColdState(
   }
 
   // 5. Capture per-dataset entity-metas snapshot.
-  reg.currentEntityMetasByDataset.set(msg.datasetId, currentEntityMetas);
+  state.currentEntityMetasByDataset.set(msg.datasetId, currentEntityMetas);
 
   // 6. Rebuild per-dataset descriptor buffer. Replaces any previous
   // buffer for the same dataset (proxy pool index churn is acceptable —
   // descriptors are rebuilt fresh each cold state, same as entityMetas).
-  const oldDesc = reg.descriptorBuffersByDataset.get(msg.datasetId);
+  const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
   if (oldDesc) destroyDescriptorBuffer(oldDesc);
-  reg.descriptorBuffersByDataset.set(
+  state.descriptorBuffersByDataset.set(
     msg.datasetId,
     buildDescriptorBuffer(
       ctx.device,
       msg,
-      reg.proxyDescriptorsByEntity,
-      reg.proxyPoolsByDataset,
+      state.proxyDescriptorsByEntity,
+      state.proxyPoolsByDataset,
       currentEntityMetas,
     ),
   );

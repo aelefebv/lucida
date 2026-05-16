@@ -1,58 +1,60 @@
 /**
  * Volume-mode eviction state + view hot-state application.
  *
- * Owns the per-entity ray-pick reference (`rayHitPerEntity`) that
- * `findFarthestSlot` consults to prefer keeping chunks near the
- * camera's hit point.
+ * Operates over `ctx.state.rayHitPerEntity` — the per-entity ray-pick
+ * reference that `findFarthestSlot` consults to prefer keeping chunks
+ * near the camera's hit point.
  *
- * Extracted from `volumeHandlers.ts` in Slice 7. The thin
- * `chunkDistSq` / `findFarthestSlot` wrappers delegate to the shared
- * kernel in `renderer/eviction.ts` (Slice 6); local re-exports keep the
- * volume call sites readable.
+ * Extracted from `volumeHandlers.ts` in Slice 7. Slice 8 moved the Map
+ * onto `WorkerCtx.state`; callers now thread ctx (or a RendererState)
+ * instead of relying on a module-local Map.
  */
 
 import type { ViewHotStateMessage } from "../workerProtocol.ts";
+import type { WorkerCtx } from "../workerContext.ts";
+import type { RendererState } from "../worker/state.ts";
 import {
   chunkDistSq as sharedChunkDistSq,
   findFarthestSlot as sharedFindFarthestSlot,
 } from "../eviction.ts";
 import type { AtlasState, LodIndirectionMeta } from "./atlas.ts";
 
-// Last known ray-volume hit point in local [0,1]³ space per ENTITY (memberId).
-// Chunks closest to this point are kept; farthest are evicted first.
-// Populated by `applyViewHotState` on viewEpoch advance; chunk-data and
-// render handlers read it for `findFarthestSlot` distance metrics.
-const rayHitPerEntity = new Map<string, [number, number, number]>();
-
 /**
- * Apply a viewEpoch hot-state message. Updates the `rayHitPerEntity`
- * map so chunk eviction prioritization stays in sync with the camera
- * ray-pick. Latest message wins per entity.
+ * Apply a viewEpoch hot-state message. Updates
+ * `ctx.state.rayHitPerEntity` so chunk eviction prioritization stays in
+ * sync with the camera ray-pick. Latest message wins per entity.
  */
-export function applyViewHotState(msg: ViewHotStateMessage): void {
+export function applyViewHotState(ctx: WorkerCtx, msg: ViewHotStateMessage): void {
+  const map = ctx.state.rayHitPerEntity;
   for (const [entityId, hit] of msg.rayHitsByEntity) {
-    rayHitPerEntity.set(entityId, hit);
+    map.set(entityId, hit);
   }
 }
 
-/** Test-only: read the per-entity ray-pick map. */
-export function getRayHitForMember(memberId: string): [number, number, number] | undefined {
-  return rayHitPerEntity.get(memberId);
+/** Test/debug: read the per-entity ray-pick reference for a member. */
+export function getRayHitForMember(
+  state: RendererState,
+  memberId: string,
+): [number, number, number] | undefined {
+  return state.rayHitPerEntity.get(memberId);
 }
 
 /** Internal: read the per-entity ray-pick map (used by chunk upload + render). */
-export function rayHitForMember(memberId: string): [number, number, number] {
-  return rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5];
+export function rayHitForMember(
+  state: RendererState,
+  memberId: string,
+): [number, number, number] {
+  return state.rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5];
 }
 
 /** Drop ray-hit state for a removed dataset / member. */
-export function clearRayHitForMember(idOrMember: string): void {
-  rayHitPerEntity.delete(idOrMember);
+export function clearRayHitForMember(state: RendererState, idOrMember: string): void {
+  state.rayHitPerEntity.delete(idOrMember);
 }
 
 /** Drop all ray-hit state (worker destroy). */
-export function clearAllRayHits(): void {
-  rayHitPerEntity.clear();
+export function clearAllRayHits(state: RendererState): void {
+  state.rayHitPerEntity.clear();
 }
 
 /**
@@ -72,14 +74,18 @@ export function chunkDistSq(
 /**
  * Find the best eviction candidate: prefer stale (unmapped) chunks,
  * then farthest mapped chunk. Distance reference is per-entity
- * (`rayHitPerEntity`). Delegates to the shared kernel with `is3D: true`.
+ * (`ctx.state.rayHitPerEntity`). Delegates to the shared kernel with
+ * `is3D: true`.
  */
-export function findFarthestSlot(atlas: AtlasState): { key: string; dist: number } {
+export function findFarthestSlot(
+  state: RendererState,
+  atlas: AtlasState,
+): { key: string; dist: number } {
   return sharedFindFarthestSlot({
     slots: atlas.slots,
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
-    cameraFor: (memberId) => rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5],
+    cameraFor: (memberId) => state.rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5],
     is3D: true,
   });
 }

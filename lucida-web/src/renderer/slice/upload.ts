@@ -17,7 +17,6 @@ import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint16Slice } from "../dataTypeUtil.ts";
 import { parseCompositeKey, makeCompositeKey } from "../chunkKeys.ts";
-import { getSliceAtlases } from "./atlas.ts";
 import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction.ts";
 
 export function handleSliceChunkData(
@@ -37,7 +36,7 @@ export function handleSliceChunkData(
     return;
   }
 
-  const atlas = getSliceAtlases().get(poolKey);
+  const atlas = ctx.state.sliceAtlases.get(poolKey);
   if (!atlas) return;
 
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
@@ -98,9 +97,9 @@ export function handleSliceChunkData(
     } else if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;
     } else {
-      const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(atlas);
+      const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(ctx.state, atlas);
       if (!evictKey) continue;
-      const cam = cameraUVForMember(memberId);
+      const cam = cameraUVForMember(ctx.state, memberId);
       const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
       if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;

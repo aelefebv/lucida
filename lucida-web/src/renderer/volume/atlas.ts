@@ -1,8 +1,11 @@
 /**
  * Volume atlas state — pool allocation, indirection sizing, depth
- * texture, dummy indirection buffer, and per-dataset registry.
+ * texture, dummy indirection buffer.
  *
- * Extracted from `volumeHandlers.ts` in Slice 7. Behavior is unchanged.
+ * Extracted from `volumeHandlers.ts` in Slice 7. Slice 8 moved the
+ * per-dataset registry onto `ctx.state.volumeAtlases`; this module now
+ * mutates that Map through the passed ctx instead of holding its own
+ * module-local copy.
  *
  * Composed cleanups (`removeVolumeResources`, `destroyAllVolumeResources`)
  * live in `volume/index.ts` so this module stays free of dependencies on
@@ -42,20 +45,16 @@ export interface AtlasState {
   indirectionDirty: boolean;
 }
 
-const atlasPerDataset = new Map<string, AtlasState>();
-
-export function getVolumeAtlases(): Map<string, AtlasState> {
-  return atlasPerDataset;
-}
-
-// Shared depth texture for volume rendering (used by cursor renderer for occlusion)
+// Shared depth texture for volume rendering (used by cursor renderer for occlusion).
+// Stays at module scope: it's a per-canvas resource (not per-session) that
+// `ensureDepthTexture` resizes when canvas dims change. Slice 9 lifts it into
+// `worker/resources.ts` along with the other shared GPU resources.
 let depthTexture: GPUTexture | null = null;
 let depthW = 0;
 let depthH = 0;
 
-// Shared dummy indirection buffer, used when binding the chunk atlas
-// for `well-as-proxy` layers (which sample only the proxy texture;
-// chunk bindings still need valid GPU resources).
+// Shared dummy indirection buffer for `well-as-proxy` chunk bindings.
+// Same reasoning as `depthTexture`: not per-session state. Slice 9 owns it.
 let dummyIndirectionBuf: GPUBuffer | null = null;
 export function getDummyIndirection(device: GPUDevice): GPUBuffer {
   if (!dummyIndirectionBuf) {
@@ -145,8 +144,8 @@ export function destroyAtlas(atlas: AtlasState): void {
 
 /**
  * Get or create a shared volume atlas pool for the given (poolKey, chunk dims).
- * Returns the pool. Cold state handler is responsible for setting entityMetas
- * and resizing the indirection buffer afterward.
+ * Stores the pool in `ctx.state.volumeAtlases`. Cold state handler is responsible
+ * for setting entityMetas and resizing the indirection buffer afterward.
  */
 export function getOrCreateVolumePool(
   ctx: WorkerCtx,
@@ -154,7 +153,8 @@ export function getOrCreateVolumePool(
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
 ): AtlasState {
-  const existing = atlasPerDataset.get(poolKey);
+  const atlases = ctx.state.volumeAtlases;
+  const existing = atlases.get(poolKey);
   if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.chunkZ === chunkZ) {
     existing.t = t;
     existing.c = c;
@@ -162,7 +162,7 @@ export function getOrCreateVolumePool(
   }
   if (existing) destroyAtlas(existing);
   const newAtlas = createVolumeAtlas(ctx.device, chunkX, chunkY, chunkZ, t, c);
-  atlasPerDataset.set(poolKey, newAtlas);
+  atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
 
@@ -185,11 +185,12 @@ export function resizeIndirection(ctx: WorkerCtx, atlas: AtlasState, totalEntrie
  * Composed cleanup that also clears per-entity ray-pick state lives in
  * `volume/index.ts` as `removeVolumeResources`.
  */
-export function removeVolumeAtlas(idOrMember: string): void {
-  const atlas = atlasPerDataset.get(idOrMember);
+export function removeVolumeAtlas(ctx: WorkerCtx, idOrMember: string): void {
+  const atlases = ctx.state.volumeAtlases;
+  const atlas = atlases.get(idOrMember);
   if (atlas) {
     destroyAtlas(atlas);
-    atlasPerDataset.delete(idOrMember);
+    atlases.delete(idOrMember);
   }
 }
 
@@ -198,9 +199,10 @@ export function removeVolumeAtlas(idOrMember: string): void {
  * buffer. Composed cleanup that also clears per-entity ray-pick state
  * lives in `volume/index.ts` as `destroyAllVolumeResources`.
  */
-export function destroyAllVolumeAtlasResources(): void {
-  for (const atlas of atlasPerDataset.values()) destroyAtlas(atlas);
-  atlasPerDataset.clear();
+export function destroyAllVolumeAtlasResources(ctx: WorkerCtx): void {
+  const atlases = ctx.state.volumeAtlases;
+  for (const atlas of atlases.values()) destroyAtlas(atlas);
+  atlases.clear();
   depthTexture?.destroy();
   depthTexture = null;
   dummyIndirectionBuf?.destroy();

@@ -16,7 +16,6 @@ import {
   parseCompositeKey,
   makeCompositeKey,
 } from "../chunkKeys.ts";
-import { getVolumeAtlases } from "./atlas.ts";
 import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
 
 export function handleVolumeChunkData(
@@ -37,7 +36,7 @@ export function handleVolumeChunkData(
     return;
   }
 
-  const atlas = getVolumeAtlases().get(poolKey);
+  const atlas = ctx.state.volumeAtlases.get(poolKey);
   if (!atlas) return; // pool not yet created by cold state handler
 
   // Debug: detect chunk dims mismatch (pool created for different chunk size)
@@ -69,9 +68,9 @@ export function handleVolumeChunkData(
     if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;
     } else {
-      const { key: evictKey, dist: farthestDist } = findFarthestSlot(atlas);
+      const { key: evictKey, dist: farthestDist } = findFarthestSlot(ctx.state, atlas);
       if (!evictKey) continue;
-      const cam = rayHitForMember(memberId);
+      const cam = rayHitForMember(ctx.state, memberId);
       const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
       if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;

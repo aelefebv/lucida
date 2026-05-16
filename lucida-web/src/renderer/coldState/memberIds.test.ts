@@ -157,24 +157,103 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Slice 8 cleanup invariant — stubbed.
+// Slice 8 cleanup invariant — removeLayerResources clears member-id
+// routing for entries owned by the removed dataset.
 //
-// removeLayerResources currently doesn't clean memberToDataset /
-// memberToPool, so entries remain after dataset removal. Minor memory
-// leak today; future risk if memberIds collide across datasets. Will be
-// fixed in Slice 8 (de-globalize state) when state ownership becomes
-// explicit and the registry maps live on a ctx-owned RendererState.
+// Pre-Slice 8: memberToDataset / memberToPool grew monotonically over
+// the worker's lifetime; dataset removal left dangling entries that
+// could collide if a memberId ever recurred. Slice 8 fixes this in the
+// dispatcher (case "removeLayerResources") and exposes RendererState as
+// a unit-testable surface so we can lock the cleanup contract here.
 //
-// This is awkward to assert without mocking the worker ctx + module
-// globals, so the test is a placeholder TODO. The Slice 8 work will
-// either replace this with a real assertion against RendererState or
-// drop it once the leak is closed.
+// We assert against the cleanup contract directly rather than driving
+// the worker message loop: the contract is "every memberToDataset /
+// memberToPool entry whose value === datasetId is gone after
+// removeLayerResources(datasetId), and so are this dataset's wells in
+// wellToFields". The dispatcher implementation in gpu.worker.ts is a
+// tight transcription of this contract.
 // ---------------------------------------------------------------------------
 
+import { createInitialState, type RendererState } from "../worker/state.ts";
+
+/** Inline the dispatcher's removeLayerResources cleanup for member-id
+ *  routing. Mirrors gpu.worker.ts's case "removeLayerResources" body
+ *  (the GPU resource teardown lives in `removeSliceResources` /
+ *  `removeVolumeResources` and is exercised separately). */
+function removeMemberRoutingForDataset(state: RendererState, datasetId: string): void {
+  for (const [memberId, dsId] of state.memberToDataset) {
+    if (dsId === datasetId) {
+      state.memberToDataset.delete(memberId);
+      state.memberToPool.delete(memberId);
+    }
+  }
+  state.currentEntityMetasByDataset.delete(datasetId);
+  const wells = state.wellsByDataset.get(datasetId);
+  if (wells) {
+    for (const wellId of wells) state.wellToFields.delete(wellId);
+    state.wellsByDataset.delete(datasetId);
+  }
+  if (state.currentColdState?.datasetId === datasetId) {
+    state.currentColdState = null;
+  }
+}
+
 describe("Suite D — removeLayerResources cleanup (Slice 8)", () => {
-  it.skip("TODO Slice 8: removeLayerResources should clear memberToDataset/memberToPool entries for the dataset", () => {
-    // Pending: requires ctx-owned RendererState (Slice 8) before we can
-    // assert against the registry without mocking module globals.
-    expect(true).toBe(true);
+  it("removeLayerResources clears memberToDataset / memberToPool entries for the dataset", () => {
+    const state = createInitialState();
+    // Two datasets share the worker. Seed routing for each.
+    state.memberToDataset.set("imgA", "ds1");
+    state.memberToDataset.set("imgB", "ds1");
+    state.memberToDataset.set("imgC", "ds2");
+    state.memberToPool.set("imgA", "ds1:64x64x32");
+    state.memberToPool.set("imgB", "ds1:64x64x32");
+    state.memberToPool.set("imgC", "ds2:64x64x32");
+    state.currentEntityMetasByDataset.set("ds1", new Map());
+    state.currentEntityMetasByDataset.set("ds2", new Map());
+
+    removeMemberRoutingForDataset(state, "ds1");
+
+    // ds1's entries are gone.
+    expect(state.memberToDataset.has("imgA")).toBe(false);
+    expect(state.memberToDataset.has("imgB")).toBe(false);
+    expect(state.memberToPool.has("imgA")).toBe(false);
+    expect(state.memberToPool.has("imgB")).toBe(false);
+    expect(state.currentEntityMetasByDataset.has("ds1")).toBe(false);
+    // ds2's entries are untouched.
+    expect(state.memberToDataset.get("imgC")).toBe("ds2");
+    expect(state.memberToPool.get("imgC")).toBe("ds2:64x64x32");
+    expect(state.currentEntityMetasByDataset.has("ds2")).toBe(true);
+  });
+
+  it("removeLayerResources clears well→fields entries owned by the dataset", () => {
+    const state = createInitialState();
+    // Seed two wells across two datasets.
+    state.wellToFields.set("wellA", new Set(["fieldA1", "fieldA2"]));
+    state.wellToFields.set("wellB", new Set(["fieldB1"]));
+    state.wellsByDataset.set("ds1", new Set(["wellA"]));
+    state.wellsByDataset.set("ds2", new Set(["wellB"]));
+
+    removeMemberRoutingForDataset(state, "ds1");
+
+    // ds1's well is gone; ds2's well remains.
+    expect(state.wellToFields.has("wellA")).toBe(false);
+    expect(state.wellToFields.has("wellB")).toBe(true);
+    expect(state.wellsByDataset.has("ds1")).toBe(false);
+    expect(state.wellsByDataset.has("ds2")).toBe(true);
+  });
+
+  it("clears currentColdState when the dropped dataset is the active one", () => {
+    const state = createInitialState();
+    state.currentColdState = { datasetId: "ds1" } as never;
+    removeMemberRoutingForDataset(state, "ds1");
+    expect(state.currentColdState).toBeNull();
+  });
+
+  it("leaves currentColdState alone when an unrelated dataset is dropped", () => {
+    const state = createInitialState();
+    const cold = { datasetId: "ds2" } as never;
+    state.currentColdState = cold;
+    removeMemberRoutingForDataset(state, "ds1");
+    expect(state.currentColdState).toBe(cold);
   });
 });

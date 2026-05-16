@@ -1,8 +1,13 @@
 /**
  * Proxy asset upload orchestrator.
  *
- * Extracted from `gpu.worker.ts:handleProxyAssetData` (Slice 5). Owns
- * the GPU upload path for a delivered proxy asset:
+ * Extracted from `gpu.worker.ts:handleProxyAssetData` (Slice 5). Slice 8
+ * promoted every previously-module-level registry onto
+ * `WorkerCtx.state`; this function reads + mutates them via
+ * `ctx.state.*` directly instead of taking a `ProxyUploadRegistries`
+ * parameter. Also reads `ctx.state.currentEpochs` for staleness checks.
+ *
+ * Owns the GPU upload path for a delivered proxy asset:
  *
  *   1. Stale-check against the worker's current cold-state epochs.
  *   2. Validate buffer length against the declared slot dims.
@@ -25,7 +30,6 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { ProxyAssetDataMessage } from "../workerProtocol.ts";
-import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import type {
   ProxyAtlasState,
   ProxyHandle,
@@ -50,19 +54,6 @@ import type { EntityProxyDescriptor } from "../workerContext.ts";
  * hardware/limit constants).
  */
 const PROXY_POOL_CAPACITY = 64;
-
-/**
- * Registries `handleProxyUpload` reads + mutates. Passed in explicitly
- * so this slice doesn't depend on Slice 8 (state ownership cleanup);
- * the worker module still owns the actual Maps. Same pattern as
- * `ColdStateRegistries` in `coldState/apply.ts`.
- */
-export interface ProxyUploadRegistries {
-  proxyPoolsByDataset: Map<string, Map<string, ProxyAtlasState>>;
-  proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>;
-  wellToFields: Map<string, Set<string>>;
-  proxyStats: { uploaded: number; dropped: number; evicted: number };
-}
 
 /**
  * Outcome of a proxy upload. The caller uses these flags to drive the
@@ -127,12 +118,12 @@ function getOrCreateProxyPool(
 export function handleProxyUpload(
   ctx: WorkerCtx,
   msg: ProxyAssetDataMessage,
-  currentEpochs: SceneEpochs | null,
-  registries: ProxyUploadRegistries,
 ): ProxyUploadOutcome {
+  const state = ctx.state;
+
   // 0. Staleness — drop if older than the current cold-state epoch.
-  if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    registries.proxyStats.dropped++;
+  if (isStaleDelivery(msg.epochs, state.currentEpochs)) {
+    state.proxyStats.dropped++;
     console.log(
       "[proxy.upload] dropped stale",
       msg.entityId,
@@ -157,7 +148,7 @@ export function handleProxyUpload(
   // 2. Resolve pool.
   const { poolKey, pool } = getOrCreateProxyPool(
     ctx.device,
-    registries.proxyPoolsByDataset,
+    state.proxyPoolsByDataset,
     msg.datasetId,
     msg.kind,
     slotDims,
@@ -170,7 +161,7 @@ export function handleProxyUpload(
   const willEvict =
     !pool.slots.has(compositeKey) && pool.freeSlots.length === 0;
   const slotIndex = allocateProxySlot(pool, compositeKey);
-  if (willEvict) registries.proxyStats.evicted++;
+  if (willEvict) state.proxyStats.evicted++;
 
   // 4. Upload to the slot region. Layout is 1-D-along-X.
   const origin = proxySlotOrigin(pool, slotIndex);
@@ -184,7 +175,7 @@ export function handleProxyUpload(
   // 5. Update descriptors.
   const handle: ProxyHandle = { poolKey, slotIndex };
   const desc = getOrCreateProxyDescriptor(
-    registries.proxyDescriptorsByEntity,
+    state.proxyDescriptorsByEntity,
     msg.entityId,
   );
   if (msg.kind === "FieldProxy3D") {
@@ -196,12 +187,12 @@ export function handleProxyUpload(
     propagateWellProxyToFields(
       handle,
       msg.entityId,
-      registries.wellToFields,
-      registries.proxyDescriptorsByEntity,
+      state.wellToFields,
+      state.proxyDescriptorsByEntity,
     );
   }
 
-  registries.proxyStats.uploaded++;
+  state.proxyStats.uploaded++;
   console.log(
     "[proxy.upload] uploaded",
     msg.entityId,
