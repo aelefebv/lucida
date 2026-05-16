@@ -6,8 +6,7 @@
  * half-planes. Pure helpers — no side effects beyond mutating the
  * caller-supplied `stats` accumulator.
  *
- * PRD #578 / Slice 1 (ADR 0029): chunk-iteration helpers extracted out
- * of `./index.ts` into this dedicated file.
+ * See ADR 0029.
  */
 
 import { Axis } from "../../axes.ts";
@@ -273,9 +272,7 @@ interface ClippedGridRange {
  * index-space range to iterate, or `null` if there is no overlap.
  *
  * Side effect: increments `stats.culling.considered`,
- * `stats.culling.afterXyBounds`, and `stats.culling.afterZRange`. The
- * mutation pattern is preserved exactly so the Slice 1 characterization
- * tests still pass.
+ * `stats.culling.afterXyBounds`, and `stats.culling.afterZRange`.
  */
 function clipGridCellsToRegion(
   entity: EntitySnapshot,

@@ -3,13 +3,10 @@
 // code (e.g. a manual "refresh auth" button) can call them without
 // driving the hook.
 //
-// Slice 1 (issue #456) treats every non-200 from `/auth/whoami` as
-// "not authenticated" and surfaces network errors the same way.
-// Slice 3 (issue #459) adds `postLogout`. Both helpers swallow
-// network errors deliberately — logout's user-visible promise is
-// "you're signed out now," and the next whoami refresh will reveal
-// that. The richer error model (provider-down vs. cookie-rejected)
-// lands in slice 4 alongside the real error page.
+// Both helpers swallow network errors deliberately — every non-200
+// from `/auth/whoami` is treated as "not authenticated", and
+// logout's user-visible promise is "you're signed out now," with the
+// next whoami refresh revealing the truth.
 
 import type { AuthPrincipal, AuthState } from "./types.ts";
 
@@ -32,8 +29,8 @@ export async function fetchAuthState(fetchImpl: FetchLike = fetch): Promise<Auth
     res = await fetchImpl(WHOAMI_URL, { credentials: "include" });
   } catch {
     // Network failure: behave as unauthenticated rather than blocking
-    // the app indefinitely. Slice 4 will distinguish "server unreachable"
-    // from "session rejected".
+    // the app indefinitely. We don't yet distinguish "server
+    // unreachable" from "session rejected" here.
     return { authenticated: false };
   }
   if (res.status === 200) {

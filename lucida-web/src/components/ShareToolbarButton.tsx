@@ -21,7 +21,7 @@ let toastIdCounter = 0;
 /**
  * Toolbar button that copies the current URL to the clipboard. Displays
  * a transient inline notification with the link size, plus warnings for
- * local-file paths and oversize URLs (PRD #454 acceptance criteria).
+ * local-file paths and oversize URLs.
  */
 export function ShareToolbarButton({ getCurrentSavedView }: Props) {
   const [toasts, setToasts] = useState<ToastMessage[]>([]);

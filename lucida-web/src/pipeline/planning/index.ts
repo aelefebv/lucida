@@ -14,7 +14,7 @@
  *
  * Every external consumer (orchestrator, cpuCache, debug derivation,
  * tests, …) imports from this barrel so the public surface is stable
- * across the file split. PRD #578 / Slice 1 (ADR 0029).
+ * across the file split. See ADR 0029.
  */
 
 // ---------------------------------------------------------------------------

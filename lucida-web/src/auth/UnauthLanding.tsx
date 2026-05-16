@@ -9,8 +9,6 @@
 // stashes intent + 302s to Google. After the round-trip, the
 // browser lands at the originally-requested URL and AuthGate flips
 // back to the authed branch.
-//
-// Slice 4 (issue #460). Replaces slice 1's `UnauthPlaceholder` stub.
 
 import { useEffect, useRef } from "react";
 

@@ -28,11 +28,11 @@ export interface BookmarkSidebarProps {
   style?: React.CSSProperties;
   /** Visible flag. Parent toggles this to collapse/expand the panel. */
   visible: boolean;
-  /** PRD #454 slice 4: WebSocket bridge for live cross-peer sidebar
-   *  updates. When provided, the hook subscribes to `bookmark_changed`
-   *  broadcasts and reconciles local state on Created/Updated/Deleted
-   *  events without requiring a refresh. May be `null` until the
-   *  bridge is constructed (initial render). */
+  /** WebSocket bridge for live cross-peer sidebar updates. When
+   *  provided, the hook subscribes to `bookmark_changed` broadcasts
+   *  and reconciles local state on Created/Updated/Deleted events
+   *  without requiring a refresh. May be `null` until the bridge is
+   *  constructed (initial render). */
   bridge?: Bridge | null;
 }
 

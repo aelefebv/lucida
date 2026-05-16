@@ -1,6 +1,6 @@
 // Apply a `SavedView` to the live scene. Async, deep module.
 //
-// Per PRD #454 "Apply flow at the recipient":
+// Apply flow at the recipient:
 //
 //   1. Parse + validate (the encoder did this; we accept a parsed SavedView)
 //   2. Diff datasets — compute DatasetId for each URL via blake3 (delegated

@@ -7,8 +7,7 @@
  * {@link PlanningConfig} so they can be live-tuned. `computePriority`
  * is the shared formula every emitter consumes.
  *
- * PRD #578 / Slice 1 (ADR 0029): emission and priority helpers extracted
- * out of `./index.ts` into this dedicated file.
+ * See ADR 0029.
  */
 
 import { Axis } from "../../axes.ts";
@@ -56,14 +55,14 @@ function computePriority(
 // ---------------------------------------------------------------------------
 
 /**
- * Minimap lane — promoted to its own dedicated highest-priority lane
- * by Slice 5 of PRD #545. For every {@link EntitySnapshot} in
- * `entities`, look up `minimapPending.get(entity.imageId)` and emit
- * one {@link ChunkRequest} per coord with `priority = config.minimapLaneOffset`
+ * Minimap lane — its own dedicated highest-priority lane (see ADR
+ * 0023). For every {@link EntitySnapshot} in `entities`, look up
+ * `minimapPending.get(entity.imageId)` and emit one
+ * {@link ChunkRequest} per coord with `priority = config.minimapLaneOffset`
  * directly (no importance / distance terms — minimap chunks are
  * per-dataset, not per-entity-importance).
  *
- * Cited in ADR 0023. Mutates `out`.
+ * Mutates `out`.
  */
 export function emitMinimapLane(
   minimapPending: Map<string, MinimapChunkCoord[]>,
@@ -183,12 +182,11 @@ export function emitDetailLane(
     // (wellId, t, c)). At `fields-with-detail` zoom the chunk path is
     // expected to keep up — no extra parent fetch.
     //
-    // PRD #563 / Slice 5: only `FieldSnapshot` carries a `parentId`.
-    // Narrow on `kind === "Field"` before reading it; the post-narrow
-    // access is non-null. Field-mode active entries map to Field
-    // entities (image-mode datasets have no parent well to fall back
-    // to), so a non-Field here is a producer invariant violation we
-    // skip silently.
+    // Only `FieldSnapshot` carries a `parentId`, so narrow on
+    // `kind === "Field"` first. Field-mode active entries map to
+    // Field entities (image-mode datasets have no parent well to fall
+    // back to), so a non-Field here is a producer invariant violation
+    // we skip silently.
     if (
       entry.mode === "fields-with-proxy-fallback" &&
       entry.wellProxyAvailable &&

@@ -41,8 +41,8 @@ export interface OrchMemberDebug {
 export interface PlanningDatasetDebug {
   datasetId: string;
   /**
-   * Total chunk requests in the plan, broken down by lane. Slice 5
-   * of PRD #545 added the `minimap` lane (highest priority — see
+   * Total chunk requests in the plan, broken down by lane. The
+   * `minimap` lane is highest priority (see
    * [[decisions/0023-minimap-lane-with-highest-priority]]); `proxy`
    * is a chunk-lane reservation used by the type-system extension
    * (proxy *requests* are still tracked separately in {@link proxyCount}).

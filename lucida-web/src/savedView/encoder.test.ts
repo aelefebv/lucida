@@ -250,10 +250,9 @@ describe("SavedView encoder", () => {
      *   - default channel settings, default contrast/gamma
      *   - typical slice camera position
      *
-     * Per PRD #454 §"Schema decisions", this should fit comfortably under
-     * 1 KB after gzip+base64. The dataset side is one URL; the wire-cost
-     * driver is the per-channel display defaults — which the encoder
-     * strips.
+     * The wire payload should fit comfortably under 1 KB after
+     * gzip+base64. The dataset side is one URL; the wire-cost driver
+     * is the per-channel display defaults — which the encoder strips.
      */
     it("384-well plate share link fits under 1 KB", async () => {
       const v = emptySliceView([1280, 720]);

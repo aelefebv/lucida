@@ -6,8 +6,7 @@
  * work lives in {@link assignModes} (mode decisions), the lane emitters
  * in `./emit.ts`, and the chunk-iteration helpers in `./chunks.ts`.
  *
- * PRD #578 / Slice 1 (ADR 0029): `plan()` extracted out of `./index.ts`
- * into this dedicated file.
+ * See ADR 0029.
  */
 
 import type { SceneEpochs } from "../epochs.ts";
@@ -34,7 +33,7 @@ import { validatePlanningInputs } from "./validate.ts";
  * Top-level pure planning function. Composes promotion, chunk
  * iteration, and three-lane scheduling into a single {@link RequestPlan}.
  *
- * Three-way decomposition (PRD #563 / Slice 3):
+ * Three-way decomposition:
  *   - `snapshot` — the world this tick (entities, region, selection, …).
  *   - `state` — opaque carry-forward state from the previous tick (the
  *     pointer the caller stored from the previous {@link RequestPlan.nextState}).
@@ -44,9 +43,9 @@ import { validatePlanningInputs } from "./validate.ts";
  *   - `requests` and `proxyRequests` are sorted ascending by `priority`
  *     (lower value = more urgent).
  *   - All output objects are freshly allocated; the caller may mutate
- *     them. Every request carries `datasetId` from
- *     {@link PlanningSnapshot.datasetId} (PRD #563 / Slice 1: planner
- *     stamps at emit time, no orchestrator post-`plan()` mutation).
+ *     them. Every request carries `datasetId` stamped from
+ *     {@link PlanningSnapshot.datasetId} at emit time (the orchestrator
+ *     does not post-`plan()` mutate it).
  *   - `epochs.request` is the input epoch + 1; other epoch fields are
  *     forwarded unchanged so consumers can detect plan freshness.
  *   - `stats` reflects work done in this call only — no carry-forward.
@@ -59,9 +58,9 @@ export function plan(
   state: PlanningState,
   config: PlanningConfig = DEFAULT_PLANNING_CONFIG,
 ): RequestPlan {
-  // Dev-mode boundary check (PRD #578 / Slice 3, ADR 0031). Vite
-  // dead-code-eliminates this branch in production builds; the
-  // validator's source is absent from the shipped bundle.
+  // Dev-mode boundary check (see ADR 0031). Vite dead-code-eliminates
+  // this branch in production builds; the validator's source is
+  // absent from the shipped bundle.
   if (import.meta.env.DEV) validatePlanningInputs(snapshot, state);
 
   const stats = emptyPlanStats();
@@ -89,10 +88,9 @@ export function plan(
   // the same well don't each push a duplicate parent-well request.
   const wellProxyEmitted = new Set<string>();
 
-  // Step 3: Minimap lane — promoted to highest priority by Slice 5
-  // (PRD #545 / ADR 0023). Emitted before detail so the minimap
-  // appears within ~1s of dataset open instead of after detail
-  // finishes.
+  // Step 3: Minimap lane — highest priority (see ADR 0023). Emitted
+  // before detail so the minimap appears within ~1s of dataset open
+  // instead of after detail finishes.
   emitMinimapLane(
     snapshot.minimapPending,
     snapshot.entities,

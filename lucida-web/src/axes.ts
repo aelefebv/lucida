@@ -9,6 +9,6 @@
  *
  * JS-side only; the Rust side mostly uses destructuring (`let [t, c, z, y, x] = arr`).
  *
- * PRD #578 / Slice 2 (ADR 0030).
+ * See ADR 0030.
  */
 export const Axis = { T: 0, C: 1, Z: 2, Y: 3, X: 4 } as const;

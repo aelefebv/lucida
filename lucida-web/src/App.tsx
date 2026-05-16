@@ -126,12 +126,12 @@ function App() {
     setSelectedDatasetId(firstVisibleId);
   }, []);
 
-  // SavedView wiring (PRD #454, slices 1+3). Mounts the URL→scene sync,
-  // exposes the share-button capture, gives the loading banner a handle
-  // on apply progress, and forwards apply summaries for the
-  // selectedDatasetId wrinkle. Hook order matters: must come *after*
-  // `useBridge` so we can hand the applier the bridge functions, and
-  // *before* the savedViewHooksRef populate below.
+  // SavedView wiring. Mounts the URL→scene sync, exposes the
+  // share-button capture, gives the loading banner a handle on apply
+  // progress, and forwards apply summaries for the selectedDatasetId
+  // wrinkle. Hook order matters: must come *after* `useBridge` so we
+  // can hand the applier the bridge functions, and *before* the
+  // savedViewHooksRef populate below.
   const savedViewSync = useSavedViewSync({
     getScene: () => scene.wasmSceneRef.current,
     sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,

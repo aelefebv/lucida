@@ -3,7 +3,7 @@
 // resolution can call `getBookmark(id)` without dragging in the hook
 // machinery (the bootstrap path runs before any React tree is mounted).
 //
-// Slice 2 (issue #475) defines the wire contract:
+// Wire contract:
 //   - GET /api/bookmarks?dataset=<url>&dataset=<url>
 //   - GET /api/bookmarks/:id
 //   - POST /api/bookmarks  body {name, datasets, view}

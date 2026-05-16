@@ -37,7 +37,7 @@ Highest-numbered tier evicts first. LRU within each tier (by `insertedAt`), exce
 4. **proxy** — fallback resource (well/field proxy)
 5. **overview** — per-entity coarsest pass + minimap; most expensive; covers whole dataset
 
-`lane: "minimap"` chunks (introduced in Slice 5 of PRD #545 / ADR 0023) land in the overview cache — the most-protected tier — so the minimap survives memory pressure that would clear other tiers. Combined with the planner emitting minimap at priority 0, the effect is "fetched first, evicted last."
+`lane: "minimap"` chunks land in the overview cache — the most-protected tier — so the minimap survives memory pressure that would clear other tiers. Combined with the planner emitting minimap at priority 0, the effect is "fetched first, evicted last." See [[decisions/0023-minimap-lane-with-highest-priority]].
 
 Budgets: main 512 MB, overview 64 MB, proxy 256 MB.
 

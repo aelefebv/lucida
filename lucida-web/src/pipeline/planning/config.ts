@@ -1,22 +1,18 @@
 /**
  * Planning tunables — typed, parameter-passed.
  *
- * Slice 3 of the planning refactor (PRD #545) lifts the legacy
- * module-level constants out of the planning code paths and into a
- * `PlanningConfig` value that {@link plan} accepts as a parameter. This
- * honours principle §4 of `wiki/principles/planning.md` — planning is
- * pure and any state that survives across ticks (or any policy knob the
- * user might twist live) is an explicit input.
+ * `PlanningConfig` is the single value {@link plan} accepts as a
+ * parameter for every policy knob. This honours principle §4 of
+ * `wiki/principles/planning.md` — planning is pure and any state that
+ * survives across ticks (or any policy knob the user might twist
+ * live) is an explicit input.
  *
  * The default-value literals live in this module (the leaf, to avoid a
  * circular import with `./index.ts`) and are re-exported from
  * `./index.ts` under their historical names (`FAR_THRESHOLD_PX`, etc.)
  * so existing callers and tests keep importing them from the planning
  * entry point. Both the named constants and {@link DEFAULT_PLANNING_CONFIG}
- * share the same underlying numbers, so the two cannot drift. Slice 6
- * wires a live `configStore` into the orchestrator; until then the
- * orchestrator passes {@link DEFAULT_PLANNING_CONFIG} verbatim,
- * preserving today's behaviour exactly.
+ * share the same underlying numbers, so the two cannot drift.
  */
 
 // ---------------------------------------------------------------------------
@@ -44,8 +40,7 @@ export const HYSTERESIS_PX = 5;
 
 /**
  * Priority lane offset for the minimap lane (highest urgency in the
- * system). Slice 5 of PRD #545 promoted minimap from the OVERVIEW
- * lane (2000) to its own dedicated lane at offset `0` so the
+ * system). Minimap is its own dedicated lane at offset `0` so the
  * whole-sample spatial context appears within ~1 second of dataset
  * open instead of after every other lane drains. See ADR 0023.
  */

@@ -15,8 +15,9 @@
  * Display-state changes (contrast slider, colormap dropdown, etc.)
  * bump `epochs.selection` in the WASM scene. The orchestrator detects
  * this via its standard epoch-cache check, re-runs `plan()`, re-emits
- * cold state, and the worker rebuilds the descriptor buffer. No
- * separate "descriptorPatch" message — see PRD #432 design decision 4.
+ * cold state, and the worker rebuilds the descriptor buffer.
+ * Deliberately no separate "descriptorPatch" message — display-state
+ * changes flow through the same cold-state seam as everything else.
  */
 
 import type {
@@ -93,9 +94,9 @@ export interface EntityDescriptorIndex {
   /**
    * M2: colormap name → dense LUT index (matches GPU descriptor's
    * `colormapLutIndex` field). Stable across rebuilds in the
-   * insertion-order they were first seen for this dataset (option A in
-   * PRD #432 §3 — informational on the GPU side; CPU resolves
-   * `colormapNameByMember` per draw to bind the right LUT texture).
+   * insertion-order they were first seen for this dataset; the GPU
+   * descriptor's index is informational, with the CPU resolving
+   * `colormapNameByMember` per draw to bind the right LUT texture.
    */
   colormapLutIndices: Map<string, number>;
   /** M2: memberId → colormap name. Drives per-draw LUT texture binding. */

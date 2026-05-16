@@ -356,9 +356,8 @@ export function DebugOverlays({
                 if (ent.parent === entry.entityId && ent.kind === "Field") {
                   const img = ds.manifest.images.find(i => i.image_id === ent.id)
                     ?? ds.manifest.images[0];
-                  // PRD #563 / Slice 4: well-as-proxy entries have no
-                  // LOD bookkeeping — surface `null` so the badge skips
-                  // the LOD label.
+                  // well-as-proxy entries have no LOD bookkeeping —
+                  // surface `null` so the badge skips the LOD label.
                   if (img) addField(entry.entityId, ent.id, img.image_id, "well-as-proxy", null);
                 }
               }
@@ -464,9 +463,9 @@ export function DebugOverlays({
             if (out.length >= MAX_CHUNK_RECTS) break outer;
 
             // Invisible entries don't contribute chunks or proxies —
-            // skip them entirely. PRD #563 / Slice 4 split them into
-            // their own variant; reading mode/imageId/targetLod here
-            // would otherwise be a type error.
+            // skip them entirely. They live in their own variant;
+            // reading mode/imageId/targetLod here would otherwise be
+            // a type error.
             if (entry.kind === "invisible") continue;
 
             // Well-as-proxy: there's no chunk grid because the well is

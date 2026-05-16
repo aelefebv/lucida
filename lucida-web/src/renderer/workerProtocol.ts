@@ -300,7 +300,7 @@ export interface ColdStateActiveEntry {
  * M2: per-channel display state in cold state. The worker writes these
  * fields into the GPU `EntityDescriptor` and resolves `colormapName` to
  * a CPU-side LUT texture binding per draw (the descriptor's
- * `colormapLutIndex` is informational; option A in PRD #432 §3).
+ * `colormapLutIndex` is informational, not authoritative).
  *
  * `channelMask` is a single-bit-per-active-channel flag used as a
  * forward-compatibility marker; the existing `imageId:chN` memberId

@@ -4,8 +4,7 @@
  * case; the composing function gets a fully-valid passing case and a
  * smoke test that violations propagate.
  *
- * PRD #578 / Slice 3 (ADR 0031): per-check coverage colocated with the
- * validator.
+ * Per ADR 0031, per-check coverage is colocated with the validator.
  */
 
 import { describe, it, expect } from "vitest";
@@ -250,10 +249,10 @@ describe("checkVisibleRegionBounds", () => {
 // ===========================================================================
 //
 // The original "every assetCatalog key must be a known entityId" check
-// was withdrawn after PRD #578 / Slice 3 shipped. The catalog is
-// flattened across all datasets the catalog has ever seen; the snapshot
-// is for one dataset's current tick. They legitimately diverge. See
-// validate.ts for the full rationale.
+// was withdrawn. The catalog is flattened across all datasets the
+// catalog has ever seen; the snapshot is for one dataset's current
+// tick. They legitimately diverge. See validate.ts for the full
+// rationale.
 
 // ===========================================================================
 // Check 7 — withdrawn (minimapPending keys)

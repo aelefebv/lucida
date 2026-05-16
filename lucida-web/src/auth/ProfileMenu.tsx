@@ -1,16 +1,14 @@
 // ProfileMenu — avatar + display name + email + Sign Out, dropdown
-// menu in the bottom-left corner of the app chrome (moved from
-// top-right so the bookmark sidebar header isn't occluded).
+// menu in the bottom-left corner of the app chrome.
 //
-// Slice 3 (issue #459) introduces this component. Reads the current
-// principal and `signOut` from `<AuthGate>`'s `AuthSessionContext`
-// rather than props, so dropping it anywhere inside the authed
-// subtree works without rewiring the host.
+// Reads the current principal and `signOut` from `<AuthGate>`'s
+// `AuthSessionContext` rather than props, so dropping it anywhere
+// inside the authed subtree works without rewiring the host.
 //
-// Avatar: uses `picture_url` when present (real OAuth, slice 4+);
-// falls back to a coloured circle showing the first letter of the
-// display name. Dev sessions land here with `picture_url = null`,
-// so the fallback path is the visible default until OAuth lands.
+// Avatar: uses `picture_url` when present (real OAuth); falls back to
+// a coloured circle showing the first letter of the display name.
+// Dev sessions arrive with `picture_url = null`, so the fallback
+// path is the visible default in development.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuthSession } from "./AuthSession.ts";

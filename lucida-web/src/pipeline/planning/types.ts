@@ -7,8 +7,7 @@
  * free of circular dependencies. `./index.ts` re-exports everything for
  * the public API.
  *
- * PRD #578 / Slice 1 (ADR 0029): types extracted out of `./index.ts`
- * into this dedicated file.
+ * See ADR 0029.
  */
 
 import type { LevelGeometry } from "../../manifestTypes.ts";
@@ -17,7 +16,7 @@ import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
 
 // ---------------------------------------------------------------------------
-// EntitySnapshot — discriminated union (PRD #563 / Slice 5)
+// EntitySnapshot — discriminated union
 // ---------------------------------------------------------------------------
 
 /**
@@ -75,17 +74,15 @@ export interface WellSnapshot extends BaseEntitySnapshot {
  * and non-null by contract: a field without a parent is a producer
  * invariant violation worth surfacing rather than silently coercing.
  *
- * PRD #563 / Slice 5: `parentId: string` is enforced at the type level.
- * Consumers that read it narrow on `kind === "Field"` first; the post-
- * narrow access has no `?? null` fallback.
+ * Consumers that read `parentId` narrow on `kind === "Field"` first; the
+ * post-narrow access has no `?? null` fallback.
  */
 export interface FieldSnapshot extends BaseEntitySnapshot {
   kind: "Field";
   /**
    * Parent well's entity id. Required and non-null for {@link FieldSnapshot}
-   * — `groupByWell` keys field grouping off this id. PRD #563 / Slice 5:
-   * the previous `parentId: string | null` on the flat type is now
-   * per-variant; only fields carry one.
+   * — `groupByWell` keys field grouping off this id. Only fields carry
+   * a `parentId`; well/image variants don't.
    */
   parentId: string;
 }
@@ -134,16 +131,14 @@ export interface CacheStateSnapshot {
 export type { AssetCatalogSnapshot, ProxyKind } from "../assetCatalog.ts";
 
 // ---------------------------------------------------------------------------
-// MinimapChunkCoord  (canonical home — Slice 5)
+// MinimapChunkCoord
 // ---------------------------------------------------------------------------
 
 /**
  * Lightweight chunk coordinate carried inside {@link PlanningSnapshot.minimapPending}.
  *
- * Slice 5 of PRD #545 promoted minimap to its own dedicated lane and
- * consolidated this type here (it was previously duplicated between
- * `pipeline/orchestrator.ts` and `pipeline/planning/snapshot.ts`).
- * Both producers now import this single definition.
+ * Canonical home for this type: the orchestrator and `pipeline/planning/snapshot.ts`
+ * both import this single definition.
  *
  * The orchestrator (and the minimap path that fills its
  * `pendingFetch` map) populates one of these per missing minimap
@@ -170,8 +165,7 @@ export interface PlanningSnapshot {
    * Dataset identifier this snapshot pertains to. Carried on the
    * snapshot so the planner can stamp it onto every emitted
    * {@link ChunkRequest} and {@link ProxyRequest} at emit time —
-   * removing the orchestrator's post-`plan()` mutation loops that
-   * previously back-filled it. Required as of PRD #563 / Slice 1.
+   * the orchestrator does not back-fill it after `plan()`.
    */
   datasetId: string;
   epochs: SceneEpochs;
@@ -195,10 +189,10 @@ export interface PlanningSnapshot {
    * coords the minimap path produced this tick (chunks not yet on
    * the GPU's minimap atlas).
    *
-   * Slice 5 of PRD #545 wires this through the planning snapshot so
-   * `emitMinimapLane` can emit them at `MINIMAP_LANE_OFFSET`,
-   * the highest priority in the system. Empty map ⇒ no minimap work
-   * this tick (planning emits no minimap requests).
+   * `emitMinimapLane` reads this and emits requests at
+   * `MINIMAP_LANE_OFFSET`, the highest priority in the system.
+   * Empty map ⇒ no minimap work this tick (planning emits no
+   * minimap requests).
    */
   minimapPending: Map<string, MinimapChunkCoord[]>;
 }
@@ -305,10 +299,9 @@ export function emptyPlanStats(): PlanStats {
 
 export interface ChunkRequest {
   /**
-   * Dataset id this request belongs to. Required as of PRD #563 /
-   * Slice 1: the planner stamps this at emit time from
-   * {@link PlanningSnapshot.datasetId} so the orchestrator no longer
-   * needs to back-fill it via post-`plan()` mutation loops.
+   * Dataset id this request belongs to. The planner stamps this at
+   * emit time from {@link PlanningSnapshot.datasetId}; the
+   * orchestrator does not back-fill it after `plan()`.
    */
   datasetId: string;
   entityId: string;
@@ -320,10 +313,10 @@ export interface ChunkRequest {
   y: number;
   x: number;
   /**
-   * Which planning lane produced this request. Slice 5 of PRD #545
-   * added the `"minimap"` lane (highest priority — fetched first).
-   * The CPU cache and GPU upload paths route per-lane (see
-   * [[cpu-cache]] for the eviction-tier mapping).
+   * Which planning lane produced this request. `"minimap"` is the
+   * highest priority — fetched first. The CPU cache and GPU upload
+   * paths route per-lane (see [[cpu-cache]] for the eviction-tier
+   * mapping).
    */
   lane: "minimap" | "detail" | "proxy" | "prefetch" | "overview";
   priority: number;
@@ -365,12 +358,12 @@ export interface ProxyRequest {
  *     field detail chunks only; proxy is a stand-in fallback that the
  *     worker uses when chunks are missing.
  *
- * The third tier — well-as-proxy (< `FAR_THRESHOLD_PX`) — no
- * longer lives on this type. It's a separate {@link ActiveSetEntry}
- * variant ({@link WellAsProxyEntry}) discriminated by `kind`. PRD #563
- * / Slice 4: per-variant invariants (no LOD bookkeeping for
- * well-as-proxy, no proxy bookkeeping for invisible) are now
- * compile-time enforced rather than JSDoc'd.
+ * The third tier — well-as-proxy (< `FAR_THRESHOLD_PX`) — does not
+ * live on this type. It's a separate {@link ActiveSetEntry} variant
+ * ({@link WellAsProxyEntry}) discriminated by `kind`, so per-variant
+ * invariants (no LOD bookkeeping for well-as-proxy, no proxy
+ * bookkeeping for invisible) are compile-time enforced rather than
+ * JSDoc'd.
  */
 export type EntityMode =
   | "fields-with-proxy-fallback"
@@ -392,10 +385,8 @@ export type ResolvedMode = EntityMode | "well-as-proxy";
  * Promotion decision for one visible well or visible field, plus
  * pass-through entries for invisible entities. Discriminated by `kind`
  * so each variant can declare only the fields that make sense for it
- * (per-variant invariants compile-time enforced — PRD #563 / Slice 4
- * extends [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
- * from "carry-forward state is explicit" to "per-variant invariants are
- * compile-time enforced").
+ * (per-variant invariants compile-time enforced — see
+ * [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]).
  *
  * Three variants:
  *   - {@link WellAsProxyEntry} (`kind: "well-as-proxy"`) — one per
@@ -466,10 +457,9 @@ export interface FieldEntry {
  * (used for overview-lane bookkeeping); no LOD range or proxy fields,
  * since invisibles don't request chunks or proxies.
  *
- * Distinct from a `fields-with-detail` field entry — the previous
- * encoding conflated them under `mode: "fields-with-detail"`, which
- * was a real footgun for `if (entry.mode === "fields-with-detail")`
- * checks. PRD #563 / Slice 4 splits them cleanly.
+ * Distinct from a `fields-with-detail` field entry: keeping invisibles
+ * as their own variant prevents `if (entry.mode === "fields-with-detail")`
+ * checks from accidentally including invisible entities.
  */
 export interface InvisibleEntry {
   kind: "invisible";

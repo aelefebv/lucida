@@ -10,11 +10,6 @@
  * to camelCase here, every fallback is explicit, and the resulting
  * {@link PlanningSnapshot} is the only thing {@link plan} ever sees.
  *
- * Slice 4 of the planning refactor (PRD #545) extracted this from the
- * orchestrator's `planAndFetch` body. Behaviour is preserved verbatim:
- * the same JSON parses, the same fallback shape when `visible_region`
- * is null, the same single-channel vs multi-channel selection rules.
- *
  * The function is pure: it touches no module state, mutates none of
  * its inputs, and produces a fresh {@link PlanningSnapshot} per call.
  */
@@ -34,11 +29,8 @@ import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import type { PlanningConfig } from "./config.ts";
 
-// Re-export {@link MinimapChunkCoord} so existing snapshot.ts callers
-// keep working unchanged. Slice 5 of PRD #545 consolidated the
-// duplicated declarations (this module + orchestrator.ts) into the
-// single canonical definition in `./index.ts` since the type is now
-// part of the planning snapshot's public shape.
+// Re-export {@link MinimapChunkCoord} from its canonical home in
+// `./index.ts` so callers that imported it from here keep working.
 export type { MinimapChunkCoord } from "./index.ts";
 
 /**
@@ -98,8 +90,7 @@ export interface SnapshotDatasetEntry {
 
 /**
  * Inputs to {@link buildPlanningSnapshot}. Options-object signature so
- * callers can drop new fields in (see Slice 5 + 6) without churning
- * every test stub.
+ * callers can drop new fields in without churning every test stub.
  */
 export interface BuildPlanningSnapshotArgs {
   /** Live WASM scene — queried for view, positions, visible region, selection. */
@@ -114,14 +105,13 @@ export interface BuildPlanningSnapshotArgs {
   assetCatalog: AssetCatalogSnapshot;
   /**
    * Per-image pending minimap fetches the orchestrator has
-   * accumulated this tick. Slice 5 of PRD #545 wires this through
-   * into {@link PlanningSnapshot.minimapPending}; the planner emits
-   * one minimap-lane request per coord at
-   * {@link MINIMAP_LANE_OFFSET} (highest priority).
+   * accumulated this tick. Forwarded verbatim into
+   * {@link PlanningSnapshot.minimapPending}; the planner emits one
+   * minimap-lane request per coord at {@link MINIMAP_LANE_OFFSET}
+   * (highest priority).
    *
-   * Pass `new Map()` if the caller has nothing to forward — that
-   * value is forwarded verbatim to the snapshot, so the planner
-   * emits no minimap requests.
+   * Pass `new Map()` if the caller has nothing to forward — the
+   * planner then emits no minimap requests.
    */
   minimapPending: Map<string, MinimapChunkCoord[]>;
   /** Render mode of the current tick (`slice` vs `volume`). */
@@ -159,12 +149,11 @@ export interface BuildPlanningSnapshotResult {
  * `null` if `view_query(datasetId)` produces a missing or empty
  * `visible_entities` payload — the caller should skip this dataset.
  *
- * The body mirrors the historical orchestrator inline assembly step
- * for step (`view_query` → `member_positions` → `visible_region` →
- * stitch in `imageSpec` + `parentId` → assemble `EntitySnapshot[]` →
- * compute selection). Slice 5 of PRD #545 wires `minimapPending`
- * through into {@link PlanningSnapshot.minimapPending} so the
- * planner can emit minimap-lane requests at the highest priority.
+ * Assembly order: `view_query` → `member_positions` → `visible_region`
+ * → stitch in `imageSpec` + `parentId` → assemble `EntitySnapshot[]` →
+ * compute selection. `minimapPending` is forwarded into
+ * {@link PlanningSnapshot.minimapPending} so the planner can emit
+ * minimap-lane requests at the highest priority.
  */
 export function buildPlanningSnapshot(
   args: BuildPlanningSnapshotArgs,
@@ -180,11 +169,10 @@ export function buildPlanningSnapshot(
     multiChannel,
     currentEpochs,
   } = args;
-  // `requestEpoch` and `config` are accepted in the arg shape so the
-  // orchestrator's call site is forwards-compatible with Slice 6,
-  // but Slice 4/5 don't read them here — the caller already folded
-  // `requestEpoch` into `currentEpochs`, and the config is consumed
-  // by `plan()` (not the snapshot).
+  // `requestEpoch` and `config` are accepted in the arg shape for
+  // forward compatibility but aren't read here: the caller has
+  // already folded `requestEpoch` into `currentEpochs`, and the
+  // config is consumed by `plan()` (not the snapshot).
   void args.requestEpoch;
   void args.config;
 
@@ -214,16 +202,14 @@ export function buildPlanningSnapshot(
 
   // 4. Snake-case → camelCase translation for every visible entity.
   //    Joins the WASM payload with the manifest to pick up `levels` and
-  //    `parentId` (neither of which are part of `view_query`). PRD #563
-  //    / Slice 1 dropped the redundant `numLevels` field — consumers
-  //    derive it from `levels.length`.
+  //    `parentId` (neither of which are part of `view_query`).
   //
-  //    PRD #563 / Slice 5: {@link EntitySnapshot} is a discriminated
-  //    union. Branch on the WASM-reported `kind` and construct the
-  //    matching variant. Field entities require a non-null parent edge
-  //    in the manifest — we throw on the missing-edge case rather than
-  //    silently coercing, so producer bugs surface during snapshot
-  //    assembly rather than later in `groupByWell`.
+  //    {@link EntitySnapshot} is a discriminated union. Branch on the
+  //    WASM-reported `kind` and construct the matching variant. Field
+  //    entities require a non-null parent edge in the manifest — we
+  //    throw on the missing-edge case rather than silently coercing,
+  //    so producer bugs surface during snapshot assembly rather than
+  //    later in `groupByWell`.
   const entities: EntitySnapshot[] = vq.visible_entities.map((e) => {
     const imgSpec = imageSpecById.get(e.image_id);
     const levels = imgSpec ? imgSpec.multiscale.levels : [];
@@ -246,8 +232,7 @@ export function buildPlanningSnapshot(
       if (parentId === undefined || parentId === null) {
         throw new Error(
           `[planning] Field entity "${e.entity_id}" has no parent edge ` +
-            `in the manifest — FieldSnapshot.parentId is required (non-null) ` +
-            `as of PRD #563 / Slice 5.`,
+            `in the manifest — FieldSnapshot.parentId is required (non-null).`,
         );
       }
       return { kind: "Field", parentId, ...base } satisfies EntitySnapshot;
@@ -299,10 +284,10 @@ export function buildPlanningSnapshot(
   //    `minimapPending` is forwarded verbatim — the planner consumes
   //    it via `emitMinimapLane` to build minimap-lane requests at
   //    {@link MINIMAP_LANE_OFFSET}. `datasetId` is plumbed onto the
-  //    snapshot so the planner stamps it onto every emitted request
-  //    (PRD #563 / Slice 1). PRD #563 / Slice 3: `previousActiveSet`
-  //    no longer lives on the snapshot — it moved to {@link PlanningState}
-  //    which the orchestrator passes separately to `plan()`.
+  //    snapshot so the planner stamps it onto every emitted request.
+  //    `previousActiveSet` does not live on the snapshot — it travels
+  //    via {@link PlanningState} which the orchestrator passes
+  //    separately to `plan()`.
   const snapshot: PlanningSnapshot = {
     datasetId,
     epochs: currentEpochs,

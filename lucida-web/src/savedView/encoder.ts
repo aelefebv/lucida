@@ -1,4 +1,4 @@
-// Encoder/decoder for `SavedView` ↔ URL-hash payload (PRD #454, slice 1).
+// Encoder/decoder for `SavedView` ↔ URL-hash payload.
 // Pure functions; no DOM, no scene, no bridge — fully testable in isolation.
 //
 // Pipeline on encode:

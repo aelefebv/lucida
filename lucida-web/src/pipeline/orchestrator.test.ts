@@ -149,9 +149,9 @@ function createMockContent(): DatasetManifest {
     dataset_id: "ds1",
     name: "test",
     kind: "Single",
-    // PRD #563 / Slice 5: FieldSnapshot.parentId is required (non-null).
-    // The mock scene reports `field-0` as a Field, so the manifest must
-    // carry the matching parent edge or `buildPlanningSnapshot` throws.
+    // FieldSnapshot.parentId is required (non-null). The mock scene
+    // reports `field-0` as a Field, so the manifest must carry the
+    // matching parent edge or `buildPlanningSnapshot` throws.
     entities: [
       { id: "well-0", kind: "Well", parent: null, labels: {} },
       { id: "field-0", kind: "Field", parent: "well-0", labels: {} },
@@ -466,9 +466,9 @@ describe("multi-dataset planning", () => {
   });
 
   it("tracks per-dataset PlanningState independently across ticks", () => {
-    // PRD #563 / Slice 3: the orchestrator's per-dataset state map is
-    // typed `Map<datasetId, PlanningState>`. Each `plan()` call now
-    // receives `(snapshot, state, config)` — this test verifies:
+    // The orchestrator's per-dataset state map is typed
+    // `Map<datasetId, PlanningState>`. Each `plan()` call receives
+    // `(snapshot, state, config)` — this test verifies:
     //   - state arrives as the second positional argument,
     //   - both datasets see an empty initial state on tick 1,
     //   - tick 2's per-dataset state's `previousActiveSet` matches the
@@ -540,7 +540,7 @@ describe("multi-dataset planning", () => {
 });
 
 // ===========================================================================
-// 3. Proxy delivery tracking (PRD #409 / S2)
+// 3. Proxy delivery tracking
 // ===========================================================================
 
 describe("proxy delivery tracking", () => {
