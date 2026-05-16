@@ -19,13 +19,13 @@ The directory's collaborators (each one a focused, separately-testable unit):
 - `eviction.ts` — `EvictionPolicy` interface with `LRUPolicy` (overview + proxy caches) and `TieredPolicy` (main cache; preserves the active-detail tiebreaker exactly).
 - `chunkStore.ts` — `ChunkStore`. Wraps a `Map<entityId, Map<chunkKey, CacheEntry>>` + bytes counter + budget + eviction policy. Parameterized: the main cache and overview cache are both `ChunkStore` instances differing only in policy + tier label.
 - `proxyStore.ts` — `ProxyStore`. Wraps the two-level `Map<datasetId, Map<innerKey, ProxyCacheEntry>>` + LRU-across-datasets policy. Separate class because the two-level shape differs from chunk stores.
-- `scheduler.ts` — `Scheduler<Req>` generic. Owns pending queue + in-flight Map + concurrency/bytes caps + backpressure logging via injected `BurstLogger`. Instantiated twice (chunk + proxy); explicitly NOT unified — see deferred Slice 12 in [[decisions/0032-cpucache-split-into-pipeline-fetch]].
+- `scheduler.ts` — `Scheduler<Req>` generic. Owns pending queue + in-flight Map + concurrency/bytes caps + backpressure logging via injected `BurstLogger`. Instantiated twice (chunk + proxy); explicitly NOT unified — see [[decisions/0032-cpucache-split-into-pipeline-fetch]].
 - `retry.ts` — typed `FetchError(kind: "permanent" | "transient" | "abort")` + `classifyFetchError` + `RetryPolicy` interface with `OnceTransientRetry` (current chunk behaviour) and `NeverRetry` (current proxy behaviour). See [[decisions/0033-typed-fetch-error]].
 - `telemetry.ts` — `TelemetryCounters` (verb API: `recordRequest` / `recordHit` / `recordEviction` / `recordDecode` / `recordFetchFailure` / `recordCompletedFetch` / `snapshot` / `reset`) + `BurstLogger` (rate-limited debug log channel for `cache.backpressure` and `cache.failure_burst`).
 - `rejection.ts` — `RejectionTracker` wraps the per-entity `Set<chunkKey>` rejected map. `mark` returns whether the key was newly added so the caller can abort an in-flight fetch.
-- `contentSource.ts` — `ContentSource` interface + `ProxiedContentSource` impl over the WebSocket bridge. After Slice 11, owns `handleBinary(key, payload)` and routes itself by `proxy/` prefix (the bridge no longer sniffs).
+- `contentSource.ts` — `ContentSource` interface + `ProxiedContentSource` impl over the WebSocket bridge. Owns `handleBinary(key, payload)` and routes itself by `proxy/` prefix (the bridge does not sniff for binary routing).
 - `decodePool.ts` — codec-agnostic decode worker pool. Unchanged shape.
-- `decode.worker.ts` — Raw / LZ4 / Zstd decompression + uint8 / bool / uint16 normalization. Zstd path now slices the typed-array view to avoid the 12-byte garbage prefix surfaced by Slice 1's round-trip test.
+- `decode.worker.ts` — Raw / LZ4 / Zstd decompression + uint8 / bool / uint16 normalization. The Zstd path slices the typed-array view to avoid a 12-byte garbage prefix in some payloads.
 - `wireProtocol.ts` — `parseProxyHeader` (64-byte LE) + `proxyResponseKey` (cross-language contract with the Rust server's `proxy_response_key`).
 - `index.ts` — barrel re-export. External callers import from `pipeline/fetch/` only.
 

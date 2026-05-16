@@ -7,9 +7,9 @@ modified: 2026-05-16
 
 How chunk bytes become atlas slots become indirection-buffer entries become shader-sampled pixels. Lives in `lucida-web/src/renderer/`. All WebGPU work happens inside `gpu.worker.ts` (now a ~34 LOC entry point) on a dedicated Web Worker — see [[decisions/0003-gpu-on-dedicated-worker]].
 
-## Post-refactor module layout
+## Module layout
 
-PRD #622 ([[decisions/0035-gpu-worker-split-into-renderer-subdirectories]]) split the 815-LOC `gpu.worker.ts` + 646-LOC `volumeHandlers.ts` + 554-LOC `sliceHandlers.ts` into a tree of focused modules. The entry point now wires five collaborators in `worker/`:
+`renderer/` is a tree of focused modules organized around the worker entry point. The entry point wires five collaborators in `worker/` ([[decisions/0035-gpu-worker-split-into-renderer-subdirectories]]):
 
 - `worker/bootstrap.ts` — `init` handler: builds `WorkerCtx`, creates GPU device + canvas context, instantiates the per-mode renderers (slice, volume, cursor, compositor), and constructs the per-session `RendererState`.
 - `worker/dispatch.ts` — message switch: routes every typed `MainToWorkerMessage` to its handler.
@@ -32,7 +32,7 @@ The GPU side never holds "one texture per chunk." That would shred VRAM and the 
 
 An **indirection buffer** (a `array<u32>` storage buffer) maps logical `(entity, lod, z, y, x)` → atlas slot coords. The shader reads it before sampling the atlas texture. Indirection is only flushed when chunk residency actually changes (atlas write/evict), not every frame — this is a big perf win because indirection writes are otherwise per-frame and bandwidth-bound.
 
-The LRU eviction kernel (`eviction.ts` at the top of `renderer/`) and the indirection-remap kernel (`remap.ts` in each of `volume/` and `slice/`) collapsed their 2D/3D duplicate copies in Slice 6 — the 2D form is now "3D form with Z fixed to one chunk."
+The LRU eviction kernel (`eviction.ts` at the top of `renderer/`) and the indirection-remap kernel (`remap.ts` in each of `volume/` and `slice/`) share one implementation across 2D and 3D — the 2D form is "3D form with Z fixed to one chunk."
 
 ## Descriptor buffer
 
@@ -80,7 +80,7 @@ The chain runs **inside the volume ray-march loop** as well, so a ray that cross
 
 ## De-globalized session state
 
-Slice 8 collapsed the 14 module-level Maps that used to spread across `gpu.worker.ts`, `volumeHandlers.ts`, `sliceHandlers.ts`, and `apply.ts` into a single `RendererState` interface owned by `WorkerCtx.state` and created in `worker/bootstrap.ts`. Every handler reads `ctx.state.<field>` instead of reaching for a module global. The state fields cluster into five groups: cold-state routing (`memberToDataset`, `memberToPool`, `wellToFields`, `wellsByDataset`, `currentEntityMetasByDataset`), proxy + descriptor registries (`proxyPoolsByDataset`, `proxyDescriptorsByEntity`, `descriptorBuffersByDataset`), per-mode atlas registries (`volumeAtlases`, `sliceAtlases`), per-entity eviction reference points (`rayHitPerEntity`, `cameraUVPerEntity`), and cold-state/epoch tracking (`currentEpochs`, `currentColdState`). The dechaos analysis Problem 4 was the trigger; making state ownership explicit also fixed the long-running `removeLayerResources` leak (the handler used to clear atlas pools + descriptor buffers but never the routing Maps — see ADR 0035).
+Per-session state lives on a single `RendererState` interface owned by `WorkerCtx.state` and created in `worker/bootstrap.ts`. Every handler reads `ctx.state.<field>` rather than a module global. The state fields cluster into five groups: cold-state routing (`memberToDataset`, `memberToPool`, `wellToFields`, `wellsByDataset`, `currentEntityMetasByDataset`), proxy + descriptor registries (`proxyPoolsByDataset`, `proxyDescriptorsByEntity`, `descriptorBuffersByDataset`), per-mode atlas registries (`volumeAtlases`, `sliceAtlases`), per-entity eviction reference points (`rayHitPerEntity`, `cameraUVPerEntity`), and cold-state/epoch tracking (`currentEpochs`, `currentColdState`). Explicit state ownership is also what makes `removeLayerResources` clear the routing Maps alongside the atlas pools and descriptor buffers — see ADR 0035.
 
 Renderer-class singletons (slice/volume/cursor/compositor) and persistent GPU resources (LUT cache, offscreen pool, dummy textures/buffers) intentionally stay at module scope in `worker/resources.ts` because they outlive any single session.
 
@@ -88,7 +88,7 @@ Renderer-class singletons (slice/volume/cursor/compositor) and persistent GPU re
 
 When the worker evicts an atlas slot to make room:
 
-1. Posts a `chunksEvicted` message (evicted + skipped keys), keyed by `memberId` (renamed from `datasetId` in Slice 1 — the field has always carried a memberId).
+1. Posts a `chunksEvicted` message (evicted + skipped keys), keyed by `memberId`.
 2. Includes the now-missing chunks in the next `wantedSetDelta`.
 3. Main thread clears `proxyDeliveredToWorker` for the missing keys → next drain re-uploads if the chunk is still in the [[cpu-cache]], or re-requests if it's already gone.
 
@@ -96,14 +96,14 @@ This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — e
 
 ## Interactions
 
-- **Upstream**: the [[upload-pipeline|Uploader]] posts `coldState`, `viewHotState`, `sliceChunkData`, `volumeChunkData`, `proxyAsset` messages over [[worker-protocol]]. The orchestrator (planner-only post-PRD #607) drives the Uploader.
+- **Upstream**: the [[upload-pipeline|Uploader]] posts `coldState`, `viewHotState`, `sliceChunkData`, `volumeChunkData`, `proxyAsset` messages over [[worker-protocol]]. The planner-only Orchestrator drives the Uploader.
 - **Downstream**: the worker presents to the OffscreenCanvas; communicates back via `wantedSetDelta`, `chunksEvicted`, `frameStats`, `intensityRange`.
 
 ## Invariants
 
 - **`entityIndex` matches between CPU and GPU.** Both sides build their lists by iterating the active set in identical order. Drift here is a class of bug that only surfaces visually (wrong colormap on the wrong entity).
-- **Every per-session Map lives on `WorkerCtx.state`.** Module-level mutable state in render-side files is a Slice-8 regression; the lint to enforce is `grep -E '^(const|let|var) .* = new Map' renderer/{volume,slice,coldState,proxy,worker}/*.ts` — should return nothing.
-- **memberId is the canonical owner key on every wire message** (`chunksEvicted.memberId`, `volumeChunkData.memberId`, `sliceChunkData.memberId`). The pre-Slice-1 `datasetId` name lingers on `proxyAsset` and `coldState` (where it really is per-dataset) but every member-routed message uses `memberId`.
+- **Every per-session Map lives on `WorkerCtx.state`.** Module-level mutable state in render-side files is a regression; the lint to enforce is `grep -E '^(const|let|var) .* = new Map' renderer/{volume,slice,coldState,proxy,worker}/*.ts` — should return nothing.
+- **memberId is the canonical owner key on every wire message** (`chunksEvicted.memberId`, `volumeChunkData.memberId`, `sliceChunkData.memberId`). `proxyAsset` and `coldState` correctly stay `datasetId`-keyed because they really are per-dataset; every member-routed message uses `memberId`.
 - **Descriptor byte offsets live only in `descriptor/layout.ts`.** Both TS writers and both WGSL shaders must agree; `layout.test.ts` enforces this by parsing the shaders at test time.
 - **Atlas slot IDs are pool-local.** A slot ID `42` in pool A is unrelated to slot `42` in pool B. The descriptor's per-LOD info encodes which pool to read.
 - **Indirection writes are batched per frame** — many residency changes coalesce into one mapped buffer write. Don't add a per-chunk write call.
@@ -113,6 +113,6 @@ This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — e
 
 - **Worker eviction is asynchronous from the main thread's perspective.** Don't assume `client.volumeChunkData(...)` lands instantly; the worker may have evicted by the time the next tick reads back. The reconciliation path through `wantedSetDelta` is what keeps things correct.
 - **Pool keys include `channel`** — `(datasetId, kind, slotDims, channel)`. Adding multi-channel mode without re-keying pools regresses to all-channels-fight-for-one-pool, which kills plate FPS.
-- **`memberIdForColdEntry` is the only correct way to derive a memberId.** Inline `${entry.imageId}:ch${channel}` produces `:ch5` for well-as-proxy entries (where `imageId` is absent on the discriminated `kind: "well-as-proxy"` variant). Slice 2 surfaced + fixed this in the pool registry; Slice 11's discriminated union makes the type checker refuse the inline form.
+- **`memberIdForColdEntry` is the only correct way to derive a memberId.** Inline `${entry.imageId}:ch${channel}` produces `:ch5` for well-as-proxy entries (where `imageId` is absent on the discriminated `kind: "well-as-proxy"` variant). The discriminated union makes the type checker refuse the inline form.
 - **Volume's per-entity scissor for well-as-proxy entries** lives in `volumePath.ts:15-65`. Skips fragments outside the well's screen-space AABB. If a well is rendering visibly outside its footprint, this is the place to look.
 - **Compositor key naming is asymmetric**: `imageId:chN` for multichannel, bare `imageId` for single-channel. Mixing the two halves silently produces the wrong final composite.
