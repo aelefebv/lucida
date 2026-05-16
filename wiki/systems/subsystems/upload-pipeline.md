@@ -31,7 +31,7 @@ The directory's collaborators (each one a focused, separately-testable unit):
 
 ## The Uploader's role per tick
 
-The Orchestrator drives one Uploader per render loop and feeds it through five dedicated planner-seam methods (chosen over a wide "tick bundle" struct so each callsite has a focused signature):
+The Orchestrator drives one Uploader per render loop and feeds it through five dedicated planner-seam methods:
 
 1. **`onPlanRebuildStart()`** — called once per cold-state rebuild tick. Resets chunk-side delivery tracking; hoisted to once-per-tick so multi-dataset rebuilds don't multi-clear an atlas state that is global per worker.
 2. **`sendColdState(...)`** — per dataset on the rebuild path. Builds the cold-state message via the pure builders, posts it to the worker, and snapshots `epochs` for the subsequent `deliverToWorker` call.

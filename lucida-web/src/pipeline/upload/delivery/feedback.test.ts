@@ -1,9 +1,4 @@
-/**
- * Unit tests for {@link WorkerFeedback}. These tests exercise the
- * extracted module directly against `DeliveryTracker`; higher-level
- * coverage of the same effects against the full orchestrator lives in
- * the orchestrator characterization tests.
- */
+/** Tests {@link WorkerFeedback} directly against `DeliveryTracker`. */
 
 import { describe, it, expect, vi } from "vitest";
 import type { CpuCache } from "../../fetch/index.ts";

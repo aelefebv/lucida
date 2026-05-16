@@ -451,7 +451,7 @@ describe("runProxyResendPass", () => {
     expect(proxyAssetData).not.toHaveBeenCalled();
   });
 
-  it("iterates every dataset in the per-dataset map (#613)", () => {
+  it("iterates every dataset in the per-dataset map", () => {
     const reqA = makeProxyReq({ datasetId: "dsA" });
     const reqB = makeProxyReq({ datasetId: "dsB", entityId: "field-1" });
     const cache = makeMockCache({

@@ -46,9 +46,9 @@ export class Uploader {
   /** Exposed so `Orchestrator` can wire cache-hit / rebuild events. */
   readonly coldStateTelemetry = new ColdStateTelemetry();
 
-  /** Per-dataset so multi-dataset rebuilds aren't last-dataset-wins (#613). */
+  /** Per-dataset so multi-dataset rebuilds aren't last-dataset-wins. */
   private readonly lastFilteredRequests = new Map<string, ChunkRequest[]>();
-  /** Per-dataset so multi-dataset rebuilds aren't last-dataset-wins (#613). */
+  /** Per-dataset so multi-dataset rebuilds aren't last-dataset-wins. */
   private readonly lastProxyRequests = new Map<string, ProxyRequest[]>();
   private readonly lastViewEpochByDataset = new Map<string, number>();
 

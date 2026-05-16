@@ -29,12 +29,12 @@ export interface AtlasLodMeta {
 
 /** Minimal shared-pool atlas state for wanted-set computation. */
 export interface AtlasSnapshot {
-  z?: number; // only for slice atlases (single-entity for now until SP-3)
+  z?: number; // only for slice atlases
   /** Slots keyed by composite "memberId|chunkKey" (volume) or plain chunkKey (slice). */
   slots: Map<string, number>;
   /** Per-entity LOD sections (volume shared pool). */
   entityMetas?: Map<string, AtlasLodMeta[]>;
-  /** Single-entity LOD metas (slice — until SP-3 makes slice shared too). */
+  /** Single-entity LOD metas (slice). */
   lodMetas?: AtlasLodMeta[];
 }
 
@@ -211,8 +211,7 @@ export function computeWantedSet(
     }
 
     for (const { memberId, channel } of members) {
-      // Look up atlas. Volume uses shared pools (keyed by poolKey from memberToPool).
-      // Slice still uses per-member atlases (keyed by memberId) until SP-3.
+      // Look up atlas. Both modes route through `memberToPool` → poolKey.
       let atlas: AtlasSnapshot | undefined;
       let entityLodMetas: AtlasLodMeta[] | undefined;
       let useCompositeKey = false;
@@ -226,7 +225,6 @@ export function computeWantedSet(
         if (entityLodMetas === undefined) continue;
         useCompositeKey = true;
       } else {
-        // Slice — shared pool (SP-3), same lookup pattern as volume
         const poolKey = memberToPool?.get(memberId);
         if (!poolKey) continue;
         atlas = sliceAtlases.get(poolKey);

@@ -400,9 +400,9 @@ describe("Suite A — applyColdState", () => {
     // A new descriptor buffer was written.
     const descB = ctx.state.descriptorBuffersByDataset.get("ds1")!;
     expect(descB).not.toBe(descA);
-    // NOTE: memberToPool retains A's entry — applyColdState only adds
-    // mappings for the new cold state's members. removeLayerResources
-    // owns the dataset-level cleanup. We pin the current behavior here.
+    // memberToPool retains A's entry — applyColdState only adds mappings
+    // for the new cold state's members. removeLayerResources owns the
+    // dataset-level cleanup.
     expect(ctx.state.memberToPool.has("imgA")).toBe(true);
   });
 
