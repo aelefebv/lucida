@@ -35,6 +35,7 @@ import {
   type ProxyCacheEntry,
   type ProxyEvictable,
 } from "./proxyStore.ts";
+import { Scheduler } from "./scheduler.ts";
 import { debugLog } from "../../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
@@ -136,7 +137,8 @@ export interface CacheTelemetry {
   inFlightProxyBytes: number;
   pendingCount: number;
   pendingProxyCount: number;
-  /** Age (ms) of the longest-waiting entry in pendingRequests; 0 if empty. */
+  /** Age (ms) of the longest-waiting entry in the chunk scheduler's
+   *  pending queue; 0 if empty. */
   pendingOldestAgeMs: number;
   /** Decoded chunks waiting for the orchestrator's drain pass. */
   readyCount: number;
@@ -217,21 +219,9 @@ export interface CacheEntry {
   lastSeenTick: number;
 }
 
-interface InFlightEntry {
-  request: ChunkRequest;
-  controller: AbortController;
-  estimatedBytes: number;
-}
-
 interface FailedEntry {
   failedUntilContentEpoch: number;
   isPermanent: boolean;
-}
-
-interface InFlightProxyEntry {
-  request: ProxyRequest;
-  controller: AbortController;
-  estimatedBytes: number;
 }
 
 // `ProxyCacheEntry`, `ProxyEvictable`, and `proxyInnerKey` moved to
@@ -270,15 +260,25 @@ export class CpuCache {
    */
   private proxyStore!: ProxyStore;
 
-  // Fetch scheduler state
-  private pendingRequests: ChunkRequest[] = [];
-  private inFlight = new Map<string, InFlightEntry>(); // inFlightKey → entry
-  private inFlightBytes = 0;
+  /**
+   * Chunk fetch scheduler. Owns the pending queue + in-flight Map +
+   * bytes accounting + per-key enqueue timestamps + the rate-limited
+   * `cache.backpressure` log channel. Wired in the constructor with
+   * a `startFn` that runs {@link fetchAndDecode} for the dequeued
+   * request. The dedup ladder (rejected / cached / in-flight /
+   * failed) STAYS on cpu cache — the scheduler accepts a pre-deduped
+   * list via {@link Scheduler.enqueue}.
+   */
+  private chunkScheduler!: Scheduler<ChunkRequest>;
 
-  // Proxy fetch state
-  private pendingProxyRequests: ProxyRequest[] = [];
-  private inFlightProxy = new Map<string, InFlightProxyEntry>(); // datasetId|innerKey → entry
-  private inFlightProxyBytes = 0;
+  /**
+   * Proxy fetch scheduler. Mirrors {@link chunkScheduler} but with
+   * (a) a different key function (datasetId|innerKey) and
+   * (b) a `siblingInFlight` hook that lets the proxy scheduler share
+   * the chunk caps — see the original `startProxyFetches` ("share
+   * the chunk concurrency caps for now; proxies are a small minority").
+   */
+  private proxyScheduler!: Scheduler<ProxyRequest>;
 
   // Ready deliveries (not yet drained)
   private ready: ReadyDelivery[] = [];
@@ -302,8 +302,14 @@ export class CpuCache {
   // …); the cache composes the public `CacheTelemetry` from
   // `counters.snapshot(now)` plus the per-call store walk in
   // `telemetry()`.
+  //
+  // The `cache.backpressure` channel now lives on the chunk
+  // scheduler's `BurstLogger` (passed through its config) so the
+  // log fires from `Scheduler.drain` without the cache having to
+  // mediate. The proxy scheduler intentionally does NOT get a
+  // backpressure logger — pre-Slice-7 behavior never logged
+  // backpressure for the proxy path.
   private counters = new TelemetryCounters();
-  private burstBackpressure = new BurstLogger("cache", "cache.backpressure");
   private burstFailures = new BurstLogger("cache", "cache.failure_burst");
 
   /**
@@ -328,14 +334,6 @@ export class CpuCache {
 
   // Listeners notified when new chunks become ready
   private listeners: (() => void)[] = [];
-
-  /**
-   * Enqueue timestamps for entries currently in `pendingRequests`.
-   * Keyed by `inFlightKey(req)`. Used to surface starvation: the
-   * oldest age tells you "longest a request has waited unfulfilled."
-   * Cleared when an entry transitions to in-flight or is dropped.
-   */
-  private pendingEnqueuedAt = new Map<string, number>();
 
   // Current epochs (for failure clearing)
   private currentEpochs: SceneEpochs = {
@@ -392,6 +390,53 @@ export class CpuCache {
       budgetBytes: this.config.proxyBudgetBytes,
       recordEviction: () => this.counters.recordEviction("proxy"),
     });
+
+    // Wire the two schedulers. Both share the same concurrency +
+    // bytes caps; the proxy scheduler additionally consults the
+    // chunk scheduler's totals via `siblingInFlight` so the combined
+    // load can't exceed the cap (proxies are a small minority — see
+    // the original `startProxyFetches` comment).
+    //
+    // The chunk scheduler owns the rate-limited `cache.backpressure`
+    // log; the proxy scheduler intentionally does not (matches the
+    // pre-Slice-7 behavior — only the chunk path logged backpressure).
+    //
+    // The `startFn` callback decouples the scheduler from
+    // decode/proxy mechanics: the scheduler tracks the slot, the
+    // callback runs the actual work and is responsible for calling
+    // back into the scheduler (`correctInFlightBytes`,
+    // `markInFlightDone`) at the right transition points.
+    const burstBackpressure = new BurstLogger("cache", "cache.backpressure");
+    this.chunkScheduler = new Scheduler<ChunkRequest>(
+      {
+        maxConcurrentFetches: this.config.maxConcurrentFetches,
+        maxBytesInFlight: this.config.maxBytesInFlight,
+        burstLogger: burstBackpressure,
+      },
+      (req) => this.inFlightKey(req),
+      (req, controller, _estimate, key) => {
+        this.fetchAndDecode(req, controller, key).catch(() => {
+          // Errors handled inside fetchAndDecode.
+        });
+      },
+    );
+    this.proxyScheduler = new Scheduler<ProxyRequest>(
+      {
+        maxConcurrentFetches: this.config.maxConcurrentFetches,
+        maxBytesInFlight: this.config.maxBytesInFlight,
+        // Proxy slots count against the same caps as chunk slots.
+        siblingInFlight: () => ({
+          count: this.chunkScheduler.inFlightSize,
+          bytes: this.chunkScheduler.inFlightBytes,
+        }),
+      },
+      (req) => this.inFlightProxyKey(req),
+      (req, controller, _estimate, key) => {
+        this.fetchProxy(req, controller, key).catch(() => {
+          // Errors handled inside fetchProxy.
+        });
+      },
+    );
   }
 
   // =========================================================================
@@ -427,11 +472,11 @@ export class CpuCache {
     }
     this.activeEntityIds = newActiveIds;
 
-    // Build new pending queue: skip in-flight and failed; refresh cached.
-    // Re-build the enqueue-time map so dropped requests don't leak
-    // entries (the dropped key won't be re-added below).
-    this.pendingRequests = [];
-    const nextEnqueuedAt = new Map<string, number>();
+    // Build new pending list: skip in-flight and failed; refresh cached.
+    // The scheduler accepts the pre-deduped list; it handles the
+    // pending-queue + enqueue-timestamp bookkeeping internally
+    // (preserving original timestamps across re-submits).
+    const pendingChunks: ChunkRequest[] = [];
     const enqueueNow = performance.now();
     for (const req of plan.requests) {
       const key = this.inFlightKey(req);
@@ -460,25 +505,20 @@ export class CpuCache {
       }
 
       // Already in-flight?
-      if (this.inFlight.has(key)) continue;
+      if (this.chunkScheduler.hasInFlight(key)) continue;
 
       // Failed and not cleared?
       const failure = this.failures.get(key);
       if (failure && this.currentEpochs.content < failure.failedUntilContentEpoch) continue;
 
-      this.pendingRequests.push(req);
-      // Preserve original enqueue time across re-submits so age reflects
-      // "how long since the request first appeared," not "how long since
-      // the most recent plan tick."
-      nextEnqueuedAt.set(key, this.pendingEnqueuedAt.get(key) ?? enqueueNow);
+      pendingChunks.push(req);
     }
-    this.pendingEnqueuedAt = nextEnqueuedAt;
+    this.chunkScheduler.enqueue(pendingChunks, enqueueNow);
 
     // Route proxy requests to fetchProxy. Mirrors the chunk path:
     // dedup against the proxy cache + in-flight map, then enqueue.
     const proxyRequests = plan.proxyRequests ?? [];
-
-    this.pendingProxyRequests = [];
+    const pendingProxies: ProxyRequest[] = [];
     for (const req of proxyRequests) {
       const key = this.inFlightProxyKey(req);
 
@@ -488,14 +528,15 @@ export class CpuCache {
       if (this.isProxyCached(req)) continue;
 
       // Already in-flight?
-      if (this.inFlightProxy.has(key)) continue;
+      if (this.proxyScheduler.hasInFlight(key)) continue;
 
-      this.pendingProxyRequests.push(req);
+      pendingProxies.push(req);
     }
+    this.proxyScheduler.enqueue(pendingProxies, enqueueNow);
 
     // Start new fetches
-    this.startChunkFetches();
-    this.startProxyFetches();
+    this.chunkScheduler.drain(() => this.counters.averageDecodedBytes());
+    this.proxyScheduler.drain(() => this.counters.averageDecodedBytes());
   }
 
   /**
@@ -518,53 +559,32 @@ export class CpuCache {
   cancelDataset(datasetId: string, entityIds: string[]): void {
     const entityIdSet = new Set(entityIds);
 
-    // 1. In-flight chunk fetches.
-    for (const [key, entry] of this.inFlight) {
-      if (entityIdSet.has(entry.request.entityId)) {
-        entry.controller.abort();
-        this.inFlightBytes -= entry.estimatedBytes;
-        this.inFlight.delete(key);
-      }
-    }
-
-    // 2. In-flight proxy fetches.
-    for (const [key, entry] of this.inFlightProxy) {
-      if (entry.request.datasetId === datasetId) {
-        entry.controller.abort();
-        this.inFlightProxyBytes -= entry.estimatedBytes;
-        this.inFlightProxy.delete(key);
-      }
-    }
-
-    // 3. Pending chunk queue.
-    for (const r of this.pendingRequests) {
-      if (entityIdSet.has(r.entityId)) {
-        this.pendingEnqueuedAt.delete(this.inFlightKey(r));
-      }
-    }
-    this.pendingRequests = this.pendingRequests.filter(
-      r => !entityIdSet.has(r.entityId),
+    // 1. Chunk scheduler: aborts in-flight + drops pending entries
+    //    whose entityId is in the set. The scheduler shares one
+    //    predicate across both halves so the contract is uniform.
+    this.chunkScheduler.cancelDataset(
+      (entry) => entityIdSet.has(entry.request.entityId),
     );
 
-    // 4. Pending proxy queue.
-    this.pendingProxyRequests = this.pendingProxyRequests.filter(
-      r => r.datasetId !== datasetId,
+    // 2. Proxy scheduler: same shape, filtering on datasetId.
+    this.proxyScheduler.cancelDataset(
+      (entry) => entry.request.datasetId === datasetId,
     );
 
-    // 5. Cached chunks (detail + overview) — fan out to the stores.
+    // 3. Cached chunks (detail + overview) — fan out to the stores.
     this.chunkStore.cancelDataset(entityIds);
     this.overviewStore.cancelDataset(entityIds);
 
-    // 6. Cached proxies under this dataset.
+    // 4. Cached proxies under this dataset.
     this.proxyStore.cancelDataset(datasetId);
 
-    // 7. Ready deliveries.
+    // 5. Ready deliveries.
     this.ready = this.ready.filter(d => {
       if (d.kind === "proxy") return d.datasetId !== datasetId;
       return !entityIdSet.has(d.entityId);
     });
 
-    // 8. Failure map + activeEntityIds. Failure keys are
+    // 6. Failure map + activeEntityIds. Failure keys are
     // `${entityId}/${chunkKey}`; entityIds may contain slashes
     // (plate naming, e.g. "plateId:A/1/0"), so prefix-match on
     // `entityId + "/"` rather than splitting.
@@ -596,14 +616,11 @@ export class CpuCache {
     if (set.has(chunkKey)) return;
     set.add(chunkKey);
 
+    // Slice 9 (`#603`) RejectionTracker will move this fan-out, but
+    // the scheduler-side hook is already in place: abort + slot
+    // release go through `chunkScheduler.cancelOne`.
     const key = `${entityId}/${chunkKey}`;
-    const inFlightEntry = this.inFlight.get(key);
-    if (inFlightEntry) {
-      inFlightEntry.controller.abort();
-      this.inFlightBytes -= inFlightEntry.estimatedBytes;
-      this.inFlight.delete(key);
-      this.pendingEnqueuedAt.delete(key);
-    }
+    this.chunkScheduler.cancelOne(key);
   }
 
   /**
@@ -655,7 +672,7 @@ export class CpuCache {
     }
 
     const inFlight = new Map<string, Set<string>>();
-    for (const [, entry] of this.inFlight) {
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
       const entityId = entry.request.entityId;
       const set = inFlight.get(entityId) ?? new Set();
       set.add(entry.request.chunkKey);
@@ -686,16 +703,10 @@ export class CpuCache {
     };
 
     // Pending-queue starvation signal: oldest enqueue timestamp wins.
-    // Stays in cpuCache because pendingEnqueuedAt is scheduler state
-    // (Slice 7 will relocate it).
-    let pendingOldestAgeMs = 0;
-    if (this.pendingEnqueuedAt.size > 0) {
-      let oldest = now;
-      for (const t of this.pendingEnqueuedAt.values()) {
-        if (t < oldest) oldest = t;
-      }
-      pendingOldestAgeMs = now - oldest;
-    }
+    // Lives on the chunk scheduler (Slice 7); the proxy scheduler
+    // doesn't surface a separate age — proxies are best-effort and
+    // the orchestrator resubmits if they're missing.
+    const pendingOldestAgeMs = this.chunkScheduler.oldestPendingAgeMs(now);
 
     return {
       mainBytes: this.chunkStore.bytes,
@@ -706,12 +717,12 @@ export class CpuCache {
       proxyBudget: this.config.proxyBudgetBytes,
       maxConcurrentFetches: this.config.maxConcurrentFetches,
       maxBytesInFlight: this.config.maxBytesInFlight,
-      inFlightCount: this.inFlight.size,
-      inFlightBytes: this.inFlightBytes,
-      inFlightProxyCount: this.inFlightProxy.size,
-      inFlightProxyBytes: this.inFlightProxyBytes,
-      pendingCount: this.pendingRequests.length,
-      pendingProxyCount: this.pendingProxyRequests.length,
+      inFlightCount: this.chunkScheduler.inFlightSize,
+      inFlightBytes: this.chunkScheduler.inFlightBytes,
+      inFlightProxyCount: this.proxyScheduler.inFlightSize,
+      inFlightProxyBytes: this.proxyScheduler.inFlightBytes,
+      pendingCount: this.chunkScheduler.pendingSize,
+      pendingProxyCount: this.proxyScheduler.pendingSize,
       pendingOldestAgeMs,
       readyCount: this.ready.length,
       hitRate: counters.hitRate,
@@ -797,7 +808,9 @@ export class CpuCache {
     t: number,
     c: number,
   ): boolean {
-    return this.inFlightProxy.has(`${datasetId}|${proxyInnerKey({ entityId, kind, t, c })}`);
+    return this.proxyScheduler.hasInFlight(
+      `${datasetId}|${proxyInnerKey({ entityId, kind, t, c })}`,
+    );
   }
 
   /**
@@ -822,12 +835,12 @@ export class CpuCache {
    * is visible alongside "actual cached state."
    */
   getPendingSnapshot(): readonly ChunkRequest[] {
-    return [...this.pendingRequests];
+    return this.chunkScheduler.pendingSnapshot();
   }
 
   /** Snapshot of pending proxy requests, sorted by priority. */
   getPendingProxySnapshot(): readonly ProxyRequest[] {
-    return [...this.pendingProxyRequests];
+    return this.proxyScheduler.pendingSnapshot();
   }
 
   /**
@@ -881,8 +894,8 @@ export class CpuCache {
     ageMs: number;
   }> {
     const now = performance.now();
-    return this.pendingRequests.map(r => {
-      const enq = this.pendingEnqueuedAt.get(this.inFlightKey(r));
+    return this.chunkScheduler.pendingSnapshot().map(r => {
+      const enq = this.chunkScheduler.enqueueTimeFor(this.inFlightKey(r));
       return {
         chunkKey: r.chunkKey,
         entityId: r.entityId,
@@ -908,18 +921,9 @@ export class CpuCache {
 
   /** Clear all caches, cancel all fetches. */
   reset(): void {
-    // Cancel all in-flight
-    for (const [, entry] of this.inFlight) {
-      entry.controller.abort();
-    }
-    this.inFlight.clear();
-    this.inFlightBytes = 0;
-
-    for (const [, entry] of this.inFlightProxy) {
-      entry.controller.abort();
-    }
-    this.inFlightProxy.clear();
-    this.inFlightProxyBytes = 0;
+    // Cancel all in-flight + drop pending — fan out to each scheduler.
+    this.chunkScheduler.reset();
+    this.proxyScheduler.reset();
 
     // Clear caches — fan out to each store.
     this.chunkStore.reset();
@@ -927,9 +931,6 @@ export class CpuCache {
     this.proxyStore.reset();
 
     // Clear state
-    this.pendingRequests = [];
-    this.pendingProxyRequests = [];
-    this.pendingEnqueuedAt.clear();
     this.ready = [];
     this.activeEntityIds.clear();
     this.interactionDetector.reset();
@@ -948,53 +949,8 @@ export class CpuCache {
   }
 
   // =========================================================================
-  // Fetch Scheduler
+  // Fetch + Decode
   // =========================================================================
-
-  private startChunkFetches(): void {
-    while (
-      this.pendingRequests.length > 0 &&
-      this.inFlight.size < this.config.maxConcurrentFetches &&
-      this.inFlightBytes < this.config.maxBytesInFlight
-    ) {
-      const req = this.pendingRequests.shift()!;
-      this.pendingEnqueuedAt.delete(this.inFlightKey(req));
-      this.startSingleFetch(req);
-    }
-    // If pending remain *because* we hit a limit, surface backpressure.
-    // Rate-limit to ≤1/sec; aggregate skipped count so a sustained
-    // queue still emits a periodic summary.
-    if (
-      this.pendingRequests.length > 0 &&
-      (this.inFlight.size >= this.config.maxConcurrentFetches ||
-        this.inFlightBytes >= this.config.maxBytesInFlight)
-    ) {
-      this.burstBackpressure.recordSkipped(
-        this.pendingRequests.length,
-        (skipped) => ({
-          pending: this.pendingRequests.length,
-          inFlight: this.inFlight.size,
-          maxConcurrent: this.config.maxConcurrentFetches,
-          inFlightBytes: this.inFlightBytes,
-          maxBytes: this.config.maxBytesInFlight,
-          skippedSinceLastLog: skipped,
-        }),
-      );
-    }
-  }
-
-  private startSingleFetch(req: ChunkRequest): void {
-    const key = this.inFlightKey(req);
-    const controller = new AbortController();
-    const estimate = this.counters.averageDecodedBytes();
-    const entry: InFlightEntry = { request: req, controller, estimatedBytes: estimate };
-    this.inFlightBytes += estimate;
-    this.inFlight.set(key, entry);
-
-    this.fetchAndDecode(req, controller, key).catch(() => {
-      // Errors handled inside fetchAndDecode
-    });
-  }
 
   private async fetchAndDecode(
     req: ChunkRequest,
@@ -1011,7 +967,7 @@ export class CpuCache {
     } catch (err: unknown) {
       // Aborted — clean and silent
       if (err instanceof DOMException && err.name === "AbortError") {
-        this.inFlight.delete(key);
+        this.chunkScheduler.markInFlightDone(key);
         return;
       }
 
@@ -1022,7 +978,7 @@ export class CpuCache {
       if (!isPermanent && retryCount < MAX_TRANSIENT_RETRIES) {
         // Transient retry
         await new Promise(r => setTimeout(r, TRANSIENT_RETRY_DELAY_MS));
-        if (!this.inFlight.has(key)) return; // cancelled during wait
+        if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
         return this.fetchAndDecode(req, controller, key, retryCount + 1);
       }
 
@@ -1033,19 +989,13 @@ export class CpuCache {
       });
       this.counters.recordFetchFailure(isPermanent, message);
       this.recordFailureForBurstDetection(isPermanent, message);
-      const failedEntry = this.inFlight.get(key);
-      if (failedEntry) this.inFlightBytes -= failedEntry.estimatedBytes;
-      this.inFlight.delete(key);
+      this.chunkScheduler.markInFlightDone(key);
       return;
     }
 
     // Correct in-flight bytes from estimate to actual
     const responseBytes = result.bytes.byteLength;
-    const inFlightEntry = this.inFlight.get(key);
-    if (inFlightEntry) {
-      this.inFlightBytes += responseBytes - inFlightEntry.estimatedBytes;
-      inFlightEntry.estimatedBytes = responseBytes;
-    }
+    this.chunkScheduler.correctInFlightBytes(key, responseBytes);
 
     // Update running average for future estimates
     this.counters.recordCompletedFetch(responseBytes);
@@ -1059,18 +1009,12 @@ export class CpuCache {
     } catch (err: unknown) {
       this.counters.recordError(err instanceof Error ? err.message : String(err));
       // Guard: submit() may have already cancelled this entry during decode
-      if (this.inFlight.has(key)) {
-        this.inFlightBytes -= responseBytes;
-        this.inFlight.delete(key);
-      }
+      this.chunkScheduler.markInFlightDone(key);
       return;
     }
 
     // Remove from in-flight (guard: submit() may have cancelled during decode)
-    if (this.inFlight.has(key)) {
-      this.inFlightBytes -= responseBytes;
-      this.inFlight.delete(key);
-    }
+    this.chunkScheduler.markInFlightDone(key);
 
     // Check if still wanted (might have been cancelled during decode)
     // We still cache it since the work is done
@@ -1132,40 +1076,12 @@ export class CpuCache {
     this.notifyListeners();
 
     // Start next pending fetch
-    this.startChunkFetches();
+    this.chunkScheduler.drain(() => this.counters.averageDecodedBytes());
   }
 
   // =========================================================================
-  // Proxy Fetch Scheduler
+  // Proxy Fetch
   // =========================================================================
-
-  private startProxyFetches(): void {
-    while (
-      this.pendingProxyRequests.length > 0 &&
-      // Share the chunk concurrency caps for now; proxies are a small minority.
-      this.inFlight.size + this.inFlightProxy.size < this.config.maxConcurrentFetches &&
-      this.inFlightBytes + this.inFlightProxyBytes < this.config.maxBytesInFlight
-    ) {
-      const req = this.pendingProxyRequests.shift()!;
-      this.startSingleProxyFetch(req);
-    }
-  }
-
-  private startSingleProxyFetch(req: ProxyRequest): void {
-    const key = this.inFlightProxyKey(req);
-    const controller = new AbortController();
-    // We don't have a running average for proxy sizes yet; reuse the chunk
-    // average as a rough estimate. Corrected to actual size once the
-    // response arrives.
-    const estimate = this.counters.averageDecodedBytes();
-    const entry: InFlightProxyEntry = { request: req, controller, estimatedBytes: estimate };
-    this.inFlightProxyBytes += estimate;
-    this.inFlightProxy.set(key, entry);
-
-    this.fetchProxy(req, controller, key).catch(() => {
-      // Errors handled inside fetchProxy
-    });
-  }
 
   private async fetchProxy(
     req: ProxyRequest,
@@ -1186,14 +1102,12 @@ export class CpuCache {
       );
     } catch (err: unknown) {
       if (err instanceof DOMException && err.name === "AbortError") {
-        this.inFlightProxy.delete(key);
+        this.proxyScheduler.markInFlightDone(key);
         return;
       }
       const message = err instanceof Error ? err.message : String(err);
       this.counters.recordError(message);
-      const failed = this.inFlightProxy.get(key);
-      if (failed) this.inFlightProxyBytes -= failed.estimatedBytes;
-      this.inFlightProxy.delete(key);
+      this.proxyScheduler.markInFlightDone(key);
       // No retry / failure tracking — orchestrator can resubmit on the
       // next plan if it still wants this proxy.
       return;
@@ -1201,11 +1115,7 @@ export class CpuCache {
 
     // Correct in-flight bytes accounting
     const responseBytes = result.data.byteLength;
-    const inFlightEntry = this.inFlightProxy.get(key);
-    if (inFlightEntry) {
-      this.inFlightProxyBytes += responseBytes - inFlightEntry.estimatedBytes;
-      inFlightEntry.estimatedBytes = responseBytes;
-    }
+    this.proxyScheduler.correctInFlightBytes(key, responseBytes);
 
     // Insert into proxy cache (store handles eviction internally).
     const cacheEntry: ProxyCacheEntry = {
@@ -1224,17 +1134,14 @@ export class CpuCache {
 
     this.proxyStore.insert(req.datasetId, proxyInnerKey(req), cacheEntry);
 
-    if (this.inFlightProxy.has(key)) {
-      this.inFlightProxyBytes -= responseBytes;
-      this.inFlightProxy.delete(key);
-    }
+    this.proxyScheduler.markInFlightDone(key);
 
     // Mark as ready for drain
     this.ready.push(this.proxyEntryToDelivery(cacheEntry));
     this.notifyListeners();
 
     // Drain queue
-    this.startProxyFetches();
+    this.proxyScheduler.drain(() => this.counters.averageDecodedBytes());
   }
 
   private isProxyCached(req: ProxyRequest): boolean {
