@@ -7,7 +7,6 @@
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { SceneSettings } from "../tickCommon.ts";
 import { Axis } from "../axes.ts";
-import type { DatasetManifest } from "../manifestTypes.ts";
 import type {
   ColdStateMessage,
   MissingChunk,
@@ -42,11 +41,7 @@ import type { VisibleRegion } from "./viewport.ts";
 // canonical declaration lives in `pipeline/planning/index.ts` since
 // the type is part of the planning snapshot's public shape.
 export type { MinimapChunkCoord } from "./planning/index.ts";
-import type {
-  CpuCache,
-  ReadyChunkDelivery,
-  ReadyProxyDelivery,
-} from "./fetch/index.ts";
+import type { CpuCache } from "./fetch/index.ts";
 import type { ProxyRequest } from "./planning/index.ts";
 import {
   debugStats,
@@ -73,14 +68,16 @@ import {
   UPLOAD_SIZE_SAMPLES,
   UPLOAD_WINDOW_MS,
 } from "./upload/constants.ts";
-import {
-  proxyKeyFromDelivery,
-  proxyKeyFromRequest,
-} from "./upload/proxyKeys.ts";
 import { buildColdState } from "./upload/coldState/build.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
 import { buildViewHotState } from "./upload/coldState/hotState.ts";
 import { DeliveryTracker } from "./upload/delivery/tracker.ts";
+import { buildManifestByImage } from "./upload/delivery/manifestIndex.ts";
+import { runDrainPass } from "./upload/delivery/drain.ts";
+import {
+  runChunkResendPass,
+  runProxyResendPass,
+} from "./upload/delivery/resend.ts";
 
 /** Per-epoch cause keys we attribute rebuilds to. */
 type ColdStateCauseKey = "content" | "layout" | "view" | "selection" | "asset";
@@ -1189,11 +1186,18 @@ export class Orchestrator {
    * Deliver decoded chunks to the GPU worker via RenderClient. Called
    * from slicePath/volumePath.
    *
-   * Telemetry: writes per-tick stats to `currentUploadStats` and pushes
-   * to the rolling window via `publishUploadStats`. Skip reasons are
-   * incremented either inline (for lane / wrong-lod filters that the
-   * caller checks) or inside `sendDeliveryToWorker` (for the
-   * already-sent / no-meta cases the helper detects).
+   * Composition of three extracted passes (see `upload/delivery/`):
+   * - {@link runDrainPass} — iterate `cpuCache.drain(budget)` output
+   *   and dispatch chunks / proxies that pass `classifyDelivery`.
+   * - {@link runChunkResendPass} — re-send chunks the worker evicted
+   *   or never received, sourced from `_lastFilteredRequests`.
+   * - {@link runProxyResendPass} — same shape for proxies, sourced
+   *   from `_lastProxyRequests`.
+   *
+   * Each pass owns its own counter writes (skips + uploads) onto the
+   * shared `currentUploadStats`. The per-tick manifest index built by
+   * `buildManifestByImage` eliminates the O(D × I) per-chunk scan the
+   * old `sendDeliveryToWorker` did.
    */
   deliverToWorker(
     ctx: TickContext,
@@ -1206,157 +1210,74 @@ export class Orchestrator {
 
     const multiChannel = ctx.scene.multi_channel();
     const epochs = this.lastEpochs ?? { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
-    let remaining = budget;
-    let budgetExhausted = false;
+    const viewMode = ctx.mode;
 
-    // Build target level map from current plan for LOD filtering.
-    // Merge across all datasets so multi-dataset rebuilds see every
-    // dataset's requested levels, not just the last-processed one
-    // (see #613).
+    // Build per-tick lookup tables: target LOD by image (drives the
+    // drain pass's wrongLod filter) and the per-image manifest index
+    // (eliminates the per-chunk dataset scan during dispatch).
     const targetLevelByImage = new Map<string, number>();
     for (const requests of this._lastFilteredRequests.values()) {
       for (const req of requests) {
         targetLevelByImage.set(req.imageId, req.level);
       }
     }
+    const manifestByImage = buildManifestByImage(ctx.datasets);
 
-    // Drain new deliveries from CpuCache
     const deliveries = ctx.cpuCache.drain(budget);
     for (const d of deliveries) {
       if (d.kind === "proxy") this.currentUploadStats.drainedProxies++;
       else this.currentUploadStats.drainedChunks++;
     }
 
-    // Send each delivery to the worker.
-    for (const delivery of deliveries) {
-      if (delivery.kind === "proxy") {
-        // Proxies are routed to a dedicated worker message.
-        const sent = this.sendProxyDeliveryToWorker(ctx, delivery, epochs);
-        if (sent > 0) {
-          this.currentUploadStats.uploadedProxies++;
-          this.currentUploadStats.bytesUploaded += sent;
-          this.recordUploadEvent(tickStart, sent, false);
-          remaining -= sent;
-          if (remaining <= 0) {
-            budgetExhausted = true;
-            break;
-          }
-        }
-        continue;
-      }
-      // Chunk path. Skip prefetch (pre-cached for future timepoints),
-      // overview (minimap path), and wrong-LOD chunks (stale requests
-      // from a previous plan).
-      if (delivery.lane === "prefetch") {
-        this.currentUploadStats.skippedPrefetch++;
-        continue;
-      }
-      if (delivery.lane === "overview") {
-        this.currentUploadStats.skippedOverview++;
-        continue;
-      }
-      const target = targetLevelByImage.get(delivery.imageId);
-      if (target === undefined || delivery.level !== target) {
-        this.currentUploadStats.skippedWrongLod++;
-        continue;
-      }
-      const sent = this.sendDeliveryToWorker(ctx, delivery, multiChannel, sliceZ, epochs);
-      if (sent > 0) {
-        this.currentUploadStats.uploadedChunks++;
-        this.currentUploadStats.bytesUploaded += sent;
-        this.recordUploadEvent(tickStart, sent, false);
-        remaining -= sent;
-        if (remaining <= 0) {
-          budgetExhausted = true;
-          break;
-        }
-      }
-      // sent === 0 → skippedAlreadySent or skippedNoMeta — the helper
-      // mutated currentUploadStats accordingly.
+    const recordUpload = (bytes: number, isResend: boolean): void => {
+      this.recordUploadEvent(tickStart, bytes, isResend);
+    };
+    const passCtx = {
+      tracker: this.deliveryTracker,
+      client: ctx.client,
+      multiChannel,
+      viewMode,
+      sliceZ,
+      epochs,
+      stats: this.currentUploadStats,
+      recordUpload,
+    } as const;
+
+    const drainRes = runDrainPass({
+      deliveries,
+      targetByImage: targetLevelByImage,
+      manifestByImage,
+      ...passCtx,
+      remaining: budget,
+    });
+    let remaining = drainRes.remaining;
+    let budgetExhausted = drainRes.budgetExhausted;
+
+    if (!budgetExhausted) {
+      const chunkRes = runChunkResendPass({
+        requestsByDataset: this._lastFilteredRequests,
+        manifestByImage,
+        cpuCache: ctx.cpuCache,
+        ...passCtx,
+        remaining,
+      });
+      remaining = chunkRes.remaining;
+      budgetExhausted = chunkRes.budgetExhausted;
     }
 
-    // Re-send evicted chunks (budget permitting).
-    // Use _lastFilteredRequests (target-level only) to avoid flipping the atlas
-    // config between levels, which clears the sent set and causes flickering.
-    // Iterate every dataset's requests so multi-dataset rebuilds resend
-    // for every dataset, not just the last-processed one (see #613).
     if (!budgetExhausted) {
-      outer: for (const requests of this._lastFilteredRequests.values()) {
-        for (const req of requests) {
-          if (budgetExhausted) break outer;
-          if (req.lane === "prefetch") continue;
-          this.currentUploadStats.resendChunksConsidered++;
-
-          const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
-          if (this.deliveryTracker.wasChunkSent(wid, req.chunkKey)) {
-            this.currentUploadStats.resendChunksAlreadySent++;
-            continue;
-          }
-
-          // Worker rejected this chunk under the current camera (atlas
-          // full + too far). Don't re-attempt until the next cold-state
-          // rebuild clears the tracker's rejection state.
-          if (this.deliveryTracker.wasChunkRejected(wid, req.chunkKey)) {
-            this.currentUploadStats.resendChunksRejected++;
-            continue;
-          }
-
-          const cached = ctx.cpuCache.getCachedChunk(req.entityId, req.chunkKey);
-          if (!cached) {
-            this.currentUploadStats.resendChunksNotCached++;
-            continue;
-          }
-
-          const sent = this.sendDeliveryToWorker(ctx, cached, multiChannel, sliceZ, epochs);
-          if (sent > 0) {
-            this.currentUploadStats.resendChunkUploads++;
-            this.currentUploadStats.bytesUploaded += sent;
-            this.recordUploadEvent(tickStart, sent, true);
-            remaining -= sent;
-            if (remaining <= 0) budgetExhausted = true;
-          }
-        }
-      }
-    }
-
-    // Re-send proxies the worker has evicted (or never received because
-    // the previous tick cleared the tracker's proxy-delivered entry).
-    // Mirrors the chunk resend pass: iterate the last-known proxy
-    // request set, skip anything already tracked as delivered, and
-    // look up the cached entry via `getCachedProxy`. New deliveries
-    // (above) populate the tracker themselves; this pass closes the
-    // gap for cache hits where `submit()` is now a no-op. Iterate
-    // every dataset's proxy requests so multi-dataset rebuilds resend
-    // for every dataset, not just the last-processed one (see #613).
-    if (!budgetExhausted) {
-      outer: for (const requests of this._lastProxyRequests.values()) {
-        for (const req of requests) {
-          if (budgetExhausted) break outer;
-          this.currentUploadStats.resendProxiesConsidered++;
-
-          if (this.deliveryTracker.wasProxyDelivered(proxyKeyFromRequest(req))) {
-            this.currentUploadStats.resendProxiesAlreadyDelivered++;
-            continue;
-          }
-
-          const cached = ctx.cpuCache.getCachedProxy(
-            req.datasetId, req.entityId, req.kind, req.t, req.c,
-          );
-          if (!cached) {
-            this.currentUploadStats.resendProxiesNotCached++;
-            continue;
-          }
-
-          const sent = this.sendProxyDeliveryToWorker(ctx, cached, epochs);
-          if (sent > 0) {
-            this.currentUploadStats.resendProxyUploads++;
-            this.currentUploadStats.bytesUploaded += sent;
-            this.recordUploadEvent(tickStart, sent, true);
-            remaining -= sent;
-            if (remaining <= 0) budgetExhausted = true;
-          }
-        }
-      }
+      const proxyRes = runProxyResendPass({
+        requestsByDataset: this._lastProxyRequests,
+        tracker: this.deliveryTracker,
+        cpuCache: ctx.cpuCache,
+        client: ctx.client,
+        epochs,
+        stats: this.currentUploadStats,
+        recordUpload,
+        remaining,
+      });
+      remaining = proxyRes.remaining;
+      budgetExhausted = proxyRes.budgetExhausted;
     }
 
     this.currentUploadStats.budgetExhausted = budgetExhausted;
@@ -1474,110 +1395,6 @@ export class Orchestrator {
    */
   getLastPlans(): ReadonlyMap<string, RequestPlan> {
     return this._lastPlanByDataset;
-  }
-
-  /**
-   * Send a single chunk delivery to the GPU worker, emitting atlas config if the
-   * state key changed and the chunk data itself.  Returns bytes sent (0 if skipped).
-   */
-  private sendDeliveryToWorker(
-    ctx: TickContext,
-    delivery: ReadyChunkDelivery,
-    multiChannel: boolean,
-    sliceZ: number | null,
-    epochs: SceneEpochs,
-  ): number {
-    const viewMode = ctx.mode;
-    const workerMemberId = multiChannel ? `${delivery.imageId}:ch${delivery.c}` : delivery.imageId;
-
-    // Find dataset for this delivery
-    let dsManifest: DatasetManifest | null = null;
-    for (const [, ds] of ctx.datasets) {
-      if (ds.manifest.images.some(img => img.image_id === delivery.imageId)) {
-        dsManifest = ds.manifest;
-        break;
-      }
-    }
-    if (!dsManifest) {
-      this.currentUploadStats.skippedNoMeta++;
-      return 0;
-    }
-
-    const imageSpec = dsManifest.images.find(img => img.image_id === delivery.imageId);
-    if (!imageSpec) {
-      this.currentUploadStats.skippedNoMeta++;
-      return 0;
-    }
-    const levelMeta = imageSpec.multiscale.levels[delivery.level];
-    if (!levelMeta) {
-      this.currentUploadStats.skippedNoMeta++;
-      return 0;
-    }
-
-    const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;    // [T, C, Z, Y, X]
-    const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-
-    // Send chunk data if not already sent
-    if (this.deliveryTracker.wasChunkSent(workerMemberId, delivery.chunkKey)) {
-      this.currentUploadStats.skippedAlreadySent++;
-      return 0;
-    }
-
-    const chunkData = {
-      data: delivery.data,
-      dataType: delivery.dataType,
-      x: delivery.x, y: delivery.y, z: delivery.z,
-      key: delivery.chunkKey,
-    };
-
-    if (viewMode === "slice") {
-      const fullResDepth = imageSpec.multiscale.levels[0].shape[Axis.Z];
-      ctx.client.sliceChunkData(
-        workerMemberId, [chunkData],
-        delivery.level, sliceZ!, delivery.t, delivery.c,
-        levelWidth, levelHeight, chunkX, chunkY, chunkZ,
-        fullResDepth, levelDepth, sliceZ!,
-        epochs,
-      );
-    } else {
-      ctx.client.volumeChunkData(
-        workerMemberId, [chunkData],
-        delivery.level, delivery.t, delivery.c,
-        levelWidth, levelHeight, levelDepth,
-        chunkX, chunkY, chunkZ,
-        epochs,
-      );
-    }
-
-    this.deliveryTracker.markChunkSent(workerMemberId, delivery.entityId, delivery.chunkKey);
-    return delivery.data.byteLength;
-  }
-
-  /**
-   * Forward a proxy delivery to the GPU worker.
-   *
-   * Records the composite key in the tracker's proxy-delivered set so
-   * subsequent cache-hit ticks (which re-submit `_lastProxyRequests`)
-   * can short-circuit without re-uploading.
-   */
-  private sendProxyDeliveryToWorker(
-    ctx: TickContext,
-    delivery: ReadyProxyDelivery,
-    epochs: SceneEpochs,
-  ): number {
-    ctx.client.proxyAssetData(
-      delivery.datasetId,
-      delivery.entityId,
-      delivery.imageId,
-      delivery.proxyKind,
-      delivery.t,
-      delivery.c,
-      delivery.header.dims,
-      delivery.data,
-      epochs,
-    );
-    this.deliveryTracker.markProxyDelivered(proxyKeyFromDelivery(delivery));
-    return delivery.data.byteLength;
   }
 
   /**
