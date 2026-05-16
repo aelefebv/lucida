@@ -20,7 +20,7 @@ import type {
   ReadyChunkDelivery,
   ReadyProxyDelivery,
 } from "../../fetch/index.ts";
-import type { RenderClient } from "../../../renderer/renderClient.ts";
+import type { UploadClient } from "../uploadClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { UploadTickStats } from "../../../debug/debugStats.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
@@ -111,7 +111,7 @@ export interface RunChunkResendPassArgs {
   manifestByImage: Map<string, ManifestEntry>;
   tracker: DeliveryTracker;
   cpuCache: CpuCache;
-  client: RenderClient;
+  client: UploadClient;
   multiChannel: boolean;
   viewMode: "slice" | "volume";
   sliceZ: number | null;
@@ -204,7 +204,7 @@ export interface RunProxyResendPassArgs {
   requestsByDataset: Map<string, ProxyRequest[]>;
   tracker: DeliveryTracker;
   cpuCache: CpuCache;
-  client: RenderClient;
+  client: UploadClient;
   epochs: SceneEpochs;
   stats: UploadTickStats;
   recordUpload: (bytes: number, isResend: boolean) => void;

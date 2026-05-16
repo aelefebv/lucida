@@ -79,3 +79,12 @@ export {
 // pre-refactor Orchestrator god-class also carried alongside planning;
 // see `uploader.ts` JSDoc for the planner → uploader seam.
 export { Uploader } from "./uploader.ts";
+
+// UploadClient interface (Slice 11 of PRD #607). Narrow facet of
+// `RenderClient` that the upload phase consumes; lets dispatch/drain/
+// resend depend on the smaller surface. See `uploadClient.ts` JSDoc.
+export type {
+  UploadClient,
+  ChunksEvictedHandler,
+  WantedSetHandler,
+} from "./uploadClient.ts";

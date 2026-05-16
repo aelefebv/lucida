@@ -22,7 +22,17 @@ export interface ResizeMessage {
   height: number;
 }
 
-export interface SliceChunk {
+/**
+ * A single chunk payload carried by `sliceChunkData`,
+ * `volumeChunkData`, and `minimapUploadOverviewChunksForLayer`. The
+ * shape is identical across all three callers (previously two parallel
+ * `SliceChunk` / `VolumeChunk` interfaces); folded into one `Chunk`
+ * type per the dechaos contract scan (Pass 5 finding: "structurally
+ * identical, fold or discriminate"). The `chunks: Chunk[]` array shape
+ * on the envelope messages is unchanged — that's a wire-protocol
+ * contract change tracked separately (see issue #620 discussion).
+ */
+export interface Chunk {
   data: ArrayBuffer;
   dataType: string;
   x: number;
@@ -35,7 +45,7 @@ export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
   datasetId: string;
-  chunks: SliceChunk[];
+  chunks: Chunk[];
   level: number;
   z: number;
   t: number;
@@ -50,20 +60,11 @@ export interface SliceChunkDataMessage {
   fullResZ: number;
 }
 
-export interface VolumeChunk {
-  data: ArrayBuffer;
-  dataType: string;
-  x: number;
-  y: number;
-  z: number;
-  key: string;
-}
-
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
   epochs: SceneEpochs;
   datasetId: string;
-  chunks: VolumeChunk[];
+  chunks: Chunk[];
   level: number;
   t: number;
   c: number;
@@ -201,7 +202,7 @@ export interface MinimapSetOverviewForLayerMessage {
 export interface MinimapUploadOverviewChunksForLayerMessage {
   type: "minimapUploadOverviewChunksForLayer";
   datasetId: string;
-  chunks: VolumeChunk[];
+  chunks: Chunk[];
   t: number;
   c: number;
   levelWidth: number;

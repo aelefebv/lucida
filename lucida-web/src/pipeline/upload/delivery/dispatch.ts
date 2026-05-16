@@ -15,7 +15,7 @@
  */
 
 import type { ReadyChunkDelivery, ReadyProxyDelivery } from "../../fetch/index.ts";
-import type { RenderClient } from "../../../renderer/renderClient.ts";
+import type { UploadClient } from "../uploadClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
 import { Axis } from "../../../axes.ts";
@@ -29,7 +29,7 @@ import { Axis } from "../../../axes.ts";
  * stats bumps) so the dispatch step stays a thin postMessage wrapper.
  */
 export function dispatchChunk(
-  client: RenderClient,
+  client: UploadClient,
   delivery: ReadyChunkDelivery,
   meta: ManifestEntry,
   viewMode: "slice" | "volume",
@@ -93,7 +93,7 @@ export function dispatchChunk(
  * positional-arg layout the client method expects.
  */
 export function dispatchProxy(
-  client: RenderClient,
+  client: UploadClient,
   delivery: ReadyProxyDelivery,
   epochs: SceneEpochs,
 ): void {

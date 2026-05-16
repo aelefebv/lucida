@@ -16,7 +16,7 @@ import type {
   ReadyDelivery,
   ReadyProxyDelivery,
 } from "../../fetch/index.ts";
-import type { RenderClient } from "../../../renderer/renderClient.ts";
+import type { UploadClient } from "../uploadClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { UploadTickStats } from "../../../debug/debugStats.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
@@ -72,7 +72,7 @@ export interface RunDrainPassArgs {
   targetByImage: Map<string, number>;
   manifestByImage: Map<string, ManifestEntry>;
   tracker: DeliveryTracker;
-  client: RenderClient;
+  client: UploadClient;
   multiChannel: boolean;
   viewMode: "slice" | "volume";
   sliceZ: number | null;
@@ -187,7 +187,7 @@ export function runDrainPass(args: RunDrainPassArgs): RunPassResult {
  * tracker-mark / byteLength bookkeeping.
  */
 export function sendChunk(
-  client: RenderClient,
+  client: UploadClient,
   delivery: ReadyChunkDelivery,
   manifestByImage: Map<string, ManifestEntry>,
   tracker: DeliveryTracker,
@@ -226,7 +226,7 @@ export function sendChunk(
  * tracker's proxy-delivered set. Returns the bytes sent.
  */
 export function sendProxy(
-  client: RenderClient,
+  client: UploadClient,
   delivery: ReadyProxyDelivery,
   tracker: DeliveryTracker,
   epochs: SceneEpochs,
