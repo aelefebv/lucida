@@ -10,7 +10,8 @@ import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16Slice } from "./dataTypeUtil.ts";
-import { parseChunkKey, parseCompositeKey, makeCompositeKey, type LodIndirectionMeta } from "./volumeHandlers.ts";
+import { type LodIndirectionMeta } from "./volumeHandlers.ts";
+import { parseChunkKey, parseCompositeKey, makeCompositeKey } from "./chunkKeys.ts";
 
 /** Per-entity Z metadata for slice mode (drives Z-chunk filtering and re-slice detection). */
 export interface SliceEntityZInfo {
@@ -274,7 +275,7 @@ export function handleSliceChunkData(
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     const skippedKeys = msg.chunks.map(c => c.key);
     if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", datasetId: memberId, keys: [], skipped: skippedKeys });
+      ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
     }
     return;
   }
@@ -395,10 +396,10 @@ export function handleSliceChunkData(
       evictedByMember.set(parsed.memberId, arr);
     }
     for (const [evMember, evKeys] of evictedByMember) {
-      ctx.post({ type: "chunksEvicted", datasetId: evMember, keys: evKeys, skipped: [] });
+      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [] });
     }
     if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", datasetId: memberId, keys: [], skipped: skippedKeys });
+      ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
     }
     ctx.postWantedSet();
   }

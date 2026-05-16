@@ -425,7 +425,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
       }
 
       case "sliceChunkData": {
-        const memberId = msg.datasetId;
+        const memberId = msg.memberId;
         const poolKey = memberToPool.get(memberId);
         if (!poolKey) break;
         handleSliceChunkData(ctx, msg, currentEpochs, poolKey, memberId);
@@ -446,7 +446,7 @@ self.onmessage = async (e: MessageEvent<MainToWorkerMessage>) => {
         break;
 
       case "volumeChunkData": {
-        const memberId = msg.datasetId; // protocol still names it datasetId; orchestrator sends memberId here
+        const memberId = msg.memberId;
         const poolKey = memberToPool.get(memberId);
         if (!poolKey) {
           // No pool registered yet (cold state hasn't arrived for this member)

@@ -12,6 +12,7 @@ import type {
   MissingProxy,
 } from "./workerProtocol.ts";
 import type { ProxyKind } from "../pipeline/assetCatalog.ts";
+import { makeCompositeKey } from "./chunkKeys.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -261,7 +262,7 @@ export function computeWantedSet(
           for (let iy = rowStart; iy < rowEnd; iy++) {
             for (let ix = colStart; ix < colEnd; ix++) {
               const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
-              const slotKey = useCompositeKey ? `${memberId}|${chunkKey}` : chunkKey;
+              const slotKey = useCompositeKey ? makeCompositeKey(memberId, chunkKey) : chunkKey;
               if (!atlas.slots.has(slotKey)) {
                 missing.push({
                   kind: "chunk",

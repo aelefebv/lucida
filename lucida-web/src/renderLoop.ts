@@ -104,8 +104,8 @@ export class RenderLoop {
     // When the worker evicts or skips chunks, update the uploader's
     // delivery tracking so they can be re-sent. Evictions trigger a new
     // tick.
-    this.client.onChunksEvicted = (datasetId: string, evicted: string[], skipped: string[]) => {
-      this.uploader.handleChunksEvicted(datasetId, evicted, skipped, this.session.cpuCache);
+    this.client.onChunksEvicted = (memberId: string, evicted: string[], skipped: string[]) => {
+      this.uploader.handleChunksEvicted(memberId, evicted, skipped, this.session.cpuCache);
       if (evicted.length > 0) {
         this.setDirty("residency", "chunks_evicted");
       }

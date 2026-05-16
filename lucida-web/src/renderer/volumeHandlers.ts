@@ -10,6 +10,11 @@ import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import { isStaleDelivery } from "./epochCheck.ts";
 import { asUint16 } from "./dataTypeUtil.ts";
+import {
+  parseChunkKey,
+  parseCompositeKey,
+  makeCompositeKey,
+} from "./chunkKeys.ts";
 
 /** Per-LOD indirection section metadata. */
 export interface LodIndirectionMeta {
@@ -39,45 +44,6 @@ export interface AtlasState {
   t: number; c: number;
   intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
-}
-
-/** Parse a chunk key "level/t/c/z/y/x" into its components. */
-export function parseChunkKey(key: string): { level: number; t: number; c: number; z: number; y: number; x: number } | null {
-  const parts = key.split("/");
-  if (parts.length !== 6) return null;
-  return {
-    level: parseInt(parts[0], 10),
-    t: parseInt(parts[1], 10),
-    c: parseInt(parts[2], 10),
-    z: parseInt(parts[3], 10),
-    y: parseInt(parts[4], 10),
-    x: parseInt(parts[5], 10),
-  };
-}
-
-/** Build composite slot key "memberId|chunkKey" for shared pool. */
-export function makeCompositeKey(memberId: string, chunkKey: string): string {
-  return `${memberId}|${chunkKey}`;
-}
-
-/**
- * Derive the shared pool key from a memberId and its datasetId.
- * Single-channel: memberId="imageId", poolKey="datasetId"
- * Multi-channel: memberId="imageId:chN", poolKey="datasetId:chN"
- */
-export function derivePoolKey(memberId: string, datasetId: string): string {
-  const colonIdx = memberId.indexOf(":");
-  if (colonIdx >= 0) {
-    return `${datasetId}${memberId.substring(colonIdx)}`;
-  }
-  return datasetId;
-}
-
-/** Parse composite slot key. Returns null if not a composite key. */
-export function parseCompositeKey(key: string): { memberId: string; chunkKey: string } | null {
-  const sep = key.indexOf("|");
-  if (sep < 0) return null;
-  return { memberId: key.substring(0, sep), chunkKey: key.substring(sep + 1) };
 }
 
 /**
@@ -349,7 +315,7 @@ export function handleVolumeChunkData(
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
     const skippedKeys = msg.chunks.map(c => c.key);
     if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", datasetId: memberId, keys: [], skipped: skippedKeys });
+      ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
     }
     return;
   }
@@ -454,11 +420,11 @@ export function handleVolumeChunkData(
     }
     // Report evictions per member
     for (const [evMember, evKeys] of evictedByMember) {
-      ctx.post({ type: "chunksEvicted", datasetId: evMember, keys: evKeys, skipped: [] });
+      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [] });
     }
     // Report skipped (this batch's member only)
     if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", datasetId: memberId, keys: [], skipped: skippedKeys });
+      ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
     }
     ctx.postWantedSet();
   }

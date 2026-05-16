@@ -44,7 +44,14 @@ export interface Chunk {
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
-  datasetId: string;
+  /**
+   * Worker-side member id (the per-channel chunk owner). Format:
+   * `imageId` for single-channel layers, `imageId:chN` for
+   * multi-channel composites. Previously named `datasetId`; renamed
+   * per dechaos Pass 5 Contract Issue 3 — the field never carried a
+   * dataset id at any call site.
+   */
+  memberId: string;
   chunks: Chunk[];
   level: number;
   z: number;
@@ -63,7 +70,8 @@ export interface SliceChunkDataMessage {
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
   epochs: SceneEpochs;
-  datasetId: string;
+  /** See {@link SliceChunkDataMessage.memberId}. */
+  memberId: string;
   chunks: Chunk[];
   level: number;
   t: number;
@@ -118,6 +126,22 @@ export interface VolumeLayerParams {
   entityIndex: number;
 }
 
+/**
+ * Multi-pass volume render request.
+ *
+ * **Stale-tolerant**: the worker draws with whatever state it has at
+ * draw time. Render messages do not run through `isStaleDelivery` —
+ * the latest geometry/material state simply renders against the most
+ * recent residency. Contrast with chunk + proxy data messages, which
+ * carry `epochs` for stale-rejection (`isStaleDelivery` drops a
+ * delivery whose epoch is older than the worker's current view of the
+ * world).
+ *
+ * Asymmetry rationale (dechaos Pass 5 Contract Issue 13): re-issuing a
+ * render is cheap and the next viewEpoch will fire one anyway; dropping
+ * a stale chunk avoids permanently writing wrong-epoch voxels into the
+ * atlas.
+ */
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
   epochs: SceneEpochs;
@@ -150,6 +174,13 @@ export interface SliceLayerParams {
   entityIndex: number;
 }
 
+/**
+ * Multi-pass slice render request.
+ *
+ * **Stale-tolerant**: see {@link VolumeRenderMultiPassMessage} — same
+ * contract. The worker draws with the latest residency at draw time;
+ * `epochs` is informational only on this message (no stale-rejection).
+ */
 export interface SliceRenderMultiPassMessage {
   type: "sliceRenderMultiPass";
   epochs: SceneEpochs;
@@ -380,7 +411,13 @@ export interface IntensityRangeMessage {
 
 export interface ChunksEvictedMessage {
   type: "chunksEvicted";
-  datasetId: string;
+  /**
+   * Worker-side member id (the per-channel chunk owner). Format:
+   * `imageId` for single-channel layers, `imageId:chN` for
+   * multi-channel composites. Previously named `datasetId`; renamed
+   * per dechaos Pass 5 Contract Issue 3.
+   */
+  memberId: string;
   /** Chunks removed from the atlas (were present, got evicted by closer chunks). */
   keys: string[];
   /** Chunks from the batch that were not inserted (too far, wrong Z, etc.). */
