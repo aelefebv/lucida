@@ -1,13 +1,33 @@
 ---
 created: 2026-04-18
-modified: 2026-05-15
+modified: 2026-05-16
 ---
 
 # CPU Cache
 
-`lucida-web/src/pipeline/cpuCache.ts` — host-side cache between the network and the GPU. Owns fetch scheduling, decode pool dispatch, tiered LRU eviction, and the drain queue that feeds [[gpu-residency|the GPU worker]].
+`lucida-web/src/pipeline/fetch/` — host-side cache between the network and the GPU. A directory of focused modules with `cpuCache.ts` as a thin coordinator that fans out to collaborators (interaction-mode detector, telemetry counters, eviction policies, three stores, two schedulers, retry policy + typed errors, rejection tracker, wire-protocol helpers). See [[decisions/0032-cpucache-split-into-pipeline-fetch]] for the directory-layout philosophy and the per-module rationale.
 
 After S5, this is the **sole** chunk fetch path. The old `SharedChunkQueue` was deleted; if you see a reference to it anywhere, that's stale.
+
+## Module layout
+
+The directory's collaborators (each one a focused, separately-testable unit):
+
+- `cpuCache.ts` — coordinator. Wires the collaborators in its constructor; each public method (`submit`, `drain`, `snapshot`, `telemetry`, `cancelDataset`, `reset`, `markRejected`, `clearRejected`, `getCachedChunk`, `getCachedProxy`, `getCacheDump`, `getProxyCacheDump`, `subscribe`) is a few-line fan-out. Still hosts `fetchAndDecode` and `fetchProxy` — they're the startFn callbacks the schedulers invoke and the seam where source + decode + store + ready-listener coordinate.
+- `types.ts` — internal + public type defs (`CacheEntry`, `ReadyDelivery` union, `CacheTelemetry`, `CpuCacheConfig`, `EvictionTier`, `Lane`, `TierCounters`, `TierResidencyEntry`).
+- `interactionMode.ts` — `InteractionModeDetector` (panning / scrubbing / idle) drives the tier-order rotation in `TieredPolicy`.
+- `eviction.ts` — `EvictionPolicy` interface with `LRUPolicy` (overview + proxy caches) and `TieredPolicy` (main cache; preserves the active-detail tiebreaker exactly).
+- `chunkStore.ts` — `ChunkStore`. Wraps a `Map<entityId, Map<chunkKey, CacheEntry>>` + bytes counter + budget + eviction policy. Parameterized: the main cache and overview cache are both `ChunkStore` instances differing only in policy + tier label.
+- `proxyStore.ts` — `ProxyStore`. Wraps the two-level `Map<datasetId, Map<innerKey, ProxyCacheEntry>>` + LRU-across-datasets policy. Separate class because the two-level shape differs from chunk stores.
+- `scheduler.ts` — `Scheduler<Req>` generic. Owns pending queue + in-flight Map + concurrency/bytes caps + backpressure logging via injected `BurstLogger`. Instantiated twice (chunk + proxy); explicitly NOT unified — see deferred Slice 12 in [[decisions/0032-cpucache-split-into-pipeline-fetch]].
+- `retry.ts` — typed `FetchError(kind: "permanent" | "transient" | "abort")` + `classifyFetchError` + `RetryPolicy` interface with `OnceTransientRetry` (current chunk behaviour) and `NeverRetry` (current proxy behaviour). See [[decisions/0033-typed-fetch-error]].
+- `telemetry.ts` — `TelemetryCounters` (verb API: `recordRequest` / `recordHit` / `recordEviction` / `recordDecode` / `recordFetchFailure` / `recordCompletedFetch` / `snapshot` / `reset`) + `BurstLogger` (rate-limited debug log channel for `cache.backpressure` and `cache.failure_burst`).
+- `rejection.ts` — `RejectionTracker` wraps the per-entity `Set<chunkKey>` rejected map. `mark` returns whether the key was newly added so the caller can abort an in-flight fetch.
+- `contentSource.ts` — `ContentSource` interface + `ProxiedContentSource` impl over the WebSocket bridge. After Slice 11, owns `handleBinary(key, payload)` and routes itself by `proxy/` prefix (the bridge no longer sniffs).
+- `decodePool.ts` — codec-agnostic decode worker pool. Unchanged shape.
+- `decode.worker.ts` — Raw / LZ4 / Zstd decompression + uint8 / bool / uint16 normalization. Zstd path now slices the typed-array view to avoid the 12-byte garbage prefix surfaced by Slice 1's round-trip test.
+- `wireProtocol.ts` — `parseProxyHeader` (64-byte LE) + `proxyResponseKey` (cross-language contract with the Rust server's `proxy_response_key`).
+- `index.ts` — barrel re-export. External callers import from `pipeline/fetch/` only.
 
 ## Why a CPU cache between network and GPU
 
