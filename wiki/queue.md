@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-05-15
 ---
 
 # Queue — Open Questions
@@ -22,6 +22,7 @@ Each item is a short bullet. Add a date when raised. Link to an article or PR wh
 - **2026-05-07** — Three gotchas may be stale after recent commits and need a verify-and-update pass: [[gotchas/preexisting-ts-build-errors]] (27 errors cleared in `593eb8d` — likely fully stale), [[gotchas/blosc-support]] (decoder extended in `90a3dbc` for CZI 6D — may understate current support), [[gotchas/non-canonical-axes]] (`185c429` added explicit handling — may understate current behavior).
 - **2026-05-07 / refined 2026-05-08** — Disabled-mode bookmark ownership. Originally framed as "auth cutover for `dev@local` bookmarks created pre-auth"; resolved-by-sequence (auth landed before bookmarks did, so production never sees `dev@local` rows). Refined open question: when `LUCIDA_AUTH=disabled` runs against a SQLite DB that already has bookmarks (e.g., a local dev clone of a prod backup), the disabled-extractor synthesizes a principal whose email may not match any real user — so PATCH/DELETE permission checks behave oddly. Decide policy if/when production ever runs disabled mode against a bookmark-bearing DB.
 - **2026-05-07** — Undo/redo system (future scope, surfaced during saved-views grilling): proposed dedicated undo/redo for milestone events (dataset opened/removed, active layout changed) — *not* via browser back/forward + `pushState`. Saved-views feature deliberately uses `replaceState` only so back-button stays clean; an in-app undo/redo lives separately and would track milestone document/viewport mutations independently of URL state.
+- **2026-05-15** — `principles/cpu-cache.md` does not yet exist. Author it via an INTERVIEW pass after the fetch/decode refactor (PRD covering 11 slices in `wiki/outputs/dechaos-fetch-decode-2026-05-15/08-refactor-sequencing.md`) settles. The refactor's ADRs intentionally land without principle citations — consistent with [[decisions/0008-cpu-cache-as-sole-fetch-path]] which also predates the principles framework. The principles emerge from the patterns visible in the cleaner post-refactor code.
 
 ## Resolved
 
