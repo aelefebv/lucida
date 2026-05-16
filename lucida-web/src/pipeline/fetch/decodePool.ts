@@ -68,7 +68,7 @@ export class DecodePool {
   }
 
   /** Decode raw wire-format bytes. Returns data in its native format (uint8 stays uint8). */
-  decode(bytes: ArrayBuffer, wireFormat: WireFormat, dataType: string): Promise<ArrayBuffer> {
+  decode(bytes: ArrayBuffer, wireFormat: WireFormat): Promise<ArrayBuffer> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       // Pick least-busy worker
@@ -78,7 +78,7 @@ export class DecodePool {
       }
       best.pending.set(id, { resolve, reject });
       best.activeCount++;
-      best.worker.postMessage({ id, bytes, wireFormat, dataType }, [bytes]);
+      best.worker.postMessage({ id, bytes, wireFormat }, [bytes]);
     });
   }
 
@@ -99,16 +99,4 @@ export class DecodePool {
     for (const w of this.pool) w.worker.terminate();
     this.pool = [];
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Extract data_type string from a WireFormat variant. */
-export function extractDataType(wf: WireFormat): string {
-  if ("Raw" in wf) return wf.Raw.data_type;
-  if ("Lz4" in wf) return wf.Lz4.data_type;
-  if ("Zstd" in wf) return wf.Zstd.data_type;
-  return "uint16";
 }

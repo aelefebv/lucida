@@ -104,7 +104,6 @@ function createMockContentSource(): MockContentSource {
       return Promise.resolve({
         header: source.proxyHeader,
         data: new ArrayBuffer(bytes),
-        wireFormat: { Raw: { data_type: "uint16" } },
       });
     },
 
@@ -407,7 +406,6 @@ describe("CpuCache", () => {
           proxyResolve = () => resolve({
             header: source.proxyHeader,
             data: new ArrayBuffer(64),
-            wireFormat: { Raw: { data_type: "uint16" } },
           });
           signal.addEventListener("abort", () => {
             reject(new DOMException("Aborted", "AbortError"));

@@ -17,9 +17,8 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { parseProxyHeader, proxyResponseKey } from "./contentSource.ts";
-import { extractDataType } from "./decodePool.ts";
-import type { WireFormat } from "../../manifestTypes.ts";
+import { parseProxyHeader, proxyResponseKey } from "./wireProtocol.ts";
+import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures

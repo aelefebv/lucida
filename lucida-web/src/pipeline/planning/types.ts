@@ -317,7 +317,7 @@ export interface ChunkRequest {
    * paths route per-lane (see [[cpu-cache]] for the eviction-tier
    * mapping).
    */
-  lane: "minimap" | "detail" | "proxy" | "prefetch" | "overview";
+  lane: "minimap" | "detail" | "prefetch" | "overview";
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;

@@ -57,25 +57,22 @@ export interface CpuCacheConfig {
 // Types
 // ---------------------------------------------------------------------------
 
-type Lane = "minimap" | "detail" | "proxy" | "prefetch" | "overview";
+type Lane = "minimap" | "detail" | "prefetch" | "overview";
 type InteractionMode = "panning" | "scrubbing" | "idle";
 export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
 /**
  * A delivery from the CPU cache that the orchestrator routes to the GPU
  * worker. The discriminated union covers both regular chunks
- * (`kind: "chunk"`, the default for backward compat) and proxy
- * deliveries (`kind: "proxy"`).
- *
- * Existing call sites that work with chunks should not need changes:
- * the `kind` field is optional on the chunk variant for source-level
- * compat, and the orchestrator narrows by inspecting the field.
+ * (`kind: "chunk"`) and proxy deliveries (`kind: "proxy"`); both
+ * variants stamp the discriminator explicitly so consumers narrow
+ * unambiguously.
  */
 export type ReadyDelivery = ReadyChunkDelivery | ReadyProxyDelivery;
 
 export interface ReadyChunkDelivery {
-  /** Discriminant. Optional for backward compat — defaults to `"chunk"`. */
-  kind?: "chunk";
+  /** Discriminant. */
+  kind: "chunk";
   entityId: string;
   imageId: string;
   level: number;
@@ -1141,7 +1138,7 @@ export class CpuCache {
     let decoded: ArrayBuffer;
     try {
       const t0 = performance.now();
-      decoded = await this.decode.decode(result.bytes, result.wireFormat, result.dataType);
+      decoded = await this.decode.decode(result.bytes, result.wireFormat);
       this.decodeTimes.push(performance.now() - t0);
       if (this.decodeTimes.length > 100) this.decodeTimes.shift();
       this.decodesSinceSnapshot++;
@@ -1427,8 +1424,8 @@ export class CpuCache {
 
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
     // `minimap` shares the overview cache (see ADR 0023) so we look
-    // in the same map. Other lanes (detail / prefetch / proxy
-    // chunks) live in mainCache.
+    // in the same map. Other lanes (detail / prefetch) live in
+    // mainCache.
     const usesOverviewCache = req.lane === "overview" || req.lane === "minimap";
     const cache = usesOverviewCache ? this.overviewCache : this.mainCache;
     return cache.get(req.entityId)?.get(req.chunkKey);
@@ -1452,6 +1449,7 @@ export class CpuCache {
     // the active-detail / demoted-detail / prefetch distinctions only
     // matter for mainCache entries.
     if (lane === "overview" || lane === "minimap") return "prefetch";
+    // Only "detail" remains.
     return "active-detail";
   }
 

@@ -12,7 +12,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { ProxiedContentSource, proxyResponseKey } from "./contentSource.ts";
+import { ProxiedContentSource } from "./contentSource.ts";
+import { proxyResponseKey } from "./wireProtocol.ts";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -186,7 +187,6 @@ describe("ProxiedContentSource.fetchProxy", () => {
     expect(result.header.dims).toEqual([2, 2, 2]);
     expect(result.header.dtype).toBe("u16");
     expect(result.data.byteLength).toBe(16);
-    expect(result.wireFormat).toEqual({ Raw: { data_type: "uint16" } });
   });
 
   it("times out after the configured proxyTimeoutMs", async () => {

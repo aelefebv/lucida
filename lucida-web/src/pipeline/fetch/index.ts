@@ -27,24 +27,24 @@ export type {
   TierCounters,
 } from "./cpuCache.ts";
 
-export {
-  ProxiedContentSource,
-  parseProxyHeader,
-  proxyResponseKey,
-} from "./contentSource.ts";
+export { ProxiedContentSource } from "./contentSource.ts";
 export type {
   ContentSource,
   FetchRequest,
   FetchResult,
   FetchProxyRequest,
   FetchProxyResult,
-  ProxyHeaderJs,
 } from "./contentSource.ts";
+
+export {
+  parseProxyHeader,
+  proxyResponseKey,
+} from "./wireProtocol.ts";
+export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
 export {
   DecodePool,
   MIN_DECODE_WORKERS,
   DECODE_POOL_HEADROOM,
   defaultPoolSize,
-  extractDataType,
 } from "./decodePool.ts";

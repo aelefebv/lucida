@@ -6,13 +6,12 @@
  *   2. Normalize: interpret as dataType, produce GPU-ready Uint16Array buffer
  */
 
-import type { WireFormat } from "../../manifestTypes.ts";
+import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 
 interface DecodeRequest {
   id: number;
   bytes: ArrayBuffer;
   wireFormat: WireFormat;
-  dataType: string;
 }
 
 interface DecodeResponse {
@@ -127,10 +126,10 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
 // ---------------------------------------------------------------------------
 
 self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
-  const { id, bytes, wireFormat, dataType } = e.data;
+  const { id, bytes, wireFormat } = e.data;
   try {
     const decompressed = await decompress(bytes, wireFormat);
-    const data = normalize(decompressed, dataType);
+    const data = normalize(decompressed, extractDataType(wireFormat));
     (self as unknown as Worker).postMessage({ id, data } satisfies DecodeResponse, [data]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
