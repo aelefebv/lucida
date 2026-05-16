@@ -105,9 +105,8 @@ function makeCold(activeSet: ColdStateActiveEntry[], visibleChannels: number[] =
 }
 
 // ---------------------------------------------------------------------------
-// Construction matrix — locks the four corner cases that gpu.worker.ts and
-// wantedSet.ts call sites previously hand-rolled (and got subtly wrong for
-// the well-as-proxy variants).
+// Construction matrix — locks the four corner cases callers must agree on
+// (well-as-proxy is the easy one to get wrong).
 // ---------------------------------------------------------------------------
 
 describe("Suite D — memberIdForColdEntry matrix", () => {

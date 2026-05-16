@@ -2,10 +2,8 @@
  * Suite C — chunk-upload eviction policy + multi-member demux.
  *
  * Exercises `handleVolumeChunkData` / `handleSliceChunkData` against
- * mock-device atlases. The shared `chunkDistSq` / `findFarthestSlot` /
- * `remapIndirection` kernels collapsed the previously-duplicated
- * volume/slice implementations; these invariants are what they must
- * preserve.
+ * mock-device atlases via the shared `chunkDistSq` / `findFarthestSlot`
+ * / `remapIndirection` kernels.
  *
  * Invariants pinned:
  *  - Eviction picks the farthest cached chunk from the per-entity ray-hit

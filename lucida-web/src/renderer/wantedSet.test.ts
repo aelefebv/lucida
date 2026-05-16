@@ -94,9 +94,8 @@ function makeActiveEntry(
       },
     },
   };
-  // Default to `fields-with-detail` (matching the pre-Slice-11
-  // default) when no mode override is provided, so existing tests keep
-  // their chunk-only expectations.
+  // Default to `fields-with-detail` so existing tests keep their
+  // chunk-only expectations when no mode override is provided.
   const mode = overrides?.mode ?? "fields-with-detail";
   if (mode === "well-as-proxy") {
     return {

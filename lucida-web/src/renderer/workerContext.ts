@@ -23,10 +23,8 @@ export interface WorkerCtx {
   context: GPUCanvasContext;
   format: GPUTextureFormat;
   /**
-   * Per-session worker state — every Map / counter / pointer that
-   * previously lived as a module global across the worker + per-mode
-   * handler files. Owned by the dispatcher; handlers mutate it directly.
-   * See {@link RendererState} for the shape.
+   * Per-session worker state. Owned by the dispatcher; handlers mutate
+   * it directly. See {@link RendererState} for the shape.
    */
   state: RendererState;
   getSliceRenderer(): SliceRenderer;

@@ -16,10 +16,9 @@ struct Uniforms {
   // total = 240 bytes
 };
 
-// M1: per-draw uniform with the entity index into entityDescriptors.
 struct EntityRef { index: vec4u }; // x = entity index
 
-// M1: per-entity descriptor. Layout matches descriptorBuffer.ts.
+// Layout matches descriptorBuffer.ts.
 struct LodInfo {
   level: u32,
   indirectionOffset: u32,
@@ -64,13 +63,12 @@ struct EntityDescriptor {
 @group(0) @binding(2) var<storage, read> indirection: array<u32>;
 @group(0) @binding(3) var lutTex: texture_2d<f32>;
 @group(0) @binding(4) var lutSampler: sampler;
-// S8: proxy textures. Same r16uint format as the chunk atlas. A slot
+// Proxy textures. Same r16uint format as the chunk atlas. A slot
 // occupies texture region [slotIdx * dims.z, 0, 0] of size dims (X=dims.z,
 // Y=dims.y, Z=dims.x), matching `proxySlotOrigin()` in proxyAtlas.ts.
 @group(0) @binding(5) var fieldProxyTex: texture_3d<u32>;
 @group(0) @binding(6) var wellProxyTex: texture_3d<u32>;
 
-// M1: per-dataset descriptor table + per-draw entity index.
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
 
@@ -109,20 +107,13 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
   return vec2f(tNear, tFar);
 }
 
-// S8: Sample one voxel from a proxy atlas slot.
-//
+// Sample one voxel from a proxy atlas slot.
 //   - `dims.x` = slot Z, `dims.y` = slot Y, `dims.z` = slot X (matches
 //     `proxyAtlas.ts` `slotDims: [Z, Y, X]`).
-//   - Slot origin in the texture is `[slotIdx * dims.z, 0, 0]` (1-D-along-X
-//     layout — see `proxySlotOrigin()`).
-//   - `frac` is in [0,1]³ over the slot's voxel cube. We Y-flip to match
-//     the chunk path's image-convention sampling.
-//
-// Returns 0xFFFFFFFFu if the slot index is the sentinel; otherwise the
-// raw u16 voxel value (zero-extended into u32).
-//
-// M1: dims is now read straight from the descriptor as a vec3<u32>
-// (fieldProxyDims / wellProxyDims) — same Z/Y/X convention.
+//   - Slot origin is `[slotIdx * dims.z, 0, 0]` (1-D-along-X layout).
+//   - `frac` is in [0,1]³ over the slot's voxel cube; Y is flipped to
+//     match the chunk path's image-convention sampling.
+// Returns 0xFFFFFFFFu if the slot index is the sentinel.
 fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f) -> u32 {
   if (slotIdx == 0xFFFFFFFFu) {
     return 0xFFFFFFFFu;
@@ -307,7 +298,6 @@ fn fs(input: VSOut) -> FsOut {
   }
 
   let dims = vec3i(u.volumeDims.xyz);
-  // M2: per-entity display state from the descriptor buffer.
   let intensityMin = entity.contrastMin;
   let intensityMax = entity.contrastMax;
   let opacityScale = u.stepInfo.x;
@@ -368,7 +358,6 @@ fn fs(input: VSOut) -> FsOut {
     t += adaptiveStep;
   }
 
-  // M2: layer opacity from descriptor.
   let layerOpacity = entity.opacity;
   var out: FsOut;
   out.depth = hitDepth;

@@ -66,9 +66,9 @@ export interface WantedSetResult {
  *
  * Pure function — no side effects, no GPU dependencies.
  *
- * Chunk wanted-set rules (unchanged): for each detail-owned LOD on
- * each visible channel, enumerate the visible-region grid cells and
- * report any whose composite slot key is missing.
+ * Chunk wanted-set rules: for each detail-owned LOD on each visible
+ * channel, enumerate the visible-region grid cells and report any
+ * whose composite slot key is missing.
  *
  * Proxy wanted-set rules: for each cold-state active entry, walk its
  * `mode`:

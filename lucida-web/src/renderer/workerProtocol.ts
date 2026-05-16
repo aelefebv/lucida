@@ -43,8 +43,7 @@ export interface SliceChunkDataMessage {
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. (Not a dataset id — the field was
-   * previously misnamed `datasetId`.)
+   * multi-channel composites. Not a dataset id.
    */
   memberId: string;
   chunks: Chunk[];
@@ -290,7 +289,7 @@ interface ColdStateActiveEntryBase {
    * from `scene.member_model_matrix` for field entries and synthesises
    * it from the well AABB for `well-as-proxy` entries (see
    * `synthesizeWellRosterEntry` in orchestrator.ts). The worker writes
-   * this directly into the descriptor buffer; render messages no longer
+   * this straight into the descriptor buffer; render messages do not
    * carry per-frame model matrices.
    */
   modelMatrix: Float32Array;
@@ -325,9 +324,7 @@ interface ColdStateActiveEntryBase {
  *     `imageId` is intentionally absent (`?: never`) — use `entityId`
  *     as the routing key throughout the pipeline.
  *
- * Wire bytes are unchanged from the pre-Slice-11 shape: the producer
- * always emitted `mode`; the consumer now also receives `kind`, which
- * lets TypeScript narrow the variant without the `imageId === ""`
+ * `kind` lets TypeScript narrow the variant without the `imageId === ""`
  * sentinel. `mode` is retained for backward compat (logging, debug,
  * existing inspection paths); future work can drop it once every
  * consumer routes through `kind`.
@@ -449,8 +446,7 @@ export interface ChunksEvictedMessage {
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. (Not a dataset id — the field was
-   * previously misnamed `datasetId`.)
+   * multi-channel composites. Not a dataset id.
    */
   memberId: string;
   /** Chunks removed from the atlas (were present, got evicted by closer chunks). */

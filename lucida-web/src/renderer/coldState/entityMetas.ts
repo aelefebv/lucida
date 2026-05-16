@@ -1,17 +1,12 @@
 /**
  * Per-entity LOD section computation. Pure function — no GPU side
- * effects, no state mutation.
- *
- * Extracted from `gpu.worker.ts` cold-state handler (volume branch
- * ~lines 590-625, slice branch ~lines 674-708). The two branches were
- * near-duplicates that differ only in whether the per-LOD section size
- * counts `gridX * gridY * gridZ` (volume) or `gridX * gridY` (slice).
+ * effects, no state mutation. Per-LOD section size is `gridX * gridY *
+ * gridZ` for volume pools and `gridX * gridY` for slice pools.
  *
  * For each entry in a pool, walks `[finest, coarsest]` LODs and emits
  * a `LodIndirectionMeta` for every level whose `chunkShape` matches the
  * pool's chunk dims. Falls back to the target LOD only when no LODs
- * match — preserving the worker's behavior for cross-LOD chunk-dim
- * mismatches.
+ * match (the legacy chunk-dim-mismatch path).
  *
  * Threads `startOffset` through entries in the same pool so the
  * returned `nextOffset` becomes the start offset for the next entry.

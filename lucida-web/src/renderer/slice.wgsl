@@ -8,10 +8,9 @@ struct Uniforms {
   // total = 112 bytes
 };
 
-// M1: per-draw uniform with the entity index into entityDescriptors.
 struct EntityRef { index: vec4u };
 
-// M1: per-entity descriptor. Layout matches descriptorBuffer.ts.
+// Layout matches descriptorBuffer.ts.
 struct LodInfo {
   level: u32,
   indirectionOffset: u32,
@@ -56,12 +55,11 @@ struct EntityDescriptor {
 @group(0) @binding(2) var<storage, read> indirection: array<u32>;
 @group(0) @binding(3) var lutTex: texture_2d<f32>;
 @group(0) @binding(4) var lutSampler: sampler;
-// S8: proxy textures are 3D (same as volume.wgsl). Slice mode reads
-// one Z plane within the slot region.
+// Proxy textures are 3D (same as volume.wgsl); slice mode reads one Z
+// plane within the slot region.
 @group(0) @binding(5) var fieldProxyTex: texture_3d<u32>;
 @group(0) @binding(6) var wellProxyTex: texture_3d<u32>;
 
-// M1: per-dataset descriptor table + per-draw entity index.
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
 
@@ -82,13 +80,9 @@ fn vs(@builtin(vertex_index) vid: u32) -> VSOut {
   return out;
 }
 
-// S8: Sample one voxel from a proxy slot using 2D UV. Reads at the slot's
-// Z midpoint — see header comment on `wellProxyTex` for the rationale and
-// follow-up note. Slot layout (1-D-along-X) and dim convention match
+// Sample one voxel from a proxy slot using 2D UV. Reads at the slot's
+// Z midpoint. Slot layout (1-D-along-X) and dim convention match
 // `proxyAtlas.ts` (`slotDims: [Z, Y, X]` → `dims.x=Z, dims.y=Y, dims.z=X`).
-//
-// M1: dims is now read straight from the descriptor as a vec3<u32> —
-// same Z/Y/X convention.
 fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f) -> u32 {
   if (slotIdx == 0xFFFFFFFFu) {
     return 0xFFFFFFFFu;
@@ -132,7 +126,6 @@ fn fs(input: VSOut) -> @location(0) vec4f {
 
   let entity = entityDescriptors[currentEntity.index.x];
 
-  // M2: per-entity display state from the descriptor buffer.
   let intensityMin = entity.contrastMin;
   let intensityMax = entity.contrastMax;
   let range = intensityMax - intensityMin;
