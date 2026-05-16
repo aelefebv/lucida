@@ -51,11 +51,11 @@ export interface UseBookmarksOptions {
    *  Used to evaluate the "Mine only" toggle. `null` ≡ no auth resolved
    *  yet — the toggle hides everything when checked. */
   currentUserEmail: string | null;
-  /** Optional WebSocket bridge for live cross-peer updates (slice 4).
-   *  When provided, the hook subscribes to `bookmark_changed` broadcasts
+  /** Optional WebSocket bridge for live cross-peer updates. When
+   *  provided, the hook subscribes to `bookmark_changed` broadcasts
    *  and reconciles local state on Created/Updated/Deleted events.
    *  When `null` or `undefined`, the hook degrades cleanly to manual
-   *  refresh — same behavior as before slice 4 landed. */
+   *  refresh. */
   bridge?: Bridge | null;
 }
 
@@ -79,7 +79,7 @@ export interface UseBookmarksHandle {
   renameBookmark: (id: string, newName: string) => Promise<Bookmark>;
   deleteBookmark: (id: string) => Promise<void>;
   /** Used by `urlSync` for `#b=<id>` resolution. Kept on the hook for
-   *  symmetry; the slice-3 wiring resolves through the React-free
+   *  symmetry; the actual resolution goes through the React-free
    *  `bookmarksApi` directly so it doesn't depend on a mounted hook. */
   getBookmark: (id: string) => Promise<Bookmark | null>;
 }

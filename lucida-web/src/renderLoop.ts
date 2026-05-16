@@ -57,12 +57,10 @@ export class RenderLoop {
   private volumeState: VolumeState = createVolumeState();
   private minimapState: MinimapState = createMinimapState();
   /**
-   * Upload coordinator (Slice 10 of PRD #607). Owns delivery tracking,
-   * telemetry, cold/hot-state emission, drain/resend dispatch, and
-   * worker feedback. Constructed alongside the Orchestrator so
-   * `client.onChunksEvicted` / `client.onWantedSetDelta` callbacks wire
-   * directly here (the orchestrator no longer carries the
-   * upload-feedback handlers).
+   * Upload coordinator. Owns delivery tracking, telemetry, cold/hot-
+   * state emission, drain/resend dispatch, and worker feedback.
+   * Constructed alongside the Orchestrator so `client.onChunksEvicted`
+   * / `client.onWantedSetDelta` callbacks wire directly here.
    */
   private uploader = new Uploader();
   private orchestrator = new Orchestrator(this.uploader);

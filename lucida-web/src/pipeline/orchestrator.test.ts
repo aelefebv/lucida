@@ -5,12 +5,12 @@ import type { CpuCache } from "./fetch/index.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
 
-// Planner-only tests for Orchestrator (post-Slice 10 of PRD #607).
-// Upload-side describes (proxy delivery, cold-state display state,
-// viewHotState emission, chunk delivery, handleChunksEvicted, multi-
-// dataset upload characterization, cold-state lifecycle invariant)
-// migrated to `upload/uploader.test.ts`. The two describes here cover
-// only the planner role: epoch caching + multi-dataset planning state.
+// Planner-only tests for Orchestrator. Upload-side describes (proxy
+// delivery, cold-state display state, viewHotState emission, chunk
+// delivery, handleChunksEvicted, multi-dataset upload characterization,
+// cold-state lifecycle invariant) live in `upload/uploader.test.ts`.
+// The two describes here cover only the planner role: epoch caching +
+// multi-dataset planning state.
 
 /** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
 function createMockAssetCatalog(): AssetCatalog {
@@ -27,9 +27,9 @@ function createMockCpuCache(): CpuCache {
     drain: vi.fn(() => []),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     getCached: vi.fn(() => null),
-    // Chunk-delivery tests (Slice 1 of PRD #607) consult this method
-    // from the resend pass. Default to a miss so cache-hit fixtures
-    // don't accidentally re-emit deliveries across unrelated describes.
+    // Chunk-delivery tests consult this method from the resend pass.
+    // Default to a miss so cache-hit fixtures don't accidentally
+    // re-emit deliveries across unrelated describes.
     getCachedChunk: vi.fn(() => null),
     telemetry: vi.fn(),
     updateConfig: vi.fn(),

@@ -1,9 +1,9 @@
 // @vitest-environment happy-dom
 //
-// Tests for the slice-3 enhanced `useAuthState` hook (issue #459).
-// Verifies the round-trip: initial whoami populates `state`,
-// `signOut()` calls postLogout *then* refreshes state via whoami,
-// flipping AuthGate from authed to unauth without a page reload.
+// Tests for the `useAuthState` hook. Verifies the round-trip: initial
+// whoami populates `state`, `signOut()` calls postLogout *then*
+// refreshes state via whoami, flipping AuthGate from authed to unauth
+// without a page reload.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, cleanup, screen } from "@testing-library/react";

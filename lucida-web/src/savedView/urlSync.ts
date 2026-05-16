@@ -11,14 +11,13 @@
 //     on `popstate`, re-parse and re-apply. Both routed through the
 //     SavedViewApplier so the same step-ordered logic runs in both cases.
 //     Two recognized payload shapes:
-//       * `#view=<inline base64+gzip>` — slice 1
-//       * `#b=<bookmark-id>` — slice 3, fetched via `/api/bookmarks/:id`
-//         then handed to the applier; the URL is then collapsed to its
-//         live `#view=…` form so further pans don't drift the recipient
+//       * `#view=<inline base64+gzip>` — inline payload
+//       * `#b=<bookmark-id>` — fetched via `/api/bookmarks/:id` then
+//         handed to the applier; the URL is then collapsed to its live
+//         `#view=…` form so further pans don't drift the recipient
 //         back to a stale snapshot.
 //
-// The debounce timing is configurable via the constructor for tests
-// (PRD acceptance criterion §"debounce timing configurable for tests").
+// The debounce timing is configurable via the constructor for tests.
 
 import { encode, decode } from "./encoder.ts";
 import type { SavedView } from "./types.ts";
@@ -27,7 +26,7 @@ import { getBookmark, type Bookmark } from "./bookmarksApi.ts";
 
 export interface UrlSyncOptions {
   /** ms of idle to wait before writing the URL. Default 350 (mid-range
-   * of PRD's 250-500 ms target). */
+   * of the 250-500 ms target). */
   debounceMs?: number;
   /** Override `window` for testing. */
   window?: Window;
@@ -40,8 +39,8 @@ export type CaptureBuilder = () => SavedView | null;
 
 export type FetchBookmark = (id: string) => Promise<Bookmark | null>;
 
-/** Default `#b=<id>` resolver — the slice-2 REST helper.
- *  Tests inject their own to avoid the production fetch path. */
+/** Default `#b=<id>` resolver — the REST helper. Tests inject their
+ *  own to avoid the production fetch path. */
 const defaultFetchBookmark: FetchBookmark = (id) => getBookmark(id);
 
 export class UrlSync {
@@ -106,11 +105,10 @@ export class UrlSync {
    * error). Safe to call multiple times — guarded by the applier's own
    * "in progress" check so we never re-enter mid-apply.
    *
-   * For `#b=<id>`: fetches the bookmark via the slice-2 REST endpoint,
-   * applies its `view`, then `replaceState`s the URL to the inline
-   * `#view=…` form so further pans don't drift the recipient back to
-   * a stale snapshot every time the URL is re-applied (PRD §"URL
-   * semantics across all states", row "Open someone's #b=<id> link").
+   * For `#b=<id>`: fetches the bookmark via the REST endpoint, applies
+   * its `view`, then `replaceState`s the URL to the inline `#view=…`
+   * form so further pans don't drift the recipient back to a stale
+   * snapshot every time the URL is re-applied.
    */
   async bootstrap(): Promise<void> {
     if (this.applier.isInProgress()) return;
@@ -187,7 +185,7 @@ export class UrlSync {
   }
 
   /** Force-write immediately, bypassing the debounce. Used by tests
-   * and on user-explicit save events (none in slice 1). */
+   * and on user-explicit save events. */
   async flush(): Promise<void> {
     if (this.destroyed) return;
     if (this.applier.isInProgress()) return;

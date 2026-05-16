@@ -203,10 +203,10 @@ export class SavedViewApplier {
   // --- Main entry point -------------------------------------------------
 
   /**
-   * Apply a SavedView to the live scene. Steps 2-10 of the PRD apply flow.
-   * Returns when all in-flight commands are dispatched and the camera has
-   * been imported. Resolves even on partial dataset-open failure (the
-   * loading banner shows the indicator).
+   * Apply a SavedView to the live scene. Returns when all in-flight
+   * commands are dispatched and the camera has been imported. Resolves
+   * even on partial dataset-open failure (the loading banner shows the
+   * indicator).
    */
   async apply(view: SavedView): Promise<void> {
     if (this.state.inProgress) {
@@ -553,12 +553,11 @@ export function clampViewIndices(
       if (shape.length >= 3) {
         // shape returns [Z, Y, X]; t/c are not in volume_shape — but
         // dataset_volume_shape is the only call we have for "max valid
-        // index". Fall back to view.view.t/c as-is for t/c since the
-        // PRD says "clamp out-of-range silently" specifically about
-        // z/t/c — we conservatively clamp z to volume_shape[0] and
-        // pass t/c through (downstream WASM `set_t`/`set_c` accept any
-        // u32; out-of-range there is harmless because rendering will
-        // skip frames we don't have).
+        // index". The clamp contract is "clamp out-of-range silently"
+        // specifically about z/t/c — we conservatively clamp z to
+        // volume_shape[0] and pass t/c through (downstream WASM
+        // `set_t`/`set_c` accept any u32; out-of-range there is
+        // harmless because rendering will skip frames we don't have).
         minZ = Math.min(minZ, shape[0]);
       }
     } catch {

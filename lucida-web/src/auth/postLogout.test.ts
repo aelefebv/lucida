@@ -1,4 +1,4 @@
-// Tests for `postLogout` (slice 3, issue #459).
+// Tests for `postLogout`.
 //
 // Mirrors the `fetchAuthState` test pattern: hand a fake fetch in,
 // assert on what the helper sends + how it tolerates failures. Pure

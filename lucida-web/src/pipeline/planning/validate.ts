@@ -34,16 +34,14 @@ import type { ActiveSetEntry, EntitySnapshot, PlanningSnapshot, PlanningState } 
  * Every {@link FieldSnapshot}'s `parentId`, when present in
  * `snapshot.entities`, must refer to an entity whose `kind === "Well"`.
  *
- * Subtle: the PRD's literal phrasing was "exists in entities AND refers
- * to a Well." In production the snapshot only carries entities WASM's
- * `view_query` returned this tick — a visible field can have an
- * invisible parent well that doesn't appear at all. The planner's
- * `groupByWell` already handles this via a `wellEntity: null` group
- * (see `pipeline/planning/modes.ts`). Treating a missing parent as a
- * violation would false-positive on every legitimate
- * field-without-visible-parent snapshot the orchestrator builds. The
- * narrowed form catches the genuinely-broken case (parent IS in
- * entities but it's not a Well) without contradicting reality.
+ * The snapshot only carries entities WASM's `view_query` returned this
+ * tick — a visible field can have an invisible parent well that doesn't
+ * appear at all. The planner's `groupByWell` already handles this via a
+ * `wellEntity: null` group (see `pipeline/planning/modes.ts`); treating
+ * a missing parent as a violation would false-positive on every
+ * legitimate field-without-visible-parent snapshot the orchestrator
+ * builds. This narrowed form catches the genuinely-broken case (parent
+ * IS in entities but it's not a Well) without contradicting reality.
  */
 export function checkFieldParentRefs(snapshot: PlanningSnapshot): void {
   const byId = new Map<string, EntitySnapshot>();
@@ -175,31 +173,31 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
 // ---------------------------------------------------------------------------
 
 // The original "every assetCatalog key must be a known entityId" check
-// was withdrawn after PRD #578 / Slice 3 shipped. `assetCatalog.byEntity`
-// is flattened across ALL datasets the catalog has ever seen
-// (`pipeline/assetCatalog.ts::snapshot()` walks every dataset map);
-// `snapshot.entities` is for ONE dataset's current tick. They legitimately
-// diverge — the catalog is a cross-dataset registry, not a snapshot-coupled
-// view. Production lookups go snapshot-entity → catalog (per-id `get()`),
-// so dangling catalog entries are harmless: they're never iterated. Kept
-// as a comment so the check number stays stable in cross-references.
+// was withdrawn: `assetCatalog.byEntity` is flattened across ALL datasets
+// the catalog has ever seen (`pipeline/assetCatalog.ts::snapshot()` walks
+// every dataset map); `snapshot.entities` is for ONE dataset's current
+// tick. They legitimately diverge — the catalog is a cross-dataset
+// registry, not a snapshot-coupled view. Production lookups go
+// snapshot-entity → catalog (per-id `get()`), so dangling catalog entries
+// are harmless: they're never iterated. Kept as a comment so the check
+// number stays stable in cross-references.
 
 // ---------------------------------------------------------------------------
 // Check 7 — withdrawn (see comment below)
 // ---------------------------------------------------------------------------
 
 // The original "every minimapPending key must be a known imageId in
-// snapshot.entities" check was withdrawn during the post-ship audit
-// (PR #589). Same root issue as withdrawn check 6: producer scope
-// doesn't match snapshot scope. minimapPath populates pendingFetch by
-// iterating ALL `dataset_images()` (every image in the dataset whose
-// minimap chunks haven't been fully uploaded yet), keyed by `image_id`.
-// snapshot.entities is the result of `view_query` (only currently-
-// visible entities). The two routinely diverge — minimap pending coords
-// for off-screen images are legitimate, and the planner gracefully
-// no-ops on them (its `emitMinimapLane` only walks images present in
-// the active set). Kept as a comment so the surviving check numbers
-// stay stable in cross-references.
+// snapshot.entities" check was withdrawn. Same root issue as withdrawn
+// check 6: producer scope doesn't match snapshot scope. minimapPath
+// populates pendingFetch by iterating ALL `dataset_images()` (every
+// image in the dataset whose minimap chunks haven't been fully
+// uploaded yet), keyed by `image_id`. snapshot.entities is the result
+// of `view_query` (only currently-visible entities). The two routinely
+// diverge — minimap pending coords for off-screen images are
+// legitimate, and the planner gracefully no-ops on them (its
+// `emitMinimapLane` only walks images present in the active set). Kept
+// as a comment so the surviving check numbers stay stable in
+// cross-references.
 
 // ---------------------------------------------------------------------------
 // Check 8 — previousActiveSet has no duplicate entityIds
@@ -302,11 +300,11 @@ function allowedEntityKindsFor(
  * `import.meta.env.DEV` is true.
  *
  * Originally nine checks per ADR 0031; checks 6 (assetCatalog refs)
- * and 7 (minimapPending keys) were withdrawn post-ship — both shared
- * the same root issue: producer scope (cross-dataset registry / all
- * dataset images) didn't match snapshot scope (one dataset's currently
- * visible entities). Check 9's mapping was also widened. See the
- * comments above the withdrawn-check blocks for details.
+ * and 7 (minimapPending keys) were withdrawn — both shared the same
+ * root issue: producer scope (cross-dataset registry / all dataset
+ * images) didn't match snapshot scope (one dataset's currently visible
+ * entities). Check 9's mapping was also widened. See the comments
+ * above the withdrawn-check blocks for details.
  *
  * Order is fixed (matches ADR 0031). Earlier checks build the referential
  * context later checks rely on (e.g. uniqueness before reference-resolution),

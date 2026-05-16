@@ -7,10 +7,10 @@
  *
  * Upload-side concerns (cold-state assembly, view hot-state, drain /
  * resend / dispatch, delivery tracking, worker feedback, telemetry)
- * live on the {@link Uploader} after Slice 10 of PRD #607. The
- * Orchestrator owns one Uploader per render loop and calls dedicated
- * Uploader methods inline during `planAndFetch` rather than passing a
- * wide "tick bundle" struct (see uploader.ts for the rationale).
+ * live on the {@link Uploader}. The Orchestrator owns one Uploader per
+ * render loop and calls dedicated Uploader methods inline during
+ * `planAndFetch` rather than passing a wide "tick bundle" struct (see
+ * uploader.ts for the rationale).
  *
  * See `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`
  * for the design rationale.
@@ -107,10 +107,10 @@ export interface OrchestratorResult {
   entityIndexByDataset: Map<string, Map<string, number>>;
 }
 
-// `synthesizeWellRosterEntry` moved to `upload/coldState/roster.ts` in
-// Slice 6b of PRD #607. Re-exported here so existing import sites stay
-// working; new call sites should import directly from
-// `pipeline/upload/coldState/roster.ts` (or via `pipeline/upload/`).
+// `synthesizeWellRosterEntry` lives in `upload/coldState/roster.ts`;
+// re-exported here so existing import sites stay working. New call
+// sites should import directly from `pipeline/upload/coldState/roster.ts`
+// (or via `pipeline/upload/`).
 export { synthesizeWellRosterEntry } from "./upload/coldState/roster.ts";
 
 export class Orchestrator {
@@ -367,11 +367,10 @@ export class Orchestrator {
       );
 
       // 3f. Build member roster + per-entity matrix map from the active
-      // set in a single walk (Slice 6c, PRD #607). The roster is
-      // consumed by slicePath/volumePath for layer construction; the
-      // matrices map is consumed below by `uploader.sendColdState` so
-      // the worker gets precomputed model matrices baked into descriptor
-      // entries.
+      // set in a single walk. The roster is consumed by
+      // slicePath/volumePath for layer construction; the matrices map
+      // is consumed below by `uploader.sendColdState` so the worker
+      // gets precomputed model matrices baked into descriptor entries.
       //
       // `well-as-proxy` entries are synthesised (their well isn't in
       // `derived.members`); `invisible` entries are skipped (they don't
@@ -480,10 +479,9 @@ export class Orchestrator {
     // Step 4 — Orchestrator debug snapshot
     if (debugStats.enabled) {
       // Aggregate from all per-dataset state (active sets, visible
-      // regions, entity diagnostics, cached-key counts). Multi-dataset
-      // rebuilds previously kept only the last-processed dataset's
-      // snapshot for these fields; #613 made the underlying state
-      // per-dataset, so the aggregator now walks every entry.
+      // regions, entity diagnostics, cached-key counts). The underlying
+      // state is per-dataset, so the aggregator walks every entry
+      // rather than overwriting with the last-processed dataset.
       const orchDebug: OrchDebug = {
         activeSet: [],
         laneCount: { detail: 0, prefetch: 0, overview: 0 },
@@ -666,7 +664,7 @@ export class Orchestrator {
     delete debugStats.planning.byDataset[workerMemberId];
     this._lastPlanByDataset.delete(workerMemberId);
 
-    // Drop per-dataset state added in #613. All keyed by datasetId; for
+    // Drop per-dataset state. All keyed by datasetId; for
     // member-shaped ids these are no-ops, which matches the
     // best-effort cleanup pattern above.
     this._lastEntities.delete(workerMemberId);
