@@ -1,12 +1,8 @@
 /** WebGPU pipeline for volume ray marching. */
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
-import {
-  DESCRIPTOR_ENTRY_SIZE,
-  DESCRIPTOR_LODS_OFFSET,
-  DESCRIPTOR_LOD_INFO_SIZE,
-  DESCRIPTOR_SENTINEL_INDEX,
-} from "./descriptorBuffer.ts";
+import { DESCRIPTOR_ENTRY_SIZE } from "./descriptorBuffer.ts";
+import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 
 import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 
@@ -273,37 +269,15 @@ export class VolumeRenderer {
       });
     }
     const cpu = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
-    const f32 = new Float32Array(cpu);
-    const u32 = new Uint32Array(cpu);
-    if (modelMatrix.length === 16) f32.set(modelMatrix, 0);
-    if (invModelMatrix.length === 16) f32.set(invModelMatrix, 16);
-    // Sentinel proxy handles, no proxy dims.
-    u32[33] = DESCRIPTOR_SENTINEL_INDEX;
-    u32[34] = DESCRIPTOR_SENTINEL_INDEX;
-    u32[35] = DESCRIPTOR_SENTINEL_INDEX;
-    u32[36] = DESCRIPTOR_SENTINEL_INDEX;
-    u32[40] = 1; u32[41] = 1; u32[42] = 1;
-    u32[44] = 1; u32[45] = 1; u32[46] = 1;
-    f32[48] = contrastMin;
-    f32[49] = contrastMax;
-    f32[50] = gamma;
-    f32[51] = opacity;
-    // Single LOD covering the full volume (single-slot atlas).
-    u32[53] = 1; // lodCount
-    const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4;
-    u32[lodsBaseU32 + 0] = 0; // level
-    u32[lodsBaseU32 + 1] = 0; // indirectionOffset
-    // gridDims = 1×1×1
-    u32[lodsBaseU32 + 4] = 1; u32[lodsBaseU32 + 5] = 1; u32[lodsBaseU32 + 6] = 1;
-    // chunkDims = volumeDims (full volume = single chunk)
-    u32[lodsBaseU32 + 8] = volumeDims[0]; u32[lodsBaseU32 + 9] = volumeDims[1]; u32[lodsBaseU32 + 10] = volumeDims[2];
-    // levelDims = volumeDims
-    u32[lodsBaseU32 + 12] = volumeDims[0]; u32[lodsBaseU32 + 13] = volumeDims[1]; u32[lodsBaseU32 + 14] = volumeDims[2];
-    // Zero out unused LOD slots.
-    for (let i = 1; i < 8; i++) {
-      const base = lodsBaseU32 + i * (DESCRIPTOR_LOD_INFO_SIZE / 4);
-      for (let s = 0; s < DESCRIPTOR_LOD_INFO_SIZE / 4; s++) u32[base + s] = 0;
-    }
+    serializeTransientDescriptor(cpu, {
+      modelMatrix,
+      invModelMatrix,
+      volumeDims,
+      contrastMin,
+      contrastMax,
+      gamma,
+      opacity,
+    });
     this.device.queue.writeBuffer(this.transientDescriptorBuffer, 0, cpu);
     this.setDescriptorBinding(this.transientDescriptorBuffer, 0);
   }

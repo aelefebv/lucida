@@ -28,57 +28,50 @@ import type {
 import type { EntityProxyDescriptor } from "./workerContext.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
 import type { LodIndirectionMeta } from "./volumeHandlers.ts";
+import {
+  DESCRIPTOR_ENTRY_SIZE,
+  DESCRIPTOR_LOD_INFO_SIZE,
+  DESCRIPTOR_LODS_OFFSET,
+  DESCRIPTOR_MAX_LODS,
+  DESCRIPTOR_SENTINEL_INDEX,
+  LOD_OFFSET_CHUNK_DIMS,
+  LOD_OFFSET_GRID_DIMS,
+  LOD_OFFSET_INDIRECTION_OFFSET,
+  LOD_OFFSET_LEVEL,
+  LOD_OFFSET_LEVEL_DIMS,
+  LOD_OFFSET_PAD0,
+  LOD_OFFSET_PAD1,
+  OFFSET_CHANNEL_MASK,
+  OFFSET_COLORMAP_LUT_INDEX,
+  OFFSET_CONTRAST_MAX,
+  OFFSET_CONTRAST_MIN,
+  OFFSET_FIELD_PROXY_DIMS,
+  OFFSET_FIELD_PROXY_POOL_INDEX,
+  OFFSET_FIELD_PROXY_SLOT_INDEX,
+  OFFSET_GAMMA,
+  OFFSET_INV_MODEL_MATRIX,
+  OFFSET_LOD_COUNT,
+  OFFSET_MODEL_MATRIX,
+  OFFSET_OPACITY,
+  OFFSET_PAD_PROXY0,
+  OFFSET_PAD_PROXY1,
+  OFFSET_PAD_PROXY2,
+  OFFSET_PAD_TAIL0,
+  OFFSET_PAD_TAIL1,
+  OFFSET_WELL_PROXY_DIMS,
+  OFFSET_WELL_PROXY_POOL_INDEX,
+  OFFSET_WELL_PROXY_SLOT_INDEX,
+} from "./descriptor/layout.ts";
 
-/** Maximum LOD slots packed per entity. Matches `LodInfo[8]` in WGSL. */
-export const DESCRIPTOR_MAX_LODS = 8;
-
-/**
- * Per-entity descriptor size in bytes. Mirrors the WGSL `EntityDescriptor`
- * layout in volume.wgsl / slice.wgsl.
- *
- * Layout (offsets in bytes):
- *
- *   0:   modelMatrix         mat4x4<f32>     (64)
- *   64:  invModelMatrix      mat4x4<f32>     (64)
- *   128: channelMask         u32             (4)
- *   132: fieldProxyPoolIndex u32             (4)
- *   136: fieldProxySlotIndex u32             (4)
- *   140: wellProxyPoolIndex  u32             (4)
- *   144: wellProxySlotIndex  u32             (4)
- *   148: _pad_proxy0         u32             (4)
- *   152: _pad_proxy1         u32             (4)
- *   156: _pad_proxy2         u32             (4)
- *   160: fieldProxyDims      vec3<u32>+pad   (16) — xyz=(Z,Y,X)
- *   176: wellProxyDims       vec3<u32>+pad   (16) — xyz=(Z,Y,X)
- *   192: contrastMin         f32             (4)
- *   196: contrastMax         f32             (4)
- *   200: gamma               f32             (4)
- *   204: opacity             f32             (4)
- *   208: colormapLutIndex    u32             (4)
- *   212: lodCount            u32             (4)
- *   216: _pad_tail0          u32             (4)
- *   220: _pad_tail1          u32             (4)
- *   224: lods                LodInfo[8]      (512)
- *
- *   total = 736 bytes
- *
- * `LodInfo` (64B):
- *
- *   0:  level             u32             (4)
- *   4:  indirectionOffset u32             (4)
- *   8:  _pad0             u32             (4)
- *   12: _pad1             u32             (4)
- *   16: gridDims          vec3<u32>+pad   (16) — xyz=(X,Y,Z)
- *   32: chunkDims         vec3<u32>+pad   (16) — xyz=(X,Y,Z)
- *   48: levelDims         vec3<u32>+pad   (16) — xyz=(X,Y,Z)
- */
-export const DESCRIPTOR_LOD_INFO_SIZE = 64;
-export const DESCRIPTOR_LODS_OFFSET = 224;
-export const DESCRIPTOR_ENTRY_SIZE =
-  DESCRIPTOR_LODS_OFFSET + DESCRIPTOR_MAX_LODS * DESCRIPTOR_LOD_INFO_SIZE;
-
-/** Shader-side sentinel for missing pool / slot. Matches `0xFFFFFFFFu`. */
-export const DESCRIPTOR_SENTINEL_INDEX = 0xffffffff;
+// Re-export size/sentinel constants so existing consumers don't break.
+// New code should import these from `./descriptor/layout.ts` directly.
+export {
+  DESCRIPTOR_ENTRY_SIZE,
+  DESCRIPTOR_LOD_INFO_SIZE,
+  DESCRIPTOR_LODS_OFFSET,
+  DESCRIPTOR_MAX_LODS,
+  DESCRIPTOR_SENTINEL_INDEX,
+} from "./descriptor/layout.ts";
 
 export interface EntityDescriptorIndex {
   buffer: GPUBuffer;
@@ -321,8 +314,8 @@ export function serializeEntityDescriptor(
   const f32 = new Float32Array(target, offset, DESCRIPTOR_ENTRY_SIZE / 4);
   const u32 = new Uint32Array(target, offset, DESCRIPTOR_ENTRY_SIZE / 4);
 
-  if (entry.modelMatrix.length === 16) f32.set(entry.modelMatrix, 0);
-  if (entry.invModelMatrix.length === 16) f32.set(entry.invModelMatrix, 16);
+  if (entry.modelMatrix.length === 16) f32.set(entry.modelMatrix, OFFSET_MODEL_MATRIX / 4);
+  if (entry.invModelMatrix.length === 16) f32.set(entry.invModelMatrix, OFFSET_INV_MODEL_MATRIX / 4);
 
   // Resolve proxy handles to (poolIndex, slotIndex, dims). Sentinels for
   // any missing handle.
@@ -352,47 +345,70 @@ export function serializeEntityDescriptor(
 
   const lutIdx = colormapLutIndices.get(displayState.colormapName) ?? 0;
 
-  u32[32] = displayState.channelMask >>> 0; // 128 channelMask
-  u32[33] = fieldPoolIdx;            // 132
-  u32[34] = fieldSlotIdx;            // 136
-  u32[35] = wellPoolIdx;             // 140
-  u32[36] = wellSlotIdx;             // 144
-  u32[37] = 0; u32[38] = 0; u32[39] = 0; // 148/152/156 _pad_proxy0..2
-  u32[40] = fieldDims[0]; u32[41] = fieldDims[1]; u32[42] = fieldDims[2]; u32[43] = 0; // 160 fieldProxyDims
-  u32[44] = wellDims[0];  u32[45] = wellDims[1];  u32[46] = wellDims[2];  u32[47] = 0; // 176 wellProxyDims
+  u32[OFFSET_CHANNEL_MASK / 4]          = displayState.channelMask >>> 0;
+  u32[OFFSET_FIELD_PROXY_POOL_INDEX / 4] = fieldPoolIdx;
+  u32[OFFSET_FIELD_PROXY_SLOT_INDEX / 4] = fieldSlotIdx;
+  u32[OFFSET_WELL_PROXY_POOL_INDEX / 4]  = wellPoolIdx;
+  u32[OFFSET_WELL_PROXY_SLOT_INDEX / 4]  = wellSlotIdx;
+  u32[OFFSET_PAD_PROXY0 / 4] = 0;
+  u32[OFFSET_PAD_PROXY1 / 4] = 0;
+  u32[OFFSET_PAD_PROXY2 / 4] = 0;
+  const fieldDimsBase = OFFSET_FIELD_PROXY_DIMS / 4;
+  u32[fieldDimsBase + 0] = fieldDims[0];
+  u32[fieldDimsBase + 1] = fieldDims[1];
+  u32[fieldDimsBase + 2] = fieldDims[2];
+  u32[fieldDimsBase + 3] = 0;
+  const wellDimsBase = OFFSET_WELL_PROXY_DIMS / 4;
+  u32[wellDimsBase + 0] = wellDims[0];
+  u32[wellDimsBase + 1] = wellDims[1];
+  u32[wellDimsBase + 2] = wellDims[2];
+  u32[wellDimsBase + 3] = 0;
 
-  f32[48] = displayState.contrastMin; // 192 contrastMin
-  f32[49] = displayState.contrastMax; // 196 contrastMax
-  f32[50] = displayState.gamma;       // 200 gamma
-  f32[51] = displayState.opacity;     // 204 opacity
-  u32[52] = lutIdx >>> 0;             // 208 colormapLutIndex
+  f32[OFFSET_CONTRAST_MIN / 4] = displayState.contrastMin;
+  f32[OFFSET_CONTRAST_MAX / 4] = displayState.contrastMax;
+  f32[OFFSET_GAMMA / 4]        = displayState.gamma;
+  f32[OFFSET_OPACITY / 4]      = displayState.opacity;
+  u32[OFFSET_COLORMAP_LUT_INDEX / 4] = lutIdx >>> 0;
 
   // LODs and indirectionOffsets come from worker-built entityMetas — same
   // source the pool's shared indirection buffer was sized from. Computing
   // a per-entity local offset here would point every entity at entity 0's
   // range in the shared buffer, so all fields would render the same data.
   const lodCount = Math.min(lodMetas.length, DESCRIPTOR_MAX_LODS);
-  u32[53] = lodCount;                // 212 lodCount
-  u32[54] = 0;                       // 216 _pad_tail0
-  u32[55] = 0;                       // 220 _pad_tail1
+  u32[OFFSET_LOD_COUNT / 4] = lodCount;
+  u32[OFFSET_PAD_TAIL0 / 4] = 0;
+  u32[OFFSET_PAD_TAIL1 / 4] = 0;
 
-  const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4; // 56
+  const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4;
+  const lodStrideU32 = DESCRIPTOR_LOD_INFO_SIZE / 4;
   for (let i = 0; i < DESCRIPTOR_MAX_LODS; i++) {
-    const slotBase = lodsBaseU32 + i * (DESCRIPTOR_LOD_INFO_SIZE / 4);
+    const slotBase = lodsBaseU32 + i * lodStrideU32;
     if (i < lodCount) {
       const m = lodMetas[i];
       const [gZ, gY, gX] = m.gridDims;
       const [cZ, cY, cX] = m.chunkDims;
       const [lZ, lY, lX] = m.levelDims;
-      u32[slotBase + 0]  = m.level;
-      u32[slotBase + 1]  = m.offset;
-      u32[slotBase + 2]  = 0;
-      u32[slotBase + 3]  = 0;
-      u32[slotBase + 4]  = gX; u32[slotBase + 5]  = gY; u32[slotBase + 6]  = gZ; u32[slotBase + 7]  = 0;
-      u32[slotBase + 8]  = cX; u32[slotBase + 9]  = cY; u32[slotBase + 10] = cZ; u32[slotBase + 11] = 0;
-      u32[slotBase + 12] = lX; u32[slotBase + 13] = lY; u32[slotBase + 14] = lZ; u32[slotBase + 15] = 0;
+      u32[slotBase + LOD_OFFSET_LEVEL / 4]              = m.level;
+      u32[slotBase + LOD_OFFSET_INDIRECTION_OFFSET / 4] = m.offset;
+      u32[slotBase + LOD_OFFSET_PAD0 / 4]               = 0;
+      u32[slotBase + LOD_OFFSET_PAD1 / 4]               = 0;
+      const gridBase = slotBase + LOD_OFFSET_GRID_DIMS / 4;
+      u32[gridBase + 0] = gX;
+      u32[gridBase + 1] = gY;
+      u32[gridBase + 2] = gZ;
+      u32[gridBase + 3] = 0;
+      const chunkBase = slotBase + LOD_OFFSET_CHUNK_DIMS / 4;
+      u32[chunkBase + 0] = cX;
+      u32[chunkBase + 1] = cY;
+      u32[chunkBase + 2] = cZ;
+      u32[chunkBase + 3] = 0;
+      const levelBase = slotBase + LOD_OFFSET_LEVEL_DIMS / 4;
+      u32[levelBase + 0] = lX;
+      u32[levelBase + 1] = lY;
+      u32[levelBase + 2] = lZ;
+      u32[levelBase + 3] = 0;
     } else {
-      for (let s = 0; s < DESCRIPTOR_LOD_INFO_SIZE / 4; s++) {
+      for (let s = 0; s < lodStrideU32; s++) {
         u32[slotBase + s] = 0;
       }
     }
