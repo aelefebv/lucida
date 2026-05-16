@@ -20,8 +20,7 @@
  * lifecycle in the per-mode files. Consolidating them into this module
  * would either require threading new accessors through every
  * `setAtlas` / `setProxyTextures` call site or reaching back from per-mode
- * files into the worker; both expand the scope of Slice 9 without buying
- * clarity. Tracked for a follow-up if a second motivator appears.
+ * files into the worker.
  */
 
 import { createOffscreenTarget } from "../gpuContext.ts";

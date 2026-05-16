@@ -1,9 +1,8 @@
 /**
  * Suite B — proxy upload characterization.
  *
- * Locks the behavior of `handleProxyUpload` so the extraction in Slice 5
- * can't regress it. Covers the variant matrix from the testability scan
- * (Pass 7 / Suites B + E):
+ * Locks the behavior of `handleProxyUpload`. Covers the variant matrix
+ * for Suites B + E:
  *
  *   1. First proxy upload for an entity → pool created, slot 0 allocated,
  *      descriptor populated.
@@ -28,10 +27,9 @@
  * (only-rebuild-when-dataset-matches) is exercised as a thin extra block
  * since the dispatcher's policy is what the suite locks.
  *
- * Mocks `WorkerCtx.device` + `GPUDevice` — no real GPU. Slice 8 moved
- * the previously-passed registries onto `ctx.state`, plus the current
- * epochs pointer — tests set `ctx.state.currentEpochs` to drive the
- * staleness check.
+ * Mocks `WorkerCtx.device` + `GPUDevice` — no real GPU. Registries and
+ * the current epochs pointer live on `ctx.state`; tests set
+ * `ctx.state.currentEpochs` to drive the staleness check.
  */
 
 import { describe, it, expect, beforeEach, vi } from "vitest";

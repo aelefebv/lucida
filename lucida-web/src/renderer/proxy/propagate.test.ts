@@ -1,8 +1,7 @@
 /**
  * Tests for `propagateWellProxyToFields`. Pure Map mutation — no GPU.
  *
- * Locks behavior the original `handleProxyAssetData` inline branch
- * provided so Slice 5's extraction can't regress:
+ * Locks the behavior the inline `handleProxyAssetData` branch provided:
  *   - well with no children → no-op
  *   - well with one child → child gets handle
  *   - well with multiple children → all children get same handle

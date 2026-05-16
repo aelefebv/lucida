@@ -3,11 +3,8 @@
  *
  * Operates over `ctx.state.rayHitPerEntity` — the per-entity ray-pick
  * reference that `findFarthestSlot` consults to prefer keeping chunks
- * near the camera's hit point.
- *
- * Extracted from `volumeHandlers.ts` in Slice 7. Slice 8 moved the Map
- * onto `WorkerCtx.state`; callers now thread ctx (or a RendererState)
- * instead of relying on a module-local Map.
+ * near the camera's hit point. Callers thread ctx (or a
+ * `RendererState`) through rather than holding a module-local Map.
  */
 
 import type { ViewHotStateMessage } from "../workerProtocol.ts";

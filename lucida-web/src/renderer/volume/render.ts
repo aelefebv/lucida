@@ -4,8 +4,6 @@
  * Per layer: resolve member→pool→datasetId, look up descriptor + atlas,
  * compute hasDetail, resolve proxy textures, bind, draw to offscreen,
  * composite. After the loop: cursor draw.
- *
- * Extracted from `volumeHandlers.ts` in Slice 7. No behavior change.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";

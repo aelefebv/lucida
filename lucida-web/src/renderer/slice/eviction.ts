@@ -3,11 +3,8 @@
  *
  * Operates over `ctx.state.cameraUVPerEntity` — the per-entity
  * camera-UV reference that `findFarthestSlot2D` consults to prefer
- * keeping chunks near the viewport's center for each entity.
- *
- * Extracted from `sliceHandlers.ts` in Slice 7. Slice 8 moved the Map
- * onto `WorkerCtx.state`; callers now thread RendererState instead of
- * relying on a module-local Map.
+ * keeping chunks near the viewport's center for each entity. Callers
+ * thread `RendererState` through rather than holding a module-local Map.
  */
 
 import type { RendererState } from "../worker/state.ts";

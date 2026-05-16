@@ -6,7 +6,6 @@
  * shader can fall back to the parent's proxy when the field's own detail
  * chunks (and its `FieldProxy3D`, if any) haven't been delivered yet.
  *
- * Extracted from `gpu.worker.ts:handleProxyAssetData` (Slice 5).
  */
 
 import type { ProxyHandle } from "../proxyAtlas.ts";

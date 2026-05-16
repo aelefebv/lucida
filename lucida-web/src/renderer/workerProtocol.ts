@@ -25,12 +25,8 @@ export interface ResizeMessage {
 /**
  * A single chunk payload carried by `sliceChunkData`,
  * `volumeChunkData`, and `minimapUploadOverviewChunksForLayer`. The
- * shape is identical across all three callers (previously two parallel
- * `SliceChunk` / `VolumeChunk` interfaces); folded into one `Chunk`
- * type per the dechaos contract scan (Pass 5 finding: "structurally
- * identical, fold or discriminate"). The `chunks: Chunk[]` array shape
- * on the envelope messages is unchanged — that's a wire-protocol
- * contract change tracked separately (see issue #620 discussion).
+ * shape is identical across all three callers; one `Chunk` type rather
+ * than two parallel `SliceChunk` / `VolumeChunk` interfaces.
  */
 export interface Chunk {
   data: ArrayBuffer;
@@ -47,9 +43,8 @@ export interface SliceChunkDataMessage {
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. Previously named `datasetId`; renamed
-   * per dechaos Pass 5 Contract Issue 3 — the field never carried a
-   * dataset id at any call site.
+   * multi-channel composites. (Not a dataset id — the field was
+   * previously misnamed `datasetId`.)
    */
   memberId: string;
   chunks: Chunk[];
@@ -137,10 +132,9 @@ export interface VolumeLayerParams {
  * delivery whose epoch is older than the worker's current view of the
  * world).
  *
- * Asymmetry rationale (dechaos Pass 5 Contract Issue 13): re-issuing a
- * render is cheap and the next viewEpoch will fire one anyway; dropping
- * a stale chunk avoids permanently writing wrong-epoch voxels into the
- * atlas.
+ * Asymmetry rationale: re-issuing a render is cheap and the next
+ * viewEpoch will fire one anyway; dropping a stale chunk avoids
+ * permanently writing wrong-epoch voxels into the atlas.
  */
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
@@ -455,8 +449,8 @@ export interface ChunksEvictedMessage {
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. Previously named `datasetId`; renamed
-   * per dechaos Pass 5 Contract Issue 3.
+   * multi-channel composites. (Not a dataset id — the field was
+   * previously misnamed `datasetId`.)
    */
   memberId: string;
   /** Chunks removed from the atlas (were present, got evicted by closer chunks). */

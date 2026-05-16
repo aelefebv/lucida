@@ -1,12 +1,7 @@
 /**
  * Cold-state ingestion orchestrator.
  *
- * Extracted from `gpu.worker.ts:506-753` (Slice 4). Slice 8 promoted
- * every previously-module-level registry onto `WorkerCtx.state`; this
- * function now reads + mutates them via `ctx.state.*` directly instead
- * of taking a `ColdStateRegistries` parameter.
- *
- * Reads + writes (all on `ctx.state`):
+ * Reads + writes per-worker registries via `ctx.state.*`:
  *   - `memberToDataset` / `memberToPool` — routing registries used by
  *     chunk + render handlers to look up which dataset / pool a
  *     memberId belongs to.

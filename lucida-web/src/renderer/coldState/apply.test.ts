@@ -1,26 +1,23 @@
 /**
  * Suite A — cold-state ingestion characterization.
  *
- * Locks the behavior of `applyColdState` so the extraction in Slice 4
- * can't regress it. Covers the variant matrix from the testability scan
- * (Pass 7 / Suite A): single + multi channel volume cold state, mixed
- * `fields-with-detail` + `well-as-proxy` entries, fields sharing chunk
- * dims, fields with different chunk dims, slice mode with mixed LODs +
- * Z retargeting, cold-state churn (replace), empty active-set cold
- * state.
+ * Locks the behavior of `applyColdState`. Covers single + multi
+ * channel volume cold state, mixed `fields-with-detail` +
+ * `well-as-proxy` entries, fields sharing chunk dims, fields with
+ * different chunk dims, slice mode with mixed LODs + Z retargeting,
+ * cold-state churn (replace), and empty active-set cold state.
  *
- * Mocks `WorkerCtx` + `GPUDevice` — no real GPU. Slice 8 moved the
- * per-dataset atlas Map onto `ctx.state.{volumeAtlases, sliceAtlases}`,
- * so each test owns its own RendererState via `makeCtx()` and no module
- * teardown is required between cases.
+ * Mocks `WorkerCtx` + `GPUDevice` — no real GPU. The per-dataset atlas
+ * Map lives on `ctx.state.{volumeAtlases, sliceAtlases}`, so each test
+ * owns its own RendererState via `makeCtx()` and no module teardown is
+ * required between cases.
  */
 
 import { describe, it, expect, vi } from "vitest";
 
 // Polyfill the GPU usage constants the production code reads at module
-// scope. Slice extractions import `volume/atlas` / `slice/atlas`
-// which reference `GPUTextureUsage.*` / `GPUBufferUsage.*` literals
-// when allocating atlases.
+// scope. `volume/atlas` / `slice/atlas` reference `GPUTextureUsage.*` /
+// `GPUBufferUsage.*` literals when allocating atlases.
 (globalThis as Record<string, unknown>).GPUTextureUsage = {
   COPY_SRC: 0x01,
   COPY_DST: 0x02,
@@ -451,7 +448,7 @@ describe("Suite A — applyColdState", () => {
     applyColdState(ctx, cold);
     expect(ctx.state.wellToFields.get("wellA")).toEqual(new Set(["field1", "field2"]));
     expect(ctx.state.wellToFields.get("wellB")).toEqual(new Set(["field3"]));
-    // Slice 8: wellsByDataset tracks which wells came from this dataset so
+    // wellsByDataset tracks which wells came from this dataset so
     // removeLayerResources can clear them cheaply.
     expect(ctx.state.wellsByDataset.get("ds1")).toEqual(new Set(["wellA", "wellB"]));
   });

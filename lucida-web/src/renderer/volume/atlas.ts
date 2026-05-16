@@ -2,13 +2,9 @@
  * Volume atlas state — pool allocation, indirection sizing, depth
  * texture, dummy indirection buffer.
  *
- * Extracted from `volumeHandlers.ts` in Slice 7. Slice 8 moved the
- * per-dataset registry onto `ctx.state.volumeAtlases`; this module now
- * mutates that Map through the passed ctx instead of holding its own
- * module-local copy.
- *
- * Composed cleanups (`removeVolumeResources`, `destroyAllVolumeResources`)
- * live in `volume/index.ts` so this module stays free of dependencies on
+ * Mutates the per-dataset registry on `ctx.state.volumeAtlases`. Composed
+ * cleanups (`removeVolumeResources`, `destroyAllVolumeResources`) live in
+ * `volume/index.ts` so this module stays free of dependencies on
  * `volume/eviction.ts` (which owns the per-entity ray-pick state).
  */
 
@@ -49,14 +45,13 @@ export interface AtlasState {
 
 // Shared depth texture for volume rendering (used by cursor renderer for occlusion).
 // Stays at module scope: it's a per-canvas resource (not per-session) that
-// `ensureDepthTexture` resizes when canvas dims change. Slice 9 lifts it into
-// `worker/resources.ts` along with the other shared GPU resources.
+// `ensureDepthTexture` resizes when canvas dims change.
 let depthTexture: GPUTexture | null = null;
 let depthW = 0;
 let depthH = 0;
 
 // Shared dummy indirection buffer for `well-as-proxy` chunk bindings.
-// Same reasoning as `depthTexture`: not per-session state. Slice 9 owns it.
+// Same reasoning as `depthTexture`: not per-session state.
 let dummyIndirectionBuf: GPUBuffer | null = null;
 export function getDummyIndirection(device: GPUDevice): GPUBuffer {
   if (!dummyIndirectionBuf) {

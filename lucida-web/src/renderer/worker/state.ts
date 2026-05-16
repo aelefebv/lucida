@@ -10,8 +10,7 @@
  *
  * Renderer-class singletons (slice/volume/cursor/compositor renderers)
  * and persistent GPU resources (LUT cache, offscreen pool, dummy
- * textures) intentionally stay at module scope in `gpu.worker.ts` —
- * Slice 9 owns the cleanup for those.
+ * textures) intentionally stay at module scope in `gpu.worker.ts`.
  *
  * Created in the `case "init"` handler by {@link createInitialState}
  * and torn down by the dispatcher's `case "destroy"` path (the GPU

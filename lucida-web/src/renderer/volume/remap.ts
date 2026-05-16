@@ -1,11 +1,9 @@
 /**
  * Volume-mode indirection remap (thin wrapper).
  *
- * Delegates to the shared `remapSharedIndirection` kernel from Slice 6.
- * Volume mode passes `targetChunkZForMember: null` to (a) disable the Z
- * filter and (b) select volume index arithmetic (Z multiplier included).
- *
- * Extracted from `volumeHandlers.ts` in Slice 7. No behavior change.
+ * Delegates to the shared `remapSharedIndirection` kernel. Volume mode
+ * passes `targetChunkZForMember: null` to (a) disable the Z filter and
+ * (b) select volume index arithmetic (Z multiplier included).
  */
 
 import { remapSharedIndirection } from "../remap.ts";

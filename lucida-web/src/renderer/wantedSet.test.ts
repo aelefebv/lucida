@@ -52,11 +52,11 @@ function makeVisibleRegion(
 }
 
 /**
- * Fixture builder for `ColdStateActiveEntry`. Slice 11 promoted the
- * type to a discriminated union (`kind: "field" | "well-as-proxy"`);
- * this helper inspects `overrides.mode` to pick the right variant so
- * existing call sites keep working unchanged (`mode: "well-as-proxy"`
- * with `imageId: ""` yields the well-as-proxy variant).
+ * Fixture builder for `ColdStateActiveEntry`. The type is a
+ * discriminated union (`kind: "field" | "well-as-proxy"`); this helper
+ * inspects `overrides.mode` to pick the right variant so existing call
+ * sites keep working unchanged (`mode: "well-as-proxy"` with
+ * `imageId: ""` yields the well-as-proxy variant).
  */
 type WantedSetEntryOverrides = Partial<Omit<ColdStateActiveEntry, "kind">>;
 function makeActiveEntry(

@@ -1,8 +1,6 @@
 /**
  * Volume chunk upload — staleness check, LRU eviction, GPU write,
  * intensity sampling, and per-member post-message demux.
- *
- * Extracted from `volumeHandlers.ts` in Slice 7. No behavior change.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";

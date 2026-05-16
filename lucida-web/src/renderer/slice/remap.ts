@@ -1,13 +1,11 @@
 /**
  * Slice-mode indirection remap (thin wrapper).
  *
- * Delegates to the shared `remapSharedIndirection` kernel from Slice 6.
- * Slice mode passes a per-entity `targetChunkZForMember` callback to
- * (a) enable the Z filter (chunks whose `chunk.z !==` the returned
- * target are skipped) and (b) select slice index arithmetic (Z
- * multiplier dropped).
- *
- * Extracted from `sliceHandlers.ts` in Slice 7. No behavior change.
+ * Delegates to the shared `remapSharedIndirection` kernel. Slice mode
+ * passes a per-entity `targetChunkZForMember` callback to (a) enable
+ * the Z filter (chunks whose `chunk.z !==` the returned target are
+ * skipped) and (b) select slice index arithmetic (Z multiplier
+ * dropped).
  */
 
 import { remapSharedIndirection } from "../remap.ts";

@@ -2,13 +2,9 @@
  * Slice atlas state — pool allocation, indirection sizing, per-entity
  * Z metadata, stale-on-Z-change tracking, dummy indirection buffer.
  *
- * Extracted from `sliceHandlers.ts` in Slice 7. Slice 8 moved the
- * per-dataset registry onto `ctx.state.sliceAtlases`; this module now
- * mutates that Map through the passed ctx instead of holding its own
- * module-local copy.
- *
- * Composed cleanups (`removeSliceResources`, `destroyAllSliceResources`)
- * live in `slice/index.ts` so this module stays free of dependencies on
+ * Mutates the per-dataset registry on `ctx.state.sliceAtlases`. Composed
+ * cleanups (`removeSliceResources`, `destroyAllSliceResources`) live in
+ * `slice/index.ts` so this module stays free of dependencies on
  * `slice/eviction.ts` (which owns per-entity camera-UV state).
  */
 
@@ -52,7 +48,7 @@ export interface SliceAtlasState {
 
 // Shared dummy 2D indirection buffer for well-as-proxy slice layers.
 // Stays at module scope: it's a per-device singleton, not per-session
-// state. Slice 9 lifts it into `worker/resources.ts`.
+// state.
 let dummySliceIndirectionBuf: GPUBuffer | null = null;
 export function getDummySliceIndirection(device: GPUDevice): GPUBuffer {
   if (!dummySliceIndirectionBuf) {

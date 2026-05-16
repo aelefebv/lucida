@@ -3,10 +3,8 @@
  *
  * Both `volume/atlas.ts` and `slice/atlas.ts` need to decide how many
  * fixed-size slots fit in their texture given a byte budget and the
- * device's max texture dimension. The math was duplicated with subtly
- * different hardcoded device-limit assumptions (volume: 2048, slice:
- * 8192). Slice 10 centralizes both the limits (`getDeviceLimits` in
- * `gpuContext.ts`) and the slot-grid math (here).
+ * device's max texture dimension. Device limits live in `getDeviceLimits`
+ * (`gpuContext.ts`); slot-grid math lives here.
  *
  * Dimension-order convention
  * --------------------------

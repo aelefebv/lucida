@@ -3,9 +3,6 @@
  * the worker has accumulated, then calls `self.close()` so the worker
  * thread exits cleanly.
  *
- * Extracted from `gpu.worker.ts` (Slice 9) so the entry point doesn't
- * have to know which subsystems own which Maps / GPU resources.
- *
  * Teardown order matters: clear cold-state pointers first (so any
  * in-flight async handlers can't reschedule work), then drop proxy
  * pools + descriptor buffers (they hold GPU resources), then per-mode

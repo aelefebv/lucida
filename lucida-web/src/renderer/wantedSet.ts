@@ -108,8 +108,8 @@ export function computeWantedSet(
 
   for (const entry of coldState.activeSet) {
     // ---- proxy wanted-set ----
-    // Discriminate via `entry.kind` (Slice 11): narrows the well-as-proxy
-    // variant so subsequent branches see the field variant typed-out.
+    // Discriminate via `entry.kind` so subsequent branches see the
+    // field variant typed-out.
     if (entry.kind === "well-as-proxy") {
       // Single proxy per visible channel; no chunks.
       for (const c of coldState.visibleChannels) {
@@ -187,11 +187,11 @@ export function computeWantedSet(
       }
     }
 
-    // ---- existing chunk wanted-set (unchanged) ----
+    // ---- chunk wanted-set ----
     // Build the list of (workerMemberId, channel) pairs for this entry.
     // Use the canonical memberIdForColdEntry helper so well-as-proxy
-    // entries resolve to entityId rather than ":chN". (Slice 11
-    // narrows them out earlier via `entry.kind === "well-as-proxy"`,
+    // entries resolve to entityId rather than ":chN". (Well-as-proxy
+    // entries are narrowed out earlier via `entry.kind === "well-as-proxy"`,
     // but the helper still routes through the union so the convention
     // stays in one place.)
     const members: Array<{ memberId: string; channel: number }> = [];

@@ -5,9 +5,6 @@
  * `self.__lucidaProxyDescriptors` so a DevTools breakpoint inside the
  * worker thread can inspect current proxy counts + pool + descriptor
  * state without threading through the dispatcher.
- *
- * Extracted from `gpu.worker.ts` in Slice 9 so the entry point doesn't
- * have to know about the debug-surface contract.
  */
 
 import type { RendererState } from "./state.ts";

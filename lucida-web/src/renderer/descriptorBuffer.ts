@@ -108,9 +108,9 @@ export interface EntityDescriptorIndex {
  *   - Single-channel well-as-proxy:   `entry.entityId`
  *   - Multi-channel well-as-proxy:    `${entry.entityId}:ch${channel}`
  *
- * Slice 11 (PRD #622): `ColdStateActiveEntry` is now a discriminated
- * union on `kind`; narrowing through `entry.kind` makes the
- * well-as-proxy variant TS-visible (it has no `imageId`).
+ * `ColdStateActiveEntry` is a discriminated union on `kind`; narrowing
+ * through `entry.kind` makes the well-as-proxy variant TS-visible (it
+ * has no `imageId`).
  */
 export function memberIdForColdEntry(
   entry: ColdStateActiveEntry,
