@@ -71,7 +71,7 @@ function makeActiveEntry(
         levelDims: [64, 128, 128],
       },
     ],
-    // S7 defaults — `fields-with-detail` with no proxy advertised, so
+    // Defaults — `fields-with-detail` with no proxy advertised, so
     // existing tests keep their chunk-only expectations.
     mode: "fields-with-detail",
     proxyAvailable: false,
@@ -425,10 +425,10 @@ describe("computeWantedSet", () => {
   });
 
   // -------------------------------------------------------------------------
-  // S7: proxy wanted-set
+  // proxy wanted-set
   // -------------------------------------------------------------------------
 
-  describe("S7 — proxy wanted-set", () => {
+  describe("proxy wanted-set", () => {
     /** Helper: pool snapshot with the given resident slot keys. */
     function makeProxyPool(
       kind: "WellProxy3D" | "FieldProxy3D",

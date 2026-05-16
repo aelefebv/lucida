@@ -27,7 +27,7 @@ import "./DebugPanel.css";
 
 const POLL_INTERVAL_MS = 200;
 
-/** Short label for a S6 EntityMode in the active-set rendering. */
+/** Short label for an EntityMode in the active-set rendering. */
 function modeLabel(mode: string): string {
   switch (mode) {
     case "well-as-proxy":
@@ -41,7 +41,7 @@ function modeLabel(mode: string): string {
   }
 }
 
-/** Color for a S6 EntityMode in the active-set rendering. */
+/** Color for an EntityMode in the active-set rendering. */
 function modeColor(mode: string): string {
   switch (mode) {
     case "well-as-proxy":

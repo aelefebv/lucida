@@ -22,7 +22,7 @@ import type { LodIndirectionMeta } from "./volumeHandlers.ts";
 //   offset 224: lodParams       vec4u     (16B) — x=targetLodIdx
 const UNIFORM_SIZE = 240;
 
-/** M1: 16-byte uniform with the entity index for the current draw. */
+/** 16-byte uniform with the entity index for the current draw. */
 const ENTITY_REF_SIZE = 16;
 
 export class VolumeRenderer {
@@ -35,8 +35,8 @@ export class VolumeRenderer {
   private bindGroup: GPUBindGroup | null = null;
   private descriptorBindGroup: GPUBindGroup | null = null;
   private currentDescriptorBuffer: GPUBuffer | null = null;
-  /** M1: single-entity descriptor used by minimap + other call sites
-   *  that aren't backed by cold-state. Lazily allocated. */
+  /** Single-entity descriptor used by minimap + other call sites that
+   *  aren't backed by cold-state. Lazily allocated. */
   private transientDescriptorBuffer: GPUBuffer | null = null;
   private volumeDims = [1, 1, 1];
   private renderMode = 0;
@@ -50,10 +50,10 @@ export class VolumeRenderer {
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
-  // S8: proxy textures for binding. The descriptor carries pool/slot
+  // Proxy textures for binding. The descriptor carries pool/slot
   // indices + dims; the texture handle stays CPU-side because WebGPU
-  // bind groups can't index into a texture array without a texture-array
-  // binding (future optimization).
+  // bind groups can't index into a texture array without a texture-
+  // array binding (future optimization).
   private fieldProxyTexture: GPUTexture | null = null;
   private wellProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
@@ -90,7 +90,7 @@ export class VolumeRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" },
         },
-        // S8: proxy textures (fieldProxy + wellProxy)
+        // Proxy textures (fieldProxy + wellProxy)
         {
           binding: 5,
           visibility: GPUShaderStage.FRAGMENT,
@@ -104,7 +104,7 @@ export class VolumeRenderer {
       ],
     });
 
-    // M1: per-dataset descriptor table + per-draw entity index.
+    // Per-dataset descriptor table + per-draw entity index.
     this.descriptorBindGroupLayout = device.createBindGroupLayout({
       entries: [
         {
@@ -173,9 +173,9 @@ export class VolumeRenderer {
     // Bind group will be rebuilt on the next setAtlas call
   }
 
-  /** S8: lazily allocate the 1×1×1 dummy proxy texture used when no real
-   *  proxy is bound. Same r16uint format as the real proxy atlases so the
-   *  bind-group layout is satisfied. */
+  /** Lazily allocate the 1×1×1 dummy proxy texture used when no real
+   *  proxy is bound. Same r16uint format as the real proxy atlases so
+   *  the bind-group layout is satisfied. */
   private getDummyProxyTexture(): GPUTexture {
     if (!this.dummyProxyTexture) {
       this.dummyProxyTexture = this.device.createTexture({
@@ -228,9 +228,9 @@ export class VolumeRenderer {
   }
 
   /**
-   * M1: bind the per-dataset entity descriptor buffer and write the
-   * entity index for the next draw. Rebuilds the descriptor bind group
-   * if the buffer pointer changed (cold-state churn → buffer recreated).
+   * Bind the per-dataset entity descriptor buffer and write the entity
+   * index for the next draw. Rebuilds the descriptor bind group if the
+   * buffer pointer changed (cold-state churn → buffer recreated).
    */
   setDescriptorBinding(descriptorBuffer: GPUBuffer, entityIndex: number) {
     if (this.currentDescriptorBuffer !== descriptorBuffer || !this.descriptorBindGroup) {
@@ -248,13 +248,13 @@ export class VolumeRenderer {
   }
 
   /**
-   * M1: bind a single-entity transient descriptor for callers that
-   * don't have a cold-state-backed descriptor buffer (minimap path).
-   * Writes `modelMatrix` + `invModelMatrix` and one LOD slot covering
-   * the full volume.
+   * Bind a single-entity transient descriptor for callers that don't
+   * have a cold-state-backed descriptor buffer (minimap path). Writes
+   * `modelMatrix` + `invModelMatrix` and one LOD slot covering the
+   * full volume.
    *
-   * M2: callers also pass display state (contrast/gamma/opacity) since
-   * the shader reads it from the descriptor. Minimap supplies its own
+   * Callers also pass display state (contrast/gamma/opacity) since the
+   * shader reads it from the descriptor. Minimap supplies its own
    * values so the contrast slider still affects the minimap.
    */
   setTransientDescriptor(
@@ -327,7 +327,7 @@ export class VolumeRenderer {
   }
 
   /**
-   * M1: per-frame matrices. Model + invModel moved into the descriptor
+   * Per-frame matrices. Model + invModel moved into the descriptor
    * buffer; this only carries view-projection / eye / clip params.
    */
   setMatrices(
@@ -379,7 +379,7 @@ export class VolumeRenderer {
     uniformData.set(this.invViewProj, 0);                       // mat4 at offset 0
     uniformData.set([this.eyePos[0], this.eyePos[1], this.eyePos[2], 0], 16); // cameraPos at 64B = 16 floats
     uniformData.set([this.volumeDims[0], this.volumeDims[1], this.volumeDims[2], 0], 20); // volumeDims at 80B = 20 floats
-    // M2: stepInfo = (opacityScale, stepSize, renderMode, _). Per-entity
+    // stepInfo = (opacityScale, stepSize, renderMode, _). Per-entity
     // contrast/gamma/opacity moved into the descriptor buffer.
     uniformData.set([0.08, stepSize, this.renderMode, 0], 24); // stepInfo at 96B = 24 floats
 
@@ -396,7 +396,7 @@ export class VolumeRenderer {
     // clipParams at 208B = 52 floats
     uniformData.set([this.clipDistance, this.clipMode, 0, 0], 52);
 
-    // M1: lodParams.x = targetLodIdx (always 0 — descriptor lods are
+    // lodParams.x = targetLodIdx (always 0 — descriptor lods are
     // already trimmed to start at finest LOD). lodCount comes from
     // descriptor.
     u32View.set([0, 0, 0, 0], 56); // lodParams at 224B = 56 u32s

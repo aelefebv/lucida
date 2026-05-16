@@ -1,7 +1,7 @@
 /**
  * Planning domain — promotion-mode decision logic.
  *
- * Three-tier per-well decision (S6):
+ * Three-tier per-well decision:
  *   - Group fields by parent well (or treat plain Images as singletons).
  *   - For each group, pick a {@link ResolvedMode} from the group's
  *     projected diagonal with hysteresis against the previous active set.
@@ -256,7 +256,7 @@ export function degradeForCatalog(
 /**
  * Decide each entity's promotion mode and compute its LOD range.
  *
- * Three-tier per-well decision (S6):
+ * Three-tier per-well decision:
  *   - Group fields by parent well (or treat plain Images as singletons).
  *   - For each group, pick a {@link EntityMode} from the group's projected
  *     diagonal with hysteresis against the previous active set.

@@ -1,10 +1,10 @@
 /**
- * M1+M2 (DOMAINS step 8a): per-dataset entity descriptor buffer.
+ * Per-dataset entity descriptor buffer.
  *
  * Holds the geometric/LOD/proxy fields the shader used to read out of
  * per-frame uniforms: model matrix + inverse, per-LOD chunk/grid/level
  * dims with indirection offsets, proxy handles (pool index + slot
- * index), proxy slot dims, and (M2) per-channel display state
+ * index), proxy slot dims, and per-channel display state
  * (contrast/gamma/opacity/colormapLutIndex/channelMask).
  *
  * The descriptor lives entirely in worker-side state. Orchestrator and
@@ -40,7 +40,7 @@ export const DESCRIPTOR_MAX_LODS = 8;
  *
  *   0:   modelMatrix         mat4x4<f32>     (64)
  *   64:  invModelMatrix      mat4x4<f32>     (64)
- *   128: channelMask         u32             (4)  — placeholder M1
+ *   128: channelMask         u32             (4)
  *   132: fieldProxyPoolIndex u32             (4)
  *   136: fieldProxySlotIndex u32             (4)
  *   140: wellProxyPoolIndex  u32             (4)
@@ -50,11 +50,11 @@ export const DESCRIPTOR_MAX_LODS = 8;
  *   156: _pad_proxy2         u32             (4)
  *   160: fieldProxyDims      vec3<u32>+pad   (16) — xyz=(Z,Y,X)
  *   176: wellProxyDims       vec3<u32>+pad   (16) — xyz=(Z,Y,X)
- *   192: contrastMin         f32             (4)  — placeholder M1
- *   196: contrastMax         f32             (4)  — placeholder M1
- *   200: gamma               f32             (4)  — placeholder M1
- *   204: opacity             f32             (4)  — placeholder M1
- *   208: colormapLutIndex    u32             (4)  — placeholder M1
+ *   192: contrastMin         f32             (4)
+ *   196: contrastMax         f32             (4)
+ *   200: gamma               f32             (4)
+ *   204: opacity             f32             (4)
+ *   208: colormapLutIndex    u32             (4)
  *   212: lodCount            u32             (4)
  *   216: _pad_tail0          u32             (4)
  *   220: _pad_tail1          u32             (4)
@@ -92,14 +92,14 @@ export interface EntityDescriptorIndex {
   /** Number of populated descriptor entries (== `indexByMember.size`). */
   entityCount: number;
   /**
-   * M2: colormap name → dense LUT index (matches GPU descriptor's
+   * Colormap name → dense LUT index (matches GPU descriptor's
    * `colormapLutIndex` field). Stable across rebuilds in the
    * insertion-order they were first seen for this dataset; the GPU
    * descriptor's index is informational, with the CPU resolving
    * `colormapNameByMember` per draw to bind the right LUT texture.
    */
   colormapLutIndices: Map<string, number>;
-  /** M2: memberId → colormap name. Drives per-draw LUT texture binding. */
+  /** memberId → colormap name. Drives per-draw LUT texture binding. */
   colormapNameByMember: Map<string, string>;
 }
 
@@ -269,9 +269,9 @@ export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
 }
 
 /**
- * M2: per-channel display state lookup helper. Falls back to a
- * "no-op display" default if the channel slot is missing — this should
- * not happen in normal operation (the orchestrator populates every
+ * Per-channel display state lookup helper. Falls back to a "no-op
+ * display" default if the channel slot is missing — this should not
+ * happen in normal operation (the orchestrator populates every
  * `cold.visibleChannels` entry) but defensive defaults keep the
  * descriptor well-formed if a channel index drifts during transition.
  */
@@ -302,11 +302,10 @@ export function displayStateForChannel(
  * Serialize one EntityDescriptor into `target` at byte offset `offset`.
  * Exposed for tests so they can verify the byte layout without a GPU.
  *
- * M2: display state (`channelMask`, `contrastMin/Max`, `gamma`,
- * `opacity`, `colormapLutIndex`) is sourced from a per-channel
- * `displayState` lookup against `entry.displayStateByChannel`. The
- * orchestrator populates this from `selection.channelSettings` (the
- * same source the old per-frame layer params used).
+ * Display state (`channelMask`, `contrastMin/Max`, `gamma`, `opacity`,
+ * `colormapLutIndex`) is sourced from a per-channel `displayState`
+ * lookup against `entry.displayStateByChannel`. The orchestrator
+ * populates this from `selection.channelSettings`.
  */
 export function serializeEntityDescriptor(
   target: ArrayBuffer,

@@ -2,8 +2,8 @@
  * Wanted-set computation — pure function that diffs expected chunks against
  * actual atlas contents to determine what the GPU worker is missing.
  *
- * S7: extended to also report missing proxy assets, alongside missing
- * chunks. Output is a discriminated union (`MissingChunk | MissingProxy`).
+ * Reports missing chunks and missing proxy assets via a discriminated
+ * union (`MissingChunk | MissingProxy`).
  */
 
 import type {
@@ -68,8 +68,8 @@ export interface WantedSetResult {
  * each visible channel, enumerate the visible-region grid cells and
  * report any whose composite slot key is missing.
  *
- * Proxy wanted-set rules (S7): for each cold-state active entry, walk
- * its `mode`:
+ * Proxy wanted-set rules: for each cold-state active entry, walk its
+ * `mode`:
  *
  *   - `well-as-proxy` (entry.entityId IS the wellId)
  *       → emit a `MissingProxy { kind: WellProxy3D }` per visible
@@ -105,7 +105,7 @@ export function computeWantedSet(
   const wellProxyEmitted = new Set<string>();
 
   for (const entry of coldState.activeSet) {
-    // ---- S7: proxy wanted-set ----
+    // ---- proxy wanted-set ----
     if (entry.mode === "well-as-proxy") {
       // Single proxy per visible channel; no chunks.
       for (const c of coldState.visibleChannels) {

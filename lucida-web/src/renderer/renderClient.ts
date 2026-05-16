@@ -20,8 +20,8 @@ export class RenderClient {
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ((datasetId: string, evicted: string[], skipped: string[]) => void) | null = null;
   /**
-   * S7: missing entries are now a discriminated union over chunks and
-   * proxies. Existing consumers should match on `kind === "chunk"`.
+   * Missing entries are a discriminated union over chunks and proxies.
+   * Consumers should match on `kind === "chunk"` to handle chunk gaps.
    */
   onWantedSetDelta: ((epochs: SceneEpochs, missing: Array<MissingChunk | MissingProxy>) => void) | null = null;
 
@@ -147,18 +147,16 @@ export class RenderClient {
   }
 
   /**
-   * M3 (DOMAINS step 8a): post a viewEpoch hot-state message. Sent
-   * before the corresponding render message so chunk eviction has the
-   * latest ray-pick coords.
+   * Post a viewEpoch hot-state message. Sent before the corresponding
+   * render message so chunk eviction has the latest ray-pick coords.
    */
   viewHotState(msg: ViewHotStateMessage) {
     this.worker.postMessage(msg);
   }
 
   /**
-   * S5: forward a proxy asset to the worker. Transfers the underlying
-   * ArrayBuffer for zero-copy. The worker logs receipt for now; S7 will
-   * upload the proxy as a 3D texture.
+   * Forward a proxy asset to the worker. Transfers the underlying
+   * ArrayBuffer for zero-copy.
    */
   proxyAssetData(
     datasetId: string,

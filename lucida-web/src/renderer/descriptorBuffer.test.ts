@@ -1,5 +1,5 @@
 /**
- * M1 (DOMAINS step 8a) tests: per-dataset entity descriptor buffer.
+ * Per-dataset entity descriptor buffer tests.
  *
  * Locks down:
  *   1. Entity-index assignment is deterministic across cold-state churn
@@ -455,10 +455,10 @@ describe("EntityDescriptor byte layout", () => {
 });
 
 // ---------------------------------------------------------------------------
-// M2: Display state (contrast/gamma/opacity/colormap/channelMask)
+// Display state (contrast/gamma/opacity/colormap/channelMask)
 // ---------------------------------------------------------------------------
 
-describe("EntityDescriptor display state (M2)", () => {
+describe("EntityDescriptor display state", () => {
   it("writes contrastMin/contrastMax/gamma/opacity at offsets 192..208", () => {
     const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
     const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "fields-with-detail" });

@@ -1,5 +1,5 @@
 /**
- * S7: GPU residency for proxy assets.
+ * GPU residency for proxy assets.
  *
  * Proxies are small, generated 3-D textures (`r16uint`, single channel)
  * representing either a whole well (`WellProxy3D`) or a single field

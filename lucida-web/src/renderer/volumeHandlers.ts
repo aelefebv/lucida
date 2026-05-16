@@ -131,9 +131,9 @@ let depthTexture: GPUTexture | null = null;
 let depthW = 0;
 let depthH = 0;
 
-// S8: shared dummy indirection buffer, used when binding the chunk atlas
-// for `well-as-proxy` layers (which sample only the proxy texture; chunk
-// bindings still need valid GPU resources).
+// Shared dummy indirection buffer, used when binding the chunk atlas
+// for `well-as-proxy` layers (which sample only the proxy texture;
+// chunk bindings still need valid GPU resources).
 let dummyIndirectionBuf: GPUBuffer | null = null;
 function getDummyIndirection(device: GPUDevice): GPUBuffer {
   if (!dummyIndirectionBuf) {
@@ -160,14 +160,14 @@ function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPUTexture
 }
 // Last known ray-volume hit point in local [0,1]³ space per ENTITY (memberId).
 // Chunks closest to this point are kept; farthest are evicted first.
-// Populated by `applyViewHotState` on viewEpoch advance (M3); chunk-data
-// and render handlers read it for `findFarthestSlot` distance metrics.
+// Populated by `applyViewHotState` on viewEpoch advance; chunk-data and
+// render handlers read it for `findFarthestSlot` distance metrics.
 const rayHitPerEntity = new Map<string, [number, number, number]>();
 
 /**
- * M3 (DOMAINS step 8a): apply a viewEpoch hot-state message. Updates the
- * `rayHitPerEntity` map so chunk eviction prioritization stays in sync
- * with the camera ray-pick. Latest message wins per entity.
+ * Apply a viewEpoch hot-state message. Updates the `rayHitPerEntity`
+ * map so chunk eviction prioritization stays in sync with the camera
+ * ray-pick. Latest message wins per entity.
  */
 export function applyViewHotState(msg: ViewHotStateMessage): void {
   for (const [entityId, hit] of msg.rayHitsByEntity) {
@@ -490,9 +490,9 @@ export function handleVolumeRenderMultiPass(
     const resolved = layerToPool(memberId);
     if (!resolved) continue;
 
-    // M1+M2: descriptor buffer covers all members for this dataset;
-    // entity index is computed by the orchestrator (and threaded into
-    // the layer params) — both sides converge by construction.
+    // Descriptor buffer covers all members for this dataset; entity
+    // index is computed by the orchestrator (and threaded into the
+    // layer params) — both sides converge by construction.
     const descIndex = resolved.datasetId
       ? ctx.lookupEntityDescriptor(resolved.datasetId)
       : null;
@@ -509,8 +509,8 @@ export function handleVolumeRenderMultiPass(
     }
     const hasDetail = entityLodMetas != null && entityLodMetas.length > 0;
 
-    // M2: colormap name lives in the descriptor's CPU mirror (set by
-    // cold state). Resolve it per draw to bind the right LUT texture.
+    // Colormap name lives in the descriptor's CPU mirror (set by cold
+    // state). Resolve it per draw to bind the right LUT texture.
     const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
     const lutTex = ctx.getOrCreateLUT(colormapName);
     renderer.setColormapTexture(lutTex);
@@ -520,10 +520,10 @@ export function handleVolumeRenderMultiPass(
       atlas.indirectionDirty = false;
     }
 
-    // M1: pool index + slot index live in the descriptor; CPU side only
-    // needs the texture handle for binding. Read the pool by walking the
-    // dense `proxyPoolsByIndex` array (resolved via the entity's CPU-side
-    // proxy descriptor mirror).
+    // Pool index + slot index live in the descriptor; CPU side only
+    // needs the texture handle for binding. Read the pool by walking
+    // the dense `proxyPoolsByIndex` array (resolved via the entity's
+    // CPU-side proxy descriptor mirror).
     const desc = layer.entityId
       ? ctx.lookupProxyDescriptor(layer.entityId)
       : null;

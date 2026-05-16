@@ -213,8 +213,7 @@ export function useBridge({
               bridgeLog("setup_fetch_pipeline.skipped_existing", { datasetId });
             }
             // Mirror the initial catalog into the JS-side AssetCatalog so
-            // Planning's snapshot view stays consistent with WASM. Empty
-            // in S3; populated by S5 once the server actually sends data.
+            // Planning's snapshot view stays consistent with WASM.
             const catalog = cmd.catalog ?? { entries: [] };
             sessionRef.current?.ensureAssetCatalog()?.applyInitial(cmd.manifest.dataset_id, catalog);
 

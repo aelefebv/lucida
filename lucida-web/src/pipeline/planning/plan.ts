@@ -65,7 +65,7 @@ export function plan(
 
   const stats = emptyPlanStats();
 
-  // Step 1: Promote (three-tier, S6).
+  // Step 1: Promote (three-tier).
   const activeSet = assignModes(
     snapshot.entities,
     state.previousActiveSet,

@@ -269,10 +269,10 @@ describe("remapIndirection (shared volume pool)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// M3: applyViewHotState (rayHitPerEntity population)
+// applyViewHotState (rayHitPerEntity population)
 // ---------------------------------------------------------------------------
 
-describe("applyViewHotState (M3)", () => {
+describe("applyViewHotState", () => {
   function makeMsg(
     rayHitsByEntity: Array<[string, [number, number, number]]>,
   ): ViewHotStateMessage {

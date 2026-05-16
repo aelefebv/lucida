@@ -46,7 +46,7 @@ export interface SliceAtlasState {
 
 const atlasPerDataset = new Map<string, SliceAtlasState>();
 
-// S8: shared dummy 2D indirection buffer for well-as-proxy slice layers
+// Shared dummy 2D indirection buffer for well-as-proxy slice layers
 // (chunk bindings still need valid GPU resources even though the shader
 // short-circuits to the proxy texture).
 let dummySliceIndirectionBuf: GPUBuffer | null = null;
@@ -428,9 +428,9 @@ export function handleSliceRenderMultiPass(
     const resolved = layerToPool(memberId);
     if (!resolved) continue;
 
-    // M1+M2: per-dataset descriptor + entity index (orchestrator-
-    // computed; converges with the worker's descriptor build by
-    // canonical iteration order).
+    // Per-dataset descriptor + entity index (orchestrator-computed;
+    // converges with the worker's descriptor build by canonical
+    // iteration order).
     const descIndex = resolved.datasetId
       ? ctx.lookupEntityDescriptor(resolved.datasetId)
       : null;
@@ -463,7 +463,7 @@ export function handleSliceRenderMultiPass(
       atlas.indirectionDirty = false;
     }
 
-    // M1: resolve proxy texture handles via the descriptor's dense pool
+    // Resolve proxy texture handles via the descriptor's dense pool
     // array. Slot indices + dims come from the GPU descriptor.
     const desc = layer.entityId
       ? ctx.lookupProxyDescriptor(layer.entityId)
@@ -510,8 +510,8 @@ export function handleSliceRenderMultiPass(
       );
     }
 
-    // M2: colormap from descriptor's CPU mirror; contrast/gamma/opacity
-    // are read by the shader straight from the descriptor.
+    // Colormap from descriptor's CPU mirror; contrast/gamma/opacity are
+    // read by the shader straight from the descriptor.
     const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
     const lutTex = ctx.getOrCreateLUT(colormapName);
     renderer.setColormapTexture(lutTex);

@@ -751,10 +751,10 @@ describe("proxy delivery tracking", () => {
 });
 
 // ===========================================================================
-// 4. M2: cold-state display state propagation
+// 4. cold-state display state propagation
 // ===========================================================================
 
-describe("cold-state display state (M2)", () => {
+describe("cold-state display state", () => {
   let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
 
   beforeEach(async () => {
@@ -904,10 +904,10 @@ describe("cold-state display state (M2)", () => {
 });
 
 // ===========================================================================
-// 5. M3: viewHotState emission (per-viewEpoch ray-pick coords)
+// 5. viewHotState emission (per-viewEpoch ray-pick coords)
 // ===========================================================================
 
-describe("viewHotState emission (M3)", () => {
+describe("viewHotState emission", () => {
   let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
 
   beforeEach(async () => {

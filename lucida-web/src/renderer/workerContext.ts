@@ -7,7 +7,7 @@ import type { ProxyAtlasState, ProxyHandle } from "./proxyAtlas.ts";
 import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
 
 /**
- * S8: per-entity proxy descriptor — handles into the GPU proxy atlases.
+ * Per-entity proxy descriptor — handles into the GPU proxy atlases.
  * Owned by gpu.worker.ts and exposed to render handlers through
  * `WorkerCtx.lookupProxyDescriptor` so they can bind the right proxy
  * textures + pass slot info to the shader.
@@ -33,22 +33,22 @@ export interface WorkerCtx {
   /** Recompute and post wanted-set delta after eviction. */
   postWantedSet(): void;
   /**
-   * S8: look up the proxy descriptor for an entity. Returns null if no
+   * Look up the proxy descriptor for an entity. Returns null if no
    * proxy has been uploaded yet for the entity (handlers should fall
    * back to the chunk-only render path).
    */
   lookupProxyDescriptor(entityId: string): EntityProxyDescriptor | null;
   /**
-   * S8: resolve a proxy pool for the given dataset by its pool key
+   * Resolve a proxy pool for the given dataset by its pool key
    * (`proxyPoolKey()`). Returns null if no such pool. Handlers use this
    * to fetch the GPU texture + slot dims for binding.
    */
   lookupProxyPool(datasetId: string, poolKey: string): ProxyAtlasState | null;
   /**
-   * M1 (DOMAINS step 8a): look up the per-dataset entity descriptor
-   * buffer + index maps. Returns null until the first cold state for
-   * this dataset arrives. Render handlers bind `idx.buffer` plus a small
-   * uniform with the layer's `entityIndex`; the shader reads
+   * Look up the per-dataset entity descriptor buffer + index maps.
+   * Returns null until the first cold state for this dataset arrives.
+   * Render handlers bind `idx.buffer` plus a small uniform with the
+   * layer's `entityIndex`; the shader reads
    * `entityDescriptors[currentEntity.x]` for matrix and per-LOD geometry.
    */
   lookupEntityDescriptor(datasetId: string): EntityDescriptorIndex | null;

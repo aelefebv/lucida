@@ -1,5 +1,5 @@
 /**
- * S8: pure-TS tests covering the bridge between `proxyAtlas.ts` and the
+ * Pure-TS tests covering the bridge between `proxyAtlas.ts` and the
  * shaders' proxy sampling math. We can't run WGSL in vitest, but the
  * critical invariants we DO want to lock down are:
  *

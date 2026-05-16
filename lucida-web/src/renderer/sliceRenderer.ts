@@ -29,8 +29,8 @@ export class SliceRenderer {
   private lutSampler: GPUSampler;
 
   private atlasSlotDims = [1, 1];
-  // S8 / M1: proxy textures still bound CPU-side (slot indices and dims
-  // come from the descriptor).
+  // Proxy textures still bound CPU-side (slot indices and dims come
+  // from the descriptor).
   private fieldProxyTexture: GPUTexture | null = null;
   private wellProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
@@ -67,7 +67,7 @@ export class SliceRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           sampler: { type: "filtering" },
         },
-        // S8: proxy textures (fieldProxy + wellProxy). 3D r16uint, same as
+        // Proxy textures (fieldProxy + wellProxy). 3D r16uint, same as
         // volume.wgsl — slice mode reads at the slot's Z midpoint.
         {
           binding: 5,
@@ -162,9 +162,9 @@ export class SliceRenderer {
   }
 
   /**
-   * M1: setAtlas no longer takes per-entity chunkDims/gridDims/levelDims
-   * — those live in the descriptor. atlasSlotDims still per-frame for
-   * the shader's slot-coord computation in the chunk path.
+   * Per-entity chunkDims/gridDims/levelDims live in the descriptor.
+   * atlasSlotDims still per-frame for the shader's slot-coord
+   * computation in the chunk path.
    */
   setAtlas(
     texture: GPUTexture,
@@ -177,7 +177,7 @@ export class SliceRenderer {
     this.rebuildBindGroup();
   }
 
-  /** S8: lazily allocate the 1×1×1 dummy proxy texture. */
+  /** Lazily allocate the 1×1×1 dummy proxy texture. */
   private getDummyProxyTexture(): GPUTexture {
     if (!this.dummyProxyTexture) {
       this.dummyProxyTexture = this.device.createTexture({
@@ -205,8 +205,8 @@ export class SliceRenderer {
   }
 
   /**
-   * M1: bind the per-dataset entity descriptor buffer + write the
-   * entity index for the next draw.
+   * Bind the per-dataset entity descriptor buffer + write the entity
+   * index for the next draw.
    */
   setDescriptorBinding(descriptorBuffer: GPUBuffer, entityIndex: number) {
     if (this.currentDescriptorBuffer !== descriptorBuffer || !this.descriptorBindGroup) {
@@ -270,8 +270,8 @@ export class SliceRenderer {
     const memberScreenH = dataH * zoom;
     uniformData.set([memberScreenW, memberScreenH, 0, 0], 20); // memberScreenSize at 80B = 20 f32s
 
-    // M1: lodParams.x = targetLodIdx (always 0 — descriptor lods start
-    // at finest LOD).
+    // lodParams.x = targetLodIdx (always 0 — descriptor lods start at
+    // finest LOD).
     u32View.set([0, 0, 0, 0], 24); // lodParams at 96B = 24 u32s
 
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);

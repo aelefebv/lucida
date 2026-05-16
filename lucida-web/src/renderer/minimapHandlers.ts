@@ -72,7 +72,7 @@ export function handleMinimapRender(ctx: WorkerCtx, msg: MinimapRenderMessage): 
     renderer.setProxyTextures(null, null);
     renderer.setVolume(overview.texture, overview.width, overview.height, overview.depth);
     renderer.setMatrices(msg.invViewProj, msg.eye);
-    // M1+M2: bind a transient single-entity descriptor so the shader's
+    // Bind a transient single-entity descriptor so the shader's
     // descriptor reads return the minimap layer's model matrix, single
     // LOD over the full overview volume, plus the minimap layer's
     // contrast/gamma (opacity hard-wired to 1.0 for minimap).

@@ -18,7 +18,6 @@ export interface SceneEpochs {
   /**
    * Bumped by `apply_asset_catalog_delta` (catalog membership change).
    * The orchestrator reads it from `wasmScene.asset_epoch()` each tick.
-   * Stays 0 until S5 starts publishing real proxy availability.
    */
   asset: number;
   /** Bumped when Planning produces a new request plan. */
