@@ -40,6 +40,7 @@
 // renderer modules can keep their imports local.
 export type { ProxyKind } from "../pipeline/assetCatalog.ts";
 import type { ProxyKind } from "../pipeline/assetCatalog.ts";
+import { getDeviceLimits } from "./gpuContext.ts";
 
 export interface ProxyAtlasState {
   /** 3-D `r16uint` texture; slots tiled along X. */
@@ -103,7 +104,7 @@ export function createProxyAtlas(
   const [slotZ, slotY, slotX] = slotDims;
 
   // Clamp capacity to fit under the device's 3-D texture limits.
-  const limit = device.limits.maxTextureDimension3D ?? 2048;
+  const limit = getDeviceLimits(device).maxTextureDimension3D;
   let cap = capacity;
   if (slotX > 0 && slotX * cap > limit) {
     const maxCap = Math.max(1, Math.floor(limit / slotX));

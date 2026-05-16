@@ -405,13 +405,13 @@ export class Uploader {
    * the full eviction-vs-skipped semantics.
    */
   handleChunksEvicted(
-    workerMemberId: string,
+    memberId: string,
     evicted: string[],
     skipped: string[],
     cpuCache: CpuCache,
   ): void {
     this.workerFeedback.handleChunksEvicted(
-      workerMemberId, evicted, skipped, cpuCache,
+      memberId, evicted, skipped, cpuCache,
     );
   }
 

@@ -42,7 +42,7 @@ export class WorkerFeedback {
    * - `skipped` chunks never made it into the atlas (full + incoming
    *   farther than the farthest existing slot). They're recorded as
    *   rejected on the tracker and — for skipped chunks whose
-   *   `workerMemberId` resolves to a known entityId — forwarded to
+   *   `memberId` resolves to a known entityId — forwarded to
    *   `cpuCache.markRejected` so the cache stops re-fetching them
    *   under eviction churn.
    *
@@ -52,13 +52,13 @@ export class WorkerFeedback {
    * Uploader could hold its own and the parameter can drop.
    */
   handleChunksEvicted(
-    workerMemberId: string,
+    memberId: string,
     evicted: string[],
     skipped: string[],
     cpuCache: CpuCache,
   ): void {
     const { rejectedNew } = this.tracker.markChunkEvicted(
-      workerMemberId, evicted, skipped,
+      memberId, evicted, skipped,
     );
     for (const { entityId, chunkKey } of rejectedNew) {
       cpuCache.markRejected(entityId, chunkKey);

@@ -60,7 +60,7 @@ export class RenderClient implements UploadClient {
     if (msg.type === "intensityRange" && this.onIntensityRange) {
       this.onIntensityRange(msg.datasetId, msg.min, msg.max);
     } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
-      this.onChunksEvicted(msg.datasetId, msg.keys, msg.skipped ?? []);
+      this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? []);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.epochs, msg.missing);
     } else if (msg.type === "error") {
@@ -73,7 +73,7 @@ export class RenderClient implements UploadClient {
   }
 
   volumeChunkData(
-    datasetId: string,
+    memberId: string,
     chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
     level: number,
     t: number,
@@ -88,6 +88,12 @@ export class RenderClient implements UploadClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
+      // Copy: the upstream `chunk.data` is owned by the CpuCache (see
+      // `CacheEntry.data` in pipeline/fetch/types.ts). The cache holds
+      // the buffer indefinitely for re-delivery after worker-side
+      // eviction (`getCachedChunk`); transferring it directly would
+      // detach the cache's copy and break later resends. Copy + transfer
+      // keeps both sides alive.
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -96,7 +102,7 @@ export class RenderClient implements UploadClient {
       {
         type: "volumeChunkData",
         epochs,
-        datasetId,
+        memberId,
         chunks: workerChunks,
         level, t, c,
         levelWidth, levelHeight, levelDepth,
@@ -107,7 +113,7 @@ export class RenderClient implements UploadClient {
   }
 
   sliceChunkData(
-    datasetId: string,
+    memberId: string,
     chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
     level: number,
     z: number,
@@ -125,6 +131,8 @@ export class RenderClient implements UploadClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
+      // See note on `volumeChunkData` above — the cache reuses
+      // `chunk.data` across deliveries, so we copy before transfer.
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -133,7 +141,7 @@ export class RenderClient implements UploadClient {
       {
         type: "sliceChunkData",
         epochs,
-        datasetId,
+        memberId,
         chunks: workerChunks,
         level, z, t, c,
         levelWidth, levelHeight,
@@ -157,8 +165,12 @@ export class RenderClient implements UploadClient {
   }
 
   /**
-   * Forward a proxy asset to the worker. Transfers the underlying
-   * ArrayBuffer for zero-copy.
+   * Forward a proxy asset to the worker. Copies the buffer before
+   * transferring — the upstream `data` is owned by the CpuCache
+   * (`ProxyCacheEntry.data` in pipeline/fetch/cpuCache.ts), which
+   * retains it for re-delivery (`getCachedProxy`) after worker-side
+   * eviction. Transferring directly would detach the cache's copy and
+   * break later resends.
    */
   proxyAssetData(
     datasetId: string,
@@ -171,7 +183,7 @@ export class RenderClient implements UploadClient {
     data: ArrayBuffer,
     epochs: SceneEpochs,
   ) {
-    // Take ownership of the buffer for transfer.
+    // Copy before transfer — see method docstring above.
     const buf = data.slice(0);
     this.worker.postMessage(
       {

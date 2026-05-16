@@ -114,8 +114,10 @@ export function synthesizeWellRosterEntry(
     -minX / sx,     -minY / sy,     -minZ / sz,     1,
   ]);
   return {
-    // imageId stays empty per planning's `well-as-proxy` convention; the
-    // worker uses entityId for descriptor lookup, not imageId.
+    // For `MemberRosterEntry` (the render-side roster, separate from
+    // `ColdStateActiveEntry`) we set `imageId = wellEntityId` so the
+    // render path has a non-empty handle. The descriptor lookup uses
+    // `entityId` (via `memberIdForColdEntry`), not `imageId`.
     imageId: wellEntityId,
     // 2D voxel-space position + size for the slice path. Independent of
     // the 3D model matrix above (different coordinate frame).

@@ -1,0 +1,58 @@
+/**
+ * Pool-key helpers — canonical encoding for the chunk + proxy atlas
+ * pool keys.
+ *
+ * Lifted from `gpu.worker.ts` cold-state handler (dechaos render Pass 5
+ * Contract Issue 4: chunk-pool key built inline at multiple sites with
+ * subtly different separator conventions, and proxy-pool key declared
+ * in `proxyAtlas.ts`). This module is the single source of truth for
+ * pool-key formatting.
+ *
+ * Call-site migration is intentionally deferred to Slice 4 of the
+ * render refactor — for now this slice declares and tests the helper
+ * while the worker keeps its inline format strings (kept visually in
+ * sync; future drift is caught by `poolKeys.test.ts`).
+ */
+
+export { proxyPoolKey } from "./proxyAtlas.ts";
+
+/**
+ * Build the canonical chunk-pool key for the worker's shared volume +
+ * slice atlas pools.
+ *
+ * Encoding (must match the inline strings in `gpu.worker.ts` cold-state
+ * handler, ~lines 580-582 (volume) and ~665-667 (slice)):
+ *
+ * - Single-channel volume (`chunkDims.length === 3`):
+ *   `${datasetId}:${X}x${Y}x${Z}`
+ * - Multi-channel volume:
+ *   `${datasetId}:ch${channel}:${X}x${Y}x${Z}`
+ * - Single-channel slice (`chunkDims.length === 2`):
+ *   `${datasetId}:${X}x${Y}`
+ * - Multi-channel slice:
+ *   `${datasetId}:ch${channel}:${X}x${Y}`
+ *
+ * `chunkDims` is `[X, Y]` for slice (2D) or `[X, Y, Z]` for volume
+ * (3D). The helper picks the arity from `chunkDims.length` and
+ * throws on anything else — there's no use case for 1-D or 4-D pools.
+ */
+export function chunkPoolKey(
+  datasetId: string,
+  channel: number,
+  chunkDims: number[],
+  isMultiCh: boolean,
+): string {
+  let chunkDimsKey: string;
+  if (chunkDims.length === 3) {
+    chunkDimsKey = `${chunkDims[0]}x${chunkDims[1]}x${chunkDims[2]}`;
+  } else if (chunkDims.length === 2) {
+    chunkDimsKey = `${chunkDims[0]}x${chunkDims[1]}`;
+  } else {
+    throw new Error(
+      `chunkPoolKey: unsupported chunkDims arity ${chunkDims.length}; expected 2 (slice) or 3 (volume)`,
+    );
+  }
+  return isMultiCh
+    ? `${datasetId}:ch${channel}:${chunkDimsKey}`
+    : `${datasetId}:${chunkDimsKey}`;
+}

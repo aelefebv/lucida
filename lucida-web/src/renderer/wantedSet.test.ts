@@ -51,35 +51,39 @@ function makeVisibleRegion(
   };
 }
 
+/**
+ * Fixture builder for `ColdStateActiveEntry`. Slice 11 promoted the
+ * type to a discriminated union (`kind: "field" | "well-as-proxy"`);
+ * this helper inspects `overrides.mode` to pick the right variant so
+ * existing call sites keep working unchanged (`mode: "well-as-proxy"`
+ * with `imageId: ""` yields the well-as-proxy variant).
+ */
+type WantedSetEntryOverrides = Partial<Omit<ColdStateActiveEntry, "kind">>;
 function makeActiveEntry(
-  overrides?: Partial<ColdStateActiveEntry>,
+  overrides?: WantedSetEntryOverrides,
 ): ColdStateActiveEntry {
   // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
   // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
   const identity = new Float32Array(16) as Float32Array<ArrayBuffer>;
   identity[0] = identity[5] = identity[10] = identity[15] = 1;
-  return {
-    entityId: "entity-0",
-    imageId: "img",
-    targetLod: 0,
-    detailOwnedLodRange: [0, 0],
-    levels: [
+  const base = {
+    entityId: overrides?.entityId ?? "entity-0",
+    targetLod: overrides?.targetLod ?? 0,
+    detailOwnedLodRange: overrides?.detailOwnedLodRange ?? [0, 0] as [number, number],
+    levels: overrides?.levels ?? [
       {
         level: 0,
-        chunkShape: [32, 32, 32], // [Z, Y, X]
-        gridShape: [2, 4, 4], // 64 deep, 128 high, 128 wide
-        levelDims: [64, 128, 128],
+        chunkShape: [32, 32, 32] as [number, number, number], // [Z, Y, X]
+        gridShape: [2, 4, 4] as [number, number, number], // 64 deep, 128 high, 128 wide
+        levelDims: [64, 128, 128] as [number, number, number],
       },
     ],
-    // Defaults — `fields-with-detail` with no proxy advertised, so
-    // existing tests keep their chunk-only expectations.
-    mode: "fields-with-detail",
-    proxyAvailable: false,
-    wellProxyAvailable: false,
-    parentWellId: null,
-    modelMatrix: identity,
-    invModelMatrix: identity,
-    displayStateByChannel: {
+    proxyKind: overrides?.proxyKind,
+    proxyAvailable: overrides?.proxyAvailable ?? false,
+    wellProxyAvailable: overrides?.wellProxyAvailable ?? false,
+    modelMatrix: overrides?.modelMatrix ?? identity,
+    invModelMatrix: overrides?.invModelMatrix ?? identity,
+    displayStateByChannel: overrides?.displayStateByChannel ?? {
       0: {
         contrastMin: 0,
         contrastMax: 1,
@@ -89,7 +93,25 @@ function makeActiveEntry(
         channelMask: 1,
       },
     },
-    ...overrides,
+  };
+  // Default to `fields-with-detail` (matching the pre-Slice-11
+  // default) when no mode override is provided, so existing tests keep
+  // their chunk-only expectations.
+  const mode = overrides?.mode ?? "fields-with-detail";
+  if (mode === "well-as-proxy") {
+    return {
+      ...base,
+      kind: "well-as-proxy",
+      mode: "well-as-proxy",
+      parentWellId: null,
+    };
+  }
+  return {
+    ...base,
+    kind: "field",
+    imageId: overrides?.imageId ?? "img",
+    mode,
+    parentWellId: overrides?.parentWellId ?? null,
   };
 }
 

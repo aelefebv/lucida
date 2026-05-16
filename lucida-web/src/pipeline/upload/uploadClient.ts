@@ -30,14 +30,15 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 
 /**
- * Callback type for the worker's `chunksEvicted` report. The
- * `datasetId` argument is actually a `workerMemberId` (single-channel
- * imageId, multi-channel `imageId:chN`, or a bare datasetId), kept
- * named `datasetId` for backward compatibility with the existing
- * `RenderClient.onChunksEvicted` field shape.
+ * Callback type for the worker's `chunksEvicted` report. The first
+ * argument is the worker-side member id (single-channel `imageId` or
+ * multi-channel `imageId:chN`) — the same identifier the orchestrator
+ * uses to key per-member delivery tracking. Previously named
+ * `datasetId` on both the wire protocol and this typedef; renamed per
+ * dechaos Pass 5 Contract Issue 3.
  */
 export type ChunksEvictedHandler = (
-  datasetId: string,
+  memberId: string,
   evicted: string[],
   skipped: string[],
 ) => void;
@@ -71,7 +72,7 @@ export interface UploadClient {
   viewHotState(msg: ViewHotStateMessage): void;
 
   sliceChunkData(
-    datasetId: string,
+    memberId: string,
     chunks: {
       data: ArrayBuffer;
       dataType: string;
@@ -96,7 +97,7 @@ export interface UploadClient {
   ): void;
 
   volumeChunkData(
-    datasetId: string,
+    memberId: string,
     chunks: {
       data: ArrayBuffer;
       dataType: string;

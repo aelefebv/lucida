@@ -41,10 +41,11 @@ import {
   DESCRIPTOR_MAX_LODS,
   DESCRIPTOR_SENTINEL_INDEX,
 } from "./descriptorBuffer.ts";
+import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 import type { EntityProxyDescriptor } from "./workerContext.ts";
 import type { ColdStateActiveEntry, ColdStateMessage } from "./workerProtocol.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
-import type { LodIndirectionMeta } from "./volumeHandlers.ts";
+import type { LodIndirectionMeta } from "./volume/atlas.ts";
 
 // ---------------------------------------------------------------------------
 // Mock GPU device — buffer creation only.
@@ -106,23 +107,48 @@ function defaultDisplayState(): ColdStateActiveEntry["displayStateByChannel"][nu
   };
 }
 
-function makeEntry(opts: Partial<ColdStateActiveEntry> & { entityId: string; imageId: string; mode: ColdStateActiveEntry["mode"] }): ColdStateActiveEntry {
-  return {
+/**
+ * Test-fixture helper. Mode-driven branching keeps existing call sites
+ * unchanged: pass `mode: "well-as-proxy"` (with `imageId: ""`) to get
+ * the well-as-proxy variant; anything else returns a `kind: "field"`
+ * entry. Slice 11 added the `kind` discriminator on
+ * `ColdStateActiveEntry`; this helper hides the variant construction
+ * so test fixtures don't have to.
+ */
+type MakeEntryOpts = Partial<Omit<ColdStateActiveEntry, "kind">> & {
+  entityId: string;
+  imageId: string;
+  mode: ColdStateActiveEntry["mode"];
+};
+function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
+  const base = {
     entityId: opts.entityId,
-    imageId: opts.imageId,
     targetLod: opts.targetLod ?? 0,
-    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0],
+    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
     levels: opts.levels ?? [
-      { level: 0, chunkShape: [1, 64, 64], gridShape: [1, 4, 4], levelDims: [1, 256, 256] },
+      { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
-    mode: opts.mode,
     proxyKind: opts.proxyKind,
     proxyAvailable: opts.proxyAvailable ?? false,
     wellProxyAvailable: opts.wellProxyAvailable ?? false,
-    parentWellId: opts.parentWellId ?? null,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplayState() },
+  };
+  if (opts.mode === "well-as-proxy") {
+    return {
+      ...base,
+      kind: "well-as-proxy",
+      mode: "well-as-proxy",
+      parentWellId: null,
+    };
+  }
+  return {
+    ...base,
+    kind: "field",
+    imageId: opts.imageId,
+    mode: opts.mode,
+    parentWellId: opts.parentWellId ?? null,
   };
 }
 
@@ -192,7 +218,7 @@ function metasFromEntry(entry: ColdStateActiveEntry): LodIndirectionMeta[] {
 function metasForCold(cold: ColdStateMessage): Map<string, LodIndirectionMeta[]> {
   const out = new Map<string, LodIndirectionMeta[]>();
   for (const entry of cold.activeSet) {
-    const memberId = entry.mode === "well-as-proxy" ? entry.entityId : entry.imageId;
+    const memberId = entry.kind === "well-as-proxy" ? entry.entityId : entry.imageId;
     out.set(memberId, metasFromEntry(entry));
   }
   return out;
@@ -708,5 +734,118 @@ describe("buildDescriptorBuffer GPU write", () => {
     expect(entry0Lod0Offset).toBe(0);
     expect(entry1Lod0Offset).toBe(16);
     destroyDescriptorBuffer(result);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Transient ↔ canonical byte equivalence
+// ---------------------------------------------------------------------------
+
+describe("transient descriptor matches canonical for equivalent params", () => {
+  it("agrees byte-for-byte on modelMatrix, invModelMatrix, display state, sentinel proxy handles, and the single LOD slot", () => {
+    // Same volume + display state for both writers.
+    const volumeDims: [number, number, number] = [128, 64, 32]; // X, Y, Z
+    const modelMatrix = new Float32Array([
+       1, 0, 0, 0,
+       0, 2, 0, 0,
+       0, 0, 3, 0,
+       4, 5, 6, 1,
+    ]);
+    const invModelMatrix = new Float32Array([
+       1.5, 0, 0, 0,
+       0, 1.5, 0, 0,
+       0, 0, 1.5, 0,
+       -1, -2, -3, 1,
+    ]);
+    const contrastMin = 50;
+    const contrastMax = 5000;
+    const gamma = 1.8;
+    const opacity = 0.6;
+
+    // Transient writer.
+    const transientBuf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    serializeTransientDescriptor(transientBuf, {
+      modelMatrix, invModelMatrix, volumeDims,
+      contrastMin, contrastMax, gamma, opacity,
+    });
+
+    // Canonical writer fed an entry that mimics the transient's shape:
+    //   - single LOD, level=0, offset=0
+    //   - gridDims=[1,1,1], chunkDims=levelDims=volumeDims
+    //   - sentinel proxy handles (no proxy descriptor)
+    //   - colormap absent → lutIdx = 0 (matches transient writer which
+    //     skips colormapLutIndex entirely → buffer-init zero)
+    //   - channelMask = 0 (transient writer doesn't write it)
+    // `metasFromEntry` walks (entry.levels × entry.detailOwnedLodRange) in
+    // X/Y/Z conventions that match `serializeEntityDescriptor` → the LOD
+    // bytes line up with what the transient writer emits.
+    const entry = makeEntry({
+      entityId: "transient", imageId: "transient", mode: "fields-with-detail",
+      modelMatrix, invModelMatrix,
+      detailOwnedLodRange: [0, 0],
+      targetLod: 0,
+      levels: [{
+        level: 0,
+        chunkShape: [volumeDims[2], volumeDims[1], volumeDims[0]], // (Z, Y, X)
+        gridShape: [1, 1, 1],
+        levelDims: [volumeDims[2], volumeDims[1], volumeDims[0]],  // (Z, Y, X)
+      }],
+      displayStateByChannel: { 0: {
+        contrastMin, contrastMax, gamma, opacity,
+        colormapName: "missing", channelMask: 0,
+      }},
+    });
+    const canonicalBuf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
+    serializeEntityDescriptor(
+      canonicalBuf, 0, entry, metasFromEntry(entry),
+      { contrastMin, contrastMax, gamma, opacity, colormapName: "missing", channelMask: 0 },
+      new Map(), new Map(), [], new Map(),
+    );
+
+    const tF32 = new Float32Array(transientBuf);
+    const cF32 = new Float32Array(canonicalBuf);
+    const tU32 = new Uint32Array(transientBuf);
+    const cU32 = new Uint32Array(canonicalBuf);
+
+    // modelMatrix at offset 0 (16 f32s)
+    for (let i = 0; i < 16; i++) expect(cF32[i]).toBe(tF32[i]);
+    // invModelMatrix at offset 64 (16 f32s)
+    for (let i = 0; i < 16; i++) expect(cF32[16 + i]).toBe(tF32[16 + i]);
+
+    // Sentinel proxy handles at offsets 132/136/140/144
+    expect(cU32[33]).toBe(tU32[33]);
+    expect(cU32[34]).toBe(tU32[34]);
+    expect(cU32[35]).toBe(tU32[35]);
+    expect(cU32[36]).toBe(tU32[36]);
+    expect(cU32[33]).toBe(DESCRIPTOR_SENTINEL_INDEX);
+
+    // Proxy dims (canonical defaults to (1,1,1) when handle missing; transient writes (1,1,1))
+    expect(cU32[40]).toBe(tU32[40]); expect(cU32[41]).toBe(tU32[41]); expect(cU32[42]).toBe(tU32[42]);
+    expect(cU32[44]).toBe(tU32[44]); expect(cU32[45]).toBe(tU32[45]); expect(cU32[46]).toBe(tU32[46]);
+
+    // Display state: contrast / gamma / opacity
+    expect(cF32[48]).toBe(tF32[48]);
+    expect(cF32[49]).toBe(tF32[49]);
+    expect(cF32[50]).toBe(tF32[50]);
+    expect(cF32[51]).toBe(tF32[51]);
+
+    // lodCount at offset 212
+    expect(cU32[53]).toBe(1);
+    expect(tU32[53]).toBe(1);
+
+    // First LOD slot — level / offset / gridDims / chunkDims / levelDims.
+    const lodsBaseU32 = DESCRIPTOR_LODS_OFFSET / 4;
+    for (let i = 0; i < DESCRIPTOR_LOD_INFO_SIZE / 4; i++) {
+      expect(cU32[lodsBaseU32 + i]).toBe(tU32[lodsBaseU32 + i]);
+    }
+
+    // Remaining LOD slots zero-filled in both writers.
+    for (let slot = 1; slot < DESCRIPTOR_MAX_LODS; slot++) {
+      const base = lodsBaseU32 + slot * (DESCRIPTOR_LOD_INFO_SIZE / 4);
+      for (let s = 0; s < DESCRIPTOR_LOD_INFO_SIZE / 4; s++) {
+        expect(cU32[base + s]).toBe(tU32[base + s]);
+        expect(cU32[base + s]).toBe(0);
+      }
+    }
   });
 });

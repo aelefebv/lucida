@@ -12,6 +12,8 @@ import type {
   MissingProxy,
 } from "./workerProtocol.ts";
 import type { ProxyKind } from "../pipeline/assetCatalog.ts";
+import { makeCompositeKey } from "./chunkKeys.ts";
+import { memberIdForColdEntry } from "./descriptorBuffer.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -106,7 +108,9 @@ export function computeWantedSet(
 
   for (const entry of coldState.activeSet) {
     // ---- proxy wanted-set ----
-    if (entry.mode === "well-as-proxy") {
+    // Discriminate via `entry.kind` (Slice 11): narrows the well-as-proxy
+    // variant so subsequent branches see the field variant typed-out.
+    if (entry.kind === "well-as-proxy") {
       // Single proxy per visible channel; no chunks.
       for (const c of coldState.visibleChannels) {
         if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "WellProxy3D")) {
@@ -185,15 +189,24 @@ export function computeWantedSet(
 
     // ---- existing chunk wanted-set (unchanged) ----
     // Build the list of (workerMemberId, channel) pairs for this entry.
+    // Use the canonical memberIdForColdEntry helper so well-as-proxy
+    // entries resolve to entityId rather than ":chN". (Slice 11
+    // narrows them out earlier via `entry.kind === "well-as-proxy"`,
+    // but the helper still routes through the union so the convention
+    // stays in one place.)
     const members: Array<{ memberId: string; channel: number }> = [];
     if (isMultiChannel) {
       for (const c of coldState.visibleChannels) {
-        members.push({ memberId: `${entry.imageId}:ch${c}`, channel: c });
+        members.push({
+          memberId: memberIdForColdEntry(entry, c, true),
+          channel: c,
+        });
       }
     } else {
+      const channel = coldState.visibleChannels[0];
       members.push({
-        memberId: entry.imageId,
-        channel: coldState.visibleChannels[0],
+        memberId: memberIdForColdEntry(entry, channel, false),
+        channel,
       });
     }
 
@@ -261,7 +274,7 @@ export function computeWantedSet(
           for (let iy = rowStart; iy < rowEnd; iy++) {
             for (let ix = colStart; ix < colEnd; ix++) {
               const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
-              const slotKey = useCompositeKey ? `${memberId}|${chunkKey}` : chunkKey;
+              const slotKey = useCompositeKey ? makeCompositeKey(memberId, chunkKey) : chunkKey;
               if (!atlas.slots.has(slotKey)) {
                 missing.push({
                   kind: "chunk",
