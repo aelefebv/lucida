@@ -23,6 +23,12 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 import { InteractionModeDetector, type InteractionMode } from "./interactionMode.ts";
 import { BurstLogger, TelemetryCounters } from "./telemetry.ts";
+import {
+  LRUPolicy,
+  TieredPolicy,
+  getTierOrder,
+  type EvictionPolicy,
+} from "./eviction.ts";
 import { debugLog } from "../../debug/logging.ts";
 
 // ---------------------------------------------------------------------------
@@ -165,7 +171,13 @@ export interface TierCounters {
   proxy: number;
 }
 
-interface CacheEntry {
+/**
+ * Internal cache entry. Exported so the {@link EvictionPolicy}
+ * implementations in `eviction.ts` can operate on cache contents.
+ * Slice 6 (`#600`) will relocate this to a colocated `types.ts` when
+ * the per-cache stores extract.
+ */
+export interface CacheEntry {
   data: ArrayBuffer;
   sizeBytes: number;
   lane: Lane;
@@ -229,6 +241,20 @@ interface InFlightProxyEntry {
   request: ProxyRequest;
   controller: AbortController;
   estimatedBytes: number;
+}
+
+/**
+ * Adapter shape passed to {@link LRUPolicy} for proxy eviction. Maps
+ * `ProxyCacheEntry.bytes` → `sizeBytes` for the policy interface while
+ * carrying the `datasetId` + inner-map `key` the cache needs to remove
+ * the victim from its two-level Map.
+ */
+interface ProxyEvictable {
+  insertedAt: number;
+  sizeBytes: number;
+  datasetId: string;
+  key: string;
+  entry: ProxyCacheEntry;
 }
 
 /**
@@ -339,6 +365,16 @@ export class CpuCache {
     content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
   };
 
+  // Eviction policies. The main (detail) cache uses tiered LRU with the
+  // active-detail tiebreaker; overview + proxy caches use pure LRU.
+  // TieredPolicy is constructed in the constructor body so it can close
+  // over `this.interactionDetector`. The proxy adapter shape carries
+  // back-references the cache needs to remove the victim from its
+  // two-level Map.
+  private mainPolicy: EvictionPolicy<CacheEntry>;
+  private overviewPolicy: EvictionPolicy<CacheEntry> = new LRUPolicy<CacheEntry>();
+  private proxyPolicy: EvictionPolicy<ProxyEvictable> = new LRUPolicy<ProxyEvictable>();
+
   constructor(source: ContentSource, decode: DecodePool, config?: Partial<CpuCacheConfig>) {
     this.source = source;
     this.decode = decode;
@@ -349,6 +385,7 @@ export class CpuCache {
       maxConcurrentFetches: config?.maxConcurrentFetches ?? (decode.size * FETCH_CONCURRENCY_MULTIPLIER),
       maxBytesInFlight: config?.maxBytesInFlight ?? DEFAULT_MAX_BYTES_IN_FLIGHT,
     };
+    this.mainPolicy = new TieredPolicy(() => this.interactionDetector.current());
   }
 
   // =========================================================================
@@ -718,7 +755,7 @@ export class CpuCache {
       evictionsPerSec: counters.evictionsPerSec,
       evictionsByTier: counters.evictionsByTier,
       interactionMode: mode,
-      evictionTierOrder: this.getTierOrder(mode),
+      evictionTierOrder: getTierOrder(mode),
       failedChunks: {
         transient: counters.transientFailures,
         permanent: counters.permanentFailures,
@@ -1274,24 +1311,33 @@ export class CpuCache {
   private evictProxyIfNeeded(incomingBytes: number): void {
     if (this.proxyBytes + incomingBytes <= this.config.proxyBudgetBytes) return;
     const needed = this.proxyBytes + incomingBytes - this.config.proxyBudgetBytes;
-    let freed = 0;
 
-    // Flatten + sort by insertion order (LRU oldest first).
-    const entries: { datasetId: string; key: string; entry: ProxyCacheEntry }[] = [];
+    // Flatten into an adapter shape that exposes `sizeBytes` to the
+    // policy while keeping the back-references the cache needs to
+    // actually remove the entry. The proxy entry's own `bytes` field
+    // is mapped to `sizeBytes` so {@link LRUPolicy} can serve both
+    // cache shapes without ProxyCacheEntry having to rename its field.
+    const evictables: ProxyEvictable[] = [];
     for (const [datasetId, inner] of this.proxyCache) {
-      for (const [k, e] of inner) entries.push({ datasetId, key: k, entry: e });
-    }
-    entries.sort((a, b) => a.entry.insertedAt - b.entry.insertedAt);
-
-    for (const { datasetId, key, entry } of entries) {
-      if (freed >= needed) break;
-      const inner = this.proxyCache.get(datasetId);
-      if (inner) {
-        inner.delete(key);
-        if (inner.size === 0) this.proxyCache.delete(datasetId);
+      for (const [k, e] of inner) {
+        evictables.push({
+          insertedAt: e.insertedAt,
+          sizeBytes: e.bytes,
+          datasetId,
+          key: k,
+          entry: e,
+        });
       }
-      this.proxyBytes -= entry.bytes;
-      freed += entry.bytes;
+    }
+
+    const victims = this.proxyPolicy.selectVictims(evictables, needed);
+    for (const v of victims) {
+      const inner = this.proxyCache.get(v.datasetId);
+      if (inner) {
+        inner.delete(v.key);
+        if (inner.size === 0) this.proxyCache.delete(v.datasetId);
+      }
+      this.proxyBytes -= v.entry.bytes;
       this.counters.recordEviction("proxy");
     }
   }
@@ -1390,72 +1436,28 @@ export class CpuCache {
     const currentBytes = cacheType === "main" ? this.mainBytes : this.overviewBytes;
     if (currentBytes + incomingBytes <= budget) return;
 
-    if (cacheType === "overview") {
-      this.evictLRU(cache, currentBytes + incomingBytes - budget, cacheType);
-    } else {
-      this.evictTiered(cache, currentBytes + incomingBytes - budget);
-    }
-  }
+    const bytesNeeded = currentBytes + incomingBytes - budget;
+    const entries = this.collectEntries(cache);
+    const policy = cacheType === "main" ? this.mainPolicy : this.overviewPolicy;
+    const victims = policy.selectVictims(entries, bytesNeeded);
 
-  /** Simple LRU eviction for overview cache. */
-  private evictLRU(
-    cache: Map<string, Map<string, CacheEntry>>,
-    bytesNeeded: number,
-    cacheType: "main" | "overview",
-  ): void {
     let freed = 0;
-    const allEntries = this.collectEntries(cache);
-    allEntries.sort((a, b) => a.insertedAt - b.insertedAt); // oldest first
-
-    for (const entry of allEntries) {
-      if (freed >= bytesNeeded) break;
-      this.removeEntry(cache, entry, cacheType);
-      freed += entry.sizeBytes;
+    for (const victim of victims) {
+      this.removeEntry(cache, victim, cacheType);
+      freed += victim.sizeBytes;
     }
-  }
 
-  /** Three-tier adaptive eviction for detail cache. */
-  private evictTiered(
-    cache: Map<string, Map<string, CacheEntry>>,
-    bytesNeeded: number,
-  ): void {
-    const mode = this.interactionDetector.current();
-    const tierOrder = this.getTierOrder(mode);
-    let freed = 0;
-    let removed = 0;
-
-    for (const tier of tierOrder) {
-      if (freed >= bytesNeeded) break;
-      const entries = this.collectEntriesByTier(cache, tier as EvictionTier);
-      // Active-detail uses a "least-recently-wanted, lowest-importance
-      // first" sort to avoid evicting focal-point chunks (which are
-      // fetched first and would otherwise be the oldest in pure LRU,
-      // producing a center-outward eviction wave). Other tiers stay on
-      // pure insertion-order LRU — they're sacrificial by design.
-      if (tier === "active-detail") {
-        entries.sort((a, b) =>
-          a.lastSeenTick - b.lastSeenTick      // oldest plan tick first
-          || b.priority - a.priority           // then highest priority number (= farthest from focal) first
-          || a.insertedAt - b.insertedAt,      // then oldest insertion as deterministic tiebreaker
-        );
-      } else {
-        entries.sort((a, b) => a.insertedAt - b.insertedAt);
-      }
-
-      for (const entry of entries) {
-        if (freed >= bytesNeeded) break;
-        this.removeEntry(cache, entry, "main");
-        freed += entry.sizeBytes;
-        removed++;
-      }
-    }
-    if (removed >= 16) {
+    // Eviction-burst log fires when a single eviction pass removes a
+    // lot of entries. Stays at the call site — the count of removals
+    // is something the cache observes as it processes the policy's
+    // output. Only emitted for the main cache (matches prior behavior).
+    if (cacheType === "main" && victims.length >= 16) {
       debugLog("cache", "cache.eviction_burst", {
         cache: "main",
-        removed,
+        removed: victims.length,
         bytesFreed: freed,
         bytesNeeded,
-        mode,
+        mode: this.interactionDetector.current(),
       });
     }
   }
@@ -1490,35 +1492,6 @@ export class CpuCache {
       }
     }
     return result;
-  }
-
-  private collectEntriesByTier(
-    cache: Map<string, Map<string, CacheEntry>>,
-    tier: EvictionTier,
-  ): CacheEntry[] {
-    const result: CacheEntry[] = [];
-    for (const entityMap of cache.values()) {
-      for (const entry of entityMap.values()) {
-        if (entry.tier === tier) result.push(entry);
-      }
-    }
-    return result;
-  }
-
-  // =========================================================================
-  // Eviction tier order
-  // =========================================================================
-
-  private getTierOrder(mode: InteractionMode): string[] {
-    switch (mode) {
-      case "panning":
-        return ["prefetch", "demoted-detail", "active-detail"];
-      case "scrubbing":
-        return ["demoted-detail", "active-detail", "prefetch"];
-      case "idle":
-      default:
-        return ["prefetch", "demoted-detail", "active-detail"];
-    }
   }
 
   // =========================================================================
