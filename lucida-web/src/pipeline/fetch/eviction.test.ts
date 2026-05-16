@@ -1,12 +1,11 @@
 /**
- * Unit tests for the {@link LRUPolicy} and {@link TieredPolicy}
- * extracted in Slice 5 (`#599`).
+ * Unit tests for the {@link LRUPolicy} and {@link TieredPolicy}.
  *
  * Synthetic `CacheEntry` literals only — no cache instance, no fetch
- * mock. The existing `cpuCache.test.ts:eviction tiers` describe block
- * remains as integration coverage for the cache-level wiring; these
- * tests pin the per-policy behavior so future stores (Slice 6) can
- * swap policies without losing the active-detail tiebreaker contract.
+ * mock. The `cpuCache.test.ts:eviction tiers` describe block remains
+ * as integration coverage for the cache-level wiring; these tests
+ * pin the per-policy behavior so stores can swap policies without
+ * losing the active-detail tiebreaker contract.
  */
 
 import { describe, it, expect } from "vitest";

@@ -109,8 +109,7 @@ export class ProxiedContentSource implements ContentSource {
    * Drop wire-format registrations for the listed images. Pair with
    * `cancelDataset` on the cache from the dataset-removal lifecycle —
    * without this, `imageWireFormats` accumulates entries indefinitely
-   * across long sessions of open/close cycles (real long-session leak
-   * surfaced by dechaos pass 4 of the fetch refactor).
+   * across long sessions of open/close cycles.
    *
    * The caller passes the imageIds because `ProxiedContentSource` is
    * dataset-agnostic: it has no datasetId → imageIds mapping of its
@@ -195,9 +194,9 @@ export class ProxiedContentSource implements ContentSource {
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
     const wireFormat = this.imageWireFormats.get(imageId);
     if (!wireFormat) {
-      // Setup bug — retrying won't recover. Pre-Slice-8 this was a
-      // plain `Error` and the catch block's substring rules
-      // misclassified it as transient (dechaos pass 5 finding).
+      // Setup bug — retrying won't recover. Raised as a typed
+      // permanent FetchError so the cache's classifier doesn't fall
+      // through to the transient-by-default branch.
       return Promise.reject(
         new FetchError(`No wire format registered for image ${imageId}`, {
           kind: "permanent",
@@ -209,8 +208,8 @@ export class ProxiedContentSource implements ContentSource {
     return new Promise<FetchResult>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pending.delete(compositeKey);
-        // Timeout preserves the pre-Slice-8 behaviour: a single retry
-        // via `OnceTransientRetry`, then mark transient-failed.
+        // Timeouts surface as transient so `OnceTransientRetry`
+        // grants a single retry before marking transient-failed.
         reject(new FetchError(`Chunk ${chunkKey} timed out`, { kind: "transient" }));
       }, this.timeoutMs);
 

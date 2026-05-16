@@ -1,11 +1,10 @@
 /**
- * Unit tests for {@link ChunkStore} (Slice 6, `#600`).
+ * Unit tests for {@link ChunkStore}.
  *
  * Synthetic `CacheEntry` literals only — no cache instance, no fetch
- * mock. The existing `cpuCache.test.ts` integration tests cover the
- * store's interaction with the rest of the cache; these tests pin the
- * store's own contract so a future refactor that moves logic around can
- * verify per-store invariants in isolation.
+ * mock. `cpuCache.test.ts` integration tests cover the store's
+ * interaction with the rest of the cache; these tests pin the store's
+ * own contract in isolation.
  *
  * Both store flavours (main = TieredPolicy, overview = LRUPolicy) are
  * exercised through the same {@link ChunkStore} class — the policy and

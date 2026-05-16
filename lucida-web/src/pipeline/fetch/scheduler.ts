@@ -18,13 +18,10 @@
  * for proxies), and (b) the start callback (chunk path runs
  * `fetchAndDecode`; proxy path runs `fetchProxy`).
  *
- * The dedup ladder (rejected / cached / in-flight / failed) STAYS in
- * `cpuCache.ts` for now — it touches state owned by stores +
- * rejection + failure-map collaborators that haven't all extracted
- * yet. The scheduler's contract is "enqueue this pre-deduped list and
- * drain to capacity." Future slices may push more of the dedup logic
- * down here once those collaborators land (Slice 9 RejectionTracker,
- * Slice 8 RetryPolicy, etc.).
+ * The dedup ladder (rejected / cached / in-flight / failed) lives in
+ * `cpuCache.ts` — it touches state owned by stores + rejection +
+ * failure-map collaborators. The scheduler's contract is "enqueue
+ * this pre-deduped list and drain to capacity."
  *
  * The scheduler does NOT know about decode, retry, or the cache.
  * Once `startFn` runs, the request is considered in-flight; the
@@ -326,9 +323,7 @@ export class Scheduler<Req extends SchedulableRequest> {
   /**
    * Abort and drop a single in-flight request by key. Mirrors
    * {@link markInFlightDone} but also fires the `AbortController`.
-   * Used by the rejection feedback path
-   * (`CpuCache.markRejected` — Slice 9 will route through this same
-   * method).
+   * Used by the rejection feedback path (`CpuCache.markRejected`).
    */
   cancelOne(key: string): void {
     const entry = this.inFlight.get(key);

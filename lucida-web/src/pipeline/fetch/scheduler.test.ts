@@ -1,5 +1,5 @@
 /**
- * Unit tests for {@link Scheduler} (Slice 7, `#601`).
+ * Unit tests for {@link Scheduler}.
  *
  * Synthetic-input only — no cache instance, no fetch mock. The
  * scheduler's contract is: bookkeep a pending queue + an in-flight
@@ -7,10 +7,9 @@
  * dequeued request, surface backpressure through the optional
  * BurstLogger when a cap is hit.
  *
- * Existing `cpuCache.test.ts` integration tests verify the
- * scheduler's interaction with fetch + decode + cache. These tests
- * pin the scheduler's own contract so a future refactor can verify
- * per-scheduler invariants in isolation.
+ * `cpuCache.test.ts` integration tests cover the scheduler's
+ * interaction with fetch + decode + cache; these tests pin the
+ * scheduler's own contract in isolation.
  */
 
 import { describe, it, expect, vi } from "vitest";

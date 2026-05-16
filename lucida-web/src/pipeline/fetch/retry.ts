@@ -1,23 +1,15 @@
 /**
  * Typed fetch errors + retry policy.
  *
- * Pre-Slice-8 the fetch error path classified errors by string-matching
- * `err.message.includes("404") || err.message.includes("malformed")`.
- * The "no wire format registered for image X" error from
- * `ContentSource.fetch` matched neither, so it was treated as transient
- * and retried once — a setup bug, not a network blip (surfaced by
- * dechaos pass 5).
- *
  * `FetchError` lets the source (which knows what kind of error it
- * raised) own the classification. `RetryPolicy` extracts the retry rule
- * so it's unit-testable and injectable: the chunk path uses
- * `OnceTransientRetry` (current behaviour: retry once on transient,
- * never on permanent/abort), the proxy path uses `NeverRetry`
- * (current behaviour: no retries).
+ * raised) own the classification. `RetryPolicy` extracts the retry
+ * rule so it's unit-testable and injectable: the chunk path uses
+ * `OnceTransientRetry` (retry once on transient, never on
+ * permanent/abort); the proxy path uses `NeverRetry` (no retries).
  *
  * `classifyFetchError` is the boundary in the catch block: pre-typed
  * `FetchError`s pass through; `DOMException AbortError`s are promoted;
- * plain `Error` messages fall back to the legacy substring rules for
+ * plain `Error` messages fall back to message-substring rules for
  * untyped throws elsewhere in the stack; non-`Error` values are
  * wrapped as transient.
  */
@@ -67,11 +59,11 @@ export class FetchError extends Error {
  * 1. Already a `FetchError`? Returned as-is.
  * 2. `DOMException` with `name === "AbortError"`? Promoted to
  *    `FetchError(kind: "abort")`.
- * 3. Plain `Error`? Falls back to message-substring rules (legacy
- *    behaviour preserved for any caller that still throws a plain
- *    `Error`): `404` / `malformed` → `permanent`; anything else →
- *    `transient`. A `debugLog` warning surfaces untyped errors so
- *    they can be migrated to typed `FetchError`s.
+ * 3. Plain `Error`? Falls back to message-substring rules for any
+ *    caller that still throws a plain `Error`: `404` / `malformed` →
+ *    `permanent`; anything else → `transient`. A `debugLog` warning
+ *    surfaces untyped errors so they can be migrated to typed
+ *    `FetchError`s.
  * 4. Non-`Error` value? Wrapped in
  *    `FetchError(kind: "transient", message: String(err))`.
  */
@@ -112,10 +104,9 @@ export interface RetryPolicy {
 }
 
 /**
- * Retry-once policy for transient failures. Mirrors the pre-Slice-8
- * chunk behaviour: one retry on a transient error, none on permanent
- * or abort. The delay is a fixed value (the cache constructs this
- * with `TRANSIENT_RETRY_DELAY_MS`).
+ * Retry-once policy for transient failures. One retry on a transient
+ * error, none on permanent or abort. The delay is a fixed value
+ * (the cache constructs this with `TRANSIENT_RETRY_DELAY_MS`).
  */
 export class OnceTransientRetry implements RetryPolicy {
   private readonly delay: number;
@@ -134,9 +125,9 @@ export class OnceTransientRetry implements RetryPolicy {
 }
 
 /**
- * No-retry policy. Mirrors the pre-Slice-8 proxy behaviour: the
- * orchestrator resubmits on the next plan tick if it still wants the
- * proxy, so the fetch path doesn't retry internally.
+ * No-retry policy for the proxy path: the orchestrator resubmits on
+ * the next plan tick if it still wants the proxy, so the fetch path
+ * doesn't retry internally.
  */
 export class NeverRetry implements RetryPolicy {
   shouldRetry(_err: FetchError, _attempt: number): boolean {

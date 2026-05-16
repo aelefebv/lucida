@@ -1,9 +1,5 @@
 /**
- * Pre-refactor characterization tests for the wire-protocol helpers.
- *
- * These functions move to a dedicated `wireProtocol.ts` module in Slice 2.
- * The tests live at the destination location now; their imports retarget
- * once Slice 2 lands.
+ * Tests for the wire-protocol helpers.
  *
  * Pinned behaviour:
  *   - parseProxyHeader: 64-byte little-endian record matching

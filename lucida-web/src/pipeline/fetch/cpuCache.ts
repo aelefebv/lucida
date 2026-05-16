@@ -168,28 +168,27 @@ export class CpuCache {
   // `counters.snapshot(now)` plus the per-call store walk in
   // `telemetry()`.
   //
-  // The `cache.backpressure` channel now lives on the chunk
-  // scheduler's `BurstLogger` (passed through its config) so the
-  // log fires from `Scheduler.drain` without the cache having to
-  // mediate. The proxy scheduler intentionally does NOT get a
-  // backpressure logger — pre-Slice-7 behavior never logged
-  // backpressure for the proxy path.
+  // The `cache.backpressure` channel lives on the chunk scheduler's
+  // `BurstLogger` (passed through its config) so the log fires from
+  // `Scheduler.drain` without the cache having to mediate. The proxy
+  // scheduler intentionally does NOT get a backpressure logger —
+  // backpressure logging is chunk-path only.
   private counters = new TelemetryCounters();
   private burstFailures = new BurstLogger("cache", "cache.failure_burst");
 
   /**
-   * Retry rule for the chunk fetch path. `OnceTransientRetry` mirrors
-   * the pre-Slice-8 behaviour: one retry on transient errors, none on
-   * permanent (404 / malformed / setup bugs like "no wire format
-   * registered"). Wired at construction so tests + future variants can
-   * swap policies without touching `fetchAndDecode`.
+   * Retry rule for the chunk fetch path. `OnceTransientRetry` allows
+   * one retry on transient errors and none on permanent (404 /
+   * malformed / setup bugs like "no wire format registered"). Wired at
+   * construction so tests + future variants can swap policies without
+   * touching `fetchAndDecode`.
    */
   private chunkRetryPolicy: RetryPolicy = new OnceTransientRetry(TRANSIENT_RETRY_DELAY_MS);
 
   /**
-   * Retry rule for the proxy fetch path. `NeverRetry` mirrors the
-   * pre-Slice-8 behaviour: no in-fetch retries — the orchestrator
-   * resubmits on the next plan tick if the proxy is still wanted.
+   * Retry rule for the proxy fetch path. `NeverRetry`: no in-fetch
+   * retries — the orchestrator resubmits on the next plan tick if the
+   * proxy is still wanted.
    */
   private proxyRetryPolicy: RetryPolicy = new NeverRetry();
 
@@ -234,10 +233,10 @@ export class CpuCache {
 
     // Wire the three stores. Eviction policies and telemetry sinks
     // flow in via store-options; insert + eviction collapse into one
-    // call on the store side (see Slice 6 / chunkStore.ts).
+    // call on the store side (see chunkStore.ts).
     //
-    // Eviction-burst log is main-cache only (matches pre-Slice-6
-    // behavior) — only the main store gets `onEvictionBurst`.
+    // Eviction-burst log is main-cache only — only the main store
+    // gets `onEvictionBurst`.
     const mainPolicy = new TieredPolicy(() => this.interactionDetector.current());
     this.chunkStore = new ChunkStore({
       policy: mainPolicy,
@@ -279,8 +278,8 @@ export class CpuCache {
     // the original `startProxyFetches` comment).
     //
     // The chunk scheduler owns the rate-limited `cache.backpressure`
-    // log; the proxy scheduler intentionally does not (matches the
-    // pre-Slice-7 behavior — only the chunk path logged backpressure).
+    // log; the proxy scheduler intentionally does not (backpressure
+    // logging is chunk-path only).
     //
     // The `startFn` callback decouples the scheduler from
     // decode/proxy mechanics: the scheduler tracks the slot, the
@@ -582,9 +581,9 @@ export class CpuCache {
     };
 
     // Pending-queue starvation signal: oldest enqueue timestamp wins.
-    // Lives on the chunk scheduler (Slice 7); the proxy scheduler
-    // doesn't surface a separate age — proxies are best-effort and
-    // the orchestrator resubmits if they're missing.
+    // Lives on the chunk scheduler; the proxy scheduler doesn't
+    // surface a separate age — proxies are best-effort and the
+    // orchestrator resubmits if they're missing.
     const pendingOldestAgeMs = this.chunkScheduler.oldestPendingAgeMs(now);
 
     return {
@@ -845,9 +844,8 @@ export class CpuCache {
       }
 
       // Final failure: mark in failures map + record telemetry. The
-      // "no wire format registered" path now lands here with
-      // `kind: "permanent"` (Slice 8 bug fix; was misclassified
-      // transient pre-refactor).
+      // "no wire format registered" path lands here with
+      // `kind: "permanent"` so it is not retried as a transient blip.
       const isPermanent = fe.kind === "permanent";
       this.failures.set(key, {
         failedUntilContentEpoch: this.currentEpochs.content + 1,
@@ -960,8 +958,7 @@ export class CpuCache {
       // Proxy retry policy is `NeverRetry` — consult it for symmetry
       // with the chunk path; today it always returns false. No
       // failures-map entry: the orchestrator resubmits on the next
-      // plan tick if the proxy is still wanted (pre-Slice-8 behaviour
-      // preserved).
+      // plan tick if the proxy is still wanted.
       if (this.proxyRetryPolicy.shouldRetry(fe, 0)) {
         await new Promise(r => setTimeout(r, this.proxyRetryPolicy.delayMs(0)));
         if (!this.proxyScheduler.hasInFlight(key)) return;

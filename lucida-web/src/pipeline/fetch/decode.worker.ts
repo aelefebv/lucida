@@ -88,7 +88,7 @@ async function decompressZstd(src: ArrayBuffer): Promise<ArrayBuffer> {
   // fzstd returns a Uint8Array that is a view into a larger underlying
   // buffer (12-byte prefix + decoded bytes). Slice to get just the
   // decoded range, otherwise downstream readers see garbage prefix
-  // bytes. Surfaced by Slice 1 characterization tests.
+  // bytes.
   const decoded = fzstdModule.decompress(new Uint8Array(src));
   return decoded.buffer.slice(decoded.byteOffset, decoded.byteOffset + decoded.byteLength) as ArrayBuffer;
 }

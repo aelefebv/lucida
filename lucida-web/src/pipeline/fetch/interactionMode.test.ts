@@ -21,8 +21,7 @@ function makeEpochs(overrides?: Partial<SceneEpochs>): SceneEpochs {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — migrated from cpuCache.test.ts "adaptive eviction" block
-// (Slice 3). They become PURE — no cache instance, no fetch mock.
+// Tests — pure detector unit (no cache instance, no fetch mock).
 // ---------------------------------------------------------------------------
 
 describe("InteractionModeDetector", () => {
@@ -61,13 +60,11 @@ describe("InteractionModeDetector", () => {
     });
 
     it("scrubbing mode protects prefetch over demoted", () => {
-      // Original cpuCache test exercised the cache's eviction tier
-      // order under scrubbing mode. The detector-level invariant it
-      // depends on is: rapid selection bumps + zero view bumps
-      // classify as scrubbing, even with later equal-view-equal-selection
-      // pushes mixed in. Integration coverage of the tier-order
-      // consequence lives at the EvictionPolicy + getTierOrder seam
-      // (planned for Slice 5).
+      // The detector-level invariant: rapid selection bumps + zero
+      // view bumps classify as scrubbing, even with later
+      // equal-view-equal-selection pushes mixed in. Integration
+      // coverage of the tier-order consequence lives at the
+      // EvictionPolicy + getTierOrder seam.
       const detector = new InteractionModeDetector(INTERACTION_MODE_WINDOW);
 
       // Force scrubbing mode via selectionEpoch velocity

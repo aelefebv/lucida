@@ -83,8 +83,7 @@ export interface ChunkStoreOptions {
    * Optional callback fired when a single insert evicts ≥
    * {@link ChunkStore.evictionBurstThreshold} entries. Main store wires
    * this to a `debugLog` line; overview store leaves it unset
-   * (eviction-burst log is main-cache only — see prior behavior in
-   * `cpuCache.ts` before Slice 6).
+   * (eviction-burst log is main-cache only).
    */
   onEvictionBurst?: (info: EvictionBurstInfo) => void;
 }
@@ -92,8 +91,7 @@ export interface ChunkStoreOptions {
 /**
  * Threshold for the eviction-burst log. A single insert that evicts
  * this many entries or more fires the optional `onEvictionBurst`
- * callback. Matches the pre-Slice-6 behavior baked into
- * `cpuCache.ts:evictIfNeeded`.
+ * callback.
  */
 const EVICTION_BURST_THRESHOLD = 16;
 
@@ -118,7 +116,7 @@ export class ChunkStore {
     this.onEvictionBurst = opts.onEvictionBurst;
   }
 
-  /** Current bytes held by the store; mirrors the pre-Slice-6 field. */
+  /** Current bytes held by the store. */
   get bytes(): number {
     return this.bytesCounter;
   }

@@ -110,8 +110,7 @@ function createMockContentSource(): MockContentSource {
 
     // No-op: the cache doesn't drive `handleBinary` — only the bridge
     // does, and these tests don't exercise the bridge path. The mock
-    // implements the method to satisfy the `ContentSource` interface
-    // post Slice 11.
+    // implements the method to satisfy the `ContentSource` interface.
     handleBinary(_key: string, _data: ArrayBuffer): void {},
 
     resolve(compositeKey: string, bytes?: ArrayBuffer, dataType?: string) {
@@ -841,10 +840,10 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Adaptive eviction tests migrated to interactionMode.test.ts (Slice 3).
-  // The detector is now a pure unit; exercising it through the cache no
+  // Adaptive eviction tests live in interactionMode.test.ts. The
+  // detector is a pure unit; exercising it through the cache no
   // longer adds coverage. Integration of the tier-order consequence
-  // lives at the EvictionPolicy seam (planned for Slice 5).
+  // lives at the EvictionPolicy seam.
   // =========================================================================
 
   // =========================================================================
@@ -1009,14 +1008,12 @@ describe("CpuCache", () => {
       expect(tel.lastError).toContain("404");
     });
 
-    it("'no wire format registered' classifies as permanent — no retry (Slice 8 #602 bug fix)", async () => {
-      // Pre-Slice-8 regression: the cache catch block matched
-      // `err.message.includes("404") || err.message.includes("malformed")`
-      // to decide permanent vs. transient. "No wire format registered
-      // for image X" matched neither, so the cache wasted a retry on
-      // a setup bug. With typed FetchError + classifyFetchError, the
-      // source's `kind: "permanent"` flows through to the cache and
-      // dispatches via the policy.
+    it("'no wire format registered' classifies as permanent — no retry", async () => {
+      // Substring-only classification (matching only "404" /
+      // "malformed") would treat this as transient and waste a retry
+      // on a setup bug. With typed FetchError + classifyFetchError,
+      // the source's `kind: "permanent"` flows through to the cache
+      // and dispatches via the policy.
       //
       // End-to-end via ProxiedContentSource (the source that raises
       // this error) — exercises the full fetch path, not just the
@@ -1424,20 +1421,19 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Characterization gaps surfaced by the dechaos pre-refactor pass.
-  // Pin behaviour as it stands today; the upcoming refactor (PRD #592)
-  // preserves these contracts unless a slice explicitly fixes them.
+  // Characterization gaps: pin subtle behaviours that are easy to break
+  // accidentally — race orderings, telemetry shape, eviction-burst log.
   // =========================================================================
 
-  describe("characterization gaps (pre-refactor)", () => {
+  describe("characterization gaps", () => {
     beforeEach(() => {
       vi.mocked(debugLog).mockClear();
     });
 
     it("cancelled-during-decode: chunk still lands in cache and ready[]", async () => {
-      // Race per dechaos pass 5: a fetch resolves *before* cancelDataset,
-      // but the queued decode microtask runs *after* it. The cache-insert
-      // and ready-push paths run unconditionally (no inFlight check), so
+      // Race: a fetch resolves *before* cancelDataset, but the queued
+      // decode microtask runs *after* it. The cache-insert and
+      // ready-push paths run unconditionally (no inFlight check), so
       // the chunk lands in both. The orchestrator's wanted-set filter
       // handles the stale delivery downstream — this test pins the
       // behaviour rather than asserts it as a defect.
@@ -1567,7 +1563,7 @@ describe("CpuCache", () => {
       expect(removedArg).toBeGreaterThanOrEqual(16);
     });
 
-    it("imageWireFormats cleared on dataset removal (Slice 4 #598 fix)", async () => {
+    it("imageWireFormats cleared on dataset removal", async () => {
       // Construct a ProxiedContentSource directly — the leak fix lives
       // on it, not on the cache. Register an image, drop the dataset
       // via unregisterDataset, then assert the next fetch rejects with

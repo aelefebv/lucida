@@ -1,11 +1,11 @@
 /**
- * Unit tests for {@link ProxyStore} (Slice 6, `#600`).
+ * Unit tests for {@link ProxyStore}.
  *
  * Exercises the two-level Map shape (datasetId → innerKey →
  * ProxyCacheEntry), dataset-scoped cancel, and policy-driven eviction
  * across datasets. Synthetic-input only — no fetch mock, no cache
- * instance. The existing `cpuCache.test.ts:proxy tier` describe block
- * covers the higher-level integration.
+ * instance. The `cpuCache.test.ts:proxy tier` describe block covers
+ * the higher-level integration.
  */
 
 import { describe, it, expect, vi } from "vitest";
