@@ -317,8 +317,8 @@ interface ColdStateActiveEntryBase {
  *     worker should serve the proxy alongside the chunks
  *     (`fields-with-proxy-fallback`) or rely on chunks only
  *     (`fields-with-detail`). Invisible entries from the planner also
- *     surface as `field` with `mode: "fields-with-detail"` (the legacy
- *     encoding) so the worker doesn't try to fetch proxies for them.
+ *     surface as `field` with `mode: "fields-with-detail"` so the
+ *     worker doesn't try to fetch proxies for them.
  *   - `kind: "well-as-proxy"` — a synthesised well-level entry with no
  *     backing image; the worker renders the well's proxy directly.
  *     `imageId` is intentionally absent (`?: never`) — use `entityId`

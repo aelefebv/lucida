@@ -214,9 +214,9 @@ export class RenderLoop {
   }
 
   /**
-   * Handle multi-channel mode transitions. When switching from multi-channel
-   * to single-channel (or vice versa), clean up resources keyed with the
-   * old naming convention so they don't leak on the worker.
+   * On multi-channel ↔ single-channel transitions, clear members whose
+   * key shape (composite `:chN` vs plain) no longer matches the new mode,
+   * so they don't leak on the worker.
    */
   private handleMultiChannelTransition(): void {
     const mc = this.session.scene!.multi_channel();

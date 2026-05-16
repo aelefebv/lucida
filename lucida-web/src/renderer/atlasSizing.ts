@@ -14,7 +14,7 @@
  * `createSliceAtlas` (which both took `chunkX, chunkY[, chunkZ]`).
  *
  * NOTE: This is the OPPOSITE order from `LodIndirectionMeta.chunkDims`,
- * which is stored as `[Z, Y, X]` for legacy reasons. Don't mix them.
+ * which is stored as `[Z, Y, X]`. Don't mix them.
  */
 
 import type { DeviceLimits } from "./gpuContext.ts";

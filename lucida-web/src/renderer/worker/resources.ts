@@ -33,7 +33,7 @@ export function getOrCreateLUT(device: GPUDevice, name: string): GPUTexture {
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
   // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
-  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+  // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app).
   device.queue.writeTexture({ texture: tex }, data as Uint8Array<ArrayBuffer>, { bytesPerRow: 256 * 4 }, [256, 1]);
   lutCache.set(name, tex);
   return tex;

@@ -93,7 +93,7 @@ export function classifyProxyResend(
 // ---------------------------------------------------------------------------
 
 export interface RunChunkResendPassArgs {
-  /** Per-dataset map (avoids last-dataset-wins; #613). */
+  /** Per-dataset map (avoids last-dataset-wins). */
   requestsByDataset: Map<string, ChunkRequest[]>;
   manifestByImage: Map<string, ManifestEntry>;
   tracker: DeliveryTracker;
