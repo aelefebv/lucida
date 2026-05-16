@@ -252,3 +252,42 @@ describe("ProxiedContentSource.fetchProxy", () => {
     await expect(promise).rejects.toThrow(/magic/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// handleBinary dispatch (Slice 11 — bridge binary-router cleanup)
+// ---------------------------------------------------------------------------
+
+describe("ProxiedContentSource.handleBinary", () => {
+  it("routes a `proxy/...` key to the proxy queue", async () => {
+    const ctrl = new AbortController();
+    const promise = source.fetchProxy(
+      { datasetId: "ds-1", entityId: "ent-1", kind: "WellProxy3D", t: 0, c: 0 },
+      ctrl.signal,
+    );
+
+    const response = makeProxyResponse({ dims: [2, 2, 2], payloadBytes: 16 });
+    source.handleBinary(
+      proxyResponseKey("ent-1", "WellProxy3D", 0, 0),
+      response,
+    );
+
+    const result = await promise;
+    expect(result.header.dims).toEqual([2, 2, 2]);
+    expect(result.data.byteLength).toBe(16);
+  });
+
+  it("routes a non-proxy key to the chunk queue", async () => {
+    const ctrl = new AbortController();
+    const promise = source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0" },
+      ctrl.signal,
+    );
+
+    const responseBytes = new Uint8Array([0x10, 0x20, 0x30]).buffer;
+    source.handleBinary("ds-1/image-1/0/0/0/0/0/0", responseBytes);
+
+    const result = await promise;
+    expect(result.bytes).toBe(responseBytes);
+    expect(result.dataType).toBe("uint16");
+  });
+});

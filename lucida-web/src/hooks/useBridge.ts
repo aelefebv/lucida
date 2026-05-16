@@ -279,11 +279,8 @@ export function useBridge({
         }
       },
       onAck: (_seq) => {},
-      onChunkData: (key, data) => {
-        contentSource.handleChunkData(key, data);
-      },
-      onProxyData: (key, data) => {
-        contentSource.handleProxyData(key, data);
+      onBinary: (key, data) => {
+        contentSource.handleBinary(key, data);
       },
       onPeerJoined: (clientId, presence) => {
         setPeers(prev => {

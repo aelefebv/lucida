@@ -108,6 +108,12 @@ function createMockContentSource(): MockContentSource {
       });
     },
 
+    // No-op: the cache doesn't drive `handleBinary` — only the bridge
+    // does, and these tests don't exercise the bridge path. The mock
+    // implements the method to satisfy the `ContentSource` interface
+    // post Slice 11.
+    handleBinary(_key: string, _data: ArrayBuffer): void {},
+
     resolve(compositeKey: string, bytes?: ArrayBuffer, dataType?: string) {
       const entry = pendingFetches.get(compositeKey);
       if (entry) {

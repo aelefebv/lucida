@@ -49,6 +49,12 @@ export interface ContentSource {
   fetch(request: FetchRequest, signal: AbortSignal): Promise<FetchResult>;
   /** Fetch a proxy asset. Resolves with header + raw voxel bytes. */
   fetchProxy(request: FetchProxyRequest, signal: AbortSignal): Promise<FetchProxyResult>;
+  /**
+   * Route a binary frame from the transport layer (e.g. the bridge's
+   * WebSocket) to the appropriate pending request. Owns the
+   * chunk-vs-proxy dispatch decision so the transport stays generic.
+   */
+  handleBinary(key: string, data: ArrayBuffer): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,7 +123,21 @@ export class ProxiedContentSource implements ContentSource {
     }
   }
 
-  /** Route binary chunk data from bridge. Called by the onChunkData handler. */
+  /**
+   * Route a binary frame from the bridge to the matching pending
+   * chunk- or proxy-request. The transport delivers (key, payload)
+   * without knowing the application's chunk-vs-proxy taxonomy; this
+   * method owns the dispatch by sniffing the `proxy/` key prefix.
+   */
+  handleBinary(key: string, data: ArrayBuffer): void {
+    if (key.startsWith("proxy/")) {
+      this.handleProxyData(key, data);
+    } else {
+      this.handleChunkData(key, data);
+    }
+  }
+
+  /** Route binary chunk data to a pending chunk request. */
   handleChunkData(key: string, data: ArrayBuffer): void {
     const entry = this.pending.get(key);
     if (entry) {
@@ -127,10 +147,7 @@ export class ProxiedContentSource implements ContentSource {
     }
   }
 
-  /**
-   * Route binary proxy data from bridge. Called when the bridge receives
-   * a binary frame whose key starts with `proxy/`.
-   */
+  /** Route binary proxy data to a pending proxy request. */
   handleProxyData(key: string, data: ArrayBuffer): void {
     const entry = this.pendingProxy.get(key);
     if (entry) {
