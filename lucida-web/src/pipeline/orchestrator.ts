@@ -78,10 +78,10 @@ import {
 } from "./upload/constants.ts";
 import {
   proxyKeyFromDelivery,
-  proxyKeyFromMissing,
   proxyKeyFromRequest,
 } from "./upload/proxyKeys.ts";
 import { identityMatrix } from "./upload/coldState/identity.ts";
+import { DeliveryTracker } from "./upload/delivery/tracker.ts";
 
 /** Per-epoch cause keys we attribute rebuilds to. */
 type ColdStateCauseKey = "content" | "layout" | "view" | "selection" | "asset";
@@ -324,42 +324,16 @@ export class Orchestrator {
    */
   private _lastProxyRequests = new Map<string, ProxyRequest[]>();
 
-  // Delivery state — tracks what's been sent to the GPU worker
-  private deliverySentToWorker = new Map<string, Set<string>>();
-
   /**
-   * Chunks the GPU worker has reported as `skipped` (atlas full +
-   * incoming farther than the farthest existing slot). The resend pass
-   * checks this set before attempting an upload; without it, the
-   * pass would re-send the same too-far chunks every tick because
-   * `handleChunksEvicted` removes them from `deliverySentToWorker`,
-   * driving the `upload.resend_storm` and `upload.budget_exhausted`
-   * anomalies. Cleared on every cold-state rebuild — the camera or
-   * active set may have shifted enough that previously-too-far chunks
-   * now fit. Keyed by workerMemberId (mirrors `deliverySentToWorker`).
+   * Delivery state for both chunks and proxies. Owns four maps that
+   * were previously scattered as orchestrator fields
+   * (`deliverySentToWorker`, `deliveryRejectedByWorker`, `widToEntityId`,
+   * `proxyDeliveredToWorker`). The implicit lifetime invariants
+   * ("clear sent / rejected / wid on every cold-state rebuild", "proxy
+   * delivery survives cold state") are encoded as method contracts on
+   * the tracker. See Seam F of the dechaos boundary scan.
    */
-  private deliveryRejectedByWorker = new Map<string, Set<string>>();
-
-  /**
-   * Reverse lookup from `workerMemberId` to `entityId`, rebuilt during
-   * the rebuild path from `_lastFilteredRequests`. Needed by
-   * `handleChunksEvicted` to resolve the cpuCache entityId for
-   * `markRejected` calls — workerMemberId is composite for multi-channel
-   * (`imageId:chN`) and may differ from entityId entirely (plate fields).
-   */
-  private widToEntityId = new Map<string, string>();
-
-  /**
-   * Tracks proxies already uploaded to the GPU worker. Composite key:
-   * `${datasetId}|${entityId}|${proxyKind}|${t}|${c}`. Mirrors
-   * `deliverySentToWorker` for chunks: cleared on full-plan ticks,
-   * cleared per-entry by `handleWantedSetDelta` when the worker reports
-   * a `MissingProxy`, and consulted by `deliverToWorker`'s proxy resend
-   * pass. Without it the cache-hit short-circuit (which re-submits
-   * `_lastProxyRequests` every tick) would re-emit and re-upload every
-   * cached proxy on every animation frame.
-   */
-  private proxyDeliveredToWorker = new Set<string>();
+  private deliveryTracker = new DeliveryTracker();
 
   // -------------------------------------------------------------------------
   // Cold-state rebuild telemetry. See COLD_STATE_* constants above.
@@ -550,11 +524,12 @@ export class Orchestrator {
 
     // Cold-state rebuild path. Drop worker-rejection state on both
     // sides — the camera, active set, or selection has shifted enough
-    // that previously-too-far chunks may now fit. The per-dataset loop
-    // below re-populates `widToEntityId` from the new
-    // `_lastFilteredRequests`.
-    this.deliveryRejectedByWorker.clear();
-    this.widToEntityId.clear();
+    // that previously-too-far chunks may now fit. `onColdStateRebuild`
+    // clears chunk sent / rejected / wid-to-entity tracking in one
+    // shot; the per-dataset loop below re-populates wid→entity from
+    // the new `_lastFilteredRequests` via `recordMember`. Proxy
+    // tracking survives — worker proxy pools persist across cold state.
+    this.deliveryTracker.onColdStateRebuild();
     ctx.cpuCache.clearRejected();
 
     // Step 2 — Settings
@@ -652,11 +627,13 @@ export class Orchestrator {
       // Build wid → entityId for this dataset so handleChunksEvicted
       // can resolve `cpuCache.markRejected(entityId, ...)` from the
       // worker's report (which carries workerMemberId, not entityId).
+      // Pre-populated here at plan time so an eviction that arrives
+      // before any chunk has been sent still resolves the entityId.
       // Multi-dataset case: rebuilt cumulatively across the loop since
-      // we clear once at the top of the rebuild path.
+      // `onColdStateRebuild` clears once at the top of the rebuild path.
       for (const req of result.requests) {
         const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
-        this.widToEntityId.set(wid, req.entityId);
+        this.deliveryTracker.recordMember(wid, req.entityId);
       }
       // Note: proxy delivery tracking is NOT cleared here. Worker proxy pools
       // persist across cold states (they're created lazily in getOrCreateProxyPool
@@ -752,10 +729,12 @@ export class Orchestrator {
         this.lastViewEpochByDataset.set(dsId, currentEpochs.view);
       }
 
-      // Clear chunk delivery tracking so chunks are re-sent for the new state.
-      // Worker rebuilds slice/volume atlas pools on each cold state, so all
-      // chunks must be re-uploaded to fill the rebuilt atlases.
-      this.deliverySentToWorker.clear();
+      // Chunk delivery tracking was cleared once at the top of the
+      // rebuild path via `deliveryTracker.onColdStateRebuild()` — see
+      // the comment above the call. The worker rebuilds slice/volume
+      // atlas pools on each cold state, so all chunks must be re-
+      // uploaded to fill the rebuilt atlases; the tracker reset
+      // ensures the resend pass sees every chunk as un-sent.
 
       // Submit chunk + proxy requests in a single call so they don't
       // cancel each other. Proxies sit in their own queue inside
@@ -1457,16 +1436,15 @@ export class Orchestrator {
           this.currentUploadStats.resendChunksConsidered++;
 
           const wid = multiChannel ? `${req.imageId}:ch${req.c}` : req.imageId;
-          const ss = this.deliverySentToWorker.get(wid);
-          if (ss?.has(req.chunkKey)) {
+          if (this.deliveryTracker.wasChunkSent(wid, req.chunkKey)) {
             this.currentUploadStats.resendChunksAlreadySent++;
             continue;
           }
 
           // Worker rejected this chunk under the current camera (atlas
           // full + too far). Don't re-attempt until the next cold-state
-          // rebuild clears `deliveryRejectedByWorker`.
-          if (this.deliveryRejectedByWorker.get(wid)?.has(req.chunkKey)) {
+          // rebuild clears the tracker's rejection state.
+          if (this.deliveryTracker.wasChunkRejected(wid, req.chunkKey)) {
             this.currentUploadStats.resendChunksRejected++;
             continue;
           }
@@ -1490,21 +1468,21 @@ export class Orchestrator {
     }
 
     // Re-send proxies the worker has evicted (or never received because
-    // the previous tick cleared `proxyDeliveredToWorker`). Mirrors the
-    // chunk resend pass: iterate the last-known proxy request set, skip
-    // anything already tracked as delivered, and look up the cached
-    // entry via `getCachedProxy`. New deliveries (above) populate
-    // `proxyDeliveredToWorker` themselves; this pass closes the gap
-    // for cache hits where `submit()` is now a no-op. Iterate every
-    // dataset's proxy requests so multi-dataset rebuilds resend for
-    // every dataset, not just the last-processed one (see #613).
+    // the previous tick cleared the tracker's proxy-delivered entry).
+    // Mirrors the chunk resend pass: iterate the last-known proxy
+    // request set, skip anything already tracked as delivered, and
+    // look up the cached entry via `getCachedProxy`. New deliveries
+    // (above) populate the tracker themselves; this pass closes the
+    // gap for cache hits where `submit()` is now a no-op. Iterate
+    // every dataset's proxy requests so multi-dataset rebuilds resend
+    // for every dataset, not just the last-processed one (see #613).
     if (!budgetExhausted) {
       outer: for (const requests of this._lastProxyRequests.values()) {
         for (const req of requests) {
           if (budgetExhausted) break outer;
           this.currentUploadStats.resendProxiesConsidered++;
 
-          if (this.proxyDeliveredToWorker.has(proxyKeyFromRequest(req))) {
+          if (this.deliveryTracker.wasProxyDelivered(proxyKeyFromRequest(req))) {
             this.currentUploadStats.resendProxiesAlreadyDelivered++;
             continue;
           }
@@ -1545,16 +1523,16 @@ export class Orchestrator {
    * `skipped` chunks never made it into the atlas (full + incoming
    * farther than the farthest existing slot). Without rejection
    * tracking they would be re-sent every tick by the resend pass,
-   * driving `upload.resend_storm`. We add them to
-   * `deliveryRejectedByWorker` so the resend pass can short-circuit,
-   * and forward to `cpuCache.markRejected` so the cache stops
-   * re-fetching them under eviction churn.
+   * driving `upload.resend_storm`. The tracker adds them to its
+   * rejected set so the resend pass can short-circuit; the orchestrator
+   * then forwards each skipped-with-known-entityId to
+   * `cpuCache.markRejected` so the cache stops re-fetching them
+   * under eviction churn.
    *
-   * Both sets are removed from `deliverySentToWorker` (skipped chunks
-   * were optimistically added there by `sendDeliveryToWorker`). Both
-   * are also removed from `deliveryRejectedByWorker` for evicted
-   * chunks, since acceptance + later eviction proves the chunk was
-   * deliverable.
+   * Both sets are removed from the tracker's sent set (skipped chunks
+   * were optimistically added there by `sendDeliveryToWorker`).
+   * Evicted chunks are also removed from the rejected set since
+   * acceptance + later eviction proves the chunk was deliverable.
    */
   handleChunksEvicted(
     workerMemberId: string,
@@ -1562,38 +1540,19 @@ export class Orchestrator {
     skipped: string[],
     cpuCache: CpuCache,
   ): void {
-    const sentSet = this.deliverySentToWorker.get(workerMemberId);
-    if (sentSet) {
-      for (const key of evicted) sentSet.delete(key);
-      for (const key of skipped) sentSet.delete(key);
-    }
-
-    if (evicted.length > 0) {
-      const rejectedSet = this.deliveryRejectedByWorker.get(workerMemberId);
-      if (rejectedSet) {
-        for (const key of evicted) rejectedSet.delete(key);
-      }
-    }
-
-    if (skipped.length > 0) {
-      let rejectedSet = this.deliveryRejectedByWorker.get(workerMemberId);
-      if (!rejectedSet) {
-        rejectedSet = new Set();
-        this.deliveryRejectedByWorker.set(workerMemberId, rejectedSet);
-      }
-      const entityId = this.widToEntityId.get(workerMemberId);
-      for (const key of skipped) {
-        rejectedSet.add(key);
-        if (entityId) cpuCache.markRejected(entityId, key);
-      }
+    const { rejectedNew } = this.deliveryTracker.markChunkEvicted(
+      workerMemberId, evicted, skipped,
+    );
+    for (const { entityId, chunkKey } of rejectedNew) {
+      cpuCache.markRejected(entityId, chunkKey);
     }
   }
 
   /**
    * Process a wanted-set delta from the GPU worker.
    *
-   * For each missing proxy, clear the entry from
-   * `proxyDeliveredToWorker` so the next tick's resend pass picks it up
+   * For each missing proxy, clear the entry from the tracker's
+   * proxy-delivered set so the next tick's resend pass picks it up
    * via `getCachedProxy`. Chunk entries are ignored: the chunk-resend
    * path is driven by `cpuCache` drain order plus the upload-pass
    * lane/LOD filter in `deliverToWorker` — there is no per-chunk
@@ -1608,31 +1567,27 @@ export class Orchestrator {
   ): void {
     for (const entry of missing) {
       if (entry.kind === "proxy") {
-        this.proxyDeliveredToWorker.delete(proxyKeyFromMissing(entry));
+        this.deliveryTracker.clearProxyDelivered(entry);
       }
     }
   }
 
   /** Get all tracked worker member IDs (for multi-channel transition cleanup). */
   getTrackedMemberIds(): string[] {
-    return [...this.deliverySentToWorker.keys()];
+    return [...this.deliveryTracker.trackedKeys()];
   }
 
   /** Clear all delivery state for a member (e.g. on dataset removal). */
   clearMemberResources(workerMemberId: string): void {
-    this.deliverySentToWorker.delete(workerMemberId);
-    this.deliveryRejectedByWorker.delete(workerMemberId);
-    this.widToEntityId.delete(workerMemberId);
-    // Drop proxy delivery tracking entries scoped to this member's dataset
-    // so a re-add of the same dataset doesn't skip resends. Keys are
-    // `${datasetId}|${entityId}|${kind}|${t}|${c}` — workerMemberId is
-    // either a datasetId, an imageId, or `${imageId}:ch${c}`. We do a
-    // best-effort prefix match on datasetId-shaped keys; benign if no
-    // match (the worker recreates pools on next request anyway).
-    const prefix = `${workerMemberId}|`;
-    for (const key of this.proxyDeliveredToWorker) {
-      if (key.startsWith(prefix)) this.proxyDeliveredToWorker.delete(key);
-    }
+    // Two-pronged cleanup: chunk-side tracking is keyed by
+    // workerMemberId, proxy-side tracking is keyed by composite
+    // `${datasetId}|...`. `workerMemberId` here is either a datasetId,
+    // an imageId, or `${imageId}:ch${c}` — the id shape is ambiguous,
+    // so we call both. Each is a no-op when the id doesn't match its
+    // expected shape; the worker recreates pools on next request
+    // anyway.
+    this.deliveryTracker.clearMember(workerMemberId);
+    this.deliveryTracker.clearDataset(workerMemberId);
     // Drop the cached lastViewEpoch entry. If `workerMemberId` is a
     // bare datasetId this clears the right entry; for imageId-shaped IDs
     // it's a no-op (the dataset entry survives, which is correct — the
@@ -1711,13 +1666,7 @@ export class Orchestrator {
     const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
 
     // Send chunk data if not already sent
-    let sentSet = this.deliverySentToWorker.get(workerMemberId);
-    if (!sentSet) {
-      sentSet = new Set();
-      this.deliverySentToWorker.set(workerMemberId, sentSet);
-    }
-
-    if (sentSet.has(delivery.chunkKey)) {
+    if (this.deliveryTracker.wasChunkSent(workerMemberId, delivery.chunkKey)) {
       this.currentUploadStats.skippedAlreadySent++;
       return 0;
     }
@@ -1748,16 +1697,16 @@ export class Orchestrator {
       );
     }
 
-    sentSet.add(delivery.chunkKey);
+    this.deliveryTracker.markChunkSent(workerMemberId, delivery.entityId, delivery.chunkKey);
     return delivery.data.byteLength;
   }
 
   /**
    * Forward a proxy delivery to the GPU worker.
    *
-   * Records the composite key in `proxyDeliveredToWorker` so subsequent
-   * cache-hit ticks (which re-submit `_lastProxyRequests`) can short-
-   * circuit without re-uploading.
+   * Records the composite key in the tracker's proxy-delivered set so
+   * subsequent cache-hit ticks (which re-submit `_lastProxyRequests`)
+   * can short-circuit without re-uploading.
    */
   private sendProxyDeliveryToWorker(
     ctx: TickContext,
@@ -1775,7 +1724,7 @@ export class Orchestrator {
       delivery.data,
       epochs,
     );
-    this.proxyDeliveredToWorker.add(proxyKeyFromDelivery(delivery));
+    this.deliveryTracker.markProxyDelivered(proxyKeyFromDelivery(delivery));
     return delivery.data.byteLength;
   }
 
@@ -1787,7 +1736,7 @@ export class Orchestrator {
    * @internal
    */
   getProxyDeliveredKeys(): Set<string> {
-    return this.proxyDeliveredToWorker;
+    return this.deliveryTracker.getProxyDeliveredKeys();
   }
 
   /**

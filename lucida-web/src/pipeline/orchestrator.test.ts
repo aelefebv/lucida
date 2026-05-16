@@ -706,7 +706,7 @@ describe("proxy delivery tracking", () => {
     expect(proxyAssetData).toHaveBeenCalledTimes(2);
   });
 
-  it("proxyDeliveredToWorker persists across full plans (worker proxy pools survive cold state)", async () => {
+  it("tracker proxy-delivered set persists across full plans (worker proxy pools survive cold state)", async () => {
     // Worker proxy pools are not rebuilt on cold state (only chunk atlases
     // are). Re-sending proxies on every full plan would upload-spam them
     // every time a view epoch bumps (e.g., wheel scroll). Worker eviction
@@ -1328,7 +1328,7 @@ describe("chunk delivery (drain pass)", () => {
     expect(scopedDebugStats.upload!.tick!.resendChunksConsidered).toBe(1);
   });
 
-  it("resend pass: chunk in deliveryRejectedByWorker → skipped; resendChunksRejected bumps", () => {
+  it("resend pass: chunk in tracker's rejected set → skipped; resendChunksRejected bumps", () => {
     const orch = new Orchestrator();
     const req = makeChunkRequest({ chunkKey: "0/0/0/2/0/0" });
     const cpuCache = makeChunkCpuCache();
@@ -1336,11 +1336,11 @@ describe("chunk delivery (drain pass)", () => {
     const ctx = makeChunkCtx({ cpuCache, sliceChunkData: sliceFn });
     seedLastRequests(orch, [req]);
     // Mark the chunk as rejected for the worker member id (= imageId
-    // since multiChannel = false). The resend pass checks this map
+    // since multiChannel = false). The resend pass checks the tracker
     // BEFORE consulting the cache, so the cache mock is irrelevant here.
-    (orch as unknown as {
-      deliveryRejectedByWorker: Map<string, Set<string>>;
-    }).deliveryRejectedByWorker.set("img-0", new Set([req.chunkKey]));
+    // Drive through the worker-eviction path so we exercise the same
+    // tracker contract the runtime uses.
+    orch.handleChunksEvicted("img-0", [], [req.chunkKey], cpuCache);
 
     orch.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
 
@@ -1393,32 +1393,40 @@ describe("chunk delivery (drain pass)", () => {
 
 describe("handleChunksEvicted", () => {
   let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+  let DeliveryTracker: typeof import("./upload/delivery/tracker.ts").DeliveryTracker;
 
   beforeEach(async () => {
     vi.resetModules();
     Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+    DeliveryTracker = (await import("./upload/delivery/tracker.ts")).DeliveryTracker;
   });
+
+  function getTracker(
+    orch: import("./orchestrator.ts").Orchestrator,
+  ): InstanceType<typeof DeliveryTracker> {
+    return (orch as unknown as {
+      deliveryTracker: InstanceType<typeof DeliveryTracker>;
+    }).deliveryTracker;
+  }
 
   function seedSentSet(
     orch: import("./orchestrator.ts").Orchestrator,
     wid: string,
     keys: string[],
+    entityId = "field-0",
   ): void {
-    const map = (orch as unknown as {
-      deliverySentToWorker: Map<string, Set<string>>;
-    }).deliverySentToWorker;
-    map.set(wid, new Set(keys));
+    const tracker = getTracker(orch);
+    for (const k of keys) tracker.markChunkSent(wid, entityId, k);
   }
 
+  // We seed rejected state through `markChunkEvicted` (skipped path)
+  // so we exercise the same contract the runtime uses.
   function seedRejectedSet(
     orch: import("./orchestrator.ts").Orchestrator,
     wid: string,
     keys: string[],
   ): void {
-    const map = (orch as unknown as {
-      deliveryRejectedByWorker: Map<string, Set<string>>;
-    }).deliveryRejectedByWorker;
-    map.set(wid, new Set(keys));
+    getTracker(orch).markChunkEvicted(wid, [], keys);
   }
 
   function seedWidToEntity(
@@ -1426,57 +1434,54 @@ describe("handleChunksEvicted", () => {
     wid: string,
     entityId: string,
   ): void {
-    const map = (orch as unknown as {
-      widToEntityId: Map<string, string>;
-    }).widToEntityId;
-    map.set(wid, entityId);
+    getTracker(orch).recordMember(wid, entityId);
   }
 
-  function getSentSet(
+  function getSentKeys(
     orch: import("./orchestrator.ts").Orchestrator,
     wid: string,
-  ): Set<string> | undefined {
-    return (orch as unknown as {
-      deliverySentToWorker: Map<string, Set<string>>;
-    }).deliverySentToWorker.get(wid);
+    candidates: string[],
+  ): Set<string> {
+    const tracker = getTracker(orch);
+    return new Set(candidates.filter(k => tracker.wasChunkSent(wid, k)));
   }
 
-  function getRejectedSet(
+  function getRejectedKeys(
     orch: import("./orchestrator.ts").Orchestrator,
     wid: string,
-  ): Set<string> | undefined {
-    return (orch as unknown as {
-      deliveryRejectedByWorker: Map<string, Set<string>>;
-    }).deliveryRejectedByWorker.get(wid);
+    candidates: string[],
+  ): Set<string> {
+    const tracker = getTracker(orch);
+    return new Set(candidates.filter(k => tracker.wasChunkRejected(wid, k)));
   }
 
-  it("evicted keys are removed from deliverySentToWorker", () => {
+  it("evicted keys are removed from the tracker's sent set", () => {
     const orch = new Orchestrator();
     seedSentSet(orch, "img-0", ["k1", "k2", "k3"]);
 
     orch.handleChunksEvicted("img-0", ["k1", "k3"], [], createMockCpuCache());
 
-    expect(getSentSet(orch, "img-0")).toEqual(new Set(["k2"]));
+    expect(getSentKeys(orch, "img-0", ["k1", "k2", "k3"])).toEqual(new Set(["k2"]));
   });
 
-  it("evicted keys are removed from deliveryRejectedByWorker (acceptance proves deliverable)", () => {
+  it("evicted keys are removed from the tracker's rejected set (acceptance proves deliverable)", () => {
     const orch = new Orchestrator();
     seedRejectedSet(orch, "img-0", ["k1", "k2"]);
 
     orch.handleChunksEvicted("img-0", ["k1"], [], createMockCpuCache());
 
-    expect(getRejectedSet(orch, "img-0")).toEqual(new Set(["k2"]));
+    expect(getRejectedKeys(orch, "img-0", ["k1", "k2"])).toEqual(new Set(["k2"]));
   });
 
-  it("skipped keys are added to deliveryRejectedByWorker", () => {
+  it("skipped keys are added to the tracker's rejected set", () => {
     const orch = new Orchestrator();
     seedSentSet(orch, "img-0", ["k1"]);
 
     orch.handleChunksEvicted("img-0", [], ["k1", "k2"], createMockCpuCache());
 
-    expect(getRejectedSet(orch, "img-0")).toEqual(new Set(["k1", "k2"]));
+    expect(getRejectedKeys(orch, "img-0", ["k1", "k2"])).toEqual(new Set(["k1", "k2"]));
     // skipped also removes from sent.
-    expect(getSentSet(orch, "img-0")).toEqual(new Set());
+    expect(getSentKeys(orch, "img-0", ["k1", "k2"])).toEqual(new Set());
   });
 
   it("skipped keys are forwarded to cpuCache.markRejected with the resolved entityId", () => {
@@ -1492,9 +1497,9 @@ describe("handleChunksEvicted", () => {
     expect(markRejected.mock.calls[1]).toEqual(["field-0", "kB"]);
   });
 
-  it("silent skip: markRejected NOT called when widToEntityId has no entry", () => {
+  it("silent skip: markRejected NOT called when no wid → entityId mapping exists", () => {
     const orch = new Orchestrator();
-    // No seedWidToEntity → widToEntityId.get returns undefined.
+    // No seedWidToEntity → tracker.entityIdFor returns null.
     const cpuCache = createMockCpuCache();
     const markRejected = cpuCache.markRejected as ReturnType<typeof vi.fn>;
 
@@ -1503,7 +1508,7 @@ describe("handleChunksEvicted", () => {
     expect(markRejected).not.toHaveBeenCalled();
     // The rejected set still receives the key (so the resend pass
     // short-circuits future re-attempts), but the cache isn't told.
-    expect(getRejectedSet(orch, "img-ghost")).toEqual(new Set(["k1"]));
+    expect(getRejectedKeys(orch, "img-ghost", ["k1"])).toEqual(new Set(["k1"]));
   });
 });
 
@@ -1648,25 +1653,24 @@ describe("multi-dataset upload characterization", () => {
     },
   );
 
-  it("deliverySentToWorker is empty after a fresh multi-dataset rebuild (clear-all behavior)", () => {
-    // Pre-Slice-4 the per-dataset loop calls `deliverySentToWorker.clear()`
-    // once per dataset (effectively all-or-nothing). Post-Slice-4 the
-    // intent is once-per-rebuild — same observable result. This test
-    // characterizes the current behavior: empty after a rebuild.
+  it("tracker.wasChunkSent returns false after a fresh multi-dataset rebuild (clear-all behavior)", async () => {
+    // Pre-Slice-4 the per-dataset loop called `deliverySentToWorker.clear()`
+    // once per dataset (effectively all-or-nothing). Post-Slice-5 a single
+    // `deliveryTracker.onColdStateRebuild()` call at the top of the
+    // rebuild path consolidates the reset — same observable result.
+    const { DeliveryTracker } = await import("./upload/delivery/tracker.ts");
     const orch = new Orchestrator();
+    const tracker = (orch as unknown as {
+      deliveryTracker: InstanceType<typeof DeliveryTracker>;
+    }).deliveryTracker;
     // Pre-seed a tracking entry that should be cleared by the rebuild.
-    (orch as unknown as {
-      deliverySentToWorker: Map<string, Set<string>>;
-    }).deliverySentToWorker.set("img-stale", new Set(["k1"]));
+    tracker.markChunkSent("img-stale", "field-stale", "k1");
 
     const scene = makeMultiDatasetScene();
     const datasets = makeTwoDatasetEntries();
     orch.planAndFetch(makeCtx(scene, datasets), new Map());
 
-    const sentMap = (orch as unknown as {
-      deliverySentToWorker: Map<string, Set<string>>;
-    }).deliverySentToWorker;
-    expect(sentMap.has("img-stale")).toBe(false);
+    expect(tracker.wasChunkSent("img-stale", "k1")).toBe(false);
   });
 
   it("per-dataset sendColdState + sendViewHotState: each dataset receives its own message on initial plan", () => {
@@ -1700,20 +1704,22 @@ describe("cold-state lifecycle invariant", () => {
     Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
   });
 
-  it("after sendColdState, deliverySentToWorker is empty for previously-sent keys", () => {
-    // Invariant: every `sendColdState` is followed by
-    // `deliverySentToWorker.clear()` (today inside the per-dataset
-    // loop; post-Slice-4 once per rebuild). Without this the worker
+  it("after sendColdState, tracker.wasChunkSent returns false for previously-sent keys", async () => {
+    // Invariant: every cold-state rebuild calls
+    // `deliveryTracker.onColdStateRebuild()`, which clears the sent /
+    // rejected / wid → entity maps in one shot. Without this the worker
     // would build a fresh atlas while the orchestrator believed it had
     // already supplied chunks — atlas would stay empty for stale keys.
     //
     // After the Seam B refactor folds the clear into sendColdState
     // itself, this test guards against regressions.
+    const { DeliveryTracker } = await import("./upload/delivery/tracker.ts");
     const orch = new Orchestrator();
     // Seed: pretend a previous tick delivered a chunk for "img-0".
-    (orch as unknown as {
-      deliverySentToWorker: Map<string, Set<string>>;
-    }).deliverySentToWorker.set("img-0", new Set(["0/0/0/0/0/0"]));
+    const tracker = (orch as unknown as {
+      deliveryTracker: InstanceType<typeof DeliveryTracker>;
+    }).deliveryTracker;
+    tracker.markChunkSent("img-0", "field-0", "0/0/0/0/0/0");
 
     // Trigger a fresh rebuild.
     const scene = createMockScene({
@@ -1735,13 +1741,6 @@ describe("cold-state lifecycle invariant", () => {
 
     orch.planAndFetch(ctx, new Map());
 
-    const sentMap = (orch as unknown as {
-      deliverySentToWorker: Map<string, Set<string>>;
-    }).deliverySentToWorker;
-    // Either the entire entry is gone, or the set is empty — both
-    // satisfy the invariant. The orchestrator currently calls
-    // `.clear()` on the Map, dropping the entry entirely.
-    const sent = sentMap.get("img-0");
-    expect(sent === undefined || sent.size === 0).toBe(true);
+    expect(tracker.wasChunkSent("img-0", "0/0/0/0/0/0")).toBe(false);
   });
 });

@@ -1,7 +1,7 @@
 /**
  * Composite-key helpers for the proxy-delivered tracking set.
  *
- * `proxyDeliveredToWorker` keys are strings of the form
+ * `DeliveryTracker` proxy-delivered keys are strings of the form
  *
  *     `${datasetId}|${entityId}|${proxyKind}|${t}|${c}`
  *

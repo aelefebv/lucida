@@ -26,3 +26,5 @@ export {
 } from "./proxyKeys.ts";
 
 export { identityMatrix } from "./coldState/identity.ts";
+
+export { DeliveryTracker } from "./delivery/tracker.ts";

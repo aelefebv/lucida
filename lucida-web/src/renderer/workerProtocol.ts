@@ -397,9 +397,9 @@ export type MissingChunk = {
  * A proxy asset that the worker is missing from its proxy atlas.
  *
  * `datasetId` is included so the orchestrator can clear its
- * `proxyDeliveredToWorker` tracking by composite key without scanning
- * `_lastProxyRequests`. Populated from `coldState.datasetId` in
- * `wantedSet.computeWantedSet`.
+ * `DeliveryTracker` proxy-delivered entry by composite key without
+ * scanning `_lastProxyRequests`. Populated from `coldState.datasetId`
+ * in `wantedSet.computeWantedSet`.
  */
 export type MissingProxy = {
   kind: "proxy";
