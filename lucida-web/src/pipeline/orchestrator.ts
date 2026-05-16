@@ -340,9 +340,6 @@ export class Orchestrator {
    */
   private proxyDeliveredToWorker = new Set<string>();
 
-  /** Wanted-set from the GPU worker — entityId → Set<chunkKey> of missing chunks. */
-  private workerWantedSet = new Map<string, Set<string>>();
-
   // -------------------------------------------------------------------------
   // Cold-state rebuild telemetry. See COLD_STATE_* constants above.
   // -------------------------------------------------------------------------
@@ -1535,10 +1532,12 @@ export class Orchestrator {
   /**
    * Process a wanted-set delta from the GPU worker.
    *
-   * Accepts a discriminated union over chunks and proxies:
-   *  - chunk: land in `workerWantedSet` (existing chunk-resend logic).
-   *  - proxy: clear the entry from `proxyDeliveredToWorker` so the
-   *    next tick's resend pass picks it up via `getCachedProxy`.
+   * For each missing proxy, clear the entry from
+   * `proxyDeliveredToWorker` so the next tick's resend pass picks it up
+   * via `getCachedProxy`. Chunk entries are ignored: the chunk-resend
+   * path is driven by `cpuCache` drain order plus the upload-pass
+   * lane/LOD filter in `deliverToWorker` — there is no per-chunk
+   * worker-wanted-set on the orchestrator.
    *
    * Proxy resends must be tracked (not just chunk resends): the
    * cache-hit short-circuit means we can't rely on `submit()`
@@ -1547,22 +1546,9 @@ export class Orchestrator {
   handleWantedSetDelta(
     missing: Array<MissingChunk | MissingProxy>,
   ): void {
-    this.workerWantedSet.clear();
     for (const entry of missing) {
-      switch (entry.kind) {
-        case "chunk": {
-          let set = this.workerWantedSet.get(entry.entityId);
-          if (!set) {
-            set = new Set();
-            this.workerWantedSet.set(entry.entityId, set);
-          }
-          set.add(entry.chunkKey);
-          break;
-        }
-        case "proxy": {
-          this.proxyDeliveredToWorker.delete(proxyKeyFromMissing(entry));
-          break;
-        }
+      if (entry.kind === "proxy") {
+        this.proxyDeliveredToWorker.delete(proxyKeyFromMissing(entry));
       }
     }
   }
