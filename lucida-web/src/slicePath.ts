@@ -50,12 +50,10 @@ function uploadAndRenderSlice(
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
 
-  // Use Uploader delivery loop instead of uploadChunksForMembers
   const budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, sliceZ);
 
   if (!shouldRender) return budgetExhausted;
 
-  // Build layer params for visible layers in order
   const { layerOrder, allSettings } = settings;
   const currentZoom = scene.zoom();
   const centerArr = scene.center();
@@ -191,5 +189,4 @@ export function tickSlice(
 
 export function clearSliceForDataset(_state: SliceState, _dsId: string): void {}
 
-/** Clear member-keyed entries for all members of a dataset. */
 export function clearSliceForMembers(_state: SliceState, _memberIds: string[]): void {}

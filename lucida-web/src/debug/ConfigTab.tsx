@@ -27,10 +27,6 @@ import {
   type PlanningConfig,
 } from "../pipeline/planning/config.ts";
 
-// ---------------------------------------------------------------------------
-// Tunable schema
-// ---------------------------------------------------------------------------
-//
 // Single source of truth for the per-field UI metadata: label, slider
 // bounds + step, and the section grouping. The render loop walks these
 // arrays — new fields show up just by adding a row here.
@@ -94,10 +90,6 @@ const LANE_ORDER: (keyof PlanningConfig)[] = [
   "overviewLaneOffset",
 ];
 
-// ---------------------------------------------------------------------------
-// Cross-constraint warnings
-// ---------------------------------------------------------------------------
-
 /**
  * Returns a human warning when the middle mode band collapses, i.e. the
  * upper hysteresis band of FAR overlaps the lower band of DETAIL and
@@ -148,10 +140,6 @@ function labelForField(field: keyof PlanningConfig): string {
   return String(field);
 }
 
-// ---------------------------------------------------------------------------
-// Store hook (useSyncExternalStore — the React 19 pattern)
-// ---------------------------------------------------------------------------
-
 function usePlanningConfig(): PlanningConfig {
   return useSyncExternalStore(
     (cb) => configStore.subscribe(cb),
@@ -159,10 +147,6 @@ function usePlanningConfig(): PlanningConfig {
     () => configStore.get(),
   );
 }
-
-// ---------------------------------------------------------------------------
-// Per-row UI
-// ---------------------------------------------------------------------------
 
 /**
  * One tunable row: label + slider + number input + reset arrow (visible
@@ -246,10 +230,6 @@ function TunableRow({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
 
 export function ConfigTab() {
   const cfg = usePlanningConfig();

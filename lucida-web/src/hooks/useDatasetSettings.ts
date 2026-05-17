@@ -308,7 +308,6 @@ export function useDatasetSettings({
     datasetCallbacksRef.current.removeDataset(id);
   }, [wasmSceneRef, datasetsRef, bridgeCallbacksRef, datasetCallbacksRef]);
 
-  // Build layer infos from WASM state
   const buildLayerInfos = (): LayerInfo[] => {
     const scene = wasmSceneRef.current;
     if (!scene) return [];
@@ -340,7 +339,6 @@ export function useDatasetSettings({
       const dr = dataRangeMap.get(id) ?? null;
       const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
 
-      // Use per-channel settings if available
       const chSettings = settings?.channel_settings?.[currentC];
 
       return {

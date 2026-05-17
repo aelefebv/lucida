@@ -47,12 +47,10 @@ function uploadAndRenderVolume(
   const { memberRoster, settings, eye, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel, entityIndexByDataset } = plan;
   const { layerOrder, allSettings } = settings;
 
-  // Use Uploader delivery loop instead of uploadChunksForMembers
   const budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
 
   if (!shouldRender) return budgetExhausted;
 
-  // Build layer params for visible layers in order
   const invVP = new Float32Array(scene.inv_view_proj());
   const viewProj = new Float32Array(scene.view_proj());
   const camForward = new Float32Array(scene.camera_forward());
@@ -208,7 +206,6 @@ export function tickVolume(
 
 export function clearVolumeForDataset(_state: VolumeState, _dsId: string): void {}
 
-/** Clear member-keyed entries for all members of a dataset. */
 export function clearVolumeForMembers(_state: VolumeState, _memberIds: string[]): void {}
 
 export function resetVolumeState(_state: VolumeState): void {}

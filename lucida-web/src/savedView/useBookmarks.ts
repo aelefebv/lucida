@@ -178,7 +178,7 @@ export function useBookmarks({
     return unsubscribe;
   }, [bridge]);
 
-  // --- Filter (purely local; no network) -------------------------------
+  // Filter (purely local; no network).
 
   const bookmarks = useMemo(() => {
     const needle = filter.search.trim().toLowerCase();
@@ -202,7 +202,7 @@ export function useBookmarks({
     setFilter((f) => ({ ...f, mineOnly: v }));
   }, []);
 
-  // --- CRUD wrappers (optimistic) --------------------------------------
+  // CRUD wrappers (optimistic).
 
   const createBookmark = useCallback(
     async (name: string, datasets: string[], view: SavedView): Promise<Bookmark> => {
@@ -272,7 +272,7 @@ export function useBookmarks({
   };
 }
 
-// --- Misc helpers (exported so the sidebar can reuse) -------------------
+// Misc helpers (exported so the sidebar can reuse).
 
 /**
  * Format an ISO timestamp as "3d ago", "2h ago", "just now". Uses

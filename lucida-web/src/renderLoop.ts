@@ -31,7 +31,7 @@ export class RenderLoop {
   private rafId: number | null = null;
   private unsubs = new Map<string, () => void>();
 
-  // --- debug instrumentation (gated on the "render" category) ---
+  // Debug instrumentation (gated on the "render" category).
   // Per-(kind,source) emit throttling for `render_loop.dirty_set`. A
   // burst of identical calls within DIRTY_EMIT_INTERVAL_MS collapses to
   // one log + a `suppressedSince` count.

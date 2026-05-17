@@ -202,7 +202,6 @@ export interface ColdStateDebug {
   lastRebuildAt: number;
 }
 
-/** Initialize a zeroed ColdStateDebug snapshot. */
 export function emptyColdStateDebug(): ColdStateDebug {
   return {
     rebuilds: 0,
@@ -381,7 +380,6 @@ export interface UploadRollingStats {
   budgetExhaustedTicksLastSecond: number;
 }
 
-/** Initialize a zeroed UploadTickStats. */
 export function emptyUploadTickStats(): UploadTickStats {
   return {
     drainedChunks: 0, drainedProxies: 0,

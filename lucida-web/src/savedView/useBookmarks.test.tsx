@@ -42,7 +42,7 @@ function makeBm(overrides: Partial<Bookmark> = {}): Bookmark {
   };
 }
 
-// ---- Fetch stub used by all tests below ----
+// Fetch stub used by all tests below.
 
 interface ApiSpy {
   list: typeof globalThis.fetch;

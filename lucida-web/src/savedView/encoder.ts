@@ -25,7 +25,7 @@ import {
   type DisplayState,
 } from "./types.ts";
 
-// --- Public API ----------------------------------------------------------
+// Public API
 
 export async function encode(view: SavedView): Promise<string> {
   const stripped = stripDefaults(view);
@@ -64,7 +64,7 @@ export class SavedViewDecodeError extends Error {
   }
 }
 
-// --- Validation + version handling --------------------------------------
+// Validation + version handling
 
 function validateAndRestore(raw: unknown): SavedView {
   if (typeof raw !== "object" || raw === null) {
@@ -86,8 +86,7 @@ function validateAndRestore(raw: unknown): SavedView {
   return restoreDefaults(obj);
 }
 
-// --- Defaults stripping (encode-side) -----------------------------------
-//
+// Defaults stripping (encode-side).
 // Anything that matches the default in `lucida-core/src/scene/types.rs` and
 // `lucida-core/src/view.rs` gets dropped on the wire. The decoder re-fills.
 // This is purely a payload-size optimization — the round-trip identity is
@@ -199,7 +198,7 @@ function stripChannel(c: ChannelSettings, index: number): Record<string, unknown
 // Mirrors `Colormap::default_for_channel` in `lucida-core/src/scene/types.rs`.
 const DEFAULT_COLORMAP_CYCLE = ["magenta", "green", "cyan"] as const;
 
-// --- Defaults restoration (decode-side) ---------------------------------
+// Defaults restoration (decode-side)
 
 function restoreDefaults(obj: Record<string, unknown>): SavedView {
   const out: SavedView = {
@@ -273,7 +272,7 @@ function restoreChannel(p: Partial<ChannelSettings>, index: number): ChannelSett
   };
 }
 
-// --- gzip / gunzip via CompressionStream --------------------------------
+// gzip / gunzip via CompressionStream
 
 async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
   // Wrap in a Blob so the BodyInit overload is unambiguous (a raw
@@ -291,8 +290,7 @@ async function gunzip(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(buf);
 }
 
-// --- base64url ---------------------------------------------------------
-//
+// base64url.
 // btoa expects a binary string. We chunk the bytes to avoid blowing the
 // argument-list size on long payloads (typical limit ~64K).
 

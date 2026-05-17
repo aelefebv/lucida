@@ -45,12 +45,10 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     };
   }, [session, client, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Update slice params on prop changes and when loop is recreated
   useEffect(() => {
     loopRef.current?.setSliceParams(z, t, c);
   }, [z, t, c, scene, client, canvas]);
 
-  // Mark dirty on remote document updates
   useEffect(() => {
     loopRef.current?.markInteractiveDirty();
   }, [remoteDocumentVersion]);
@@ -136,7 +134,6 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     [scene, canvas, emitPresence, breakFollow],
   );
 
-  // Attach event handlers to the shared canvas
   useEffect(() => {
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);

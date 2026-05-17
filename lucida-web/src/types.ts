@@ -9,7 +9,6 @@ export interface VolumeData {
   depth: number; // Z
 }
 
-/** State for a single dataset, either local or remote. */
 export interface DatasetState {
   id: string;
   name: string;

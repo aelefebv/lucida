@@ -31,7 +31,7 @@ import type {
   ChannelSettings,
 } from "./types.ts";
 
-// --- Public types -------------------------------------------------------
+// Public types
 
 export interface ApplierBridge {
   /** Send `OpenRemoteDataset { url }` over the WebSocket. */
@@ -94,7 +94,7 @@ export type ApplyResultListener = (r: ApplyResult) => void;
  *  C/T/Z back to React state (since the applier writes to WASM only). */
 export type ApplyCompleteListener = (view: SavedView) => void;
 
-// --- Implementation ----------------------------------------------------
+// Implementation
 
 const IDLE_STATE: ApplierState = {
   inProgress: false,
@@ -140,7 +140,7 @@ export class SavedViewApplier {
     this.openTimeoutMs = openTimeoutMs;
   }
 
-  // --- State subscription (used by LoadingViewBanner) -------------------
+  // State subscription (used by LoadingViewBanner)
 
   subscribe(fn: StateListener): () => void {
     this.listeners.add(fn);
@@ -200,7 +200,7 @@ export class SavedViewApplier {
     entry.reject(new Error(error));
   }
 
-  // --- Main entry point -------------------------------------------------
+  // Main entry point
 
   /**
    * Apply a SavedView to the live scene. Returns when all in-flight
@@ -388,7 +388,7 @@ export class SavedViewApplier {
     for (const fn of this.applyResultListeners) fn(result);
   }
 
-  // --- Helpers ----------------------------------------------------------
+  // Helpers
 
   private async openMissing(toOpen: { url: string; id: string }[]): Promise<void> {
     if (toOpen.length === 0) return;
@@ -527,8 +527,7 @@ export class SavedViewApplier {
   }
 }
 
-// --- Out-of-range clamping for view indices ---------------------------
-//
+// Out-of-range clamping for view indices.
 // Exported for tests so the clamp logic can be exercised in isolation
 // without spinning up a WasmScene.
 

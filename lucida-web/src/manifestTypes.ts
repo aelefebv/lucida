@@ -1,9 +1,5 @@
 /** Dataset manifest and fetch source types — mirrors lucida-content/lucida-protocol serde output. */
 
-// ---------------------------------------------------------------------------
-// DatasetManifest (from lucida-content)
-// ---------------------------------------------------------------------------
-
 export type DatasetKind =
   | "Single"
   | { Plate: { rows: string[]; columns: string[]; positioning_mode: string; has_stage_positions: boolean } };
@@ -80,10 +76,6 @@ export interface DatasetManifest {
   default_layout_id: string | null;
 }
 
-// ---------------------------------------------------------------------------
-// FetchSource (from lucida-protocol)
-// ---------------------------------------------------------------------------
-
 /** Externally tagged enum: { "Proxied": { images: [...] } } */
 export type FetchSource =
   | { Proxied: ProxiedFetchDescriptor }
@@ -104,7 +96,6 @@ export type WireFormat =
   | { Lz4: { data_type: string } }
   | { Zstd: { data_type: string } };
 
-/** Extract data_type string from a WireFormat variant. */
 export function extractDataType(wf: WireFormat): string {
   if ("Raw" in wf) return wf.Raw.data_type;
   if ("Lz4" in wf) return wf.Lz4.data_type;

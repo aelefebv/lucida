@@ -337,7 +337,6 @@ function PlanningTabBody({
   );
 }
 
-/** One per-dataset section in the Planning tab. */
 function PlanningDatasetSection({
   p,
   name,
