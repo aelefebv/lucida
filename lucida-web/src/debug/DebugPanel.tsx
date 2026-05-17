@@ -62,7 +62,7 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
   render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
   cache: "CPU cache backpressure, failure bursts, eviction bursts",
-  orch: "TickCoordinator events — cold-state rebuild churn, upload budget exhaustion, resend storm, drain waste",
+  orch: "TickCoordinator events — cold-state rebuild churn, upload budget exhaustion, resend storm, delivery waste",
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
@@ -928,10 +928,10 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     )}
                   </div>
                   <div>
-                    Ready: {cacheTelemetry.readyCount}
+                    Deliverable: {cacheTelemetry.readyCount}
                     {cacheTelemetry.readyCount > 32 && (
                       <span style={{ color: "#fb4", marginLeft: 6 }}>
-                        (drain backlog)
+                        (upload backlog)
                       </span>
                     )}
                   </div>
@@ -1168,7 +1168,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                     <div className="debug-title">Upload (CPU → GPU)</div>
                     {(() => {
                       const t = snap.upload.tick;
-                      const drained = t.drainedChunks + t.drainedProxies;
+                      const considered = t.drainedChunks + t.drainedProxies;
                       const uploaded = t.uploadedChunks + t.uploadedProxies;
                       const skipBits = [
                         t.skippedPrefetch > 0 && `prefetch:${t.skippedPrefetch}`,
@@ -1184,7 +1184,7 @@ export function DebugPanel({ wasmSceneRef, datasetId, lastClickScreen, datasets,
                       return (
                         <>
                           <div>
-                            Drained: {drained}{" "}
+                            Considered: {considered}{" "}
                             <span style={{ color: "#888" }}>
                               ({t.drainedChunks}c / {t.drainedProxies}p)
                             </span>

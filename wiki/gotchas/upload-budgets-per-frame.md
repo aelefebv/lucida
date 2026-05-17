@@ -7,12 +7,12 @@ modified: 2026-05-17
 
 ## The footgun
 
-The tick coordinator drains decoded chunks to the GPU within a strict per-frame byte budget, separately for the main view and the minimap:
+The uploader sends CpuCache deliverables to the GPU within a strict per-frame byte budget, separately for the main view and the minimap:
 
-- **Main view (slice + volume)**: 16 MB / frame
+- **Main view (slice + volume)**: 8 MB / frame
 - **Minimap**: 2 MB / frame
 
-If a single chunk exceeds the remaining budget, it stays in the [[cpu-cache]]'s `ready[]` queue and waits for the next frame. Multiple medium chunks deplete the budget proportionally.
+If a single chunk exceeds the remaining budget, the uploader still sends it when it is the next priority item, then stops after that one-item soft-cap overshoot. Multiple medium chunks deplete the budget proportionally.
 
 The footgun: **changing the budget without measuring is risky**.
 
@@ -25,14 +25,14 @@ The [[lucida-web|debug panel]] surfaces:
 
 - Bytes uploaded per frame (rolling average)
 - Chunks pending decode
-- Chunks in `ready[]` waiting to drain
+- Deliverables pending in [[cpu-cache]]
 - Worker's `chunksEvicted` rate
 
-If `ready[]` grows monotonically, the budget is too low. If render frame times spike during loading, it's too high.
+If pending deliverables grow monotonically, the budget is too low. If render frame times spike during loading, it's too high.
 
 ## Where the constants live
 
-`lucida-web/src/pipeline/tickCoordinator.ts` has the constants. Look for `MAIN_VIEW_UPLOAD_BUDGET_BYTES` and the minimap equivalent.
+`lucida-web/src/pipeline/upload/constants.ts` has `MAIN_VIEW_UPLOAD_BUDGET_BYTES`. The minimap equivalent lives with the minimap/render-loop path.
 
 The minimap budget being separate (and smaller) is intentional: the minimap renders rarely, so it doesn't need to compete with main-view bandwidth.
 

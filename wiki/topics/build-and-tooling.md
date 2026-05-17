@@ -22,4 +22,3 @@ This page is a curated index of footguns; the articles live in `gotchas/`.
 ## Related
 
 - [[decisions/0007-wasm-scene-as-source-of-truth]] — why Rust-in-the-browser is load-bearing (and therefore why the WASM rebuild step matters)
-- The repo-root `CHUNK_PIPELINE.md` for the canonical chunk-pipeline narrative if you're debugging a build that broke after touching the renderer

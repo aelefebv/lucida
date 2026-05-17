@@ -206,12 +206,10 @@ export class TickCoordinator {
       return this.cachedResult;
     }
 
-    // Cold-state rebuild path. Drop worker-rejection state on both
-    // sides — camera/active-set/selection has shifted enough that
-    // far-rejected chunks may now fit. Proxy tracking survives —
-    // worker proxy pools persist across cold state.
-    this.uploader.onPlanRebuildStart();
-    ctx.cpuCache.clearRejected();
+    // Cold-state rebuild path. CpuCache owns wanted-generation and
+    // delivery/rejection state, so the rebuild lifecycle advances there
+    // exactly once before the per-dataset loop.
+    ctx.cpuCache.onPlanRebuildStart();
 
     // Step 2 — Settings
     const settings = getSceneSettings(ctx.scene);
@@ -283,14 +281,7 @@ export class TickCoordinator {
         );
       }
 
-      // 3e. Hand off planner output. Pre-populates the wid → entityId
-      // reverse lookup so a worker eviction that arrives before any
-      // chunk has been sent can still resolve `cpuCache.markRejected`.
-      this.uploader.recordPlanForDataset(
-        dsId, result.requests, result.proxyRequests, multiChannel,
-      );
-
-      // 3f. Build member roster + per-entity matrix map in one walk.
+      // 3e. Build member roster + per-entity matrix map in one walk.
       const { entries: rosterEntries, matricesByEntity } = buildRoster({
         activeSet: result.activeSet,
         entities,
@@ -307,6 +298,7 @@ export class TickCoordinator {
         activeSet: result.activeSet,
         entities,
         selection,
+        multiChannel,
         visibleRegion,
         epochs: currentEpochs,
         matricesByEntity,

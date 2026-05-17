@@ -68,6 +68,8 @@ export interface ReadyChunkDelivery {
   dataType: string;
   epochs: SceneEpochs;
   lane: Lane;
+  /** Lower numbers are delivered first when present on CpuCache output. */
+  priority?: number;
 }
 
 /**
@@ -86,6 +88,8 @@ export interface ReadyProxyDelivery {
   header: ProxyHeaderJs;
   data: ArrayBuffer;
   epochs: SceneEpochs;
+  /** Lower numbers are delivered first when present on CpuCache output. */
+  priority?: number;
 }
 
 /**
@@ -160,7 +164,7 @@ export interface CacheTelemetry {
   /** Age (ms) of the longest-waiting entry in the chunk scheduler's
    *  pending queue; 0 if empty. */
   pendingOldestAgeMs: number;
-  /** Decoded chunks waiting for the orchestrator's drain pass. */
+  /** Cached, wanted, unsent deliverables currently visible to upload. */
   readyCount: number;
   hitRate: number;
   evictionsPerSec: number;

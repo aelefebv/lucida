@@ -103,7 +103,6 @@ export function handleVolumeRenderMultiPass(
     // no resident well proxy. Entities with detail OR a resident proxy
     // continue rendering — the unified fallback chain handles the rest.
     if (!hasDetail && !wellProxySlotResident) {
-      isFirstLayer = false;
       continue;
     }
 

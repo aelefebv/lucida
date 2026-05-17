@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-07
+modified: 2026-05-17
 ---
 
 # CpuCache as Sole Fetch Path
@@ -27,9 +27,9 @@ Merging into one path resolved all three. The cache's **tiered LRU** (`prefetch 
 ## How this decision shows up in code
 
 - `lucida-web/src/pipeline/cpuCache.ts` — sole fetch path.
-- `lucida-web/src/pipeline/orchestrator.ts::planAndFetch` — calls `cpuCache.submit(plan)` once per dataset per tick; calls `cpuCache.drain(uploadBudget)` once per tick to feed the GPU worker.
+- `lucida-web/src/pipeline/tickCoordinator.ts::planAndFetch` — calls `cpuCache.onPlanRebuildStart()` once per cold-state rebuild and `cpuCache.submit(plan)` once per dataset.
+- `lucida-web/src/pipeline/upload/uploader.ts::deliverToWorker` — feeds the GPU worker by walking `cpuCache.getDeliverable()`; this is the delivery-state extension captured in [[decisions/0037-delivery-state-as-cpucache-sidecar]].
 - No remaining references to `SharedChunkQueue` (deleted in S5).
-- The eviction tier discipline is documented in `CHUNK_PIPELINE.md` section 4c and in [[cpu-cache#eviction-tiers]].
 
 ## Related
 

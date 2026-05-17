@@ -111,7 +111,7 @@ Type-check the SPA: `(cd lucida-web && pnpm exec tsc --noEmit -p tsconfig.app.js
 
 ## Architecture
 
-The wiki under [`wiki/`](wiki/) is the primary reference — start at [`wiki/index.md`](wiki/index.md) (or [`wiki/CLAUDE.md`](wiki/CLAUDE.md) for navigation conventions). The chunk pipeline — how a chunk gets from disk → CPU cache → GPU atlas → shader sample — is the heart of the rendering system and is documented end-to-end in [`CHUNK_PIPELINE.md`](CHUNK_PIPELINE.md).
+The wiki under [`wiki/`](wiki/) is the primary reference — start at [`wiki/index.md`](wiki/index.md) (or [`wiki/CLAUDE.md`](wiki/CLAUDE.md) for navigation conventions).
 
 For *why* something is shaped the way it is, look in [`wiki/decisions/`](wiki/decisions/) (numbered ADRs). For *what bites you when you don't expect it*, look in [`wiki/gotchas/`](wiki/gotchas/).
 

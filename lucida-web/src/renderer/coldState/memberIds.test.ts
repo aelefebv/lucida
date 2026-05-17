@@ -84,13 +84,18 @@ function makeEntry(
   };
 }
 
-function makeCold(activeSet: ColdStateActiveEntry[], visibleChannels: number[] = [0]): ColdStateMessage {
+function makeCold(
+  activeSet: ColdStateActiveEntry[],
+  visibleChannels: number[] = [0],
+  multiChannel = visibleChannels.length > 1,
+): ColdStateMessage {
   return {
     type: "coldState",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
+    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -179,6 +184,18 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
       expect(id).not.toMatch(/^:ch/);
       expect(id).not.toBe("");
     }
+  });
+
+  it("canonical iteration uses explicit multi-channel mode with one visible channel", () => {
+    const cold = makeCold(
+      [makeEntry({ entityId: "imgA", imageId: "imgA", mode: "fields-with-detail" })],
+      [2],
+      true,
+    );
+
+    expect(Array.from(iterateColdMembers(cold)).map(x => x.memberId)).toEqual([
+      "imgA:ch2",
+    ]);
   });
 });
 

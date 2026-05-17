@@ -37,7 +37,6 @@ Curated cross-cuts that aggregate articles by architectural concern. See [[topic
 - "What is this subsystem trying to optimize for?" → [[principles/index|Principles]]
 - "Why was X done that way?" → [[decisions/index|Decisions]] (and the principles they cite)
 - "I just hit a weird build/runtime issue" → [[gotchas/index|Gotchas]]
-- "Where's the deep dive on the chunk pipeline?" → [[chunk-pipeline]] points at the canonical `CHUNK_PIPELINE.md`
 - "How does lucida actually deploy?" → [[deployment]] is the conceptual reference; `extras/deploy/RUNBOOK.md` is the procedural walkthrough
 
 ## Source material and artifacts

@@ -38,8 +38,8 @@ From "user pastes a URL" to "first chunks render." Crosses [[lucida-web]], [[luc
 6. **Server serves chunks** (`handler.rs::serve_chunk_from_store`): `cache.get_bytes` → decode storage compression → binary frame `[client_id u32 LE][key_len u16 LE][key][bytes]` to the requesting client's unicast channel.
 7. **Client receives binary frame** (`bridge.ts::handleBinary`): routes by key prefix — chunk frames go to `contentSource.fetch` resolvers; proxy frames go to a separate proxy promise table.
 8. **Decode pool** — 3 workers running `decode.worker.ts` decompress (Raw/Lz4/Zstd) into typed arrays.
-9. **Cache insertion** — chunk lands in `cpuCache.ready[]`.
-10. **Drain** (next tick): tick coordinator pulls from `ready[]` within the 16 MB upload budget, filters against `workerWantedSet`, posts `sliceChunkData` or `volumeChunkData` to the GPU worker.
+9. **Cache insertion** — chunk lands in CpuCache with priority and wanted-generation metadata.
+10. **Upload** (next tick): the uploader walks `cpuCache.getDeliverable()` within the 8 MB main-view upload budget and posts `sliceChunkData` or `volumeChunkData` to the GPU worker.
 11. **Worker** ([[gpu-residency]]): writes atlas slot, updates indirection buffer, recomputes wanted-set, posts `wantedSetDelta` back to main.
 12. **Render** — slice or volume shader runs, descriptor → indirection → atlas sample → fallback chain → contrast/gamma/LUT → opacity. Pixels.
 

@@ -32,7 +32,7 @@ The migration happens in Slice 10, after `Uploader` exists: upload-related test 
 Two real bugs were surfaced by the eight-pass dechaos analysis under `wiki/outputs/dechaos-upload-2026-05-15/`:
 
 1. `_lastFilteredRequests` / `_lastProxyRequests` are flat fields written per-dataset in the planning loop — only the last dataset's requests survive. The resend pass therefore only resends for the last dataset processed in the rebuild (multi-dataset under-resends).
-2. `workerWantedSet` is populated from `wantedSetDelta` but never read; `CHUNK_PIPELINE.md` documents a filter against it that doesn't exist (drift between doc and behaviour).
+2. `workerWantedSet` is populated from `wantedSetDelta` but never read 
 
 Each fix is a few-line diff once the surrounding structure exists. Pulling them into separate PRs would either land them speculatively (before the structure that makes them obvious) or duplicate the structural work in the bug-fix PR. They land inside the slices that surface them: dead-state removal + doc fix in Slice 3, multi-dataset map conversion in Slice 4 (which also adds the `planningState.delete(id)` lifecycle fix). Same pattern as the two latent bugs ride-alongs in [[decisions/0032-cpucache-split-into-pipeline-fetch]] (`imageWireFormats` leak in Slice 4; transient/permanent misclassification in Slice 8).
 
@@ -57,7 +57,6 @@ Pass 6 of the dechaos analysis explicitly recommended **against** an asset-abstr
 - New per-module test files under `pipeline/upload/` (`coldState/build.test.ts`, `delivery/tracker.test.ts`, `telemetry/upload.test.ts`, etc.).
 - `renderLoop.ts` rewires `client.onChunksEvicted` to `uploader.handleChunksEvicted` directly (was `orchestrator.handleChunksEvicted`).
 - `slicePath.ts` / `volumePath.ts` call `uploader.deliverToWorker` (was `orchestrator.deliverToWorker`).
-- `CHUNK_PIPELINE.md` sections 5c and 8 corrected in Slice 3 (`MAIN_VIEW_UPLOAD_BUDGET = 8 MB` not 16; no `workerWantedSet` filter).
 
 ## Related
 

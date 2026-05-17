@@ -13,17 +13,17 @@ Code that assumes "I just sent it, so it's there" is wrong. The worker may have 
 
 ## Concrete symptoms
 
-- "I uploaded the chunk and the next frame doesn't show it." — the worker may have evicted it or skipped it (if the chunk's epoch was stale).
-- "My chunk count tracking drifts from the worker's reality." — main-thread bookkeeping (e.g. `proxyDeliveredToWorker`, `sentSet`) needs to reconcile against `chunksEvicted` and `wantedSetDelta`, not just track sends.
+- "I uploaded the chunk and the next frame doesn't show it." — the worker may have evicted it, rejected it under atlas policy, or requeued it because the delivery was stale / wrong-slice / missing expected worker state.
+- "My chunk count tracking drifts from the worker's reality." — main-thread sent bookkeeping needs to reconcile against `chunksEvicted` and `wantedSetDelta`, not just track sends.
 - "Eviction storms cause visible flicker." — the worker evicts, reports, the planner re-requests, the cache re-uploads; under sustained pressure this loop stays warm.
 
 ## How the loop closes
 
 1. Worker evicts slot `S` for chunk `K`.
-2. Worker posts `chunksEvicted { evicted: [K], skipped: [] }` to main thread.
+2. Worker posts `chunksEvicted { keys: [K], skipped: [] }` to main thread.
 3. Worker includes `K` in next `wantedSetDelta { missing: [K, ...] }` (if still wanted).
-4. Main thread `chunksEvicted` handler clears `proxyDeliveredToWorker.delete(K)` and `sentSet.delete(K)` so the next drain can re-send.
-5. Next [[chunk-pipeline|tick]]: tick coordinator sees `K` in `workerWantedSet` and not in its delivered tracking, includes `K` in the next drain if it's in [[cpu-cache]].
+4. Main thread parses `memberId` at the upload wire boundary and clears `DeliveryState` chunk sent state. `skipped` chunks are the special case: they are true atlas-policy rejections and also flow into `RejectionTracker`.
+5. Next [[chunk-pipeline|tick]]: `cpuCache.getDeliverable()` includes `K` again if it is cached, wanted in the current rebuild generation, not rejected, and not currently marked sent.
 
 ## What to do
 
@@ -34,7 +34,11 @@ Code that assumes "I just sent it, so it's there" is wrong. The worker may have 
 
 ## The `skipped` field
 
-`chunksEvicted` carries both `evicted` (slots actually freed) and `skipped` (uploads the worker dropped because they were stale or already evicted). The `skipped` list often appears during fast viewport changes — multiple uploads for the same chunk arrived; all but one get marked skipped.
+`chunksEvicted.keys` means "clear optimistic sent state; this chunk can be delivered again if still cached and wanted." That bucket covers real evictions plus stale, wrong-slice, and missing-worker-state upload drops.
+
+`chunksEvicted.skipped` means "atlas-policy rejection" only: the atlas was full and the incoming chunk was farther than the farthest resident slot. This is what suppresses resend churn.
+
+`wantedSetDelta` is authoritative for both chunks and proxies. Missing chunk entries clear chunk sent state; missing proxy entries call `cpuCache.markProxyMissing(...)`, which clears `DeliveryState` proxy sent state so the next `getDeliverable()` pass can re-send the cached proxy.
 
 ## Related
 

@@ -11,7 +11,6 @@ This page is a curated index. Articles live in their canonical homes (`systems/`
 
 ## Start here
 
-- [[chunk-pipeline]] — overview of the end-to-end path; pointer to the canonical narrative `CHUNK_PIPELINE.md` at repo root
 - [[flows/chunk-lifecycle]] — concrete trace from "planner says wanted" → atlas slot → shader sample
 
 ## Subsystems

@@ -73,6 +73,7 @@ function makeCold(
   activeSet: ColdStateActiveEntry[],
   visibleChannels: number[] = [0],
   viewMode: "slice" | "volume" = "volume",
+  multiChannel = visibleChannels.length > 1,
 ): ColdStateMessage {
   return {
     type: "coldState",
@@ -80,6 +81,7 @@ function makeCold(
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
+    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -143,6 +145,25 @@ describe("groupEntriesByPool — volume", () => {
     const groups = groupEntriesByPool(cold, "volume");
     expect(groups.size).toBe(2);
     expect(groups.get("ds1:ch0:64x64x32")?.entries[0].memberId).toBe("imgA:ch0");
+    expect(groups.get("ds1:ch2:64x64x32")?.entries[0].memberId).toBe("imgA:ch2");
+  });
+
+  it("multi-channel mode with one visible channel still uses channel-suffixed keys", () => {
+    const cold = makeCold(
+      [
+        makeEntry({
+          entityId: "imgA", imageId: "imgA", mode: "fields-with-detail",
+          levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
+        }),
+      ],
+      [2],
+      "volume",
+      true,
+    );
+
+    const groups = groupEntriesByPool(cold, "volume");
+
+    expect(Array.from(groups.keys())).toEqual(["ds1:ch2:64x64x32"]);
     expect(groups.get("ds1:ch2:64x64x32")?.entries[0].memberId).toBe("imgA:ch2");
   });
 

@@ -6,7 +6,7 @@ vi.mock("../../debug/logging.ts", async (importOriginal) => {
 });
 import { debugLog } from "../../debug/logging.ts";
 
-import { CpuCache, type CpuCacheConfig } from "./cpuCache.ts";
+import { CpuCache, type CpuCacheConfig, type ReadyDelivery } from "./cpuCache.ts";
 import { ProxiedContentSource } from "./contentSource.ts";
 import type {
   ContentSource,
@@ -221,6 +221,18 @@ async function flush() {
   await new Promise(r => setTimeout(r, 0));
 }
 
+function consumeDeliverables(cache: CpuCache, budgetBytes = Infinity): ReadyDelivery[] {
+  const deliveries: ReadyDelivery[] = [];
+  let remaining = budgetBytes;
+  for (const delivery of cache.getDeliverable()) {
+    if (remaining <= 0) break;
+    deliveries.push(delivery);
+    cache.markSent(delivery);
+    remaining -= delivery.data.byteLength;
+  }
+  return deliveries;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -231,11 +243,11 @@ describe("CpuCache", () => {
   });
 
   // =========================================================================
-  // Submit/drain lifecycle
+  // Submit/deliverable lifecycle
   // =========================================================================
 
-  describe("submit/drain lifecycle", () => {
-    it("submit plan → source resolves → drain returns delivery", async () => {
+  describe("submit/deliverable lifecycle", () => {
+    it("submit plan → source resolves → getDeliverable returns delivery", async () => {
       const { cache, source } = createTestCache();
       const req = makeRequest({ x: 0, y: 0, z: 0 });
       cache.submit(makePlan([req]));
@@ -247,8 +259,8 @@ describe("CpuCache", () => {
       source.resolve("entity-1/image-1/0/0/0/0/0/0");
       await flush();
 
-      // Drain should return the delivery
-      const deliveries = cache.drain(Infinity);
+      // getDeliverable should return the delivery.
+      const deliveries = consumeDeliverables(cache);
       expect(deliveries).toHaveLength(1);
       expect(deliveries[0].entityId).toBe("entity-1");
       const delivery = deliveries[0];
@@ -257,12 +269,12 @@ describe("CpuCache", () => {
       expect(delivery.lane).toBe("detail");
     });
 
-    it("drain returns empty when nothing ready", () => {
+    it("getDeliverable returns empty when nothing is cached and wanted", () => {
       const { cache } = createTestCache();
-      expect(cache.drain(Infinity)).toHaveLength(0);
+      expect(consumeDeliverables(cache)).toHaveLength(0);
     });
 
-    it("drain respects budget", async () => {
+    it("delivery consumption respects the one-item soft budget", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 100;
       const reqs = [
@@ -273,23 +285,318 @@ describe("CpuCache", () => {
       cache.submit(makePlan(reqs));
       await flush();
 
-      // Only drain 150 bytes worth (should get 2 of 3 at 100 bytes each)
-      const first = cache.drain(150);
+      // Only consume 150 bytes worth (should get 2 of 3 at 100 bytes each).
+      const first = consumeDeliverables(cache, 150);
       expect(first).toHaveLength(2);
 
-      // Remaining delivery available on next drain
-      const second = cache.drain(Infinity);
+      // Remaining delivery available on next consumption.
+      const second = consumeDeliverables(cache);
       expect(second).toHaveLength(1);
     });
 
-    it("drained deliveries are not re-returned", async () => {
+    it("sent deliveries are not re-returned", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
       cache.submit(makePlan([makeRequest()]));
       await flush();
 
-      cache.drain(Infinity);
-      expect(cache.drain(Infinity)).toHaveLength(0);
+      consumeDeliverables(cache);
+      expect(consumeDeliverables(cache)).toHaveLength(0);
+    });
+  });
+
+  describe("getDeliverable", () => {
+    function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
+      return {
+        datasetId: "ds-1",
+        entityId: "entity-1",
+        imageId: "image-1",
+        kind: "FieldProxy3D",
+        t: 0,
+        c: 0,
+        priority: 0,
+        ...overrides,
+      };
+    }
+
+    function makePlanWithProxies(
+      requests: ChunkRequest[],
+      proxyRequests: ProxyRequest[],
+    ): RequestPlan {
+      return {
+        ...makePlan(requests),
+        proxyRequests,
+      };
+    }
+
+    it("merges chunks and proxies in priority order", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      source.autoResolveProxyBytes = 32;
+      cache.onPlanRebuildStart();
+
+      cache.submit(makePlanWithProxies(
+        [makeRequest({ priority: 100 })],
+        [makeProxyRequest({ priority: 10 })],
+      ));
+      await flush();
+
+      expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual([
+        "proxy",
+        "chunk",
+      ]);
+    });
+
+    it("interleaves equal-priority multi-channel chunks by spatial cell", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+
+      const reqs = [
+        makeRequest({ c: 0, x: 0, chunkKey: "0/0/0/0/0/0", priority: 10 }),
+        makeRequest({ c: 0, x: 1, chunkKey: "0/0/0/0/0/1", priority: 10 }),
+        makeRequest({ c: 1, x: 0, chunkKey: "0/0/1/0/0/0", priority: 10 }),
+        makeRequest({ c: 1, x: 1, chunkKey: "0/0/1/0/0/1", priority: 10 }),
+      ];
+      cache.submit(makePlan(reqs));
+      await flush();
+
+      expect(Array.from(cache.getDeliverable()).map(d =>
+        d.kind === "chunk" ? [d.x, d.c] : ["proxy", -1],
+      )).toEqual([
+        [0, 0],
+        [0, 1],
+        [1, 0],
+        [1, 1],
+      ]);
+    });
+
+    it("filters non-detail chunks, sent chunks, and rejected chunks", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+
+      const detail = makeRequest({
+        entityId: "image-1",
+        imageId: "image-1",
+        chunkKey: "0/0/0/0/0/0",
+        lane: "detail",
+      });
+      const prefetch = makeRequest({
+        entityId: "image-1",
+        imageId: "image-1",
+        chunkKey: "0/0/0/0/0/1",
+        x: 1,
+        lane: "prefetch",
+      });
+      cache.submit(makePlan([detail, prefetch], [makeActiveEntry("image-1", "image-1")]));
+      await flush();
+
+      const first = Array.from(cache.getDeliverable());
+      expect(first.map(d => d.kind === "chunk" ? d.chunkKey : "proxy")).toEqual([
+        detail.chunkKey,
+      ]);
+
+      cache.markSent(first[0]);
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+
+      cache.markChunkEvicted(detail.imageId, detail.c, [detail.chunkKey], []);
+      expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
+
+      cache.markSent(first[0]);
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+
+      cache.markChunkMissing(detail.imageId, detail.c, detail.chunkKey);
+      expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
+
+      cache.markChunkEvicted(detail.imageId, detail.c, [], [detail.chunkKey]);
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+    });
+
+    it("resolves skipped chunk feedback from imageId back to entityId", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+
+      const detail = makeRequest({
+        entityId: "field-entity",
+        imageId: "field-image",
+        chunkKey: "0/0/0/0/0/0",
+        lane: "detail",
+      });
+      cache.submit(makePlan([detail], [makeActiveEntry("field-entity", "field-image")]));
+      await flush();
+
+      expect(Array.from(cache.getDeliverable())).toHaveLength(1);
+
+      cache.markChunkEvicted(detail.imageId, detail.c, [], [detail.chunkKey]);
+
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+    });
+
+    it("advances wanted generation once per rebuild, not per submit", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+
+      cache.onPlanRebuildStart();
+      const a = makeRequest({ entityId: "entity-a", imageId: "image-a", chunkKey: "0/0/0/0/0/0" });
+      const b = makeRequest({ entityId: "entity-b", imageId: "image-b", chunkKey: "0/0/0/0/0/1", x: 1 });
+      cache.submit(makePlan([a], [makeActiveEntry("entity-a", "image-a")]));
+      cache.submit(makePlan([b], [makeActiveEntry("entity-b", "image-b")]));
+      await flush();
+
+      expect(Array.from(cache.getDeliverable()).map(d =>
+        d.kind === "chunk" ? d.entityId : "proxy",
+      ).sort()).toEqual(["entity-a", "entity-b"]);
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([b], [makeActiveEntry("entity-b", "image-b")]));
+
+      expect(Array.from(cache.getDeliverable()).map(d =>
+        d.kind === "chunk" ? d.entityId : "proxy",
+      )).toEqual(["entity-b"]);
+    });
+
+    it("proxy sent state survives rebuild and clears on missing feedback", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveProxyBytes = 32;
+      const req = makeProxyRequest();
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlanWithProxies([], [req]));
+      await flush();
+      const [proxy] = Array.from(cache.getDeliverable());
+      expect(proxy.kind).toBe("proxy");
+      cache.markSent(proxy);
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlanWithProxies([], [req]));
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+
+      cache.markProxyMissing("ds-1|entity-1|FieldProxy3D|0|0");
+      expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["proxy"]);
+    });
+
+    it("does not deliver stale in-flight chunks omitted by a newer rebuild", async () => {
+      const { cache, source } = createTestCache();
+      const staleLowRes = makeRequest({
+        level: 2,
+        chunkKey: "2/0/0/0/0/0",
+        priority: 100,
+      });
+      const currentHighRes = makeRequest({
+        level: 0,
+        chunkKey: "0/0/0/0/0/0",
+        priority: 1,
+      });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([staleLowRes]));
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([currentHighRes]));
+
+      source.resolve("entity-1/image-1/2/0/0/0/0/0");
+      await flush();
+
+      expect(cache.getCachedChunk("entity-1", staleLowRes.chunkKey)).not.toBeNull();
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+    });
+
+    it("refreshes in-flight chunks that remain wanted in a newer rebuild", async () => {
+      const { cache, source } = createTestCache();
+      const first = makeRequest({
+        chunkKey: "0/0/0/0/0/0",
+        priority: 100,
+      });
+      const refreshed = makeRequest({
+        chunkKey: "0/0/0/0/0/0",
+        priority: 1,
+      });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([first]));
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([refreshed]));
+
+      source.resolve("entity-1/image-1/0/0/0/0/0/0");
+      await flush();
+
+      const deliveries = Array.from(cache.getDeliverable());
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0].priority).toBe(1);
+    });
+
+    it("promotes an in-flight prefetch chunk when the newer rebuild wants it as detail", async () => {
+      const { cache, source } = createTestCache();
+      const prefetch = makeRequest({
+        lane: "prefetch",
+        chunkKey: "0/1/0/0/0/0",
+        t: 1,
+      });
+      const detail = makeRequest({
+        lane: "detail",
+        chunkKey: "0/1/0/0/0/0",
+        t: 1,
+      });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([prefetch]));
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([detail]));
+
+      source.resolve("entity-1/image-1/0/1/0/0/0/0");
+      await flush();
+
+      const deliveries = Array.from(cache.getDeliverable());
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({
+        kind: "chunk",
+        lane: "detail",
+        chunkKey: "0/1/0/0/0/0",
+      });
+    });
+
+    it("promotes a cached prefetch chunk when the newer rebuild wants it as detail", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      const prefetch = makeRequest({
+        lane: "prefetch",
+        chunkKey: "0/1/0/0/0/0",
+        t: 1,
+      });
+      const detail = makeRequest({
+        lane: "detail",
+        chunkKey: "0/1/0/0/0/0",
+        t: 1,
+        priority: 1,
+      });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([prefetch]));
+      await flush();
+
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+      expect(cache.getCacheDump()).toMatchObject([
+        { chunkKey: "0/1/0/0/0/0", tier: "prefetch" },
+      ]);
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([detail]));
+
+      const deliveries = Array.from(cache.getDeliverable());
+      expect(deliveries).toHaveLength(1);
+      expect(deliveries[0]).toMatchObject({
+        kind: "chunk",
+        lane: "detail",
+        chunkKey: "0/1/0/0/0/0",
+        priority: 1,
+      });
+      expect(cache.getCacheDump()).toMatchObject([
+        { chunkKey: "0/1/0/0/0/0", tier: "active-detail" },
+      ]);
     });
   });
 
@@ -584,14 +891,14 @@ describe("CpuCache", () => {
         makeRequest({ entityId: "entity-1", chunkKey: "0/0/0/0/0/0" }),
       ]));
       await flush();
-      // Don't drain — leave delivery in the ready queue.
+      // Don't consume — leave delivery eligible.
 
       cache.submit(makeProxyPlan([makeProxyRequest()]));
       await flush();
 
       cache.cancelDataset("ds-1", ["entity-1"]);
 
-      expect(cache.drain(Infinity)).toHaveLength(0);
+      expect(consumeDeliverables(cache)).toHaveLength(0);
     });
 
     it("clears failures map entries for entityIds", async () => {
@@ -1105,15 +1412,15 @@ describe("CpuCache", () => {
       expect(cache.getCachedChunk("no-such-entity", "0/0/0/0/0/0")).toBeNull();
     });
 
-    it("returns entry after drain", async () => {
+    it("returns cached entry after delivery consumption", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
       const req = makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" });
       cache.submit(makePlan([req]));
       await flush();
 
-      // Drain removes from ready queue but NOT from cache
-      cache.drain(Infinity);
+      // Delivery consumption marks sent but does NOT remove from cache.
+      consumeDeliverables(cache);
 
       const result = cache.getCachedChunk("entity-1", "0/0/0/0/0/0");
       expect(result).not.toBeNull();
@@ -1168,7 +1475,7 @@ describe("CpuCache", () => {
       const snap = cache.snapshot();
       expect(snap.cached.size).toBe(0);
       expect(snap.inFlight.size).toBe(0);
-      expect(cache.drain(Infinity)).toHaveLength(0);
+      expect(consumeDeliverables(cache)).toHaveLength(0);
 
       const tel = cache.telemetry();
       expect(tel.mainBytes).toBe(0);
@@ -1232,12 +1539,12 @@ describe("CpuCache", () => {
       });
     });
 
-    it("drain returns a proxy delivery with kind: proxy and header", async () => {
+    it("getDeliverable returns a proxy delivery with kind: proxy and header", async () => {
       const { cache, source } = createTestCache();
       cache.submit(makeProxyPlan([makeProxyRequest()]));
       await flush();
 
-      const deliveries = cache.drain(Infinity);
+      const deliveries = consumeDeliverables(cache);
       expect(deliveries).toHaveLength(1);
       const d = deliveries[0];
       expect(d.kind).toBe("proxy");
@@ -1251,13 +1558,31 @@ describe("CpuCache", () => {
       expect(d.data.byteLength).toBe(source.autoResolveProxyBytes);
     });
 
+    it("starts proxy fallback work even when chunk capacity is saturated", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+      const chunkReq = makeRequest({ chunkKey: "0/0/0/0/0/0" });
+      const proxyReq = makeProxyRequest();
+
+      cache.submit({
+        ...makePlan([chunkReq]),
+        proxyRequests: [proxyReq],
+      });
+
+      expect(source.fetchProxyCount).toBe(1);
+      expect(source.fetchCount).toBe(0);
+
+      await flush();
+
+      expect(source.fetchCount).toBe(1);
+    });
+
     it("does not re-fetch a cached proxy on second submit (cache hit)", async () => {
       const { cache, source } = createTestCache();
       const req = makeProxyRequest();
       cache.submit(makeProxyPlan([req]));
       await flush();
-      // Drain the first delivery.
-      cache.drain(Infinity);
+      // Mark the first delivery sent.
+      consumeDeliverables(cache);
 
       const fetchesBefore = source.fetchProxyCount;
       cache.submit(makeProxyPlan([req]));
@@ -1267,7 +1592,7 @@ describe("CpuCache", () => {
       expect(source.fetchProxyCount).toBe(fetchesBefore);
 
       // TickCoordinator resends evicted proxies via `getCachedProxy`.
-      const replays = cache.drain(Infinity);
+      const replays = consumeDeliverables(cache);
       expect(replays).toHaveLength(0);
     });
 
@@ -1276,14 +1601,14 @@ describe("CpuCache", () => {
       const req = makeProxyRequest();
       cache.submit(makeProxyPlan([req]));
       await flush();
-      // Drain the initial decode delivery.
-      const initial = cache.drain(Infinity);
+      // Mark the initial decode delivery sent.
+      const initial = consumeDeliverables(cache);
       expect(initial).toHaveLength(1);
 
       // Second submit of the same plan: nothing should land in `ready`.
       cache.submit(makeProxyPlan([req]));
       await flush();
-      expect(cache.drain(Infinity)).toHaveLength(0);
+      expect(consumeDeliverables(cache)).toHaveLength(0);
     });
 
     it("notifyListeners is not called on re-submit-cached-proxy", async () => {
@@ -1379,7 +1704,7 @@ describe("CpuCache", () => {
       ).toBeNull();
       // Counter sanity check — fetchProxy not called again on reset.
       const before = source.fetchProxyCount;
-      cache.drain(Infinity);
+      consumeDeliverables(cache);
       expect(source.fetchProxyCount).toBe(before);
     });
   });
@@ -1393,11 +1718,10 @@ describe("CpuCache", () => {
       vi.mocked(debugLog).mockClear();
     });
 
-    it("cancelled-during-decode: chunk still lands in cache and ready[]", async () => {
+    it("cancelled-during-decode: chunk still lands in cache and remains deliverable", async () => {
       // Race: fetch resolves before cancelDataset; the queued decode
-      // microtask runs after. Cache-insert + ready-push are
-      // unconditional, so the chunk lands in both. The orchestrator's
-      // wanted-set filter handles the stale delivery downstream.
+      // microtask runs after. Cache-insert is unconditional, so the
+      // chunk can still land and be observed by the delivery surface.
       const { cache, source } = createTestCache();
       const req = makeRequest({ x: 0, y: 0, z: 0 });
       cache.submit(makePlan([req]));
@@ -1415,7 +1739,7 @@ describe("CpuCache", () => {
       await flush();
 
       expect(cache.getCachedChunk("entity-1", req.chunkKey)).not.toBeNull();
-      const deliveries = cache.drain(Infinity);
+      const deliveries = consumeDeliverables(cache);
       expect(deliveries).toHaveLength(1);
       const delivery = deliveries[0];
       expect(delivery.kind).toBe("chunk");
@@ -1499,8 +1823,8 @@ describe("CpuCache", () => {
       cache.submit(makePlan(fillers));
       await flush();
 
-      // Drain to clear ready[]. Cache now holds 16 × 1B in main.
-      cache.drain(Infinity);
+      // Mark current deliverables sent. Cache now holds 16 × 1B in main.
+      consumeDeliverables(cache);
       vi.mocked(debugLog).mockClear();
 
       // Insert one bigger entry that requires evicting all 16.
@@ -1550,13 +1874,13 @@ describe("CpuCache", () => {
     });
 
     it("telemetry shape regression — locks the CacheTelemetry surface", async () => {
-      // Pinned shape after `submit + flush + drain`; values that depend
+      // Pinned shape after `submit + flush + delivery consumption`; values that depend
       // on wall-clock or running averages use expect.any(Number).
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;
       cache.submit(makePlan([makeRequest()]));
       await flush();
-      cache.drain(Infinity);
+      consumeDeliverables(cache);
 
       const tel = cache.telemetry();
       expect(tel).toEqual({

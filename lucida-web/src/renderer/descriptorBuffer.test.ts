@@ -151,13 +151,18 @@ function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
   };
 }
 
-function makeCold(activeSet: ColdStateActiveEntry[], visibleChannels: number[] = [0]): ColdStateMessage {
+function makeCold(
+  activeSet: ColdStateActiveEntry[],
+  visibleChannels: number[] = [0],
+  multiChannel = visibleChannels.length > 1,
+): ColdStateMessage {
   return {
     type: "coldState",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
+    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -272,6 +277,18 @@ describe("iterateColdMembers", () => {
     expect(ids).toEqual([
       "img-0:ch0", "img-0:ch1",
       "img-1:ch0", "img-1:ch1",
+    ]);
+  });
+
+  it("uses cold-state multiChannel flag instead of visible channel count", () => {
+    const cold = makeCold(
+      [makeEntry({ entityId: "e1", imageId: "img-0", mode: "fields-with-detail" })],
+      [2],
+      true,
+    );
+
+    expect(Array.from(iterateColdMembers(cold)).map(x => x.memberId)).toEqual([
+      "img-0:ch2",
     ]);
   });
 });

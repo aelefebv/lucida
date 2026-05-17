@@ -15,6 +15,7 @@ import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint16Slice } from "../dataTypeUtil.ts";
 import { parseCompositeKey, makeCompositeKey } from "../chunkKeys.ts";
+import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction.ts";
 
 export function handleSliceChunkData(
@@ -27,15 +28,15 @@ export function handleSliceChunkData(
   const { level, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
 
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    const requeueKeys = msg.chunks.map(c => c.key);
-    if (requeueKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", memberId, keys: requeueKeys, skipped: [] });
-    }
+    postChunksRequeued(ctx, memberId, msg.chunks, "stale");
     return;
   }
 
   const atlas = ctx.state.sliceAtlases.get(poolKey);
-  if (!atlas) return;
+  if (!atlas) {
+    postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+    return;
+  }
 
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY) {
     console.warn(`[sliceChunkData] chunkDims mismatch for ${memberId}: pool=[${atlas.chunkX},${atlas.chunkY}] msg=[${chunkX},${chunkY}] level=${level}`);
@@ -43,11 +44,13 @@ export function handleSliceChunkData(
   const entityLodMetas = atlas.entityMetas.get(memberId);
   if (!entityLodMetas) {
     console.warn(`[sliceChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
+    postChunksRequeued(ctx, memberId, msg.chunks, "missing-entity-meta");
     return;
   }
   const lodMeta = entityLodMetas.find(m => m.level === level);
   if (!lodMeta) {
     console.warn(`[sliceChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
+    postChunksRequeued(ctx, memberId, msg.chunks, "missing-lod-meta");
     return;
   }
 
@@ -159,13 +162,22 @@ export function handleSliceChunkData(
       evictedByMember.set(parsed.memberId, arr);
     }
     for (const [evMember, evKeys] of evictedByMember) {
-      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [] });
+      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [], reason: "evicted" });
     }
     if (requeueKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", memberId, keys: requeueKeys, skipped: [] });
+      postChunksRequeued(
+        ctx,
+        memberId,
+        requeueKeys.map(key => ({ key })),
+        "wrong-slice",
+      );
     }
     if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
+      postChunksRejected(
+        ctx,
+        memberId,
+        skippedKeys.map(key => ({ key })),
+      );
     }
     ctx.postWantedSet();
   }

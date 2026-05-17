@@ -4,6 +4,7 @@
  * are deliberately NOT part of this interface.
  */
 import type {
+  ChunkFeedbackReason,
   ColdStateMessage,
   ViewHotStateMessage,
   MissingChunk,
@@ -19,6 +20,7 @@ export type ChunksEvictedHandler = (
   memberId: string,
   evicted: string[],
   skipped: string[],
+  reason?: ChunkFeedbackReason,
 ) => void;
 
 export type WantedSetHandler = (

@@ -35,6 +35,10 @@ export interface ProxyCacheEntry {
   c: number;
   insertedAt: number;
   epochs: SceneEpochs;
+  /** Priority recorded the last time this proxy appeared in a plan. */
+  priority: number;
+  /** Plan-rebuild generation from the last plan that wanted this proxy. */
+  lastSeenTick: number;
 }
 
 /**
@@ -172,6 +176,14 @@ export class ProxyStore {
   /** Whether the store holds an entry under (datasetId, innerKey). */
   has(datasetId: string, innerKey: string): boolean {
     return this.store.get(datasetId)?.has(innerKey) === true;
+  }
+
+  *iterateSeenAt(lastSeenTick: number): Iterable<ProxyCacheEntry> {
+    for (const inner of this.store.values()) {
+      for (const entry of inner.values()) {
+        if (entry.lastSeenTick === lastSeenTick) yield entry;
+      }
+    }
   }
 
   /**

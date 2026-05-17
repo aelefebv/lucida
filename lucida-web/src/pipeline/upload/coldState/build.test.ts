@@ -214,6 +214,7 @@ describe("buildColdState", () => {
       activeSet,
       entities,
       selection: makeSelection({ t: 7, z: 13, renderMode: "volume", visibleChannels: [0] }),
+      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       matricesByEntity: makeMatrices(),
@@ -224,6 +225,7 @@ describe("buildColdState", () => {
     expect(msg.datasetId).toBe("ds1");
     expect(msg.currentT).toBe(7);
     expect(msg.currentZ).toBe(13);
+    expect(msg.multiChannel).toBe(false);
     expect(msg.visibleChannels).toEqual([0]);
     expect(msg.viewMode).toBe("volume");
     expect(msg.epochs).toEqual({ content: 1, layout: 2, view: 3, selection: 4, asset: 5, request: 6 });
@@ -262,6 +264,7 @@ describe("buildColdState", () => {
       activeSet,
       entities,
       selection: makeSelection({ visibleChannels: [0, 1] }),
+      multiChannel: true,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       matricesByEntity: makeMatrices(),
@@ -269,6 +272,7 @@ describe("buildColdState", () => {
     });
 
     expect(msg.visibleChannels).toEqual([0, 1]);
+    expect(msg.multiChannel).toBe(true);
     const ds0 = msg.activeSet[0].displayStateByChannel[0];
     expect(ds0.colormapName).toBe("viridis");
     expect(ds0.contrastMin).toBe(5);
@@ -315,6 +319,7 @@ describe("buildColdState", () => {
       activeSet,
       entities,
       selection: makeSelection(),
+      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       matricesByEntity: matrices,
@@ -334,6 +339,7 @@ describe("buildColdState", () => {
       activeSet: [],
       entities: [],
       selection: makeSelection(),
+      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       matricesByEntity: makeMatrices(),
@@ -365,6 +371,7 @@ describe("buildColdState", () => {
       activeSet: sharedActive,
       entities,
       selection: makeSelection(),
+      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       matricesByEntity: makeMatrices(),
@@ -375,6 +382,7 @@ describe("buildColdState", () => {
       activeSet: sharedActive,
       entities,
       selection: makeSelection(),
+      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       matricesByEntity: makeMatrices(),

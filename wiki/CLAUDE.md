@@ -7,8 +7,6 @@ modified: 2026-05-07
 
 This is a **code-repo wiki** capturing the *why and how it hangs together* layer of the Lucida codebase. The code itself is ground truth for *what* the system does — read it directly when you need exact behavior. This wiki earns its keep by capturing **intent, connective tissue, gotchas, invariants, and in-flight state** that aren't visible from the source alone.
 
-The wiki supersedes the repo's earlier root-level docs for navigational purposes. Of the originals, only `CHUNK_PIPELINE.md` still lives at the repo root as an authoritative narrative document; `ARCHITECTURE.md`, `GLOSSARY.md`, and `DOMAINS.md` no longer exist. New connective tissue lands in this wiki.
-
 ## Navigation order
 
 When you start a task, read in this order:

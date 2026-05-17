@@ -117,13 +117,15 @@ function makeActiveEntry(
 function makeColdState(
   overrides?: Partial<ColdStateMessage>,
 ): ColdStateMessage {
+  const visibleChannels = overrides?.visibleChannels ?? [0];
   return {
     type: "coldState",
     epochs: makeEpochs(),
     datasetId: "ds-0",
     currentT: 0,
     currentZ: 0,
-    visibleChannels: [0],
+    multiChannel: overrides?.multiChannel ?? visibleChannels.length > 1,
+    visibleChannels,
     visibleRegion: makeVisibleRegion(),
     activeSet: [makeActiveEntry()],
     viewMode: "volume",
@@ -185,6 +187,8 @@ describe("computeWantedSet", () => {
     // Verify chunk keys follow the correct format
     for (const entry of chunks(result.missing)) {
       expect(entry.entityId).toBe("entity-0");
+      expect(entry.memberId).toBe("img");
+      expect(entry.c).toBe(0);
       expect(entry.chunkKey).toMatch(/^0\/0\/0\/\d+\/\d+\/\d+$/);
     }
   });
@@ -290,6 +294,37 @@ describe("computeWantedSet", () => {
     const keys = chunks(result.missing).map((m) => m.chunkKey).sort();
     // channel 0 and channel 2
     expect(keys).toEqual(["0/0/0/0/0/0", "0/0/2/0/0/0"]);
+    expect(chunks(result.missing).map((m) => m.memberId).sort()).toEqual([
+      "img:ch0",
+      "img:ch2",
+    ]);
+  });
+
+  it("multi-channel mode with one visible channel still uses channel-qualified member ids", () => {
+    const coldState = makeColdState({
+      multiChannel: true,
+      visibleChannels: [2],
+      visibleRegion: makeVisibleRegion({
+        xyBoundsVox: [0, 0, 32, 32],
+        zRangeVox: [0, 32],
+      }),
+    });
+    const ch2Pool = makeVolumePool("img:ch2", [
+      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+    ]);
+    const volumeAtlases = new Map<string, AtlasSnapshot>([
+      ["ds-0:ch2", ch2Pool],
+    ]);
+
+    const result = computeWantedSet(coldState, volumeAtlases, new Map(), buildMemberToPool(volumeAtlases));
+
+    expect(chunks(result.missing)).toEqual([
+      expect.objectContaining({
+        memberId: "img:ch2",
+        c: 2,
+        chunkKey: "0/0/2/0/0/0",
+      }),
+    ]);
   });
 
   it("slice mode - only current Z slice", () => {

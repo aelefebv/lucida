@@ -41,6 +41,8 @@ function makeProxyEntry(overrides: Partial<ProxyCacheEntry> & {
     c: 0,
     insertedAt: nextInsertedAt++,
     epochs: ZERO_EPOCHS,
+    priority: 0,
+    lastSeenTick: 0,
   };
   return { ...base, ...overrides };
 }

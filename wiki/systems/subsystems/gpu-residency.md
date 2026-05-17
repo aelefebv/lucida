@@ -86,11 +86,12 @@ Renderer-class singletons (slice/volume/cursor/compositor) and persistent GPU re
 
 ## Eviction and re-fetch loop
 
-When the worker evicts an atlas slot to make room:
+When worker residency changes or rejects an upload:
 
-1. Posts a `chunksEvicted` message (evicted + skipped keys), keyed by `memberId`.
-2. Includes the now-missing chunks in the next `wantedSetDelta`.
-3. Main thread clears `proxyDeliveredToWorker` for the missing keys → next drain re-uploads if the chunk is still in the [[cpu-cache]], or re-requests if it's already gone.
+1. Posts chunk feedback keyed by `memberId`. `keys` are re-eligible chunks whose optimistic sent state should clear; `skipped` is reserved for atlas-policy rejection (atlas full + too far).
+2. Includes missing chunks and proxies in the next `wantedSetDelta` from authoritative atlas/proxy-pool state.
+3. Main thread reconciles through [[cpu-cache]]: missing/re-eligible chunks clear `DeliveryState` chunk sent state; true rejections enter `RejectionTracker`; missing proxies clear proxy sent state.
+4. Next `getDeliverable()` pass re-uploads cached, wanted, not-rejected, not-sent assets without relying on a pan/zoom cold-state rebuild.
 
 This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — eviction churn cascades. See [[decisions/0004-multi-pool-atlases]].
 
@@ -113,6 +114,7 @@ This is why **plate FPS is sensitive to pool capacity and CPU-cache size** — e
 
 - **Worker eviction is asynchronous from the main thread's perspective.** Don't assume `client.volumeChunkData(...)` lands instantly; the worker may have evicted by the time the next tick reads back. The reconciliation path through `wantedSetDelta` is what keeps things correct.
 - **Pool keys include `channel`** — `(datasetId, kind, slotDims, channel)`. Adding multi-channel mode without re-keying pools regresses to all-channels-fight-for-one-pool, which kills plate FPS.
+- **Cold state carries explicit `multiChannel`.** A multi-channel view can have one visible channel; member IDs and pool grouping still need the multi-channel `imageId:chN` shape.
 - **`memberIdForColdEntry` is the only correct way to derive a memberId.** Inline `${entry.imageId}:ch${channel}` produces `:ch5` for well-as-proxy entries (where `imageId` is absent on the discriminated `kind: "well-as-proxy"` variant). The discriminated union makes the type checker refuse the inline form.
 - **Volume's per-entity scissor for well-as-proxy entries** lives in `volumePath.ts:15-65`. Skips fragments outside the well's screen-space AABB. If a well is rendering visibly outside its footprint, this is the place to look.
 - **Compositor key naming is asymmetric**: `imageId:chN` for multichannel, bare `imageId` for single-channel. Mixing the two halves silently produces the wrong final composite.

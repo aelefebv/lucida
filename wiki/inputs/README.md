@@ -19,6 +19,5 @@ This directory holds source material that the `/repo-wiki` compile pass reads *f
 If you're populating this directory, candidate sources include:
 
 - The PRDs referenced in project memory: PRD #378 (Worker Protocol), PRD #383 (GPU Residency), PRD #393 (Shared Atlas Pools), PRD #148 (`lucida-store` redesign)
-- The remaining top-level narrative doc that should eventually fold into the wiki: `CHUNK_PIPELINE.md` (the others — `ARCHITECTURE.md`, `DOMAINS.md`, `GLOSSARY.md` — no longer exist)
 - Recent PR descriptions for in-flight refactors (chunk pipeline, planning domain, orchestrator)
 - Any meeting notes or design discussions that don't currently live in the repo
