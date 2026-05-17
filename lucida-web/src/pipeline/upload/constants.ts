@@ -3,17 +3,10 @@
  * (windows, thresholds) for the cold-state rebuild and upload detectors.
  */
 
-// ---------------------------------------------------------------------------
-// Per-frame upload budgets
-// ---------------------------------------------------------------------------
-
 /** Per-frame upload budget for the main view (slice + volume). */
 export const MAIN_VIEW_UPLOAD_BUDGET_BYTES = 8 * 1024 * 1024; // 8 MB per frame
 
-// ---------------------------------------------------------------------------
 // Cold-state rebuild telemetry
-// ---------------------------------------------------------------------------
-
 /** Rolling-window size for hit/rebuild rates and cause attribution. */
 export const COLD_STATE_WINDOW_MS = 1000;
 
@@ -30,10 +23,7 @@ export const COLD_STATE_CHURN_SUSTAIN_MS = 2000;
 
 export const COLD_STATE_CHURN_LOG_RATE_LIMIT_MS = 2000;
 
-// ---------------------------------------------------------------------------
 // Upload (CPU → GPU hand-off) telemetry
-// ---------------------------------------------------------------------------
-
 /** Rolling window for bytes/sec, uploads/sec, ratios, exhausted-tick count. */
 export const UPLOAD_WINDOW_MS = 1000;
 

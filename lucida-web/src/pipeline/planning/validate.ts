@@ -26,11 +26,9 @@
 
 import type { ActiveSetEntry, EntitySnapshot, PlanningSnapshot, PlanningState } from "./types.ts";
 
-// ---------------------------------------------------------------------------
-// Check 1 — FieldSnapshot.parentId references a known WellSnapshot
-// ---------------------------------------------------------------------------
-
 /**
+ * Check 1 — FieldSnapshot.parentId references a known WellSnapshot.
+ *
  * Every {@link FieldSnapshot}'s `parentId`, when present in
  * `snapshot.entities`, must refer to an entity whose `kind === "Well"`.
  *
@@ -58,11 +56,9 @@ export function checkFieldParentRefs(snapshot: PlanningSnapshot): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Check 2 — entityId uniqueness
-// ---------------------------------------------------------------------------
-
 /**
+ * Check 2 — entityId uniqueness.
+ *
  * Every `entityId` must be unique across `snapshot.entities`. Duplicate
  * ids cause `prevModeByWell` (and other entity-keyed maps inside the
  * planner and downstream consumers) to silently drop earlier values.
@@ -79,11 +75,9 @@ export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Check 3 — imageId uniqueness
-// ---------------------------------------------------------------------------
-
 /**
+ * Check 3 — imageId uniqueness.
+ *
  * Every non-empty `imageId` must be unique across `snapshot.entities`.
  * Duplicate `imageId`s break `minimapPending` keying and any
  * image-keyed downstream lookup (cache keys, residency tables).
@@ -108,11 +102,9 @@ export function checkUniqueImageIds(snapshot: PlanningSnapshot): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Check 4 — level shape arity (TCZYX = 5)
-// ---------------------------------------------------------------------------
-
 /**
+ * Check 4 — level shape arity (TCZYX = 5).
+ *
  * Every level on every entity must have `shape.length === 5` and
  * `chunk_shape.length === 5`. The TCZYX axis convention is a hard
  * precondition for `iterateChunks`, `chunkOutsideFrustum`, and every
@@ -136,11 +128,9 @@ export function checkLevelShapeArity(snapshot: PlanningSnapshot): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Check 5 — visibleRegion bbox + z-range validity
-// ---------------------------------------------------------------------------
-
 /**
+ * Check 5 — visibleRegion bbox + z-range validity.
+ *
  * `visibleRegion.xyBoundsVox` must be a valid bbox: `xMin <= xMax` and
  * `yMin <= yMax`. `zRangeVox[0] <= zRangeVox[1]`. The field shape is
  * `[minX, minY, maxX, maxY]` (see `pipeline/viewport.ts`).
@@ -168,42 +158,22 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Check 6 — withdrawn (see comment below)
-// ---------------------------------------------------------------------------
-
-// The original "every assetCatalog key must be a known entityId" check
-// was withdrawn: `assetCatalog.byEntity` is flattened across ALL datasets
-// the catalog has ever seen (`pipeline/assetCatalog.ts::snapshot()` walks
-// every dataset map); `snapshot.entities` is for ONE dataset's current
-// tick. They legitimately diverge — the catalog is a cross-dataset
-// registry, not a snapshot-coupled view. Production lookups go
-// snapshot-entity → catalog (per-id `get()`), so dangling catalog entries
-// are harmless: they're never iterated. Kept as a comment so the check
-// number stays stable in cross-references.
-
-// ---------------------------------------------------------------------------
-// Check 7 — withdrawn (see comment below)
-// ---------------------------------------------------------------------------
-
-// The original "every minimapPending key must be a known imageId in
-// snapshot.entities" check was withdrawn. Same root issue as withdrawn
-// check 6: producer scope doesn't match snapshot scope. minimapPath
-// populates pendingFetch by iterating ALL `dataset_images()` (every
-// image in the dataset whose minimap chunks haven't been fully
-// uploaded yet), keyed by `image_id`. snapshot.entities is the result
-// of `view_query` (only currently-visible entities). The two routinely
-// diverge — minimap pending coords for off-screen images are
-// legitimate, and the planner gracefully no-ops on them (its
-// `emitMinimapLane` only walks images present in the active set). Kept
-// as a comment so the surviving check numbers stay stable in
-// cross-references.
-
-// ---------------------------------------------------------------------------
-// Check 8 — previousActiveSet has no duplicate entityIds
-// ---------------------------------------------------------------------------
+// Check 6 (assetCatalog → entityId referential integrity) withdrawn:
+// `assetCatalog.byEntity` is flattened across ALL datasets ever seen,
+// while `snapshot.entities` is for ONE dataset's current tick. They
+// legitimately diverge; dangling catalog entries are harmless because
+// lookups go snapshot-entity → catalog (per-id `get()`).
+//
+// Check 7 (minimapPending → imageId referential integrity) withdrawn for
+// the same producer-scope mismatch: minimapPath enumerates all
+// `dataset_images()`, snapshot.entities is `view_query` output, and
+// `emitMinimapLane` only walks images in the active set.
+//
+// Numbers preserved so cross-references in ADR 0031 stay stable.
 
 /**
+ * Check 8 — previousActiveSet has no duplicate entityIds.
+ *
  * `state.previousActiveSet` must have no duplicate `entityId` entries.
  * Duplicates break `prevModeByWell`'s last-write-wins indexing
  * downstream of the planner.
@@ -220,11 +190,9 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Check 9 — previousActiveSet entry kind agrees with snapshot entity kind
-// ---------------------------------------------------------------------------
-
 /**
+ * Check 9 — previousActiveSet entry kind agrees with snapshot entity kind.
+ *
  * For each `state.previousActiveSet` entry whose `entityId` is also in
  * `snapshot.entities`, the entry's `kind` must agree with the entity's
  * `kind`:
@@ -288,10 +256,6 @@ function allowedEntityKindsFor(
       return null;
   }
 }
-
-// ---------------------------------------------------------------------------
-// validatePlanningInputs — composing entry point
-// ---------------------------------------------------------------------------
 
 /**
  * Run the seven semantic-invariant checks on `plan()`'s inputs. Throws

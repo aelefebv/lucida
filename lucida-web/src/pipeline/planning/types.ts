@@ -8,10 +8,6 @@ import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
 
-// ---------------------------------------------------------------------------
-// EntitySnapshot — discriminated union
-// ---------------------------------------------------------------------------
-
 /**
  * Shared shape across every {@link EntitySnapshot} variant. Holds the
  * fields that don't depend on the entity's `kind`. The variants
@@ -90,10 +86,6 @@ export interface FieldSnapshot extends BaseEntitySnapshot {
  */
 export type EntitySnapshot = ImageSnapshot | WellSnapshot | FieldSnapshot;
 
-// ---------------------------------------------------------------------------
-// SelectionState
-// ---------------------------------------------------------------------------
-
 export interface SelectionState {
   t: number;
   c: number;
@@ -103,10 +95,6 @@ export interface SelectionState {
   interactionState: "idle" | "panning" | "zooming" | "scrubbing";
 }
 
-// ---------------------------------------------------------------------------
-// Cache / worker snapshots
-// ---------------------------------------------------------------------------
-
 export interface CacheStateSnapshot {
   /** entityId -> set of chunk keys currently cached. */
   cached: Map<string, Set<string>>;
@@ -114,17 +102,8 @@ export interface CacheStateSnapshot {
   inFlight: Map<string, Set<string>>;
 }
 
-// ---------------------------------------------------------------------------
-// AssetCatalogSnapshot
-// ---------------------------------------------------------------------------
-
-// Re-exported from `./assetCatalog.ts` so consumers of the planning
-// snapshot don't need a separate import.
+// Re-exported so planning consumers don't need a separate import.
 export type { AssetCatalogSnapshot, ProxyKind } from "../assetCatalog.ts";
-
-// ---------------------------------------------------------------------------
-// MinimapChunkCoord
-// ---------------------------------------------------------------------------
 
 /**
  * Lightweight chunk coordinate carried inside {@link PlanningSnapshot.minimapPending}.
@@ -147,10 +126,6 @@ export interface MinimapChunkCoord {
   /** Canonical chunk key, equivalent to `chunkKey`'s output. */
   key: string;
 }
-
-// ---------------------------------------------------------------------------
-// PlanningSnapshot  (full input)
-// ---------------------------------------------------------------------------
 
 export interface PlanningSnapshot {
   /**
@@ -189,10 +164,6 @@ export interface PlanningSnapshot {
   minimapPending: Map<string, MinimapChunkCoord[]>;
 }
 
-// ---------------------------------------------------------------------------
-// PlanningState  (carry-forward seam)
-// ---------------------------------------------------------------------------
-
 /**
  * Carry-forward state that survives across planning ticks. Distinct
  * from {@link PlanningSnapshot} (the world this tick) and
@@ -212,10 +183,6 @@ export interface PlanningSnapshot {
 export interface PlanningState {
   previousActiveSet: ActiveSetEntry[];
 }
-
-// ---------------------------------------------------------------------------
-// Output types
-// ---------------------------------------------------------------------------
 
 export interface RequestPlan {
   /**
@@ -460,10 +427,6 @@ export interface InvisibleEntry {
   /** The entity's coarsest LOD (= `levels.length - 1`, or 0 if empty). */
   coarsestLod: number;
 }
-
-// ---------------------------------------------------------------------------
-// WellGroup
-// ---------------------------------------------------------------------------
 
 export interface WellGroup {
   /** The well's entity id. May be derived from `parentId` of fields. */

@@ -8,10 +8,6 @@ import { FetchError } from "./retry.ts";
 
 export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
-// ---------------------------------------------------------------------------
-// Interface
-// ---------------------------------------------------------------------------
-
 export interface FetchRequest {
   datasetId: string;
   imageId: string;
@@ -24,9 +20,6 @@ export interface FetchResult {
   dataType: string;
 }
 
-// ---- Proxy fetch types ----
-
-/** Identifies which proxy asset to fetch. */
 export interface FetchProxyRequest {
   datasetId: string;
   entityId: string;
@@ -47,10 +40,6 @@ export interface ContentSource {
   /** Owns the chunk-vs-proxy dispatch so the transport stays generic. */
   handleBinary(key: string, data: ArrayBuffer): void;
 }
-
-// ---------------------------------------------------------------------------
-// ProxiedContentSource — wraps the WebSocket bridge
-// ---------------------------------------------------------------------------
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 /** Proxies can take longer to generate than chunks. */
@@ -90,7 +79,6 @@ export class ProxiedContentSource implements ContentSource {
     this.proxyTimeoutMs = proxyTimeoutMs;
   }
 
-  /** Register an image's wire format. Called during dataset setup. */
   registerImage(imageId: string, wireFormat: WireFormat): void {
     this.imageWireFormats.set(imageId, wireFormat);
   }

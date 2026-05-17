@@ -11,10 +11,6 @@
 
 import type { ProxyKind } from "../assetCatalog.ts";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 /**
  * Parsed proxy header. Mirrors the Rust `ProxyHeader` after the binary
  * 64-byte little-endian record is decoded — see
@@ -27,10 +23,6 @@ export interface ProxyHeaderJs {
   dims: [number, number, number];
   dtype: "u16";
 }
-
-// ---------------------------------------------------------------------------
-// Proxy header parsing
-// ---------------------------------------------------------------------------
 
 /**
  * Parse a 64-byte proxy header out of `buffer` starting at `offset`.
@@ -51,7 +43,6 @@ export function parseProxyHeader(buffer: ArrayBuffer, offset = 0): ProxyHeaderJs
   }
   const view = new DataView(buffer, offset, 64);
 
-  // Magic check.
   if (
     view.getUint8(0) !== 0x4c /* 'L' */ ||
     view.getUint8(1) !== 0x50 /* 'P' */ ||

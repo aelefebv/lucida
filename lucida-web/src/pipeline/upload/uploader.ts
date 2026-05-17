@@ -58,9 +58,7 @@ export class Uploader {
   /** Reset at the start of each `deliverToWorker`; mutated by drain/resend. */
   private currentUploadStats: UploadTickStats = emptyUploadTickStats();
 
-  // ---------------------------------------------------------------------
   // Planner → Uploader seam
-  // ---------------------------------------------------------------------
 
   /**
    * Called once at the top of every cold-state rebuild path. Hoisted to
@@ -152,9 +150,7 @@ export class Uploader {
     }
   }
 
-  // ---------------------------------------------------------------------
   // Per-tick upload (slicePath / volumePath)
-  // ---------------------------------------------------------------------
 
   /**
    * Deliver decoded chunks to the GPU worker. Composes three passes
@@ -250,9 +246,7 @@ export class Uploader {
     return deliveries.length > 0 || budgetExhausted;
   }
 
-  // ---------------------------------------------------------------------
   // Worker feedback (wired in renderLoop.start)
-  // ---------------------------------------------------------------------
 
   handleChunksEvicted(
     memberId: string,
@@ -271,9 +265,7 @@ export class Uploader {
     this.workerFeedback.handleWantedSetDelta(missing);
   }
 
-  // ---------------------------------------------------------------------
   // Lifecycle (dataset removal, multi-channel transitions)
-  // ---------------------------------------------------------------------
 
   /**
    * Clear chunk-side state for a workerMemberId. Used on multi-channel

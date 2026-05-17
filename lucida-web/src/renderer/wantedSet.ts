@@ -15,10 +15,6 @@ import type { ProxyKind } from "../pipeline/assetCatalog.ts";
 import { makeCompositeKey } from "./chunkKeys.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 /** Per-LOD metadata for an entity in a shared pool. */
 export interface AtlasLodMeta {
   level: number;
@@ -56,10 +52,6 @@ export interface ProxyAtlasSnapshot {
 export interface WantedSetResult {
   missing: Array<MissingChunk | MissingProxy>;
 }
-
-// ---------------------------------------------------------------------------
-// computeWantedSet()
-// ---------------------------------------------------------------------------
 
 /**
  * Compute which chunks AND proxies the GPU worker is missing.
@@ -107,11 +99,9 @@ export function computeWantedSet(
   const wellProxyEmitted = new Set<string>();
 
   for (const entry of coldState.activeSet) {
-    // ---- proxy wanted-set ----
-    // Discriminate via `entry.kind` so subsequent branches see the
-    // field variant typed-out.
+    // Proxy wanted-set. `entry.kind` discriminates so the field
+    // branches see the field variant typed-out.
     if (entry.kind === "well-as-proxy") {
-      // Single proxy per visible channel; no chunks.
       for (const c of coldState.visibleChannels) {
         if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "WellProxy3D")) {
           missing.push({
@@ -124,13 +114,10 @@ export function computeWantedSet(
           });
         }
       }
-      // well-as-proxy contributes no chunk requests.
       continue;
     }
 
-    // Field-mode entries can need both proxies and chunks.
     if (entry.mode === "fields-with-proxy-fallback") {
-      // Field proxy per visible channel.
       if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
         for (const c of coldState.visibleChannels) {
           if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")) {
@@ -145,7 +132,6 @@ export function computeWantedSet(
           }
         }
       }
-      // Parent-well proxy per visible channel (deduped).
       const wellId = entry.parentWellId ?? null;
       if (entry.wellProxyAvailable && wellId) {
         for (const c of coldState.visibleChannels) {
@@ -162,15 +148,14 @@ export function computeWantedSet(
               c,
             });
           } else {
-            // Already resident — still mark dedup so we don't requery.
+            // Already resident; mark dedup to avoid re-checking.
             wellProxyEmitted.add(dk);
           }
         }
       }
     } else if (entry.mode === "fields-with-detail") {
-      // Field proxy fallback (per channel) for the worker to use while
-      // detail chunks are still loading. Only request if catalog says
-      // the proxy exists.
+      // Field proxy fallback for the worker to use while detail chunks
+      // are still loading. Only request if catalog advertises one.
       if (entry.proxyAvailable && entry.proxyKind === "FieldProxy3D") {
         for (const c of coldState.visibleChannels) {
           if (!isProxyResident(proxyAtlases, entry.entityId, coldState.currentT, c, "FieldProxy3D")) {
@@ -187,13 +172,9 @@ export function computeWantedSet(
       }
     }
 
-    // ---- chunk wanted-set ----
-    // Build the list of (workerMemberId, channel) pairs for this entry.
-    // Use the canonical memberIdForColdEntry helper so well-as-proxy
-    // entries resolve to entityId rather than ":chN". (Well-as-proxy
-    // entries are narrowed out earlier via `entry.kind === "well-as-proxy"`,
-    // but the helper still routes through the union so the convention
-    // stays in one place.)
+    // Chunk wanted-set. memberIdForColdEntry centralizes the
+    // well-as-proxy → entityId convention even though those entries are
+    // narrowed out above.
     const members: Array<{ memberId: string; channel: number }> = [];
     if (isMultiChannel) {
       for (const c of coldState.visibleChannels) {
@@ -211,7 +192,6 @@ export function computeWantedSet(
     }
 
     for (const { memberId, channel } of members) {
-      // Look up atlas. Both modes route through `memberToPool` → poolKey.
       let atlas: AtlasSnapshot | undefined;
       let entityLodMetas: AtlasLodMeta[] | undefined;
       let useCompositeKey = false;
@@ -236,7 +216,6 @@ export function computeWantedSet(
 
       const atlasLodByLevel = new Map(entityLodMetas.map((m) => [m.level, m]));
 
-      // Iterate all detail-owned LODs for this entry.
       const [finest, coarsest] = entry.detailOwnedLodRange;
       for (let lvl = finest; lvl <= coarsest; lvl++) {
         if (!atlasLodByLevel.has(lvl)) continue;
@@ -289,10 +268,6 @@ export function computeWantedSet(
 
   return { missing };
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Check whether a proxy is resident across any pool with matching

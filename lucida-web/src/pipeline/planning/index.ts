@@ -3,10 +3,6 @@
  * Core lives in sibling files; this module is re-exports only.
  */
 
-// ---------------------------------------------------------------------------
-// Types and the empty-stats factory.
-// ---------------------------------------------------------------------------
-
 export {
   emptyPlanStats,
   type ActiveSetEntry,
@@ -35,10 +31,6 @@ export {
   type WellSnapshot,
 } from "./types.ts";
 
-// ---------------------------------------------------------------------------
-// Mode-decision helpers.
-// ---------------------------------------------------------------------------
-
 export {
   assignModes,
   buildPrevModeByWell,
@@ -46,10 +38,6 @@ export {
   degradeForCatalog,
   groupByWell,
 } from "./modes.ts";
-
-// ---------------------------------------------------------------------------
-// Chunk enumeration and culling primitives.
-// ---------------------------------------------------------------------------
 
 export {
   chunkKey,
@@ -59,10 +47,6 @@ export {
   iterateChunksAtLodRange,
 } from "./chunks.ts";
 
-// ---------------------------------------------------------------------------
-// Lane emission helpers.
-// ---------------------------------------------------------------------------
-
 export {
   emitDetailLane,
   emitMinimapLane,
@@ -70,15 +54,7 @@ export {
   emitPrefetchLane,
 } from "./emit.ts";
 
-// ---------------------------------------------------------------------------
-// Top-level planner.
-// ---------------------------------------------------------------------------
-
 export { plan } from "./plan.ts";
-
-// ---------------------------------------------------------------------------
-// Tunables (configurable defaults).
-// ---------------------------------------------------------------------------
 
 export {
   DEFAULT_PLANNING_CONFIG,
@@ -97,10 +73,6 @@ export {
   mergeConfig,
   type PlanningConfig,
 } from "./config.ts";
-
-// ---------------------------------------------------------------------------
-// Synthetic test helpers.
-// ---------------------------------------------------------------------------
 
 export {
   createSyntheticEntity,

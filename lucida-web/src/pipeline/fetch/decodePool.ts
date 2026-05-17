@@ -7,10 +7,6 @@
 
 import type { WireFormat } from "../../manifestTypes.ts";
 
-// ---------------------------------------------------------------------------
-// Constants (exported for CpuCacheConfig)
-// ---------------------------------------------------------------------------
-
 export const MIN_DECODE_WORKERS = 2;
 export const DECODE_POOL_HEADROOM = 1;
 
@@ -18,10 +14,6 @@ export function defaultPoolSize(): number {
   const cores = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency ?? 4) : 4;
   return Math.max(MIN_DECODE_WORKERS, Math.floor(cores / 2) - DECODE_POOL_HEADROOM);
 }
-
-// ---------------------------------------------------------------------------
-// Pool worker bookkeeping
-// ---------------------------------------------------------------------------
 
 interface PendingEntry {
   resolve: (data: ArrayBuffer) => void;
@@ -33,10 +25,6 @@ interface PoolWorker {
   pending: Map<number, PendingEntry>;
   activeCount: number;
 }
-
-// ---------------------------------------------------------------------------
-// DecodePool
-// ---------------------------------------------------------------------------
 
 export class DecodePool {
   private pool: PoolWorker[];
@@ -71,7 +59,6 @@ export class DecodePool {
   decode(bytes: ArrayBuffer, wireFormat: WireFormat): Promise<ArrayBuffer> {
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
-      // Pick least-busy worker
       let best = this.pool[0];
       for (let i = 1; i < this.pool.length; i++) {
         if (this.pool[i].activeCount < best.activeCount) best = this.pool[i];
@@ -82,19 +69,16 @@ export class DecodePool {
     });
   }
 
-  /** Number of workers currently busy. */
   activeCount(): number {
     let n = 0;
     for (const w of this.pool) n += w.activeCount;
     return n;
   }
 
-  /** Total number of workers in the pool. */
   get size(): number {
     return this.pool.length;
   }
 
-  /** Terminate all workers. */
   terminate(): void {
     for (const w of this.pool) w.worker.terminate();
     this.pool = [];

@@ -4,10 +4,6 @@
 
 import { debugLog } from "../../debug/logging.ts";
 
-// ---------------------------------------------------------------------------
-// FetchError
-// ---------------------------------------------------------------------------
-
 /**
  * - `permanent`: same failure on retry — record + surface, no retry.
  * - `transient`: network blip / timeout — eligible for retry.
@@ -48,10 +44,6 @@ export function classifyFetchError(err: unknown): FetchError {
   }
   return new FetchError(String(err), { kind: "transient", cause: err });
 }
-
-// ---------------------------------------------------------------------------
-// RetryPolicy
-// ---------------------------------------------------------------------------
 
 /** `attempt` is the zero-based count of attempts already made. */
 export interface RetryPolicy {

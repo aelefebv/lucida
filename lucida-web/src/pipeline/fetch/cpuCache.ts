@@ -68,10 +68,6 @@ export type {
   TierResidencyEntry,
 } from "./types.ts";
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 export const DEFAULT_MAIN_BUDGET = 512 * 1024 * 1024;
 export const DEFAULT_OVERVIEW_BUDGET = 64 * 1024 * 1024;
 export const DEFAULT_PROXY_BUDGET = 256 * 1024 * 1024;
@@ -81,18 +77,10 @@ export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
 export const INTERACTION_MODE_WINDOW = 10;
 
-// ---------------------------------------------------------------------------
-// Internal types
-// ---------------------------------------------------------------------------
-
 interface FailedEntry {
   failedUntilContentEpoch: number;
   isPermanent: boolean;
 }
-
-// ---------------------------------------------------------------------------
-// CpuCache
-// ---------------------------------------------------------------------------
 
 export class CpuCache {
   private source: ContentSource;
@@ -194,9 +182,7 @@ export class CpuCache {
       },
       (req) => this.inFlightKey(req),
       (req, controller, _estimate, key) => {
-        this.fetchAndDecode(req, controller, key).catch(() => {
-          // Errors handled inside fetchAndDecode.
-        });
+        this.fetchAndDecode(req, controller, key).catch(() => {});
       },
     );
     this.proxyScheduler = new Scheduler<ProxyRequest>(
@@ -210,16 +196,12 @@ export class CpuCache {
       },
       (req) => this.inFlightProxyKey(req),
       (req, controller, _estimate, key) => {
-        this.fetchProxy(req, controller, key).catch(() => {
-          // Errors handled inside fetchProxy.
-        });
+        this.fetchProxy(req, controller, key).catch(() => {});
       },
     );
   }
 
-  // =========================================================================
   // Public API
-  // =========================================================================
 
   /**
    * Purely additive. Re-submitting an unchanged plan is a no-op for
@@ -543,7 +525,6 @@ export class CpuCache {
     });
   }
 
-  /** Returns the unsubscribe function. */
   subscribe(listener: () => void): () => void {
     this.listeners.push(listener);
     return () => {
@@ -556,7 +537,6 @@ export class CpuCache {
     for (const l of this.listeners) l();
   }
 
-  /** Clear all caches, cancel all fetches. */
   reset(): void {
     this.chunkScheduler.reset();
     this.proxyScheduler.reset();
@@ -579,9 +559,7 @@ export class CpuCache {
     this.counters.reset();
   }
 
-  // =========================================================================
   // Fetch + Decode
-  // =========================================================================
 
   private async fetchAndDecode(
     req: ChunkRequest,
@@ -676,9 +654,7 @@ export class CpuCache {
     this.chunkScheduler.drain(() => this.counters.averageDecodedBytes());
   }
 
-  // =========================================================================
   // Proxy Fetch
-  // =========================================================================
 
   private async fetchProxy(
     req: ProxyRequest,
@@ -791,9 +767,7 @@ export class CpuCache {
     };
   }
 
-  // =========================================================================
   // Cache Management
-  // =========================================================================
 
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
     // minimap shares the overview cache (ADR 0023).
@@ -808,10 +782,6 @@ export class CpuCache {
     if (lane === "overview" || lane === "minimap") return "prefetch";
     return "active-detail";
   }
-
-  // =========================================================================
-  // Helpers
-  // =========================================================================
 
   private inFlightKey(req: ChunkRequest): string {
     return `${req.entityId}/${req.chunkKey}`;

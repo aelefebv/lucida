@@ -17,10 +17,6 @@ import type { DeliveryTracker } from "./tracker.ts";
 import { dispatchChunk, dispatchProxy } from "./dispatch.ts";
 import { proxyKeyFromDelivery } from "../proxyKeys.ts";
 
-// ---------------------------------------------------------------------------
-// Pure filter — classifyDelivery
-// ---------------------------------------------------------------------------
-
 export type FilterVerdict =
   | { action: "send-proxy" }
   | { action: "send-chunk" }
@@ -50,10 +46,6 @@ export function classifyDelivery(
   }
   return { action: "send-chunk" };
 }
-
-// ---------------------------------------------------------------------------
-// Loop — runDrainPass
-// ---------------------------------------------------------------------------
 
 export interface RunDrainPassArgs {
   deliveries: ReadyDelivery[];
@@ -123,7 +115,6 @@ export function runDrainPass(args: RunDrainPassArgs): RunPassResult {
       continue;
     }
 
-    // send-chunk
     const sent = sendChunk(
       client,
       delivery as ReadyChunkDelivery,
@@ -149,10 +140,6 @@ export function runDrainPass(args: RunDrainPassArgs): RunPassResult {
 
   return { remaining, budgetExhausted };
 }
-
-// ---------------------------------------------------------------------------
-// Internal: per-delivery dispatch with tracker / already-sent guard
-// ---------------------------------------------------------------------------
 
 /**
  * Dispatch a chunk + mark the tracker, with an already-sent guard.

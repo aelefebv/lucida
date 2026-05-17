@@ -14,10 +14,6 @@ import type {
   SelectionState,
 } from "./types.ts";
 
-// ---------------------------------------------------------------------------
-// chunkKey()
-// ---------------------------------------------------------------------------
-
 /** Canonical chunk key: "level/t/c/z/y/x". */
 export function chunkKey(
   level: number,
@@ -29,10 +25,6 @@ export function chunkKey(
 ): string {
   return `${level}/${t}/${c}/${z}/${y}/${x}`;
 }
-
-// ---------------------------------------------------------------------------
-// chunkOutsideFrustum()
-// ---------------------------------------------------------------------------
 
 /**
  * Test whether a chunk AABB is fully outside any frustum half-plane.
@@ -57,10 +49,6 @@ export function chunkOutsideFrustum(
   return false;
 }
 
-// ---------------------------------------------------------------------------
-// chunkWorldDims()
-// ---------------------------------------------------------------------------
-
 /**
  * Per-axis world size of a chunk at a given LOD, expressed in level-0
  * voxel units. Returns `[x, y, z]`. Used by both spatial enumeration
@@ -83,10 +71,6 @@ export function chunkWorldDims(
     geo.chunk_shape[Axis.Z] * scaleZ,
   ];
 }
-
-// ---------------------------------------------------------------------------
-// iterateChunks() / iterateChunksAtLodRange()
-// ---------------------------------------------------------------------------
 
 /**
  * Enumerate chunk grid cells for a promoted entity, applying spatial culling

@@ -22,10 +22,6 @@ import type { RunPassResult } from "./drain.ts";
 import { sendChunk, sendProxy } from "./drain.ts";
 import { proxyKeyFromRequest } from "../proxyKeys.ts";
 
-// ---------------------------------------------------------------------------
-// Pure dedup filters
-// ---------------------------------------------------------------------------
-
 export type ResendVerdict<T> =
   | {
       action: "skip";
@@ -87,10 +83,6 @@ export function classifyProxyResend(
   if (!cached) return { action: "skip", reason: "notCached" };
   return { action: "send", cached };
 }
-
-// ---------------------------------------------------------------------------
-// Chunk resend loop
-// ---------------------------------------------------------------------------
 
 export interface RunChunkResendPassArgs {
   /** Per-dataset map (avoids last-dataset-wins). */
@@ -176,10 +168,6 @@ export function runChunkResendPass(
 
   return { remaining, budgetExhausted };
 }
-
-// ---------------------------------------------------------------------------
-// Proxy resend loop
-// ---------------------------------------------------------------------------
 
 export interface RunProxyResendPassArgs {
   requestsByDataset: Map<string, ProxyRequest[]>;
