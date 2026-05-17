@@ -449,9 +449,14 @@ export interface ChunksEvictedMessage {
    * multi-channel composites. Not a dataset id.
    */
   memberId: string;
-  /** Chunks removed from the atlas (were present, got evicted by closer chunks). */
+  /**
+   * Chunks that should be eligible for delivery again. Usually these
+   * were present and got evicted by closer chunks; stale-epoch and
+   * wrong-slice deliveries also use this path because they should clear
+   * optimistic sent state without entering the rejection tracker.
+   */
   keys: string[];
-  /** Chunks from the batch that were not inserted (too far, wrong Z, etc.). */
+  /** Chunks from the batch rejected by residency policy (atlas full + too far). */
   skipped?: string[];
 }
 

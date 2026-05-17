@@ -27,9 +27,9 @@ export function handleVolumeChunkData(
 
   // Drop entire batch if stale
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    const skippedKeys = msg.chunks.map(c => c.key);
-    if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
+    const requeueKeys = msg.chunks.map(c => c.key);
+    if (requeueKeys.length > 0) {
+      ctx.post({ type: "chunksEvicted", memberId, keys: requeueKeys, skipped: [] });
     }
     return;
   }

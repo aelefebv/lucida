@@ -14,10 +14,11 @@
  *    delivery tracking depends on this.
  *  - Incoming chunks farther than the farthest cached are rejected and
  *    reported as `skipped` (NOT as evictions).
- *  - Stale-epoch batches report every chunk as `skipped` with `keys: []`.
+ *  - Stale-epoch batches report every chunk as re-eligible `keys`, not
+ *    `skipped`, so they clear optimistic sent state without rejection.
  *  - Empty `chunks: []` is a no-op; no posts.
- *  - Slice mode: chunks with `z !== targetChunkZ` are skipped (Z-slice
- *    retargeting).
+ *  - Slice mode: chunks with `z !== targetChunkZ` are re-eligible keys
+ *    (Z-slice retargeting), not residency rejections.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -326,7 +327,7 @@ describe("handleVolumeChunkData — eviction policy", () => {
     expect(atlas.slots.size).toBe(1);
   });
 
-  it("stale-epoch batch → entire batch reported as skipped, no work done", () => {
+  it("stale-epoch batch → entire batch reported as re-eligible, no work done", () => {
     const { ctx, posts } = makeMockCtx();
     const poolKey = "ds1";
     const memberA = "imgA";
@@ -346,8 +347,8 @@ describe("handleVolumeChunkData — eviction policy", () => {
     const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
     expect(evictions.length).toBe(1);
     expect(evictions[0].memberId).toBe(memberA);
-    expect(evictions[0].keys).toEqual([]);
-    expect(evictions[0].skipped).toEqual(chunks.map(c => c.key));
+    expect(evictions[0].keys).toEqual(chunks.map(c => c.key));
+    expect(evictions[0].skipped).toEqual([]);
   });
 
   it("empty chunks array → no posts, no work", () => {
@@ -371,8 +372,8 @@ describe("handleVolumeChunkData — eviction policy", () => {
 // ---------------------------------------------------------------------------
 
 describe("handleSliceChunkData — Z-slice retargeting", () => {
-  it("upload for Z=0 when currentZ targets Z=1 → chunks with z !== targetChunkZ skipped", () => {
-    const { ctx } = makeMockCtx();
+  it("upload for Z=0 when currentZ targets Z=1 → chunks with z !== targetChunkZ re-eligible", () => {
+    const { ctx, posts } = makeMockCtx();
     const poolKey = "ds1";
     const memberA = "imgA";
 
@@ -395,6 +396,11 @@ describe("handleSliceChunkData — Z-slice retargeting", () => {
     expect(atlas.slots.size).toBe(1);
     const [[compositeKey]] = [...atlas.slots.entries()];
     expect(compositeKey).toBe(`${memberA}|${chunkAtZ1.key}`);
+    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0].memberId).toBe(memberA);
+    expect(evictions[0].keys).toEqual([chunkAtZ0.key]);
+    expect(evictions[0].skipped).toEqual([]);
   });
 });
 
