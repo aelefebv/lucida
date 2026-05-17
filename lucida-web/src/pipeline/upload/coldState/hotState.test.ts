@@ -62,6 +62,7 @@ function makeColdMsg(
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
+    multiChannel: visibleChannels.length > 1,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1, 1],

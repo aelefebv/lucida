@@ -10,6 +10,29 @@ import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
 import { Axis } from "../../../axes.ts";
 
+export function workerMemberIdForChunk(
+  delivery: ReadyChunkDelivery,
+  multiChannel: boolean,
+): string {
+  return multiChannel ? `${delivery.imageId}:ch${delivery.c}` : delivery.imageId;
+}
+
+export function parseWorkerMemberId(memberId: string): {
+  imageId: string;
+  c: number | null;
+} {
+  const match = /^(.*):ch(\d+)$/.exec(memberId);
+  if (!match) return { imageId: memberId, c: null };
+  return { imageId: match[1], c: Number(match[2]) };
+}
+
+export function channelFromChunkKey(chunkKey: string): number | null {
+  const parts = chunkKey.split("/");
+  if (parts.length < 3) return null;
+  const c = Number(parts[2]);
+  return Number.isFinite(c) ? c : null;
+}
+
 /**
  * Picks the slice vs volume client variant based on `viewMode`.
  * Caller owns counter accounting (tracker mark, stats bumps).
@@ -71,6 +94,20 @@ export function dispatchChunk(
       epochs,
     );
   }
+}
+
+export function dispatchChunkDelivery(
+  client: UploadClient,
+  delivery: ReadyChunkDelivery,
+  meta: ManifestEntry,
+  viewMode: "slice" | "volume",
+  multiChannel: boolean,
+  sliceZ: number | null,
+  epochs: SceneEpochs,
+): string {
+  const workerMemberId = workerMemberIdForChunk(delivery, multiChannel);
+  dispatchChunk(client, delivery, meta, viewMode, workerMemberId, sliceZ, epochs);
+  return workerMemberId;
 }
 
 export function dispatchProxy(

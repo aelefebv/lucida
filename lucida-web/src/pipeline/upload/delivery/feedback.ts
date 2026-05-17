@@ -5,18 +5,18 @@
 
 import type { CpuCache } from "../../fetch/index.ts";
 import type {
+  ChunkFeedbackReason,
   MissingChunk,
   MissingProxy,
 } from "../../../renderer/workerProtocol.ts";
-import type { DeliveryTracker } from "./tracker.ts";
+import { debugLog } from "../../../debug/logging.ts";
+import { proxyKeyFromMissing } from "../proxyKeys.ts";
+import {
+  channelFromChunkKey,
+  parseWorkerMemberId,
+} from "./dispatch.ts";
 
 export class WorkerFeedback {
-  private readonly tracker: DeliveryTracker;
-
-  constructor(tracker: DeliveryTracker) {
-    this.tracker = tracker;
-  }
-
   /**
    * - `evicted` chunks were displaced by closer arrivals — re-eligible
    *   under the same plan.
@@ -32,28 +32,65 @@ export class WorkerFeedback {
     evicted: string[],
     skipped: string[],
     cpuCache: CpuCache,
+    reason?: ChunkFeedbackReason,
   ): void {
-    const { rejectedNew } = this.tracker.markChunkEvicted(
-      memberId, evicted, skipped,
-    );
-    for (const { entityId, chunkKey } of rejectedNew) {
-      cpuCache.markRejected(entityId, chunkKey);
+    const parsed = parseWorkerMemberId(memberId);
+    const byChannel = new Map<number, { evicted: string[]; skipped: string[] }>();
+    const collect = (chunkKey: string, bucket: "evicted" | "skipped"): void => {
+      const c = parsed.c ?? channelFromChunkKey(chunkKey) ?? 0;
+      let group = byChannel.get(c);
+      if (!group) {
+        group = { evicted: [], skipped: [] };
+        byChannel.set(c, group);
+      }
+      group[bucket].push(chunkKey);
+    };
+
+    for (const chunkKey of evicted) collect(chunkKey, "evicted");
+    for (const chunkKey of skipped) collect(chunkKey, "skipped");
+
+    for (const [c, group] of byChannel) {
+      cpuCache.markChunkEvicted(parsed.imageId, c, group.evicted, group.skipped);
+    }
+
+    if (evicted.length > 0 || skipped.length > 0) {
+      debugLog("orch", "upload.worker_chunk_feedback", {
+        memberId,
+        imageId: parsed.imageId,
+        reason: reason ?? "evicted",
+        requeued: evicted.length,
+        rejected: skipped.length,
+      });
     }
   }
 
   /**
-   * Only the proxy branch is meaningful — the orchestrator has no
-   * per-chunk wanted-set (see `CHUNK_PIPELINE.md`). Proxy resends MUST
-   * be tracked: the cache-hit short-circuit means we can't rely on
-   * `submit()` re-emission to recover from a worker-side eviction.
+   * Worker wanted-set is authoritative residency feedback. Chunks clear
+   * optimistic sent state; proxies do the same through their composite
+   * proxy key. Both paths schedule a residency tick in RenderLoop.
    */
   handleWantedSetDelta(
     missing: Array<MissingChunk | MissingProxy>,
+    cpuCache: CpuCache,
   ): void {
+    let missingChunks = 0;
+    let missingProxies = 0;
     for (const entry of missing) {
-      if (entry.kind === "proxy") {
-        this.tracker.clearProxyDelivered(entry);
+      if (entry.kind === "chunk") {
+        const parsed = parseWorkerMemberId(entry.memberId);
+        const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
+        cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey);
+        missingChunks++;
+      } else if (entry.kind === "proxy") {
+        cpuCache.markProxyMissing(proxyKeyFromMissing(entry));
+        missingProxies++;
       }
+    }
+    if (missingChunks > 0 || missingProxies > 0) {
+      debugLog("orch", "upload.worker_wanted_set_delta", {
+        missingChunks,
+        missingProxies,
+      });
     }
   }
 }

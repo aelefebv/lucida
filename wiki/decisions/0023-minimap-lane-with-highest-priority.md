@@ -11,8 +11,6 @@ The minimap is its own dedicated planning lane (`MINIMAP`) with priority offset 
 
 The CPU cache routes `lane: "minimap"` to the existing overview eviction tier (most-protected). Combined effect: minimap chunks are fetched first and evicted last.
 
-Cited in PRD #545. The previously-implicit "OVERVIEW = Minimap" labeling in `CHUNK_PIPELINE.md` is corrected — the OVERVIEW lane keeps its current behaviour but is re-described as the per-entity coarsest pass for the shader fallback chain, distinct from the new MINIMAP lane.
-
 ## Why
 
 The minimap exists to give the user immediate spatial context — "where am I in the whole sample?" — which is most valuable on dataset open, before they've started navigating. The previous implementation emitted minimap requests at priority `2000` (the OVERVIEW lane), which is the *lowest* priority in the system. On dataset open, the minimap appeared *after* detail, proxy, and prefetch chunks — the opposite of its purpose.

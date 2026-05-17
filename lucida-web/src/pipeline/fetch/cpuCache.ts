@@ -2,7 +2,7 @@
  * CPU Cache — holds decompressed data between network and GPU.
  *
  * Owns detail/overview caches with three-tier adaptive eviction,
- * a priority-ordered fetch scheduler, and the submit/drain/snapshot/telemetry API.
+ * a priority-ordered fetch scheduler, and the submit/getDeliverable/snapshot/telemetry API.
  *
  * See docs/cpu-cache-spec.md for the full specification.
  */
@@ -42,6 +42,7 @@ import {
   type RetryPolicy,
 } from "./retry.ts";
 import { RejectionTracker } from "./rejection.ts";
+import { DeliveryState } from "./deliveryState.ts";
 import { debugLog } from "../../debug/logging.ts";
 import type {
   CacheEntry,
@@ -82,6 +83,16 @@ interface FailedEntry {
   isPermanent: boolean;
 }
 
+interface InFlightChunkMeta {
+  request: ChunkRequest;
+  lastSeenTick: number;
+}
+
+interface InFlightProxyMeta {
+  request: ProxyRequest;
+  lastSeenTick: number;
+}
+
 export class CpuCache {
   private source: ContentSource;
   private decode: DecodePool;
@@ -99,9 +110,10 @@ export class CpuCache {
   /** Shares concurrency / bytes caps with `chunkScheduler` via `siblingInFlight`. */
   private proxyScheduler!: Scheduler<ProxyRequest>;
 
-  private ready: ReadyDelivery[] = [];
+  readonly deliveryState = new DeliveryState();
 
   private activeEntityIds = new Set<string>();
+  private activeEntityIdsThisRebuild = new Set<string>();
 
   private interactionDetector = new InteractionModeDetector(INTERACTION_MODE_WINDOW);
 
@@ -117,8 +129,17 @@ export class CpuCache {
   /** Proxies are not retried in-fetch; orchestrator resubmits next tick. */
   private proxyRetryPolicy: RetryPolicy = new NeverRetry();
 
-  /** Stamped onto cached entries; oldest tick = least recently planned. */
-  private submitTick = 0;
+  /** Plan-rebuild generation stamped onto wanted cache entries. */
+  private currentSubmitTick = 0;
+
+  /**
+   * Latest wanted metadata for in-flight fetches. The request object
+   * passed to `fetchAndDecode` may have been queued under an older
+   * camera/LOD plan; these maps let later submits refresh the generation
+   * and lane while the bytes are still in flight.
+   */
+  private inFlightChunkMeta = new Map<string, InFlightChunkMeta>();
+  private inFlightProxyMeta = new Map<string, InFlightProxyMeta>();
 
   /**
    * Worker-rejected (atlas full + too far) chunks. `submit()` skips
@@ -179,9 +200,17 @@ export class CpuCache {
         maxConcurrentFetches: this.config.maxConcurrentFetches,
         maxBytesInFlight: this.config.maxBytesInFlight,
         burstLogger: burstBackpressure,
+        siblingInFlight: () => {
+          const proxyScheduler = this.proxyScheduler as Scheduler<ProxyRequest> | undefined;
+          return {
+            count: proxyScheduler?.inFlightSize ?? 0,
+            bytes: proxyScheduler?.inFlightBytes ?? 0,
+          };
+        },
       },
       (req) => this.inFlightKey(req),
       (req, controller, _estimate, key) => {
+        this.rememberInFlightChunk(key, req);
         this.fetchAndDecode(req, controller, key).catch(() => {});
       },
     );
@@ -196,6 +225,7 @@ export class CpuCache {
       },
       (req) => this.inFlightProxyKey(req),
       (req, controller, _estimate, key) => {
+        this.rememberInFlightProxy(key, req);
         this.fetchProxy(req, controller, key).catch(() => {});
       },
     );
@@ -209,18 +239,11 @@ export class CpuCache {
    */
   submit(plan: RequestPlan): void {
     this.currentEpochs = plan.epochs;
-    this.submitTick++;
 
     this.interactionDetector.push(plan.epochs);
 
-    // Demote entities that left the active set (main store only).
     const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
-    for (const entityId of this.activeEntityIds) {
-      if (!newActiveIds.has(entityId)) {
-        this.chunkStore.demoteEntity(entityId);
-      }
-    }
-    this.activeEntityIds = newActiveIds;
+    for (const entityId of newActiveIds) this.activeEntityIdsThisRebuild.add(entityId);
 
     const pendingChunks: ChunkRequest[] = [];
     const enqueueNow = performance.now();
@@ -235,17 +258,22 @@ export class CpuCache {
         continue;
       }
 
-      // Refresh priority + lastSeenTick on cached entries so eviction
-      // sees them as still wanted.
+      // Refresh lane/tier/priority/lastSeenTick on cached entries so
+      // deliverability and eviction reflect the current plan.
       const cachedEntry = this.lookupCachedEntry(req);
       if (cachedEntry) {
         this.counters.recordHit();
+        cachedEntry.lane = req.lane;
+        cachedEntry.tier = this.laneToTier(req.lane);
         cachedEntry.priority = req.priority;
-        cachedEntry.lastSeenTick = this.submitTick;
+        cachedEntry.lastSeenTick = this.currentSubmitTick;
         continue;
       }
 
-      if (this.chunkScheduler.hasInFlight(key)) continue;
+      if (this.chunkScheduler.hasInFlight(key)) {
+        this.rememberInFlightChunk(key, req);
+        continue;
+      }
 
       const failure = this.failures.get(key);
       if (failure && this.currentEpochs.content < failure.failedUntilContentEpoch) continue;
@@ -259,18 +287,23 @@ export class CpuCache {
     for (const req of proxyRequests) {
       const key = this.inFlightProxyKey(req);
 
-      // TickCoordinator resends evicted proxies via `getCachedProxy`, so
-      // cache hits here are silent.
-      if (this.isProxyCached(req)) continue;
+      const cachedProxy = this.proxyStore.get(req.datasetId, proxyInnerKey(req));
+      if (cachedProxy) {
+        cachedProxy.priority = req.priority;
+        cachedProxy.lastSeenTick = this.currentSubmitTick;
+        continue;
+      }
 
-      if (this.proxyScheduler.hasInFlight(key)) continue;
+      if (this.proxyScheduler.hasInFlight(key)) {
+        this.rememberInFlightProxy(key, req);
+        continue;
+      }
 
       pendingProxies.push(req);
     }
     this.proxyScheduler.enqueue(pendingProxies, enqueueNow);
 
-    this.chunkScheduler.drain(() => this.counters.averageDecodedBytes());
-    this.proxyScheduler.drain(() => this.counters.averageDecodedBytes());
+    this.drainSchedulers();
   }
 
   /**
@@ -293,11 +326,7 @@ export class CpuCache {
     this.overviewStore.cancelDataset(entityIds);
 
     this.proxyStore.cancelDataset(datasetId);
-
-    this.ready = this.ready.filter(d => {
-      if (d.kind === "proxy") return d.datasetId !== datasetId;
-      return !entityIdSet.has(d.entityId);
-    });
+    this.deliveryState.clearProxySentForDataset(datasetId);
 
     // Failure keys are `${entityId}/${chunkKey}`; entityIds may
     // contain slashes (plate naming, e.g. "plateId:A/1/0"), so
@@ -307,7 +336,16 @@ export class CpuCache {
       for (const key of this.failures.keys()) {
         if (key.startsWith(prefix)) this.failures.delete(key);
       }
+      for (const key of this.inFlightChunkMeta.keys()) {
+        if (key.startsWith(prefix)) this.inFlightChunkMeta.delete(key);
+      }
       this.activeEntityIds.delete(entityId);
+      this.activeEntityIdsThisRebuild.delete(entityId);
+      this.deliveryState.clearChunksForImage(entityId);
+    }
+    const proxyPrefix = `${datasetId}|`;
+    for (const key of this.inFlightProxyMeta.keys()) {
+      if (key.startsWith(proxyPrefix)) this.inFlightProxyMeta.delete(key);
     }
   }
 
@@ -321,32 +359,82 @@ export class CpuCache {
     const wasNew = this.rejectionTracker.mark(entityId, chunkKey);
     if (!wasNew) return;
 
-    this.chunkScheduler.cancelOne(this.inFlightKey({ entityId, chunkKey } as ChunkRequest));
+    const key = this.inFlightKey({ entityId, chunkKey } as ChunkRequest);
+    this.chunkScheduler.cancelOne(key);
+    this.inFlightChunkMeta.delete(key);
   }
 
   clearRejected(): void {
     this.rejectionTracker.clear();
   }
 
-  /** Pull decoded buffers up to budget. Returns new deliveries only. */
-  drain(budgetBytes: number): ReadyDelivery[] {
-    if (this.ready.length === 0) return [];
-
-    const result: ReadyDelivery[] = [];
-    let remaining = budgetBytes;
-    const kept: ReadyDelivery[] = [];
-
-    for (const delivery of this.ready) {
-      if (remaining > 0) {
-        result.push(delivery);
-        remaining -= delivery.data.byteLength;
-      } else {
-        kept.push(delivery);
+  onPlanRebuildStart(): void {
+    for (const entityId of this.activeEntityIds) {
+      if (!this.activeEntityIdsThisRebuild.has(entityId)) {
+        this.chunkStore.demoteEntity(entityId);
       }
     }
+    this.activeEntityIds = this.activeEntityIdsThisRebuild;
+    this.activeEntityIdsThisRebuild = new Set();
+    this.currentSubmitTick++;
+    this.rejectionTracker.clear();
+    this.deliveryState.onPlanRebuildStart();
+  }
 
-    this.ready = kept;
-    return result;
+  *getDeliverable(): Iterable<ReadyDelivery> {
+    const candidates: ReadyDelivery[] = [];
+
+    for (const entry of this.chunkStore.iterateTier("active-detail")) {
+      if (entry.lane !== "detail") continue;
+      if (entry.lastSeenTick !== this.currentSubmitTick) continue;
+      if (this.deliveryState.wasChunkSent(entry.imageId, entry.c, entry.chunkKey)) {
+        continue;
+      }
+      if (this.rejectionTracker.has(entry.entityId, entry.chunkKey)) continue;
+      candidates.push(this.chunkEntryToDelivery(entry));
+    }
+
+    for (const entry of this.proxyStore.iterateSeenAt(this.currentSubmitTick)) {
+      if (this.deliveryState.wasProxySent(this.proxyKeyFromEntry(entry))) continue;
+      candidates.push(this.proxyEntryToDelivery(entry));
+    }
+
+    candidates.sort((a, b) => this.compareDeliveries(a, b));
+    yield* candidates;
+  }
+
+  markSent(delivery: ReadyDelivery): void {
+    if (delivery.kind === "chunk") {
+      this.deliveryState.markChunkSent(
+        delivery.imageId, delivery.c, delivery.chunkKey,
+      );
+    } else {
+      this.deliveryState.markProxySent(this.proxyKeyFromDelivery(delivery));
+    }
+  }
+
+  markChunkEvicted(
+    imageId: string,
+    c: number,
+    evicted: string[],
+    skipped: string[],
+  ): void {
+    for (const key of evicted) {
+      this.deliveryState.clearChunkSent(imageId, c, key);
+    }
+    for (const key of skipped) {
+      this.deliveryState.clearChunkSent(imageId, c, key);
+      const entry = this.chunkStore.findByImageChunk(imageId, c, key);
+      this.markRejected(entry?.entityId ?? imageId, key);
+    }
+  }
+
+  markChunkMissing(imageId: string, c: number, chunkKey: string): void {
+    this.deliveryState.clearChunkSent(imageId, c, chunkKey);
+  }
+
+  markProxyMissing(key: string): void {
+    this.deliveryState.clearProxySent(key);
   }
 
   snapshot(): CacheStateSnapshot {
@@ -405,7 +493,7 @@ export class CpuCache {
       pendingCount: this.chunkScheduler.pendingSize,
       pendingProxyCount: this.proxyScheduler.pendingSize,
       pendingOldestAgeMs,
-      readyCount: this.ready.length,
+      readyCount: Array.from(this.getDeliverable()).length,
       hitRate: counters.hitRate,
       evictionsPerSec: counters.evictionsPerSec,
       evictionsByTier: counters.evictionsByTier,
@@ -545,13 +633,16 @@ export class CpuCache {
     this.overviewStore.reset();
     this.proxyStore.reset();
 
-    this.ready = [];
     this.activeEntityIds.clear();
+    this.activeEntityIdsThisRebuild.clear();
     this.interactionDetector.reset();
     this.failures.clear();
     this.rejectionTracker.clear();
+    this.deliveryState.reset();
+    this.inFlightChunkMeta.clear();
+    this.inFlightProxyMeta.clear();
     this.lruCounter = 0;
-    this.submitTick = 0;
+    this.currentSubmitTick = 0;
 
     this.listeners = [];
 
@@ -578,6 +669,7 @@ export class CpuCache {
 
       if (fe.kind === "abort") {
         this.chunkScheduler.markInFlightDone(key);
+        this.inFlightChunkMeta.delete(key);
         return;
       }
 
@@ -595,6 +687,7 @@ export class CpuCache {
       this.counters.recordFetchFailure(isPermanent, fe.message);
       this.recordFailureForBurstDetection(isPermanent, fe.message);
       this.chunkScheduler.markInFlightDone(key);
+      this.inFlightChunkMeta.delete(key);
       return;
     }
 
@@ -611,33 +704,41 @@ export class CpuCache {
     } catch (err: unknown) {
       this.counters.recordError(err instanceof Error ? err.message : String(err));
       this.chunkScheduler.markInFlightDone(key);
+      this.inFlightChunkMeta.delete(key);
       return;
     }
 
+    const latestMeta = this.inFlightChunkMeta.get(key);
+    const effectiveReq = latestMeta?.request ?? req;
+    const lastSeenTick = latestMeta?.lastSeenTick ?? this.currentSubmitTick;
+
     this.chunkScheduler.markInFlightDone(key);
+    if (this.inFlightChunkMeta.get(key) === latestMeta) {
+      this.inFlightChunkMeta.delete(key);
+    }
 
     // Cache even if cancelled during decode — the work is done.
-    const lane = req.lane;
+    const lane = effectiveReq.lane;
     const tier = this.laneToTier(lane);
     const cacheEntry: CacheEntry = {
       data: decoded,
       sizeBytes: decoded.byteLength,
       lane,
       tier,
-      entityId: req.entityId,
-      imageId: req.imageId,
-      level: req.level,
-      t: req.t,
-      c: req.c,
-      z: req.z,
-      y: req.y,
-      x: req.x,
-      chunkKey: req.chunkKey,
+      entityId: effectiveReq.entityId,
+      imageId: effectiveReq.imageId,
+      level: effectiveReq.level,
+      t: effectiveReq.t,
+      c: effectiveReq.c,
+      z: effectiveReq.z,
+      y: effectiveReq.y,
+      x: effectiveReq.x,
+      chunkKey: effectiveReq.chunkKey,
       insertedAt: this.lruCounter++,
       epochs: { ...this.currentEpochs },
       dataType: result.dataType,
-      priority: req.priority,
-      lastSeenTick: this.submitTick,
+      priority: effectiveReq.priority,
+      lastSeenTick,
     };
 
     // minimap routes to overview cache (ADR 0023).
@@ -647,11 +748,9 @@ export class CpuCache {
       this.chunkStore.insert(cacheEntry);
     }
 
-    this.ready.push(this.chunkEntryToDelivery(cacheEntry));
-
     this.notifyListeners();
 
-    this.chunkScheduler.drain(() => this.counters.averageDecodedBytes());
+    this.drainSchedulers();
   }
 
   // Proxy Fetch
@@ -677,6 +776,7 @@ export class CpuCache {
       const fe = classifyFetchError(err);
       if (fe.kind === "abort") {
         this.proxyScheduler.markInFlightDone(key);
+        this.inFlightProxyMeta.delete(key);
         return;
       }
       // Consulted for symmetry; NeverRetry always returns false.
@@ -687,38 +787,67 @@ export class CpuCache {
       }
       this.counters.recordError(fe.message);
       this.proxyScheduler.markInFlightDone(key);
+      this.inFlightProxyMeta.delete(key);
       return;
     }
 
     const responseBytes = result.data.byteLength;
     this.proxyScheduler.correctInFlightBytes(key, responseBytes);
 
+    const latestMeta = this.inFlightProxyMeta.get(key);
+    const effectiveReq = latestMeta?.request ?? req;
+    const lastSeenTick = latestMeta?.lastSeenTick ?? this.currentSubmitTick;
+
     const cacheEntry: ProxyCacheEntry = {
       header: result.header,
       data: result.data,
       bytes: responseBytes,
-      datasetId: req.datasetId,
-      entityId: req.entityId,
-      imageId: req.imageId,
-      proxyKind: req.kind,
-      t: req.t,
-      c: req.c,
+      datasetId: effectiveReq.datasetId,
+      entityId: effectiveReq.entityId,
+      imageId: effectiveReq.imageId,
+      proxyKind: effectiveReq.kind,
+      t: effectiveReq.t,
+      c: effectiveReq.c,
       insertedAt: this.lruCounter++,
       epochs: { ...this.currentEpochs },
+      priority: effectiveReq.priority,
+      lastSeenTick,
     };
 
-    this.proxyStore.insert(req.datasetId, proxyInnerKey(req), cacheEntry);
+    this.proxyStore.insert(effectiveReq.datasetId, proxyInnerKey(effectiveReq), cacheEntry);
 
     this.proxyScheduler.markInFlightDone(key);
+    if (this.inFlightProxyMeta.get(key) === latestMeta) {
+      this.inFlightProxyMeta.delete(key);
+    }
 
-    this.ready.push(this.proxyEntryToDelivery(cacheEntry));
     this.notifyListeners();
 
-    this.proxyScheduler.drain(() => this.counters.averageDecodedBytes());
+    this.drainSchedulers();
   }
 
-  private isProxyCached(req: ProxyRequest): boolean {
-    return this.proxyStore.has(req.datasetId, proxyInnerKey(req));
+  private drainSchedulers(): void {
+    const estimateBytes = () => this.counters.averageDecodedBytes();
+
+    // The two schedulers share caps through `siblingInFlight`. Drain the
+    // proxy side first so fallback assets cannot sit behind a saturated
+    // detail queue until the next camera move/submission wakes them.
+    this.proxyScheduler.drain(estimateBytes);
+    this.chunkScheduler.drain(estimateBytes);
+  }
+
+  private rememberInFlightChunk(key: string, req: ChunkRequest): void {
+    this.inFlightChunkMeta.set(key, {
+      request: req,
+      lastSeenTick: this.currentSubmitTick,
+    });
+  }
+
+  private rememberInFlightProxy(key: string, req: ProxyRequest): void {
+    this.inFlightProxyMeta.set(key, {
+      request: req,
+      lastSeenTick: this.currentSubmitTick,
+    });
   }
 
   private inFlightProxyKey(req: ProxyRequest): string {
@@ -745,6 +874,7 @@ export class CpuCache {
       header: entry.header,
       data: entry.data,
       epochs: entry.epochs,
+      priority: entry.priority,
     };
   }
 
@@ -764,7 +894,50 @@ export class CpuCache {
       dataType: entry.dataType,
       epochs: entry.epochs,
       lane: entry.lane,
+      priority: entry.priority,
     };
+  }
+
+  private compareDeliveries(a: ReadyDelivery, b: ReadyDelivery): number {
+    const priority = (a.priority ?? 0) - (b.priority ?? 0);
+    if (priority !== 0) return priority;
+
+    if (a.kind !== b.kind) {
+      return a.kind === "proxy" ? -1 : 1;
+    }
+
+    if (a.kind === "proxy" && b.kind === "proxy") {
+      return (
+        a.datasetId.localeCompare(b.datasetId) ||
+        a.entityId.localeCompare(b.entityId) ||
+        a.proxyKind.localeCompare(b.proxyKind) ||
+        a.t - b.t ||
+        a.c - b.c
+      );
+    }
+
+    if (a.kind === "chunk" && b.kind === "chunk") {
+      return (
+        a.imageId.localeCompare(b.imageId) ||
+        a.level - b.level ||
+        a.t - b.t ||
+        a.z - b.z ||
+        a.y - b.y ||
+        a.x - b.x ||
+        a.c - b.c ||
+        a.chunkKey.localeCompare(b.chunkKey)
+      );
+    }
+
+    return 0;
+  }
+
+  private proxyKeyFromEntry(entry: ProxyCacheEntry): string {
+    return `${entry.datasetId}|${entry.entityId}|${entry.proxyKind}|${entry.t}|${entry.c}`;
+  }
+
+  private proxyKeyFromDelivery(delivery: ReadyProxyDelivery): string {
+    return `${delivery.datasetId}|${delivery.entityId}|${delivery.proxyKind}|${delivery.t}|${delivery.c}`;
   }
 
   // Cache Management

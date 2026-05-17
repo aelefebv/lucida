@@ -20,12 +20,10 @@ function createMockAssetCatalog(): AssetCatalog {
 function createMockCpuCache(): CpuCache {
   return {
     submit: vi.fn(),
-    drain: vi.fn(() => []),
+    onPlanRebuildStart: vi.fn(),
+    getDeliverable: vi.fn(function* () {}),
+    markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
-    getCached: vi.fn(() => null),
-    // Chunk-delivery tests consult this method from the resend pass.
-    // Default to a miss so cache-hit fixtures don't accidentally
-    // re-emit deliveries across unrelated describes.
     getCachedChunk: vi.fn(() => null),
     telemetry: vi.fn(),
     updateConfig: vi.fn(),

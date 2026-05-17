@@ -5,7 +5,7 @@ modified: 2026-05-17
 
 # CPU Cache
 
-`lucida-web/src/pipeline/fetch/` — host-side cache between the network and the GPU. A directory of focused modules with `cpuCache.ts` as a thin coordinator that fans out to collaborators (interaction-mode detector, telemetry counters, eviction policies, three stores, two schedulers, retry policy + typed errors, rejection tracker, wire-protocol helpers). See [[decisions/0032-cpucache-split-into-pipeline-fetch]] for the directory-layout philosophy and the per-module rationale.
+`lucida-web/src/pipeline/fetch/` — host-side cache between the network and the GPU. A directory of focused modules with `cpuCache.ts` as a thin coordinator that fans out to collaborators (interaction-mode detector, telemetry counters, eviction policies, three stores, two schedulers, retry policy + typed errors, rejection tracker, delivery-state tracker, wire-protocol helpers). See [[decisions/0032-cpucache-split-into-pipeline-fetch]] for the directory-layout philosophy and the per-module rationale.
 
 This is the **sole** chunk fetch path. If you see a reference to a `SharedChunkQueue` anywhere, that's stale.
 
@@ -13,7 +13,7 @@ This is the **sole** chunk fetch path. If you see a reference to a `SharedChunkQ
 
 The directory's collaborators (each one a focused, separately-testable unit):
 
-- `cpuCache.ts` — coordinator. Wires the collaborators in its constructor; each public method (`submit`, `drain`, `snapshot`, `telemetry`, `cancelDataset`, `reset`, `markRejected`, `clearRejected`, `getCachedChunk`, `getCachedProxy`, `getCacheDump`, `getProxyCacheDump`, `subscribe`) is a few-line fan-out. Still hosts `fetchAndDecode` and `fetchProxy` — they're the startFn callbacks the schedulers invoke and the seam where source + decode + store + ready-listener coordinate.
+- `cpuCache.ts` — coordinator. Wires the collaborators in its constructor; each public method (`submit`, `getDeliverable`, `markSent`, `markChunkEvicted`, `markProxyMissing`, `onPlanRebuildStart`, `snapshot`, `telemetry`, `cancelDataset`, `reset`, `markRejected`, `getCachedChunk`, `getCachedProxy`, `getCacheDump`, `getProxyCacheDump`, `subscribe`) is a few-line fan-out. Still hosts `fetchAndDecode` and `fetchProxy` — they're the startFn callbacks the schedulers invoke and the seam where source + decode + store coordinate.
 - `types.ts` — internal + public type defs (`CacheEntry`, `ReadyDelivery` union, `CacheTelemetry`, `CpuCacheConfig`, `EvictionTier`, `Lane`, `TierCounters`, `TierResidencyEntry`).
 - `interactionMode.ts` — `InteractionModeDetector` (panning / scrubbing / idle) drives the tier-order rotation in `TieredPolicy`.
 - `eviction.ts` — `EvictionPolicy` interface with `LRUPolicy` (overview + proxy caches) and `TieredPolicy` (main cache; preserves the active-detail tiebreaker exactly).
@@ -23,6 +23,7 @@ The directory's collaborators (each one a focused, separately-testable unit):
 - `retry.ts` — typed `FetchError(kind: "permanent" | "transient" | "abort")` + `classifyFetchError` + `RetryPolicy` interface with `OnceTransientRetry` (current chunk behaviour) and `NeverRetry` (current proxy behaviour). See [[decisions/0033-typed-fetch-error]].
 - `telemetry.ts` — `TelemetryCounters` (verb API: `recordRequest` / `recordHit` / `recordEviction` / `recordDecode` / `recordFetchFailure` / `recordCompletedFetch` / `snapshot` / `reset`) + `BurstLogger` (rate-limited debug log channel for `cache.backpressure` and `cache.failure_burst`).
 - `rejection.ts` — `RejectionTracker` wraps the per-entity `Set<chunkKey>` rejected map. `mark` returns whether the key was newly added so the caller can abort an in-flight fetch.
+- `deliveryState.ts` — `DeliveryState` wraps optimistic chunk/proxy sent state. Chunk sent facts clear on cold-state rebuild; proxy sent facts survive until worker feedback says the proxy is missing or the dataset is removed.
 - `contentSource.ts` — `ContentSource` interface + `ProxiedContentSource` impl over the WebSocket bridge. Owns `handleBinary(key, payload)` and routes itself by `proxy/` prefix (the bridge does not sniff for binary routing).
 - `decodePool.ts` — codec-agnostic decode worker pool. Unchanged shape.
 - `decode.worker.ts` — Raw / LZ4 / Zstd decompression + uint8 / bool / uint16 normalization. The Zstd path slices the typed-array view to avoid a 12-byte garbage prefix in some payloads.
@@ -37,15 +38,16 @@ Three problems all want to be solved in one place:
 2. **Re-fetch on GPU eviction is wasteful** if the bytes are still in CPU memory. The worker can evict an atlas slot under memory pressure; the CPU cache holds the decoded bytes long enough to re-upload without going back to the network.
 3. **Tier-aware eviction lets the cheap stuff (prefetch, demoted) go first.** Without tiers, LRU evicts whatever's oldest, which often happens to be the most expensive thing to re-fetch (overview/minimap data covers the whole dataset).
 
-## Submit → schedule → decode → drain
+## Submit → schedule → decode → deliver
 
 Each tick:
 
-1. **Submit** — tick coordinator calls `cpuCache.submit(plan)`. The cache demotes entities that left the active set (their chunks move to the `demoted-detail` tier), dedups requests, pushes survivors onto `pendingRequests`.
-2. **Schedule** — `startChunkFetches` sorts pending by priority and launches up to `maxConcurrentFetches` (≈9) bounded by `maxBytesInFlight` (32 MB).
-3. **Fetch** — `contentSource.fetch(req)` returns binary bytes via the WebSocket bridge; routed by `(level, t, c, z, y, x)` key.
-4. **Decode** — `decodePool.decode(...)` picks a worker from a 3-worker pool, selects codec by wire format (Raw/Lz4/Zstd), returns a typed array.
-5. **Insert + signal** — decoded chunk lands in the cache and on the `ready[]` queue. The tick coordinator drains this each tick within the upload budget.
+1. **Rebuild start** — on a cold-state rebuild, tick coordinator calls `cpuCache.onPlanRebuildStart()` once before the per-dataset loop. This advances the wanted generation, clears rejection state, and clears chunk sent state.
+2. **Submit** — tick coordinator calls `cpuCache.submit(plan)` per dataset. The cache demotes entities that left the active set (their chunks move to the `demoted-detail` tier), dedups requests, refreshes wanted-generation/priority on cached entries, and pushes survivors onto scheduler pending queues.
+3. **Schedule** — schedulers launch up to `maxConcurrentFetches` (≈9), bounded by `maxBytesInFlight` (32 MB). Chunk and proxy schedulers share both caps; proxy fallback drains first so a saturated detail queue cannot strand fallback assets until the next camera move.
+4. **Fetch** — `contentSource.fetch(req)` or `fetchProxy(req)` returns bytes via the WebSocket bridge.
+5. **Decode / insert** — decoded chunks and proxies land in their cache stores with priority and wanted generation stamped from the latest submit that still wanted the in-flight request.
+6. **Deliver** — the uploader walks `cpuCache.getDeliverable()`, which yields cached, currently-wanted, not-rejected, not-sent chunks/proxies in priority order. After dispatch, it calls `cpuCache.markSent(delivery)`.
 
 ## Eviction tiers
 
@@ -77,18 +79,20 @@ Both `lastSeenTick` and `priority` are refreshed on every `submit()` for any cac
 
 - **Upstream**: [[planning-domain]] produces the `RequestPlan` consumed by `submit`. The tick coordinator owns the call site (`pipeline/tickCoordinator.ts`).
 - **Sideways**: `contentSource.ts` (binary fetch via [[lucida-web|bridge.ts]]) and `decodePool.ts` (3 web workers running `decode.worker.ts`).
-- **Downstream**: the tick coordinator's drain loop pulls from `ready[]`, filters against `workerWantedSet`, and posts to the GPU worker via [[worker-protocol]] messages.
+- **Downstream**: the [[upload-pipeline|Uploader]] walks `getDeliverable()` and posts to the GPU worker via [[worker-protocol]] messages. Worker feedback returns through `markChunkEvicted` and `markProxyMissing`.
 
 ## Invariants
 
 - **Demotion preserves bytes.** When an entity leaves the active set, its chunks don't drop — they move tier. They evict only under memory pressure, after the cheaper tiers are exhausted.
 - **In-flight dedup is by chunk key.** The same `(level, t, c, z, y, x)` is fetched at most once concurrently regardless of how many requesters want it.
-- **Recently-failed requests are skipped on next submit.** A failed fetch doesn't immediately retry. The tick coordinator sees no entry in `ready[]` and the wanted-set carries the request forward; eventually the failure window expires.
-- **Drain is byte-bounded, not count-bounded.** Bigger chunks consume budget faster. The tick coordinator passes `MAIN_VIEW_UPLOAD_BUDGET_BYTES` (16 MB on main view, 2 MB on minimap) per tick.
+- **Recently-failed requests are skipped on next submit.** A failed fetch doesn't immediately retry. The wanted set carries the request forward; eventually the failure window expires.
+- **Delivery is byte-bounded, not count-bounded.** Bigger chunks consume budget faster. The uploader receives `MAIN_VIEW_UPLOAD_BUDGET_BYTES` (8 MB on main view, 2 MB on minimap) per tick and uses a one-item soft cap.
 
 ## Gotchas
 
 - **Failure tracking is a window, not a permanent fail-list.** If a request fails repeatedly because the server can't serve it (e.g. a missing chunk), the cache will keep retrying with a backoff. There's no per-request retry budget.
 - **Cache budgets are per-tier, not global.** A dataset with a huge proxy footprint can fill the proxy tier while the detail tier is half-empty; the cache won't redistribute. Tune budgets or the planner if this bites.
-- **Drain order matches decode-completion order within a priority band.** If a high-priority chunk decodes after a lower-priority one in the same band, the lower-priority one drains first. The tick coordinator's wanted-set filter still ensures only useful chunks make it across.
-- **`submit` is called before `drain` in the same tick** — the planner can immediately move a freshly-decoded chunk from `ready[]` into the upload path within one frame. If you reorder these in `tickCoordinator.ts`, expect a one-frame upload latency.
+- **Delivery order is strict priority across chunks and proxies.** `ready[]` no longer imposes decode-completion order; `getDeliverable()` merges currently-wanted cached entries by planner priority.
+- **In-flight fetches are not automatically current.** A chunk requested by an older camera/LOD plan may finish after a rebuild; it stays cached but is deliverable only if a newer submit refreshed that in-flight key. This prevents stale low-LOD arrivals from uploading into a zoomed-in cold state.
+- **Worker skipped feedback is image-keyed, rejection is entity-keyed.** `markChunkEvicted` resolves `(imageId, c, chunkKey)` back through the cache entry before marking rejections, so plate fields whose `entityId` differs from `imageId` do not repeatedly resend rejected chunks.
+- **`submit` is called before upload in the same tick** — the planner refreshes wanted-generation on cached entries before `deliverToWorker` asks for deliverables. If you reorder these in `tickCoordinator.ts`, expect a one-frame upload latency or stale deliverability.

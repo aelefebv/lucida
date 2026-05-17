@@ -148,28 +148,30 @@ export function iterateChunksAtLodRange(
     const level0 = entity.levels[0];
     if (level0 === undefined) continue;
 
-    for (const c of selection.visibleChannels) {
-      iterateGridCells(
-        entity,
-        visibleRegion,
-        selection,
-        levelGeo,
-        level0,
-        level,
-        c,
-        requests,
-        stats,
-        datasetId,
-      );
-    }
+    iterateGridCells(
+      entity,
+      visibleRegion,
+      selection,
+      levelGeo,
+      level0,
+      level,
+      selection.visibleChannels,
+      requests,
+      stats,
+      datasetId,
+    );
   }
 
   return requests;
 }
 
 /**
- * Iterate the spatial grid cells for one (level, channel) pair, pushing
- * matching ChunkRequests into `out`.
+ * Iterate the spatial grid cells for one level, pushing matching
+ * ChunkRequests for every visible channel into `out`.
+ *
+ * Channel is the innermost loop so equal-priority multi-channel chunks
+ * are spatially interleaved. That lets upload budget reach all channels
+ * for the focal cells before walking farther cells.
  *
  * Decomposes into named primitives:
  *   - {@link clipGridCellsToRegion}: reduces the full grid to the
@@ -185,7 +187,7 @@ function iterateGridCells(
   levelGeo: LevelGeometry,
   level0: LevelGeometry,
   level: number,
-  c: number,
+  channels: readonly number[],
   out: ChunkRequest[],
   stats: PlanStats | null = null,
   datasetId = "",
@@ -204,6 +206,7 @@ function iterateGridCells(
     chunkWorldY,
     chunkWorldZ,
     stats,
+    channels.length,
   );
   if (clip === null) return;
 
@@ -226,11 +229,12 @@ function iterateGridCells(
         ) {
           continue;
         }
-        if (stats) stats.culling.afterFrustum++;
-
-        out.push(
-          makeChunkRequest(entity, datasetId, level, selection.t, c, iz, row, col),
-        );
+        for (const c of channels) {
+          if (stats) stats.culling.afterFrustum++;
+          out.push(
+            makeChunkRequest(entity, datasetId, level, selection.t, c, iz, row, col),
+          );
+        }
       }
     }
   }
@@ -261,6 +265,7 @@ function clipGridCellsToRegion(
   chunkWorldY: number,
   chunkWorldZ: number,
   stats: PlanStats | null,
+  channelCount = 1,
 ): ClippedGridRange | null {
   // 5D indices: [T=0, C=1, Z=2, Y=3, X=4] — see `axes.ts` (Axis namespace).
   const fullX = level0.shape[Axis.X];
@@ -271,10 +276,10 @@ function clipGridCellsToRegion(
   const maxRow = levelGeo.grid_shape[Axis.Y];
   const maxZ = levelGeo.grid_shape[Axis.Z];
 
-  // Whole-grid count is "considered" — every cell at this (level, channel)
-  // that could have been emitted before culling.
+  // Whole-grid count is "considered" — every cell at this
+  // (level, channel) that could have been emitted before culling.
   const totalCells = maxCol * maxRow * maxZ;
-  if (stats) stats.culling.considered += totalCells;
+  if (stats) stats.culling.considered += totalCells * channelCount;
 
   // Offset visible region by entity position to get local coords.
   const localMinX = region.xyBoundsVox[0] - entity.layoutPositionVox[0];
@@ -299,8 +304,8 @@ function clipGridCellsToRegion(
     const colsKept = Math.max(0, colEnd - colStart);
     const rowsKept = Math.max(0, rowEnd - rowStart);
     const zsKept = Math.max(0, zEnd - zStart);
-    stats.culling.afterXyBounds += colsKept * rowsKept * maxZ;
-    stats.culling.afterZRange += colsKept * rowsKept * zsKept;
+    stats.culling.afterXyBounds += colsKept * rowsKept * maxZ * channelCount;
+    stats.culling.afterZRange += colsKept * rowsKept * zsKept * channelCount;
   }
 
   return { colStart, colEnd, rowStart, rowEnd, zStart, zEnd };

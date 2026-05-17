@@ -7,8 +7,6 @@ modified: 2026-05-17
 
 From "the planner decides this chunk is wanted" to "this chunk's voxels become pixels." This is the canonical hot path; every render frame walks pieces of it.
 
-The repo's top-level **`CHUNK_PIPELINE.md`** is the long-form trace, complete with file:line references for every transition. This flow article gives the high-level shape and points at where each phase is owned.
-
 ## Phases
 
 ### 1. Planning decides "wanted"
@@ -31,11 +29,11 @@ Frame layout: `[client_id u32 LE][key_len u16 LE][key bytes][payload bytes]`. `b
 
 ### 5. Cache insertion
 
-Decoded chunk inserted into the appropriate tier of [[cpu-cache]] (active-detail / demoted-detail / prefetch / proxy / overview); appended to `ready[]`.
+Decoded chunk inserted into the appropriate tier of [[cpu-cache]] (active-detail / demoted-detail / prefetch / proxy / overview), stamped with priority and wanted generation.
 
-### 6. TickCoordinator drain
+### 6. Deliverability
 
-`tickCoordinator.ts:869-934` — pulls from `ready[]` until upload budget exhausted (16 MB main view, 2 MB minimap). Filters to chunks still in `workerWantedSet` (don't waste bandwidth on chunks the worker no longer wants).
+`CpuCache.getDeliverable()` yields cached, currently-wanted, not-rejected, not-sent chunks/proxies in priority order. The [[upload-pipeline|Uploader]] consumes that iterable within the upload budget (8 MB main view, 2 MB minimap).
 
 ### 7. Post to worker
 
@@ -61,7 +59,7 @@ Slice or volume shader runs:
 
 ### 11. Eviction (closing the loop)
 
-When the worker evicts a slot under memory pressure, it posts `chunksEvicted` (evicted + skipped keys) and the evicted chunks reappear in the next `wantedSetDelta`. Main thread clears its delivery tracking → next drain re-uploads from CPU cache, or re-requests if the cache also evicted.
+When the worker evicts a slot under memory pressure, it posts `chunksEvicted` (evicted + skipped keys) and the evicted chunks reappear in the next `wantedSetDelta`. Main thread clears `DeliveryState` via `cpuCache.markChunkEvicted(...)` → next `getDeliverable()` re-uploads from CPU cache, or the planner re-requests if the cache also evicted.
 
 ## Where things can fail
 

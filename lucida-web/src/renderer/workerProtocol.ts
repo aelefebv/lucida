@@ -382,6 +382,12 @@ export interface ColdStateMessage {
   datasetId: string;
   currentT: number;
   currentZ: number;
+  /**
+   * Explicit scene mode. Do not infer this from `visibleChannels.length`:
+   * multi-channel mode can legitimately have one visible channel, and
+   * residency/member keys must still use the multi-channel shape.
+   */
+  multiChannel: boolean;
   visibleChannels: number[];
   visibleRegion: VisibleRegion;
   activeSet: ColdStateActiveEntry[];
@@ -441,6 +447,15 @@ export interface IntensityRangeMessage {
   max: number;
 }
 
+export type ChunkFeedbackReason =
+  | "evicted"
+  | "stale"
+  | "wrong-slice"
+  | "missing-pool"
+  | "missing-entity-meta"
+  | "missing-lod-meta"
+  | "atlas-policy";
+
 export interface ChunksEvictedMessage {
   type: "chunksEvicted";
   /**
@@ -458,22 +473,30 @@ export interface ChunksEvictedMessage {
   keys: string[];
   /** Chunks from the batch rejected by residency policy (atlas full + too far). */
   skipped?: string[];
+  /** Observability-only reason for this feedback batch. */
+  reason?: ChunkFeedbackReason;
 }
 
 /** A chunk that the worker is missing from its atlas. */
 export type MissingChunk = {
   kind: "chunk";
   entityId: string;
+  /**
+   * Worker-side member id that owns the missing chunk. Single-channel
+   * mode uses bare image ids; multi-channel mode uses `imageId:chN`.
+   */
+  memberId: string;
+  /** Channel index parsed from the wanted-set member/channel loop. */
+  c: number;
   chunkKey: string;
 };
 
 /**
  * A proxy asset that the worker is missing from its proxy atlas.
  *
- * `datasetId` is included so the orchestrator can clear its
- * `DeliveryTracker` proxy-delivered entry by composite key without
- * scanning `_lastProxyRequests`. Populated from `coldState.datasetId`
- * in `wantedSet.computeWantedSet`.
+ * `datasetId` is included so the main thread can clear CpuCache's
+ * proxy-sent delivery state by composite key. Populated from
+ * `coldState.datasetId` in `wantedSet.computeWantedSet`.
  */
 export type MissingProxy = {
   kind: "proxy";

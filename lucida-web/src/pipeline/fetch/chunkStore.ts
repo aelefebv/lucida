@@ -126,8 +126,8 @@ export class ChunkStore {
   }
 
   /**
-   * Returns the live reference; mutating `priority` / `lastSeenTick` is
-   * how `submit()` refreshes the active-detail tiebreaker.
+   * Returns the live reference; mutating lane / tier / priority /
+   * lastSeenTick is how `submit()` refreshes wanted cache entries.
    */
   get(entityId: string, chunkKey: string): CacheEntry | undefined {
     return this.store.get(entityId)?.get(chunkKey);
@@ -151,6 +151,29 @@ export class ChunkStore {
         yield entry;
       }
     }
+  }
+
+  *iterateTier(tier: EvictionTier): Iterable<CacheEntry> {
+    for (const entityMap of this.store.values()) {
+      for (const entry of entityMap.values()) {
+        if (entry.tier === tier) yield entry;
+      }
+    }
+  }
+
+  findByImageChunk(imageId: string, c: number, chunkKey: string): CacheEntry | undefined {
+    for (const entityMap of this.store.values()) {
+      for (const entry of entityMap.values()) {
+        if (
+          entry.imageId === imageId &&
+          entry.c === c &&
+          entry.chunkKey === chunkKey
+        ) {
+          return entry;
+        }
+      }
+    }
+    return undefined;
   }
 
   *entityChunkKeys(): Iterable<[string, IterableIterator<string>]> {

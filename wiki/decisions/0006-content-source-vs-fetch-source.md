@@ -39,7 +39,6 @@ The `register_dataset → dataset_opened` server-event rename in commit `c1d982d
 
 - **Two near-identical names invite confusion.** Mitigated by:
   - File location: `pipeline/contentSource.ts` for JS, `lucida-protocol/src/fetch.rs` for wire.
-  - Comments in `CHUNK_PIPELINE.md` explicitly calling out the distinction.
   - Type-level: TS uses `ContentSource` (class); Rust uses `FetchSource` (enum).
 - The alternative (calling them the same name with disambiguation suffixes) was worse — it implied they were the same thing.
 

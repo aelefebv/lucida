@@ -129,13 +129,12 @@ export function memberIdForColdEntry(
 export function* iterateColdMembers(
   cold: ColdStateMessage,
 ): Generator<{ entry: ColdStateActiveEntry; channel: number; memberId: string }> {
-  const multiChannel = cold.visibleChannels.length > 1;
   for (const entry of cold.activeSet) {
     for (const channel of cold.visibleChannels) {
       yield {
         entry,
         channel,
-        memberId: memberIdForColdEntry(entry, channel, multiChannel),
+        memberId: memberIdForColdEntry(entry, channel, cold.multiChannel),
       };
     }
   }

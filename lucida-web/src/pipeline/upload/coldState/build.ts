@@ -127,6 +127,7 @@ export function buildColdState(args: {
   activeSet: ActiveSetEntry[];
   entities: EntitySnapshot[];
   selection: SelectionState;
+  multiChannel: boolean;
   visibleRegion: VisibleRegion;
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
@@ -146,6 +147,7 @@ export function buildColdState(args: {
     datasetId: args.datasetId,
     currentT: args.selection.t,
     currentZ: args.selection.z,
+    multiChannel: args.multiChannel,
     visibleChannels: args.selection.visibleChannels,
     visibleRegion: args.visibleRegion,
     activeSet: coldActiveSet,

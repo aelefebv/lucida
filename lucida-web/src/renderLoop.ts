@@ -57,8 +57,8 @@ export class RenderLoop {
   private volumeState: VolumeState = createVolumeState();
   private minimapState: MinimapState = createMinimapState();
   /**
-   * Upload coordinator. Owns delivery tracking, telemetry, cold/hot-
-   * state emission, drain/resend dispatch, and worker feedback.
+   * Upload coordinator. Owns telemetry, cold/hot-state emission,
+   * dispatch, worker-feedback parsing, and worker resource cleanup.
    * Constructed alongside the TickCoordinator so `client.onChunksEvicted`
    * / `client.onWantedSetDelta` callbacks wire directly here.
    */
@@ -102,8 +102,8 @@ export class RenderLoop {
     // When the worker evicts or skips chunks, update the uploader's
     // delivery tracking so they can be re-sent. Evictions trigger a new
     // tick.
-    this.client.onChunksEvicted = (memberId: string, evicted: string[], skipped: string[]) => {
-      this.uploader.handleChunksEvicted(memberId, evicted, skipped, this.session.cpuCache);
+    this.client.onChunksEvicted = (memberId: string, evicted: string[], skipped: string[], reason) => {
+      this.uploader.handleChunksEvicted(memberId, evicted, skipped, this.session.cpuCache, reason);
       if (evicted.length > 0) {
         this.setDirty("residency", "chunks_evicted");
       }
@@ -112,7 +112,7 @@ export class RenderLoop {
     // When the worker reports its wanted-set, update the uploader and
     // schedule a tick so wanted chunks can be delivered from CpuCache.
     this.client.onWantedSetDelta = (_epochs, missing) => {
-      this.uploader.handleWantedSetDelta(missing);
+      this.uploader.handleWantedSetDelta(missing, this.session.cpuCache);
       if (missing.length > 0) {
         this.setDirty("residency", "wanted_set_delta");
       }
@@ -223,7 +223,7 @@ export class RenderLoop {
     if (mc === this.prevMultiChannel) return;
     this.prevMultiChannel = mc;
 
-    const trackedIds = this.uploader.getTrackedMemberIds();
+    const trackedIds = this.uploader.getTrackedResourceMemberIds();
     for (const key of trackedIds) {
       const isComposite = /:ch\d+$/.test(key);
       if ((mc && !isComposite) || (!mc && isComposite)) {
@@ -238,7 +238,7 @@ export class RenderLoop {
   private collectMemberIds(dsId: string): string[] {
     const ids = new Set<string>();
     const prefix = dsId + ":";
-    for (const key of this.uploader.getTrackedMemberIds()) {
+    for (const key of this.uploader.getTrackedResourceMemberIds()) {
       if (key === dsId || key.startsWith(prefix)) ids.add(key);
     }
     ids.delete(dsId);

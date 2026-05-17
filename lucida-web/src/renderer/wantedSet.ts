@@ -92,7 +92,7 @@ export function computeWantedSet(
     return { missing };
   }
 
-  const isMultiChannel = coldState.visibleChannels.length > 1;
+  const isMultiChannel = coldState.multiChannel;
 
   // Dedup per (wellId, t, c) so multiple field entries of the same
   // parent only emit one parent-well-proxy request.
@@ -256,6 +256,8 @@ export function computeWantedSet(
                 missing.push({
                   kind: "chunk",
                   entityId: entry.entityId,
+                  memberId,
+                  c: channel,
                   chunkKey,
                 });
               }

@@ -14,6 +14,7 @@ import {
   parseCompositeKey,
   makeCompositeKey,
 } from "../chunkKeys.ts";
+import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
 
 export function handleVolumeChunkData(
@@ -27,15 +28,15 @@ export function handleVolumeChunkData(
 
   // Drop entire batch if stale
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    const requeueKeys = msg.chunks.map(c => c.key);
-    if (requeueKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", memberId, keys: requeueKeys, skipped: [] });
-    }
+    postChunksRequeued(ctx, memberId, msg.chunks, "stale");
     return;
   }
 
   const atlas = ctx.state.volumeAtlases.get(poolKey);
-  if (!atlas) return; // pool not yet created by cold state handler
+  if (!atlas) {
+    postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+    return; // pool not yet created by cold state handler
+  }
 
   // Debug: detect chunk dims mismatch (pool created for different chunk size)
   if (atlas.chunkX !== chunkX || atlas.chunkY !== chunkY || atlas.chunkZ !== chunkZ) {
@@ -45,11 +46,13 @@ export function handleVolumeChunkData(
   const entityLodMetas = atlas.entityMetas.get(memberId);
   if (!entityLodMetas) {
     console.warn(`[volumeChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
+    postChunksRequeued(ctx, memberId, msg.chunks, "missing-entity-meta");
     return;
   }
   const lodMeta = entityLodMetas.find(m => m.level === level);
   if (!lodMeta) {
     console.warn(`[volumeChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
+    postChunksRequeued(ctx, memberId, msg.chunks, "missing-lod-meta");
     return;
   }
 
@@ -134,11 +137,15 @@ export function handleVolumeChunkData(
     }
     // Report evictions per member
     for (const [evMember, evKeys] of evictedByMember) {
-      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [] });
+      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [], reason: "evicted" });
     }
     // Report skipped (this batch's member only)
     if (skippedKeys.length > 0) {
-      ctx.post({ type: "chunksEvicted", memberId, keys: [], skipped: skippedKeys });
+      postChunksRejected(
+        ctx,
+        memberId,
+        skippedKeys.map(key => ({ key })),
+      );
     }
     ctx.postWantedSet();
   }

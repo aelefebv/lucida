@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-16
+modified: 2026-05-17
 ---
 
 ADRs cite [[principles/index|principles]] as their justification when applicable. Principles never cite back — they remain agnostic to which decisions exist today.
@@ -49,6 +49,7 @@ Most articles below were originally seeded by reading the code (rationale recons
 - [[decisions/0034-orchestrator-split-into-pipeline-upload]] — `orchestrator.ts` (2027 lines) splits into a planner-only `Orchestrator` (~400 LOC) plus a new `Uploader` coordinator (~250 LOC) backed by `pipeline/upload/` — mirrors [[decisions/0032-cpucache-split-into-pipeline-fetch]] in shape; integration test suite stays monolithic through Slice 9; two latent bugs ride along (`workerWantedSet` dead state, multi-dataset resend under-resend); chunk/proxy asset-abstraction explicitly NOT pursued (PRD #607; 2026-05-16)
 - [[decisions/0035-gpu-worker-split-into-renderer-subdirectories]] — `gpu.worker.ts` (815 lines) + `volumeHandlers.ts` (646 lines) + `sliceHandlers.ts` (554 lines) split into a tree of focused modules under `lucida-web/src/renderer/` (subdirs `coldState/`, `proxy/`, `volume/`, `slice/`, `worker/`, `descriptor/`); eleven incremental slices; mirrors [[decisions/0034-orchestrator-split-into-pipeline-upload]] in cadence and shape; two latent bugs ride along (well-as-proxy memberId in pool registry, `removeLayerResources` Map cleanup leak); wire-protocol renames `chunksEvicted.datasetId` → `memberId` + `ColdStateActiveEntry` discriminated union; no `RenderClient` interface split (no second renderer on the horizon); does NOT cite a principle (`principles/render-pipeline.md` deferred to post-refactor INTERVIEW, same as `cpu-cache.md` / `upload-pipeline.md`) (PRD #622; 2026-05-16)
 - [[decisions/0036-descriptor-byte-layout-ssot-and-wgsl-lock-test]] — `EntityDescriptor` byte layout owned by a single TS file (`renderer/descriptor/layout.ts`) as named offset constants; companion `layout.test.ts` parses the `EntityDescriptor` struct from both `slice.wgsl` and `volume.wgsl` and asserts agreement, failing CI on drift; WGSL codegen explicitly deferred (only two shaders; build cost not justified); generalizable seam for future cross-language byte-shape contracts (PRD #622, Slice 3; 2026-05-16)
+- [[decisions/0037-delivery-state-as-cpucache-sidecar]] — `CpuCache` owns optimistic chunk/proxy sent state via `DeliveryState`; `getDeliverable()` replaces `ready[]` drain plus chunk/proxy resend passes; uploader planner-staging hooks disappear; send order becomes strict priority across deliverables (PRD #640; 2026-05-17)
 
 ## Deferred — considered but not built yet
 

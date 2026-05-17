@@ -41,6 +41,7 @@ import {
   removeMinimapResources,
 } from "../minimapHandlers.ts";
 import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
+import { postChunksRequeued } from "../chunkUploadFeedback.ts";
 
 /**
  * Dispatch one main-thread message. The caller is responsible for
@@ -63,7 +64,10 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "sliceChunkData": {
       const memberId = msg.memberId;
       const poolKey = ctx.state.memberToPool.get(memberId);
-      if (!poolKey) return;
+      if (!poolKey) {
+        postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+        return;
+      }
       handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
       return;
     }
@@ -86,6 +90,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       const poolKey = ctx.state.memberToPool.get(memberId);
       if (!poolKey) {
         // No pool registered yet (cold state hasn't arrived for this member)
+        postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
         return;
       }
       handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);

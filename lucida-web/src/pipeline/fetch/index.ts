@@ -52,6 +52,8 @@ export {
 export { InteractionModeDetector } from "./interactionMode.ts";
 export type { InteractionMode } from "./interactionMode.ts";
 
+export { DeliveryState } from "./deliveryState.ts";
+
 export {
   FetchError,
   classifyFetchError,

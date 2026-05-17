@@ -15,7 +15,7 @@ Tribal knowledge, footguns, and "we tried X, it broke Y" lessons. The kind of th
 - [[app-tsx-hook-order]] — App.tsx hook order is load-bearing; callback refs break circular deps
 - [[document-vs-viewport-classification]] — misclassifying a command floods peers (viewport-as-document) or silently desyncs (document-as-viewport)
 - [[scene-document-state-json-compat]] — `Scene` flattens `DocumentState` for JSON compat; new fields need backward-compat tests
-- [[upload-budgets-per-frame]] — 16 MB main view, 2 MB minimap; non-linear behavior at limits, profile before changing
+- [[upload-budgets-per-frame]] — 8 MB main view, 2 MB minimap; non-linear behavior at limits, profile before changing
 - [[worker-eviction-async-reporting]] — worker posts `chunksEvicted` async; main-thread send-tracking must reconcile
 - [[minimap-render-key]] — minimap skips render when key matches; new visual inputs must extend the key
 - [[wasm-rebuild-after-rust-changes]] — `npm run build:wasm` is the second half of every Rust change

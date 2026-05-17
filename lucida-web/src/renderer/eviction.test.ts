@@ -365,6 +365,36 @@ describe("handleVolumeChunkData — eviction policy", () => {
     expect(posts.length).toBe(0);
     expect(ctx.state.volumeAtlases.get(poolKey)?.slots.size).toBe(0);
   });
+
+  it("missing volume atlas → batch reported as re-eligible", () => {
+    const { ctx, posts } = makeMockCtx();
+    const memberA = "imgA";
+    const chunk = makeChunk(0, 0, 0, 0, 0, 0);
+
+    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [chunk]), epochs(), "missing-pool", memberA);
+
+    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0].memberId).toBe(memberA);
+    expect(evictions[0].keys).toEqual([chunk.key]);
+    expect(evictions[0].skipped).toEqual([]);
+  });
+
+  it("missing volume entity metadata → batch reported as re-eligible", () => {
+    const { ctx, posts } = makeMockCtx();
+    const poolKey = "ds1";
+    const memberA = "imgA";
+    const chunk = makeChunk(0, 0, 0, 0, 0, 0);
+
+    getOrCreateVolumePool(ctx, poolKey, 32, 32, 32, 0, 0);
+    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [chunk]), epochs(), poolKey, memberA);
+
+    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0].memberId).toBe(memberA);
+    expect(evictions[0].keys).toEqual([chunk.key]);
+    expect(evictions[0].skipped).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -400,6 +430,20 @@ describe("handleSliceChunkData — Z-slice retargeting", () => {
     expect(evictions).toHaveLength(1);
     expect(evictions[0].memberId).toBe(memberA);
     expect(evictions[0].keys).toEqual([chunkAtZ0.key]);
+    expect(evictions[0].skipped).toEqual([]);
+  });
+
+  it("missing slice atlas → batch reported as re-eligible", () => {
+    const { ctx, posts } = makeMockCtx();
+    const memberA = "imgA";
+    const chunk = makeSliceChunk(0, 0, 0, 0, 0, 0);
+
+    handleSliceChunkData(ctx, makeSliceMsg(memberA, [chunk]), epochs(), "missing-pool", memberA);
+
+    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
+    expect(evictions).toHaveLength(1);
+    expect(evictions[0].memberId).toBe(memberA);
+    expect(evictions[0].keys).toEqual([chunk.key]);
     expect(evictions[0].skipped).toEqual([]);
   });
 });

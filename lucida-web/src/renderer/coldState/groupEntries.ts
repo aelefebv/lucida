@@ -49,7 +49,7 @@ export function groupEntriesByPool(
   mode: "volume" | "slice",
 ): Map<string, PoolGroup> {
   const groups = new Map<string, PoolGroup>();
-  const isMultiCh = cold.visibleChannels.length > 1;
+  const isMultiCh = cold.multiChannel;
   const channels = isMultiCh
     ? cold.visibleChannels
     : [cold.visibleChannels[0]];

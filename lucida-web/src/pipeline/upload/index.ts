@@ -36,29 +36,20 @@ export { buildViewHotState } from "./coldState/hotState.ts";
 
 export { computeScissorRect } from "./scissor.ts";
 
-export { DeliveryTracker } from "./delivery/tracker.ts";
 export { WorkerFeedback } from "./delivery/feedback.ts";
 export {
   buildManifestByImage,
   type ManifestEntry,
 } from "./delivery/manifestIndex.ts";
-export { dispatchChunk, dispatchProxy } from "./delivery/dispatch.ts";
 export {
-  classifyDelivery,
-  runDrainPass,
-  type FilterVerdict,
-  type RunDrainPassArgs,
-  type RunPassResult,
-} from "./delivery/drain.ts";
-export {
-  classifyChunkResend,
-  classifyProxyResend,
-  runChunkResendPass,
-  runProxyResendPass,
-  type ResendVerdict,
-  type RunChunkResendPassArgs,
-  type RunProxyResendPassArgs,
-} from "./delivery/resend.ts";
+  dispatchChunk,
+  dispatchChunkDelivery,
+  dispatchProxy,
+  workerMemberIdForChunk,
+  parseWorkerMemberId,
+  channelFromChunkKey,
+} from "./delivery/dispatch.ts";
+export { WorkerResourceTracker } from "./delivery/resources.ts";
 
 export {
   SustainedCondition,

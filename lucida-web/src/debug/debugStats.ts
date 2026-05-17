@@ -281,8 +281,8 @@ export interface DebugStats {
    * tick. Two views:
    *
    * - `tick`: snapshot of the most recent `deliverToWorker` call —
-   *   what got drained, what got uploaded vs filtered, bytes against
-   *   budget, resend pass results.
+   *   what was considered deliverable, what got uploaded vs filtered, and
+   *   bytes against budget.
    * - `rolling`: 1s-windowed rates and ratios for "is the upload path
    *   keeping up?" plus cumulative totals and an upload-size sketch.
    *
@@ -299,7 +299,7 @@ export interface DebugStats {
  * call; published at the end. Drives the Orch tab's per-tick pane.
  */
 export interface UploadTickStats {
-  /** Items returned by `cpuCache.drain(budget)` this tick. */
+  /** Deliverable items considered from `cpuCache.getDeliverable()` this tick. */
   drainedChunks: number;
   drainedProxies: number;
   /** Items actually posted to the worker this tick. */
@@ -307,27 +307,26 @@ export interface UploadTickStats {
   uploadedProxies: number;
   /** Bytes actually posted (from delivery `data.byteLength`). */
   bytesUploaded: number;
-  /** Drain byte budget passed in by the caller. */
+  /** Upload byte budget passed in by the caller. */
   bytesBudget: number;
   /**
-   * Drain stopped early because remaining budget hit zero. NOT a
+   * Upload stopped early because remaining budget hit zero. NOT a
    * function of bytesUploaded reaching bytesBudget: a single chunk
    * larger than remaining will still be uploaded and trigger this.
    */
   budgetExhausted: boolean;
-  // Skip reasons during the drain pass (one entry per drained item):
+  // Skip reasons during the delivery pass (one entry per considered item):
   /** Lane was `prefetch` — pre-cached for future timepoint. */
   skippedPrefetch: number;
   /** Lane was `overview` — minimap path owns these. */
   skippedOverview: number;
   /** Chunk level didn't match `targetLevelByImage[imageId]`. Stale plan. */
   skippedWrongLod: number;
-  /** Chunk already in the orchestrator's `DeliveryTracker` sent set for the worker memberId. */
+  /** Chunk already in CpuCache delivery sent state for the worker memberId. */
   skippedAlreadySent: number;
   /** Couldn't resolve dataset/imageSpec/level meta — should be ~0; bug indicator. */
   skippedNoMeta: number;
-  // Resend pass — separate from drain because it indicates worker
-  // eviction churn rather than fresh decode work.
+  // Legacy resend counters retained for telemetry shape compatibility.
   resendChunkUploads: number;
   resendProxyUploads: number;
   resendChunksConsidered: number;
@@ -336,8 +335,8 @@ export interface UploadTickStats {
   /**
    * Chunks the worker has reported as `skipped` (atlas full + farther
    * than the farthest existing slot). Tracked in the orchestrator's
-   * `DeliveryTracker` rejected set and skipped by the resend pass until
-   * the next plan rebuild clears the rejection state.
+   * CpuCache rejection state and skipped by `getDeliverable()` until the
+   * next plan rebuild clears the rejection state.
    */
   resendChunksRejected: number;
   resendProxiesConsidered: number;
@@ -350,17 +349,17 @@ export interface UploadTickStats {
  * 1s window. NaN ratios mean "no events in window" — render as `—`.
  */
 export interface UploadRollingStats {
-  /** Bytes/sec across all uploads (drain + resend) in the last 1s. */
+  /** Bytes/sec across all uploads in the last 1s. */
   bytesPerSec: number;
   /** Uploads/sec (chunks + proxies). */
   uploadsPerSec: number;
   /**
-   * Ratio of uploads sourced from the resend pass. High = atlas
-   * thrashing (worker is evicting faster than fresh decodes can fill).
+   * Legacy resend-sourced ratio. Now normally 0 because deliverability is a
+   * single `cpuCache.getDeliverable()` pass.
    */
   resendRatio: number;
   /**
-   * Ratio of *upload-bound* drained chunks that were filtered out:
+   * Ratio of *upload-bound* considered chunks that were filtered out:
    * `(skippedWrongLod + skippedAlreadySent + skippedNoMeta) /
    *  (drainedChunks − skippedPrefetch − skippedOverview)`.
    *

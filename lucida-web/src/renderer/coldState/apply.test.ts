@@ -162,6 +162,7 @@ function makeCold(
     datasetId: opts?.datasetId ?? "ds1",
     currentT: opts?.currentT ?? 0,
     currentZ: opts?.currentZ ?? 0,
+    multiChannel: opts?.multiChannel ?? (opts?.visibleChannels?.length ?? 1) > 1,
     visibleChannels: opts?.visibleChannels ?? [0],
     visibleRegion: opts?.visibleRegion ?? {
       xyBoundsVox: [0, 0, 1024, 1024],

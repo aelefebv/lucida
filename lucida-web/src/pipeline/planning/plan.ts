@@ -23,6 +23,36 @@ import {
 } from "./types.ts";
 import { validatePlanningInputs } from "./validate.ts";
 
+function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
+  const priority = a.priority - b.priority;
+  if (priority !== 0) return priority;
+
+  const image = a.imageId.localeCompare(b.imageId);
+  if (image !== 0) return image;
+
+  return (
+    a.level - b.level ||
+    a.t - b.t ||
+    a.z - b.z ||
+    a.y - b.y ||
+    a.x - b.x ||
+    a.c - b.c ||
+    a.chunkKey.localeCompare(b.chunkKey)
+  );
+}
+
+function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
+  const priority = a.priority - b.priority;
+  if (priority !== 0) return priority;
+  return (
+    a.datasetId.localeCompare(b.datasetId) ||
+    a.entityId.localeCompare(b.entityId) ||
+    a.kind.localeCompare(b.kind) ||
+    a.t - b.t ||
+    a.c - b.c
+  );
+}
+
 /**
  * Top-level pure planner. `state` is the opaque carry-forward the
  * caller stored from the previous tick's {@link RequestPlan.nextState}.
@@ -100,8 +130,11 @@ export function plan(
   emitOverviewLane(snapshot.entities, snapshot, stats, allRequests, config);
 
   // Step 7: Merge and sort by priority (ascending — lower = more urgent).
-  allRequests.sort((a, b) => a.priority - b.priority);
-  proxyRequests.sort((a, b) => a.priority - b.priority);
+  // Equal-priority chunk ties are spatial-first, channel-second so
+  // multi-channel upload reaches all channels for focal cells instead
+  // of exhausting the budget on one channel's whole grid.
+  allRequests.sort(compareChunkRequests);
+  proxyRequests.sort(compareProxyRequests);
 
   // Step 8: Epoch propagation.
   const epochs: SceneEpochs = {

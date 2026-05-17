@@ -60,7 +60,7 @@ export class RenderClient implements UploadClient {
     if (msg.type === "intensityRange" && this.onIntensityRange) {
       this.onIntensityRange(msg.datasetId, msg.min, msg.max);
     } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
-      this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? []);
+      this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.epochs, msg.missing);
     } else if (msg.type === "error") {

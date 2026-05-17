@@ -768,6 +768,28 @@ describe("iterateChunks", () => {
     expect(channels).toEqual([0, 2, 3]);
   });
 
+  it("multi-channel request order interleaves channels per spatial cell", () => {
+    const level0 = makeLevelGeo(0, [1, 2, 1, 256, 512], [1, 1, 1, 256, 256]);
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      imageId: "img0",
+      levels: [level0],
+      layoutPositionVox: [0, 0],
+    });
+    const entry = makeFieldDetailEntry("e0", "img0", 0, 0);
+    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 256] });
+    const selection = makeSelection({ visibleChannels: [0, 1] });
+
+    const result = iterateChunks(entity, entry, region, selection);
+
+    expect(result.map((r) => [r.x, r.c])).toEqual([
+      [0, 0],
+      [0, 1],
+      [1, 0],
+      [1, 1],
+    ]);
+  });
+
   it("returns all visible chunks regardless of sort order", () => {
     // 4x1x1 grid so chunks are spread along X.
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 1024], [1, 1, 1, 256, 256]);
