@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-16
+modified: 2026-05-17
 ---
 
 # Chunk Pipeline
@@ -18,7 +18,7 @@ This article captures the *shape*, *invariants*, and *gotchas* — the things th
 Every RAF tick runs four phases in this order, then reschedules if work remains:
 
 1. **Plan** — query WASM (`view_query`, `member_positions`, `visible_region`); decide which entities are active and at what LOD; enumerate wanted chunks with priorities. Owned by [[planning-domain]].
-2. **Upload** — drain decoded chunks from the [[cpu-cache]] to the GPU worker, bounded by the per-frame byte budget. Drain/resend/dispatch is owned by the [[upload-pipeline|Uploader]]; the Orchestrator is planner-only.
+2. **Upload** — drain decoded chunks from the [[cpu-cache]] to the GPU worker, bounded by the per-frame byte budget. Drain/resend/dispatch is owned by the [[upload-pipeline|Uploader]]; the TickCoordinator is planner-only.
 3. **Render** — slice or volume path; throttled if only `residencyDirty` changed (≈30 fps cap on chunk-arrival redraws), immediate if `interactiveDirty`. Owned by [[gpu-residency]] downstream of `renderLoop.ts`. The render side lives under `lucida-web/src/renderer/` as `coldState/`, `proxy/`, `volume/`, `slice/`, `worker/`, `descriptor/` subdirectories plus the algorithmic core (`wantedSet.ts`, `proxyAtlas.ts`, `descriptorBuffer.ts`, …); `gpu.worker.ts` is a ~34 LOC entry point. See [[decisions/0035-gpu-worker-split-into-renderer-subdirectories]].
 4. **Minimap** — same indirection lookups, smaller atlas, render-key skips when stationary.
 
@@ -37,7 +37,7 @@ Every RAF tick runs four phases in this order, then reschedules if work remains:
 - **Single vs plate complexity lives entirely in planning.** Below planning, both produce the same shape of `ChunkRequest` — plates just have more of them and add `WellProxy3D` / `FieldProxy3D` request kinds.
 - **Priority is a single scalar, lower wins.** The formula is `laneOffset + (1 - importance) * 500 + distance * 10`. Lanes are `MINIMAP=0`, `DETAIL=500`, `PROXY=1000`, `PREFETCH=1500`, `OVERVIEW=2500`. Minimap is fetched first on dataset open; centered detail follows; the per-entity OVERVIEW backstop loses (~2500+). See [[decisions/0023-minimap-lane-with-highest-priority]] for why MINIMAP sits at offset 0.
 - **`CpuCache` is the sole fetch path.** Nothing else fetches chunks.
-- **Atlas eviction is pure LRU per pool.** The orchestrator drives "what should be there"; the GPU worker just reports what it lost via `chunksEvicted` and the next `wantedSetDelta`.
+- **Atlas eviction is pure LRU per pool.** The tick coordinator drives "what should be there"; the GPU worker just reports what it lost via `chunksEvicted` and the next `wantedSetDelta`.
 - **Plate proxy pools are keyed by `(datasetId, kind, slotDims, channel)`.** The `channel` axis matters because each channel composites independently and pool capacity is per-pool — see [[decisions/0004-multi-pool-atlases]].
 
 ## Gotchas

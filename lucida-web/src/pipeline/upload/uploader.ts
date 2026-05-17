@@ -1,6 +1,7 @@
 /**
- * Uploader — owns upload-phase state the orchestrator hands off alongside
- * its planning role. See `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`.
+ * Uploader — owns upload-phase state the tickCoordinator hands off
+ * alongside its planning role. See
+ * `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`.
  */
 
 import type { CpuCache } from "../fetch/index.ts";
@@ -43,7 +44,7 @@ export class Uploader {
 
   readonly uploadTelemetry = new UploadTelemetry();
 
-  /** Exposed so `Orchestrator` can wire cache-hit / rebuild events. */
+  /** Exposed so `TickCoordinator` can wire cache-hit / rebuild events. */
   readonly coldStateTelemetry = new ColdStateTelemetry();
 
   /** Per-dataset so multi-dataset rebuilds aren't last-dataset-wins. */
@@ -276,7 +277,7 @@ export class Uploader {
     this.deliveryTracker.clearMember(workerMemberId);
   }
 
-  /** Symmetric with `Orchestrator.clearMemberResources`; both are called on dataset removal. */
+  /** Symmetric with `TickCoordinator.clearMemberResources`; both are called on dataset removal. */
   clearDataset(datasetId: string): void {
     this.deliveryTracker.clearDataset(datasetId);
     this.lastFilteredRequests.delete(datasetId);
@@ -293,7 +294,7 @@ export class Uploader {
     return this.deliveryTracker.getProxyDeliveredKeys();
   }
 
-  /** Placeholder so RenderLoop teardown stays symmetric with `Orchestrator.dispose`. */
+  /** Placeholder so RenderLoop teardown stays symmetric with `TickCoordinator.dispose`. */
   dispose(): void {
     // No-op: telemetry collaborators own no subscriptions today.
   }

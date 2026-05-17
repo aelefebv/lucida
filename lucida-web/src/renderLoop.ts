@@ -7,7 +7,7 @@ import { debugStats, resetFrameStats } from "./debug/debugStats.ts";
 import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
 import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset, clearVolumeForMembers, resetVolumeState } from "./volumePath.ts";
-import { Orchestrator } from "./pipeline/orchestrator.ts";
+import { TickCoordinator } from "./pipeline/tickCoordinator.ts";
 import { Uploader } from "./pipeline/upload/uploader.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
@@ -59,11 +59,11 @@ export class RenderLoop {
   /**
    * Upload coordinator. Owns delivery tracking, telemetry, cold/hot-
    * state emission, drain/resend dispatch, and worker feedback.
-   * Constructed alongside the Orchestrator so `client.onChunksEvicted`
+   * Constructed alongside the TickCoordinator so `client.onChunksEvicted`
    * / `client.onWantedSetDelta` callbacks wire directly here.
    */
   private uploader = new Uploader();
-  private orchestrator = new Orchestrator(this.uploader);
+  private tickCoordinator = new TickCoordinator(this.uploader);
   private cpuCacheUnsub: () => void;
   private configStoreUnsub: () => void;
 
@@ -137,14 +137,14 @@ export class RenderLoop {
   }
 
   /**
-   * Expose the orchestrator + cpuCache for HITL debugging via
+   * Expose the tickCoordinator + cpuCache for HITL debugging via
    * `window.__lucidaOrch`. The full chain is needed because
-   * `Orchestrator.requestTestProxy(...)` submits through CpuCache and the
-   * normal subscribe → tick → `deliverToWorker` path forwards the result
-   * to the GPU worker.
+   * `TickCoordinator.requestTestProxy(...)` submits through CpuCache and
+   * the normal subscribe → tick → `deliverToWorker` path forwards the
+   * result to the GPU worker.
    */
-  getOrchestrator(): Orchestrator {
-    return this.orchestrator;
+  getTickCoordinator(): TickCoordinator {
+    return this.tickCoordinator;
   }
   getCpuCache(): CpuCache {
     return this.session.cpuCache;
@@ -188,10 +188,10 @@ export class RenderLoop {
     // uploader owns delivery tracking / per-dataset request snapshots /
     // last-view-epoch entries. Both need their own cleanup pass.
     this.client.removeLayerResources(id);
-    this.orchestrator.clearMemberResources(id);
+    this.tickCoordinator.clearMemberResources(id);
     this.uploader.clearDataset(id);
     for (const mid of memberIds) {
-      this.orchestrator.clearMemberResources(mid);
+      this.tickCoordinator.clearMemberResources(mid);
       this.uploader.clearMember(mid);
       this.client.removeLayerResources(mid);
     }
@@ -228,7 +228,7 @@ export class RenderLoop {
       const isComposite = /:ch\d+$/.test(key);
       if ((mc && !isComposite) || (!mc && isComposite)) {
         this.client.removeLayerResources(key);
-        this.orchestrator.clearMemberResources(key);
+        this.tickCoordinator.clearMemberResources(key);
         this.uploader.clearMember(key);
       }
     }
@@ -495,11 +495,11 @@ export class RenderLoop {
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.orchestrator, this.uploader, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickSlice(ctx, this.tickCoordinator, this.uploader, this.sliceZ, this.sliceT, this.sliceC, this.minimapState.pendingFetch, shouldRender)) {
         this.setDirty("residency", "tick_slice_continuation");
       }
     } else {
-      if (tickVolume(ctx, this.orchestrator, this.uploader, this.minimapState.pendingFetch, shouldRender)) {
+      if (tickVolume(ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, shouldRender)) {
         this.setDirty("residency", "tick_volume_continuation");
       }
     }

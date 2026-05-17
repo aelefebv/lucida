@@ -1,6 +1,6 @@
 ---
 created: 2026-05-16
-modified: 2026-05-16
+modified: 2026-05-17
 ---
 
 # Upload Pipeline
@@ -11,7 +11,7 @@ The Uploader is the symmetric downstream counterpart to [[cpu-cache]]: the cache
 
 ## Why split it out
 
-`orchestrator.ts` was a dual-personality god-object: planning (driven by view state, produces request plans) and upload (driven by tick budget, dispatches bytes to the worker) coexisted in one 2027-line class because both touched [[cpu-cache]] and worker IPC during early development. The two roles share almost no state in practice — `lastEpochs`, `requestEpoch`, and `lastViewEpochByDataset` were the only fields read by both — yet every modification required reasoning across both phases.
+`tickCoordinator.ts` was a dual-personality god-object: planning (driven by view state, produces request plans) and upload (driven by tick budget, dispatches bytes to the worker) coexisted in one 2027-line class because both touched [[cpu-cache]] and worker IPC during early development. The two roles share almost no state in practice — `lastEpochs`, `requestEpoch`, and `lastViewEpochByDataset` were the only fields read by both — yet every modification required reasoning across both phases.
 
 The split mirrors the fetch/decode refactor (see [[decisions/0032-cpucache-split-into-pipeline-fetch]]) in shape and cadence: a single overgrown file becomes a coordinator plus a directory of small modules, behaviour-preserving except for explicit named bug fixes. The eleven modules correspond one-to-one with the extractable units the fetch side surfaced — a state tracker, pure builders, telemetry counters, a feedback handler.
 
@@ -31,7 +31,7 @@ The directory's collaborators (each one a focused, separately-testable unit):
 
 ## The Uploader's role per tick
 
-The Orchestrator drives one Uploader per render loop and feeds it through five dedicated planner-seam methods:
+The TickCoordinator drives one Uploader per render loop and feeds it through five dedicated planner-seam methods:
 
 1. **`onPlanRebuildStart()`** — called once per cold-state rebuild tick. Resets chunk-side delivery tracking; hoisted to once-per-tick so multi-dataset rebuilds don't multi-clear an atlas state that is global per worker.
 2. **`sendColdState(...)`** — per dataset on the rebuild path. Builds the cold-state message via the pure builders, posts it to the worker, and snapshots `epochs` for the subsequent `deliverToWorker` call.
@@ -53,10 +53,10 @@ The Orchestrator drives one Uploader per render loop and feeds it through five d
 
 ## Interactions
 
-- **Upstream**: [[planning-domain]] produces the `RequestPlan` and per-dataset request snapshots the Uploader stashes via `recordPlanForDataset`. The Orchestrator (now planner-only) is the call site that feeds them in.
+- **Upstream**: [[planning-domain]] produces the `RequestPlan` and per-dataset request snapshots the Uploader stashes via `recordPlanForDataset`. The TickCoordinator (now planner-only) is the call site that feeds them in.
 - **Sideways**: [[cpu-cache]]'s drain output is the input to the drain pass; the cache and the Uploader meet in `deliverToWorker`.
 - **Downstream**: [[worker-protocol]] is the wire shape. The Uploader consumes the narrow `UploadClient` facet of `RenderClient` (cold/hot state, chunk and proxy dispatch, layer-resource removal, the two feedback callback fields). The render-side methods on `RenderClient` (`volumeRenderMultiPass`, `sliceRenderMultiPass`, `minimap*`, `updateCursorData`, `destroy`) are not part of `UploadClient`. The worker side that consumes those messages is [[gpu-residency]].
-- **Worker → main feedback** loops back through `WorkerFeedback` into the `DeliveryTracker`. The Orchestrator owns no upload state — every read or write of `chunkSent` / `chunkRejected` / `proxyDelivered` / `widToEntityId` goes through the tracker.
+- **Worker → main feedback** loops back through `WorkerFeedback` into the `DeliveryTracker`. The TickCoordinator owns no upload state — every read or write of `chunkSent` / `chunkRejected` / `proxyDelivered` / `widToEntityId` goes through the tracker.
 
 ## Invariants
 
@@ -68,11 +68,11 @@ The Orchestrator drives one Uploader per render loop and feeds it through five d
 
 ## Gotchas
 
-- **The Uploader is constructed before the Orchestrator and passed into it.** If anything reaches `Uploader` before the first plan completes, `lastEpochs` falls back to the zero-default `{ content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 }`. Tests must call `planAndFetch` first; production code never hits this branch because the render loop ordering guarantees a plan before any tick.
+- **The Uploader is constructed before the TickCoordinator and passed into it.** If anything reaches `Uploader` before the first plan completes, `lastEpochs` falls back to the zero-default `{ content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 }`. Tests must call `planAndFetch` first; production code never hits this branch because the render loop ordering guarantees a plan before any tick.
 - **No `workerWantedSet` filter exists.** `deliverToWorker` does NOT filter against any worker-wanted-set — it filters via `classifyDelivery` on per-tick `targetLevelByImage`. If you see references to a `workerWantedSet` filter in old code, old docs, or your muscle memory, fix them.
 - **`getProxyDeliveredKeys()` returns the live `Set` on `DeliveryTracker`.** Used by `uploader.test.ts` for inspection — do not call from production code, and do not mutate the returned set.
-- **`recordPlanForDataset` and `sendColdState` happen on the rebuild path; `deliverToWorker` happens every tick.** On cache-hit ticks the per-dataset snapshots are reused and the resend passes do all the work; the drain pass still runs but the deliveries queue is usually empty. If you change the rebuild gating in `Orchestrator.planAndFetch`, expect resend latency.
+- **`recordPlanForDataset` and `sendColdState` happen on the rebuild path; `deliverToWorker` happens every tick.** On cache-hit ticks the per-dataset snapshots are reused and the resend passes do all the work; the drain pass still runs but the deliveries queue is usually empty. If you change the rebuild gating in `TickCoordinator.planAndFetch`, expect resend latency.
 
 ## Design rationale
 
-See [[decisions/0034-orchestrator-split-into-pipeline-upload]] for why the upload role was hoisted out of `orchestrator.ts` into its own coordinator, and why the directory layout mirrors the [[cpu-cache]] shape.
+See [[decisions/0034-orchestrator-split-into-pipeline-upload]] for why the upload role was hoisted out of `tickCoordinator.ts` into its own coordinator, and why the directory layout mirrors the [[cpu-cache]] shape.

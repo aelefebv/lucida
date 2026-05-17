@@ -1,15 +1,15 @@
 ---
 created: 2026-04-18
-modified: 2026-05-15
+modified: 2026-05-17
 ---
 
 # Planning Domain
 
-`lucida-web/src/pipeline/planning/` — decides which chunks the renderer wants this tick. Inputs are pulled from WASM (view query + member positions + visible region) and from the orchestrator (asset catalog, minimap pending coords, carry-forward state); output is a `RequestPlan` consumed by [[cpu-cache]] and the [[gpu-residency|GPU worker]]. The module is structured as a small directory of pure functions: `types.ts` (every interface and type alias), `modes.ts` (per-well mode resolution), `chunks.ts` (chunk enumeration + culling), `emit.ts` (lane emitters + priority), `plan.ts` (top-level composition), with `index.ts` as a barrel re-export. Supporting modules: `config.ts` / `configStore.ts` (live-tunable parameters), `snapshot.ts` (WASM → snapshot translation), `debug.ts` (debug-panel derivations), `synthetic.ts` (test fixtures), `validate.ts` (dev-mode boundary check).
+`lucida-web/src/pipeline/planning/` — decides which chunks the renderer wants this tick. Inputs are pulled from WASM (view query + member positions + visible region) and from the tick coordinator (asset catalog, minimap pending coords, carry-forward state); output is a `RequestPlan` consumed by [[cpu-cache]] and the [[gpu-residency|GPU worker]]. The module is structured as a small directory of pure functions: `types.ts` (every interface and type alias), `modes.ts` (per-well mode resolution), `chunks.ts` (chunk enumeration + culling), `emit.ts` (lane emitters + priority), `plan.ts` (top-level composition), with `index.ts` as a barrel re-export. Supporting modules: `config.ts` / `configStore.ts` (live-tunable parameters), `snapshot.ts` (WASM → snapshot translation), `debug.ts` (debug-panel derivations), `synthetic.ts` (test fixtures), `validate.ts` (dev-mode boundary check).
 
 ## Why a separate domain
 
-Planning is the only place where the renderer's "what should be on screen" intent meets reality (server catalog, GPU residency, dataset shape). Pulling it out of the orchestrator and the renderer made three things possible:
+Planning is the only place where the renderer's "what should be on screen" intent meets reality (server catalog, GPU residency, dataset shape). Pulling it out of the tick coordinator and the renderer made three things possible:
 
 1. **Pure-function tests** — `planning.test.ts` covers the threshold logic without standing up GPU or network.
 2. **Catalog-aware degradation in one place** — when the server doesn't advertise a proxy, the planner degrades; downstream layers don't need to know.
@@ -25,7 +25,7 @@ For each well group, planning chooses one of three modes from the well's project
 | **fields-with-proxy-fallback** | 80–150 px | Detail chunks + per-field proxy + per-well proxy |
 | **fields-with-detail** | > 150 px | Detail chunks. Field proxy only if catalog advertises it. |
 
-Hysteresis bands of ±5 px around each threshold prevent flapping. Thresholds, the band, and every other tunable live in `planning/config.ts` as exported constants and as fields of `PlanningConfig`. The orchestrator reads the live `PlanningConfig` from `planning/configStore.ts` once per tick — so values can be tweaked at runtime via the [Config tab in DebugPanel](https://github.com/aelefebv/lucida/blob/main/lucida-web/src/debug/ConfigTab.tsx) without rebuilding.
+Hysteresis bands of ±5 px around each threshold prevent flapping. Thresholds, the band, and every other tunable live in `planning/config.ts` as exported constants and as fields of `PlanningConfig`. The tick coordinator reads the live `PlanningConfig` from `planning/configStore.ts` once per tick — so values can be tweaked at runtime via the [Config tab in DebugPanel](https://github.com/aelefebv/lucida/blob/main/lucida-web/src/debug/ConfigTab.tsx) without rebuilding.
 
 ## LOD range
 
@@ -35,7 +35,7 @@ coarsestDetailLod = targetLod
 detailOwnedRange  = [targetLod, targetLod]
 ```
 
-Planning hands the caller exactly one level — the orchestrator does not filter the request stream by `entry.targetLod`, so a buffered range would queue chunks the cache could never use. Cross-LOD smoothing during zoom transitions is the shader fallback chain's responsibility — see [[gpu-residency#semantic-fallback-chain]].
+Planning hands the caller exactly one level — the tick coordinator does not filter the request stream by `entry.targetLod`, so a buffered range would queue chunks the cache could never use. Cross-LOD smoothing during zoom transitions is the shader fallback chain's responsibility — see [[gpu-residency#semantic-fallback-chain]].
 
 ## Priority formula
 
@@ -59,7 +59,7 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
 
 ## Interactions
 
-- **Inputs from WASM** (read every tick via the orchestrator):
+- **Inputs from WASM** (read every tick via the tick coordinator):
   - `scene.view_query(dsId)` → per-entity `projected_diagonal_px`, `projected_area_px2`, `centroid_world`, `ideal_target_lod`, `importance`
   - `scene.member_positions(dsId)` → per-entity 2D position for slice placement (translated to `layoutPositionVox` JS-side)
   - `scene.visible_region(dsId)` → `xyBoundsVox`, `zRangeVox`, `sortCenterVox`, `effectiveZoom`, `frustumPlanes`
@@ -67,9 +67,9 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
 - **Plan signature**: `plan(snapshot, state, config?)` — three-way decomposition. `snapshot` is the world this tick; `state: PlanningState` is what crossed from last tick (v1: `{ previousActiveSet }`); `config: PlanningConfig` is the tunables. The planner returns `RequestPlan & { nextState: PlanningState }`; callers store the opaque pointer. See [[decisions/0027-planning-state-as-the-carry-forward-seam]].
 - **Outputs**: a `RequestPlan` per dataset — list of `ChunkRequest` with priorities (each carrying its own `datasetId`, no post-stamp), per-well mode metadata for cold-state assembly, plus the opaque `nextState` for the next tick.
 - **Consumers**: [[cpu-cache]] (`submit(plan)`), [[gpu-residency|gpu.worker.ts]] (via the cold-state message — see [[worker-protocol]]).
-- **Snapshot assembly**: `planning/snapshot.ts` exports `buildPlanningSnapshot(args)` — a pure WASM→snapshot translator the orchestrator calls each tick. Lets planning be tested with stub WASM scenes. Snapshot carries `datasetId` and constructs the matching discriminated `EntitySnapshot` variant (`ImageSnapshot | WellSnapshot | FieldSnapshot`) per WASM `kind()`.
+- **Snapshot assembly**: `planning/snapshot.ts` exports `buildPlanningSnapshot(args)` — a pure WASM→snapshot translator the tick coordinator calls each tick. Lets planning be tested with stub WASM scenes. Snapshot carries `datasetId` and constructs the matching discriminated `EntitySnapshot` variant (`ImageSnapshot | WellSnapshot | FieldSnapshot`) per WASM `kind()`.
 - **Debug panel data**: `planning/debug.ts` exports `buildPlanningDatasetDebug` and `modeReason` — pure derivations from the plan + entity list, consumed by the DebugPanel "Planning" tab. `modeReason` reads thresholds from `PlanningConfig` so it can't drift from `chooseEntityMode`.
-- **Live tuning**: `planning/configStore.ts` is a singleton with `get`/`set`/`reset`/`subscribe`, persisted to `localStorage["lucida.planning.config"]` with a schemaVersion envelope. The orchestrator subscribes to clear its planning cache on config change; the render loop subscribes to fire an interactive-dirty frame.
+- **Live tuning**: `planning/configStore.ts` is a singleton with `get`/`set`/`reset`/`subscribe`, persisted to `localStorage["lucida.planning.config"]` with a schemaVersion envelope. The tick coordinator subscribes to clear its planning cache on config change; the render loop subscribes to fire an interactive-dirty frame.
 - **Cross-subsystem types**: `SceneEpochs` lives in `pipeline/epochs.ts` (only the `request` field is planning-owned; the others are scene-state change counters consumed by render and worker pipelines too). `VisibleRegion` lives in `pipeline/viewport.ts` (viewport concept, not planning concept). See [[decisions/0028-scene-epochs-rename-and-relocation]].
 - **Coordinate-frame discipline**: contract fields encode their frame in the name. `Vox` = voxel-space (dataset-local, pre-LOD); `World` = world-space (post-LOD, post-spacing — what the renderer draws in); `Px` = screen pixels. Applied JS-side at the `snapshot.ts` boundary; Rust source naming (`pub centroid_world`, `xy_bounds`, `sort_center`) is untouched. `BaseEntitySnapshot.layoutPositionVox` (grid placement, voxel) and `BaseEntitySnapshot.centroidWorld` (intrinsic spatial center, world) are *different* coordinates serving different purposes; the suffixes make this distinction visible at the use site. See [[decisions/0030-coordinate-frame-naming-discipline]].
 - **Axis-index constants**: `lucida-web/src/axes.ts` exports `Axis = { T, C, Z, Y, X } as const`. Use `shape[Axis.X]` rather than `shape[4]` at every TCZYX-indexed access site. The Rust side mostly destructures (`let [t, c, z, y, x] = arr`) and isn't mirrored.
@@ -80,10 +80,10 @@ Minimap wins outright on dataset open (~0); centered, important detail follows (
 - **Wells are the planning unit for plates.** All field-level decisions cascade from the well's mode. A well in `well-as-proxy` mode does not enumerate field chunks regardless of any field's individual visibility.
 - **Singles are treated as a singleton "well group" with one field.** `planning/modes.ts::groupByWell` synthesizes an `__image__${entityId}` group key for `kind === "Image"` entities — same code path as plates, simpler shape.
 - **Catalog degradation is one tier at a time.** If well-as-proxy isn't available, drop to fields-with-proxy-fallback; if that's not available, drop to fields-with-detail. Never skip a tier.
-- **The plan is fresh every tick.** No caching across ticks; the [[scene-state-and-epochs|epoch fast-path]] in the orchestrator decides whether to re-run planning at all.
+- **The plan is fresh every tick.** No caching across ticks; the [[scene-state-and-epochs|epoch fast-path]] in the tick coordinator decides whether to re-run planning at all.
 - **Per-variant invariants are compile-time enforced.** `WellAsProxyEntry` carries no `imageId` / LOD fields / proxy fields — the well IS the proxy. `InvisibleEntry` is its own kind, never confused with `mode: "fields-with-detail"` for visible fields. `FieldSnapshot` always has a `parentId: string`; `ImageSnapshot` and `WellSnapshot` don't have the field at all. Reads must narrow on `kind` first. See [[decisions/0026-discriminated-active-set-and-entity-types]].
 - **Carry-forward state is explicit.** The planner consumes `state: PlanningState` (today: `{ previousActiveSet }`) and returns `nextState: PlanningState`. No globals, no module state, no implicit caches — see [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]].
-- **`datasetId` is stamped at emit time, not post-hoc.** The snapshot carries `datasetId`; the planner stamps it on every `ChunkRequest` and `ProxyRequest` as it emits. The orchestrator no longer mutates the result.
+- **`datasetId` is stamped at emit time, not post-hoc.** The snapshot carries `datasetId`; the planner stamps it on every `ChunkRequest` and `ProxyRequest` as it emits. The tick coordinator no longer mutates the result.
 - **Inputs are validated in dev mode, not in production.** `validatePlanningInputs` runs at `plan()` entry under `import.meta.env.DEV`. In dev, malformed snapshots throw a crisp `Error` at the boundary; in production, the call is dead-code-eliminated. The validator catches semantic invariants the type system can't express (referential integrity of `parentId`, uniqueness of `entityId` / non-empty `imageId`, valid bbox + level shape arity, prev-active-set duplicates, prev-active-set kind agreement when entity present). Disappeared prev-active-set entities are explicitly NOT a violation — entities can come and go across ticks. The asset catalog and minimapPending are also NOT validated against the snapshot's entity set — both are populated at producer scopes that legitimately exceed the per-tick view-query result.
 
 ## Gotchas

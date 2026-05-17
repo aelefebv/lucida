@@ -10,7 +10,7 @@ import type {
   EntitySnapshot,
 } from "../../planning/index.ts";
 import { groupByWell } from "../../planning/index.ts";
-import type { MemberRosterEntry } from "../../orchestrator.ts";
+import type { MemberRosterEntry } from "../../tickCoordinator.ts";
 
 /**
  * Synthetic roster entry for a `well-as-proxy` entry.

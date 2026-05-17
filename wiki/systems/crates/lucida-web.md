@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-05-08
+modified: 2026-05-17
 ---
 
 # lucida-web
@@ -28,8 +28,6 @@ WASM owns:
 - **Picking** — ray cast for clicks
 
 ## Subsystem map
-
-The pipeline (planning → fetch → GPU upload → render) is documented end-to-end in the repo's top-level `CHUNK_PIPELINE.md`. Treat it as the canonical trace; this wiki captures intent, invariants, and gotchas.
 
 - [[chunk-pipeline]] — end-to-end overview pointing into the deep dive
 - [[planning-domain]] — wanted-set computation, LOD promotion, hysteresis, lane-based priorities
@@ -59,7 +57,7 @@ The pipeline (planning → fetch → GPU upload → render) is documented end-to
 
 Subdirectories:
 
-- `pipeline/` — planning, orchestrator, CpuCache, contentSource, decode pool, asset catalog, layout builders/registry
+- `pipeline/` — planning, tickCoordinator, CpuCache, contentSource, decode pool, asset catalog, layout builders/registry
 - `renderer/` — GPU worker, atlases, indirection, descriptor buffer, wanted-set, three WGSL shaders, residency
 - `hooks/` — 11 React hooks driving App.tsx
 - `components/` — React components: viewers, controls, file browser, plate selector, peer cursors, FPS counter, minimap, layout switcher, layer panel, colormap selector, dimension controls, contrast controls

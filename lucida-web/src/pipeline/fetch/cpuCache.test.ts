@@ -1266,7 +1266,7 @@ describe("CpuCache", () => {
       // No new network fetch.
       expect(source.fetchProxyCount).toBe(fetchesBefore);
 
-      // Orchestrator resends evicted proxies via `getCachedProxy`.
+      // TickCoordinator resends evicted proxies via `getCachedProxy`.
       const replays = cache.drain(Infinity);
       expect(replays).toHaveLength(0);
     });

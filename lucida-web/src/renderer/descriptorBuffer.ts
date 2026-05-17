@@ -7,7 +7,7 @@
  * slot dims, and per-channel display state (contrast/gamma/opacity/
  * colormapLutIndex/channelMask).
  *
- * The descriptor lives entirely in worker-side state. Orchestrator and
+ * The descriptor lives entirely in worker-side state. TickCoordinator and
  * worker converge on entity indices by construction — both walk
  * `cold.activeSet × cold.visibleChannels` in the same canonical order
  * (see {@link iterateColdMembers}), so no readback is needed.

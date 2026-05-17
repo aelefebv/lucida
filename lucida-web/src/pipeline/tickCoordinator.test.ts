@@ -195,9 +195,9 @@ function createMockContent(): DatasetManifest {
 
 describe("epoch caching", () => {
   // We dynamically import and spy on plan() to verify caching behavior.
-  // The Orchestrator should skip plan() when epochs haven't changed.
+  // The TickCoordinator should skip plan() when epochs haven't changed.
 
-  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
   let Uploader: typeof import("./upload/uploader.ts").Uploader;
   let planSpy: ReturnType<typeof vi.fn>;
 
@@ -214,7 +214,7 @@ describe("epoch caching", () => {
       return { ...actual, plan: planSpy };
     });
 
-    Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
     Uploader = (await import("./upload/uploader.ts")).Uploader;
   });
 
@@ -234,11 +234,11 @@ describe("epoch caching", () => {
     } as unknown as TickContext;
   }
 
-  function makeOrch(): InstanceType<typeof Orchestrator> {
-    return new Orchestrator(new Uploader());
+  function makeOrch(): InstanceType<typeof TickCoordinator> {
+    return new TickCoordinator(new Uploader());
   }
 
-  function makeOrchestratorDeps(epochOverrides?: Partial<{ content: number; layout: number; view: number; selection: number }>) {
+  function makeTickCoordinatorDeps(epochOverrides?: Partial<{ content: number; layout: number; view: number; selection: number }>) {
     const scene = createMockScene({
       epochs: { content: 1, layout: 1, view: 1, selection: 1, ...epochOverrides },
     });
@@ -253,7 +253,7 @@ describe("epoch caching", () => {
   const emptyMinimap = new Map<string, never[]>();
 
   it("calls plan() on the first invocation", () => {
-    const { scene, datasets } = makeOrchestratorDeps();
+    const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
 
     orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
@@ -262,7 +262,7 @@ describe("epoch caching", () => {
   });
 
   it("returns cached result when epochs are unchanged", () => {
-    const { scene, datasets } = makeOrchestratorDeps();
+    const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
 
     const ctx = makeCtx(scene, datasets);
@@ -276,7 +276,7 @@ describe("epoch caching", () => {
   });
 
   it("re-plans when viewEpoch changes", () => {
-    const { datasets } = makeOrchestratorDeps();
+    const { datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
 
     const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
@@ -290,7 +290,7 @@ describe("epoch caching", () => {
   });
 
   it("re-plans when contentEpoch changes", () => {
-    const { datasets } = makeOrchestratorDeps();
+    const { datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
 
     const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
@@ -304,7 +304,7 @@ describe("epoch caching", () => {
   });
 
   it("re-plans when layoutEpoch changes", () => {
-    const { datasets } = makeOrchestratorDeps();
+    const { datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
 
     const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
@@ -318,7 +318,7 @@ describe("epoch caching", () => {
   });
 
   it("re-plans when selectionEpoch changes", () => {
-    const { datasets } = makeOrchestratorDeps();
+    const { datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
 
     const scene1 = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
@@ -337,7 +337,7 @@ describe("epoch caching", () => {
 // ===========================================================================
 
 describe("multi-dataset planning", () => {
-  let Orchestrator: typeof import("./orchestrator.ts").Orchestrator;
+  let TickCoordinator: typeof import("./tickCoordinator.ts").TickCoordinator;
   let Uploader: typeof import("./upload/uploader.ts").Uploader;
   let planSpy: ReturnType<typeof vi.fn>;
 
@@ -352,12 +352,12 @@ describe("multi-dataset planning", () => {
       return { ...actual, plan: planSpy };
     });
 
-    Orchestrator = (await import("./orchestrator.ts")).Orchestrator;
+    TickCoordinator = (await import("./tickCoordinator.ts")).TickCoordinator;
     Uploader = (await import("./upload/uploader.ts")).Uploader;
   });
 
-  function makeOrch(): InstanceType<typeof Orchestrator> {
-    return new Orchestrator(new Uploader());
+  function makeOrch(): InstanceType<typeof TickCoordinator> {
+    return new TickCoordinator(new Uploader());
   }
 
   function makeMultiDatasetScene() {

@@ -62,7 +62,7 @@ const LOGGING_CATEGORY_DESCRIPTIONS: Record<DebugCategory, string> = {
   wasm: "Scene mutations inside the Rust WASM module (scene.* events)",
   render: "Render loop lifecycle, dirty-flag attribution, throttle skips",
   cache: "CPU cache backpressure, failure bursts, eviction bursts",
-  orch: "Orchestrator events — cold-state rebuild churn, upload budget exhaustion, resend storm, drain waste",
+  orch: "TickCoordinator events — cold-state rebuild churn, upload budget exhaustion, resend storm, drain waste",
 };
 
 const OVERLAY_DESCRIPTIONS: Record<DebugOverlay, string> = {
@@ -217,12 +217,12 @@ function PlanningTabBody({
   }
 
   const dumpPlans = () => {
-    const orch = renderLoopRef?.current?.getOrchestrator();
-    if (!orch) {
-      console.warn("[DebugPanel] orchestrator not available");
+    const coord = renderLoopRef?.current?.getTickCoordinator();
+    if (!coord) {
+      console.warn("[DebugPanel] tickCoordinator not available");
       return;
     }
-    const plans = orch.getLastPlans();
+    const plans = coord.getLastPlans();
     console.group("[DebugPanel] last plans");
     for (const [dsId, plan] of plans) {
       const lanes: Record<string, typeof plan.requests> = {
@@ -263,12 +263,12 @@ function PlanningTabBody({
   };
 
   const dumpActiveSets = () => {
-    const orch = renderLoopRef?.current?.getOrchestrator();
-    if (!orch) {
-      console.warn("[DebugPanel] orchestrator not available");
+    const coord = renderLoopRef?.current?.getTickCoordinator();
+    if (!coord) {
+      console.warn("[DebugPanel] tickCoordinator not available");
       return;
     }
-    const plans = orch.getLastPlans();
+    const plans = coord.getLastPlans();
     console.group("[DebugPanel] last active sets");
     // ActiveSetEntry is a discriminated union; each variant exposes a
     // different field shape. Render the table with per-variant

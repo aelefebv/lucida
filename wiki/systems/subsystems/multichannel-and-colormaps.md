@@ -1,6 +1,6 @@
 ---
 created: 2026-04-18
-modified: 2026-04-18
+modified: 2026-05-17
 ---
 
 # Multi-Channel and Colormaps
@@ -59,7 +59,7 @@ Composite keys identify which compositor output buffer a render result lands in:
 
 - **State**: [[scene-state-and-epochs|DocumentState/DatasetDisplaySettings]] holds the per-channel settings.
 - **UI**: `LayerPanel.tsx` exposes channel sublayers when multichannel is enabled. `ColormapSelector.tsx` is the dropdown. `ContrastControls.tsx` covers contrast/gamma.
-- **Pipeline**: [[planning-domain]] reads `channel_settings[c].visible` to skip invisible channels in proxy enumeration. The orchestrator builds per-channel descriptor entries.
+- **Pipeline**: [[planning-domain]] reads `channel_settings[c].visible` to skip invisible channels in proxy enumeration. The tick coordinator builds per-channel descriptor entries.
 - **GPU**: descriptors carry per-channel colormap/contrast/gamma; the compositor blends.
 
 ## Invariants

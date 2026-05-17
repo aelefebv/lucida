@@ -7,7 +7,7 @@ import { computeScissorRect } from "./pipeline/upload/scissor.ts";
 import { getActiveChannels, compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
 import { debugStats } from "./debug/debugStats.ts";
-import type { Orchestrator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/orchestrator.ts";
+import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 
@@ -148,7 +148,7 @@ function uploadAndRenderVolume(
  */
 export function tickVolume(
   ctx: TickContext,
-  orchestrator: Orchestrator,
+  tickCoordinator: TickCoordinator,
   uploader: Uploader,
   minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   shouldRender: boolean = true,
@@ -165,13 +165,13 @@ export function tickVolume(
   const canvasH = Math.round(fullH * ctx.renderScale);
 
   const t0 = debugStats.enabled ? performance.now() : 0;
-  const orchResult = orchestrator.planAndFetch(ctx, minimapPendingFetch);
+  const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (debugStats.enabled) debugStats.planTimeMs = performance.now() - t0;
   if (!orchResult) return false;
 
   // Volume-specific rendering state. Camera position drives ray-marching
   // in the shader (different from `rayHitLocal`, which is residency-only
-  // and emitted by the orchestrator on viewEpoch advance).
+  // and emitted by the tickCoordinator on viewEpoch advance).
   const eye = new Float32Array(scene.eye_position());
 
   if (debugStats.enabled) {

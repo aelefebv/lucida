@@ -14,7 +14,7 @@ export interface MemberStat {
   chunksSent: number;
 }
 
-/** Per-member debug data from the Orchestrator's adapter translation. */
+/** Per-member debug data from the TickCoordinator's adapter translation. */
 export interface OrchMemberDebug {
   imageId: string;
   position: [number, number];
@@ -108,7 +108,7 @@ export interface PlanningDatasetDebug {
   } | null;
 }
 
-/** Orchestrator debug snapshot, populated per planning cycle. */
+/** TickCoordinator debug snapshot, populated per planning cycle. */
 export interface OrchDebug {
   /** Active set entries from plan() */
   activeSet: Array<{
@@ -263,7 +263,7 @@ export interface DebugStats {
   // Mode
   mode: "slice" | "volume" | "";
 
-  // Orchestrator debug
+  // TickCoordinator debug
   orch: OrchDebug | null;
 
   /**

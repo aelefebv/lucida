@@ -226,17 +226,17 @@ function App() {
 
   // Side-effect hooks.
 
-  // Expose the orchestrator + cpuCache on `window.__orch` (also aliased
-  // as `__lucidaOrch`) so the dev console can call
+  // Expose the tickCoordinator + cpuCache on `window.__orch` (also
+  // aliased as `__lucidaOrch`) so the dev console can call
   // `requestTestProxy(datasetId, entityId, imageId, kind, t, c)` to
   // verify the proxy fetch wire flow.
   useEffect(() => {
     const loop = render.activeLoop;
     const cache = bridge.sessionRef.current?.cpuCache;
     if (!loop || !cache) return;
-    const orch = loop.getOrchestrator();
+    const coord = loop.getTickCoordinator();
     const debug = {
-      orchestrator: orch,
+      tickCoordinator: coord,
       cpuCache: cache,
       requestTestProxy: (
         datasetId: string,
@@ -245,7 +245,7 @@ function App() {
         kind: "WellProxy3D" | "FieldProxy3D",
         t = 0,
         c = 0,
-      ) => orch.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
+      ) => coord.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
     };
     const w = window as unknown as { __orch?: typeof debug; __lucidaOrch?: typeof debug };
     w.__orch = debug;

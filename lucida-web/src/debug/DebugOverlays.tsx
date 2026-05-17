@@ -269,8 +269,8 @@ export function DebugOverlays({
       const dpr = devicePixelRatio;
       const is3D = viewMode === "3d";
 
-      const orch = renderLoopRef.current?.getOrchestrator();
-      const plans = orch?.getLastPlans();
+      const coord = renderLoopRef.current?.getTickCoordinator();
+      const plans = coord?.getLastPlans();
 
       // Off-screen culling margin (CSS px).
       const xMin = -64;

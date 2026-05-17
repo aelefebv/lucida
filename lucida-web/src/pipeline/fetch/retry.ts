@@ -67,7 +67,7 @@ export class OnceTransientRetry implements RetryPolicy {
   }
 }
 
-/** Orchestrator resubmits on the next plan tick if still wanted. */
+/** TickCoordinator resubmits on the next plan tick if still wanted. */
 export class NeverRetry implements RetryPolicy {
   shouldRetry(_err: FetchError, _attempt: number): boolean {
     return false;
